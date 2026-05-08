@@ -1,6 +1,6 @@
 # Sprintly Backend
 
-FastAPI backend for [Sprintly](https://sprintly.ai) — Cursor for product managers. Deployed to AWS EC2; called by the Vercel-hosted frontend at `https://sprintly.ai`.
+FastAPI backend for [Sprntly](https://www.sprntly.ai) — Cursor for product managers. Deployed to AWS EC2; called by the Vercel-hosted frontend at `https://sprntly.ai`.
 
 ## Stack
 
@@ -38,11 +38,11 @@ cp .env.example .env  # fill in real ANTHROPIC_API_KEY
 bash deploy/setup.sh
 ```
 
-Then on your local machine, point `api.sprintly.ai` (A record) at the instance's elastic IP, and on the box run:
+Then add an `A` record `api.sprntly.ai → <elastic-ip>` in the Vercel DNS dashboard (sprntly.ai uses Vercel nameservers), and on the box run:
 
 ```bash
 sudo dnf -y install certbot python3-certbot-nginx
-sudo certbot --nginx -d api.sprintly.ai
+sudo certbot --nginx -d api.sprntly.ai
 ```
 
 ## Project layout
