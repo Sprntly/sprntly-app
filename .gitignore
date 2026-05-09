@@ -9,3 +9,18 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# SQLite databases (generated, not source-of-truth)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Node / Next.js
+node_modules/
+.next/
+.turbo/
+out/
+dist/
+build/
+.vercel/

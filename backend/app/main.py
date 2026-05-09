@@ -1,10 +1,20 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import auth, db
 from app.config import settings
-from app.routes import chat, health
+from app.routes import ask, brief, health, prd
 
-app = FastAPI(title="Sprintly API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init_db()
+    yield
+
+
+app = FastAPI(title="Sprntly API", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,4 +25,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-app.include_router(chat.router, prefix="/v1")
+app.include_router(auth.router)
+app.include_router(brief.router)
+app.include_router(ask.router)
+app.include_router(prd.router)

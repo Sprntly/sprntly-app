@@ -1,0 +1,49 @@
+"""Corpus loader: reads the static markdown notes for a dataset and exposes them
+as plain strings for inclusion in LLM prompts. No vector store yet — at this
+size (single dataset, ~50KB) just feed everything in.
+"""
+from dataclasses import dataclass
+from pathlib import Path
+
+from app.config import DATA_DIR
+
+
+@dataclass(frozen=True)
+class CorpusDoc:
+    name: str
+    path: str
+    text: str
+
+
+@dataclass(frozen=True)
+class Corpus:
+    dataset: str
+    docs: tuple[CorpusDoc, ...]
+
+    def total_chars(self) -> int:
+        return sum(len(d.text) for d in self.docs)
+
+    def joined(self) -> str:
+        parts = []
+        for d in self.docs:
+            parts.append(f"<<< SOURCE: {d.name} >>>\n{d.text}\n<<< END SOURCE >>>")
+        return "\n\n".join(parts)
+
+
+def load_corpus(dataset: str = "asurion") -> Corpus:
+    base = DATA_DIR / dataset
+    if not base.exists():
+        raise FileNotFoundError(f"Dataset {dataset!r} not found at {base}")
+    docs: list[CorpusDoc] = []
+    # Skip _reference/ which holds the answer key — never feed that to the LLM
+    for p in sorted(base.glob("*.md")):
+        if p.name.startswith("_"):
+            continue
+        docs.append(CorpusDoc(name=p.stem, path=str(p), text=p.read_text()))
+    if not docs:
+        raise RuntimeError(f"No corpus docs found for dataset {dataset!r}")
+    return Corpus(dataset=dataset, docs=tuple(docs))
+
+
+def load_prd_template() -> str:
+    return (DATA_DIR / "sprntly_prd_template.md").read_text()
