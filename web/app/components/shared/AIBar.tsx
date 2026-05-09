@@ -1,6 +1,8 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { AI_CONTEXTS, APP_SCREENS } from "../../types"
@@ -142,7 +144,11 @@ export function AIBar() {
               <div className="ai-bar-reply-error">{askError}</div>
             ) : lastReply ? (
               <>
-                <div className="ai-bar-reply-answer">{lastReply.answer}</div>
+                <div className="ai-bar-reply-answer">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {lastReply.answer}
+                  </ReactMarkdown>
+                </div>
                 {lastReply.key_points?.length ? (
                   <ul className="ai-bar-reply-kp">
                     {lastReply.key_points.map((kp, i) => (

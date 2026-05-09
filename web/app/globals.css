@@ -755,8 +755,86 @@
   }
   .ai-bar-reply-loading { color: var(--muted); font-size: 13px; }
   .ai-bar-reply-error { color: var(--danger); font-size: 13px; line-height: 1.45; }
-  .ai-bar-reply-answer {
-    white-space: pre-wrap; color: var(--ink-2); line-height: 1.55;
+  /* Markdown-rendered prose. Scoped to .ai-bar-reply-answer so we don't
+     restyle anything else on the page. */
+  .ai-bar-reply-answer { color: var(--ink-2); line-height: 1.6; font-size: 13px; }
+  .ai-bar-reply-answer > :first-child { margin-top: 0; }
+  .ai-bar-reply-answer > :last-child  { margin-bottom: 0; }
+  .ai-bar-reply-answer p { margin: 0.5em 0; }
+  .ai-bar-reply-answer h2 {
+    font-family: var(--font-display);
+    font-size: 14px; font-weight: 600; color: var(--ink);
+    letter-spacing: -0.005em;
+    margin: 1.1em 0 0.4em;
+  }
+  .ai-bar-reply-answer h3 {
+    font-size: 13px; font-weight: 600; color: var(--ink);
+    margin: 1em 0 0.3em;
+  }
+  .ai-bar-reply-answer h2:first-child,
+  .ai-bar-reply-answer h3:first-child { margin-top: 0; }
+  .ai-bar-reply-answer strong { color: var(--ink); font-weight: 600; }
+  .ai-bar-reply-answer em { color: var(--ink-3); }
+  .ai-bar-reply-answer ul,
+  .ai-bar-reply-answer ol { margin: 0.5em 0; padding-left: 20px; }
+  .ai-bar-reply-answer li { margin: 0.25em 0; }
+  .ai-bar-reply-answer li > p { margin: 0; }
+  .ai-bar-reply-answer code {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--ink);
+  }
+  .ai-bar-reply-answer pre {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    margin: 0.7em 0;
+  }
+  .ai-bar-reply-answer pre code {
+    border: 0; padding: 0; background: transparent; font-size: 12px;
+  }
+  .ai-bar-reply-answer blockquote {
+    margin: 0.7em 0;
+    padding: 6px 12px;
+    border-left: 3px solid var(--accent, var(--ink-3));
+    color: var(--ink-3);
+    background: var(--surface);
+    border-radius: 0 6px 6px 0;
+  }
+  .ai-bar-reply-answer blockquote p { margin: 0.25em 0; }
+  .ai-bar-reply-answer table {
+    border-collapse: collapse;
+    margin: 0.7em 0;
+    font-size: 12px;
+    width: 100%;
+  }
+  .ai-bar-reply-answer th,
+  .ai-bar-reply-answer td {
+    border: 1px solid var(--line);
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .ai-bar-reply-answer th {
+    background: var(--surface);
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .ai-bar-reply-answer a {
+    color: var(--accent, var(--ink));
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .ai-bar-reply-answer hr {
+    border: none;
+    border-top: 1px solid var(--line);
+    margin: 1em 0;
   }
   .ai-bar-reply-kp {
     margin: 10px 0 0; padding-left: 18px; color: var(--ink-3);
