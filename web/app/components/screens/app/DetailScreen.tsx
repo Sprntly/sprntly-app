@@ -1,15 +1,37 @@
 "use client"
 
+import { useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import type { DetailEvidenceSection } from "../../../types/content"
+import { prdApi } from "../../../lib/api"
+import { markdownToPrdState } from "../../../lib/prd-adapter"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
 export function DetailScreen() {
-  const { goTo, setAIBarValue } = useNavigation()
-  const { content } = useContent()
+  const { goTo, setAIBarValue, showToast } = useNavigation()
+  const { content, setContent } = useContent()
   const d = content.detail
+  const [generating, setGenerating] = useState(false)
+
+  const handleGeneratePrd = async () => {
+    if (!d?.meta) {
+      showToast("Can't generate PRD", "Open this evidence from the brief first.")
+      return
+    }
+    setGenerating(true)
+    try {
+      const res = await prdApi.generate(d.meta.briefId, d.meta.insightIndex)
+      setContent({ prd: markdownToPrdState(res.markdown) })
+      goTo("prd")
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      showToast("PRD generation failed", msg.slice(0, 200))
+    } finally {
+      setGenerating(false)
+    }
+  }
 
   if (!d) {
     return (
@@ -85,8 +107,13 @@ export function DetailScreen() {
               <button type="button" className="btn" onClick={() => goTo("brief")}>
                 {d.cta.dismissLabel}
               </button>
-              <button type="button" className="btn btn-accent" onClick={() => goTo("prd")}>
-                {d.cta.primaryLabel}
+              <button
+                type="button"
+                className="btn btn-accent"
+                onClick={handleGeneratePrd}
+                disabled={generating}
+              >
+                {generating ? "Generating PRD…" : d.cta.primaryLabel}
               </button>
             </div>
           </div>

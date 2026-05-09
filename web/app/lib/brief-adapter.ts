@@ -126,10 +126,14 @@ function sectionFromInsights(
   }
 }
 
-function detailFromInsight(insight: Insight, rank: number): DetailState {
-  const meta = TAG_MAP[insight.tag] || TAG_MAP.something_broken
+function detailFromInsight(
+  insight: Insight,
+  rank: number,
+  source?: { briefId: number; insightIndex: number },
+): DetailState {
+  const tagMeta = TAG_MAP[insight.tag] || TAG_MAP.something_broken
   const tags: DetailState["tags"] = [
-    { label: meta.tagLabel, className: meta.detailTagClass },
+    { label: tagMeta.tagLabel, className: tagMeta.detailTagClass },
   ]
   if (insight.domain) tags.push({ label: insight.domain.toUpperCase(), className: "tag-domain" })
   if (insight.subdomain) tags.push({ label: insight.subdomain.toUpperCase(), className: "tag-sub" })
@@ -143,9 +147,9 @@ function detailFromInsight(insight: Insight, rank: number): DetailState {
   const metrics = (insight.metrics || []).map((m) => ({
     label: m.label,
     value: m.value,
-    valueClass: meta.tagType === "fix"
+    valueClass: tagMeta.tagType === "fix"
       ? ("neg" as const)
-      : meta.tagType === "double"
+      : tagMeta.tagType === "double"
       ? ("pos" as const)
       : undefined,
   }))
@@ -206,6 +210,7 @@ function detailFromInsight(insight: Insight, rank: number): DetailState {
           primaryLabel: "Generate PRD",
         }
       : null,
+    meta: source,
   }
 }
 
@@ -259,18 +264,27 @@ export function briefToBriefState(brief: Brief): BriefState {
 
 export function briefToDetailMap(brief: Brief): Record<string, DetailState> {
   const insights = brief.insights || []
+  const map: Record<string, DetailState> = {}
+
+  // Build per-tag groupings to assign rank-within-tag for the detail key.
   const grouped: Record<string, Insight[]> = {}
   for (const ins of insights) {
     const key = TAG_MAP[ins.tag] ? ins.tag : "something_broken"
     ;(grouped[key] ||= []).push(ins)
   }
-  const map: Record<string, DetailState> = {}
+
   for (const tag of Object.keys(grouped) as (keyof typeof TAG_MAP)[]) {
     grouped[tag].forEach((insight, idx) => {
-      const meta = TAG_MAP[tag]
+      const tagMeta = TAG_MAP[tag]
       const rank = idx + 1
-      const key = detailKeyFor(meta.tagType, rank)
-      map[key] = detailFromInsight(insight, rank)
+      const key = detailKeyFor(tagMeta.tagType, rank)
+      // insight_index is the position in the *original* insights array,
+      // which is what the backend's /v1/prd/generate expects.
+      const insightIndex = insights.indexOf(insight)
+      map[key] = detailFromInsight(insight, rank, {
+        briefId: brief.id,
+        insightIndex,
+      })
     })
   }
   return map

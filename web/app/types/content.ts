@@ -155,6 +155,12 @@ export interface DetailState {
     dismissLabel: string
     primaryLabel: string
   } | null
+  /** Source-of-truth pointer — used by 'Generate PRD' to tell the backend
+   * which brief insight to PRD-ify. */
+  meta?: {
+    briefId: number
+    insightIndex: number
+  }
 }
 
 export interface PrdState {
