@@ -17,6 +17,8 @@ export interface BriefFindingRow {
     negative?: boolean
   }>
   askQuestion: string
+  /** Stable key for looking up the matching DetailState in `briefDetails`. */
+  detailKey?: string
 }
 
 export interface BriefSectionRow {
@@ -175,6 +177,8 @@ export interface AppContentState {
   conversations: ConversationRow[]
   ondemandStarters: ChatHomeCard[]
   detail: DetailState | null
+  /** Pre-built drill-down state per finding, indexed by `BriefFindingRow.detailKey`. */
+  briefDetails: Record<string, DetailState>
   prd: PrdState | null
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]

@@ -35,6 +35,7 @@ const EMPTY: AppContentState = {
   conversations: [],
   ondemandStarters: [],
   detail: null,
+  briefDetails: {},
   prd: null,
   teamMembers: [],
   teamPending: [],

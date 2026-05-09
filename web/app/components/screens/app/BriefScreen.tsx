@@ -9,8 +9,15 @@ import { EmptyPane } from "../../shared/EmptyPane"
 
 export function BriefScreen() {
   const { goTo, setAIBarValue, reviewPastOpen, setReviewPastOpen } = useNavigation()
-  const { content } = useContent()
-  const { brief, pastWeeks } = content
+  const { content, setContent } = useContent()
+  const { brief, pastWeeks, briefDetails } = content
+
+  const openEvidenceFor = (detailKey: string | undefined) => {
+    if (detailKey && briefDetails?.[detailKey]) {
+      setContent({ detail: briefDetails[detailKey] })
+    }
+    goTo("detail")
+  }
   const [pastFilter, setPastFilter] = useState<"week" | "month" | "all">("week")
 
   const empty = isBriefEmpty(brief)
@@ -113,7 +120,7 @@ export function BriefScreen() {
                   impacts={f.impacts}
                   askQuestion={f.askQuestion}
                   onAskAI={handleAskAI}
-                  onViewEvidence={() => goTo("detail")}
+                  onViewEvidence={() => openEvidenceFor(f.detailKey)}
                 />
               ))}
             </div>
