@@ -97,9 +97,22 @@ export type Brief = {
   insights: Insight[]
 }
 
+export type BriefStatus = {
+  dataset: string
+  status: "ready" | "generating" | "failed" | "empty"
+  error?: string
+}
+
 export const briefApi = {
-  current: () => api.get<Brief>("/v1/brief/current"),
+  current: (dataset: string = "asurion") =>
+    api.get<Brief>(`/v1/brief/current?dataset=${encodeURIComponent(dataset)}`),
   byId: (id: number) => api.get<Brief>(`/v1/brief/${id}`),
+  status: (dataset: string = "asurion") =>
+    api.get<BriefStatus>(`/v1/brief/status?dataset=${encodeURIComponent(dataset)}`),
+  regenerate: (dataset: string = "asurion") =>
+    api.post<{ started: boolean; dataset: string }>(
+      `/v1/brief/regenerate?dataset=${encodeURIComponent(dataset)}`,
+    ),
   generate: () => api.post<Brief & { brief_id: number }>("/v1/brief/generate"),
 }
 

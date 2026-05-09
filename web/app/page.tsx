@@ -36,8 +36,13 @@ import {
   ConnectorsScreen,
 } from "./components/screens/app"
 import { useAuth } from "./lib/auth"
+import { useBriefHydration } from "./lib/useBriefHydration"
 
 function AppContent() {
+  // Hydrate ContentContext.brief from /v1/brief/current.
+  // Polls /v1/brief/status if the backend is still generating.
+  useBriefHydration("asurion")
+
   const { currentScreen, closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } =
     useNavigation()
 
