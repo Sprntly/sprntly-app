@@ -3,9 +3,11 @@
  * All requests include the session cookie via credentials: 'include'.
  */
 
+// Default to the deployed backend so `npm run dev` works out of the box
+// without a local FastAPI. To run against a local backend, set
+// `NEXT_PUBLIC_API_URL=http://localhost:8000` in `web/.env.local`.
 export const API_URL =
-  (typeof process !== "undefined" && process.env.NEXT_PUBLIC_API_URL) ||
-  "http://localhost:8000"
+  process.env.NEXT_PUBLIC_API_URL || "https://api.sprntly.ai"
 
 export class ApiError extends Error {
   status: number
