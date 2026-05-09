@@ -25,6 +25,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Build static export
+        env:
+          NEXT_PUBLIC_API_URL: https://api.sprntly.ai
         run: |
           cd web
           npm ci --no-audit --no-fund
