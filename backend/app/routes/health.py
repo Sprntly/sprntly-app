@@ -7,7 +7,7 @@ router = APIRouter()
 
 @router.get("/")
 def root():
-    return {"service": "sprintly-api", "status": "ok"}
+    return {"service": "sprintly-api", "version": "0.1.1", "status": "ok"}
 
 
 @router.get("/healthz")
