@@ -5,7 +5,7 @@ import { useContent } from "../../context/ContentContext"
 import type { ScreenId } from "../../types"
 
 export function Sidebar() {
-  const { currentScreen, goTo } = useNavigation()
+  const { currentScreen, goTo, sidebarCollapsed, toggleSidebar } = useNavigation()
   const { content } = useContent()
 
   const NavItem = ({
@@ -21,10 +21,11 @@ export function Sidebar() {
   }) => (
     <a
       className={`sb-item ${currentScreen === screen ? "active" : ""}`}
+      title={label}
       onClick={() => goTo(screen)}
     >
       <span className="sb-icon">{icon}</span>
-      {label}
+      <span className="sb-item-label">{label}</span>
       {count != null && count > 0 ? (
         <span className="sb-count">{count > 99 ? "99+" : count}</span>
       ) : null}
@@ -45,9 +46,31 @@ export function Sidebar() {
   const displayEmail = content.userEmail ?? "Sign in to sync"
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${sidebarCollapsed ? " sidebar--collapsed" : ""}`}>
+      <div className="sb-toolbar">
+        <button
+          type="button"
+          className="sb-collapse-btn"
+          onClick={toggleSidebar}
+          aria-expanded={!sidebarCollapsed}
+          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {sidebarCollapsed ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+          )}
+        </button>
+      </div>
       <div className="sb-brand">
-        <span className="sb-brand-dot"></span>spr<span>ntly</span>
+        <span className="sb-brand-dot" aria-hidden />
+        <span className="sb-brand-text">
+          spr<span>ntly</span>
+        </span>
       </div>
       <div className="sb-section-title">Intelligence</div>
       <NavItem

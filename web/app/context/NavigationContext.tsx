@@ -5,6 +5,7 @@ import {
   useContext,
   useState,
   useCallback,
+  useEffect,
   type ReactNode,
 } from "react"
 import type { ScreenId } from "../types"
@@ -39,6 +40,10 @@ interface NavigationContextType {
   // AI bar
   aiBarValue: string
   setAIBarValue: (value: string) => void
+
+  /** Narrow icon-only rail vs full labels */
+  sidebarCollapsed: boolean
+  toggleSidebar: () => void
 }
 
 const NavigationContext = createContext<NavigationContextType | null>(null)
@@ -51,6 +56,38 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [reviewPastOpen, setReviewPastOpen] = useState(false)
   const [toast, setToast] = useState<{ title: string; sub: string; link?: string } | null>(null)
   const [aiBarValue, setAIBarValue] = useState("")
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("sprntly-sidebar-collapsed") === "1") {
+        setSidebarCollapsed(true)
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof document === "undefined") return
+    if (sidebarCollapsed) {
+      document.documentElement.setAttribute("data-sidebar-collapsed", "")
+    } else {
+      document.documentElement.removeAttribute("data-sidebar-collapsed")
+    }
+  }, [sidebarCollapsed])
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem("sprntly-sidebar-collapsed", next ? "1" : "0")
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }, [])
 
   const goTo = useCallback((screen: ScreenId) => {
     setCurrentScreen(screen)
@@ -106,6 +143,8 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         hideToast,
         aiBarValue,
         setAIBarValue,
+        sidebarCollapsed,
+        toggleSidebar,
       }}
     >
       {children}

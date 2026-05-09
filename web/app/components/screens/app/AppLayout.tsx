@@ -1,6 +1,7 @@
 "use client"
 
 import { ReactNode } from "react"
+import { useNavigation } from "../../../context/NavigationContext"
 import { Sidebar } from "../../shared/Sidebar"
 
 interface AppLayoutProps {
@@ -10,8 +11,12 @@ interface AppLayoutProps {
 }
 
 export function AppLayout({ children, style, mainStyle }: AppLayoutProps) {
+  const { sidebarCollapsed } = useNavigation()
   return (
-    <div className="app" style={style}>
+    <div
+      className={`app${sidebarCollapsed ? " app--sidebar-collapsed" : ""}`}
+      style={style}
+    >
       <Sidebar />
       <main className="main" style={mainStyle}>
         {children}
