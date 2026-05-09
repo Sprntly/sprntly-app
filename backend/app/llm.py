@@ -54,7 +54,7 @@ def call_md(
     system: str,
     user: str,
     model: str = DEFAULT_MODEL,
-    max_tokens: int = 12000,
+    max_tokens: int = 16000,
 ) -> str:
     """Call Claude expecting plain markdown output."""
     msg = get_client().messages.create(
