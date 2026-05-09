@@ -22,8 +22,24 @@ export function DetailScreen() {
     }
     setGenerating(true)
     try {
-      const res = await prdApi.generate(d.meta.briefId, d.meta.insightIndex)
-      setContent({ prd: markdownToPrdState(res.markdown) })
+      const start = await prdApi.generate(d.meta.briefId, d.meta.insightIndex)
+
+      // Poll until ready (or failed). PRDs typically take ~3 min on first run;
+      // already-generated PRDs return status='ready' immediately so we skip the loop.
+      let prd = await prdApi.get(start.prd_id)
+      const startedAt = Date.now()
+      const MAX_MS = 6 * 60 * 1000 // 6 min ceiling
+      while (prd.status === "generating" && Date.now() - startedAt < MAX_MS) {
+        await new Promise((r) => setTimeout(r, 4000))
+        prd = await prdApi.get(start.prd_id)
+      }
+      if (prd.status === "failed") {
+        throw new Error(prd.error || "PRD generation failed on the backend")
+      }
+      if (prd.status !== "ready") {
+        throw new Error("Timed out waiting for PRD")
+      }
+      setContent({ prd: markdownToPrdState(prd.payload_md) })
       goTo("prd")
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)

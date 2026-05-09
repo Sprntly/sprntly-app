@@ -130,21 +130,34 @@ export const askApi = {
     api.post<AskResponse>("/v1/ask", { question, dataset }),
 }
 
-export type PrdResponse = { prd_id: number; title: string; markdown: string }
+export type PrdStartResponse = {
+  prd_id: number
+  status: "generating" | "ready" | "failed"
+  title: string
+}
+
+export type PrdRecord = {
+  id: number
+  brief_id: number
+  insight_index: number
+  generated_at: string
+  title: string
+  payload_md: string
+  status: "generating" | "ready" | "failed"
+  error?: string | null
+}
 
 export const prdApi = {
-  generate: (briefId: number, insightIndex: number) =>
-    api.post<PrdResponse>("/v1/prd/generate", {
+  /** Kicks off PRD generation in the background. Returns immediately with a
+   *  prd_id; client should poll prdApi.get(id) until status === 'ready'. */
+  generate: (briefId: number, insightIndex: number, force = false) =>
+    api.post<PrdStartResponse>("/v1/prd/generate", {
       brief_id: briefId,
       insight_index: insightIndex,
+      force,
     }),
-  byId: (id: number) =>
-    api.get<{
-      id: number
-      brief_id: number
-      insight_index: number
-      generated_at: string
-      title: string
-      payload_md: string
-    }>(`/v1/prd/${id}`),
+  /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
+  get: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
+  /** Old name retained for compatibility. */
+  byId: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
 }

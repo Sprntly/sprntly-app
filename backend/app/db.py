@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS prds (
     insight_index INTEGER NOT NULL,
     generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     title TEXT NOT NULL,
-    payload_md TEXT NOT NULL,
+    payload_md TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ready',
+    error TEXT,
     FOREIGN KEY (brief_id) REFERENCES briefs(id)
 );
 
@@ -43,6 +45,12 @@ def init_db() -> None:
     Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)
     with conn() as c:
         c.executescript(SCHEMA)
+        # Idempotent migrations for boxes that already have the prds table
+        cols = {row[1] for row in c.execute("PRAGMA table_info(prds)").fetchall()}
+        if "status" not in cols:
+            c.execute("ALTER TABLE prds ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'")
+        if "error" not in cols:
+            c.execute("ALTER TABLE prds ADD COLUMN error TEXT")
 
 
 @contextmanager
@@ -107,21 +115,63 @@ def save_brief(dataset: str, week_label: str, payload: dict) -> int:
 
 
 def save_prd(brief_id: int, insight_index: int, title: str, md: str) -> int:
+    """Insert a complete PRD (sync flow). Status='ready'."""
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO prds (brief_id, insight_index, title, payload_md) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO prds (brief_id, insight_index, title, payload_md, status) "
+            "VALUES (?, ?, ?, ?, 'ready')",
             (brief_id, insight_index, title, md),
         )
         return cur.lastrowid
 
 
+def start_prd(brief_id: int, insight_index: int, title: str) -> int:
+    """Insert an empty PRD row in 'generating' state. Returns the new id."""
+    with conn() as c:
+        cur = c.execute(
+            "INSERT INTO prds (brief_id, insight_index, title, payload_md, status) "
+            "VALUES (?, ?, ?, '', 'generating')",
+            (brief_id, insight_index, title),
+        )
+        return cur.lastrowid
+
+
+def complete_prd(prd_id: int, title: str, md: str) -> None:
+    with conn() as c:
+        c.execute(
+            "UPDATE prds SET title=?, payload_md=?, status='ready', error=NULL "
+            "WHERE id=?",
+            (title, md, prd_id),
+        )
+
+
+def fail_prd(prd_id: int, error: str) -> None:
+    with conn() as c:
+        c.execute(
+            "UPDATE prds SET status='failed', error=? WHERE id=?",
+            (error[:500], prd_id),
+        )
+
+
 def get_prd(prd_id: int) -> dict | None:
     with conn() as c:
         row = c.execute(
-            "SELECT id, brief_id, insight_index, generated_at, title, payload_md "
-            "FROM prds WHERE id=?",
+            "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
+            "status, error FROM prds WHERE id=?",
             (prd_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def find_existing_prd(brief_id: int, insight_index: int) -> dict | None:
+    """Return the most recent ready/generating PRD for a (brief, insight)."""
+    with conn() as c:
+        row = c.execute(
+            "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
+            "status, error FROM prds "
+            "WHERE brief_id=? AND insight_index=? AND status IN ('ready','generating') "
+            "ORDER BY id DESC LIMIT 1",
+            (brief_id, insight_index),
         ).fetchone()
     return dict(row) if row else None
 
