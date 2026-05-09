@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation"
 import { NavigationProvider, useNavigation } from "./context/NavigationContext"
 import { ContentProvider } from "./context/ContentContext"
 import {
-  Picker,
+  TopSearchBar,
   AIBar,
   Toast,
   ApproveModal,
@@ -118,7 +118,7 @@ function AppContent() {
 
   return (
     <>
-      <Picker />
+      <TopSearchBar />
       {renderScreen()}
       <AIBar />
       <Toast />

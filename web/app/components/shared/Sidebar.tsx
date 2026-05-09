@@ -5,6 +5,18 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
 import type { ScreenId } from "../../types"
+import {
+  IconAsk,
+  IconBrief,
+  IconConnectors,
+  IconEvidence,
+  IconHome,
+  IconPast,
+  IconPrd,
+  IconSettings,
+  IconShipped,
+  IconTeam,
+} from "./sidebar-icons"
 
 export function Sidebar() {
   const { currentScreen, goTo, sidebarCollapsed, toggleSidebar } = useNavigation()
@@ -87,38 +99,37 @@ export function Sidebar() {
           spr<span>ntly</span>
         </span>
       </div>
+
+      <div className="sb-section-title">Overview</div>
+      <NavItem screen="chat" icon={<IconHome />} label="Home" />
+
       <div className="sb-section-title">Intelligence</div>
       <NavItem
         screen="brief"
-        icon="✦"
+        icon={<IconBrief />}
         label="Weekly brief"
         count={content.sidebarBriefCount ?? undefined}
       />
+      <NavItem screen="detail" icon={<IconEvidence />} label="Evidence" />
+      <NavItem screen="prd" icon={<IconPrd />} label="PRD" />
       <NavItem
         screen="ondemand"
-        icon={
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
-        }
+        icon={<IconAsk />}
         label="Ask Sprntly"
         count={content.sidebarConvCount ?? undefined}
       />
-      <NavItem screen="shipped" icon="✓" label="Shipped" />
-      <div className="sb-spacer"></div>
+
+      <div className="sb-section-title">Outcomes</div>
+      <NavItem screen="shipped" icon={<IconShipped />} label="Shipped" />
+      <NavItem screen="past" icon={<IconPast />} label="Past briefs" />
+
+      <div className="sb-spacer" />
+
       <div className="sb-section-title">Workspace</div>
-      <NavItem screen="connectors" icon="⊞" label="Connectors" />
-      <NavItem screen="team" icon="○" label="Team" />
-      <NavItem screen="settings" icon="⚙" label="Settings" />
+      <NavItem screen="connectors" icon={<IconConnectors />} label="Connectors" />
+      <NavItem screen="team" icon={<IconTeam />} label="Team" />
+      <NavItem screen="settings" icon={<IconSettings />} label="Settings" />
+
       <div className="sb-footer">
         <div className="sb-user">
           <div className="sb-avatar">{initials}</div>
