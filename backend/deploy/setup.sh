@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # One-shot setup script. Run on a fresh Amazon Linux 2023 t3.micro as ec2-user.
-# Assumes the repo is already cloned at ~/Sprntly and ~/Sprntly/.env exists.
+# Assumes the monorepo is cloned at ~/Sprntly and ~/Sprntly/backend/.env exists.
 
-REPO_DIR="$HOME/Sprntly"
-cd "$REPO_DIR"
+BACKEND_DIR="$HOME/Sprntly/backend"
+cd "$BACKEND_DIR"
 
 sudo dnf -y update
 sudo dnf -y install python3.11 python3.11-pip nginx git
