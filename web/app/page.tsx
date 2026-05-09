@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect } from "react"
+import { useRouter } from "next/navigation"
 import { NavigationProvider, useNavigation } from "./context/NavigationContext"
 import { ContentProvider } from "./context/ContentContext"
 import {
@@ -34,6 +35,7 @@ import {
   TeamScreen,
   ConnectorsScreen,
 } from "./components/screens/app"
+import { useAuth } from "./lib/auth"
 
 function AppContent() {
   const { currentScreen, closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } =
@@ -123,12 +125,46 @@ function AppContent() {
   )
 }
 
+function AuthGate({ children }: { children: React.ReactNode }) {
+  const auth = useAuth()
+  const router = useRouter()
+
+  useEffect(() => {
+    if (auth.kind === "anonymous") {
+      router.replace("/sign-in")
+    }
+  }, [auth.kind, router])
+
+  if (auth.kind !== "authed") {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#0a0a0c",
+          color: "#7a7a85",
+          fontFamily: "Geist, system-ui, sans-serif",
+          fontSize: 14,
+        }}
+      >
+        Loading…
+      </div>
+    )
+  }
+
+  return <>{children}</>
+}
+
 export default function HomePage() {
   return (
-    <NavigationProvider>
-      <ContentProvider>
-        <AppContent />
-      </ContentProvider>
-    </NavigationProvider>
+    <AuthGate>
+      <NavigationProvider>
+        <ContentProvider>
+          <AppContent />
+        </ContentProvider>
+      </NavigationProvider>
+    </AuthGate>
   )
 }
