@@ -1,0 +1,36 @@
+name: Deploy backend to EC2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd ~/Sprntly
+            git fetch --quiet origin main
+            git reset --hard origin/main
+            cd backend
+            ./.venv/bin/pip install -q -r requirements.txt
+            sudo /bin/systemctl restart sprintly
+            sleep 3
+            curl -fsS http://127.0.0.1:8000/healthz
+            echo "Deploy OK: $(git -C ~/Sprntly rev-parse --short HEAD)"
