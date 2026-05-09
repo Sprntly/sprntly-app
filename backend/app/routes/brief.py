@@ -1,6 +1,9 @@
+import asyncio
+
 from fastapi import APIRouter, Cookie, HTTPException
 
 from app.auth import require_session
+from app.brief_runner import auto_generate_brief, get_status
 from app.corpus import load_corpus
 from app.db import get_brief_by_id, get_current_brief, save_brief
 from app.llm import call_json
@@ -14,11 +17,50 @@ def current(
     dataset: str = "asurion",
     sprintly_session: str | None = Cookie(default=None),
 ):
+    """Return the latest cached brief for a dataset.
+
+    If none exists yet, returns 404 with a body that includes the current
+    auto-generation status (`empty | generating | failed`). Frontend can
+    poll `/v1/brief/status` while this is anything other than `ready`.
+    """
     require_session(sprintly_session)
     brief = get_current_brief(dataset)
-    if not brief:
-        raise HTTPException(404, "No brief generated yet")
-    return brief
+    if brief:
+        return brief
+    raise HTTPException(404, {"message": "No brief generated yet", **get_status(dataset)})
+
+
+@router.get("/status")
+def status(
+    dataset: str = "asurion",
+    sprintly_session: str | None = Cookie(default=None),
+):
+    """Lightweight poll endpoint for the frontend.
+
+    Status values:
+      - "ready": brief is in the cache, fetch it via /v1/brief/current
+      - "generating": auto-gen is in flight; retry in a few seconds
+      - "failed": last attempt failed (see `error`); will retry on service restart
+      - "empty": nothing has been attempted yet
+    """
+    require_session(sprintly_session)
+    return {"dataset": dataset, **get_status(dataset)}
+
+
+@router.post("/regenerate")
+async def regenerate(
+    dataset: str = "asurion",
+    sprintly_session: str | None = Cookie(default=None),
+):
+    """Force a fresh brief generation in the background. Returns immediately.
+
+    Use case: API key was just fixed, want to retry without restarting the
+    service. Existing cached brief (if any) stays in place until the new
+    generation completes successfully.
+    """
+    require_session(sprintly_session)
+    asyncio.create_task(auto_generate_brief(dataset))
+    return {"started": True, "dataset": dataset}
 
 
 @router.get("/{brief_id}")
@@ -38,9 +80,10 @@ def generate(
     dataset: str = "asurion",
     sprintly_session: str | None = Cookie(default=None),
 ):
-    """Pre-compute a fresh brief for a dataset. Caches the result.
+    """Synchronously generate a fresh brief and return it.
 
-    Note: invokes Claude. Costs tokens. Intended for ops, not normal user flow.
+    Note: invokes Claude. Costs tokens. Blocks until done (~30s). Use
+    /v1/brief/regenerate for fire-and-forget behavior instead.
     """
     require_session(sprintly_session)
     corpus = load_corpus(dataset)
