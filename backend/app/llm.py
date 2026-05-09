@@ -25,7 +25,7 @@ def call_json(
     system: str,
     user: str,
     model: str = DEFAULT_MODEL,
-    max_tokens: int = 8000,
+    max_tokens: int = 16000,
 ) -> dict:
     """Call Claude expecting a strict JSON object response."""
     msg = get_client().messages.create(
