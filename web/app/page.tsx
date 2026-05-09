@@ -1,0 +1,134 @@
+"use client"
+
+import { useEffect } from "react"
+import { NavigationProvider, useNavigation } from "./context/NavigationContext"
+import { ContentProvider } from "./context/ContentContext"
+import {
+  Picker,
+  AIBar,
+  Toast,
+  ApproveModal,
+  InviteModal,
+  ClaudeDrawer,
+  TicketDrawer,
+} from "./components/shared"
+import {
+  Onboarding1,
+  Onboarding2,
+  Onboarding3,
+  Onboarding4,
+  Onboarding5,
+  Onboarding6,
+  Onboarding7,
+  Onboarding8,
+} from "./components/screens/onboarding"
+import {
+  ChatScreen,
+  BriefScreen,
+  DetailScreen,
+  PrdScreen,
+  OndemandScreen,
+  PastScreen,
+  ShippedScreen,
+  SettingsScreen,
+  TeamScreen,
+  ConnectorsScreen,
+} from "./components/screens/app"
+
+function AppContent() {
+  const { currentScreen, closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } =
+    useNavigation()
+
+  useEffect(() => {
+    const handleKeydown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        closeDrawers()
+        closeModal()
+        setShareMenuOpen(false)
+        setReviewPastOpen(false)
+      }
+    }
+    document.addEventListener("keydown", handleKeydown)
+    return () => document.removeEventListener("keydown", handleKeydown)
+  }, [closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen])
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement
+      if (!target.closest(".share-menu") && !target.closest('[class*="share"]')) {
+        setShareMenuOpen(false)
+      }
+      if (!target.closest(".review-past-menu") && !target.closest(".review-past-wrap")) {
+        setReviewPastOpen(false)
+      }
+    }
+    document.addEventListener("click", handleClick)
+    return () => document.removeEventListener("click", handleClick)
+  }, [setShareMenuOpen, setReviewPastOpen])
+
+  const renderScreen = () => {
+    switch (currentScreen) {
+      case "ob-1":
+        return <Onboarding1 />
+      case "ob-2":
+        return <Onboarding2 />
+      case "ob-3":
+        return <Onboarding3 />
+      case "ob-4":
+        return <Onboarding4 />
+      case "ob-5":
+        return <Onboarding5 />
+      case "ob-6":
+        return <Onboarding6 />
+      case "ob-7":
+        return <Onboarding7 />
+      case "ob-8":
+        return <Onboarding8 />
+      case "chat":
+        return <ChatScreen />
+      case "brief":
+        return <BriefScreen />
+      case "detail":
+        return <DetailScreen />
+      case "prd":
+        return <PrdScreen />
+      case "ondemand":
+        return <OndemandScreen />
+      case "past":
+        return <PastScreen />
+      case "shipped":
+        return <ShippedScreen />
+      case "settings":
+        return <SettingsScreen />
+      case "team":
+        return <TeamScreen />
+      case "connectors":
+        return <ConnectorsScreen />
+      default:
+        return <Onboarding1 />
+    }
+  }
+
+  return (
+    <>
+      <Picker />
+      {renderScreen()}
+      <AIBar />
+      <Toast />
+      <ApproveModal />
+      <InviteModal />
+      <ClaudeDrawer />
+      <TicketDrawer />
+    </>
+  )
+}
+
+export default function HomePage() {
+  return (
+    <NavigationProvider>
+      <ContentProvider>
+        <AppContent />
+      </ContentProvider>
+    </NavigationProvider>
+  )
+}

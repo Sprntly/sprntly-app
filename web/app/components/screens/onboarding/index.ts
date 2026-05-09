@@ -1,0 +1,8 @@
+export { Onboarding1 } from "./Onboarding1"
+export { Onboarding2 } from "./Onboarding2"
+export { Onboarding3 } from "./Onboarding3"
+export { Onboarding4 } from "./Onboarding4"
+export { Onboarding5 } from "./Onboarding5"
+export { Onboarding6 } from "./Onboarding6"
+export { Onboarding7 } from "./Onboarding7"
+export { Onboarding8 } from "./Onboarding8"
