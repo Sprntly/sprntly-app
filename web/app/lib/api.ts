@@ -113,7 +113,8 @@ export type AskResponse = {
 }
 
 export const askApi = {
-  ask: (question: string) => api.post<AskResponse>("/v1/ask", { question }),
+  ask: (question: string, dataset: string = "asurion") =>
+    api.post<AskResponse>("/v1/ask", { question, dataset }),
 }
 
 export type PrdResponse = { prd_id: number; title: string; markdown: string }

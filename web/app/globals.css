@@ -722,6 +722,38 @@
     border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px;
   }
   .ai-bar-send:hover { background: var(--ink-2); }
+  .ai-bar-send:disabled {
+    opacity: 0.42; cursor: not-allowed;
+  }
+  .ai-bar-send:disabled:hover { background: var(--ink); }
+
+  .ai-bar-reply {
+    border-top: 1px solid var(--line);
+    padding: 12px 14px 10px;
+    max-height: min(240px, 38vh);
+    overflow-y: auto;
+    font-size: 13px;
+    background: var(--surface-2);
+  }
+  .ai-bar-reply-loading { color: var(--muted); font-size: 13px; }
+  .ai-bar-reply-error { color: var(--danger); font-size: 13px; line-height: 1.45; }
+  .ai-bar-reply-answer {
+    white-space: pre-wrap; color: var(--ink-2); line-height: 1.55;
+  }
+  .ai-bar-reply-kp {
+    margin: 10px 0 0; padding-left: 18px; color: var(--ink-3);
+    font-size: 12px; line-height: 1.45;
+  }
+  .ai-bar-reply-cites { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .ai-bar-reply-cite {
+    padding: 8px 10px; background: var(--surface); border-radius: 8px;
+    border: 1px solid var(--line); font-size: 11px; line-height: 1.4;
+  }
+  .ai-bar-reply-cite-src { font-weight: 600; color: var(--ink); margin-bottom: 4px; }
+  .ai-bar-reply-cite-ev { color: var(--ink-3); }
+  .ai-bar-reply-gap {
+    margin-top: 10px; font-size: 11px; color: var(--muted); font-style: italic;
+  }
 
   .selection-ask {
     position: absolute; z-index: 60;
