@@ -32,11 +32,19 @@ export function TopSearchBar() {
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
       const n = content.conversations.length + 1
       setContent({
-        conversations: [{ id: convId, title, time: timeStr }, ...content.conversations],
+        conversations: [
+          {
+            id: convId,
+            title,
+            time: timeStr,
+            savedTurn: { id: convId, query, reply: res },
+          },
+          ...content.conversations,
+        ],
         sidebarConvCount: n,
       })
 
-      setPendingSearchHandoff({ query, reply: res })
+      setPendingSearchHandoff({ query, reply: res, convId })
       goTo("ondemand")
       setQ("")
     } catch (e) {

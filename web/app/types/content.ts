@@ -1,5 +1,7 @@
 /** Serializable app payload — hydrate from API / LLM via `setContent`. */
 
+import type { AskResponse } from "../lib/api"
+
 export type BriefTagType = "double" | "new" | "fix"
 
 export interface BriefFindingRow {
@@ -161,10 +163,19 @@ export interface ShippedState {
   supporting: ShippedItemRow[]
 }
 
+/** One completed (or in-flight) Q&A for Ask Sprntly; used to restore the thread when a sidebar row is clicked. */
+export interface ConversationSavedTurn {
+  id: string
+  query: string
+  reply?: AskResponse
+  error?: string
+}
+
 export interface ConversationRow {
   id: string
   title: string
   time: string
+  savedTurn?: ConversationSavedTurn | null
 }
 
 export interface TeamMemberRow {

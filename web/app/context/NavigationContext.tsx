@@ -12,7 +12,7 @@ import type { ScreenId } from "../types"
 import type { AskResponse } from "../lib/api"
 
 /** Top search hands off `/v1/ask` results to Ask Sprntly (in-page thread) without a second request. */
-export type PendingSearchHandoff = { query: string; reply: AskResponse }
+export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: string }
 
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
 const AI_PANEL_C_KEY = "sprntly-ai-panel-collapsed"

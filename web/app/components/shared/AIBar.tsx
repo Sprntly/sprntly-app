@@ -202,7 +202,15 @@ export function AIBar() {
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
       const nextCount = content.conversations.length + 1
       setContent({
-        conversations: [{ id: convId, title, time: timeStr }, ...content.conversations],
+        conversations: [
+          {
+            id: convId,
+            title,
+            time: timeStr,
+            savedTurn: { id: convId, query: q, reply: res },
+          },
+          ...content.conversations,
+        ],
         sidebarConvCount: nextCount,
       })
     } catch (e) {

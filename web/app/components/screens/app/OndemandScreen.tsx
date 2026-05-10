@@ -27,7 +27,7 @@ export function OndemandScreen() {
   } = useNavigation()
   const { content, setContent } = useContent()
   const [railExpanded, setRailExpanded] = useState(false)
-  const [activeConv, setActiveConv] = useState(0)
+  const [activeConv, setActiveConv] = useState<number | null>(null)
   const [thread, setThread] = useState<ThreadTurn[]>([])
   const [draft, setDraft] = useState("")
   const [busy, setBusy] = useState(false)
@@ -36,12 +36,14 @@ export function OndemandScreen() {
 
   const conversations = content.conversations
   const starters = content.ondemandStarters
+  const conversationsRef = useRef(conversations)
+  conversationsRef.current = conversations
 
   useEffect(() => {
     if (!pendingSearchHandoff) return
-    const { query, reply } = pendingSearchHandoff
+    const { query, reply, convId } = pendingSearchHandoff
     setPendingSearchHandoff(null)
-    setThread((t) => [...t, { id: crypto.randomUUID(), query, reply }])
+    setThread([{ id: convId, query, reply }])
     setActiveConv(0)
   }, [pendingSearchHandoff, setPendingSearchHandoff])
 
@@ -59,21 +61,41 @@ export function OndemandScreen() {
     })
   }, [pendingOndemandDraft, setPendingOndemandDraft])
 
-  const appendConversation = useCallback(
-    (query: string) => {
-      const convId =
-        typeof crypto !== "undefined" && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `ask-${Date.now()}`
+  const pushPendingConversation = useCallback(
+    (turnId: string, query: string) => {
+      const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-      const nextCount = content.conversations.length + 1
+      const nextCount = prev.length + 1
       setContent({
-        conversations: [{ id: convId, title, time: timeStr }, ...content.conversations],
+        conversations: [
+          { id: turnId, title, time: timeStr, savedTurn: { id: turnId, query } },
+          ...prev,
+        ],
         sidebarConvCount: nextCount,
       })
     },
-    [content.conversations, setContent],
+    [setContent],
+  )
+
+  const finalizeConversationTurn = useCallback(
+    (turnId: string, updates: { reply?: AskResponse; error?: string }) => {
+      const prev = conversationsRef.current
+      setContent({
+        conversations: prev.map((c) => {
+          if (c.id !== turnId || !c.savedTurn) return c
+          const base = { id: turnId, query: c.savedTurn.query }
+          if (updates.reply !== undefined) {
+            return { ...c, savedTurn: { ...base, reply: updates.reply } }
+          }
+          if (updates.error !== undefined) {
+            return { ...c, savedTurn: { ...base, error: updates.error } }
+          }
+          return c
+        }),
+      })
+    },
+    [setContent],
   )
 
   const submitAsk = useCallback(
@@ -89,10 +111,12 @@ export function OndemandScreen() {
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       setBusy(true)
       setThread((t) => [...t, { id, query }])
-      appendConversation(query)
+      pushPendingConversation(id, query)
+      setActiveConv(0)
       try {
         const res = await askApi.ask(query)
         setThread((t) => t.map((turn) => (turn.id === id ? { ...turn, reply: res } : turn)))
+        finalizeConversationTurn(id, { reply: res })
       } catch (e) {
         const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
           ? (e.body as { detail: unknown }).detail
@@ -112,13 +136,14 @@ export function OndemandScreen() {
               ? e.message
               : "Something went wrong"
         setThread((t) => t.map((turn) => (turn.id === id ? { ...turn, error: msg } : turn)))
+        finalizeConversationTurn(id, { error: msg })
         showToast("Ask failed", msg.slice(0, 120))
       } finally {
         askingRef.current = false
         setBusy(false)
       }
     },
-    [appendConversation, showToast],
+    [finalizeConversationTurn, pushPendingConversation, showToast],
   )
 
   const handleComposerSubmit = () => {
@@ -153,7 +178,7 @@ export function OndemandScreen() {
   const startNewThread = () => {
     setThread([])
     setDraft("")
-    setActiveConv(0)
+    setActiveConv(null)
   }
 
   const hasThread = thread.length > 0
@@ -169,7 +194,7 @@ export function OndemandScreen() {
             onMouseEnter={() => setRailExpanded(true)}
             onMouseLeave={() => setRailExpanded(false)}
           >
-            <div className="od-rail-collapsed-icon" title="Past conversations">
+            <div className="od-rail-collapsed-icon" aria-hidden>
               <svg
                 width="18"
                 height="18"
@@ -201,7 +226,15 @@ export function OndemandScreen() {
                   <div
                     key={conv.id}
                     className={`od-conv-item ${activeConv === i ? "active" : ""}`}
-                    onClick={() => setActiveConv(i)}
+                    onClick={() => {
+                      const st = conv.savedTurn
+                      if (st) {
+                        setThread([{ id: st.id, query: st.query, reply: st.reply, error: st.error }])
+                      } else {
+                        setThread([])
+                      }
+                      setActiveConv(i)
+                    }}
                   >
                     <div className="od-conv-title">{conv.title}</div>
                     <div className="od-conv-time">{conv.time}</div>
