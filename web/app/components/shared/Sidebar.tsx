@@ -1,9 +1,7 @@
 "use client"
 
-import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
-import { useAuth } from "../../lib/auth"
 import type { ScreenId } from "../../types"
 import {
   IconAsk,
@@ -17,19 +15,6 @@ import {
 export function Sidebar() {
   const { currentScreen, goTo, sidebarCollapsed, toggleSidebar } = useNavigation()
   const { content } = useContent()
-  const auth = useAuth()
-  const [signingOut, setSigningOut] = useState(false)
-
-  const handleSignOut = async () => {
-    if (signingOut) return
-    setSigningOut(true)
-    try {
-      await auth.signOut()
-      // AuthGate will detect anonymous state and redirect to /sign-in
-    } finally {
-      setSigningOut(false)
-    }
-  }
 
   const NavItem = ({
     screen,
@@ -55,18 +40,15 @@ export function Sidebar() {
     </a>
   )
 
+  const displayName = content.userName ?? "David"
   const initials =
     content.userInitials ??
-    (content.userName
-      ? content.userName
-          .split(/\s+/)
-          .map((p) => p[0])
-          .join("")
-          .slice(0, 2)
-          .toUpperCase()
-      : "—")
-  const displayName = content.userName ?? "Account"
-  const displayEmail = content.userEmail ?? "Sign in to sync"
+    displayName
+      .split(/\s+/)
+      .map((p) => p[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase()
 
   return (
     <aside className={`sidebar${sidebarCollapsed ? " sidebar--collapsed" : ""}`}>
@@ -148,41 +130,9 @@ export function Sidebar() {
           <div className="sb-avatar">{initials}</div>
           <div className="sb-user-info">
             <div className="sb-user-name">{displayName}</div>
-            <div className="sb-user-email">{displayEmail}</div>
           </div>
-          <button
-            type="button"
-            className="sb-signout"
-            onClick={handleSignOut}
-            disabled={signingOut}
-            aria-label="Sign out"
-            title="Sign out"
-          >
-            <SignOutIcon />
-          </button>
         </div>
       </div>
     </aside>
-  )
-}
-
-function SignOutIcon() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      {/* door + arrow leaving */}
-      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-      <polyline points="16 17 21 12 16 7" />
-      <line x1="21" y1="12" x2="9" y2="12" />
-    </svg>
   )
 }
