@@ -51,9 +51,18 @@ export interface BriefState {
   sections: BriefSectionRow[]
 }
 
+/** Stable id for suggestion-tile SVG (no emoji in UI). */
+export type ChatCardIconId =
+  | "sparkle"
+  | "message"
+  | "chart"
+  | "diamond"
+  | "document"
+  | "rocket"
+
 export interface ChatHomeCard {
   id: string
-  icon: string
+  icon: ChatCardIconId
   title: string
   desc: string
   target: "brief" | "ondemand"
@@ -64,21 +73,21 @@ export interface ChatHomeCard {
 export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
   {
     id: "home-goto-brief",
-    icon: "✦",
+    icon: "sparkle",
     title: "This week's brief",
     desc: "Ranked findings, impact, and signals in one view.",
     target: "brief",
   },
   {
     id: "home-goto-ask",
-    icon: "💬",
+    icon: "message",
     title: "Ask Sprntly",
     desc: "Free-form Q&A across your product memory.",
     target: "ondemand",
   },
   {
     id: "home-prompt-ask",
-    icon: "📈",
+    icon: "chart",
     title: "Compare our segments",
     desc: "Opens Ask with a retention question ready to send.",
     target: "ondemand",
@@ -87,7 +96,7 @@ export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
   },
   {
     id: "home-prompt-brief",
-    icon: "◇",
+    icon: "diamond",
     title: "Challenge the ranking",
     desc: "Opens the brief with a question in the side assistant.",
     target: "brief",
@@ -100,7 +109,7 @@ export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
 export const DEFAULT_ONDEMAND_STARTERS: ChatHomeCard[] = [
   {
     id: "od-default-q3",
-    icon: "◇",
+    icon: "diamond",
     title: "Q3 strategy",
     desc: "Turn product memory into priorities, bets, and risks.",
     target: "ondemand",
@@ -109,7 +118,7 @@ export const DEFAULT_ONDEMAND_STARTERS: ChatHomeCard[] = [
   },
   {
     id: "od-default-prd",
-    icon: "📄",
+    icon: "document",
     title: "PRD for team folders",
     desc: "Draft scope, rollout, and open questions.",
     target: "ondemand",
@@ -118,7 +127,7 @@ export const DEFAULT_ONDEMAND_STARTERS: ChatHomeCard[] = [
   },
   {
     id: "od-default-retention",
-    icon: "📈",
+    icon: "chart",
     title: "Retention comparison",
     desc: "Compare segments or cohorts we care about.",
     target: "ondemand",
@@ -127,7 +136,7 @@ export const DEFAULT_ONDEMAND_STARTERS: ChatHomeCard[] = [
   },
   {
     id: "od-default-ship",
-    icon: "🚀",
+    icon: "rocket",
     title: "What to ship next",
     desc: "Stack-rank ideas against impact and cost.",
     target: "ondemand",
@@ -205,7 +214,7 @@ export interface ConnectorCategoryRow {
   title: string
   /** Shown under the title (e.g. in connectors management UI) */
   subtitle?: string
-  /** Single character / emoji for the group header tile */
+  /** Reserved for future API-driven icon keys (UI uses SVG placeholders). */
   icon?: string
   items: ConnectorItemRow[]
 }

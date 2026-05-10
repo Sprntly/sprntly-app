@@ -3,6 +3,7 @@
 import { useContent } from "../../../context/ContentContext"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
+import { IconGrid } from "../../shared/app-icons"
 
 export function ConnectorsScreen() {
   const { content } = useContent()
@@ -79,7 +80,9 @@ export function ConnectorsScreen() {
           <div key={cat.key} className="conn-mgmt-group">
             <div className="conn-mgmt-head">
               <div className="conn-mgmt-title-row">
-                <div className="conn-mgmt-icon">{cat.icon ?? "⊞"}</div>
+                <div className="conn-mgmt-icon">
+                  <IconGrid size={16} />
+                </div>
                 <div>
                   <h3 className="conn-mgmt-title">{cat.title}</h3>
                   <p className="conn-mgmt-sub">

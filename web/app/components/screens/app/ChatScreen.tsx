@@ -4,6 +4,7 @@ import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
+import { ChatSuggestionIcon } from "../../shared/app-icons"
 
 export function ChatScreen() {
   const { goTo, setAIBarValue, setPendingOndemandDraft } = useNavigation()
@@ -55,7 +56,9 @@ export function ChatScreen() {
                 className="chat-suggestion"
                 onClick={() => handleCard(c.target, c.prompt)}
               >
-                <div className="chat-suggestion-icon">{c.icon}</div>
+                <div className="chat-suggestion-icon">
+                  <ChatSuggestionIcon id={c.icon} />
+                </div>
                 <div className="chat-suggestion-title">{c.title}</div>
                 <div className="chat-suggestion-desc">{c.desc}</div>
               </div>

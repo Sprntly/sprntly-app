@@ -204,7 +204,10 @@
   }
   .metric-chip:hover { background: var(--surface-2); }
   .metric-chip.selected { background: var(--ink); color: var(--surface); border-color: var(--ink); }
-  .metric-chip.selected::before { content: '✓'; font-size: 10px; }
+  .metric-chip.selected::before {
+    content: ""; flex-shrink: 0; width: 10px; height: 10px; background: currentColor;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
 
   /* ---------- Staged connectors (v3: step-by-step per category) ---------- */
   .conn-stage-header {
@@ -224,7 +227,9 @@
   .conn-stage-pill:hover { color: var(--ink); }
   .conn-stage-pill.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
   .conn-stage-pill.done::after {
-    content: '✓'; position: absolute; top: 2px; right: 3px; font-size: 9px; color: var(--accent); font-weight: 700;
+    content: ""; position: absolute; top: 3px; right: 4px; width: 9px; height: 9px;
+    background: var(--accent);
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E") center / contain no-repeat;
   }
   .conn-stage-pill.done { color: var(--ink-3); }
 
@@ -244,7 +249,9 @@
   .conn-card:hover { border-color: var(--ink-3); background: var(--surface-2); }
   .conn-card.connected { border-color: var(--accent); background: var(--accent-soft); }
   .conn-card.connected::after {
-    content: '✓'; position: absolute; top: 6px; right: 8px; font-size: 10px; color: var(--accent); font-weight: 700;
+    content: ""; position: absolute; top: 7px; right: 9px; width: 11px; height: 11px;
+    background: var(--accent);
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'/%3E%3C/svg%3E") center / contain no-repeat;
   }
   .conn-logo {
     width: 32px; height: 32px; border-radius: 8px; background: var(--surface-3);
@@ -787,7 +794,10 @@
   }
   .drawer-title { font-family: var(--font-display); font-weight: 600; font-size: 19px; letter-spacing: -0.02em; margin: 0; display: flex; align-items: center; gap: 10px; }
   .drawer-icon { width: 28px; height: 28px; background: var(--ink); color: var(--surface); border-radius: 7px; display: flex; align-items: center; justify-content: center; font-family: var(--font-display); font-weight: 600; font-size: 13px; }
-  .drawer-close { background: transparent; border: none; font-size: 18px; color: var(--muted); cursor: pointer; padding: 6px 10px; border-radius: 6px; }
+  .drawer-close {
+    background: transparent; border: none; color: var(--muted); cursor: pointer;
+    padding: 6px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center;
+  }
   .drawer-close:hover { background: var(--surface-3); color: var(--ink); }
   .drawer-body { padding: 22px 24px; flex: 1; overflow-y: auto; }
   .drawer-foot { padding: 14px 24px; border-top: 1px solid var(--line); background: var(--surface-2); display: flex; justify-content: space-between; align-items: center; gap: 10px; }
@@ -832,13 +842,17 @@
   .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
   .toast-icon {
     width: 28px; height: 28px; border-radius: 8px; background: var(--accent); color: #fff;
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   }
   .toast-body { flex: 1; }
   .toast-title { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
   .toast-sub { font-size: 11.5px; color: rgba(250,249,246,0.7); line-height: 1.4; }
   .toast-link { color: var(--accent-2); font-size: 11.5px; text-decoration: none; font-weight: 500; }
-  .toast-close { background: transparent; border: none; color: rgba(250,249,246,0.5); cursor: pointer; font-size: 14px; padding: 2px 6px; }
+  .toast-close {
+    background: transparent; border: none; color: rgba(250,249,246,0.55); cursor: pointer;
+    padding: 4px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .toast-close:hover { color: rgba(250,249,246,0.95); }
 
   /* ---------- Persistent AI assistant (side panel ≥901px, bottom bar <901px) ---------- */
   .ai-bar-wrap {
@@ -1358,10 +1372,11 @@
     border: none;
     background: var(--ink);
     color: var(--surface);
-    font-size: 18px;
-    font-weight: 600;
     cursor: pointer;
     transition: background 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   .od-composer-send:disabled { opacity: 0.35; cursor: not-allowed; }
   .od-composer-send:hover:not(:disabled) { background: var(--ink-2); }
@@ -1477,7 +1492,8 @@
       radial-gradient(350px 450px at 0% 100%, rgba(15,111,78,0.14), transparent 60%);
   }
   .shipped-celebrate::after {
-    content: '✦'; position: absolute; top: 24px; right: 32px; color: rgba(127,212,176,0.2); font-size: 48px; font-family: var(--font-display); font-weight: 600;
+    content: ""; position: absolute; top: 20px; right: 28px; width: 52px; height: 52px; opacity: 0.22;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M12 3v5M12 16v5M3 12h5M16 12h5M6.5 6.5l3 3M14.5 14.5l3 3M17.5 6.5l-3 3M10.5 14.5l-3 3' stroke='%237fd4b0' stroke-width='1.35' stroke-linecap='round'/%3E%3C/svg%3E") center / contain no-repeat;
   }
   .shipped-inner { position: relative; z-index: 1; }
   .shipped-badge {
@@ -1741,7 +1757,7 @@
   .invite-remove-btn {
     width: 32px; height: 32px; border-radius: 6px; background: transparent;
     border: 1px solid var(--line); color: var(--muted); cursor: pointer;
-    font-size: 16px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center; padding: 0;
   }
   .invite-remove-btn:hover { color: var(--danger); border-color: var(--danger-soft); }
 

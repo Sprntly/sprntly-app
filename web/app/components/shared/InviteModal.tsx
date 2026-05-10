@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
+import { IconClose } from "./app-icons"
 
 export function InviteModal() {
   const { activeModal, closeModal, showToast } = useNavigation()
@@ -73,10 +74,12 @@ export function InviteModal() {
                   <option>Viewer</option>
                 </select>
                 <button
+                  type="button"
                   className="invite-remove-btn"
                   onClick={() => removeRow(i)}
+                  aria-label="Remove row"
                 >
-                  ×
+                  <IconClose size={14} />
                 </button>
               </div>
             ))}

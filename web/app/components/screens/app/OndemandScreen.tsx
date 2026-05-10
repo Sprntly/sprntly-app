@@ -7,6 +7,7 @@ import { Sidebar } from "../../shared/Sidebar"
 import { TopSearchBar } from "../../shared/TopSearchBar"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AskReplyBody } from "../../shared/AskReplyBody"
+import { ChatSuggestionIcon, IconSendUp } from "../../shared/app-icons"
 import { ApiError, askApi, type AskResponse } from "../../../lib/api"
 
 type ThreadTurn = {
@@ -271,7 +272,9 @@ export function OndemandScreen() {
                           className="chat-suggestion"
                           onClick={() => handleSuggestion(c.prompt ?? c.title)}
                         >
-                          <div className="chat-suggestion-icon">{c.icon}</div>
+                          <div className="chat-suggestion-icon">
+                            <ChatSuggestionIcon id={c.icon} />
+                          </div>
                           <div className="chat-suggestion-title">{c.title}</div>
                           <div className="chat-suggestion-desc">{c.desc}</div>
                         </div>
@@ -312,7 +315,7 @@ export function OndemandScreen() {
                 disabled={busy || draft.trim().length < 3}
                 onClick={handleComposerSubmit}
               >
-                ↑
+                <IconSendUp size={18} />
               </button>
             </div>
           </main>

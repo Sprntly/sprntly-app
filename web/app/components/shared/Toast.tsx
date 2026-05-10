@@ -1,6 +1,7 @@
 "use client"
 
 import { useNavigation } from "../../context/NavigationContext"
+import { IconCheck, IconClose } from "./app-icons"
 
 export function Toast() {
   const { toast, hideToast } = useNavigation()
@@ -9,7 +10,9 @@ export function Toast() {
 
   return (
     <div className={`toast ${toast ? "visible" : ""}`}>
-      <div className="toast-icon">✓</div>
+      <div className="toast-icon">
+        <IconCheck size={16} />
+      </div>
       <div className="toast-body">
         <div className="toast-title">{toast.title}</div>
         <div className="toast-sub">
@@ -24,8 +27,8 @@ export function Toast() {
           )}
         </div>
       </div>
-      <button className="toast-close" onClick={hideToast}>
-        ✕
+      <button type="button" className="toast-close" onClick={hideToast} aria-label="Dismiss">
+        <IconClose size={16} />
       </button>
     </div>
   )

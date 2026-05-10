@@ -1,6 +1,7 @@
 "use client"
 
 import { useNavigation } from "../../context/NavigationContext"
+import { IconClose, IconSparkle } from "./app-icons"
 
 export function ClaudeDrawer() {
   const { activeDrawer, closeDrawers, showToast } = useNavigation()
@@ -22,10 +23,13 @@ export function ClaudeDrawer() {
       <aside className="drawer open">
         <div className="drawer-head">
           <h3 className="drawer-title">
-            <span className="drawer-icon">⌘</span>Send to Claude Code
+            <span className="drawer-icon">
+              <IconSparkle size={15} />
+            </span>
+            Send to Claude Code
           </h3>
-          <button className="drawer-close" onClick={closeDrawers}>
-            ✕
+          <button type="button" className="drawer-close" onClick={closeDrawers} aria-label="Close">
+            <IconClose size={18} />
           </button>
         </div>
         <div className="drawer-body">
@@ -118,8 +122,11 @@ export function ClaudeDrawer() {
             <button className="btn" onClick={closeDrawers}>
               Cancel
             </button>
-            <button className="btn btn-accent" onClick={handleSend}>
-              ✦ Send to Claude Code
+            <button type="button" className="btn btn-accent" onClick={handleSend}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <IconSparkle size={16} />
+                Send to Claude Code
+              </span>
             </button>
           </div>
         </div>

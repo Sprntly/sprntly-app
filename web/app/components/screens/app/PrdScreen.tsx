@@ -1,11 +1,21 @@
 "use client"
 
-import type { CSSProperties } from "react"
+import type { CSSProperties, ReactNode } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import type { PrdState } from "../../../types/content"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
+import {
+  IconCheck,
+  IconCopy,
+  IconGrid,
+  IconLinkInsert,
+  IconListBullet,
+  IconMail,
+  IconRedo,
+  IconUndo,
+} from "../../shared/app-icons"
 
 export function PrdScreen() {
   const { goTo, openModal, shareMenuOpen, setShareMenuOpen, showToast } =
@@ -88,13 +98,13 @@ export function PrdScreen() {
               {shareMenuOpen && prd && (
                 <div className="share-menu open">
                   <ShareMenuItem
-                    icon="✉"
+                    icon={<IconMail size={14} />}
                     title="Email"
                     desc="Send to teammates or stakeholders"
                     onClick={() => handleShare("email")}
                   />
                   <ShareMenuItem
-                    icon="Sl"
+                    icon={<span style={{ fontWeight: 700, fontSize: 10 }}>Sl</span>}
                     iconStyle={{ background: "#4A154B", color: "#fff" }}
                     title="Slack"
                     desc="Post to a channel"
@@ -102,7 +112,7 @@ export function PrdScreen() {
                   />
                   <div className="share-menu-divider" />
                   <ShareMenuItem
-                    icon="⎘"
+                    icon={<IconCopy size={14} />}
                     title="Copy link"
                     desc="Viewable by your team"
                     onClick={() => handleShare("link")}
@@ -116,7 +126,10 @@ export function PrdScreen() {
               disabled={!prd}
               onClick={() => prd && openModal("approve")}
             >
-              ✓ Approve & next step →
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <IconCheck size={16} />
+                Approve & next step
+              </span>
             </button>
           </div>
         </div>
@@ -164,11 +177,11 @@ function PrdToolbar({ hasDoc }: { hasDoc: boolean }) {
   return (
     <div className="prd-toolbar">
       <div className="prd-tools-l">
-        <button type="button" className="prd-tool" disabled={!hasDoc}>
-          ↶
+        <button type="button" className="prd-tool" disabled={!hasDoc} title="Undo" aria-label="Undo">
+          <IconUndo size={16} />
         </button>
-        <button type="button" className="prd-tool" disabled={!hasDoc}>
-          ↷
+        <button type="button" className="prd-tool" disabled={!hasDoc} title="Redo" aria-label="Redo">
+          <IconRedo size={16} />
         </button>
         <div className="prd-tool-divider" />
         <button type="button" className="prd-tool" disabled={!hasDoc}>
@@ -187,15 +200,29 @@ function PrdToolbar({ hasDoc }: { hasDoc: boolean }) {
         <button type="button" className="prd-tool" disabled={!hasDoc}>
           H2
         </button>
-        <button type="button" className="prd-tool" disabled={!hasDoc}>
-          •
+        <button type="button" className="prd-tool" disabled={!hasDoc} title="Bullet list" aria-label="Bullet list">
+          <IconListBullet size={16} />
         </button>
         <div className="prd-tool-divider" />
-        <button type="button" className="prd-tool" disabled={!hasDoc}>
-          ⧉ Link
+        <button
+          type="button"
+          className="prd-tool"
+          disabled={!hasDoc}
+          title="Insert link"
+          style={{ display: "inline-flex", alignItems: "center" }}
+        >
+          <IconLinkInsert size={15} />
+          <span style={{ marginLeft: 5 }}>Link</span>
         </button>
-        <button type="button" className="prd-tool" disabled={!hasDoc}>
-          ⊞ Table
+        <button
+          type="button"
+          className="prd-tool"
+          disabled={!hasDoc}
+          title="Insert table"
+          style={{ display: "inline-flex", alignItems: "center" }}
+        >
+          <IconGrid size={15} />
+          <span style={{ marginLeft: 5 }}>Table</span>
         </button>
       </div>
       <div className="prd-status">
@@ -220,7 +247,7 @@ function ShareMenuItem({
   desc,
   onClick,
 }: {
-  icon: string
+  icon: ReactNode
   iconStyle?: CSSProperties
   title: string
   desc: string

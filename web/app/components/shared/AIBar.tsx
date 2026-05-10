@@ -6,6 +6,7 @@ import { useContent } from "../../context/ContentContext"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, askApi, type AskResponse } from "../../lib/api"
 import { AskReplyBody } from "./AskReplyBody"
+import { IconSendUp, IconSparkle } from "./app-icons"
 import {
   AI_PANEL_COLLAPSED_WIDTH,
   AI_PANEL_WIDTH_MAX,
@@ -269,7 +270,7 @@ export function AIBar() {
           <div className="ai-bar-rail">
             <div className="ai-bar-rail-top">
               <div className="ai-bar-rail-mark" aria-hidden>
-                ✦
+                <IconSparkle size={18} />
               </div>
               <button
                 type="button"
@@ -323,11 +324,13 @@ export function AIBar() {
                   </svg>
                 </button>
               ) : null}
-              <div className="ai-bar-ctx-badge">✦</div>
+              <div className="ai-bar-ctx-badge">
+                <IconSparkle size={14} />
+              </div>
               <span>Asking about</span>
               <span className="ai-bar-ctx-path">{context.path}</span>
               <span className="ai-bar-ctx-hint">
-                Highlight any text to ask · <kbd>⌘</kbd> <kbd>K</kbd>
+                Highlight any text to ask · <kbd>Cmd</kbd> <kbd>K</kbd>
               </span>
             </div>
             {chips.length > 0 ? (
@@ -367,7 +370,7 @@ export function AIBar() {
                 disabled={submitting || !aiBarValue.trim()}
                 onClick={() => void submitAsk()}
               >
-                {submitting ? "…" : "↑"}
+                {submitting ? "..." : <IconSendUp size={18} />}
               </button>
             </div>
           </div>

@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
+import { IconCheck, IconClose } from "./app-icons"
 
 export function TicketDrawer() {
   const { activeDrawer, closeDrawers, showToast } = useNavigation()
@@ -43,8 +44,8 @@ export function TicketDrawer() {
           <h3 className="drawer-title">
             <span className="drawer-icon">J</span>Create ticket
           </h3>
-          <button className="drawer-close" onClick={closeDrawers}>
-            ✕
+          <button type="button" className="drawer-close" onClick={closeDrawers} aria-label="Close">
+            <IconClose size={18} />
           </button>
         </div>
         <div className="drawer-body">
@@ -204,8 +205,11 @@ export function TicketDrawer() {
             <button className="btn" onClick={closeDrawers}>
               Cancel
             </button>
-            <button className="btn btn-accent" onClick={handleCreate}>
-              ✓ Create ticket
+            <button type="button" className="btn btn-accent" onClick={handleCreate}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <IconCheck size={16} />
+                Create ticket
+              </span>
             </button>
           </div>
         </div>

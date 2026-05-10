@@ -1,6 +1,7 @@
 "use client"
 
 import { useNavigation } from "../../context/NavigationContext"
+import { IconCheck, IconSparkle } from "./app-icons"
 
 export function ApproveModal() {
   const { activeModal, closeModal, openDrawer } = useNavigation()
@@ -24,7 +25,10 @@ export function ApproveModal() {
     >
       <div className="modal">
         <div className="modal-head">
-          <div className="modal-badge">✓ PRD Approved</div>
+          <div className="modal-badge">
+            <IconCheck size={12} />
+            PRD Approved
+          </div>
           <h2 className="modal-title">Where should this go next?</h2>
           <p className="modal-sub">
             Pick how you want to move from spec to code. You can change your mind
@@ -33,7 +37,9 @@ export function ApproveModal() {
         </div>
         <div className="modal-options">
           <div className="modal-option" onClick={handleClaudeClick}>
-            <div className="modal-option-icon">⌘</div>
+            <div className="modal-option-icon">
+              <IconSparkle size={18} />
+            </div>
             <div className="modal-option-name">Send to Claude Code</div>
             <div className="modal-option-desc">
               Full context package → Claude Code scopes, implements, opens a PR
