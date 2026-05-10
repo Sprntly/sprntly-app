@@ -19,6 +19,8 @@ const AI_PANEL_C_KEY = "sprntly-ai-panel-collapsed"
 export const AI_PANEL_WIDTH_DEFAULT = 380
 export const AI_PANEL_WIDTH_MIN = 280
 export const AI_PANEL_WIDTH_MAX = 560
+/** Narrow dock when the side assistant is collapsed (mark + bubble on one row). */
+export const AI_PANEL_COLLAPSED_WIDTH = 84
 
 interface NavigationContextType {
   currentScreen: ScreenId

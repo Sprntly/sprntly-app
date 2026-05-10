@@ -7,6 +7,7 @@ import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, askApi, type AskResponse } from "../../lib/api"
 import { AskReplyBody } from "./AskReplyBody"
 import {
+  AI_PANEL_COLLAPSED_WIDTH,
   AI_PANEL_WIDTH_MAX,
   AI_PANEL_WIDTH_MIN,
 } from "../../context/NavigationContext"
@@ -67,7 +68,7 @@ export function AIBar() {
       }
     }
     root.setAttribute("data-ai-panel-layout", "side")
-    const w = aiPanelCollapsed ? 52 : aiPanelWidth
+    const w = aiPanelCollapsed ? AI_PANEL_COLLAPSED_WIDTH : aiPanelWidth
     root.style.setProperty("--ai-panel-occupied", `${w}px`)
     root.setAttribute("data-ai-panel", aiPanelCollapsed ? "collapsed" : "open")
     return () => {
@@ -258,30 +259,35 @@ export function AIBar() {
       <div className="ai-bar-wrap-inner">
         {showCollapsedRail ? (
           <div className="ai-bar-rail">
-            <button
-              type="button"
-              className="ai-bar-rail-expand"
-              onClick={toggleAiPanelCollapsed}
-              aria-label="Expand assistant"
-              title="Expand assistant"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-                <g
-                  stroke="currentColor"
-                  strokeWidth="1.75"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                >
-                  <polyline points="7 6 11 12 7 18" />
-                  <polyline points="12 6 16 12 12 18" />
-                </g>
-              </svg>
-            </button>
-            <div className="ai-bar-rail-mark" aria-hidden>
-              ✦
+            <div className="ai-bar-rail-top">
+              <div className="ai-bar-rail-mark" aria-hidden>
+                ✦
+              </div>
+              <button
+                type="button"
+                className="ai-bar-rail-expand"
+                onClick={toggleAiPanelCollapsed}
+                aria-label="Expand assistant"
+                title="Expand assistant"
+              >
+                {/* Double chevron left — expand panel into the canvas (right-docked rail). */}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <g
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fill="none"
+                  >
+                    <polyline points="17 6 13 12 17 18" />
+                    <polyline points="12 6 8 12 12 18" />
+                  </g>
+                </svg>
+              </button>
             </div>
-            <span className="ai-bar-rail-text">Ask</span>
+            <div className="ai-bar-rail-body">
+              <span className="ai-bar-rail-text">Ask</span>
+            </div>
           </div>
         ) : (
           <div className={`ai-bar${isSide ? " ai-bar--side" : ""}`}>
@@ -294,7 +300,8 @@ export function AIBar() {
                   aria-label="Collapse assistant"
                   title="Collapse assistant"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  {/* Double chevron right — collapse toward the right edge (right-docked rail). */}
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
                     <g
                       stroke="currentColor"
                       strokeWidth="1.75"
@@ -302,8 +309,8 @@ export function AIBar() {
                       strokeLinejoin="round"
                       fill="none"
                     >
-                      <polyline points="17 6 13 12 17 18" />
-                      <polyline points="12 6 8 12 12 18" />
+                      <polyline points="7 6 11 12 7 18" />
+                      <polyline points="12 6 16 12 12 18" />
                     </g>
                   </svg>
                 </button>

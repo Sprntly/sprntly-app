@@ -41,8 +41,8 @@
 
     /* Top chrome: search strip + sidebar header share min-height and divider alignment */
     --app-shell-header-min: 82px;
-    /* Sidebar: collapsed rail fits wordmark + chevron bubble until a logo ships */
-    --sidebar-rail-expanded: 220px;
+    /* Sidebar: expanded width grows with nav content; collapsed rail stays fixed */
+    --sidebar-rail-expanded-min: 220px;
     --sidebar-rail-collapsed: 156px;
   }
   * { box-sizing: border-box; }
@@ -272,7 +272,7 @@
   /* ---------- App shell ---------- */
   .app {
     display: grid;
-    grid-template-columns: var(--sidebar-rail-expanded) 1fr;
+    grid-template-columns: minmax(var(--sidebar-rail-expanded-min), max-content) 1fr;
     min-height: 100vh;
     height: 100vh;
     max-height: 100vh;
@@ -333,6 +333,7 @@
   .sidebar.sidebar--collapsed .sb-top {
     padding: 8px 6px 10px;
   }
+  /* Expanded: full header width — brand left, collapse control trailing. */
   .sb-header {
     display: flex;
     flex-direction: row;
@@ -343,10 +344,11 @@
     width: 100%;
     min-width: 0;
   }
+  /* Collapsed: narrow rail — keep wordmark and chevron bubble tight together. */
   .sidebar.sidebar--collapsed .sb-header {
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: center;
-    gap: 6px;
+    gap: 2px;
   }
   /* Match AI collapsed-rail expand control: bordered surface “bubble” */
   .sb-collapse-btn {
@@ -378,7 +380,7 @@
     flex: 1;
   }
   .sidebar.sidebar--collapsed .sb-brand {
-    flex: 1 1 auto;
+    flex: 0 1 auto;
     flex-direction: row;
     justify-content: flex-start;
     align-items: center;
@@ -650,21 +652,25 @@
 
   .chart-box { margin-top: 10px; padding: 18px; background: var(--surface-2); border-radius: 10px; }
 
-  /* NEW CTA — warmer, more human, less robotic */
+  /* End-of-page recommendation — in document flow (no sticky) so it scrolls away with the rest. */
   .detail-cta-card {
-    position: sticky; bottom: 14px; margin-top: 40px; z-index: 40;
-    background: var(--surface); border: 1px solid var(--ink); border-radius: var(--radius-xl); overflow: hidden;
-    box-shadow: var(--shadow-lg);
+    margin-top: 40px;
+    margin-bottom: 8px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
   }
   .detail-cta-strip {
-    background: var(--accent); height: 3px;
+    background: var(--accent); height: 2px; opacity: 0.85;
   }
   .detail-cta-inner {
-    padding: 20px 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px;
+    padding: 16px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px;
   }
   .detail-cta-text { flex: 1; }
-  .detail-cta-headline { font-family: var(--font-display); font-weight: 600; font-size: 20px; letter-spacing: -0.02em; line-height: 1.2; margin: 0 0 3px; color: var(--ink); }
-  .detail-cta-sub { font-size: 12.5px; color: var(--ink-3); margin: 0; }
+  .detail-cta-headline { font-family: var(--font-display); font-weight: 600; font-size: 17px; letter-spacing: -0.02em; line-height: 1.25; margin: 0 0 4px; color: var(--ink); }
+  .detail-cta-sub { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.45; }
   .detail-cta-actions { display: flex; gap: 8px; }
 
   /* ---------- PRD ---------- */
@@ -902,15 +908,43 @@
   .ai-bar-rail {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 14px 0;
-    gap: 14px;
+    align-items: stretch;
+    padding: 0;
+    gap: 0;
     height: 100%;
     background: var(--surface-2);
     border-left: 1px solid var(--line);
     pointer-events: auto;
   }
+  /* Collapsed rail: chrome row (divider + height sync with main search), mark + chevron bubble on one row. */
+  .ai-bar-rail-top {
+    flex-shrink: 0;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 2px;
+    padding: 8px 6px 10px;
+    min-height: var(--ai-chrome-sync-h, calc(var(--app-shell-header-min) + 18px));
+    border-bottom: 1px solid var(--line);
+    background: rgba(250, 249, 246, 0.96);
+    backdrop-filter: blur(12px);
+  }
+  .ai-bar-rail-top .ai-bar-rail-mark {
+    flex-shrink: 0;
+  }
+  .ai-bar-rail-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 0 14px;
+  }
   .ai-bar-rail-expand {
+    flex-shrink: 0;
     width: 36px;
     height: 36px;
     border-radius: 8px;
@@ -964,6 +998,20 @@
   }
   .ai-bar-collapse-btn:hover {
     background: var(--surface);
+    color: var(--ink);
+    border-color: var(--line);
+  }
+  /* Side layout: same bordered surface bubble as expand control on collapsed rail */
+  html[data-ai-panel-layout="side"] .ai-bar-collapse-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink-3);
+  }
+  html[data-ai-panel-layout="side"] .ai-bar-collapse-btn:hover {
+    background: var(--surface-3);
     color: var(--ink);
     border-color: var(--line);
   }
