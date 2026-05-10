@@ -142,11 +142,12 @@ export function OndemandScreen() {
       <Sidebar />
       <div className="main-column">
         <TopSearchBar />
-        <div
-          className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}
-          onMouseLeave={() => setRailExpanded(false)}
-        >
-          <aside className="od-rail" onMouseEnter={() => setRailExpanded(true)}>
+        <div className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}>
+          <aside
+            className="od-rail"
+            onMouseEnter={() => setRailExpanded(true)}
+            onMouseLeave={() => setRailExpanded(false)}
+          >
             <div className="od-rail-collapsed-icon" title="Past conversations">
               <svg
                 width="18"

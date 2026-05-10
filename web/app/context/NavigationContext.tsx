@@ -11,8 +11,14 @@ import {
 import type { ScreenId } from "../types"
 import type { AskResponse } from "../lib/api"
 
-/** Top search hands off `/v1/ask` results to `AIBar` without a second request. */
+/** Top search hands off `/v1/ask` results to Ask Sprntly (in-page thread) without a second request. */
 export type PendingSearchHandoff = { query: string; reply: AskResponse }
+
+const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
+const AI_PANEL_C_KEY = "sprntly-ai-panel-collapsed"
+export const AI_PANEL_WIDTH_DEFAULT = 380
+export const AI_PANEL_WIDTH_MIN = 280
+export const AI_PANEL_WIDTH_MAX = 560
 
 interface NavigationContextType {
   currentScreen: ScreenId
@@ -52,6 +58,12 @@ interface NavigationContextType {
   /** Narrow icon-only rail vs full labels */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
+
+  /** Right AI panel (Brief / Evidence / PRD): width in px when expanded */
+  aiPanelWidth: number
+  setAiPanelWidth: (width: number) => void
+  aiPanelCollapsed: boolean
+  toggleAiPanelCollapsed: () => void
 }
 
 const NavigationContext = createContext<NavigationContextType | null>(null)
@@ -67,11 +79,25 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [aiBarValue, setAIBarValue] = useState("")
   const [pendingSearchHandoff, setPendingSearchHandoff] = useState<PendingSearchHandoff | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [aiPanelWidth, setAiPanelWidthState] = useState(AI_PANEL_WIDTH_DEFAULT)
+  const [aiPanelCollapsed, setAiPanelCollapsed] = useState(false)
 
   useEffect(() => {
     try {
       if (localStorage.getItem("sprntly-sidebar-collapsed") === "1") {
         setSidebarCollapsed(true)
+      }
+      const w = localStorage.getItem(AI_PANEL_W_KEY)
+      if (w) {
+        const n = parseInt(w, 10)
+        if (!Number.isNaN(n)) {
+          setAiPanelWidthState(
+            Math.min(AI_PANEL_WIDTH_MAX, Math.max(AI_PANEL_WIDTH_MIN, n)),
+          )
+        }
+      }
+      if (localStorage.getItem(AI_PANEL_C_KEY) === "1") {
+        setAiPanelCollapsed(true)
       }
     } catch {
       /* ignore */
@@ -92,6 +118,31 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
       const next = !prev
       try {
         localStorage.setItem("sprntly-sidebar-collapsed", next ? "1" : "0")
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }, [])
+
+  const setAiPanelWidth = useCallback((width: number) => {
+    const clamped = Math.min(
+      AI_PANEL_WIDTH_MAX,
+      Math.max(AI_PANEL_WIDTH_MIN, Math.round(width)),
+    )
+    setAiPanelWidthState(clamped)
+    try {
+      localStorage.setItem(AI_PANEL_W_KEY, String(clamped))
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const toggleAiPanelCollapsed = useCallback(() => {
+    setAiPanelCollapsed((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem(AI_PANEL_C_KEY, next ? "1" : "0")
       } catch {
         /* ignore */
       }
@@ -157,6 +208,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         setPendingSearchHandoff,
         sidebarCollapsed,
         toggleSidebar,
+        aiPanelWidth,
+        setAiPanelWidth,
+        aiPanelCollapsed,
+        toggleAiPanelCollapsed,
       }}
     >
       {children}

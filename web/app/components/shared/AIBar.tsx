@@ -1,19 +1,37 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, askApi, type AskResponse } from "../../lib/api"
 import { AskReplyBody } from "./AskReplyBody"
+import {
+  AI_PANEL_WIDTH_MAX,
+  AI_PANEL_WIDTH_MIN,
+} from "../../context/NavigationContext"
+
+type AiLayout = "side" | "bottom"
 
 export function AIBar() {
-  const { currentScreen, aiBarValue, setAIBarValue, showToast } = useNavigation()
+  const {
+    currentScreen,
+    aiBarValue,
+    setAIBarValue,
+    showToast,
+    aiPanelWidth,
+    setAiPanelWidth,
+    aiPanelCollapsed,
+    toggleAiPanelCollapsed,
+  } = useNavigation()
   const { content, setContent } = useContent()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [submitting, setSubmitting] = useState(false)
   const [lastReply, setLastReply] = useState<AskResponse | null>(null)
   const [askError, setAskError] = useState<string | null>(null)
+  const [layout, setLayout] = useState<AiLayout>(() =>
+    typeof window !== "undefined" && window.matchMedia("(min-width: 901px)").matches ? "side" : "bottom",
+  )
 
   const showAIBar = AI_BAR_SCREENS.includes(currentScreen)
   const context = AI_CONTEXTS[currentScreen]
@@ -21,6 +39,44 @@ export function AIBar() {
     content.aiScreenChips[currentScreen] ??
     content.aiScreenChips[String(currentScreen)] ??
     []
+
+  useLayoutEffect(() => {
+    const mq = window.matchMedia("(min-width: 901px)")
+    const apply = () => setLayout(mq.matches ? "side" : "bottom")
+    apply()
+    mq.addEventListener("change", apply)
+    return () => mq.removeEventListener("change", apply)
+  }, [])
+
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    if (!showAIBar || !context) {
+      root.removeAttribute("data-ai-panel")
+      root.removeAttribute("data-ai-panel-layout")
+      root.style.removeProperty("--ai-panel-occupied")
+      root.classList.remove("ai-bar-resizing")
+      return
+    }
+    if (layout === "bottom") {
+      root.setAttribute("data-ai-panel-layout", "bottom")
+      root.setAttribute("data-ai-panel", "open")
+      root.style.removeProperty("--ai-panel-occupied")
+      return () => {
+        root.removeAttribute("data-ai-panel")
+        root.removeAttribute("data-ai-panel-layout")
+      }
+    }
+    root.setAttribute("data-ai-panel-layout", "side")
+    const w = aiPanelCollapsed ? 52 : aiPanelWidth
+    root.style.setProperty("--ai-panel-occupied", `${w}px`)
+    root.setAttribute("data-ai-panel", aiPanelCollapsed ? "collapsed" : "open")
+    return () => {
+      root.removeAttribute("data-ai-panel")
+      root.removeAttribute("data-ai-panel-layout")
+      root.style.removeProperty("--ai-panel-occupied")
+      root.classList.remove("ai-bar-resizing")
+    }
+  }, [showAIBar, context, layout, aiPanelCollapsed, aiPanelWidth])
 
   useEffect(() => {
     const handleKeydown = (e: KeyboardEvent) => {
@@ -34,6 +90,34 @@ export function AIBar() {
     document.addEventListener("keydown", handleKeydown)
     return () => document.removeEventListener("keydown", handleKeydown)
   }, [showAIBar])
+
+  const handleResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      if (layout !== "side" || aiPanelCollapsed) return
+      e.preventDefault()
+      const startX = e.clientX
+      const startW = aiPanelWidth
+      const root = document.documentElement
+      root.classList.add("ai-bar-resizing")
+
+      const onMove = (ev: MouseEvent) => {
+        const delta = startX - ev.clientX
+        const next = Math.min(AI_PANEL_WIDTH_MAX, Math.max(AI_PANEL_WIDTH_MIN, startW + delta))
+        root.style.setProperty("--ai-panel-occupied", `${next}px`)
+      }
+      const onUp = (ev: MouseEvent) => {
+        const delta = startX - ev.clientX
+        const next = Math.min(AI_PANEL_WIDTH_MAX, Math.max(AI_PANEL_WIDTH_MIN, startW + delta))
+        setAiPanelWidth(next)
+        root.classList.remove("ai-bar-resizing")
+        window.removeEventListener("mousemove", onMove)
+        window.removeEventListener("mouseup", onUp)
+      }
+      window.addEventListener("mousemove", onMove)
+      window.addEventListener("mouseup", onUp)
+    },
+    [layout, aiPanelCollapsed, aiPanelWidth, setAiPanelWidth],
+  )
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setAIBarValue(e.target.value)
@@ -109,72 +193,117 @@ export function AIBar() {
   if (!showAIBar || !context) return null
 
   const showReplyBlock = submitting || askError != null || lastReply != null
+  const isSide = layout === "side"
+  const showCollapsedRail = isSide && aiPanelCollapsed
 
   return (
-    <div className="ai-bar-wrap" style={{ display: "block" }}>
-      <div className="ai-bar">
-        <div className="ai-bar-ctx">
-          <div className="ai-bar-ctx-badge">✦</div>
-          <span>Asking about</span>
-          <span className="ai-bar-ctx-path">{context.path}</span>
-          <span className="ai-bar-ctx-hint">
-            Highlight any text to ask · <kbd>⌘</kbd> <kbd>K</kbd>
-          </span>
-        </div>
-        {chips.length > 0 ? (
-          <div className="ai-bar-suggest">
-            {chips.map((s) => (
-              <button
-                key={s}
-                className="ai-bar-chip"
-                type="button"
-                onClick={() => handleChipClick(s)}
-              >
-                {s}
-              </button>
-            ))}
+    <div
+      className={`ai-bar-wrap${showCollapsedRail ? " ai-bar-wrap--collapsed" : ""}${
+        layout === "bottom" ? " ai-bar-wrap--bottom" : ""
+      }`}
+    >
+      {isSide && !showCollapsedRail ? (
+        <div
+          className="ai-bar-resize-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize assistant panel"
+          onMouseDown={handleResizeStart}
+        />
+      ) : null}
+      <div className="ai-bar-wrap-inner">
+        {showCollapsedRail ? (
+          <div className="ai-bar-rail">
+            <button
+              type="button"
+              className="ai-bar-rail-expand"
+              onClick={toggleAiPanelCollapsed}
+              aria-label="Expand assistant"
+              title="Expand assistant"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <div className="ai-bar-rail-mark" aria-hidden>
+              ✦
+            </div>
+            <span className="ai-bar-rail-text">Ask</span>
           </div>
-        ) : null}
-        {showReplyBlock ? (
-          <div className="ai-bar-reply">
-            {submitting ? (
-              <div className="ai-bar-reply-loading">Thinking…</div>
-            ) : askError ? (
-              <div className="ai-bar-reply-error">{askError}</div>
-            ) : lastReply ? (
-              <AskReplyBody reply={lastReply} />
+        ) : (
+          <div className={`ai-bar${isSide ? " ai-bar--side" : ""}`}>
+            <div className="ai-bar-ctx">
+              <div className="ai-bar-ctx-badge">✦</div>
+              <span>Asking about</span>
+              <span className="ai-bar-ctx-path">{context.path}</span>
+              {isSide ? (
+                <button
+                  type="button"
+                  className="ai-bar-collapse-btn"
+                  onClick={toggleAiPanelCollapsed}
+                  aria-label="Collapse assistant"
+                  title="Collapse assistant"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              ) : null}
+              <span className="ai-bar-ctx-hint">
+                Highlight any text to ask · <kbd>⌘</kbd> <kbd>K</kbd>
+              </span>
+            </div>
+            {chips.length > 0 ? (
+              <div className="ai-bar-suggest">
+                {chips.map((s) => (
+                  <button key={s} className="ai-bar-chip" type="button" onClick={() => handleChipClick(s)}>
+                    {s}
+                  </button>
+                ))}
+              </div>
             ) : null}
+            {showReplyBlock ? (
+              <div className="ai-bar-reply">
+                {submitting ? (
+                  <div className="ai-bar-reply-loading">Thinking…</div>
+                ) : askError ? (
+                  <div className="ai-bar-reply-error">{askError}</div>
+                ) : lastReply ? (
+                  <AskReplyBody reply={lastReply} />
+                ) : null}
+              </div>
+            ) : null}
+            <div className="ai-bar-input-row">
+              <textarea
+                ref={textareaRef}
+                className="ai-bar-textarea"
+                placeholder="Ask Sprntly anything about this page, or describe what to build…"
+                rows={1}
+                value={aiBarValue}
+                onChange={handleInput}
+                onKeyDown={onTextareaKeyDown}
+                disabled={submitting}
+              />
+              <div className="ai-bar-tools">
+                <button type="button" className="ai-bar-tool">
+                  📎
+                </button>
+                <button type="button" className="ai-bar-tool">
+                  ◈ Generate
+                </button>
+              </div>
+              <button
+                type="button"
+                className="ai-bar-send"
+                aria-label="Send"
+                disabled={submitting || !aiBarValue.trim()}
+                onClick={() => void submitAsk()}
+              >
+                {submitting ? "…" : "↑"}
+              </button>
+            </div>
           </div>
-        ) : null}
-        <div className="ai-bar-input-row">
-          <textarea
-            ref={textareaRef}
-            className="ai-bar-textarea"
-            placeholder="Ask Sprntly anything about this page, or describe what to build…"
-            rows={1}
-            value={aiBarValue}
-            onChange={handleInput}
-            onKeyDown={onTextareaKeyDown}
-            disabled={submitting}
-          />
-          <div className="ai-bar-tools">
-            <button type="button" className="ai-bar-tool">
-              📎
-            </button>
-            <button type="button" className="ai-bar-tool">
-              ◈ Generate
-            </button>
-          </div>
-          <button
-            type="button"
-            className="ai-bar-send"
-            aria-label="Send"
-            disabled={submitting || !aiBarValue.trim()}
-            onClick={() => void submitAsk()}
-          >
-            {submitting ? "…" : "↑"}
-          </button>
-        </div>
+        )}
       </div>
     </div>
   )

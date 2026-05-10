@@ -86,12 +86,28 @@ export function Sidebar() {
             aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
             {sidebarCollapsed ? (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M9 18l6-6-6-6" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                {/* Chevron right — expand */}
+                <polyline
+                  points="10 6 16 12 10 18"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
               </svg>
             ) : (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M15 18l-6-6 6-6" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                {/* Chevron left — collapse */}
+                <polyline
+                  points="14 6 8 12 14 18"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
               </svg>
             )}
           </button>
