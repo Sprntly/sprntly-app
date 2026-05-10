@@ -56,45 +56,6 @@ export function IconAsk() {
   )
 }
 
-export function IconShipped() {
-  return (
-    <svg {...common}>
-      <path d="M20 6 9 17l-5-5" />
-    </svg>
-  )
-}
-
-export function IconPast() {
-  return (
-    <svg {...common}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7v6l4 2" />
-    </svg>
-  )
-}
-
-export function IconConnectors() {
-  return (
-    <svg {...common}>
-      <rect x="3" y="3" width="7" height="7" rx="1" />
-      <rect x="14" y="3" width="7" height="7" rx="1" />
-      <rect x="3" y="14" width="7" height="7" rx="1" />
-      <rect x="14" y="14" width="7" height="7" rx="1" />
-    </svg>
-  )
-}
-
-export function IconTeam() {
-  return (
-    <svg {...common}>
-      <circle cx="9" cy="8" r="3.5" />
-      <path d="M3 20v-1a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v1" />
-      <circle cx="17" cy="9" r="2.5" />
-      <path d="M21 20v-1a3.5 3.5 0 0 0-2.5-3.3" />
-    </svg>
-  )
-}
-
 export function IconSettings() {
   return (
     <svg {...common}>

@@ -8,14 +8,10 @@ import type { ScreenId } from "../../types"
 import {
   IconAsk,
   IconBrief,
-  IconConnectors,
   IconEvidence,
   IconHome,
-  IconPast,
   IconPrd,
   IconSettings,
-  IconShipped,
-  IconTeam,
 } from "./sidebar-icons"
 
 export function Sidebar() {
@@ -119,15 +115,9 @@ export function Sidebar() {
         count={content.sidebarConvCount ?? undefined}
       />
 
-      <div className="sb-section-title">Outcomes</div>
-      <NavItem screen="shipped" icon={<IconShipped />} label="Shipped" />
-      <NavItem screen="past" icon={<IconPast />} label="Past briefs" />
-
       <div className="sb-spacer" />
 
       <div className="sb-section-title">Workspace</div>
-      <NavItem screen="connectors" icon={<IconConnectors />} label="Connectors" />
-      <NavItem screen="team" icon={<IconTeam />} label="Team" />
       <NavItem screen="settings" icon={<IconSettings />} label="Settings" />
 
       <div className="sb-footer">

@@ -4,10 +4,11 @@ import { useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { Sidebar } from "../../shared/Sidebar"
+import { TopSearchBar } from "../../shared/TopSearchBar"
 import { EmptyPane } from "../../shared/EmptyPane"
 
 export function OndemandScreen() {
-  const { setAIBarValue } = useNavigation()
+  const { setAIBarValue, sidebarCollapsed } = useNavigation()
   const { content } = useContent()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState(0)
@@ -20,12 +21,14 @@ export function OndemandScreen() {
   }
 
   return (
-    <div className="app" style={{ gridTemplateColumns: "220px 1fr" }}>
+    <div className={`app${sidebarCollapsed ? " app--sidebar-collapsed" : ""}`}>
       <Sidebar />
-      <div
-        className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}
-        onMouseLeave={() => setRailExpanded(false)}
-      >
+      <div className="main-column">
+        <TopSearchBar />
+        <div
+          className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}
+          onMouseLeave={() => setRailExpanded(false)}
+        >
         <aside className="od-rail" onMouseEnter={() => setRailExpanded(true)}>
           <div className="od-rail-collapsed-icon" title="Past conversations">
             <svg
@@ -104,6 +107,7 @@ export function OndemandScreen() {
             )}
           </div>
         </main>
+        </div>
       </div>
     </div>
   )

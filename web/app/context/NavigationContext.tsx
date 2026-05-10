@@ -49,7 +49,8 @@ interface NavigationContextType {
 const NavigationContext = createContext<NavigationContextType | null>(null)
 
 export function NavigationProvider({ children }: { children: ReactNode }) {
-  const [currentScreen, setCurrentScreen] = useState<ScreenId>("ob-1")
+  /** Default to app Home — onboarding (ob-1…ob-8) is still reachable from flows that call `goTo`. */
+  const [currentScreen, setCurrentScreen] = useState<ScreenId>("chat")
   const [activeDrawer, setActiveDrawer] = useState<"claude" | "ticket" | null>(null)
   const [activeModal, setActiveModal] = useState<"approve" | "invite" | null>(null)
   const [shareMenuOpen, setShareMenuOpen] = useState(false)

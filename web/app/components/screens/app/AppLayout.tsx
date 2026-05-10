@@ -3,6 +3,7 @@
 import { ReactNode } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { Sidebar } from "../../shared/Sidebar"
+import { TopSearchBar } from "../../shared/TopSearchBar"
 
 interface AppLayoutProps {
   children: ReactNode
@@ -18,9 +19,12 @@ export function AppLayout({ children, style, mainStyle }: AppLayoutProps) {
       style={style}
     >
       <Sidebar />
-      <main className="main" style={mainStyle}>
-        {children}
-      </main>
+      <div className="main-column">
+        <TopSearchBar />
+        <main className="main" style={mainStyle}>
+          {children}
+        </main>
+      </div>
     </div>
   )
 }

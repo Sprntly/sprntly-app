@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation"
 import { NavigationProvider, useNavigation } from "./context/NavigationContext"
 import { ContentProvider } from "./context/ContentContext"
 import {
-  TopSearchBar,
   AIBar,
   Toast,
   ApproveModal,
@@ -112,13 +111,12 @@ function AppContent() {
       case "connectors":
         return <ConnectorsScreen />
       default:
-        return <Onboarding1 />
+        return <ChatScreen />
     }
   }
 
   return (
     <>
-      <TopSearchBar />
       {renderScreen()}
       <AIBar />
       <Toast />
