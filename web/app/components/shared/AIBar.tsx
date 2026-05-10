@@ -350,7 +350,7 @@ export function AIBar() {
                 ) : askError ? (
                   <div className="ai-bar-reply-error">{askError}</div>
                 ) : lastReply ? (
-                  <AskReplyBody reply={lastReply} animateIn />
+                  <AskReplyBody reply={lastReply} animateIn simulateTyping />
                 ) : null}
               </div>
             ) : null}

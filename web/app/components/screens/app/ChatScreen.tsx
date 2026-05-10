@@ -376,7 +376,9 @@ export function ChatScreen() {
                       <div className="od-msg od-msg-assistant">
                         {turn.error ? <div className="od-msg-error">{turn.error}</div> : null}
                         {!turn.reply && !turn.error ? <AssistantThinkingSkeleton /> : null}
-                        {turn.reply ? <AskReplyBody reply={turn.reply} animateIn /> : null}
+                        {turn.reply ? (
+                          <AskReplyBody reply={turn.reply} animateIn simulateTyping />
+                        ) : null}
                       </div>
                     </div>
                   ))}

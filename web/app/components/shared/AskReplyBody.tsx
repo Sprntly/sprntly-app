@@ -3,29 +3,39 @@
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AskResponse } from "../../lib/api"
+import { useAnswerSimulatedStream } from "../../lib/useAnswerSimulatedStream"
 
 export function AskReplyBody({
   reply,
   animateIn,
+  simulateTyping = false,
 }: {
   reply: AskResponse
-  /** Short fade/slide when the full JSON reply first mounts (simulated “arrival” after wait). */
+  /** Short fade/slide when the reply block first mounts. */
   animateIn?: boolean
+  /** Reveal the answer in cumulative chunks so it feels streamed (POST still returns full JSON). */
+  simulateTyping?: boolean
 }) {
+  const { visible, done, isStreaming } = useAnswerSimulatedStream(reply.answer, simulateTyping)
+
   const inner = (
     <>
-      <div className="ai-bar-reply-answer">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{reply.answer}</ReactMarkdown>
+      <div
+        className={`ai-bar-reply-answer${isStreaming ? " ai-bar-reply-answer--streaming" : ""}`}
+      >
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{visible}</ReactMarkdown>
       </div>
-      {reply.key_points?.length ? (
-        <ul className="ai-bar-reply-kp">
+      {done && reply.key_points?.length ? (
+        <ul className="ai-bar-reply-kp ai-bar-reply-kp--stream-reveal">
           {reply.key_points.map((kp, i) => (
-            <li key={i}>{kp}</li>
+            <li key={i} style={{ animationDelay: `${0.05 * i}s` }}>
+              {kp}
+            </li>
           ))}
         </ul>
       ) : null}
-      {reply.citations?.length ? (
-        <div className="ai-bar-reply-cites">
+      {done && reply.citations?.length ? (
+        <div className="ai-bar-reply-cites ai-bar-reply-cites--stream-reveal">
           {reply.citations.map((c, i) => (
             <div key={i} className="ai-bar-reply-cite">
               <div className="ai-bar-reply-cite-src">{c.source}</div>
@@ -34,7 +44,7 @@ export function AskReplyBody({
           ))}
         </div>
       ) : null}
-      {reply.unanswered ? <div className="ai-bar-reply-gap">Gap: {reply.unanswered}</div> : null}
+      {done && reply.unanswered ? <div className="ai-bar-reply-gap">Gap: {reply.unanswered}</div> : null}
     </>
   )
   if (animateIn) {
