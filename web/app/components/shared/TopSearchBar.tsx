@@ -1,20 +1,17 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { ONBOARDING_SCREENS } from "../../types"
-import { ApiError, askApi, type AskResponse } from "../../lib/api"
+import { ApiError, askApi } from "../../lib/api"
 
 export function TopSearchBar() {
-  const { currentScreen, goTo, setAIBarValue, showToast } = useNavigation()
+  const { currentScreen, goTo, setPendingSearchHandoff, showToast } = useNavigation()
   const { content, setContent } = useContent()
   const [q, setQ] = useState("")
-  const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [result, setResult] = useState<AskResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [lastQuery, setLastQuery] = useState("")
 
   const runSearch = useCallback(async () => {
     const query = q.trim()
@@ -24,12 +21,8 @@ export function TopSearchBar() {
     }
     setSubmitting(true)
     setError(null)
-    setResult(null)
-    setLastQuery(query)
-    setOpen(true)
     try {
       const res = await askApi.ask(query)
-      setResult(res)
 
       const convId =
         typeof crypto !== "undefined" && crypto.randomUUID
@@ -42,6 +35,10 @@ export function TopSearchBar() {
         conversations: [{ id: convId, title, time: timeStr }, ...content.conversations],
         sidebarConvCount: n,
       })
+
+      setPendingSearchHandoff({ query, reply: res })
+      goTo("ondemand")
+      setQ("")
     } catch (e) {
       const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
         ? (e.body as { detail: unknown }).detail
@@ -59,22 +56,11 @@ export function TopSearchBar() {
     } finally {
       setSubmitting(false)
     }
-  }, [q, content.conversations.length, setContent, showToast])
-
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false)
-    }
-    document.addEventListener("keydown", onKey)
-    return () => document.removeEventListener("keydown", onKey)
-  }, [open])
+  }, [q, content.conversations.length, goTo, setContent, setPendingSearchHandoff, showToast])
 
   if (ONBOARDING_SCREENS.includes(currentScreen)) {
     return null
   }
-
-  const showPanel = open && (submitting || error || result)
 
   return (
     <header className="app-top-search">
@@ -109,54 +95,9 @@ export function TopSearchBar() {
           </div>
         </form>
         <div className="app-top-search-hint">Powered by the same Q&amp;A as Ask Sprntly · Enter to run</div>
-
-        {showPanel ? (
-          <div className="app-top-search-panel">
-            {submitting ? (
-              <div className="app-top-search-panel-loading">Searching corpus…</div>
-            ) : error ? (
-              <div className="app-top-search-panel-error">{error}</div>
-            ) : result ? (
-              <>
-                <div className="ai-bar-reply-answer">{result.answer}</div>
-                {result.key_points?.length ? (
-                  <ul className="ai-bar-reply-kp">
-                    {result.key_points.map((kp, i) => (
-                      <li key={i}>{kp}</li>
-                    ))}
-                  </ul>
-                ) : null}
-                {result.citations?.length ? (
-                  <div className="ai-bar-reply-cites">
-                    {result.citations.map((c, i) => (
-                      <div key={i} className="ai-bar-reply-cite">
-                        <div className="ai-bar-reply-cite-src">{c.source}</div>
-                        <div className="ai-bar-reply-cite-ev">{c.evidence}</div>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                {result.unanswered ? (
-                  <div className="ai-bar-reply-gap">Gap: {result.unanswered}</div>
-                ) : null}
-                <div className="app-top-search-panel-actions">
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => {
-                      setAIBarValue(lastQuery)
-                      goTo("ondemand")
-                      setOpen(false)
-                    }}
-                  >
-                    Open in Ask Sprntly
-                  </button>
-                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setOpen(false)}>
-                    Close
-                  </button>
-                </div>
-              </>
-            ) : null}
+        {error ? (
+          <div className="app-top-search-error" role="alert">
+            {error}
           </div>
         ) : null}
       </div>

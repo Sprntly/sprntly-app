@@ -9,7 +9,8 @@ import { AI_CONTEXTS, APP_SCREENS } from "../../types"
 import { ApiError, askApi, type AskResponse } from "../../lib/api"
 
 export function AIBar() {
-  const { currentScreen, aiBarValue, setAIBarValue, showToast } = useNavigation()
+  const { currentScreen, aiBarValue, setAIBarValue, pendingSearchHandoff, setPendingSearchHandoff, showToast } =
+    useNavigation()
   const { content, setContent } = useContent()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -35,6 +36,19 @@ export function AIBar() {
     document.addEventListener("keydown", handleKeydown)
     return () => document.removeEventListener("keydown", handleKeydown)
   }, [isAppScreen])
+
+  useEffect(() => {
+    if (!pendingSearchHandoff) return
+    setLastReply(pendingSearchHandoff.reply)
+    setAskError(null)
+    setAIBarValue("")
+    setPendingSearchHandoff(null)
+    const ta = textareaRef.current
+    if (ta) {
+      ta.style.height = "auto"
+      ta.style.height = "24px"
+    }
+  }, [pendingSearchHandoff, setAIBarValue, setPendingSearchHandoff])
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setAIBarValue(e.target.value)

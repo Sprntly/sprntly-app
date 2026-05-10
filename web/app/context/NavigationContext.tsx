@@ -9,6 +9,10 @@ import {
   type ReactNode,
 } from "react"
 import type { ScreenId } from "../types"
+import type { AskResponse } from "../lib/api"
+
+/** Top search hands off `/v1/ask` results to `AIBar` without a second request. */
+export type PendingSearchHandoff = { query: string; reply: AskResponse }
 
 interface NavigationContextType {
   currentScreen: ScreenId
@@ -41,6 +45,10 @@ interface NavigationContextType {
   aiBarValue: string
   setAIBarValue: (value: string) => void
 
+  /** Filled by `TopSearchBar` after a successful ask; consumed once by `AIBar`. */
+  pendingSearchHandoff: PendingSearchHandoff | null
+  setPendingSearchHandoff: (value: PendingSearchHandoff | null) => void
+
   /** Narrow icon-only rail vs full labels */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
@@ -57,6 +65,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [reviewPastOpen, setReviewPastOpen] = useState(false)
   const [toast, setToast] = useState<{ title: string; sub: string; link?: string } | null>(null)
   const [aiBarValue, setAIBarValue] = useState("")
+  const [pendingSearchHandoff, setPendingSearchHandoff] = useState<PendingSearchHandoff | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
   useEffect(() => {
@@ -144,6 +153,8 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         hideToast,
         aiBarValue,
         setAIBarValue,
+        pendingSearchHandoff,
+        setPendingSearchHandoff,
         sidebarCollapsed,
         toggleSidebar,
       }}
