@@ -10,11 +10,6 @@ export function ChatScreen() {
   const { goTo, setAIBarValue, setPendingOndemandDraft } = useNavigation()
   const { content } = useContent()
 
-  const name = content.userName?.split(/\s+/)[0] ?? "there"
-  const sub =
-    content.homeSub ??
-    "When your first weekly run completes, prioritized findings will appear here. Until then, connect sources and run the pipeline — or ask anything below once the assistant is wired."
-
   const handleCard = (target: "brief" | "ondemand", prompt?: string) => {
     if (target === "ondemand" && prompt) {
       setPendingOndemandDraft(prompt)
@@ -29,17 +24,8 @@ export function ChatScreen() {
       <div className="chat-wrap">
         <div className="chat-greeting">
           <h1 className="chat-greeting-title">
-            {content.homeHeadline ? (
-              content.homeHeadline
-            ) : (
-              <>
-                Hi, {name}.
-                <br />
-                <span>What should we ship next?</span>
-              </>
-            )}
+            Hi there, what do you want to build today
           </h1>
-          <p className="chat-greeting-sub">{sub}</p>
         </div>
 
         {content.homeStarterCards.length === 0 ? (
