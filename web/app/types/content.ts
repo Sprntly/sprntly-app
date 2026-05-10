@@ -252,11 +252,28 @@ export interface DetailState {
   }
 }
 
+export type PrdChartKind = "bar" | "line" | "pie" | "stat"
+
+export type PrdChartDatum = { label: string; value: number | string }
+
+export type PrdSection =
+  | { type: "h2"; text: string }
+  | { type: "p"; text: string }
+  | { type: "ul"; items: string[] }
+  | { type: "table"; headers: string[]; rows: string[][] }
+  | {
+      type: "chart"
+      kind: PrdChartKind
+      title?: string
+      subtitle?: string
+      data: PrdChartDatum[]
+    }
+
 export interface PrdState {
   metaLine: string
   title: string
-  /** Plain sections; render as paragraphs / lists client-side */
-  sections: Array<{ type: "h2" | "p" | "ul"; text?: string; items?: string[] }>
+  /** Plain sections; render as paragraphs / lists / tables / charts client-side */
+  sections: PrdSection[]
 }
 
 export interface AppContentState {
