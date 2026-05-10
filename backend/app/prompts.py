@@ -147,11 +147,26 @@ with each section filled in concretely."""
 
 
 PRD_USER_TEMPLATE = """\
-Generate a PRD for the following insight. Use the template format below \
-(David's format) — preserve all section numbers and headings. Fill each \
-section with concrete content derived from the insight and corpus. Do NOT \
-include the placeholder examples like "[Component name]" — replace with real \
-content. Markdown output only, no JSON, no commentary outside the PRD.
+Generate a PRD for the following insight. Use the template format below — \
+preserve all section numbers, headings, subsection structure, and markdown \
+tables exactly as shown. Fill each section with concrete content derived \
+from the insight and corpus. Do NOT keep the placeholder examples like \
+"[Component name]" or "[X%]" — replace each with real content from the \
+insight/corpus. If a section truly cannot be filled from the available data, \
+write "N/A — <one-sentence reason>" rather than dropping the heading. \
+Markdown output only, no JSON, no commentary outside the PRD.
+
+For Section 3 (Evidence), prefer infographics where the data has visual \
+shape. Embed each chart as a fenced code block with language `chart` and a \
+JSON body matching the schema described under "How to embed an infographic" \
+in the template. Allowed kinds: bar, line, pie, stat. Use a markdown table \
+when the cut is a flat list of values. Use prose only when the cut is a \
+logical argument that no visual would communicate faster. Every numeric \
+value in a chart must come from the insight/corpus — never invent data.
+
+Do NOT include the "How to embed an infographic" section itself in the \
+generated PRD — it's instructions for you, not part of the output. End the \
+PRD at the last "─────" divider after Section 9.
 
 INSIGHT TO TURN INTO A PRD:
 
