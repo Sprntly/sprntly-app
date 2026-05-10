@@ -167,7 +167,7 @@ export function AIBar() {
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setAIBarValue(e.target.value)
     e.target.style.height = "auto"
-    e.target.style.height = Math.min(e.target.scrollHeight, 140) + "px"
+    e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px"
   }
 
   const handleChipClick = (suggestion: string) => {
@@ -351,16 +351,7 @@ export function AIBar() {
                 value={aiBarValue}
                 onChange={handleInput}
                 onKeyDown={onTextareaKeyDown}
-                disabled={submitting}
               />
-              <div className="ai-bar-tools">
-                <button type="button" className="ai-bar-tool">
-                  📎
-                </button>
-                <button type="button" className="ai-bar-tool">
-                  ◈ Generate
-                </button>
-              </div>
               <button
                 type="button"
                 className="ai-bar-send"

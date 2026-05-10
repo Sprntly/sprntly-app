@@ -41,9 +41,8 @@
 
     /* Top chrome: search strip + sidebar header share min-height and divider alignment */
     --app-shell-header-min: 82px;
-    /* Sidebar: expanded width grows with nav content; collapsed rail stays fixed */
+    /* Sidebar: expanded width grows with nav content; collapsed rail width follows content */
     --sidebar-rail-expanded-min: 220px;
-    --sidebar-rail-collapsed: 156px;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -281,7 +280,7 @@
     transition: grid-template-columns 0.2s ease;
   }
   .app.app--sidebar-collapsed {
-    grid-template-columns: var(--sidebar-rail-collapsed) 1fr;
+    grid-template-columns: max-content 1fr;
   }
   .main-column {
     display: flex;
@@ -304,6 +303,11 @@
   html[data-ai-panel-layout="side"] .main-column > .main {
     padding-bottom: 40px;
   }
+  /* Ask Sprntly: od-layout sits directly under TopSearchBar (no .main wrapper) — fill height so thread + composer flex correctly. */
+  .main-column > .od-layout {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
   .sidebar {
     background: var(--surface-2); border-right: 1px solid var(--line);
     padding: 0;
@@ -318,6 +322,9 @@
   }
   .sidebar.sidebar--collapsed {
     align-items: stretch;
+    width: max-content;
+    max-width: 100%;
+    box-sizing: border-box;
   }
   .sb-top {
     flex-shrink: 0;
@@ -331,7 +338,7 @@
     justify-content: center;
   }
   .sidebar.sidebar--collapsed .sb-top {
-    padding: 8px 6px 10px;
+    padding: 8px 4px 10px;
   }
   /* Expanded: full header width — brand left, collapse control trailing. */
   .sb-header {
@@ -429,7 +436,7 @@
     padding: 8px 10px 12px;
   }
   .sidebar.sidebar--collapsed .sb-body {
-    padding: 8px 6px 10px;
+    padding: 8px 4px 10px;
   }
   .sb-spacer { flex: 1 1 auto; min-height: 8px; }
   .sb-footer {
@@ -440,8 +447,8 @@
     background: var(--surface-2);
   }
   .sidebar.sidebar--collapsed .sb-footer {
-    padding-left: 6px;
-    padding-right: 6px;
+    padding-left: 4px;
+    padding-right: 4px;
   }
   .sb-user { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; cursor: pointer; }
   .sb-user:hover { background: var(--surface-3); }
@@ -472,7 +479,7 @@
   }
   .sidebar.sidebar--collapsed .sb-item {
     position: relative;
-    justify-content: center; gap: 0; padding: 9px 6px;
+    justify-content: center; gap: 0; padding: 9px 4px;
   }
   .sidebar.sidebar--collapsed .sb-item-label {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
@@ -1087,18 +1094,17 @@
 
   .ai-bar-input-row {
     display: flex; align-items: center; gap: 10px; padding: 10px 14px 12px;
+    min-width: 0;
   }
   .ai-bar-textarea {
-    flex: 1; border: none; outline: none; background: transparent;
-    font-size: 15px; color: var(--ink); resize: none; line-height: 1.5; padding: 6px 4px; min-height: 24px; max-height: 140px;
+    flex: 1;
+    min-width: 0;
+    border: none; outline: none; background: transparent;
+    font-size: 15px; color: var(--ink); resize: none; line-height: 1.5; padding: 6px 4px; min-height: 24px;
+    max-height: min(200px, 32vh);
+    overflow-y: auto;
   }
   .ai-bar-textarea::placeholder { color: var(--muted); }
-  .ai-bar-tools { display: flex; gap: 4px; align-items: center; }
-  .ai-bar-tool {
-    background: transparent; border: none; color: var(--muted); padding: 6px 8px; border-radius: 6px;
-    cursor: pointer; font-size: 12px; display: inline-flex; align-items: center; gap: 5px;
-  }
-  .ai-bar-tool:hover { background: var(--surface-2); color: var(--ink); }
   .ai-bar-send {
     width: 32px; height: 32px; border-radius: 8px; background: var(--ink); color: var(--surface);
     border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px;
@@ -1250,6 +1256,7 @@
     align-items: stretch;
     justify-content: flex-start;
     min-height: 0;
+    min-width: 0;
     flex: 1;
   }
   .od-center-scroll {
@@ -1273,6 +1280,7 @@
   .od-thread {
     max-width: 720px;
     width: 100%;
+    min-width: 0;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
@@ -1282,6 +1290,7 @@
   .od-msg-user {
     align-self: flex-end;
     max-width: 88%;
+    min-width: 0;
     padding: 10px 14px;
     border-radius: 14px 14px 4px 14px;
     background: var(--ink);
@@ -1289,9 +1298,12 @@
     font-size: 14px;
     line-height: 1.45;
     text-align: left;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   .od-msg-assistant {
     align-self: stretch;
+    min-width: 0;
     padding: 16px 18px;
     border-radius: var(--radius-lg);
     border: 1px solid var(--line);
@@ -1300,6 +1312,7 @@
     line-height: 1.55;
     color: var(--ink-2);
     text-align: left;
+    overflow-wrap: anywhere;
   }
   .od-msg-error { color: var(--danger); font-size: 13px; margin-bottom: 8px; }
   .od-msg-loading { color: var(--muted); font-size: 13px; }
@@ -1310,6 +1323,7 @@
     gap: 10px;
     max-width: 720px;
     width: 100%;
+    min-width: 0;
     margin: 0 auto;
     padding: 16px 40px 28px;
     border-top: 1px solid var(--line);
@@ -1317,6 +1331,7 @@
   }
   .od-composer-input {
     flex: 1;
+    min-width: 0;
     border: 1px solid var(--line-strong);
     border-radius: 12px;
     padding: 10px 14px;
@@ -1324,7 +1339,8 @@
     font-family: inherit;
     resize: none;
     min-height: 44px;
-    max-height: 120px;
+    max-height: min(240px, 38vh);
+    overflow-y: auto;
     line-height: 1.45;
     background: var(--surface);
     color: var(--ink);

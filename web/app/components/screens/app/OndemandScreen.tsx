@@ -53,7 +53,7 @@ export function OndemandScreen() {
       const ta = composerRef.current
       if (ta) {
         ta.style.height = "auto"
-        ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`
+        ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
         ta.focus()
       }
     })
@@ -73,7 +73,7 @@ export function OndemandScreen() {
         sidebarConvCount: nextCount,
       })
     },
-    [content.conversations.length, setContent],
+    [content.conversations, setContent],
   )
 
   const submitAsk = useCallback(
@@ -143,7 +143,7 @@ export function OndemandScreen() {
   const handleComposerInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setDraft(e.target.value)
     e.target.style.height = "auto"
-    e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"
+    e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"
   }
 
   const handleSuggestion = (text: string) => {
@@ -271,7 +271,6 @@ export function OndemandScreen() {
                 value={draft}
                 onChange={handleComposerInput}
                 onKeyDown={handleComposerKeyDown}
-                disabled={busy}
               />
               <button
                 type="button"
