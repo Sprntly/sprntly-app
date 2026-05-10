@@ -24,7 +24,7 @@ export function ChatScreen() {
       <div className="chat-wrap">
         <div className="chat-greeting">
           <h1 className="chat-greeting-title">
-            Hi there, what do you want to build today
+            Hi David, what do you want to build today
           </h1>
         </div>
 
