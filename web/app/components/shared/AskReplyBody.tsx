@@ -4,8 +4,15 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AskResponse } from "../../lib/api"
 
-export function AskReplyBody({ reply }: { reply: AskResponse }) {
-  return (
+export function AskReplyBody({
+  reply,
+  animateIn,
+}: {
+  reply: AskResponse
+  /** Short fade/slide when the full JSON reply first mounts (simulated “arrival” after wait). */
+  animateIn?: boolean
+}) {
+  const inner = (
     <>
       <div className="ai-bar-reply-answer">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{reply.answer}</ReactMarkdown>
@@ -30,4 +37,8 @@ export function AskReplyBody({ reply }: { reply: AskResponse }) {
       {reply.unanswered ? <div className="ai-bar-reply-gap">Gap: {reply.unanswered}</div> : null}
     </>
   )
+  if (animateIn) {
+    return <div className="ask-reply-body ask-reply-body--enter">{inner}</div>
+  }
+  return inner
 }

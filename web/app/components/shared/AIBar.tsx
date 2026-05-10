@@ -5,6 +5,7 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, askApi, type AskResponse } from "../../lib/api"
+import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
 import { IconSendUp, IconSparkle } from "./app-icons"
 import {
@@ -345,11 +346,11 @@ export function AIBar() {
             {showReplyBlock ? (
               <div className="ai-bar-reply">
                 {submitting ? (
-                  <div className="ai-bar-reply-loading">Thinking…</div>
+                  <AssistantThinkingSkeleton compact />
                 ) : askError ? (
                   <div className="ai-bar-reply-error">{askError}</div>
                 ) : lastReply ? (
-                  <AskReplyBody reply={lastReply} />
+                  <AskReplyBody reply={lastReply} animateIn />
                 ) : null}
               </div>
             ) : null}

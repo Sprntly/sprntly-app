@@ -1,11 +1,12 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import type { ChatHomeCard } from "../../../types/content"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
+import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { ChatSuggestionIcon, IconSendUp } from "../../shared/app-icons"
 import { ApiError, askApi, type AskResponse } from "../../../lib/api"
@@ -15,6 +16,21 @@ type ThreadTurn = {
   query: string
   reply?: AskResponse
   error?: string
+}
+
+type HomeChipItem = { kind: "home" | "starter"; card: ChatHomeCard }
+
+function buildHomeChips(home: ChatHomeCard[], starterList: ChatHomeCard[]): HomeChipItem[] {
+  const out: HomeChipItem[] = []
+  for (const card of home) {
+    if (out.length >= 3) break
+    out.push({ kind: "home", card })
+  }
+  for (const card of starterList) {
+    if (out.length >= 3) break
+    out.push({ kind: "starter", card })
+  }
+  return out
 }
 
 export function ChatScreen() {
@@ -204,7 +220,8 @@ export function ChatScreen() {
   }
 
   const hasThread = thread.length > 0
-  const showChipRow = !hasThread && (homeCards.length > 0 || starters.length > 0)
+  const displayChips = useMemo(() => buildHomeChips(homeCards, starters), [homeCards, starters])
+  const showChipRow = !hasThread && displayChips.length > 0
   const showEmptyStarters =
     !hasThread && homeCards.length === 0 && starters.length === 0
 
@@ -278,31 +295,78 @@ export function ChatScreen() {
           </aside>
 
           <main className={`od-center ${hasThread ? "od-center--thread" : "od-center--landing"}`}>
-            <div className="od-center-scroll">
+            <div className={`od-center-scroll${!hasThread ? " od-center-scroll--home-landing" : ""}`}>
               {!hasThread ? (
-                <div className="od-center-inner od-center-inner--home">
-                  <div className="chat-greeting">
-                    <h1 className="chat-greeting-title">
-                      {content.homeHeadline ? (
-                        content.homeHeadline
-                      ) : (
-                        <>
-                          Hi, {name}.
-                          <br />
-                          <span>What should we ship next?</span>
-                        </>
-                      )}
-                    </h1>
-                    {content.homeSub ? <p className="chat-greeting-sub">{content.homeSub}</p> : null}
-                  </div>
+                <div className="home-landing-eyeline">
+                  <div className="od-center-inner od-center-inner--home">
+                    <div className="chat-greeting">
+                      <h1 className="chat-greeting-title">
+                        {content.homeHeadline ? (
+                          content.homeHeadline
+                        ) : (
+                          <>
+                            Hi, {name}.
+                            <br />
+                            <span>What should we ship next?</span>
+                          </>
+                        )}
+                      </h1>
+                      {content.homeSub ? <p className="chat-greeting-sub">{content.homeSub}</p> : null}
+                    </div>
 
-                  {showEmptyStarters ? (
-                    <EmptyPane
-                      title="No starter prompts yet"
-                      hint="Populate `homeStarterCards` and `ondemandStarters` from your API or org defaults."
-                      placeholders={4}
-                    />
-                  ) : null}
+                    <div className="home-landing-composer">
+                      <div className="od-composer-row od-composer-row--home-eyeline">
+                        <textarea
+                          ref={composerRef}
+                          className="od-composer-input"
+                          placeholder="Ask Sprntly anything about your product memory…"
+                          rows={1}
+                          value={draft}
+                          onChange={handleComposerInput}
+                          onKeyDown={handleComposerKeyDown}
+                        />
+                        <button
+                          type="button"
+                          className="od-composer-send"
+                          aria-label="Send"
+                          disabled={busy || draft.trim().length < 3}
+                          onClick={handleComposerSubmit}
+                        >
+                          <IconSendUp size={18} />
+                        </button>
+                      </div>
+                      {showChipRow ? (
+                        <div className="home-chip-row home-chip-row--under-chat" role="list">
+                          {displayChips.map(({ kind, card }) => (
+                            <button
+                              key={`${kind}-${card.id}`}
+                              type="button"
+                              className={`home-chip${kind === "starter" ? " home-chip--muted" : ""}`}
+                              role="listitem"
+                              onClick={() =>
+                                kind === "home"
+                                  ? handleHomeCard(card)
+                                  : handleStarterChip(card.prompt ?? card.title)
+                              }
+                            >
+                              <span className="home-chip-icon" aria-hidden>
+                                <ChatSuggestionIcon id={card.icon} size={16} />
+                              </span>
+                              <span className="home-chip-label">{card.title}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {showEmptyStarters ? (
+                      <EmptyPane
+                        title="No starter prompts yet"
+                        hint="Populate `homeStarterCards` and `ondemandStarters` from your API or org defaults."
+                        placeholders={4}
+                      />
+                    ) : null}
+                  </div>
                 </div>
               ) : (
                 <div className="od-thread">
@@ -311,8 +375,8 @@ export function ChatScreen() {
                       <div className="od-msg od-msg-user">{turn.query}</div>
                       <div className="od-msg od-msg-assistant">
                         {turn.error ? <div className="od-msg-error">{turn.error}</div> : null}
-                        {!turn.reply && !turn.error ? <div className="od-msg-loading">Thinking…</div> : null}
-                        {turn.reply ? <AskReplyBody reply={turn.reply} /> : null}
+                        {!turn.reply && !turn.error ? <AssistantThinkingSkeleton /> : null}
+                        {turn.reply ? <AskReplyBody reply={turn.reply} animateIn /> : null}
                       </div>
                     </div>
                   ))}
@@ -320,58 +384,30 @@ export function ChatScreen() {
               )}
             </div>
 
-            <div className="od-composer od-composer--home">
-              {showChipRow ? (
-                <div className="home-chip-row home-chip-row--composer">
-                  {homeCards.map((c) => (
-                    <button
-                      key={`c-${c.id}`}
-                      type="button"
-                      className="home-chip"
-                      onClick={() => handleHomeCard(c)}
-                    >
-                      <span className="home-chip-icon" aria-hidden>
-                        <ChatSuggestionIcon id={c.icon} size={16} />
-                      </span>
-                      <span className="home-chip-label">{c.title}</span>
-                    </button>
-                  ))}
-                  {starters.map((c) => (
-                    <button
-                      key={`s-${c.id}`}
-                      type="button"
-                      className="home-chip home-chip--muted"
-                      onClick={() => handleStarterChip(c.prompt ?? c.title)}
-                    >
-                      <span className="home-chip-icon" aria-hidden>
-                        <ChatSuggestionIcon id={c.icon} size={16} />
-                      </span>
-                      <span className="home-chip-label">{c.title}</span>
-                    </button>
-                  ))}
+            {hasThread ? (
+              <div className="od-composer od-composer--home">
+                <div className="od-composer-row">
+                  <textarea
+                    ref={composerRef}
+                    className="od-composer-input"
+                    placeholder="Ask Sprntly anything about your product memory…"
+                    rows={1}
+                    value={draft}
+                    onChange={handleComposerInput}
+                    onKeyDown={handleComposerKeyDown}
+                  />
+                  <button
+                    type="button"
+                    className="od-composer-send"
+                    aria-label="Send"
+                    disabled={busy || draft.trim().length < 3}
+                    onClick={handleComposerSubmit}
+                  >
+                    <IconSendUp size={18} />
+                  </button>
                 </div>
-              ) : null}
-              <div className="od-composer-row">
-                <textarea
-                  ref={composerRef}
-                  className="od-composer-input"
-                  placeholder="Ask Sprntly anything about your product memory…"
-                  rows={1}
-                  value={draft}
-                  onChange={handleComposerInput}
-                  onKeyDown={handleComposerKeyDown}
-                />
-                <button
-                  type="button"
-                  className="od-composer-send"
-                  aria-label="Send"
-                  disabled={busy || draft.trim().length < 3}
-                  onClick={handleComposerSubmit}
-                >
-                  <IconSendUp size={18} />
-                </button>
               </div>
-            </div>
+            ) : null}
           </main>
         </div>
       </div>
