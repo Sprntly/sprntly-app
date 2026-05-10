@@ -1,19 +1,178 @@
 "use client"
 
+import { useMemo } from "react"
 import { useNavigation } from "../../context/NavigationContext"
+import { useContent } from "../../context/ContentContext"
+import type { DetailState, PrdState } from "../../types/content"
 import { IconClose, IconSparkle } from "./app-icons"
+
+type CtxItem = {
+  title: string
+  preview: string
+  defaultChecked: boolean
+  tokens: number
+}
+
+const PROBLEM_KEYS = ["problem", "context", "background", "summary", "overview"]
+const SOLUTION_KEYS = ["solution", "approach", "design", "implementation", "plan"]
+const ACCEPTANCE_KEYS = ["acceptance", "success", "criteria", "test"]
+const METRIC_KEYS = ["metric", "impact", "kpi", "measure"]
+
+function classify(heading: string): "problem" | "solution" | "acceptance" | "metrics" | "other" {
+  const h = heading.toLowerCase()
+  if (PROBLEM_KEYS.some((k) => h.includes(k))) return "problem"
+  if (SOLUTION_KEYS.some((k) => h.includes(k))) return "solution"
+  if (ACCEPTANCE_KEYS.some((k) => h.includes(k))) return "acceptance"
+  if (METRIC_KEYS.some((k) => h.includes(k))) return "metrics"
+  return "other"
+}
+
+function estimateTokens(text: string): number {
+  if (!text) return 0
+  // Rough heuristic: ~1 token per 4 characters of English prose.
+  return Math.max(1, Math.round(text.length / 4))
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K tok`
+  return `${n} tok`
+}
+
+function truncate(s: string, n = 360): string {
+  const t = s.trim()
+  return t.length > n ? `${t.slice(0, n).trimEnd()}…` : t
+}
+
+function sectionGroups(prd: PrdState): Map<string, string[]> {
+  const groups = new Map<string, string[]>()
+  let current = "Overview"
+  for (const sec of prd.sections) {
+    if (sec.type === "h2") {
+      current = sec.text || "Section"
+      if (!groups.has(current)) groups.set(current, [])
+      continue
+    }
+    const lines = groups.get(current) ?? []
+    if (sec.type === "p" && sec.text) lines.push(sec.text)
+    if (sec.type === "ul" && sec.items?.length)
+      lines.push(...sec.items.map((it) => `• ${it}`))
+    groups.set(current, lines)
+  }
+  return groups
+}
+
+function buildContextItems(
+  prd: PrdState | null,
+  detail: DetailState | null,
+): { items: CtxItem[]; instructionPlaceholder: string; total: number } {
+  const items: CtxItem[] = []
+
+  // Problem & context — prefer PRD problem-style sections, fall back to detail summary.
+  const problemBuckets: string[] = []
+  const solutionBuckets: string[] = []
+  const acceptanceBuckets: string[] = []
+  const metricsBuckets: string[] = []
+  const otherBuckets: string[] = []
+
+  if (prd) {
+    for (const [heading, lines] of sectionGroups(prd)) {
+      if (lines.length === 0) continue
+      const block = `${heading}\n${lines.join("\n")}`
+      switch (classify(heading)) {
+        case "problem":
+          problemBuckets.push(block)
+          break
+        case "solution":
+          solutionBuckets.push(block)
+          break
+        case "acceptance":
+          acceptanceBuckets.push(block)
+          break
+        case "metrics":
+          metricsBuckets.push(block)
+          break
+        default:
+          otherBuckets.push(block)
+      }
+    }
+  }
+
+  if (detail) {
+    const detailParts: string[] = []
+    if (detail.title) detailParts.push(detail.title)
+    if (detail.summary) detailParts.push(detail.summary)
+    if (detail.metrics.length > 0) {
+      detailParts.push(
+        detail.metrics
+          .slice(0, 3)
+          .map((m) => `${m.label}: ${m.value}`)
+          .join(" · "),
+      )
+    }
+    if (detailParts.length > 0) {
+      problemBuckets.unshift(detailParts.join("\n"))
+    }
+
+    // Quote-style evidence rows feed an Evidence bundle context.
+    const evidenceLines: string[] = []
+    for (const sec of detail.evidenceSections) {
+      if (sec.quoteRows?.length) {
+        for (const q of sec.quoteRows) {
+          evidenceLines.push(`${q.source}: "${q.quote}"`)
+        }
+      }
+    }
+    if (evidenceLines.length > 0) {
+      otherBuckets.push(`Evidence quotes\n${evidenceLines.join("\n")}`)
+    }
+  }
+
+  const pushItem = (
+    title: string,
+    buckets: string[],
+    defaultChecked: boolean,
+  ) => {
+    if (buckets.length === 0) return
+    const text = buckets.join("\n\n")
+    items.push({
+      title,
+      preview: truncate(text),
+      defaultChecked,
+      tokens: estimateTokens(text),
+    })
+  }
+
+  pushItem("Problem & context", problemBuckets, true)
+  pushItem("Proposed solution", solutionBuckets, true)
+  pushItem("Acceptance criteria + test plan", acceptanceBuckets, true)
+  pushItem("Impact & metrics", metricsBuckets, true)
+  pushItem("Additional PRD context", otherBuckets, false)
+
+  const total = items.reduce((sum, it) => sum + it.tokens, 0)
+  const subject = prd?.title || detail?.title || "this work"
+  const instructionPlaceholder = `e.g. Scope ${subject}; reuse existing utilities and feature flags rather than introducing new ones.`
+  return { items, instructionPlaceholder, total }
+}
 
 export function ClaudeDrawer() {
   const { activeDrawer, closeDrawers, showToast } = useNavigation()
+  const { content } = useContent()
+
+  const { items, instructionPlaceholder, total } = useMemo(
+    () => buildContextItems(content.prd, content.detail),
+    [content.prd, content.detail],
+  )
 
   if (activeDrawer !== "claude") return null
+
+  const subject = content.prd?.title || content.detail?.title || "the work"
 
   const handleSend = () => {
     closeDrawers()
     showToast(
       "Sent to Claude Code",
       "Claude is scoping the work — we'll ping Slack when the PR opens.",
-      "Track progress →"
+      "Track progress →",
     )
   }
 
@@ -34,64 +193,39 @@ export function ClaudeDrawer() {
         </div>
         <div className="drawer-body">
           <p className="drawer-sub">
-            Claude Code receives the PRD plus this context package. It'll scope
-            the work, implement across the right files, and open a PR against{" "}
-            <strong>main</strong>.
+            Claude Code receives the PRD plus this context package for{" "}
+            <strong>{subject}</strong>. It'll scope the work, implement across
+            the right files, and open a PR against <strong>main</strong>.
           </p>
 
-          <ContextSection
-            title="Problem & context"
-            size="842 tok"
-            defaultChecked
-            preview="SMS verification is leaking 43% of non-US Android activations. Median SMS latency in SE Asia is 62s — past the 30s abandonment threshold. 87 support tickets explicitly ask for manual verification. $14.2K/mo MRR at risk per Stripe LTV model..."
-          />
-
-          <ContextSection
-            title="Evidence bundle"
-            size="1.2K tok"
-            defaultChecked
-            preview={`{
-  "amplitude_funnel": { "android_non_us": 0.18, "android_us": 0.39 },
-  "twilio_latency_p50": { "IN": 41, "SEA": 62, "LATAM": 54, "US": 4 },
-  "intercom_tickets_30d": 87,
-  "app_store_1star_reviews": 14,
-  "convert_rate_after_activation": 0.47,
-  ...
-}`}
-          />
-
-          <ContextSection
-            title="Proposed solution"
-            size="512 tok"
-            defaultChecked
-            preview="Tiered delivery: 1) Primary SMS via regional Twilio senders. 2) Fallback to WhatsApp Business API at 20s. 3) Email fallback at 40s. UX: real-time delivery status instead of silent spinner. Feature-flagged per region."
-          />
-
-          <ContextSection
-            title="Acceptance criteria + test plan"
-            size="620 tok"
-            defaultChecked
-            preview="Status within 2s · WhatsApp fallback at 20s · Email fallback at 40s · Single funnel event · Feature flag per region · Unit tests per adapter · integration tests for fallback chain"
-          />
-
-          <ContextSection
-            title="Repo context (auto-detected)"
-            size="~3K tok"
-            defaultChecked={false}
-            preview={`Files likely to change:
-  auth-service/src/sms/TwilioDelivery.ts
-  auth-service/src/sms/FallbackOrchestrator.ts  (new)
-  mobile/android/app/src/main/.../VerifyScreen.kt
-  analytics/events/verification.ts
-  infrastructure/terraform/twilio.tf`}
-          />
+          {items.length === 0 ? (
+            <div
+              style={{
+                padding: "16px 18px",
+                border: "1px dashed var(--line)",
+                borderRadius: 12,
+                color: "var(--muted)",
+                fontSize: 13,
+              }}
+            >
+              No PRD loaded yet. Generate or open a PRD first, and the context
+              package will populate from it.
+            </div>
+          ) : (
+            items.map((it) => (
+              <ContextSection
+                key={it.title}
+                title={it.title}
+                size={formatTokens(it.tokens)}
+                defaultChecked={it.defaultChecked}
+                preview={it.preview}
+              />
+            ))
+          )}
 
           <div style={{ marginTop: 16 }}>
             <label className="field-label">Instruction for Claude (optional)</label>
-            <textarea
-              className="textarea"
-              placeholder="e.g. Use the existing feature flag system — don't introduce a new one. Coordinate with Dan on the orchestrator design."
-            />
+            <textarea className="textarea" placeholder={instructionPlaceholder} />
           </div>
 
           <div
@@ -109,8 +243,8 @@ export function ClaudeDrawer() {
           >
             <span>Total context size</span>
             <span>
-              <strong style={{ color: "var(--ink)" }}>~6.1K tokens</strong> · under
-              limit
+              <strong style={{ color: "var(--ink)" }}>~{formatTokens(total)}</strong>
+              {total > 0 ? " · under limit" : ""}
             </span>
           </div>
         </div>
@@ -122,7 +256,12 @@ export function ClaudeDrawer() {
             <button className="btn" onClick={closeDrawers}>
               Cancel
             </button>
-            <button type="button" className="btn btn-accent" onClick={handleSend}>
+            <button
+              type="button"
+              className="btn btn-accent"
+              onClick={handleSend}
+              disabled={items.length === 0}
+            >
               <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                 <IconSparkle size={16} />
                 Send to Claude Code
