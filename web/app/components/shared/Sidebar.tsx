@@ -73,7 +73,6 @@ export function Sidebar() {
       <div className="sb-top">
         <div className="sb-header">
           <div className="sb-brand">
-            <span className="sb-brand-dot" aria-hidden />
             <span className="sb-brand-text">
               spr<span>ntly</span>
             </span>
@@ -87,27 +86,31 @@ export function Sidebar() {
           >
             {sidebarCollapsed ? (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-                {/* Chevron right — expand */}
-                <polyline
-                  points="10 6 16 12 10 18"
-                  fill="none"
+                {/* Double chevron right — expand */}
+                <g
                   stroke="currentColor"
                   strokeWidth="1.75"
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                />
+                  fill="none"
+                >
+                  <polyline points="7 6 11 12 7 18" />
+                  <polyline points="12 6 16 12 12 18" />
+                </g>
               </svg>
             ) : (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-                {/* Chevron left — collapse */}
-                <polyline
-                  points="14 6 8 12 14 18"
-                  fill="none"
+                {/* Double chevron left — collapse */}
+                <g
                   stroke="currentColor"
                   strokeWidth="1.75"
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                />
+                  fill="none"
+                >
+                  <polyline points="17 6 13 12 17 18" />
+                  <polyline points="12 6 8 12 12 18" />
+                </g>
               </svg>
             )}
           </button>

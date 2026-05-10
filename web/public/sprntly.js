@@ -1,5 +1,5 @@
   const SIDEBAR_HTML = `
-    <div class="sb-brand"><span class="sb-brand-dot"></span>spr<span>ntly</span></div>
+    <div class="sb-brand"><span class="sb-brand-text">spr<span>ntly</span></span></div>
     <div class="sb-section-title">Intelligence</div>
     <a class="sb-item" data-goto="brief"><span class="sb-icon">✦</span>Weekly brief<span class="sb-count">4</span></a>
     <a class="sb-item" data-goto="ondemand"><span class="sb-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>Ask Sprntly<span class="sb-count">12</span></a>

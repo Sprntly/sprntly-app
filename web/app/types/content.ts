@@ -58,6 +58,82 @@ export interface ChatHomeCard {
   prompt?: string
 }
 
+/** Home landing: go-to destinations plus a few prefilled prompts (brief uses AI bar; Ask uses `pendingOndemandDraft`). */
+export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
+  {
+    id: "home-goto-brief",
+    icon: "✦",
+    title: "This week's brief",
+    desc: "Ranked findings, impact, and signals in one view.",
+    target: "brief",
+  },
+  {
+    id: "home-goto-ask",
+    icon: "💬",
+    title: "Ask Sprntly",
+    desc: "Free-form Q&A across your product memory.",
+    target: "ondemand",
+  },
+  {
+    id: "home-prompt-ask",
+    icon: "📈",
+    title: "Compare our segments",
+    desc: "Opens Ask with a retention question ready to send.",
+    target: "ondemand",
+    prompt:
+      "Compare retention across our top three customer segments — what differs, what might explain it, and what we should validate next.",
+  },
+  {
+    id: "home-prompt-brief",
+    icon: "◇",
+    title: "Challenge the ranking",
+    desc: "Opens the brief with a question in the side assistant.",
+    target: "brief",
+    prompt:
+      "Why is the #1 finding ranked higher than #2? What evidence supports that ordering?",
+  },
+]
+
+/** Curated Ask Sprntly landing chips until org-specific starters load from the API. */
+export const DEFAULT_ONDEMAND_STARTERS: ChatHomeCard[] = [
+  {
+    id: "od-default-q3",
+    icon: "◇",
+    title: "Q3 strategy",
+    desc: "Turn product memory into priorities, bets, and risks.",
+    target: "ondemand",
+    prompt:
+      "Generate a Q3 strategy from our product memory — priorities, bets, measurable goals, and the main risks to watch.",
+  },
+  {
+    id: "od-default-prd",
+    icon: "📄",
+    title: "PRD for team folders",
+    desc: "Draft scope, rollout, and open questions.",
+    target: "ondemand",
+    prompt:
+      "Draft a PRD for team folder permissions: problem, users, requirements, rollout plan, metrics, and open questions for eng and design.",
+  },
+  {
+    id: "od-default-retention",
+    icon: "📈",
+    title: "Retention comparison",
+    desc: "Compare segments or cohorts we care about.",
+    target: "ondemand",
+    prompt:
+      "Compare retention across our top three customer segments — what differs, what might explain it, and what we should validate next.",
+  },
+  {
+    id: "od-default-ship",
+    icon: "🚀",
+    title: "What to ship next",
+    desc: "Stack-rank ideas against impact and cost.",
+    target: "ondemand",
+    prompt:
+      "Given what we know in product memory, what should we ship next? Stack-rank a few options with impact, cost, and dependencies.",
+  },
+]
+
 export interface PastFindingRow {
   title: string
   status: string

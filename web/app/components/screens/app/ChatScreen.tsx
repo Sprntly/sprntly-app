@@ -6,7 +6,7 @@ import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
 export function ChatScreen() {
-  const { goTo, setAIBarValue } = useNavigation()
+  const { goTo, setAIBarValue, setPendingOndemandDraft } = useNavigation()
   const { content } = useContent()
 
   const name = content.userName?.split(/\s+/)[0] ?? "there"
@@ -15,7 +15,11 @@ export function ChatScreen() {
     "When your first weekly run completes, prioritized findings will appear here. Until then, connect sources and run the pipeline — or ask anything below once the assistant is wired."
 
   const handleCard = (target: "brief" | "ondemand", prompt?: string) => {
-    if (prompt) setAIBarValue(prompt)
+    if (target === "ondemand" && prompt) {
+      setPendingOndemandDraft(prompt)
+    } else if (prompt) {
+      setAIBarValue(prompt)
+    }
     goTo(target)
   }
 

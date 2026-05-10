@@ -41,9 +41,9 @@
 
     /* Top chrome: search strip + sidebar header share min-height and divider alignment */
     --app-shell-header-min: 82px;
-    /* Sidebar: collapsed rail wide enough for wordmark + chevron on one row */
+    /* Sidebar: collapsed rail fits wordmark + chevron bubble until a logo ships */
     --sidebar-rail-expanded: 220px;
-    --sidebar-rail-collapsed: 112px;
+    --sidebar-rail-collapsed: 156px;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -331,7 +331,7 @@
     justify-content: center;
   }
   .sidebar.sidebar--collapsed .sb-top {
-    padding: 8px 5px 10px;
+    padding: 8px 6px 10px;
   }
   .sb-header {
     display: flex;
@@ -345,17 +345,27 @@
   }
   .sidebar.sidebar--collapsed .sb-header {
     justify-content: space-between;
-    gap: 4px;
+    align-items: center;
+    gap: 6px;
   }
+  /* Match AI collapsed-rail expand control: bordered surface “bubble” */
   .sb-collapse-btn {
-    display: inline-flex; align-items: center; justify-content: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
-    width: 28px; height: 28px; border-radius: 7px; border: 1px solid transparent;
-    background: transparent; color: var(--ink-3); cursor: pointer;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink-3);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
   }
   .sb-collapse-btn:hover {
-    background: var(--surface-3); color: var(--ink); border-color: var(--line);
+    background: var(--surface-3);
+    color: var(--ink);
   }
   .sb-brand {
     font-family: var(--font-display); font-weight: 600; font-size: 20px; letter-spacing: -0.02em;
@@ -363,7 +373,7 @@
     margin: 0;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 0;
     min-width: 0;
     flex: 1;
   }
@@ -372,7 +382,7 @@
     flex-direction: row;
     justify-content: flex-start;
     align-items: center;
-    gap: 5px;
+    gap: 0;
     min-width: 0;
     width: auto;
   }
@@ -382,15 +392,9 @@
     line-height: 1;
     text-align: left;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .sidebar.sidebar--collapsed .sb-brand-dot {
     flex-shrink: 0;
   }
   .sb-brand-text span { color: var(--accent); }
-  .sb-brand-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 2.4s ease-in-out infinite; }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
   .sb-section-title {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.13em;
     color: var(--muted); padding: 14px 8px 6px; font-weight: 600;
@@ -882,7 +886,19 @@
     position: relative;
     z-index: 2;
   }
+  /* Extend the same horizontal rule as `.app-top-search` across the resize gutter (Y from `--ai-chrome-sync-h`). */
+  html[data-ai-panel-layout="side"] .ai-bar-resize-handle {
+    background: linear-gradient(
+      to bottom,
+      rgba(250, 249, 246, 0.96) 0,
+      rgba(250, 249, 246, 0.96) calc(var(--ai-chrome-sync-h, 104px) - 1px),
+      var(--line) calc(var(--ai-chrome-sync-h, 104px) - 1px),
+      var(--line) var(--ai-chrome-sync-h, 104px),
+      var(--surface) var(--ai-chrome-sync-h, 104px)
+    );
+  }
   .ai-bar-resize-handle:hover { background: var(--line); }
+  html[data-ai-panel-layout="side"] .ai-bar-resize-handle:hover { background: var(--line); }
   .ai-bar-rail {
     display: flex;
     flex-direction: column;
@@ -936,7 +952,6 @@
     flex-shrink: 0;
     width: 28px;
     height: 28px;
-    margin-left: 6px;
     border-radius: 6px;
     border: 1px solid transparent;
     background: transparent;
@@ -990,8 +1005,14 @@
   .ai-bar-ctx-path { font-family: var(--font-mono); font-weight: 500; }
   .ai-bar-ctx-hint { margin-left: auto; font-size: 10.5px; color: var(--muted-2); flex-shrink: 0; }
   html[data-ai-panel-layout="side"] .ai-bar-ctx {
+    box-sizing: border-box;
+    min-height: var(--ai-chrome-sync-h, calc(var(--app-shell-header-min) + 18px));
+    padding: 8px 10px 10px;
+    background: rgba(250, 249, 246, 0.96);
+    backdrop-filter: blur(12px);
     flex-wrap: wrap;
     row-gap: 6px;
+    align-items: center;
   }
   html[data-ai-panel-layout="side"] .ai-bar-ctx-hint {
     width: 100%;

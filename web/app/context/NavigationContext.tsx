@@ -55,6 +55,10 @@ interface NavigationContextType {
   pendingSearchHandoff: PendingSearchHandoff | null
   setPendingSearchHandoff: (value: PendingSearchHandoff | null) => void
 
+  /** Filled from Home starter cards; consumed once by `OndemandScreen` composer (AI bar is hidden there). */
+  pendingOndemandDraft: string | null
+  setPendingOndemandDraft: (value: string | null) => void
+
   /** Narrow icon-only rail vs full labels */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
@@ -78,6 +82,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [toast, setToast] = useState<{ title: string; sub: string; link?: string } | null>(null)
   const [aiBarValue, setAIBarValue] = useState("")
   const [pendingSearchHandoff, setPendingSearchHandoff] = useState<PendingSearchHandoff | null>(null)
+  const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [aiPanelWidth, setAiPanelWidthState] = useState(AI_PANEL_WIDTH_DEFAULT)
   const [aiPanelCollapsed, setAiPanelCollapsed] = useState(false)
@@ -156,6 +161,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     setActiveModal(null)
     setShareMenuOpen(false)
     setReviewPastOpen(false)
+    if (screen !== "ondemand") {
+      setPendingOndemandDraft(null)
+    }
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [])
 
@@ -206,6 +214,8 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         setAIBarValue,
         pendingSearchHandoff,
         setPendingSearchHandoff,
+        pendingOndemandDraft,
+        setPendingOndemandDraft,
         sidebarCollapsed,
         toggleSidebar,
         aiPanelWidth,

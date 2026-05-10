@@ -8,7 +8,11 @@ import {
   useState,
   type ReactNode,
 } from "react"
-import type { AppContentState } from "../types/content"
+import {
+  DEFAULT_HOME_STARTER_CARDS,
+  DEFAULT_ONDEMAND_STARTERS,
+  type AppContentState,
+} from "../types/content"
 
 const EMPTY: AppContentState = {
   userName: null,
@@ -16,7 +20,7 @@ const EMPTY: AppContentState = {
   userInitials: null,
   homeHeadline: null,
   homeSub: null,
-  homeStarterCards: [],
+  homeStarterCards: DEFAULT_HOME_STARTER_CARDS,
   brief: {
     weekRange: null,
     subline: null,
@@ -33,7 +37,7 @@ const EMPTY: AppContentState = {
   pastWeeks: [],
   shipped: { stats: [], primary: [], supporting: [] },
   conversations: [],
-  ondemandStarters: [],
+  ondemandStarters: DEFAULT_ONDEMAND_STARTERS,
   detail: null,
   briefDetails: {},
   prd: null,

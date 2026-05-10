@@ -17,7 +17,14 @@ type ThreadTurn = {
 }
 
 export function OndemandScreen() {
-  const { sidebarCollapsed, pendingSearchHandoff, setPendingSearchHandoff, showToast } = useNavigation()
+  const {
+    sidebarCollapsed,
+    pendingSearchHandoff,
+    setPendingSearchHandoff,
+    pendingOndemandDraft,
+    setPendingOndemandDraft,
+    showToast,
+  } = useNavigation()
   const { content, setContent } = useContent()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState(0)
@@ -37,6 +44,20 @@ export function OndemandScreen() {
     setThread((t) => [...t, { id: crypto.randomUUID(), query, reply }])
     setActiveConv(0)
   }, [pendingSearchHandoff, setPendingSearchHandoff])
+
+  useEffect(() => {
+    if (pendingOndemandDraft == null || !pendingOndemandDraft.trim()) return
+    setDraft(pendingOndemandDraft)
+    setPendingOndemandDraft(null)
+    requestAnimationFrame(() => {
+      const ta = composerRef.current
+      if (ta) {
+        ta.style.height = "auto"
+        ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`
+        ta.focus()
+      }
+    })
+  }, [pendingOndemandDraft, setPendingOndemandDraft])
 
   const appendConversation = useCallback(
     (query: string) => {

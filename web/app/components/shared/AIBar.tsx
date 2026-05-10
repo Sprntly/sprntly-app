@@ -78,6 +78,50 @@ export function AIBar() {
     }
   }, [showAIBar, context, layout, aiPanelCollapsed, aiPanelWidth])
 
+  /** Match `.ai-bar-ctx` strip + resize-gutter divider Y to `.app-top-search` (main column). */
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    if (!showAIBar || layout !== "side") {
+      root.style.removeProperty("--ai-chrome-sync-h")
+      return
+    }
+
+    let cancelled = false
+    let raf = 0
+    let ro: ResizeObserver | null = null
+
+    const apply = () => {
+      if (cancelled) return
+      const el = document.querySelector(".app-top-search")
+      if (!el) return
+      const h = Math.round(el.getBoundingClientRect().height)
+      if (h > 0) root.style.setProperty("--ai-chrome-sync-h", `${h}px`)
+    }
+
+    const bind = () => {
+      if (cancelled) return
+      const el = document.querySelector(".app-top-search")
+      if (!el) {
+        raf = requestAnimationFrame(bind)
+        return
+      }
+      apply()
+      ro = new ResizeObserver(apply)
+      ro.observe(el)
+    }
+
+    bind()
+    window.addEventListener("resize", apply)
+
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+      ro?.disconnect()
+      window.removeEventListener("resize", apply)
+      root.style.removeProperty("--ai-chrome-sync-h")
+    }
+  }, [showAIBar, layout])
+
   useEffect(() => {
     const handleKeydown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -221,8 +265,17 @@ export function AIBar() {
               aria-label="Expand assistant"
               title="Expand assistant"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <g
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  fill="none"
+                >
+                  <polyline points="7 6 11 12 7 18" />
+                  <polyline points="12 6 16 12 12 18" />
+                </g>
               </svg>
             </button>
             <div className="ai-bar-rail-mark" aria-hidden>
@@ -233,9 +286,6 @@ export function AIBar() {
         ) : (
           <div className={`ai-bar${isSide ? " ai-bar--side" : ""}`}>
             <div className="ai-bar-ctx">
-              <div className="ai-bar-ctx-badge">✦</div>
-              <span>Asking about</span>
-              <span className="ai-bar-ctx-path">{context.path}</span>
               {isSide ? (
                 <button
                   type="button"
@@ -244,11 +294,23 @@ export function AIBar() {
                   aria-label="Collapse assistant"
                   title="Collapse assistant"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                    <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <g
+                      stroke="currentColor"
+                      strokeWidth="1.75"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      fill="none"
+                    >
+                      <polyline points="17 6 13 12 17 18" />
+                      <polyline points="12 6 8 12 12 18" />
+                    </g>
                   </svg>
                 </button>
               ) : null}
+              <div className="ai-bar-ctx-badge">✦</div>
+              <span>Asking about</span>
+              <span className="ai-bar-ctx-path">{context.path}</span>
               <span className="ai-bar-ctx-hint">
                 Highlight any text to ask · <kbd>⌘</kbd> <kbd>K</kbd>
               </span>
