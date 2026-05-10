@@ -1,11 +1,12 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import type { DetailEvidenceSection } from "../../../types/content"
 import { prdApi } from "../../../lib/api"
 import { markdownToPrdState } from "../../../lib/prd-adapter"
+import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
@@ -14,6 +15,14 @@ export function DetailScreen() {
   const { content, setContent } = useContent()
   const d = content.detail
   const [generating, setGenerating] = useState(false)
+
+  useEffect(() => {
+    if (content.detail) return
+    const key = pickDefaultDetailKey(content.briefDetails ?? {})
+    if (!key) return
+    const next = content.briefDetails?.[key]
+    if (next) setContent({ detail: next })
+  }, [content.detail, content.briefDetails, setContent])
 
   const handleGeneratePrd = async () => {
     if (!d?.meta) {
@@ -57,7 +66,7 @@ export function DetailScreen() {
         </a>
         <EmptyPane
           title="No evidence loaded"
-          hint="Set `content.detail` when the user opens a finding (title, metrics, evidence sections, optional HTML charts). Until then this screen stays empty."
+          hint="The Evidence view is built from the current weekly brief (`/v1/brief/current`). If the API returns no insights yet, or the app cannot reach your EC2 host (wrong NEXT_PUBLIC_API_URL, CORS, or auth), this stays empty. Open Weekly brief first, or confirm the brief payload includes an `insights` array."
           placeholders={3}
         />
       </AppLayout>

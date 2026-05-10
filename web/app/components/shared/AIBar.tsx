@@ -1,23 +1,21 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
-import { AI_CONTEXTS, APP_SCREENS } from "../../types"
+import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, askApi, type AskResponse } from "../../lib/api"
+import { AskReplyBody } from "./AskReplyBody"
 
 export function AIBar() {
-  const { currentScreen, aiBarValue, setAIBarValue, pendingSearchHandoff, setPendingSearchHandoff, showToast } =
-    useNavigation()
+  const { currentScreen, aiBarValue, setAIBarValue, showToast } = useNavigation()
   const { content, setContent } = useContent()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [submitting, setSubmitting] = useState(false)
   const [lastReply, setLastReply] = useState<AskResponse | null>(null)
   const [askError, setAskError] = useState<string | null>(null)
 
-  const isAppScreen = APP_SCREENS.includes(currentScreen)
+  const showAIBar = AI_BAR_SCREENS.includes(currentScreen)
   const context = AI_CONTEXTS[currentScreen]
   const chips =
     content.aiScreenChips[currentScreen] ??
@@ -27,7 +25,7 @@ export function AIBar() {
   useEffect(() => {
     const handleKeydown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        if (textareaRef.current && isAppScreen) {
+        if (textareaRef.current && showAIBar) {
           e.preventDefault()
           textareaRef.current.focus()
         }
@@ -35,20 +33,7 @@ export function AIBar() {
     }
     document.addEventListener("keydown", handleKeydown)
     return () => document.removeEventListener("keydown", handleKeydown)
-  }, [isAppScreen])
-
-  useEffect(() => {
-    if (!pendingSearchHandoff) return
-    setLastReply(pendingSearchHandoff.reply)
-    setAskError(null)
-    setAIBarValue("")
-    setPendingSearchHandoff(null)
-    const ta = textareaRef.current
-    if (ta) {
-      ta.style.height = "auto"
-      ta.style.height = "24px"
-    }
-  }, [pendingSearchHandoff, setAIBarValue, setPendingSearchHandoff])
+  }, [showAIBar])
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setAIBarValue(e.target.value)
@@ -121,7 +106,7 @@ export function AIBar() {
     }
   }
 
-  if (!isAppScreen || !context) return null
+  if (!showAIBar || !context) return null
 
   const showReplyBlock = submitting || askError != null || lastReply != null
 
@@ -157,33 +142,7 @@ export function AIBar() {
             ) : askError ? (
               <div className="ai-bar-reply-error">{askError}</div>
             ) : lastReply ? (
-              <>
-                <div className="ai-bar-reply-answer">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {lastReply.answer}
-                  </ReactMarkdown>
-                </div>
-                {lastReply.key_points?.length ? (
-                  <ul className="ai-bar-reply-kp">
-                    {lastReply.key_points.map((kp, i) => (
-                      <li key={i}>{kp}</li>
-                    ))}
-                  </ul>
-                ) : null}
-                {lastReply.citations?.length ? (
-                  <div className="ai-bar-reply-cites">
-                    {lastReply.citations.map((c, i) => (
-                      <div key={i} className="ai-bar-reply-cite">
-                        <div className="ai-bar-reply-cite-src">{c.source}</div>
-                        <div className="ai-bar-reply-cite-ev">{c.evidence}</div>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                {lastReply.unanswered ? (
-                  <div className="ai-bar-reply-gap">Gap: {lastReply.unanswered}</div>
-                ) : null}
-              </>
+              <AskReplyBody reply={lastReply} />
             ) : null}
           </div>
         ) : null}

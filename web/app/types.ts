@@ -42,6 +42,9 @@ export const APP_SCREENS: ScreenId[] = [
   "connectors",
 ]
 
+/** Bottom contextual ask bar — Brief, Evidence, PRD only. Ask Sprntly uses in-page chat. */
+export const AI_BAR_SCREENS: ScreenId[] = ["brief", "detail", "prd"]
+
 export const AI_CONTEXTS: Record<
   string,
   { path: string; suggest: string[] }

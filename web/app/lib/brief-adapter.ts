@@ -126,12 +126,29 @@ function sectionFromInsights(
   }
 }
 
+/** Coerce optional / legacy API fields so evidence sections still render. */
+function insightArrays(insight: Insight) {
+  return {
+    why_this_ranks: Array.isArray(insight.why_this_ranks) ? insight.why_this_ranks : [],
+    why_alternatives_dont_hold: Array.isArray(insight.why_alternatives_dont_hold)
+      ? insight.why_alternatives_dont_hold
+      : [],
+    impact_math: Array.isArray(insight.impact_math) ? insight.impact_math : [],
+    verification_metrics: Array.isArray(insight.verification_metrics)
+      ? insight.verification_metrics
+      : [],
+    convergence: Array.isArray(insight.convergence) ? insight.convergence : [],
+    user_quotes: Array.isArray(insight.user_quotes) ? insight.user_quotes : [],
+  }
+}
+
 function detailFromInsight(
   insight: Insight,
   rank: number,
   source?: { briefId: number; insightIndex: number },
 ): DetailState {
   const tagMeta = TAG_MAP[insight.tag] || TAG_MAP.something_broken
+  const arrays = insightArrays(insight)
   const tags: DetailState["tags"] = [
     { label: tagMeta.tagLabel, className: tagMeta.detailTagClass },
   ]
@@ -163,24 +180,24 @@ function detailFromInsight(
     })
   }
 
-  const ranksHtml = bulletList(insight.why_this_ranks)
+  const ranksHtml = bulletList(arrays.why_this_ranks)
   if (ranksHtml) evidenceSections.push({ sectionTitle: "Why this ranks", html: ranksHtml })
 
-  const altsHtml = bulletList(insight.why_alternatives_dont_hold)
+  const altsHtml = bulletList(arrays.why_alternatives_dont_hold)
   if (altsHtml)
     evidenceSections.push({
       sectionTitle: "Why competing explanations don't hold",
       html: altsHtml,
     })
 
-  const convHtml = convergenceTable(insight.convergence)
+  const convHtml = convergenceTable(arrays.convergence)
   if (convHtml)
     evidenceSections.push({ sectionTitle: "Convergence across sources", html: convHtml })
 
-  if (insight.user_quotes && insight.user_quotes.length > 0) {
+  if (arrays.user_quotes.length > 0) {
     evidenceSections.push({
       sectionTitle: "User quotes",
-      quoteRows: insight.user_quotes.map((q) => ({
+      quoteRows: arrays.user_quotes.map((q) => ({
         source: q.source,
         quote: q.quote,
         meta: [],
@@ -188,12 +205,25 @@ function detailFromInsight(
     })
   }
 
-  const mathHtml = bulletList(insight.impact_math)
+  const mathHtml = bulletList(arrays.impact_math)
   if (mathHtml) evidenceSections.push({ sectionTitle: "Impact math", html: mathHtml })
 
-  const verifyHtml = bulletList(insight.verification_metrics)
+  const verifyHtml = bulletList(arrays.verification_metrics)
   if (verifyHtml)
     evidenceSections.push({ sectionTitle: "Verification metrics", html: verifyHtml })
+
+  if (evidenceSections.length === 0) {
+    const parts: string[] = []
+    if (insight.subtitle) parts.push(`<p>${escapeHtml(insight.subtitle)}</p>`)
+    if (insight.recommendation)
+      parts.push(`<p><strong>Recommendation</strong> — ${escapeHtml(insight.recommendation)}</p>`)
+    if (parts.length === 0 && insight.title) {
+      parts.push(`<p>${escapeHtml(insight.title)}</p>`)
+    }
+    if (parts.length > 0) {
+      evidenceSections.push({ sectionTitle: "Finding overview", html: parts.join("") })
+    }
+  }
 
   return {
     backLabel: "← Back to brief",
@@ -297,4 +327,23 @@ export function briefToContentPatch(brief: Brief): BriefHydrationPatch {
     brief: briefToBriefState(brief),
     briefDetails: briefToDetailMap(brief),
   }
+}
+
+/** Match weekly-brief section order: broken → better → new, then rank. */
+const DETAIL_KEY_TAG_ORDER = ["fix", "double", "new"] as const
+
+export function pickDefaultDetailKey(briefDetails: Record<string, DetailState>): string | null {
+  const keys = Object.keys(briefDetails)
+  if (keys.length === 0) return null
+  const sorted = [...keys].sort((a, b) => {
+    const [ta, na] = a.split("-")
+    const [tb, nb] = b.split("-")
+    const ia = DETAIL_KEY_TAG_ORDER.indexOf(ta as (typeof DETAIL_KEY_TAG_ORDER)[number])
+    const ib = DETAIL_KEY_TAG_ORDER.indexOf(tb as (typeof DETAIL_KEY_TAG_ORDER)[number])
+    const sa = ia === -1 ? 99 : ia
+    const sb = ib === -1 ? 99 : ib
+    if (sa !== sb) return sa - sb
+    return (Number(na) || 0) - (Number(nb) || 0)
+  })
+  return sorted[0] ?? null
 }
