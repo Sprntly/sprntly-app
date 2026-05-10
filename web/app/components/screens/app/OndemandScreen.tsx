@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
+import { MainChromeStrip } from "../../shared/MainChromeStrip"
 import { Sidebar } from "../../shared/Sidebar"
-import { TopSearchBar } from "../../shared/TopSearchBar"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { ChatSuggestionIcon, IconSendUp } from "../../shared/app-icons"
@@ -188,7 +188,7 @@ export function OndemandScreen() {
     <div className={`app${sidebarCollapsed ? " app--sidebar-collapsed" : ""}`}>
       <Sidebar />
       <div className="main-column">
-        <TopSearchBar />
+        <MainChromeStrip />
         <div className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}>
           <aside
             className="od-rail"

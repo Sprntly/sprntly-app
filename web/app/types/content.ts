@@ -79,13 +79,6 @@ export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
     target: "brief",
   },
   {
-    id: "home-goto-ask",
-    icon: "message",
-    title: "Ask Sprntly",
-    desc: "Free-form Q&A across your product memory.",
-    target: "ondemand",
-  },
-  {
     id: "home-prompt-ask",
     icon: "chart",
     title: "Compare our segments",

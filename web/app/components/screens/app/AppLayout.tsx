@@ -2,8 +2,8 @@
 
 import { ReactNode } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
+import { MainChromeStrip } from "../../shared/MainChromeStrip"
 import { Sidebar } from "../../shared/Sidebar"
-import { TopSearchBar } from "../../shared/TopSearchBar"
 
 interface AppLayoutProps {
   children: ReactNode
@@ -20,7 +20,7 @@ export function AppLayout({ children, style, mainStyle }: AppLayoutProps) {
     >
       <Sidebar />
       <div className="main-column">
-        <TopSearchBar />
+        <MainChromeStrip />
         <main className="main" style={mainStyle}>
           {children}
         </main>

@@ -39,7 +39,7 @@
     --font-body: 'Geist', -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
 
-    /* Top chrome: search strip + sidebar header share min-height and divider alignment */
+    /* Main-column chrome strip + sidebar header share min-height and divider alignment */
     --app-shell-header-min: 82px;
     /* Sidebar: expanded width grows with nav content; collapsed rail width follows content */
     --sidebar-rail-expanded-min: 220px;
@@ -55,62 +55,34 @@
   .mono { font-family: var(--font-mono); }
   button, input, select, textarea { font-family: inherit; }
 
-  /* ---------- Top search (product memory) ---------- */
-  .app-top-search {
+  /* ---------- Main column top chrome (no global search; aligns with sidebar + AI bar sync) ---------- */
+  .app-main-chrome {
     position: sticky;
     top: 0;
     z-index: 20;
     flex-shrink: 0;
-    background: rgba(250,249,246,0.96);
-    backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--line);
     box-sizing: border-box;
     min-height: var(--app-shell-header-min);
-    padding: 8px 0 10px;
-    pointer-events: auto;
+    border-bottom: 1px solid var(--line);
+    background: rgba(250,249,246,0.96);
+    backdrop-filter: blur(12px);
   }
-  .app-top-search-inner {
-    width: 100%;
-    display: flex;
-    flex-direction: column;
-    gap: 0;
+  .app-main-chrome-inner {
+    max-width: 100%;
     padding: 0 40px;
+    min-height: var(--app-shell-header-min);
+    display: flex;
+    align-items: center;
+    box-sizing: border-box;
   }
-  .app-top-search-row {
-    display: flex; align-items: center; gap: 12px;
-  }
-  .app-top-search-icon {
-    flex-shrink: 0; color: var(--muted); display: flex; align-items: center;
-  }
-  .app-top-search-input-wrap {
-    flex: 1; display: flex; align-items: center; gap: 10px;
-    background: var(--surface); border: 1px solid var(--line-strong);
-    border-radius: 999px; padding: 4px 6px 4px 14px;
-    box-shadow: var(--shadow-sm);
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-  .app-top-search-input-wrap:focus-within {
-    border-color: var(--ink-3); box-shadow: 0 0 0 3px rgba(15,20,17,0.06);
-  }
-  .app-top-search-input {
-    flex: 1; border: none; outline: none; background: transparent;
-    font-size: 14px; color: var(--ink); min-width: 0; padding: 8px 0;
-  }
-  .app-top-search-input::placeholder { color: var(--muted); }
-  .app-top-search-submit {
-    flex-shrink: 0; border: none; border-radius: 999px;
-    background: var(--ink); color: var(--surface);
-    font-size: 13px; font-weight: 600; padding: 8px 16px; cursor: pointer;
-    transition: background 0.15s;
-  }
-  .app-top-search-submit:hover:not(:disabled) { background: var(--ink-2); }
-  .app-top-search-submit:disabled { opacity: 0.4; cursor: not-allowed; }
-  .app-top-search-hint {
-    font-size: 11px; color: var(--muted-2); margin-top: 6px; padding-left: 36px;
-  }
-  .app-top-search-error {
-    font-size: 12px; color: var(--danger); margin-top: 8px; padding-left: 36px;
-    line-height: 1.35;
+  .app-main-chrome-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    line-height: 1.2;
   }
 
   .screen { display: none; min-height: 100vh; position: relative; }
@@ -310,7 +282,7 @@
   html[data-ai-panel-layout="side"] .main-column > .main {
     padding-bottom: 40px;
   }
-  /* Ask Sprntly: od-layout sits directly under TopSearchBar (no .main wrapper) — fill height so thread + composer flex correctly. */
+  /* Ask Sprntly: od-layout sits under chrome strip (no .main wrapper) — fill height so thread + composer flex correctly. */
   .main-column > .od-layout {
     flex: 1 1 auto;
     min-height: 0;
@@ -512,14 +484,88 @@
     max-width: 720px; margin: 0 auto; padding: 80px 40px 0;
     display: flex; flex-direction: column; align-items: center;
   }
-  .chat-greeting { text-align: center; margin-bottom: 40px; }
+  .chat-wrap--landing {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 0 40px 120px;
+    min-height: calc(100dvh - var(--app-shell-header-min) - 24px);
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+  .chat-landing-focus {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 28px;
+    padding: 32px 0 56px;
+    min-height: min(52vh, 520px);
+  }
+  .chat-greeting { text-align: center; margin-bottom: 0; }
   .chat-greeting-title {
     font-family: var(--font-display); font-weight: 600; font-size: 40px;
     letter-spacing: -0.03em; line-height: 1.08; margin: 0 0 12px;
   }
   .chat-greeting-title span { color: var(--accent); }
-  .chat-greeting-sub { color: var(--ink-3); font-size: 15px; max-width: 520px; margin: 0 auto; line-height: 1.55; }
+  .chat-greeting-sub { color: var(--ink-3); font-size: 15px; max-width: 520px; margin: 12px auto 0; line-height: 1.55; }
   .chat-greeting-sub strong { color: var(--accent); font-weight: 600; }
+  .chat-home-composer {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    width: 100%;
+    padding: 6px 6px 6px 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .chat-home-composer:focus-within {
+    border-color: var(--ink-3);
+    box-shadow: 0 0 0 3px rgba(15,20,17,0.06);
+  }
+  .chat-home-composer-input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--ink);
+    resize: none;
+    min-height: 44px;
+    max-height: min(200px, 36vh);
+    overflow-y: auto;
+    padding: 10px 0;
+    font-family: inherit;
+  }
+  .chat-home-composer-input::placeholder { color: var(--muted); }
+  .chat-home-composer-send {
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    border: none;
+    background: var(--ink);
+    color: var(--surface);
+    cursor: pointer;
+    transition: background 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .chat-home-composer-send:hover:not(:disabled) { background: var(--ink-2); }
+  .chat-home-composer-send:disabled { opacity: 0.35; cursor: not-allowed; }
+  .chat-landing-cards {
+    width: 100%;
+    padding-top: 8px;
+  }
   .chat-suggestions { margin-top: 8px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; width: 100%; }
   .chat-suggestion {
     padding: 15px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
@@ -963,7 +1009,7 @@
     position: relative;
     z-index: 2;
   }
-  /* Extend the same horizontal rule as `.app-top-search` across the resize gutter (Y from `--ai-chrome-sync-h`). */
+  /* Extend the same horizontal rule as `.app-main-chrome` across the resize gutter (Y from `--ai-chrome-sync-h`). */
   html[data-ai-panel-layout="side"] .ai-bar-resize-handle {
     background: linear-gradient(
       to bottom,
@@ -1864,9 +1910,9 @@
     .conn-mgmt-head { flex-direction: column; align-items: flex-start; gap: 8px; }
   }
   @media (max-width: 640px) {
-    .app-top-search-inner { padding: 0 16px; }
-    .app-top-search-row { flex-wrap: wrap; }
-    .app-top-search-hint { padding-left: 0; }
+    .app-main-chrome-inner { padding-left: 20px; padding-right: 20px; }
+    .chat-wrap--landing { padding-left: 20px; padding-right: 20px; }
+    .chat-landing-focus { min-height: 0; padding-top: 16px; padding-bottom: 32px; }
     .ob-title { font-size: 26px; }
     .main-title { font-size: 28px; }
     .finding-num { width: 38px; height: 38px; min-width: 38px; }

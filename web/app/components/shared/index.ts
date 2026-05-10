@@ -1,7 +1,7 @@
+export { MainChromeStrip } from "./MainChromeStrip"
 export { Sidebar } from "./Sidebar"
 export { AIBar } from "./AIBar"
 export { Toast } from "./Toast"
-export { TopSearchBar } from "./TopSearchBar"
 export { ApproveModal } from "./ApproveModal"
 export { InviteModal } from "./InviteModal"
 export { ClaudeDrawer } from "./ClaudeDrawer"

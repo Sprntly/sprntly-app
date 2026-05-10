@@ -53,7 +53,7 @@ interface NavigationContextType {
   aiBarValue: string
   setAIBarValue: (value: string) => void
 
-  /** Filled by `TopSearchBar` after a successful ask; consumed once by `AIBar`. */
+  /** Filled after a successful ask from home (composer); consumed once by `OndemandScreen`. */
   pendingSearchHandoff: PendingSearchHandoff | null
   setPendingSearchHandoff: (value: PendingSearchHandoff | null) => void
 

@@ -42,6 +42,32 @@ export const APP_SCREENS: ScreenId[] = [
   "connectors",
 ]
 
+/** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
+const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
+  "ob-1": "Setup · Step 1 of 8",
+  "ob-2": "Setup · Step 2 of 8",
+  "ob-3": "Setup · Step 3 of 8",
+  "ob-4": "Setup · Step 4 of 8",
+  "ob-5": "Setup · Step 5 of 8",
+  "ob-6": "Setup · Step 6 of 8",
+  "ob-7": "Setup · Step 7 of 8",
+  "ob-8": "Setup · Step 8 of 8",
+  chat: "Home",
+  brief: "Weekly brief",
+  detail: "Evidence",
+  prd: "PRD",
+  ondemand: "Ask Sprntly",
+  past: "Past briefs",
+  shipped: "Shipped",
+  settings: "Settings",
+  team: "Team",
+  connectors: "Connectors",
+}
+
+export function getMainChromeTitle(screen: ScreenId): string {
+  return MAIN_CHROME_TITLE[screen]
+}
+
 /** Bottom contextual ask bar — Brief, Evidence, PRD only. Ask Sprntly uses in-page chat. */
 export const AI_BAR_SCREENS: ScreenId[] = ["brief", "detail", "prd"]
 

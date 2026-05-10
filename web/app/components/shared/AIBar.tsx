@@ -80,7 +80,7 @@ export function AIBar() {
     }
   }, [showAIBar, context, layout, aiPanelCollapsed, aiPanelWidth])
 
-  /** Match `.ai-bar-ctx` strip + resize-gutter divider Y to `.app-top-search` (main column). */
+  /** Match `.ai-bar-ctx` strip + resize-gutter divider Y to `.app-main-chrome` (main column). */
   useLayoutEffect(() => {
     const root = document.documentElement
     if (!showAIBar || layout !== "side") {
@@ -94,7 +94,7 @@ export function AIBar() {
 
     const apply = () => {
       if (cancelled) return
-      const el = document.querySelector(".app-top-search")
+      const el = document.querySelector(".app-main-chrome")
       if (!el) return
       const h = Math.round(el.getBoundingClientRect().height)
       if (h > 0) root.style.setProperty("--ai-chrome-sync-h", `${h}px`)
@@ -102,7 +102,7 @@ export function AIBar() {
 
     const bind = () => {
       if (cancelled) return
-      const el = document.querySelector(".app-top-search")
+      const el = document.querySelector(".app-main-chrome")
       if (!el) {
         raf = requestAnimationFrame(bind)
         return
