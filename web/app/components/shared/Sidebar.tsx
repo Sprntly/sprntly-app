@@ -5,14 +5,7 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
 import type { ScreenId } from "../../types"
-import {
-  IconAsk,
-  IconBrief,
-  IconEvidence,
-  IconHome,
-  IconPrd,
-  IconSettings,
-} from "./sidebar-icons"
+import { IconBrief, IconEvidence, IconHome, IconPrd, IconSettings } from "./sidebar-icons"
 
 export function Sidebar() {
   const { currentScreen, goTo, sidebarCollapsed, toggleSidebar } = useNavigation()
@@ -119,7 +112,12 @@ export function Sidebar() {
 
       <div className="sb-body">
         <div className="sb-section-title">Overview</div>
-        <NavItem screen="chat" icon={<IconHome />} label="Home" />
+        <NavItem
+          screen="chat"
+          icon={<IconHome />}
+          label="Home"
+          count={content.sidebarConvCount ?? undefined}
+        />
 
         <div className="sb-section-title">Intelligence</div>
         <NavItem
@@ -130,13 +128,6 @@ export function Sidebar() {
         />
         <NavItem screen="detail" icon={<IconEvidence />} label="Evidence" />
         <NavItem screen="prd" icon={<IconPrd />} label="PRD" />
-        <NavItem
-          screen="ondemand"
-          icon={<IconAsk />}
-          label="Ask Sprntly"
-          count={content.sidebarConvCount ?? undefined}
-        />
-
         <div className="sb-spacer" />
 
         <div className="sb-section-title">Workspace</div>

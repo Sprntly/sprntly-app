@@ -56,7 +56,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   brief: "Weekly brief",
   detail: "Evidence",
   prd: "PRD",
-  ondemand: "Ask Sprntly",
+  ondemand: "Home",
   past: "Past briefs",
   shipped: "Shipped",
   settings: "Settings",
@@ -68,7 +68,7 @@ export function getMainChromeTitle(screen: ScreenId): string {
   return MAIN_CHROME_TITLE[screen]
 }
 
-/** Bottom contextual ask bar — Brief, Evidence, PRD only. Ask Sprntly uses in-page chat. */
+/** Bottom contextual ask bar — Brief, Evidence, PRD only. Home uses in-page chat. */
 export const AI_BAR_SCREENS: ScreenId[] = ["brief", "detail", "prd"]
 
 export const AI_CONTEXTS: Record<

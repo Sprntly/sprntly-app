@@ -9,10 +9,13 @@ interface AppLayoutProps {
   children: ReactNode
   style?: React.CSSProperties
   mainStyle?: React.CSSProperties
+  /** Extra classes on `<main className="main ...">` (e.g. `main--home-chat`). */
+  mainClassName?: string
 }
 
-export function AppLayout({ children, style, mainStyle }: AppLayoutProps) {
+export function AppLayout({ children, style, mainStyle, mainClassName }: AppLayoutProps) {
   const { sidebarCollapsed } = useNavigation()
+  const mainCls = ["main", mainClassName].filter(Boolean).join(" ")
   return (
     <div
       className={`app${sidebarCollapsed ? " app--sidebar-collapsed" : ""}`}
@@ -21,7 +24,7 @@ export function AppLayout({ children, style, mainStyle }: AppLayoutProps) {
       <Sidebar />
       <div className="main-column">
         <MainChromeStrip />
-        <main className="main" style={mainStyle}>
+        <main className={mainCls} style={mainStyle}>
           {children}
         </main>
       </div>

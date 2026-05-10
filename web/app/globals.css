@@ -287,6 +287,97 @@
     flex: 1 1 auto;
     min-height: 0;
   }
+  /* Home (merged Ask): `od-layout` lives inside `.main` */
+  .main-column > .main.main--home-chat {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .home-chat-root {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .home-chat-root > .od-layout {
+    flex: 1;
+    min-height: 0;
+  }
+  .od-center-inner--home {
+    padding-top: 24px;
+    padding-bottom: 12px;
+  }
+  .home-chip-row {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 4px 2px 8px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .home-chip-row--composer {
+    padding: 0 0 10px;
+    margin: 0;
+  }
+  .od-composer--home {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    max-width: none;
+    width: 100%;
+    padding: 12px 24px 20px;
+  }
+  .od-composer-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    width: 100%;
+    min-width: 0;
+  }
+  .home-chip {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 220px;
+    padding: 6px 12px 6px 8px;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    cursor: pointer;
+    box-shadow: var(--shadow-sm);
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .home-chip:hover {
+    background: var(--surface-2);
+    border-color: var(--ink-3);
+  }
+  .home-chip--muted {
+    background: var(--surface-2);
+  }
+  .home-chip-icon {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+  }
+  .home-chip-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .sidebar {
     background: var(--surface-2); border-right: 1px solid var(--line);
     padding: 0;
@@ -1897,6 +1988,7 @@
     .od-center--landing .od-center-inner { padding: 32px 20px 20px; }
     .od-center--thread .od-center-scroll { padding: 16px 20px 12px; }
     .od-composer { padding: 14px 20px 24px; }
+    .od-composer--home { padding: 10px 16px 18px; }
     .od-greeting-title { font-size: 32px; }
     .main-header { flex-direction: column; align-items: flex-start; gap: 12px; }
     .shipped-celebrate-headline { font-size: 26px; }

@@ -1,183 +1,378 @@
 "use client"
 
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
+import type { ChatHomeCard } from "../../../types/content"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
+import { AskReplyBody } from "../../shared/AskReplyBody"
 import { ChatSuggestionIcon, IconSendUp } from "../../shared/app-icons"
-import { ApiError, askApi } from "../../../lib/api"
+import { ApiError, askApi, type AskResponse } from "../../../lib/api"
+
+type ThreadTurn = {
+  id: string
+  query: string
+  reply?: AskResponse
+  error?: string
+}
 
 export function ChatScreen() {
-  const { goTo, setAIBarValue, setPendingOndemandDraft, setPendingSearchHandoff, showToast } =
-    useNavigation()
+  const {
+    goTo,
+    setAIBarValue,
+    pendingSearchHandoff,
+    setPendingSearchHandoff,
+    pendingOndemandDraft,
+    setPendingOndemandDraft,
+    showToast,
+  } = useNavigation()
   const { content, setContent } = useContent()
+  const [railExpanded, setRailExpanded] = useState(false)
+  const [activeConv, setActiveConv] = useState<number | null>(null)
+  const [thread, setThread] = useState<ThreadTurn[]>([])
   const [draft, setDraft] = useState("")
-  const [submitting, setSubmitting] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const askingRef = useRef(false)
   const composerRef = useRef<HTMLTextAreaElement>(null)
-  const conversationsRef = useRef(content.conversations)
-  conversationsRef.current = content.conversations
+
+  const conversations = content.conversations
+  const starters = content.ondemandStarters
+  const conversationsRef = useRef(conversations)
+  conversationsRef.current = conversations
 
   const name = content.userName?.split(/\s+/)[0] ?? "there"
   const homeCards = content.homeStarterCards.filter((c) => c.id !== "home-goto-ask")
 
-  const handleCard = (target: "brief" | "ondemand", prompt?: string) => {
-    if (target === "ondemand" && prompt) {
-      setPendingOndemandDraft(prompt)
-    } else if (prompt) {
-      setAIBarValue(prompt)
-    }
-    goTo(target)
-  }
+  useEffect(() => {
+    if (!pendingSearchHandoff) return
+    const { query, reply, convId } = pendingSearchHandoff
+    setPendingSearchHandoff(null)
+    setThread([{ id: convId, query, reply }])
+    setActiveConv(0)
+  }, [pendingSearchHandoff, setPendingSearchHandoff])
 
-  const submitHomeAsk = useCallback(async () => {
-    const query = draft.trim()
-    if (query.length < 3) {
-      showToast("Question too short", "Use at least 3 characters.")
-      return
-    }
-    setSubmitting(true)
-    try {
-      const res = await askApi.ask(query)
-      const convId =
-        typeof crypto !== "undefined" && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `home-${Date.now()}`
+  useEffect(() => {
+    if (pendingOndemandDraft == null || !pendingOndemandDraft.trim()) return
+    setDraft(pendingOndemandDraft)
+    setPendingOndemandDraft(null)
+    requestAnimationFrame(() => {
+      const ta = composerRef.current
+      if (ta) {
+        ta.style.height = "auto"
+        ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
+        ta.focus()
+      }
+    })
+  }, [pendingOndemandDraft, setPendingOndemandDraft])
+
+  const pushPendingConversation = useCallback(
+    (turnId: string, query: string) => {
+      const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-      const prev = conversationsRef.current
-      const n = prev.length + 1
+      const nextCount = prev.length + 1
       setContent({
         conversations: [
-          {
-            id: convId,
-            title,
-            time: timeStr,
-            savedTurn: { id: convId, query, reply: res },
-          },
+          { id: turnId, title, time: timeStr, savedTurn: { id: turnId, query } },
           ...prev,
         ],
-        sidebarConvCount: n,
+        sidebarConvCount: nextCount,
       })
-      setPendingSearchHandoff({ query, reply: res, convId })
-      setDraft("")
-      goTo("ondemand")
-      requestAnimationFrame(() => {
-        const ta = composerRef.current
-        if (ta) {
-          ta.style.height = "auto"
-          ta.style.height = "24px"
-        }
+    },
+    [setContent],
+  )
+
+  const finalizeConversationTurn = useCallback(
+    (turnId: string, updates: { reply?: AskResponse; error?: string }) => {
+      const prev = conversationsRef.current
+      setContent({
+        conversations: prev.map((c) => {
+          if (c.id !== turnId || !c.savedTurn) return c
+          const base = { id: turnId, query: c.savedTurn.query }
+          if (updates.reply !== undefined) {
+            return { ...c, savedTurn: { ...base, reply: updates.reply } }
+          }
+          if (updates.error !== undefined) {
+            return { ...c, savedTurn: { ...base, error: updates.error } }
+          }
+          return c
+        }),
       })
-    } catch (e) {
-      const detail =
-        e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
+    },
+    [setContent],
+  )
+
+  const submitAsk = useCallback(
+    async (rawQuery: string) => {
+      const query = rawQuery.trim()
+      if (query.length < 3) {
+        showToast("Question too short", "Use at least 3 characters.")
+        return
+      }
+      if (askingRef.current) return
+      askingRef.current = true
+      const id =
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      setBusy(true)
+      setThread((t) => [...t, { id, query }])
+      pushPendingConversation(id, query)
+      setActiveConv(0)
+      try {
+        const res = await askApi.ask(query)
+        setThread((t) => t.map((turn) => (turn.id === id ? { ...turn, reply: res } : turn)))
+        finalizeConversationTurn(id, { reply: res })
+      } catch (e) {
+        const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
           ? (e.body as { detail: unknown }).detail
           : null
-      const detailStr =
-        typeof detail === "string"
-          ? detail
-          : Array.isArray(detail)
+        const detailStr =
+          typeof detail === "string"
             ? detail
-                .map((x) =>
-                  typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x),
-                )
-                .join(" · ")
-            : null
-      const msg =
-        e instanceof ApiError ? detailStr || e.message : e instanceof Error ? e.message : "Something went wrong"
-      showToast("Ask failed", msg.slice(0, 120))
-    } finally {
-      setSubmitting(false)
-    }
-  }, [draft, goTo, setContent, setPendingSearchHandoff, showToast])
+            : Array.isArray(detail)
+              ? detail
+                  .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
+                  .join(" · ")
+              : null
+        const msg =
+          e instanceof ApiError
+            ? detailStr || e.message
+            : e instanceof Error
+              ? e.message
+              : "Something went wrong"
+        setThread((t) => t.map((turn) => (turn.id === id ? { ...turn, error: msg } : turn)))
+        finalizeConversationTurn(id, { error: msg })
+        showToast("Ask failed", msg.slice(0, 120))
+      } finally {
+        askingRef.current = false
+        setBusy(false)
+      }
+    },
+    [finalizeConversationTurn, pushPendingConversation, showToast],
+  )
 
-  const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleComposerSubmit = () => {
+    const q = draft.trim()
+    if (q.length < 3 || askingRef.current) return
+    setDraft("")
+    void submitAsk(q)
+    const ta = composerRef.current
+    if (ta) {
+      ta.style.height = "auto"
+      ta.style.height = "24px"
+    }
+  }
+
+  const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      if (!submitting) void submitHomeAsk()
+      handleComposerSubmit()
     }
   }
 
-  const onComposerInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleComposerInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setDraft(e.target.value)
     e.target.style.height = "auto"
-    e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`
+    e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"
   }
 
+  const handleStarterChip = (text: string) => {
+    void submitAsk(text)
+  }
+
+  const handleHomeCard = (c: ChatHomeCard) => {
+    if (c.target === "ondemand" && c.prompt) {
+      setPendingOndemandDraft(c.prompt)
+      return
+    }
+    if (c.target === "ondemand") {
+      goTo("chat")
+      return
+    }
+    if (c.target === "brief" && c.prompt) {
+      setAIBarValue(c.prompt)
+      goTo("brief")
+      return
+    }
+    goTo(c.target)
+  }
+
+  const startNewThread = () => {
+    setThread([])
+    setDraft("")
+    setActiveConv(null)
+  }
+
+  const hasThread = thread.length > 0
+  const showChipRow = !hasThread && (homeCards.length > 0 || starters.length > 0)
+  const showEmptyStarters =
+    !hasThread && homeCards.length === 0 && starters.length === 0
+
   return (
-    <AppLayout mainStyle={{ maxWidth: "none", padding: 0 }}>
-      <div className="chat-wrap chat-wrap--landing">
-        <div className="chat-landing-focus">
-          <div className="chat-greeting">
-            <h1 className="chat-greeting-title">
-              {content.homeHeadline ? (
-                content.homeHeadline
-              ) : (
-                <>
-                  Hi, {name}.
-                  <br />
-                  <span>What should we ship next?</span>
-                </>
-              )}
-            </h1>
-            {content.homeSub ? <p className="chat-greeting-sub">{content.homeSub}</p> : null}
-          </div>
-
-          <form
-            className="chat-home-composer"
-            role="search"
-            onSubmit={(e) => {
-              e.preventDefault()
-              void submitHomeAsk()
-            }}
+    <AppLayout
+      mainClassName="main--home-chat"
+      mainStyle={{
+        maxWidth: "none",
+        padding: 0,
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+        flex: "1 1 auto",
+      }}
+    >
+      <div className="home-chat-root">
+        <div className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}>
+          <aside
+            className="od-rail"
+            onMouseEnter={() => setRailExpanded(true)}
+            onMouseLeave={() => setRailExpanded(false)}
           >
-            <textarea
-              ref={composerRef}
-              className="chat-home-composer-input"
-              rows={1}
-              placeholder="Ask Sprntly anything about your product memory…"
-              value={draft}
-              onChange={onComposerInput}
-              onKeyDown={onComposerKeyDown}
-              aria-label="Ask Sprntly"
-              autoComplete="off"
-            />
-            <button
-              type="submit"
-              className="chat-home-composer-send"
-              aria-label="Send"
-              disabled={submitting || draft.trim().length < 3}
-            >
-              {submitting ? "..." : <IconSendUp size={18} />}
-            </button>
-          </form>
-        </div>
-
-        <div className="chat-landing-cards">
-          {homeCards.length === 0 ? (
-            <EmptyPane
-              title="No starter prompts yet"
-              hint="Populate `homeStarterCards` from your API (e.g. top questions from LLM or defaults from org settings)."
-              placeholders={4}
-            />
-          ) : (
-            <div className="chat-suggestions">
-              {homeCards.map((c) => (
-                <div
-                  key={c.id}
-                  className="chat-suggestion"
-                  onClick={() => handleCard(c.target, c.prompt)}
-                >
-                  <div className="chat-suggestion-icon">
-                    <ChatSuggestionIcon id={c.icon} />
-                  </div>
-                  <div className="chat-suggestion-title">{c.title}</div>
-                  <div className="chat-suggestion-desc">{c.desc}</div>
-                </div>
-              ))}
+            <div className="od-rail-collapsed-icon" aria-hidden>
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 12a9 9 0 1 0 3-6.7" />
+                <path d="M3 4v5h5" />
+                <path d="M12 7v5l3 2" />
+              </svg>
             </div>
-          )}
+            <div className="od-rail-head">
+              <h3 className="od-rail-title">Conversations</h3>
+              <button type="button" className="od-rail-newbtn" onClick={startNewThread}>
+                + New
+              </button>
+            </div>
+            <div className="od-rail-body">
+              {conversations.length === 0 ? (
+                <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--muted)" }}>
+                  No saved threads yet.
+                </div>
+              ) : (
+                conversations.map((conv, i) => (
+                  <div
+                    key={conv.id}
+                    className={`od-conv-item ${activeConv === i ? "active" : ""}`}
+                    onClick={() => {
+                      const st = conv.savedTurn
+                      if (st) {
+                        setThread([{ id: st.id, query: st.query, reply: st.reply, error: st.error }])
+                      } else {
+                        setThread([])
+                      }
+                      setActiveConv(i)
+                    }}
+                  >
+                    <div className="od-conv-title">{conv.title}</div>
+                    <div className="od-conv-time">{conv.time}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          </aside>
+
+          <main className={`od-center ${hasThread ? "od-center--thread" : "od-center--landing"}`}>
+            <div className="od-center-scroll">
+              {!hasThread ? (
+                <div className="od-center-inner od-center-inner--home">
+                  <div className="chat-greeting">
+                    <h1 className="chat-greeting-title">
+                      {content.homeHeadline ? (
+                        content.homeHeadline
+                      ) : (
+                        <>
+                          Hi, {name}.
+                          <br />
+                          <span>What should we ship next?</span>
+                        </>
+                      )}
+                    </h1>
+                    {content.homeSub ? <p className="chat-greeting-sub">{content.homeSub}</p> : null}
+                  </div>
+
+                  {showEmptyStarters ? (
+                    <EmptyPane
+                      title="No starter prompts yet"
+                      hint="Populate `homeStarterCards` and `ondemandStarters` from your API or org defaults."
+                      placeholders={4}
+                    />
+                  ) : null}
+                </div>
+              ) : (
+                <div className="od-thread">
+                  {thread.map((turn) => (
+                    <div key={turn.id} className="od-turn">
+                      <div className="od-msg od-msg-user">{turn.query}</div>
+                      <div className="od-msg od-msg-assistant">
+                        {turn.error ? <div className="od-msg-error">{turn.error}</div> : null}
+                        {!turn.reply && !turn.error ? <div className="od-msg-loading">Thinking…</div> : null}
+                        {turn.reply ? <AskReplyBody reply={turn.reply} /> : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="od-composer od-composer--home">
+              {showChipRow ? (
+                <div className="home-chip-row home-chip-row--composer">
+                  {homeCards.map((c) => (
+                    <button
+                      key={`c-${c.id}`}
+                      type="button"
+                      className="home-chip"
+                      onClick={() => handleHomeCard(c)}
+                    >
+                      <span className="home-chip-icon" aria-hidden>
+                        <ChatSuggestionIcon id={c.icon} size={16} />
+                      </span>
+                      <span className="home-chip-label">{c.title}</span>
+                    </button>
+                  ))}
+                  {starters.map((c) => (
+                    <button
+                      key={`s-${c.id}`}
+                      type="button"
+                      className="home-chip home-chip--muted"
+                      onClick={() => handleStarterChip(c.prompt ?? c.title)}
+                    >
+                      <span className="home-chip-icon" aria-hidden>
+                        <ChatSuggestionIcon id={c.icon} size={16} />
+                      </span>
+                      <span className="home-chip-label">{c.title}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className="od-composer-row">
+                <textarea
+                  ref={composerRef}
+                  className="od-composer-input"
+                  placeholder="Ask Sprntly anything about your product memory…"
+                  rows={1}
+                  value={draft}
+                  onChange={handleComposerInput}
+                  onKeyDown={handleComposerKeyDown}
+                />
+                <button
+                  type="button"
+                  className="od-composer-send"
+                  aria-label="Send"
+                  disabled={busy || draft.trim().length < 3}
+                  onClick={handleComposerSubmit}
+                >
+                  <IconSendUp size={18} />
+                </button>
+              </div>
+            </div>
+          </main>
         </div>
       </div>
     </AppLayout>

@@ -27,7 +27,6 @@ import {
   BriefScreen,
   DetailScreen,
   PrdScreen,
-  OndemandScreen,
   PastScreen,
   ShippedScreen,
   SettingsScreen,
@@ -99,7 +98,7 @@ function AppContent() {
       case "prd":
         return <PrdScreen />
       case "ondemand":
-        return <OndemandScreen />
+        return <ChatScreen />
       case "past":
         return <PastScreen />
       case "shipped":

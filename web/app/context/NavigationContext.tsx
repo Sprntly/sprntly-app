@@ -53,11 +53,11 @@ interface NavigationContextType {
   aiBarValue: string
   setAIBarValue: (value: string) => void
 
-  /** Filled after a successful ask from home (composer); consumed once by `OndemandScreen`. */
+  /** Filled after a successful ask from elsewhere; consumed once by Home chat. */
   pendingSearchHandoff: PendingSearchHandoff | null
   setPendingSearchHandoff: (value: PendingSearchHandoff | null) => void
 
-  /** Filled from Home starter cards; consumed once by `OndemandScreen` composer (AI bar is hidden there). */
+  /** Filled from Home starter chips; consumed once by Home composer. */
   pendingOndemandDraft: string | null
   setPendingOndemandDraft: (value: string | null) => void
 
@@ -158,12 +158,13 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const goTo = useCallback((screen: ScreenId) => {
-    setCurrentScreen(screen)
+    const next = screen === "ondemand" ? "chat" : screen
+    setCurrentScreen(next)
     setActiveDrawer(null)
     setActiveModal(null)
     setShareMenuOpen(false)
     setReviewPastOpen(false)
-    if (screen !== "ondemand") {
+    if (next !== "chat") {
       setPendingOndemandDraft(null)
     }
     window.scrollTo({ top: 0, behavior: "instant" })
