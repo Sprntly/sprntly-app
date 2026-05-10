@@ -105,14 +105,16 @@ export function DetailScreen() {
       <p className="detail-summary">{d.summary}</p>
 
       {d.metrics.length > 0 ? (
-        <div className="detail-grid">
-          {d.metrics.map((m, i) => (
-            <div key={i} className="detail-metric">
-              <div className="detail-metric-label">{m.label}</div>
-              <div className={`detail-metric-val ${m.valueClass ?? ""}`}>{m.value}</div>
-              {m.note ? <div className="detail-metric-note">{m.note}</div> : null}
-            </div>
-          ))}
+        <div className="impact-estimate">
+          <div className="impact-estimate-eyebrow">Estimated impact</div>
+          <div className="impact-estimate-row">
+            {d.metrics.slice(0, 3).map((m, i) => (
+              <div key={i} className="impact-estimate-item">
+                <div className={`impact-estimate-val ${m.valueClass ?? ""}`}>{m.value}</div>
+                <div className="impact-estimate-lbl">{m.label}</div>
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
 
@@ -121,27 +123,18 @@ export function DetailScreen() {
       ))}
 
       {d.cta ? (
-        <div className="detail-cta-card">
-          <div className="detail-cta-strip"></div>
-          <div className="detail-cta-inner">
-            <div className="detail-cta-text">
-              <h3 className="detail-cta-headline">{d.cta.headline}</h3>
-              <p className="detail-cta-sub">{d.cta.sub}</p>
-            </div>
-            <div className="detail-cta-actions">
-              <button type="button" className="btn" onClick={() => goTo("brief")}>
-                {d.cta.dismissLabel}
-              </button>
-              <button
-                type="button"
-                className="btn btn-accent"
-                onClick={handleGeneratePrd}
-                disabled={generating}
-              >
-                {generating ? "Generating PRD…" : d.cta.primaryLabel}
-              </button>
-            </div>
-          </div>
+        <div className="detail-cta-actions detail-cta-actions-end">
+          <button type="button" className="btn" onClick={() => goTo("brief")}>
+            {d.cta.dismissLabel}
+          </button>
+          <button
+            type="button"
+            className="btn btn-accent"
+            onClick={handleGeneratePrd}
+            disabled={generating}
+          >
+            {generating ? "Generating PRD…" : d.cta.primaryLabel}
+          </button>
         </div>
       ) : null}
     </AppLayout>

@@ -633,8 +633,8 @@
   .detail-back { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-3); font-size: 13px; text-decoration: none; margin-bottom: 16px; cursor: pointer; font-weight: 500; }
   .detail-back:hover { color: var(--ink); }
   .detail-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
-  .detail-title { font-family: var(--font-display); font-weight: 600; font-size: 34px; line-height: 1.12; letter-spacing: -0.025em; margin: 0; flex: 1; }
-  .detail-summary { font-size: 15px; color: var(--ink-3); line-height: 1.6; max-width: 720px; margin-bottom: 26px; }
+  .detail-title { font-family: var(--font-display); font-weight: 600; font-size: 28px; line-height: 1.15; letter-spacing: -0.025em; margin: 0; flex: 1; }
+  .detail-summary { font-size: 15px; color: var(--ink-3); line-height: 1.65; max-width: 760px; margin-bottom: 26px; }
   .detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 32px; }
   .detail-metric {
     padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
@@ -644,6 +644,31 @@
   .detail-metric-val.pos { color: var(--accent); }
   .detail-metric-val.neg { color: var(--danger); }
   .detail-metric-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+  /* Highlighted "Estimated impact" callout — replaces the plain metric grid. */
+  .impact-estimate {
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-lg);
+    padding: 16px 20px;
+    margin-bottom: 32px;
+    box-shadow: var(--shadow-sm);
+  }
+  .impact-estimate-eyebrow {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--accent-ink); font-weight: 600; margin-bottom: 10px;
+  }
+  .impact-estimate-row { display: flex; gap: 28px; flex-wrap: wrap; }
+  .impact-estimate-item { display: flex; flex-direction: column; gap: 4px; }
+  .impact-estimate-val {
+    font-family: var(--font-display); font-weight: 700; font-size: 30px;
+    line-height: 1; color: var(--ink); letter-spacing: -0.025em;
+  }
+  .impact-estimate-val.pos { color: var(--accent); }
+  .impact-estimate-val.neg { color: var(--danger); }
+  .impact-estimate-lbl {
+    font-size: 12px; color: var(--ink-3); font-weight: 500;
+  }
 
   .evidence-section { margin-bottom: 28px; }
   .evidence-title {
@@ -665,6 +690,31 @@
   .evidence-meta { font-size: 11.5px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; }
 
   .chart-box { margin-top: 10px; padding: 18px; background: var(--surface-2); border-radius: 10px; }
+
+  /* Convergence / data-viz charts injected via dangerouslySetInnerHTML.
+     Selectors live in evidence-card -> chart-box. */
+  .ch-chart + .ch-chart { margin-top: 18px; }
+  .ch-chart-title {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--muted); font-weight: 600; margin-bottom: 10px;
+  }
+  .ch-bars { display: flex; flex-direction: column; gap: 8px; }
+  .ch-bar-row { display: grid; grid-template-columns: 200px 1fr 44px; gap: 12px; align-items: center; font-size: 12.5px; }
+  .ch-bar-label { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ch-bar-track { height: 8px; background: var(--surface-3); border-radius: 999px; overflow: hidden; }
+  .ch-bar-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+  .ch-bar-val { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; text-align: right; }
+  .ch-line { width: 100%; height: 110px; color: var(--accent); display: block; }
+  .ch-line circle { fill: var(--accent); }
+  .ch-axis { font-size: 9px; fill: var(--muted); font-family: var(--font-mono); }
+  .ch-stats { display: flex; gap: 28px; flex-wrap: wrap; }
+  .ch-stat { display: flex; flex-direction: column; gap: 4px; }
+  .ch-stat-val { font-family: var(--font-display); font-weight: 600; font-size: 22px; color: var(--ink); letter-spacing: -0.02em; }
+  .ch-stat-lbl { font-size: 11px; color: var(--muted); }
+
+  .detail-cta-actions-end {
+    display: flex; gap: 8px; justify-content: flex-end; margin-top: 24px;
+  }
 
   /* End-of-page recommendation — in document flow (no sticky) so it scrolls away with the rest. */
   .detail-cta-card {

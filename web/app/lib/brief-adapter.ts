@@ -7,7 +7,7 @@ import type {
   BriefTagType,
   DetailState,
 } from "../types/content"
-import type { Brief, Insight } from "./api"
+import type { Brief, ChartHint, ConvergenceItem, Insight } from "./api"
 
 const TAG_MAP: Record<
   string,
@@ -59,31 +59,104 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;")
 }
 
-function bulletList(items: string[] | undefined): string | null {
-  if (!items || items.length === 0) return null
-  return (
-    "<ul>" +
-    items.map((s) => `<li>${escapeHtml(s)}</li>`).join("") +
-    "</ul>"
-  )
+function strengthToValue(s: string): number {
+  const n = parseFloat(s)
+  if (!Number.isNaN(n)) return n
+  const t = s.toLowerCase()
+  if (t.includes("very high") || t.includes("strong")) return 4
+  if (t.includes("high")) return 3
+  if (t.includes("med")) return 2
+  if (t.includes("low") || t.includes("weak")) return 1
+  return 1
 }
 
-function convergenceTable(rows: Insight["convergence"] | undefined): string | null {
-  if (!rows || rows.length === 0) return null
-  const head =
-    "<thead><tr><th>Source</th><th>Signal</th><th>Strength</th></tr></thead>"
-  const body =
-    "<tbody>" +
-    rows
+function chartHtml(chart: ChartHint): string {
+  const data = chart.data || []
+  if (data.length === 0) return ""
+  const max = Math.max(...data.map((d) => d.value), 1)
+  const title = `<div class="ch-chart-title">${escapeHtml(chart.title)}</div>`
+
+  if (chart.kind === "stat") {
+    const items = data
       .map(
-        (r) =>
-          `<tr><td>${escapeHtml(r.source)}</td><td>${escapeHtml(
-            r.signal,
-          )}</td><td>${escapeHtml(r.strength)}</td></tr>`,
+        (d) => `
+        <div class="ch-stat">
+          <div class="ch-stat-val">${escapeHtml(String(d.value))}</div>
+          <div class="ch-stat-lbl">${escapeHtml(d.label)}</div>
+        </div>`,
       )
-      .join("") +
-    "</tbody>"
-  return `<table class="convergence">${head}${body}</table>`
+      .join("")
+    return `<div class="ch-chart">${title}<div class="ch-stats">${items}</div></div>`
+  }
+
+  if (chart.kind === "line") {
+    const w = 480
+    const h = 110
+    const pad = 8
+    const n = data.length
+    const points = data
+      .map((d, i) => {
+        const x = pad + (i * (w - pad * 2)) / Math.max(n - 1, 1)
+        const y = h - pad - (d.value / max) * (h - pad * 2)
+        return `${x.toFixed(1)},${y.toFixed(1)}`
+      })
+      .join(" ")
+    const dots = data
+      .map((d, i) => {
+        const x = pad + (i * (w - pad * 2)) / Math.max(n - 1, 1)
+        const y = h - pad - (d.value / max) * (h - pad * 2)
+        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" />`
+      })
+      .join("")
+    const labels = data
+      .map((d, i) => {
+        const x = pad + (i * (w - pad * 2)) / Math.max(n - 1, 1)
+        return `<text x="${x.toFixed(1)}" y="${h - 1}" text-anchor="middle" class="ch-axis">${escapeHtml(d.label)}</text>`
+      })
+      .join("")
+    return `<div class="ch-chart">${title}<svg viewBox="0 0 ${w} ${h}" class="ch-line" preserveAspectRatio="none"><polyline points="${points}" fill="none" stroke="currentColor" stroke-width="2" />${dots}${labels}</svg></div>`
+  }
+
+  // bar (default)
+  const rows = data
+    .map((d) => {
+      const pct = (d.value / max) * 100
+      return `
+        <div class="ch-bar-row">
+          <div class="ch-bar-label">${escapeHtml(d.label)}</div>
+          <div class="ch-bar-track"><div class="ch-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+          <div class="ch-bar-val">${escapeHtml(String(d.value))}</div>
+        </div>`
+    })
+    .join("")
+  return `<div class="ch-chart">${title}<div class="ch-bars">${rows}</div></div>`
+}
+
+function convergenceVisualHtml(
+  conv: ConvergenceItem[],
+  hints: ChartHint[],
+): string | null {
+  const charts: string[] = []
+  if (hints.length > 0) {
+    for (const h of hints) {
+      const html = chartHtml(h)
+      if (html) charts.push(html)
+    }
+  }
+  if (conv.length > 0) {
+    charts.push(
+      chartHtml({
+        kind: "bar",
+        title: "Signal strength by source",
+        data: conv.map((c) => ({
+          label: `${c.source} — ${c.signal}`,
+          value: strengthToValue(c.strength),
+        })),
+      }),
+    )
+  }
+  if (charts.length === 0) return null
+  return charts.join("")
 }
 
 function findingFromInsight(insight: Insight, rank: number): BriefFindingRow {
@@ -129,17 +202,23 @@ function sectionFromInsights(
 /** Coerce optional / legacy API fields so evidence sections still render. */
 function insightArrays(insight: Insight) {
   return {
-    why_this_ranks: Array.isArray(insight.why_this_ranks) ? insight.why_this_ranks : [],
-    why_alternatives_dont_hold: Array.isArray(insight.why_alternatives_dont_hold)
-      ? insight.why_alternatives_dont_hold
-      : [],
-    impact_math: Array.isArray(insight.impact_math) ? insight.impact_math : [],
-    verification_metrics: Array.isArray(insight.verification_metrics)
-      ? insight.verification_metrics
-      : [],
     convergence: Array.isArray(insight.convergence) ? insight.convergence : [],
     user_quotes: Array.isArray(insight.user_quotes) ? insight.user_quotes : [],
+    chart_hints: Array.isArray(insight.chart_hints) ? insight.chart_hints : [],
   }
+}
+
+function buildSummary(insight: Insight): string {
+  const parts: string[] = []
+  if (insight.subtitle) parts.push(insight.subtitle.trim())
+  if (insight.headline && insight.headline.trim() !== insight.title.trim()) {
+    parts.push(insight.headline.trim())
+  }
+  if (insight.domain || insight.subdomain) {
+    const scope = [insight.domain, insight.subdomain].filter(Boolean).join(" · ")
+    if (scope) parts.push(`Scope: ${scope}.`)
+  }
+  return parts.join(" ")
 }
 
 function detailFromInsight(
@@ -161,36 +240,21 @@ function detailFromInsight(
     })
   }
 
-  const metrics = (insight.metrics || []).map((m) => ({
-    label: m.label,
-    value: m.value,
-    valueClass: tagMeta.tagType === "fix"
+  const valueClass =
+    tagMeta.tagType === "fix"
       ? ("neg" as const)
       : tagMeta.tagType === "double"
       ? ("pos" as const)
-      : undefined,
+      : undefined
+  const metrics = (insight.metrics || []).slice(0, 3).map((m) => ({
+    label: m.label,
+    value: m.value,
+    valueClass,
   }))
 
   const evidenceSections: DetailState["evidenceSections"] = []
 
-  if (insight.headline) {
-    evidenceSections.push({
-      sectionTitle: "The headline",
-      html: `<p>${escapeHtml(insight.headline)}</p>`,
-    })
-  }
-
-  const ranksHtml = bulletList(arrays.why_this_ranks)
-  if (ranksHtml) evidenceSections.push({ sectionTitle: "Why this ranks", html: ranksHtml })
-
-  const altsHtml = bulletList(arrays.why_alternatives_dont_hold)
-  if (altsHtml)
-    evidenceSections.push({
-      sectionTitle: "Why competing explanations don't hold",
-      html: altsHtml,
-    })
-
-  const convHtml = convergenceTable(arrays.convergence)
+  const convHtml = convergenceVisualHtml(arrays.convergence, arrays.chart_hints)
   if (convHtml)
     evidenceSections.push({ sectionTitle: "Convergence across sources", html: convHtml })
 
@@ -205,41 +269,19 @@ function detailFromInsight(
     })
   }
 
-  const mathHtml = bulletList(arrays.impact_math)
-  if (mathHtml) evidenceSections.push({ sectionTitle: "Impact math", html: mathHtml })
-
-  const verifyHtml = bulletList(arrays.verification_metrics)
-  if (verifyHtml)
-    evidenceSections.push({ sectionTitle: "Verification metrics", html: verifyHtml })
-
-  if (evidenceSections.length === 0) {
-    const parts: string[] = []
-    if (insight.subtitle) parts.push(`<p>${escapeHtml(insight.subtitle)}</p>`)
-    if (insight.recommendation)
-      parts.push(`<p><strong>Recommendation</strong> — ${escapeHtml(insight.recommendation)}</p>`)
-    if (parts.length === 0 && insight.title) {
-      parts.push(`<p>${escapeHtml(insight.title)}</p>`)
-    }
-    if (parts.length > 0) {
-      evidenceSections.push({ sectionTitle: "Finding overview", html: parts.join("") })
-    }
-  }
-
   return {
     backLabel: "← Back to brief",
     tags,
     title: insight.headline || insight.title,
-    summary: insight.subtitle,
+    summary: buildSummary(insight),
     metrics,
     evidenceSections,
-    cta: insight.recommendation
-      ? {
-          headline: "Recommendation",
-          sub: insight.recommendation,
-          dismissLabel: "Snooze",
-          primaryLabel: "Generate PRD",
-        }
-      : null,
+    cta: {
+      headline: "",
+      sub: "",
+      dismissLabel: "Snooze",
+      primaryLabel: "Generate PRD",
+    },
     meta: source,
   }
 }
