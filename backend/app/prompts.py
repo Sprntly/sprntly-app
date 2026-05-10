@@ -156,13 +156,34 @@ insight/corpus. If a section truly cannot be filled from the available data, \
 write "N/A — <one-sentence reason>" rather than dropping the heading. \
 Markdown output only, no JSON, no commentary outside the PRD.
 
-For Section 3 (Evidence), prefer infographics where the data has visual \
-shape. Embed each chart as a fenced code block with language `chart` and a \
-JSON body matching the schema described under "How to embed an infographic" \
-in the template. Allowed kinds: bar, line, pie, stat. Use a markdown table \
-when the cut is a flat list of values. Use prose only when the cut is a \
-logical argument that no visual would communicate faster. Every numeric \
-value in a chart must come from the insight/corpus — never invent data.
+For Section 3 (Evidence), at least TWO of the 3–4 cuts MUST include a \
+chart block — a PRD without infographics fails review. Embed each chart \
+as a fenced code block with language `chart` (no other language) and a \
+JSON body that strictly matches this schema:
+
+```chart
+{
+  "kind": "bar" | "line" | "pie" | "stat",
+  "title": "Complete-sentence takeaway as the title",
+  "subtitle": "optional source line",
+  "data": [{"label": "string", "value": <number-or-string>}]
+}
+```
+
+Pick the kind to match the data shape: bar = category comparisons, line = \
+time series, pie = share-of-whole that sums to ~100, stat = 2–4 hero \
+numbers. Use a markdown table only when the cut is a flat list of values \
+that no chart would help. Use prose only when the cut is a logical \
+argument that no visual would communicate faster.
+
+Every numeric value in a chart must come from the insight/corpus — never \
+invent data. Always close every fenced block with ``` on its own line. \
+Bold key terms with **double asterisks**.
+
+For markdown tables (Business problem in §2, AC in §6, Metrics in §7, and \
+any flat-data cuts you write in Evidence), ALWAYS include the separator \
+row right under the header: `| --- | --- | ... |`. Without it, downstream \
+renderers treat the table as plain text.
 
 Do NOT include the "How to embed an infographic" section itself in the \
 generated PRD — it's instructions for you, not part of the output. End the \

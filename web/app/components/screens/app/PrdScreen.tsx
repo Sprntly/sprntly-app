@@ -4,6 +4,7 @@ import type { CSSProperties, ReactNode } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import type { PrdChartDatum, PrdChartKind, PrdState } from "../../../types/content"
+import { renderInline } from "../../../lib/inline-md"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 import {
@@ -149,20 +150,20 @@ function PrdSections({
         if (block.type === "h2") {
           return (
             <h2 key={i} className="prd-h2">
-              {block.text}
+              {renderInline(block.text)}
             </h2>
           )
         }
         if (block.type === "p") {
           return (
-            <p key={i}>{block.text}</p>
+            <p key={i}>{renderInline(block.text)}</p>
           )
         }
         if (block.type === "ul" && block.items) {
           return (
             <ul key={i}>
               {block.items.map((li, j) => (
-                <li key={j}>{li}</li>
+                <li key={j}>{renderInline(li)}</li>
               ))}
             </ul>
           )
@@ -173,7 +174,7 @@ function PrdSections({
               <thead>
                 <tr>
                   {block.headers.map((h, j) => (
-                    <th key={j}>{h}</th>
+                    <th key={j}>{renderInline(h)}</th>
                   ))}
                 </tr>
               </thead>
@@ -181,7 +182,7 @@ function PrdSections({
                 {block.rows.map((row, j) => (
                   <tr key={j}>
                     {row.map((cell, k) => (
-                      <td key={k}>{cell}</td>
+                      <td key={k}>{renderInline(cell)}</td>
                     ))}
                   </tr>
                 ))}

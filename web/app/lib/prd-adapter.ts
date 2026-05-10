@@ -10,7 +10,6 @@ import type {
 } from "../types/content"
 
 const HEADING_RULE = /^─+$/
-const TABLE_SEP = /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/
 const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "stat"]
 
 function splitRow(line: string): string[] {
@@ -25,40 +24,67 @@ function isTableRow(line: string): boolean {
   return t.startsWith("|") && t.indexOf("|", 1) > 0
 }
 
-function isAllSeparatorRow(cells: string[]): boolean {
-  return cells.every((c) => /^:?-+:?$/.test(c.replace(/\s/g, "")))
+function isSeparatorRow(cells: string[]): boolean {
+  return (
+    cells.length > 0 &&
+    cells.every((c) => /^:?-+:?$/.test(c.replace(/\s/g, "")))
+  )
 }
 
-function parseChartBlock(body: string): PrdSection | null {
-  try {
-    const raw = JSON.parse(body)
-    if (!raw || typeof raw !== "object") return null
-    const kind = String(raw.kind || "").toLowerCase()
-    if (!CHART_KINDS.includes(kind as PrdChartKind)) return null
-    const dataRaw = Array.isArray(raw.data) ? raw.data : []
-    const data: PrdChartDatum[] = dataRaw
-      .map((d: unknown) => {
-        if (!d || typeof d !== "object") return null
-        const obj = d as Record<string, unknown>
-        const label = obj.label == null ? "" : String(obj.label)
-        const valueRaw = obj.value
-        if (valueRaw == null) return null
-        const value: number | string =
-          typeof valueRaw === "number" ? valueRaw : String(valueRaw)
-        return { label, value }
-      })
-      .filter((d: PrdChartDatum | null): d is PrdChartDatum => d !== null)
-    if (data.length === 0) return null
-    return {
-      type: "chart",
-      kind: kind as PrdChartKind,
-      title: typeof raw.title === "string" ? raw.title : undefined,
-      subtitle: typeof raw.subtitle === "string" ? raw.subtitle : undefined,
-      data,
-    }
-  } catch {
-    return null
+function looksLikeChartSpec(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false
+  const obj = value as Record<string, unknown>
+  const kind = String(obj.kind || "").toLowerCase()
+  return CHART_KINDS.includes(kind as PrdChartKind) && Array.isArray(obj.data)
+}
+
+function buildChartSection(value: unknown): PrdSection | null {
+  if (!looksLikeChartSpec(value)) return null
+  const obj = value as Record<string, unknown>
+  const kind = String(obj.kind).toLowerCase() as PrdChartKind
+  const dataRaw = (obj.data as unknown[]) || []
+  const data: PrdChartDatum[] = dataRaw
+    .map((d) => {
+      if (!d || typeof d !== "object") return null
+      const item = d as Record<string, unknown>
+      const label = item.label == null ? "" : String(item.label)
+      const valueRaw = item.value
+      if (valueRaw == null) return null
+      const value: number | string =
+        typeof valueRaw === "number" ? valueRaw : String(valueRaw)
+      return { label, value }
+    })
+    .filter((d: PrdChartDatum | null): d is PrdChartDatum => d !== null)
+  if (data.length === 0) return null
+  return {
+    type: "chart",
+    kind,
+    title: typeof obj.title === "string" ? obj.title : undefined,
+    subtitle: typeof obj.subtitle === "string" ? obj.subtitle : undefined,
+    data,
   }
+}
+
+function parseChartBody(body: string): PrdSection | null {
+  const trimmed = body.trim()
+  // Try plain JSON first.
+  try {
+    return buildChartSection(JSON.parse(trimmed))
+  } catch {
+    // Fall through to the salvage path.
+  }
+  // Salvage: extract the first {...} JSON object from the body.
+  const start = trimmed.indexOf("{")
+  const end = trimmed.lastIndexOf("}")
+  if (start >= 0 && end > start) {
+    const inner = trimmed.slice(start, end + 1)
+    try {
+      return buildChartSection(JSON.parse(inner))
+    } catch {
+      // give up
+    }
+  }
+  return null
 }
 
 export function markdownToPrdState(markdown: string): PrdState {
@@ -85,22 +111,19 @@ export function markdownToPrdState(markdown: string): PrdState {
       continue
     }
 
-    // Fenced code block — chart blocks become structured chart sections,
-    // anything else is dropped (LLM occasionally emits stray fences).
+    // Fenced code block. If the body parses as a chart spec, render a chart.
+    // Otherwise drop it (keeps the PRD body clean of stray code blocks).
     if (line.startsWith("```")) {
       flushBullets()
-      const lang = line.slice(3).trim().toLowerCase()
       const bodyLines: string[] = []
       let j = i + 1
       while (j < lines.length && !lines[j].trim().startsWith("```")) {
         bodyLines.push(lines[j])
         j++
       }
-      if (lang === "chart") {
-        const block = parseChartBlock(bodyLines.join("\n"))
-        if (block) sections.push(block)
-      }
-      i = j // skip closing fence (j stops at it)
+      const chart = parseChartBody(bodyLines.join("\n"))
+      if (chart) sections.push(chart)
+      i = j // skip closing fence
       continue
     }
 
@@ -132,24 +155,26 @@ export function markdownToPrdState(markdown: string): PrdState {
       continue
     }
 
-    // Markdown table: header row, then a --- separator, then body rows.
-    if (
-      isTableRow(line) &&
-      i + 1 < lines.length &&
-      TABLE_SEP.test(lines[i + 1].trim())
-    ) {
+    // Markdown table. Forgiving: any block of 2+ consecutive `| ... |` rows
+    // becomes a table. The first row is header; any all-dashes row is treated
+    // as a separator and dropped.
+    if (isTableRow(line)) {
       flushBullets()
-      const headers = splitRow(line)
-      const rows: string[][] = []
-      let j = i + 2
+      const tableRows: string[][] = [splitRow(line)]
+      let j = i + 1
       while (j < lines.length && isTableRow(lines[j])) {
-        const cells = splitRow(lines[j])
-        if (!isAllSeparatorRow(cells)) rows.push(cells)
+        tableRows.push(splitRow(lines[j]))
         j++
       }
-      sections.push({ type: "table", headers, rows })
-      i = j - 1
-      continue
+      // Drop separator rows like ['---','---'].
+      const cleaned = tableRows.filter((r) => !isSeparatorRow(r))
+      if (cleaned.length >= 2) {
+        const [headers, ...rows] = cleaned
+        sections.push({ type: "table", headers, rows })
+        i = j - 1
+        continue
+      }
+      // Single row that isn't really a table — fall through to paragraph.
     }
 
     flushBullets()

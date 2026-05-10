@@ -798,7 +798,19 @@
   .prd-tool:hover { background: var(--surface-3); color: var(--ink); }
   .prd-tool-divider { width: 1px; height: 14px; background: var(--line-strong); margin: 0 4px; }
   .prd-status { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
-  .prd-body { padding: 40px 56px 48px; }
+  .prd-body { padding: 40px 56px 48px; outline: none; }
+  .prd-body strong { color: var(--ink); font-weight: 700; }
+  .prd-body em { font-style: italic; color: var(--ink-2); }
+  .prd-body code {
+    font-family: var(--font-mono); font-size: 12.5px;
+    background: var(--surface-3); color: var(--ink);
+    padding: 1px 6px; border-radius: 4px;
+  }
+  .prd-body a {
+    color: var(--accent-ink); text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .prd-body a:hover { color: var(--accent); }
   .prd-meta { font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.1em; }
   .prd-title { font-family: var(--font-display); font-weight: 600; font-size: 32px; line-height: 1.15; letter-spacing: -0.025em; margin: 0 0 20px; }
   .prd-h2 { font-family: var(--font-display); font-weight: 600; font-size: 19px; margin: 26px 0 8px; letter-spacing: -0.02em; }
