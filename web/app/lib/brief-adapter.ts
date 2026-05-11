@@ -282,7 +282,7 @@ function findingFromInsight(insight: Insight, rank: number): BriefFindingRow {
     title: insight.title,
     desc: findingBodyDesc(insight),
     impacts,
-    askQuestion: `Tell me more about: ${insight.title.slice(0, 80)}`,
+    askQuestion: `Tell me more about: ${insight.title}`,
     detailKey: detailKeyFor(meta.tagType, rank),
     actionAccent: meta.actionAccent,
     actionLabel: meta.actionLabel,
