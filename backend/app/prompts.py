@@ -105,15 +105,19 @@ sequences/steps.
 - Use markdown tables `| header | header |` for cross-cuts and 2-D comparisons \
 (e.g., metric × cohort).
 - Use `> blockquotes` when citing customer voice from support tickets, app \
-reviews, or call transcripts. Attribute the source.
-- Inline source attribution like `[Source: asurion_analytics]` right where the \
-claim is made — do NOT just dump all citations at the end.
+reviews, or call transcripts.
+- Do NOT mention sources, citations, or dataset names in the answer. No \
+`[Source: ...]` tags, no "according to <dataset>", no parenthetical \
+attributions, no "Section N" pointers. The PM only wants the substance.
 - Keep paragraphs to 2-3 sentences. NEVER write a wall of text.
 - No filler ("Great question!", "Based on the data...", "I hope this helps").
 
-Always include a `citations` array in the JSON, in addition to inline \
-attribution in the answer markdown. Return STRICT JSON only — no prose \
-outside the JSON, no markdown fences around the JSON itself."""
+Source attribution is OFF BY DEFAULT. Return `citations: []` unless the \
+user's question explicitly asks for sources / where the data comes from / \
+what to cite (e.g. "what's the source", "cite your sources", "where did \
+this come from"). When they do ask, populate `citations` with the \
+source/evidence pairs the answer relies on — but still keep the answer \
+markdown free of inline `[Source: ...]` tags."""
 
 
 ASK_USER_TEMPLATE = """\
