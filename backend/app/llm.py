@@ -26,14 +26,45 @@ def call_json(
     user: str,
     model: str = DEFAULT_MODEL,
     max_tokens: int = 16000,
+    schema: dict | None = None,
 ) -> dict:
-    """Call Claude expecting a strict JSON object response."""
-    msg = get_client().messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
+    """Call Claude expecting a strict JSON object response.
+
+    If `schema` is provided, uses Anthropic tool-use with a forced tool_choice
+    — the SDK validates the structured input and returns a real dict, which
+    eliminates the JSON-string-escaping failures that happen when an LLM
+    hand-writes JSON containing markdown tables, quoted text, etc.
+
+    If `schema` is None, falls back to parsing the model's text response as
+    JSON (used by endpoints whose payload is simple enough to round-trip
+    safely).
+    """
+    client = get_client()
+    base_kwargs: dict = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }
+    if schema is not None:
+        tool = {
+            "name": "submit_response",
+            "description": "Submit the structured response. All fields required.",
+            "input_schema": schema,
+        }
+        msg = client.messages.create(
+            **base_kwargs,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "submit_response"},
+        )
+        for block in msg.content:
+            if block.type == "tool_use" and block.name == "submit_response":
+                return dict(block.input) if not isinstance(block.input, dict) else block.input
+        raise HTTPException(
+            502, "LLM did not invoke the structured response tool"
+        )
+
+    msg = client.messages.create(**base_kwargs)
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
     # Tolerate accidental fences
     if text.startswith("```"):

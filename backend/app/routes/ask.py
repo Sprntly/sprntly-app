@@ -10,6 +10,44 @@ from app.prompts import ASK_SYSTEM, ASK_USER_TEMPLATE
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
 
 
+# Tool-use schema for the Ask endpoint. Defined here (not in prompts.py)
+# because it's how we extract the response, not part of the prompt text.
+# Letting the Anthropic SDK validate structured input avoids the
+# JSON-string-escaping failures that happen when the LLM hand-writes JSON
+# with markdown tables, quoted text, and pipes inside the answer field.
+ASK_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "answer": {
+            "type": "string",
+            "description": "Markdown-formatted answer. Follow the formatting rules in the system prompt.",
+        },
+        "key_points": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Short bullet summary of the answer.",
+        },
+        "citations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["source", "evidence"],
+            },
+        },
+        "confidence": {"type": "number", "description": "0..1"},
+        "unanswered": {
+            "type": "string",
+            "description": "Empty string if fully answered, else what data is missing.",
+        },
+    },
+    "required": ["answer", "key_points", "citations", "confidence", "unanswered"],
+}
+
+
 class AskIn(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)
     dataset: str = "asurion"
@@ -23,7 +61,7 @@ def ask(
     require_session(sprintly_session)
     corpus = load_corpus(body.dataset)
     user = ASK_USER_TEMPLATE.format(question=body.question, corpus=corpus.joined())
-    payload = call_json(system=ASK_SYSTEM, user=user)
+    payload = call_json(system=ASK_SYSTEM, user=user, schema=ASK_RESPONSE_SCHEMA)
     log_ask(
         question=body.question,
         answer=payload.get("answer", ""),
