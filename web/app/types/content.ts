@@ -4,6 +4,15 @@ import type { AskResponse } from "../lib/api"
 
 export type BriefTagType = "double" | "new" | "fix"
 
+/** Weekly brief template action accent (maps from API insight tags in the adapter). */
+export type BriefActionAccent = "build" | "fix" | "decide" | "optimize" | "investigate" | "monitor"
+
+export type BriefSecondaryCtaBehavior =
+  | "generate_prd"
+  | "strategy"
+  | "open_analysis"
+  | "set_alert"
+
 export interface BriefFindingRow {
   rank: number
   tagType: BriefTagType
@@ -21,6 +30,27 @@ export interface BriefFindingRow {
   askQuestion: string
   /** Stable key for looking up the matching DetailState in `briefDetails`. */
   detailKey?: string
+  /** Template: BUILD / FIX / OPTIMIZE — left rail color + secondary CTA. */
+  actionAccent: BriefActionAccent
+  actionLabel: string
+  /** Template: headline metric (e.g. +$12M LTV / yr), accent-colored. */
+  metricHighlight: string
+  /** Template: italic footer line of signal sources. */
+  signalLine: string
+  secondaryCtaLabel: string
+  secondaryCtaBehavior: BriefSecondaryCtaBehavior
+}
+
+export interface BriefDocHeader {
+  company: string
+  weekOf: string
+  productArea: string
+}
+
+export interface BriefDocFooter {
+  totalAtRiskOrUpside: string
+  recoverableRange: string
+  sourcesThisWeek: string
 }
 
 export interface BriefSectionRow {
@@ -40,6 +70,14 @@ export interface BriefImpactStat {
 export interface BriefState {
   weekRange: string | null
   subline: string | null
+  /** Grey line under the main doc title (API summary or template tagline). */
+  docSubline: string | null
+  /** Optional one-line week summary from the API (`summary_headline`). */
+  docKicker: string | null
+  /** Template “Brief header” row — derived from dataset + insights until the API adds fields. */
+  docHeader: BriefDocHeader | null
+  /** Template footer strip (three columns) — derived from metrics + convergence. */
+  docFooter: BriefDocFooter | null
   impactEyebrow: string | null
   impactHeadlineLead: string | null
   impactHeadlineEmphasis1: string | null

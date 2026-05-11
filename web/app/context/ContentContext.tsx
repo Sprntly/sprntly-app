@@ -24,6 +24,10 @@ const EMPTY: AppContentState = {
   brief: {
     weekRange: null,
     subline: null,
+    docSubline: null,
+    docKicker: null,
+    docHeader: null,
+    docFooter: null,
     impactEyebrow: null,
     impactHeadlineLead: null,
     impactHeadlineEmphasis1: null,

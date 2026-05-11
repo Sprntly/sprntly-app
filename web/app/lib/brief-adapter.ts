@@ -1,7 +1,11 @@
 import type {
   AppContentState,
+  BriefActionAccent,
+  BriefDocFooter,
+  BriefDocHeader,
   BriefFindingRow,
   BriefImpactStat,
+  BriefSecondaryCtaBehavior,
   BriefSectionRow,
   BriefState,
   BriefTagType,
@@ -9,17 +13,23 @@ import type {
 } from "../types/content"
 import type { Brief, ChartHint, ConvergenceItem, Insight } from "./api"
 
-const TAG_MAP: Record<
-  string,
-  {
-    tagType: BriefTagType
-    tagLabel: string
-    titlePrefix: string
-    titleEmphasis: string
-    subtotalClass: "pos" | "neg" | "warn"
-    detailTagClass: string
-  }
-> = {
+const DOC_SUBLINE =
+  "Generic template · Works for any product, company, or finding type"
+
+type TagMeta = {
+  tagType: BriefTagType
+  tagLabel: string
+  titlePrefix: string
+  titleEmphasis: string
+  subtotalClass: "pos" | "neg" | "warn"
+  detailTagClass: string
+  actionAccent: BriefActionAccent
+  actionLabel: string
+  secondaryCtaLabel: string
+  secondaryCtaBehavior: BriefSecondaryCtaBehavior
+}
+
+const TAG_MAP: Record<string, TagMeta> = {
   something_better: {
     tagType: "double",
     tagLabel: "DOUBLE DOWN",
@@ -27,6 +37,10 @@ const TAG_MAP: Record<
     titleEmphasis: "down",
     subtotalClass: "pos",
     detailTagClass: "tag-double",
+    actionAccent: "optimize",
+    actionLabel: "OPTIMIZE",
+    secondaryCtaLabel: "Generate PRD →",
+    secondaryCtaBehavior: "generate_prd",
   },
   something_new: {
     tagType: "new",
@@ -35,6 +49,10 @@ const TAG_MAP: Record<
     titleEmphasis: "new",
     subtotalClass: "warn",
     detailTagClass: "tag-new",
+    actionAccent: "build",
+    actionLabel: "BUILD",
+    secondaryCtaLabel: "Generate PRD →",
+    secondaryCtaBehavior: "generate_prd",
   },
   something_broken: {
     tagType: "fix",
@@ -43,6 +61,10 @@ const TAG_MAP: Record<
     titleEmphasis: "broken",
     subtotalClass: "neg",
     detailTagClass: "tag-fix",
+    actionAccent: "fix",
+    actionLabel: "FIX",
+    secondaryCtaLabel: "Generate PRD →",
+    secondaryCtaBehavior: "generate_prd",
   },
 }
 
@@ -159,6 +181,88 @@ function convergenceVisualHtml(
   return charts.join("")
 }
 
+/** Coerce optional / legacy API fields so evidence sections still render. */
+function insightArrays(insight: Insight) {
+  return {
+    convergence: Array.isArray(insight.convergence) ? insight.convergence : [],
+    user_quotes: Array.isArray(insight.user_quotes) ? insight.user_quotes : [],
+    chart_hints: Array.isArray(insight.chart_hints) ? insight.chart_hints : [],
+  }
+}
+
+function prettyDataset(dataset: string): string {
+  const d = (dataset || "company").trim()
+  return d.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function signalLineFromInsight(insight: Insight): string {
+  const conv = insightArrays(insight).convergence
+  if (conv.length > 0) {
+    return conv
+      .map((c) => c.source)
+      .filter(Boolean)
+      .slice(0, 6)
+      .join(" · ")
+  }
+  const m = insight.metrics || []
+  if (m.length > 0) return m.map((x) => x.label).slice(0, 4).join(" · ")
+  return "Grounded in weekly product corpus"
+}
+
+function findingBodyDesc(insight: Insight): string {
+  const parts = [insight.subtitle?.trim(), insight.recommendation?.trim()].filter(Boolean)
+  let t = parts.join(" ")
+  if (!t.trim()) t = insight.headline?.trim() || insight.title
+  if (t.length > 560) return `${t.slice(0, 557)}…`
+  return t
+}
+
+function metricHighlightFor(insight: Insight, accent: BriefActionAccent): string {
+  const m0 = insight.metrics?.[0]
+  if (!m0) return accent === "fix" ? "Impact · scale · effort" : "Opportunity signal"
+  const v = String(m0.value).trim()
+  const lab = String(m0.label).trim()
+  if (accent === "fix") return `${v} ${lab}`.trim()
+  if (v.startsWith("+") || v.startsWith("$") || v.startsWith("-")) return `${v} ${lab}`.trim()
+  if (accent === "build") return `+${v} ${lab}`.replace(/^\+\+/, "+")
+  return `${v} · ${lab}`
+}
+
+function buildDocHeader(brief: Brief, insights: Insight[]): BriefDocHeader {
+  const first = insights[0]
+  const productArea =
+    first.domain && first.subdomain
+      ? `${first.domain} · ${first.subdomain}`
+      : first.domain || "Product"
+  return {
+    company: prettyDataset(brief.dataset || ""),
+    weekOf: brief.week_label || brief.generated_at?.slice(0, 10) || "—",
+    productArea,
+  }
+}
+
+function buildDocFooter(insights: Insight[]): BriefDocFooter {
+  const values = insights
+    .map((i) => i.metrics?.[0])
+    .filter((m): m is NonNullable<typeof m> => Boolean(m))
+  const total =
+    values.length > 0 ? values.map((m) => `${m.value}`.trim()).join(" · ") : "—"
+  const recover =
+    insights.length > 1
+      ? `${insights.length} ranked findings · triage near-term vs. backlog`
+      : "Single ranked focus this week"
+  const src = [
+    ...new Set(insights.flatMap((i) => (i.convergence || []).map((c) => c.source))),
+  ].filter(Boolean)
+  const sources =
+    src.length > 0 ? src.slice(0, 12).join(" · ") : "Corpus + model synthesis"
+  return {
+    totalAtRiskOrUpside: total,
+    recoverableRange: recover,
+    sourcesThisWeek: sources,
+  }
+}
+
 function findingFromInsight(insight: Insight, rank: number): BriefFindingRow {
   const meta = TAG_MAP[insight.tag] || TAG_MAP.something_broken
   const impacts = (insight.metrics || []).map((m) => ({
@@ -176,10 +280,16 @@ function findingFromInsight(insight: Insight, rank: number): BriefFindingRow {
     impactLabel: headline.trim() || (insight.domain ?? ""),
     confidence: insight.confidence ?? 0,
     title: insight.title,
-    desc: insight.subtitle,
+    desc: findingBodyDesc(insight),
     impacts,
     askQuestion: `Tell me more about: ${insight.title.slice(0, 80)}`,
     detailKey: detailKeyFor(meta.tagType, rank),
+    actionAccent: meta.actionAccent,
+    actionLabel: meta.actionLabel,
+    metricHighlight: metricHighlightFor(insight, meta.actionAccent),
+    signalLine: signalLineFromInsight(insight),
+    secondaryCtaLabel: meta.secondaryCtaLabel,
+    secondaryCtaBehavior: meta.secondaryCtaBehavior,
   }
 }
 
@@ -196,15 +306,6 @@ function sectionFromInsights(
     subtotal,
     subtotalClass: meta.subtotalClass,
     findings,
-  }
-}
-
-/** Coerce optional / legacy API fields so evidence sections still render. */
-function insightArrays(insight: Insight) {
-  return {
-    convergence: Array.isArray(insight.convergence) ? insight.convergence : [],
-    user_quotes: Array.isArray(insight.user_quotes) ? insight.user_quotes : [],
-    chart_hints: Array.isArray(insight.chart_hints) ? insight.chart_hints : [],
   }
 }
 
@@ -316,10 +417,16 @@ export function briefToBriefState(brief: Brief): BriefState {
     if (grouped[tag]?.length) sections.push(sectionFromInsights(tag, grouped[tag]))
   }
 
+  const hasFindings = sections.some((s) => s.findings.length > 0)
+
   return {
     weekRange: brief.week_label || null,
     subline: brief.summary_headline || null,
-    impactEyebrow: "This week",
+    docSubline: hasFindings ? DOC_SUBLINE : null,
+    docKicker: brief.summary_headline?.trim() || null,
+    docHeader: hasFindings && insights.length > 0 ? buildDocHeader(brief, insights) : null,
+    docFooter: hasFindings && insights.length > 0 ? buildDocFooter(insights) : null,
+    impactEyebrow: null,
     impactHeadlineLead: null,
     impactHeadlineEmphasis1: null,
     impactHeadlineMid: null,
