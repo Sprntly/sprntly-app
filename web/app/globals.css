@@ -24,6 +24,9 @@
     --info-soft: #E3E9F7;
     --celeb: #B97D1F;
     --celeb-soft: #F7ECD4;
+    /** Outgoing chat bubble / send — lighter cream than page `--surface` */
+    --chat-user-bubble: #FFF9F2;
+    --chat-user-border: rgba(15, 111, 78, 0.28);
 
     --shadow-sm: 0 1px 2px rgba(15,20,17,0.04), 0 0 0 1px rgba(15,20,17,0.04);
     --shadow-md: 0 8px 24px rgba(15,20,17,0.06), 0 2px 6px rgba(15,20,17,0.04);
@@ -667,18 +670,23 @@
     width: 44px;
     height: 44px;
     border-radius: 12px;
-    border: none;
-    background: var(--ink);
-    color: var(--surface);
+    border: 1px solid var(--chat-user-border);
+    background: var(--chat-user-bubble);
+    color: var(--ink);
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 13px;
     font-weight: 600;
+    box-shadow: var(--shadow-sm);
   }
-  .chat-home-composer-send:hover:not(:disabled) { background: var(--ink-2); }
+  .chat-home-composer-send:hover:not(:disabled) {
+    background: #FFF5EA;
+    border-color: rgba(15, 111, 78, 0.4);
+    box-shadow: var(--shadow-md);
+  }
   .chat-home-composer-send:disabled { opacity: 0.35; cursor: not-allowed; }
   .chat-landing-cards {
     width: 100%;
@@ -1453,10 +1461,21 @@
   .ai-bar-rail-body {
     flex: 1;
     min-height: 0;
+    width: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 10px 0 14px;
+    margin: 0;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+    border-radius: 0;
+  }
+  .ai-bar-rail-body:hover .ai-bar-rail-text {
+    color: var(--ink-3);
   }
   .ai-bar-rail-expand {
     flex-shrink: 0;
@@ -1601,27 +1620,64 @@
   .ai-bar-chip:hover { background: var(--surface-3); border-color: var(--line); }
 
   .ai-bar-input-row {
-    display: flex; align-items: center; gap: 10px; padding: 10px 14px 12px;
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    padding: 10px 14px 12px;
     min-width: 0;
   }
-  .ai-bar-textarea {
+  .ai-bar-textarea-shell {
     flex: 1;
     min-width: 0;
-    border: none; outline: none; background: transparent;
-    font-size: 15px; color: var(--ink); resize: none; line-height: 1.5; padding: 6px 4px; min-height: 24px;
-    max-height: min(200px, 32vh);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    padding: 6px 10px;
+    box-shadow: inset 0 1px 2px rgba(15, 20, 17, 0.05);
+  }
+  .ai-bar-textarea {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 15px;
+    color: var(--ink);
+    resize: none;
+    line-height: 1.5;
+    padding: 2px 0;
+    min-height: 72px;
+    max-height: 120px;
     overflow-y: auto;
   }
   .ai-bar-textarea::placeholder { color: var(--muted); }
   .ai-bar-send {
-    width: 32px; height: 32px; border-radius: 8px; background: var(--ink); color: var(--surface);
-    border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: 1px solid var(--chat-user-border);
+    background: var(--chat-user-bubble);
+    color: var(--ink);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+    box-shadow: var(--shadow-sm);
   }
-  .ai-bar-send:hover { background: var(--ink-2); }
+  .ai-bar-send:hover:not(:disabled) {
+    background: #FFF5EA;
+    border-color: rgba(15, 111, 78, 0.4);
+    box-shadow: var(--shadow-md);
+  }
   .ai-bar-send:disabled {
     opacity: 0.42; cursor: not-allowed;
   }
-  .ai-bar-send:disabled:hover { background: var(--ink); }
+  .ai-bar-send:disabled:hover {
+    background: var(--chat-user-bubble);
+  }
 
   .ai-bar-reply {
     border-top: 1px solid var(--line);
@@ -1630,6 +1686,29 @@
     overflow-y: auto;
     font-size: 13px;
     background: var(--surface-2);
+  }
+  .ai-bar-reply-question {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow-sm);
+  }
+  .ai-bar-reply-question-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .ai-bar-reply-question-text {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--ink-2);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   html[data-ai-panel-layout="side"] .ai-bar-reply {
     flex: 1 1 auto;
@@ -1832,13 +1911,15 @@
     min-width: 0;
     padding: 10px 14px;
     border-radius: 14px 14px 4px 14px;
-    background: var(--ink);
-    color: var(--surface);
+    background: var(--chat-user-bubble);
+    color: var(--ink);
+    border: 1px solid var(--chat-user-border);
     font-size: 14px;
     line-height: 1.45;
     text-align: left;
     overflow-wrap: anywhere;
     word-break: break-word;
+    box-shadow: var(--shadow-sm);
   }
   .od-msg-assistant {
     align-self: stretch;
@@ -1999,17 +2080,22 @@
     width: 44px;
     height: 44px;
     border-radius: 12px;
-    border: none;
-    background: var(--ink);
-    color: var(--surface);
+    border: 1px solid var(--chat-user-border);
+    background: var(--chat-user-bubble);
+    color: var(--ink);
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
     display: flex;
     align-items: center;
     justify-content: center;
+    box-shadow: var(--shadow-sm);
   }
   .od-composer-send:disabled { opacity: 0.35; cursor: not-allowed; }
-  .od-composer-send:hover:not(:disabled) { background: var(--ink-2); }
+  .od-composer-send:hover:not(:disabled) {
+    background: #FFF5EA;
+    border-color: rgba(15, 111, 78, 0.4);
+    box-shadow: var(--shadow-md);
+  }
   .od-greeting-title {
     font-family: var(--font-display); font-weight: 600; font-size: 38px; letter-spacing: -0.03em;
     line-height: 1.08; margin: 0 0 12px;

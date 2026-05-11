@@ -37,6 +37,7 @@ export function ChatScreen() {
   const {
     goTo,
     setAIBarValue,
+    expandAiPanel,
     pendingSearchHandoff,
     setPendingSearchHandoff,
     pendingOndemandDraft,
@@ -208,6 +209,7 @@ export function ChatScreen() {
     if (c.target === "brief" && c.prompt) {
       setAIBarValue(c.prompt)
       goTo("brief")
+      expandAiPanel()
       return
     }
     goTo(c.target)

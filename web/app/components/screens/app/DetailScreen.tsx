@@ -10,7 +10,7 @@ import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
 export function DetailScreen() {
-  const { goTo, setAIBarValue, showToast } = useNavigation()
+  const { goTo, setAIBarValue, expandAiPanel, showToast } = useNavigation()
   const { content, setContent } = useContent()
   const d = content.detail
   const [generating, setGenerating] = useState(false)
@@ -81,9 +81,10 @@ export function DetailScreen() {
           type="button"
           className="ask-ai-btn"
           style={{ marginTop: 8 }}
-          onClick={() =>
+          onClick={() => {
+            expandAiPanel()
             setAIBarValue(`About this finding — summarize risks and next steps.`)
-          }
+          }}
         >
           <AskIcon />
         </button>

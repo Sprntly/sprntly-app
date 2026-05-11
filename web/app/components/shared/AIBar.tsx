@@ -14,6 +14,9 @@ import {
   AI_PANEL_WIDTH_MIN,
 } from "../../context/NavigationContext"
 
+const AI_TEXTAREA_MIN_PX = 72
+const AI_TEXTAREA_MAX_PX = 120
+
 type AiLayout = "side" | "bottom"
 
 export function AIBar() {
@@ -26,12 +29,15 @@ export function AIBar() {
     setAiPanelWidth,
     aiPanelCollapsed,
     toggleAiPanelCollapsed,
+    expandAiPanel,
   } = useNavigation()
   const { content, setContent } = useContent()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const wasPanelCollapsed = useRef(aiPanelCollapsed)
   const [submitting, setSubmitting] = useState(false)
   const [lastReply, setLastReply] = useState<AskResponse | null>(null)
   const [askError, setAskError] = useState<string | null>(null)
+  const [lastSubmittedQuestion, setLastSubmittedQuestion] = useState<string | null>(null)
   const [layout, setLayout] = useState<AiLayout>(() =>
     typeof window !== "undefined" && window.matchMedia("(min-width: 901px)").matches ? "side" : "bottom",
   )
@@ -42,6 +48,13 @@ export function AIBar() {
     content.aiScreenChips[currentScreen] ??
     content.aiScreenChips[String(currentScreen)] ??
     []
+
+  useLayoutEffect(() => {
+    if (wasPanelCollapsed.current && !aiPanelCollapsed && showAIBar && layout === "side") {
+      textareaRef.current?.focus()
+    }
+    wasPanelCollapsed.current = aiPanelCollapsed
+  }, [aiPanelCollapsed, layout, showAIBar])
 
   useLayoutEffect(() => {
     const mq = window.matchMedia("(min-width: 901px)")
@@ -130,13 +143,22 @@ export function AIBar() {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         if (textareaRef.current && showAIBar) {
           e.preventDefault()
-          textareaRef.current.focus()
+          expandAiPanel()
+          requestAnimationFrame(() => textareaRef.current?.focus())
         }
       }
     }
     document.addEventListener("keydown", handleKeydown)
     return () => document.removeEventListener("keydown", handleKeydown)
-  }, [showAIBar])
+  }, [expandAiPanel, showAIBar])
+
+  useEffect(() => {
+    if (!AI_BAR_SCREENS.includes(currentScreen)) {
+      setLastSubmittedQuestion(null)
+      setLastReply(null)
+      setAskError(null)
+    }
+  }, [currentScreen])
 
   const handleResizeStart = useCallback(
     (e: React.MouseEvent) => {
@@ -168,13 +190,19 @@ export function AIBar() {
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setAIBarValue(e.target.value)
-    e.target.style.height = "auto"
-    e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px"
+    const el = e.target
+    el.style.height = "auto"
+    const next = Math.min(
+      Math.max(el.scrollHeight, AI_TEXTAREA_MIN_PX),
+      AI_TEXTAREA_MAX_PX,
+    )
+    el.style.height = `${next}px`
   }
 
   const handleChipClick = (suggestion: string) => {
+    expandAiPanel()
     setAIBarValue(suggestion)
-    textareaRef.current?.focus()
+    requestAnimationFrame(() => textareaRef.current?.focus())
   }
 
   const submitAsk = useCallback(async () => {
@@ -183,9 +211,11 @@ export function AIBar() {
       showToast("Question too short", "Use at least 3 characters.")
       return
     }
+    expandAiPanel()
     setSubmitting(true)
     setAskError(null)
     setLastReply(null)
+    setLastSubmittedQuestion(q)
     try {
       const res = await askApi.ask(q)
       setLastReply(res)
@@ -193,7 +223,7 @@ export function AIBar() {
       const ta = textareaRef.current
       if (ta) {
         ta.style.height = "auto"
-        ta.style.height = "24px"
+        ta.style.height = `${AI_TEXTAREA_MIN_PX}px`
       }
 
       const convId =
@@ -236,7 +266,14 @@ export function AIBar() {
     } finally {
       setSubmitting(false)
     }
-  }, [aiBarValue, content.conversations, setAIBarValue, setContent, showToast])
+  }, [
+    aiBarValue,
+    content.conversations,
+    expandAiPanel,
+    setAIBarValue,
+    setContent,
+    showToast,
+  ])
 
   const onTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -295,9 +332,17 @@ export function AIBar() {
                 </svg>
               </button>
             </div>
-            <div className="ai-bar-rail-body">
+            <button
+              type="button"
+              className="ai-bar-rail-body"
+              onClick={() => {
+                expandAiPanel()
+                requestAnimationFrame(() => textareaRef.current?.focus())
+              }}
+              aria-label="Open Ask Sprntly"
+            >
               <span className="ai-bar-rail-text">Ask</span>
-            </div>
+            </button>
           </div>
         ) : (
           <div className={`ai-bar${isSide ? " ai-bar--side" : ""}`}>
@@ -345,25 +390,33 @@ export function AIBar() {
             ) : null}
             {showReplyBlock ? (
               <div className="ai-bar-reply">
+                {lastSubmittedQuestion ? (
+                  <div className="ai-bar-reply-question">
+                    <div className="ai-bar-reply-question-label">Your question</div>
+                    <div className="ai-bar-reply-question-text">{lastSubmittedQuestion}</div>
+                  </div>
+                ) : null}
                 {submitting ? (
                   <AssistantThinkingSkeleton compact />
                 ) : askError ? (
                   <div className="ai-bar-reply-error">{askError}</div>
                 ) : lastReply ? (
-                  <AskReplyBody reply={lastReply} animateIn simulateTyping />
+                  <AskReplyBody reply={lastReply} animateIn simulateTyping omitCitations />
                 ) : null}
               </div>
             ) : null}
             <div className="ai-bar-input-row">
-              <textarea
-                ref={textareaRef}
-                className="ai-bar-textarea"
-                placeholder="Ask Sprntly anything about this page, or describe what to build…"
-                rows={1}
-                value={aiBarValue}
-                onChange={handleInput}
-                onKeyDown={onTextareaKeyDown}
-              />
+              <div className="ai-bar-textarea-shell">
+                <textarea
+                  ref={textareaRef}
+                  className="ai-bar-textarea"
+                  placeholder="Ask Sprntly anything about this page, or describe what to build…"
+                  rows={3}
+                  value={aiBarValue}
+                  onChange={handleInput}
+                  onKeyDown={onTextareaKeyDown}
+                />
+              </div>
               <button
                 type="button"
                 className="ai-bar-send"

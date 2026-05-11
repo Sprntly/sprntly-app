@@ -70,6 +70,8 @@ interface NavigationContextType {
   setAiPanelWidth: (width: number) => void
   aiPanelCollapsed: boolean
   toggleAiPanelCollapsed: () => void
+  /** Expand the right assistant rail (no-op on bottom layout / when AI bar hidden). */
+  expandAiPanel: () => void
 }
 
 const NavigationContext = createContext<NavigationContextType | null>(null)
@@ -157,6 +159,18 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
+  const expandAiPanel = useCallback(() => {
+    setAiPanelCollapsed((prev) => {
+      if (!prev) return prev
+      try {
+        localStorage.setItem(AI_PANEL_C_KEY, "0")
+      } catch {
+        /* ignore */
+      }
+      return false
+    })
+  }, [])
+
   const goTo = useCallback((screen: ScreenId) => {
     const next = screen === "ondemand" ? "chat" : screen
     setCurrentScreen(next)
@@ -225,6 +239,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         setAiPanelWidth,
         aiPanelCollapsed,
         toggleAiPanelCollapsed,
+        expandAiPanel,
       }}
     >
       {children}

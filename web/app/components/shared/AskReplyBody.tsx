@@ -9,12 +9,15 @@ export function AskReplyBody({
   reply,
   animateIn,
   simulateTyping = false,
+  omitCitations = false,
 }: {
   reply: AskResponse
   /** Short fade/slide when the reply block first mounts. */
   animateIn?: boolean
   /** Reveal the answer in cumulative chunks so it feels streamed (POST still returns full JSON). */
   simulateTyping?: boolean
+  /** Hide citation/source cards (e.g. right AI rail). */
+  omitCitations?: boolean
 }) {
   const { visible, done, isStreaming } = useAnswerSimulatedStream(reply.answer, simulateTyping)
 
@@ -34,7 +37,7 @@ export function AskReplyBody({
           ))}
         </ul>
       ) : null}
-      {done && reply.citations?.length ? (
+      {done && !omitCitations && reply.citations?.length ? (
         <div className="ai-bar-reply-cites ai-bar-reply-cites--stream-reveal">
           {reply.citations.map((c, i) => (
             <div key={i} className="ai-bar-reply-cite">

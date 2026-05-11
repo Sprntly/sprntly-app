@@ -9,7 +9,14 @@ import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
 export function BriefScreen() {
-  const { goTo, setAIBarValue, reviewPastOpen, setReviewPastOpen, showToast } = useNavigation()
+  const {
+    goTo,
+    setAIBarValue,
+    expandAiPanel,
+    reviewPastOpen,
+    setReviewPastOpen,
+    showToast,
+  } = useNavigation()
   const { content, setContent } = useContent()
   const { brief, pastWeeks, briefDetails } = content
 
@@ -24,6 +31,7 @@ export function BriefScreen() {
   }
 
   const handleAskAI = (question: string) => {
+    expandAiPanel()
     setAIBarValue(question)
   }
 
@@ -61,12 +69,13 @@ export function BriefScreen() {
         set_alert:
           "Suggest monitoring triggers and review cadence for this signal — thresholds, owners, and when to escalate to Investigate or Fix.",
       }
+      expandAiPanel()
       setAIBarValue(
         prompts[f.secondaryCtaBehavior] ??
           `Help me think through next steps for: ${f.title.slice(0, 120)}`,
       )
     },
-    [briefDetails, goTo, setContent, showToast],
+    [briefDetails, expandAiPanel, goTo, setContent, showToast],
   )
 
   const empty = isBriefEmpty(brief)
@@ -167,8 +176,8 @@ export function BriefScreen() {
 
           <h2 className="wb-section-title">Finding cards</h2>
           <p className="wb-findings-hint">
-            Each card follows the same structure. Replace bracket text in the source template when
-            authoring; the live brief pulls from your API. Aim for 3–5 cards per brief.
+            Each card follows the same structure. The live brief pulls from your API. Aim for 3–5
+            cards per brief.
           </p>
 
           <div className="wb-card-stack">
