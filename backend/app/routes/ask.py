@@ -61,7 +61,15 @@ def ask(
     require_session(sprintly_session)
     corpus = load_corpus(body.dataset)
     user = ASK_USER_TEMPLATE.format(question=body.question, corpus=corpus.joined())
-    payload = call_json(system=ASK_SYSTEM, user=user, schema=ASK_RESPONSE_SCHEMA)
+    # Lower than the call_json default (16k) — Ask answers run on the home
+    # surface and load time matters more than max answer length. Brief and
+    # PRD generation keep the default headroom.
+    payload = call_json(
+        system=ASK_SYSTEM,
+        user=user,
+        schema=ASK_RESPONSE_SCHEMA,
+        max_tokens=12000,
+    )
     log_ask(
         question=body.question,
         answer=payload.get("answer", ""),
