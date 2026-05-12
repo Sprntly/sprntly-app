@@ -24,7 +24,8 @@ BRIEF_SCHEMA_VERSION = 3
 #
 #  1 — original evidence prompt + template
 #  2 — Dropped the "Data sources" subsection from §1 Business context
-EVIDENCE_TEMPLATE_VERSION = 2
+#  3 — Softened the "Mix kinds" rule to a prefer-when-data-allows hint
+EVIDENCE_TEMPLATE_VERSION = 3
 
 
 # Bumped whenever the PRD prompt or template changes meaningfully. Same
@@ -396,9 +397,10 @@ language) and a JSON body that strictly matches this schema:
 
 Pick the kind to match the data shape: bar = category comparisons, line = \
 time series, pie = share-of-whole that sums to ~100, stat = 2–4 hero \
-numbers. Mix kinds across the document so the evidence stays visually \
-distinct. Use a markdown table only when the cut is a flat list of values \
-that no chart would help.
+numbers. Where the data allows, try to use distinct chart kinds across \
+the document so the evidence stays visually varied — never force a kind \
+that doesn't fit the data. Use a markdown table only when the cut is a \
+flat list of values that no chart would help.
 
 Every numeric value MUST come from the insight/corpus — never invent \
 numbers. Always close every fenced block with ``` on its own line.
