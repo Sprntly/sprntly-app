@@ -296,13 +296,7 @@ export interface DetailState {
   }
 }
 
-export type PrdChartKind =
-  | "bar"
-  | "line"
-  | "pie"
-  | "donut"
-  | "stat"
-  | "funnel"
+export type PrdChartKind = "bar" | "line" | "pie" | "donut" | "stat"
 
 export type PrdChartDatum = { label: string; value: number | string }
 

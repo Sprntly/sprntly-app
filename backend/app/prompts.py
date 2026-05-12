@@ -33,7 +33,9 @@ BRIEF_SCHEMA_VERSION = 3
 #  6 — Expanded available kinds: added `funnel` and `donut`. Dropped the
 #      hard line-char restriction; funnels with long step names should now
 #      use the `funnel` kind (trapezoid stack, side labels, no overlap).
-EVIDENCE_TEMPLATE_VERSION = 6
+#  7 — Dropped `funnel` kind (the trapezoid-clip rendering looked worse
+#      than bar). LLM now uses `bar` for sequential-step / funnel data.
+EVIDENCE_TEMPLATE_VERSION = 7
 
 
 # Bumped whenever the PRD prompt or template changes meaningfully. Same
@@ -206,7 +208,7 @@ language) and a JSON body that strictly matches this schema:
 
 ```chart
 {{
-  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "funnel",
+  "kind": "bar" | "line" | "pie" | "donut" | "stat",
   "title": "Complete-sentence takeaway as the title",
   "subtitle": "optional source line",
   "data": [{{"label": "string", "value": <number-or-string>}}]
@@ -396,7 +398,7 @@ language) and a JSON body that strictly matches this schema:
 
 ```chart
 {{
-  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "funnel",
+  "kind": "bar" | "line" | "pie" | "donut" | "stat",
   "title": "Complete-sentence takeaway as the title",
   "subtitle": "optional source line",
   "data": [{{"label": "string", "value": <number-or-string>}}]
@@ -404,15 +406,12 @@ language) and a JSON body that strictly matches this schema:
 ```
 
 Available kinds — pick the one that's prettiest AND clearest for the data:
-- `bar` — many-category comparisons (5+ devices, segments, cohorts) where \
-each row's value needs to be read precisely.
+- `bar` — category comparisons (devices, segments, cohorts) AND sequential \
+funnel/step data with descriptive step names. Horizontal bars with side \
+labels handle long step names cleanly.
 - `line` — smooth time-series with short x-axis labels (e.g. "Q1'25", \
-"Week 12", "Day 7"). If category labels are long descriptive strings, \
-prefer `funnel` instead.
-- `funnel` — sequential drop-off steps where each step has a descriptive \
-name (claim funnel, signup flow, cohort progression day 1 → day 30). \
-Trapezoidal width-scaled bars with side labels — no overlap regardless of \
-label length, and the funnel shape itself tells the drop-off story.
+"Week 12", "Day 7"). Avoid `line` for funnel-step data with long \
+descriptive step names — the x-axis labels will overlap; use `bar` instead.
 - `pie` — share-of-whole that sums to ~100 with 2–5 slices.
 - `donut` — same as pie but with a center hole. Use when the visual feel \
 should be modern / KPI-style rather than classic slice.
@@ -423,9 +422,9 @@ fail"). Far more striking than a bar chart for low-cardinality contrasts.
 Push for **visual variety** — an evidence doc that's 7 of the same chart \
 kind in a row feels monotonous. Aim for at least 3 distinct chart kinds \
 across the document, picking the one that fits each cut's shape AND reads \
-prettiest in context. Funnels for sequential steps, donut for share-of- \
-whole, stat for headline contrasts, bar for true many-category data — \
-let the mix make the page visually rich.
+prettiest in context. Use `donut` for share-of-whole, `stat` for headline \
+contrasts, `line` for time series, and `bar` for everything else — let \
+the mix make the page visually rich.
 
 Never force a kind that doesn't fit the data. Pretty matters: if `stat` \
 would look striking and `bar` would look like a bar wall, pick `stat`.
