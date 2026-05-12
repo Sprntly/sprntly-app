@@ -77,13 +77,35 @@ function BarChart({ data }: { data: PrdChartDatum[] }) {
   )
 }
 
+function wrapAxisLabel(label: string): string[] {
+  const text = (label ?? "").toString()
+  if (text.length <= 12) return [text]
+  // Prefer splitting before a parenthetical (e.g. "Searched 3P repair (Day 7)"
+  // → ["Searched 3P repair", "(Day 7)"]) so the qualifier sits on line two.
+  const parenIdx = text.lastIndexOf(" (")
+  if (parenIdx > 0 && parenIdx < text.length - 1) {
+    return [text.slice(0, parenIdx), text.slice(parenIdx + 1)]
+  }
+  const mid = Math.floor(text.length / 2)
+  const after = text.indexOf(" ", mid)
+  const before = text.lastIndexOf(" ", mid)
+  const candidates = [after, before].filter((i) => i > 0 && i < text.length - 1)
+  if (candidates.length === 0) return [text]
+  const splitAt = candidates.reduce((best, i) =>
+    Math.abs(i - mid) < Math.abs(best - mid) ? i : best,
+  )
+  return [text.slice(0, splitAt), text.slice(splitAt + 1)]
+}
+
 function LineChart({ data }: { data: PrdChartDatum[] }) {
+  const wrapped = data.map((d) => wrapAxisLabel(String(d.label ?? "")))
+  const anyWrapped = wrapped.some((lines) => lines.length > 1)
   const w = 560
-  const h = 180
   const padL = 40
   const padR = 14
   const padT = 14
-  const padB = 30
+  const padB = anyWrapped ? 44 : 30
+  const h = anyWrapped ? 196 : 180
   const innerW = w - padL - padR
   const innerH = h - padT - padB
   const values = data.map((d) => toNum(d.value))
@@ -98,6 +120,7 @@ function LineChart({ data }: { data: PrdChartDatum[] }) {
     .join(" ")
   const ticks = 4
   const yTicks = Array.from({ length: ticks + 1 }, (_, k) => min + (range * k) / ticks)
+  const labelBaselineY = anyWrapped ? h - 22 : h - 10
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="prd-line" preserveAspectRatio="xMidYMid meet">
       {yTicks.map((t, i) => {
@@ -118,14 +141,26 @@ function LineChart({ data }: { data: PrdChartDatum[] }) {
         strokeWidth={2.5}
         strokeLinejoin="round"
       />
-      {data.map((d, i) => (
-        <g key={i}>
-          <circle cx={x(i)} cy={y(toNum(d.value))} r={3.5} fill={CHART_COLORS[0]} />
-          <text x={x(i)} y={h - 10} textAnchor="middle" className="prd-line-axis">
-            {d.label}
-          </text>
-        </g>
-      ))}
+      {data.map((d, i) => {
+        const lines = wrapped[i]
+        return (
+          <g key={i}>
+            <circle cx={x(i)} cy={y(toNum(d.value))} r={3.5} fill={CHART_COLORS[0]} />
+            <text
+              x={x(i)}
+              y={labelBaselineY}
+              textAnchor="middle"
+              className="prd-line-axis"
+            >
+              {lines.map((line, j) => (
+                <tspan key={j} x={x(i)} dy={j === 0 ? 0 : 12}>
+                  {line}
+                </tspan>
+              ))}
+            </text>
+          </g>
+        )
+      })}
     </svg>
   )
 }
