@@ -1,4 +1,6 @@
 import json
+import random
+import time
 
 from fastapi import APIRouter, Cookie
 from pydantic import BaseModel, Field
@@ -10,6 +12,14 @@ from app.llm import call_json
 from app.prompts import ASK_SYSTEM, ASK_USER_TEMPLATE_QUESTION_ONLY
 
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
+
+
+# Pre-warmed cache hits return in <100ms — instantaneous responses break the
+# demo illusion that the LLM is generating the answer in real time. A short
+# random synthetic delay keeps the cached responses feeling generated. The
+# frontend's "Thinking…" loader bridges this gap.
+CACHE_HIT_DELAY_MIN_SECONDS = 5.0
+CACHE_HIT_DELAY_MAX_SECONDS = 7.0
 
 
 # Tool-use schema for the Ask endpoint. Defined here (not in prompts.py)
@@ -63,14 +73,20 @@ def ask(
     require_session(sprintly_session)
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. Returns
-    # instantly without an LLM call.
+    # without an LLM call, with a small random delay so the response
+    # doesn't appear suspiciously instant.
     cached = find_cached_ask(body.dataset, body.question)
     if cached and cached.get("status") == "ready":
         try:
-            return json.loads(cached["response_json"])
+            payload = json.loads(cached["response_json"])
         except (TypeError, ValueError):
             # Corrupt cache row — fall through and regenerate.
             pass
+        else:
+            time.sleep(
+                random.uniform(CACHE_HIT_DELAY_MIN_SECONDS, CACHE_HIT_DELAY_MAX_SECONDS)
+            )
+            return payload
 
     # 2) Cache miss → standard LLM call.
     corpus = load_corpus(body.dataset)
