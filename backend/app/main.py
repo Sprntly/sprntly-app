@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import auth, db
 from app.brief_runner import auto_generate_all
 from app.config import settings
-from app.prompts import BRIEF_SCHEMA_VERSION, EVIDENCE_TEMPLATE_VERSION, PRD_TEMPLATE_VERSION
+from app.prompts import ASK_CACHE_VERSION, BRIEF_SCHEMA_VERSION, EVIDENCE_TEMPLATE_VERSION, PRD_TEMPLATE_VERSION
 from app.routes import ask, brief, evidence, health, prd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -41,16 +41,26 @@ async def lifespan(app: FastAPI):
             prd_invalidated,
             PRD_TEMPLATE_VERSION,
         )
+    # Same for cached Ask responses (the predefined-prompt warm cache).
+    ask_invalidated = db.invalidate_stale_cached_asks(ASK_CACHE_VERSION)
+    if ask_invalidated:
+        logger.info(
+            "Invalidated %d stale cached Ask response(s) (cache bump → v%d)",
+            ask_invalidated,
+            ASK_CACHE_VERSION,
+        )
     # Demote any orphaned 'generating' rows. The worker thread that owned
     # them died with the previous process; without this, find_existing_*
     # returns them and user clicks dedupe to a row that will never finish.
     ev_orphans = db.invalidate_orphan_generating_evidences()
     prd_orphans = db.invalidate_orphan_generating_prds()
-    if ev_orphans or prd_orphans:
+    ask_orphans = db.invalidate_orphan_generating_cached_asks()
+    if ev_orphans or prd_orphans or ask_orphans:
         logger.info(
-            "Invalidated %d orphan generating evidence(s) and %d PRD(s)",
+            "Invalidated %d orphan generating evidence(s), %d PRD(s), %d cached Ask(s)",
             ev_orphans,
             prd_orphans,
+            ask_orphans,
         )
     # Kick off brief generation in the background so the service starts fast.
     # auto_generate_all is idempotent: it skips datasets that already have a

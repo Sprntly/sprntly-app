@@ -48,6 +48,31 @@ EVIDENCE_TEMPLATE_VERSION = 7
 PRD_TEMPLATE_VERSION = 2
 
 
+# Bumped whenever the predefined Ask prompts list changes or the underlying
+# ASK_SYSTEM / corpus shape changes meaningfully. Stamped into every cached
+# Ask row; on startup, cached rows with a different version are demoted
+# 'invalidated' so the warmer regenerates them.
+#
+#  1 — initial cache (the 4 home/ondemand starter prompts)
+ASK_CACHE_VERSION = 1
+
+
+# The deterministic prompts wired into the home + ondemand starter cards in
+# the frontend (see web/app/types/content.ts). Pre-generating responses for
+# these at brief-creation time means demo clicks render instantly instead of
+# waiting on the LLM. Keep this list in sync with the frontend chip prompts.
+PREDEFINED_ASK_PROMPTS: tuple[str, ...] = (
+    # Home starter chips
+    "What are the biggest revenue drivers",
+    "What are the biggest cost drivers",
+    # Ask Sprntly landing chips
+    "Generate a Q3 strategy from our product memory — priorities, bets, measurable goals, and the main risks to watch.",
+    "Draft a PRD for team folder permissions: problem, users, requirements, rollout plan, metrics, and open questions for eng and design.",
+    "Compare retention across our top three customer segments — what differs, what might explain it, and what we should validate next.",
+    "Given what we know in product memory, what should we ship next? Stack-rank a few options with impact, cost, and dependencies.",
+)
+
+
 BRIEF_SYSTEM = """\
 You are Sprntly, a product-memory assistant for product managers. Your output \
 is presented to a PM as a Weekly Product Brief — a small set of finding cards \

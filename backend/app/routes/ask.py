@@ -1,9 +1,11 @@
+import json
+
 from fastapi import APIRouter, Cookie
 from pydantic import BaseModel, Field
 
 from app.auth import require_session
 from app.corpus import load_corpus
-from app.db import log_ask
+from app.db import find_cached_ask, log_ask
 from app.llm import call_json
 from app.prompts import ASK_SYSTEM, ASK_USER_TEMPLATE_QUESTION_ONLY
 
@@ -59,6 +61,18 @@ def ask(
     sprintly_session: str | None = Cookie(default=None),
 ):
     require_session(sprintly_session)
+    # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
+    # deterministic prompts pre-warmed at brief-generation time. Returns
+    # instantly without an LLM call.
+    cached = find_cached_ask(body.dataset, body.question)
+    if cached and cached.get("status") == "ready":
+        try:
+            return json.loads(cached["response_json"])
+        except (TypeError, ValueError):
+            # Corrupt cache row — fall through and regenerate.
+            pass
+
+    # 2) Cache miss → standard LLM call.
     corpus = load_corpus(body.dataset)
     # The corpus is constant per dataset, so we pass it as a cacheable prefix
     # — repeat /v1/ask calls within the cache TTL skip re-encoding it.

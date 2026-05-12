@@ -14,6 +14,7 @@ from app.db import (
     start_evidence,
     start_prd,
 )
+from app.ask_runner import warm_predefined_asks
 from app.evidence_runner import generate_evidence
 from app.llm import call_json
 from app.prd_runner import generate_prd
@@ -118,14 +119,17 @@ async def _warm_prd(brief_id: int, insight_index: int, title: str) -> None:
         await generate_prd(prd_id, brief_id, insight_index)
 
 
-def _warm_drilldowns(brief: dict) -> None:
-    """Fan out evidence + PRD generation for every insight in this brief.
-    Warm tasks share a semaphore (_WARM_SEMA) so at most 2 run at once;
+def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
+    """Fan out evidence + PRD generation for every insight in this brief,
+    plus warming for predefined Ask Sprntly starter prompts.
+
+    Warm tasks share a semaphore (_WARM_SEMA) so at most a few run at once;
     cached entries return immediately (dedupe lives in _warm_evidence /
-    _warm_prd).
+    _warm_prd / ask_runner._warm_one).
 
     Evidence is scheduled before PRD because users click "View evidence"
-    first — they shouldn't queue behind PRD warming.
+    first — they shouldn't queue behind PRD warming. Ask warming runs in
+    parallel with both, hitting the same throughput cap.
     """
     brief_id = brief.get("id")
     if not brief_id:
@@ -139,6 +143,11 @@ def _warm_drilldowns(brief: dict) -> None:
     for i, ins in enumerate(insights):
         title = (ins or {}).get("title") or f"Insight #{i + 1}"
         asyncio.create_task(_warm_prd(brief_id, i, title))
+    # Pass 3: predefined Ask Sprntly starter prompts. The home + Ask chips
+    # send a fixed set of questions; pre-generating responses means the
+    # demo's first click renders instantly.
+    if dataset:
+        warm_predefined_asks(dataset, _WARM_SEMA)
 
 
 async def auto_generate_brief(dataset: str) -> None:
@@ -168,7 +177,7 @@ async def auto_generate_brief(dataset: str) -> None:
         logger.info("Brief already cached for %s, skipping auto-generate", dataset)
     if brief is None:
         return
-    _warm_drilldowns(brief)
+    _warm_drilldowns(brief, dataset=dataset)
 
 
 # Datasets the service will auto-generate briefs for on startup.
