@@ -25,7 +25,9 @@ BRIEF_SCHEMA_VERSION = 3
 #  1 — original evidence prompt + template
 #  2 — Dropped the "Data sources" subsection from §1 Business context
 #  3 — Softened the "Mix kinds" rule to a prefer-when-data-allows hint
-EVIDENCE_TEMPLATE_VERSION = 3
+#  4 — Push hard for visual variety: prefer stat/pie/line over bar where
+#      the data allows; bars should be the minority, not majority.
+EVIDENCE_TEMPLATE_VERSION = 4
 
 
 # Bumped whenever the PRD prompt or template changes meaningfully. Same
@@ -395,12 +397,17 @@ language) and a JSON body that strictly matches this schema:
 }}
 ```
 
-Pick the kind to match the data shape: bar = category comparisons, line = \
-time series, pie = share-of-whole that sums to ~100, stat = 2–4 hero \
-numbers. Where the data allows, try to use distinct chart kinds across \
-the document so the evidence stays visually varied — never force a kind \
-that doesn't fit the data. Use a markdown table only when the cut is a \
-flat list of values that no chart would help.
+Available kinds — match the data shape:
+- `bar` for category comparisons (devices, segments, cohorts).
+- `line` for time series or sequential progressions (funnel cohorts day 1 → day 30, weekly trends, before/after on a timeline).
+- `pie` for share-of-whole that sums to ~100 (% has feature vs doesn't, % converts vs drops).
+- `stat` for 2–4 hero numbers when a comparison reduces to a couple of headline values (e.g. "iPhone 15 Pro: 24% fail · every other device: 1% fail" → stat block with two numbers, far more striking than a bar chart).
+
+Push hard for **visual variety** — an evidence doc that's 7 bar charts in a row reads as a wall of horizontal stripes. Aim for at least 3 distinct chart kinds across the document. Whenever a cut reduces to a single dominant number vs a baseline, prefer `stat` over `bar`. Whenever a cut is "X% do Y vs (100-X)% do something else", prefer `pie` over `bar`. When you have a sequential progression (cohort over time, funnel by step), use `line`. Reserve `bar` for true many-category comparisons (5+ items with no natural alternative framing).
+
+Never force a kind that doesn't fit the data. But before you reach for `bar` on a cut with ≤4 items, ask: "would a `stat` block say this more punchily?" Bar charts are the safe default; they should be the minority of your charts, not the majority.
+
+Use a markdown table only when the cut is a flat list of values that no chart would help.
 
 Every numeric value MUST come from the insight/corpus — never invent \
 numbers. Always close every fenced block with ``` on its own line.
