@@ -262,6 +262,14 @@ export interface DetailEvidenceSection {
   quoteRows?: DetailQuoteRow[]
   /** Trusted HTML (e.g. chart SVG) from your server-side renderer */
   html?: string | null
+  /** Inline chart specs rendered via InlineChart. Used for the data-science
+   *  slicing infographics on the Evidence section. */
+  charts?: Array<{
+    kind: PrdChartKind
+    title?: string
+    subtitle?: string
+    data: PrdChartDatum[]
+  }>
 }
 
 export interface DetailState {

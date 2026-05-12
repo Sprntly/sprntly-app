@@ -187,7 +187,37 @@ function insightArrays(insight: Insight) {
     convergence: Array.isArray(insight.convergence) ? insight.convergence : [],
     user_quotes: Array.isArray(insight.user_quotes) ? insight.user_quotes : [],
     chart_hints: Array.isArray(insight.chart_hints) ? insight.chart_hints : [],
+    impact_math: Array.isArray(insight.impact_math) ? insight.impact_math : [],
   }
+}
+
+/** Parse "Label: value" strings from insight.impact_math into hero metrics
+ * for the Estimated impact callout. Falls back to insight.metrics if the
+ * impact_math entries don't follow the convention.
+ *
+ * Backend now emits 2–3 highlighted metrics in this shape, e.g.
+ *   "Revenue at risk: $143M/yr"
+ *   "Retention impact: +15pp"
+ */
+function heroMetricsFor(
+  insight: Insight,
+  valueClass: "pos" | "neg" | undefined,
+): { label: string; value: string; valueClass?: "pos" | "neg" }[] {
+  const arrays = insightArrays(insight)
+  const parsed: { label: string; value: string }[] = []
+  for (const entry of arrays.impact_math.slice(0, 3)) {
+    if (typeof entry !== "string") continue
+    const m = entry.match(/^\s*([^:]{1,60}?)\s*:\s*(.+?)\s*$/)
+    if (m) parsed.push({ label: m[1], value: m[2] })
+  }
+  if (parsed.length >= 2) {
+    return parsed.map((p) => ({ ...p, valueClass }))
+  }
+  return (insight.metrics || []).slice(0, 3).map((m) => ({
+    label: m.label,
+    value: m.value,
+    valueClass,
+  }))
 }
 
 function prettyDataset(dataset: string): string {
@@ -347,17 +377,39 @@ function detailFromInsight(
       : tagMeta.tagType === "double"
       ? ("pos" as const)
       : undefined
-  const metrics = (insight.metrics || []).slice(0, 3).map((m) => ({
-    label: m.label,
-    value: m.value,
-    valueClass,
-  }))
+  const metrics = heroMetricsFor(insight, valueClass)
 
   const evidenceSections: DetailState["evidenceSections"] = []
 
-  const convHtml = convergenceVisualHtml(arrays.convergence, arrays.chart_hints)
-  if (convHtml)
-    evidenceSections.push({ sectionTitle: "Convergence across sources", html: convHtml })
+  // Structured chart specs from chart_hints — rendered inline by DetailScreen.
+  // The chart_hints API field is the brief insight's data-science slicing.
+  type ChartSpec = NonNullable<DetailState["evidenceSections"][number]["charts"]>[number]
+  const charts: ChartSpec[] = []
+  for (const h of arrays.chart_hints) {
+    if (!h || typeof h !== "object") continue
+    const data = Array.isArray(h.data) ? h.data : []
+    if (data.length === 0) continue
+    const kind = String(h.kind || "bar").toLowerCase()
+    if (kind !== "bar" && kind !== "line" && kind !== "pie" && kind !== "stat")
+      continue
+    charts.push({
+      kind,
+      title: h.title,
+      data: data.map((d) => ({
+        label: d.label,
+        value: typeof d.value === "number" ? d.value : Number(d.value) || 0,
+      })),
+    })
+  }
+
+  if (charts.length > 0) {
+    evidenceSections.push({ sectionTitle: "Evidence", charts })
+  } else if (arrays.convergence.length > 0) {
+    // Fallback: if no chart_hints (older brief), still show a bar of
+    // signal strength so the section isn't empty.
+    const html = convergenceVisualHtml(arrays.convergence, [])
+    if (html) evidenceSections.push({ sectionTitle: "Evidence", html })
+  }
 
   if (arrays.user_quotes.length > 0) {
     evidenceSections.push({

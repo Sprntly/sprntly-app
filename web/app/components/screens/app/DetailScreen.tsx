@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import type { DetailEvidenceSection } from "../../../types/content"
+import { InlineChart } from "../../shared/InlineChart"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import { AppLayout } from "./AppLayout"
@@ -133,6 +134,18 @@ function EvidenceSectionBlock({ section }: { section: DetailEvidenceSection }) {
   return (
     <div className="evidence-section">
       <h2 className="evidence-title">{section.sectionTitle}</h2>
+      {section.charts?.length
+        ? section.charts.map((c, i) => (
+            <div key={i} className="evidence-card">
+              <InlineChart
+                kind={c.kind}
+                title={c.title}
+                subtitle={c.subtitle}
+                data={c.data}
+              />
+            </div>
+          ))
+        : null}
       {section.html ? (
         <div className="evidence-card">
           <div
