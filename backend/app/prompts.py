@@ -35,7 +35,9 @@ BRIEF_SCHEMA_VERSION = 3
 #      use the `funnel` kind (trapezoid stack, side labels, no overlap).
 #  7 — Dropped `funnel` kind (the trapezoid-clip rendering looked worse
 #      than bar). LLM now uses `bar` for sequential-step / funnel data.
-EVIDENCE_TEMPLATE_VERSION = 7
+#  8 — Added `gauge` kind (semicircular dial showing current vs target).
+#      Fits insights framed as "current X vs target/baseline Y".
+EVIDENCE_TEMPLATE_VERSION = 8
 
 
 # Bumped whenever the PRD prompt or template changes meaningfully. Same
@@ -233,7 +235,7 @@ language) and a JSON body that strictly matches this schema:
 
 ```chart
 {{
-  "kind": "bar" | "line" | "pie" | "donut" | "stat",
+  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "gauge",
   "title": "Complete-sentence takeaway as the title",
   "subtitle": "optional source line",
   "data": [{{"label": "string", "value": <number-or-string>}}]
@@ -448,7 +450,7 @@ language) and a JSON body that strictly matches this schema:
 
 ```chart
 {{
-  "kind": "bar" | "line" | "pie" | "donut" | "stat",
+  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "gauge",
   "title": "Complete-sentence takeaway as the title",
   "subtitle": "optional source line",
   "data": [{{"label": "string", "value": <number-or-string>}}]
@@ -468,6 +470,12 @@ should be modern / KPI-style rather than classic slice.
 - `stat` — 2–4 hero numbers when a comparison reduces to a couple of \
 headline values (e.g. "iPhone 15 Pro: 24% fail · every other device: 1% \
 fail"). Far more striking than a bar chart for low-cardinality contrasts.
+- `gauge` — semicircular dial for a single "current vs target" framing \
+(e.g. "App-channel churn is 22% vs target 15%"). `data` is `[{{"label": \
+"Current", "value": <num>}}, {{"label": "Target", "value": <num>}}]` — \
+the first datum fills the arc, the second renders as a tick mark. Pick \
+gauge when the headline IS the gap between an observed number and a \
+goal/baseline.
 
 Push for **visual variety** — an evidence doc that's 7 of the same chart \
 kind in a row feels monotonous. Aim for at least 3 distinct chart kinds \

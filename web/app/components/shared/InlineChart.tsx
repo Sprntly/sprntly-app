@@ -45,6 +45,7 @@ export function InlineChart({
         {kind === "pie" ? <PieChart data={data} /> : null}
         {kind === "donut" ? <PieChart data={data} donut /> : null}
         {kind === "stat" ? <StatChart data={data} /> : null}
+        {kind === "gauge" ? <GaugeChart data={data} /> : null}
       </div>
     </figure>
   )
@@ -197,7 +198,158 @@ function StatChart({ data }: { data: PrdChartDatum[] }) {
   )
 }
 
-const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "stat"]
+function GaugeChart({ data }: { data: PrdChartDatum[] }) {
+  // First datum = current value, optional second = target marker.
+  const current = data[0]
+  const target = data[1]
+  if (!current) return null
+  const currentNum = toNum(current.value)
+  const targetNum = target ? toNum(target.value) : null
+  // Pick a "nice" max — round up to next 25/50/100 based on data magnitude.
+  const rawMax = Math.max(currentNum, targetNum ?? 0, 1)
+  const niceMax = (() => {
+    if (rawMax <= 25) return 25
+    if (rawMax <= 50) return 50
+    if (rawMax <= 100) return 100
+    // Round up to next multiple of 50 above the raw max.
+    return Math.ceil(rawMax / 50) * 50
+  })()
+  const currentPct = Math.max(0, Math.min(1, currentNum / niceMax))
+  const targetPct =
+    targetNum != null ? Math.max(0, Math.min(1, targetNum / niceMax)) : null
+
+  // Geometry: 180° semicircle arc. SVG viewBox 240x140.
+  const w = 240
+  const h = 140
+  const cx = w / 2
+  const cy = 118 // baseline of arc near bottom of viewBox
+  const r = 92
+  const stroke = 16
+  // Convert pct (0..1) along the 180° arc (from left, sweeping right).
+  // Angle in degrees: 180 (left) → 0 (right). Use radians for math.
+  const angleAt = (pct: number) => Math.PI * (1 - pct) // π → 0
+  const ptAt = (pct: number, radius = r) => {
+    const a = angleAt(pct)
+    return {
+      x: cx + radius * Math.cos(a),
+      y: cy - radius * Math.sin(a),
+    }
+  }
+  const arcPath = (fromPct: number, toPct: number) => {
+    const p0 = ptAt(fromPct)
+    const p1 = ptAt(toPct)
+    const large = Math.abs(toPct - fromPct) > 0.5 ? 1 : 0
+    return `M ${p0.x.toFixed(2)} ${p0.y.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`
+  }
+
+  // Target tick mark — short radial line crossing the arc.
+  const tickInner = targetPct != null ? ptAt(targetPct, r - stroke / 2 - 4) : null
+  const tickOuter = targetPct != null ? ptAt(targetPct, r + stroke / 2 + 4) : null
+
+  const gradId = `prd-gauge-grad-${Math.random().toString(36).slice(2, 8)}`
+  const fmtCurrent = fmtVal(current.value)
+  const fmtTarget = target ? fmtVal(target.value) : null
+
+  return (
+    <div className="prd-gauge">
+      <svg
+        viewBox={`0 0 ${w} ${h}`}
+        width={w}
+        height={h}
+        className="prd-gauge-svg"
+      >
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.75" />
+            <stop offset="100%" stopColor="var(--accent)" stopOpacity="1" />
+          </linearGradient>
+        </defs>
+        {/* Background arc */}
+        <path
+          d={arcPath(0, 1)}
+          fill="none"
+          stroke="var(--surface-3)"
+          strokeWidth={stroke}
+          strokeLinecap="round"
+        />
+        {/* Filled arc (current) */}
+        {currentPct > 0 ? (
+          <path
+            d={arcPath(0, currentPct)}
+            fill="none"
+            stroke={`url(#${gradId})`}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+          />
+        ) : null}
+        {/* Target tick */}
+        {tickInner && tickOuter ? (
+          <line
+            x1={tickInner.x}
+            y1={tickInner.y}
+            x2={tickOuter.x}
+            y2={tickOuter.y}
+            stroke="var(--ink)"
+            strokeWidth={2}
+            strokeLinecap="round"
+          />
+        ) : null}
+        {/* Range labels (min / max) */}
+        <text
+          x={cx - r}
+          y={cy + 14}
+          textAnchor="middle"
+          className="prd-gauge-tick"
+        >
+          0
+        </text>
+        <text
+          x={cx + r}
+          y={cy + 14}
+          textAnchor="middle"
+          className="prd-gauge-tick"
+        >
+          {niceMax}
+        </text>
+        {/* Center value */}
+        <text
+          x={cx}
+          y={cy - 22}
+          textAnchor="middle"
+          className="prd-gauge-value"
+        >
+          {fmtCurrent}
+        </text>
+        {fmtTarget != null ? (
+          <text
+            x={cx}
+            y={cy - 6}
+            textAnchor="middle"
+            className="prd-gauge-sub"
+          >
+            vs target {fmtTarget}
+          </text>
+        ) : null}
+      </svg>
+      <ul className="prd-gauge-legend">
+        <li>
+          <span className="prd-gauge-dot" />
+          <span className="prd-gauge-lbl">{current.label || "Current"}</span>
+          <span className="prd-gauge-val">{fmtCurrent}</span>
+        </li>
+        {target ? (
+          <li>
+            <span className="prd-gauge-tick-mark" />
+            <span className="prd-gauge-lbl">{target.label || "Target"}</span>
+            <span className="prd-gauge-val">{fmtTarget}</span>
+          </li>
+        ) : null}
+      </ul>
+    </div>
+  )
+}
+
+const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "donut", "stat", "gauge"]
 
 /** Parse a `chart` fenced-block body into props for InlineChart, or null. */
 export function parseChartBody(body: string): {

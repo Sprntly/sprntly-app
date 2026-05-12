@@ -1244,7 +1244,7 @@
   .prd-table th { background: var(--surface-2); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); }
   .prd-table tr:last-child td { border-bottom: none; }
 
-  /* PRD infographics — bar / line / pie / stat charts rendered inline */
+  /* PRD infographics — bar / line / pie / stat / gauge charts rendered inline */
   .prd-chart {
     margin: 16px 0 22px; padding: 16px 18px;
     border: 1px solid var(--line); border-radius: 12px;
@@ -1281,6 +1281,18 @@
   .prd-stat { display: flex; flex-direction: column; gap: 4px; min-width: 120px; }
   .prd-stat-val { font-family: var(--font-display); font-weight: 700; font-size: 26px; line-height: 1; color: var(--ink); letter-spacing: -0.025em; }
   .prd-stat-lbl { font-size: 11.5px; color: var(--muted); }
+
+  .prd-gauge { display: flex; gap: 28px; align-items: center; flex-wrap: wrap; }
+  .prd-gauge-svg { display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.08)); }
+  .prd-gauge-value { font-family: var(--font-display); font-weight: 700; font-size: 24px; fill: var(--ink); letter-spacing: -0.025em; }
+  .prd-gauge-sub { font-size: 10.5px; fill: var(--muted); font-family: var(--font-mono); }
+  .prd-gauge-tick { font-size: 9.5px; fill: var(--muted); font-family: var(--font-mono); }
+  .prd-gauge-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; min-width: 180px; }
+  .prd-gauge-legend li { display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center; font-size: 12.5px; }
+  .prd-gauge-legend .prd-gauge-lbl { color: var(--ink-2); }
+  .prd-gauge-legend .prd-gauge-val { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .prd-gauge-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--accent); justify-self: center; }
+  .prd-gauge-tick-mark { width: 2px; height: 12px; background: var(--ink); border-radius: 1px; justify-self: center; }
 
   /* PRD footer — just save + share + approve&next (no redundant handoff section) */
   .prd-foot {
