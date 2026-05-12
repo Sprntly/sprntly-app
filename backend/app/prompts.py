@@ -27,6 +27,16 @@ BRIEF_SCHEMA_VERSION = 3
 EVIDENCE_TEMPLATE_VERSION = 2
 
 
+# Bumped whenever the PRD prompt or template changes meaningfully. Same
+# pattern as EVIDENCE_TEMPLATE_VERSION — cached PRDs with a stale version
+# are demoted to status='invalidated' on startup, regenerated on next click.
+#
+#  1 — original PRD prompt + template
+#  2 — Removed the Evidence section (§3) from the PRD output; renumbered
+#      §4–9 → §3–8. Evidence lives in its own Sprntly Evidence Page now.
+PRD_TEMPLATE_VERSION = 2
+
+
 BRIEF_SYSTEM = """\
 You are Sprntly, a product-memory assistant for product managers. Your output \
 is presented to a PM as a Weekly Product Brief — a small set of finding cards \
@@ -226,20 +236,33 @@ Corpus:
 
 
 PRD_SYSTEM = """\
-You are Sprntly's PRD generator. You output PRDs in the exact format described \
-by the supplied template — sections numbered 1–9, with a TL;DR before \
-Section 1 and a 'How to embed an infographic' aid omitted from the final PRD. \
-You ground every quantitative claim in the supplied brief insight (which \
-itself was grounded in source corpus). You never invent data points. The \
-output is markdown — section headings as in the template, with each section \
-filled in concretely. Numbers beat adjectives: words like 'significantly', \
-'substantially', 'meaningful', and 'considerable' are banned from TL;DR and \
-the Hypothesis."""
+You are Sprntly's PRD generator. You output PRDs in the exact format \
+described by the supplied template — sections numbered 1–8, with a TL;DR \
+before Section 1.
+
+Internally you ALWAYS reason through the full evidence first: the supplied \
+brief insight, the convergence sources, the chart_hints, the impact_math, \
+and the corpus the insight was derived from. Every numeric claim, every \
+mechanism in the Hypothesis, every metric in §6, and every Acceptance \
+Criterion threshold MUST be grounded in that evidence — falsifiable by a \
+reader who can pull the same data. You never invent numbers.
+
+But the PRD output does NOT include a rendered Evidence section. The \
+Evidence is shipped as its own Sprntly Evidence Page (data cuts, chart \
+briefs, Rules in / out, qualitative signals, customer quotes — all live \
+there). Do not duplicate any of that into the PRD output. The PRD is the \
+shipping spec; the Evidence is the supporting analysis. Treat them as two \
+documents with one shared truth.
+
+The output is markdown — section headings as in the template, each filled \
+in concretely. Numbers beat adjectives: words like 'significantly', \
+'substantially', 'meaningful', and 'considerable' are banned from TL;DR \
+and the Hypothesis."""
 
 
 PRD_USER_TEMPLATE = """\
 Generate a PRD for the following insight. Use the template format below — \
-preserve the title format, the section numbers (TL;DR, then 1–9), headings, \
+preserve the title format, the section numbers (TL;DR, then 1–8), headings, \
 subsection structure, and every markdown table exactly as shown. Fill each \
 section with concrete content derived from the insight and corpus. Do NOT \
 keep the placeholder examples like "[Component name]" or "[X%]" — replace \
@@ -253,63 +276,34 @@ Hard structural rules:
 key number; (2) the proposed fix; (3) the projected impact in concrete \
 numbers. No adjectives. A senior reader who only reads TL;DR should know \
 whether to read the rest.
-- **Section 3 (Evidence)** has 3 to 4 cuts. EVERY cut must include a filled \
-**Chart brief** table BEFORE the infographic, with all five rows (Type, \
-X-axis, Y-axis, Highlight, Color logic) filled with specific values — not \
-"steps" but "Claim step", not "%" but "Completion rate (%)". At least TWO \
-of the cuts MUST include a `chart` fenced block — a PRD without infographics \
-fails review. After every chart, end the cut with a single line of the form: \
-`Rules in: <one sentence>. Rules out: <one sentence>.` Both labeled, both \
-present, one sentence each.
-- **Section 3 (Evidence)** ends with two H3 subsections — `Qualitative \
-signals` (3–5 bullets in the format `[Source] — "[theme]" — [volume] — \
-[trend]`) and `In their own words` (3–5 verbatim quotes attributed by \
-channel). Never invent a quote; drop the bullet if no real quote exists.
-- **Section 5 (Solution Requirements)** is a SINGLE markdown table with \
+- **NO rendered evidence in the PRD output.** You still reason through the \
+full evidence internally (cuts, charts, signals, quotes) to ground every \
+claim — but do NOT emit a "Section 3 Evidence" or any cuts, chart briefs, \
+infographics, qualitative-signal bullets, or verbatim user quotes in the \
+markdown. The Evidence lives in its own Sprntly Evidence Page. Section 3 \
+in the PRD is `Hypothesis`.
+- **Section 4 (Solution Requirements)** is a SINGLE markdown table with \
 columns `Requirement | Category | Detail`. Category values are exactly: \
 `Functional`, `Feature flag`, `Remote config`, `Telemetry`. One verifiable \
 behavior per row (the *what*, not the *how*).
-- **Section 7 (Metrics)** uses the table's `Category` column with exactly \
+- **Section 6 (Metrics)** uses the table's `Category` column with exactly \
 these values: `Primary` (one row only — the metric the hypothesis moves), \
 `Secondary` (1–3 leading indicators), `Guardrail` (1–3 must-not-degrade \
 metrics). Always specify Current and Target.
-- **Section 9 (Test Plan)** is a markdown table with columns `Phase | Detail`. \
-Phase values are exactly `Pre-launch`, `Rollout`, `Post-launch`. Use \
-`<br>` to separate multiple bullets within a Detail cell.
-- **Evidence confidence** line at the top of Section 3 is mandatory: \
-`Evidence confidence: High | Medium | Low`. If Medium or Low, append a \
-single sentence explaining the data gap.
+- **Section 8 (Test Plan)** is a markdown table with columns `Phase | Detail`. \
+Phase values are exactly `Pre-launch`, `Rollout`, `Post-launch`. Use `<br>` \
+to separate multiple bullets within a Detail cell.
 
-Embed each chart as a fenced code block with language `chart` (no other \
-language) and a JSON body that strictly matches this schema:
+For markdown tables (Business impact in §2, Solution Requirements in §4, \
+AC in §5, Metrics in §6, Test Plan in §8), ALWAYS include the separator row \
+right under the header: `| --- | --- | ... |`. Without it, downstream \
+renderers treat the table as plain text.
 
-```chart
-{{
-  "kind": "bar" | "line" | "pie" | "stat",
-  "title": "Complete-sentence takeaway as the title",
-  "subtitle": "optional source line",
-  "data": [{{"label": "string", "value": <number-or-string>}}]
-}}
-```
-
-Pick the kind to match the data shape: bar = category comparisons, line = \
-time series, pie = share-of-whole that sums to ~100, stat = 2–4 hero \
-numbers. Use a markdown table only when the cut is a flat list of values \
-that no chart would help. Use prose only when the cut is a logical \
-argument that no visual would communicate faster.
-
-Every numeric value in a chart must come from the insight/corpus — never \
-invent data. Always close every fenced block with ``` on its own line. \
 Bold key terms with **double asterisks**.
 
-For markdown tables (Chart brief in §3, Business impact in §2, Solution \
-Requirements in §5, AC in §6, Metrics in §7, Test Plan in §9), ALWAYS \
-include the separator row right under the header: `| --- | --- | ... |`. \
-Without it, downstream renderers treat the table as plain text.
-
-Do NOT include the "How to embed an infographic" or "How to use this \
-template" sections in the generated PRD — they are instructions for you, not \
-part of the output. End the PRD at the last "─────" divider after Section 9.
+Do NOT include the "How to use this template" footer in the generated PRD — \
+it is instructions for you, not part of the output. End the PRD at the last \
+"─────" divider after Section 8.
 
 INSIGHT TO TURN INTO A PRD:
 

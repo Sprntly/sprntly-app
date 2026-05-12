@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import auth, db
 from app.brief_runner import auto_generate_all
 from app.config import settings
-from app.prompts import BRIEF_SCHEMA_VERSION, EVIDENCE_TEMPLATE_VERSION
+from app.prompts import BRIEF_SCHEMA_VERSION, EVIDENCE_TEMPLATE_VERSION, PRD_TEMPLATE_VERSION
 from app.routes import ask, brief, evidence, health, prd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -32,6 +32,14 @@ async def lifespan(app: FastAPI):
             "Invalidated %d stale evidence doc(s) (template bump → v%d)",
             ev_invalidated,
             EVIDENCE_TEMPLATE_VERSION,
+        )
+    # And the same for PRDs.
+    prd_invalidated = db.invalidate_stale_prds(PRD_TEMPLATE_VERSION)
+    if prd_invalidated:
+        logger.info(
+            "Invalidated %d stale PRD(s) (template bump → v%d)",
+            prd_invalidated,
+            PRD_TEMPLATE_VERSION,
         )
     # Kick off brief generation in the background so the service starts fast.
     # auto_generate_all is idempotent: it skips datasets that already have a

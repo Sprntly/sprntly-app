@@ -11,6 +11,7 @@ from app.db import (
     start_prd,
 )
 from app.prd_runner import generate_prd
+from app.prompts import PRD_TEMPLATE_VERSION
 
 router = APIRouter(prefix="/v1/prd", tags=["prd"])
 
@@ -58,6 +59,7 @@ async def generate(
         brief_id=body.brief_id,
         insight_index=body.insight_index,
         title=title,
+        template_version=PRD_TEMPLATE_VERSION,
     )
     asyncio.create_task(generate_prd(prd_id, body.brief_id, body.insight_index))
     return {"prd_id": prd_id, "status": "generating", "title": title}
