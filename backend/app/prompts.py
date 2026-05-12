@@ -317,3 +317,108 @@ PRD TEMPLATE TO FOLLOW:
 """
 
 
+EVIDENCE_SYSTEM = """\
+You are Sprntly's Evidence Page generator. You output a Data Science evidence \
+document in the exact format described by the supplied template. The evidence \
+page is the drill-down behind a single weekly-brief finding: it explains what \
+is happening, walks through the data-science slicing that proves the cause, \
+and ends with a testable hypothesis.
+
+You ground every quantitative claim in the supplied brief insight (which \
+itself was grounded in source corpus). You never invent data points, never \
+invent customer quotes. Charts are the default for any quantitative cut; \
+each chart's title is a complete-sentence takeaway, not a label. The output \
+is markdown — section headings and tables exactly as in the template, with \
+each section filled in concretely. Numbers beat adjectives."""
+
+
+EVIDENCE_USER_TEMPLATE = """\
+Generate an Evidence Page for the following brief insight. Use the template \
+format below — preserve the title-as-consequence, subtitle-as-behavior+scale, \
+the Estimated impact table, the Bottom-line narrative beats, and every \
+section heading exactly as shown. Fill each placeholder with concrete content \
+derived from the insight and corpus. Do NOT keep placeholder examples like \
+"[Source 1]" or "[X%]" — replace each with real content. If a section truly \
+cannot be filled from the available data, write "N/A — <one-sentence reason>" \
+rather than dropping the heading. Markdown output only, no JSON, no \
+commentary outside the document.
+
+Hard structural rules:
+
+- **Title** is the finding-as-consequence — what is happening to users and \
+what it costs. Never a noun-phrase label like "Checkout Analysis"; always a \
+sentence like "Users abandon checkout at the deductible step and never \
+return."
+- **Subtitle** states the specific behavior observed plus the scale of the \
+problem in one sentence. This is the most important sentence in the document \
+for a senior reader.
+- **Estimated impact** table contains exactly 2 or 3 highlighted business \
+metrics — Revenue / Retention / Affected users style — that a senior reader \
+can internalize in five seconds. Each row is one labeled metric with a \
+concrete number.
+- **Bottom line** is a 3–5 sentence paragraph that buttresses the title with \
+substance (journey scale → where it works → exact step where it breaks, with \
+the headline number). Then 1–5 chart beats, each: paragraph framing the \
+chart, the chart itself as a `chart` fenced block, then a single \
+`Rules in: <sentence>. Rules out: <sentence>.` line. Beats are flexible: use \
+1 for a simple finding, 5 for a complex one.
+- **Section 3 (Evidence)** has 3 to 4 cuts. EVERY cut must include a filled \
+**Chart brief** table (Type, X-axis, Y-axis, Highlight, Color logic) followed \
+by a `chart` fenced block and a `Rules in: … Rules out: …` line. The data \
+science slicing here is what justifies the finding — make the infographics \
+self-explanatory; let the chart type follow the data shape.
+- **Section 3** ends with `Qualitative signals` (3–5 bullets, format \
+`[Source] — "[theme]" — [volume] — [trend]`) and `In their own words` \
+(3–5 verbatim quotes, attributed by channel). Never invent a quote; drop \
+the bullet if no real quote exists.
+- **Section 4 (What the data says together)** synthesizes the cuts into one \
+causal story for a senior reader who skipped the evidence. 2–3 paragraphs.
+- **Section 5 (Hypothesis)** is a single sentence in the form \
+`If we [change], then [primary metric] will move from [current] to [target], \
+because [mechanism]. [Optional secondary effect.]` — specific enough to \
+design an A/B test from.
+
+Embed each chart as a fenced code block with language `chart` (no other \
+language) and a JSON body that strictly matches this schema:
+
+```chart
+{{
+  "kind": "bar" | "line" | "pie" | "stat",
+  "title": "Complete-sentence takeaway as the title",
+  "subtitle": "optional source line",
+  "data": [{{"label": "string", "value": <number-or-string>}}]
+}}
+```
+
+Pick the kind to match the data shape: bar = category comparisons, line = \
+time series, pie = share-of-whole that sums to ~100, stat = 2–4 hero \
+numbers. Mix kinds across the document so the evidence stays visually \
+distinct. Use a markdown table only when the cut is a flat list of values \
+that no chart would help.
+
+Every numeric value MUST come from the insight/corpus — never invent \
+numbers. Always close every fenced block with ``` on its own line.
+
+For markdown tables (Analyst/Team meta, Estimated impact, Data sources, \
+Business impact, Chart briefs), ALWAYS include the separator row right under \
+the header (`| --- | --- | ... |`). Without it, downstream renderers treat \
+the table as plain text.
+
+Do NOT include the "How to use this template" section in the generated \
+document — it is instructions for you, not part of the output. End the \
+document at the last "─────" divider after Section 5.
+
+INSIGHT TO TURN INTO AN EVIDENCE PAGE:
+
+```json
+{insight_json}
+```
+
+CORPUS (for additional grounding when needed):
+
+{corpus}
+
+EVIDENCE PAGE TEMPLATE TO FOLLOW:
+
+{template}
+"""

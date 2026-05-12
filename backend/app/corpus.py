@@ -47,3 +47,7 @@ def load_corpus(dataset: str = "asurion") -> Corpus:
 
 def load_prd_template() -> str:
     return (DATA_DIR / "sprntly_prd_template.md").read_text()
+
+
+def load_evidence_template() -> str:
+    return (DATA_DIR / "sprntly_evidence_template.md").read_text()

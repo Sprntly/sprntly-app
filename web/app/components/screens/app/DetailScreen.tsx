@@ -6,6 +6,7 @@ import { useContent } from "../../../context/ContentContext"
 import type { DetailEvidenceSection } from "../../../types/content"
 import { InlineChart } from "../../shared/InlineChart"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
+import { runEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
@@ -15,6 +16,7 @@ export function DetailScreen() {
   const { content, setContent } = useContent()
   const d = content.detail
   const [generating, setGenerating] = useState(false)
+  const [generatingEvidence, setGeneratingEvidence] = useState(false)
 
   useEffect(() => {
     if (content.detail) return
@@ -43,6 +45,31 @@ export function DetailScreen() {
       showToast("PRD generation failed", msg.slice(0, 200))
     } finally {
       setGenerating(false)
+    }
+  }
+
+  const handleViewFullEvidence = async () => {
+    if (!d?.meta) {
+      showToast(
+        "Can't open full evidence",
+        "Open this finding from the weekly brief first.",
+      )
+      return
+    }
+    setGeneratingEvidence(true)
+    try {
+      const result = await runEvidenceGeneration(d.meta)
+      if (!result.ok) {
+        showToast("Evidence generation failed", result.message.slice(0, 200))
+        return
+      }
+      setContent({ evidence: result.evidence })
+      goTo("evidence")
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      showToast("Evidence generation failed", msg.slice(0, 200))
+    } finally {
+      setGeneratingEvidence(false)
     }
   }
 
@@ -115,6 +142,14 @@ export function DetailScreen() {
         <div className="detail-cta-actions detail-cta-actions-end">
           <button type="button" className="btn" onClick={() => goTo("brief")}>
             {d.cta.dismissLabel}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={handleViewFullEvidence}
+            disabled={generatingEvidence}
+          >
+            {generatingEvidence ? "Generating evidence…" : "View full evidence →"}
           </button>
           <button
             type="button"
