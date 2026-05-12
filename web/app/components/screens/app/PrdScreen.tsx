@@ -46,7 +46,7 @@ export function PrdScreen() {
   }
 
   return (
-    <AppLayout mainStyle={{ maxWidth: 900 }}>
+    <AppLayout mainClassName="main--reading">
       <a className="detail-back" onClick={() => goTo("detail")}>
         ← Back to evidence
       </a>

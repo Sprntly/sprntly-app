@@ -89,7 +89,8 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [aiPanelWidth, setAiPanelWidthState] = useState(AI_PANEL_WIDTH_DEFAULT)
-  const [aiPanelCollapsed, setAiPanelCollapsed] = useState(false)
+  /** Default collapsed; expanded only if user saved `sprntly-ai-panel-collapsed=0`. */
+  const [aiPanelCollapsed, setAiPanelCollapsed] = useState(true)
 
   useEffect(() => {
     try {
@@ -105,7 +106,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
           )
         }
       }
-      if (localStorage.getItem(AI_PANEL_C_KEY) === "1") {
+      const aiCollapsed = localStorage.getItem(AI_PANEL_C_KEY)
+      if (aiCollapsed === "0") {
+        setAiPanelCollapsed(false)
+      } else if (aiCollapsed === "1") {
         setAiPanelCollapsed(true)
       }
     } catch {

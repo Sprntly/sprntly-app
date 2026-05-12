@@ -95,7 +95,7 @@ export function BriefScreen() {
     (empty ? "No brief loaded yet — connect data and run the weekly pipeline." : "")
 
   return (
-    <AppLayout>
+    <AppLayout mainClassName="main--reading">
       <div className="main-header">
         <div>
           <h1
