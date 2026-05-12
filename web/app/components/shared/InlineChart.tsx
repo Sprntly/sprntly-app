@@ -77,16 +77,11 @@ function BarChart({ data }: { data: PrdChartDatum[] }) {
 
 function LineChart({ data }: { data: PrdChartDatum[] }) {
   const w = 560
+  const h = 180
   const padL = 40
   const padR = 14
   const padT = 14
-  // Long category labels need vertical room. We rotate them -30° and size
-  // the bottom padding to fit; tall charts also benefit from rotation
-  // alone, so this avoids the "all labels jammed together" overlap.
-  const longest = Math.max(...data.map((d) => String(d.label || "").length), 0)
-  const longish = longest > 8
-  const padB = longish ? 70 : 30
-  const h = 180 + (longish ? 40 : 0)
+  const padB = 30
   const innerW = w - padL - padR
   const innerH = h - padT - padB
   const values = data.map((d) => toNum(d.value))
@@ -121,34 +116,14 @@ function LineChart({ data }: { data: PrdChartDatum[] }) {
         strokeWidth={2.5}
         strokeLinejoin="round"
       />
-      {data.map((d, i) => {
-        const cx = x(i)
-        const cy = y(toNum(d.value))
-        // Rotate long labels 30° counter-clockwise around their anchor at
-        // (cx, padT + innerH + 16). Short labels stay horizontal.
-        const labelY = padT + innerH + 16
-        const label = String(d.label ?? "")
-        return (
-          <g key={i}>
-            <circle cx={cx} cy={cy} r={3.5} fill={CHART_COLORS[0]} />
-            {longish ? (
-              <text
-                x={cx}
-                y={labelY}
-                textAnchor="end"
-                className="prd-line-axis"
-                transform={`rotate(-30 ${cx} ${labelY})`}
-              >
-                {label}
-              </text>
-            ) : (
-              <text x={cx} y={labelY} textAnchor="middle" className="prd-line-axis">
-                {label}
-              </text>
-            )}
-          </g>
-        )
-      })}
+      {data.map((d, i) => (
+        <g key={i}>
+          <circle cx={x(i)} cy={y(toNum(d.value))} r={3.5} fill={CHART_COLORS[0]} />
+          <text x={x(i)} y={h - 10} textAnchor="middle" className="prd-line-axis">
+            {d.label}
+          </text>
+        </g>
+      ))}
     </svg>
   )
 }
