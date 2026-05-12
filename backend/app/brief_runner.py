@@ -1,13 +1,29 @@
 """Background brief generation. Kicked off on app startup; ensures a brief
-exists for each configured dataset without blocking startup.
+exists for each configured dataset, and also warms the per-insight
+evidence + PRD drill-downs so the first user click renders instantly.
 """
 import asyncio
 import logging
 
 from app.corpus import load_corpus
-from app.db import get_current_brief, save_brief
+from app.db import (
+    find_existing_evidence,
+    find_existing_prd,
+    get_current_brief,
+    save_brief,
+    start_evidence,
+    start_prd,
+)
+from app.evidence_runner import generate_evidence
 from app.llm import call_json
-from app.prompts import BRIEF_SCHEMA_VERSION, BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
+from app.prd_runner import generate_prd
+from app.prompts import (
+    BRIEF_SCHEMA_VERSION,
+    BRIEF_SYSTEM,
+    BRIEF_USER_TEMPLATE,
+    EVIDENCE_TEMPLATE_VERSION,
+    PRD_TEMPLATE_VERSION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,27 +55,102 @@ def _run_sync(dataset: str) -> None:
     )
 
 
-async def auto_generate_brief(dataset: str) -> None:
-    """Generate a brief for `dataset` if one doesn't already exist.
-
-    Errors are logged and stored on `_errors[dataset]`; the service keeps
-    serving. The user can retry by restarting the service (e.g. after fixing
-    the Anthropic API key).
+async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
+    """Generate an evidence doc for (brief_id, insight_index) unless one is
+    already cached. Errors are swallowed — drill-down warming is a perf
+    optimization, not a correctness requirement.
     """
-    if get_current_brief(dataset):
-        logger.info("Brief already cached for %s, skipping auto-generate", dataset)
+    if find_existing_evidence(brief_id, insight_index):
+        logger.info(
+            "Evidence already cached brief_id=%s insight_index=%s, skipping warm",
+            brief_id,
+            insight_index,
+        )
         return
-    _status[dataset] = "generating"
-    _errors.pop(dataset, None)
-    logger.info("Auto-generating brief for %s ...", dataset)
-    try:
-        await asyncio.to_thread(_run_sync, dataset)
-        _status[dataset] = "ready"
-        logger.info("Brief generated for %s", dataset)
-    except Exception as exc:
-        _status[dataset] = "failed"
-        _errors[dataset] = f"{type(exc).__name__}: {exc}"[:300]
-        logger.exception("Brief generation failed for %s", dataset)
+    ev_id = start_evidence(
+        brief_id=brief_id,
+        insight_index=insight_index,
+        title=title,
+        template_version=EVIDENCE_TEMPLATE_VERSION,
+    )
+    logger.info(
+        "Warming evidence ev_id=%s brief_id=%s insight_index=%s",
+        ev_id,
+        brief_id,
+        insight_index,
+    )
+    await generate_evidence(ev_id, brief_id, insight_index)
+
+
+async def _warm_prd(brief_id: int, insight_index: int, title: str) -> None:
+    """Generate a PRD for (brief_id, insight_index) unless one is already
+    cached. Errors are swallowed for the same reason as _warm_evidence.
+    """
+    if find_existing_prd(brief_id, insight_index):
+        logger.info(
+            "PRD already cached brief_id=%s insight_index=%s, skipping warm",
+            brief_id,
+            insight_index,
+        )
+        return
+    prd_id = start_prd(
+        brief_id=brief_id,
+        insight_index=insight_index,
+        title=title,
+        template_version=PRD_TEMPLATE_VERSION,
+    )
+    logger.info(
+        "Warming PRD prd_id=%s brief_id=%s insight_index=%s",
+        prd_id,
+        brief_id,
+        insight_index,
+    )
+    await generate_prd(prd_id, brief_id, insight_index)
+
+
+def _warm_drilldowns(brief: dict) -> None:
+    """Fan out evidence + PRD generation for every insight in this brief.
+    Each warm-task runs concurrently; cached entries return immediately
+    (dedupe lives in _warm_evidence / _warm_prd).
+    """
+    brief_id = brief.get("id")
+    if not brief_id:
+        return
+    insights = brief.get("insights") or []
+    for i, ins in enumerate(insights):
+        title = (ins or {}).get("title") or f"Insight #{i + 1}"
+        asyncio.create_task(_warm_evidence(brief_id, i, title))
+        asyncio.create_task(_warm_prd(brief_id, i, title))
+
+
+async def auto_generate_brief(dataset: str) -> None:
+    """Generate a brief for `dataset` if one doesn't already exist, then warm
+    the per-insight drill-downs (evidence + PRD).
+
+    Errors during brief generation are logged and stored on `_errors[dataset]`;
+    the service keeps serving. Drill-down warming failures are logged inside
+    the runners and don't block subsequent work.
+    """
+    brief = get_current_brief(dataset)
+    if brief is None:
+        _status[dataset] = "generating"
+        _errors.pop(dataset, None)
+        logger.info("Auto-generating brief for %s ...", dataset)
+        try:
+            await asyncio.to_thread(_run_sync, dataset)
+            _status[dataset] = "ready"
+            logger.info("Brief generated for %s", dataset)
+        except Exception as exc:
+            _status[dataset] = "failed"
+            _errors[dataset] = f"{type(exc).__name__}: {exc}"[:300]
+            logger.exception("Brief generation failed for %s", dataset)
+            return
+        brief = get_current_brief(dataset)
+    else:
+        logger.info("Brief already cached for %s, skipping auto-generate", dataset)
+    if brief is None:
+        return
+    _warm_drilldowns(brief)
 
 
 # Datasets the service will auto-generate briefs for on startup.
