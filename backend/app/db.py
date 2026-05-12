@@ -38,6 +38,18 @@ CREATE TABLE IF NOT EXISTS ask_log (
     answer TEXT NOT NULL,
     citations_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS evidences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brief_id INTEGER NOT NULL,
+    insight_index INTEGER NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    title TEXT NOT NULL,
+    payload_md TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'generating',
+    error TEXT,
+    FOREIGN KEY (brief_id) REFERENCES briefs(id)
+);
 """
 
 
@@ -219,3 +231,56 @@ def log_ask(question: str, answer: str, citations: list) -> None:
             "INSERT INTO ask_log (question, answer, citations_json) VALUES (?, ?, ?)",
             (question, answer, json.dumps(citations)),
         )
+
+
+# ----- Evidence pages ---------------------------------------------------------
+
+def start_evidence(brief_id: int, insight_index: int, title: str) -> int:
+    """Insert an empty evidence row in 'generating' state. Returns the new id."""
+    with conn() as c:
+        cur = c.execute(
+            "INSERT INTO evidences (brief_id, insight_index, title, payload_md, status) "
+            "VALUES (?, ?, ?, '', 'generating')",
+            (brief_id, insight_index, title),
+        )
+        return cur.lastrowid
+
+
+def complete_evidence(evidence_id: int, title: str, md: str) -> None:
+    with conn() as c:
+        c.execute(
+            "UPDATE evidences SET title=?, payload_md=?, status='ready', error=NULL "
+            "WHERE id=?",
+            (title, md, evidence_id),
+        )
+
+
+def fail_evidence(evidence_id: int, error: str) -> None:
+    with conn() as c:
+        c.execute(
+            "UPDATE evidences SET status='failed', error=? WHERE id=?",
+            (error[:500], evidence_id),
+        )
+
+
+def get_evidence(evidence_id: int) -> dict | None:
+    with conn() as c:
+        row = c.execute(
+            "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
+            "status, error FROM evidences WHERE id=?",
+            (evidence_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def find_existing_evidence(brief_id: int, insight_index: int) -> dict | None:
+    """Return the most recent ready/generating evidence for a (brief, insight)."""
+    with conn() as c:
+        row = c.execute(
+            "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
+            "status, error FROM evidences "
+            "WHERE brief_id=? AND insight_index=? AND status IN ('ready','generating') "
+            "ORDER BY id DESC LIMIT 1",
+            (brief_id, insight_index),
+        ).fetchone()
+    return dict(row) if row else None
