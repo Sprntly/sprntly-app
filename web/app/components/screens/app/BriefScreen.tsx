@@ -89,11 +89,6 @@ export function BriefScreen() {
     [brief.sections],
   )
 
-  const headerSub =
-    brief.docSubline ??
-    brief.subline ??
-    (empty ? "No brief loaded yet — connect data and run the weekly pipeline." : "")
-
   return (
     <AppLayout>
       <div className="main-header">
@@ -110,7 +105,6 @@ export function BriefScreen() {
           >
             Sprntly found three most important things to drive your goal
           </h1>
-          <p className="main-sub">{headerSub}</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <div className="review-past-wrap">
@@ -160,6 +154,8 @@ export function BriefScreen() {
         />
       ) : (
         <div className="wb-doc">
+          {brief.docKicker ? <p className="wb-doc-kicker">{brief.docKicker}</p> : null}
+
           <hr className="wb-rule" />
 
           {brief.docHeader ? (
