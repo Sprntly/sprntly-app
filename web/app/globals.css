@@ -633,6 +633,13 @@
   .main.main--reading .prd-foot {
     padding: 12px 18px;
   }
+  /* Evidence + PRD share `.prd-frame`; 820px centered left large gutters in reading mode. */
+  .main.main--reading .prd-frame {
+    max-width: none;
+    width: 100%;
+    margin-left: 0;
+    margin-right: 0;
+  }
   /** Weekly brief only — extra vertical rhythm (headline · company row · cards). */
   .main.main--brief .main-header {
     margin-bottom: 30px;
