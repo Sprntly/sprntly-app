@@ -14,7 +14,7 @@ from app.db import (
     start_evidence,
     start_prd,
 )
-from app.ask_runner import warm_predefined_asks
+from app.ask_runner import warm_brief_dynamic_asks, warm_predefined_asks
 from app.evidence_runner import generate_evidence
 from app.llm import call_json
 from app.prd_runner import generate_prd
@@ -148,6 +148,10 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
     # demo's first click renders instantly.
     if dataset:
         warm_predefined_asks(dataset, _WARM_SEMA)
+        # Pass 4: per-insight Ask prompts. Clicking "Ask Sprntly" on a
+        # finding card in the BriefScreen fires "Tell me more about: <title>"
+        # — those titles are known at brief-gen time, so we warm them too.
+        warm_brief_dynamic_asks(dataset, brief, _WARM_SEMA)
 
 
 async def auto_generate_brief(dataset: str) -> None:

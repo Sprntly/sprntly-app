@@ -37,7 +37,11 @@ BRIEF_SCHEMA_VERSION = 3
 #      than bar). LLM now uses `bar` for sequential-step / funnel data.
 #  8 — Added `gauge` kind (semicircular dial showing current vs target).
 #      Fits insights framed as "current X vs target/baseline Y".
-EVIDENCE_TEMPLATE_VERSION = 8
+#  9 — Dropped the "Chart brief" tables from Section 3 cuts. Each cut now
+#      goes straight from Source/Period line → chart → Rules in/out. The
+#      Type/X-axis/Y-axis/Highlight/Color-logic table was redundant
+#      scaffolding (chart title + visual already convey it).
+EVIDENCE_TEMPLATE_VERSION = 9
 
 
 # Bumped whenever the PRD prompt or template changes meaningfully. Same
@@ -429,11 +433,12 @@ the headline number). Then 1–5 chart beats, each: paragraph framing the \
 chart, the chart itself as a `chart` fenced block, then a single \
 `Rules in: <sentence>. Rules out: <sentence>.` line. Beats are flexible: use \
 1 for a simple finding, 5 for a complex one.
-- **Section 3 (Evidence)** has 3 to 4 cuts. EVERY cut must include a filled \
-**Chart brief** table (Type, X-axis, Y-axis, Highlight, Color logic) followed \
-by a `chart` fenced block and a `Rules in: … Rules out: …` line. The data \
-science slicing here is what justifies the finding — make the infographics \
-self-explanatory; let the chart type follow the data shape.
+- **Section 3 (Evidence)** has 3 to 4 cuts. Each cut: a `Source: ... | \
+Period: ...` provenance line, then a `chart` fenced block, then a single \
+`Rules in: <sentence>. Rules out: <sentence>.` line. DO NOT emit a "Chart \
+brief" table — the chart's title is already a complete-sentence takeaway, \
+and the chart itself shows the axes/values, so a separate Type/X-axis/ \
+Y-axis/Highlight/Color-logic table is redundant scaffolding. Skip it.
 - **Section 3** ends with `Qualitative signals` (3–5 bullets, format \
 `[Source] — "[theme]" — [volume] — [trend]`) and `In their own words` \
 (3–5 verbatim quotes, attributed by channel). Never invent a quote; drop \
@@ -492,8 +497,8 @@ Use a markdown table only when the cut is a flat list of values that no chart wo
 Every numeric value MUST come from the insight/corpus — never invent \
 numbers. Always close every fenced block with ``` on its own line.
 
-For markdown tables (Analyst/Team meta, Estimated impact, Business impact, \
-Chart briefs), ALWAYS include the separator row right under the header \
+For markdown tables (Analyst/Team meta, Estimated impact, Business impact), \
+ALWAYS include the separator row right under the header \
 (`| --- | --- | ... |`). Without it, downstream renderers treat the table \
 as plain text.
 

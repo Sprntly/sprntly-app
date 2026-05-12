@@ -105,3 +105,23 @@ def warm_predefined_asks(dataset: str, sema: asyncio.Semaphore) -> None:
     """
     for prompt in PREDEFINED_ASK_PROMPTS:
         asyncio.create_task(_warm_one(dataset, prompt, sema))
+
+
+def warm_brief_dynamic_asks(
+    dataset: str, brief: dict, sema: asyncio.Semaphore
+) -> None:
+    """Warm the per-insight Ask prompts that the BriefScreen fires when the
+    user clicks "Ask Sprntly" on a finding card.
+
+    Frontend pattern (web/app/lib/brief-adapter.ts):
+        askQuestion: `Tell me more about: ${insight.title}`
+
+    For each insight in the brief, we precompute the same text and warm a
+    cache row so the click renders instantly.
+    """
+    for insight in brief.get("insights") or []:
+        title = (insight or {}).get("title")
+        if not title:
+            continue
+        prompt = f"Tell me more about: {title}"
+        asyncio.create_task(_warm_one(dataset, prompt, sema))

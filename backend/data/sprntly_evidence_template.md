@@ -109,16 +109,6 @@ Evidence confidence: [High / Medium / Low]   |   If not High, state what additio
 
 Source: [Tool/system]   |   Period: [date range and sample size]
 
-**Chart brief**
-
-| Field | Spec |
-| --- | --- |
-| Type | [funnel / line / grouped bar / comparison bar / scatter] |
-| X-axis | [specific x-axis label] |
-| Y-axis | [specific y-axis label] |
-| Highlight | [name the one bar or data point that carries the story] |
-| Color logic | [red = problem state   |   green = healthy state   |   two colors max] |
-
 ```chart
 { "kind": "...", "title": "Complete-sentence takeaway", "data": [...] }
 ```
@@ -128,16 +118,6 @@ Rules in: [One sentence: the hypothesis this cut supports.] Rules out: [One sent
 ### Cut 2 — [One-sentence headline with the number]
 
 Source: [Tool/system]   |   Period: [date range and sample size]
-
-**Chart brief**
-
-| Field | Spec |
-| --- | --- |
-| Type | [chart type] |
-| X-axis | [x-axis] |
-| Y-axis | [y-axis] |
-| Highlight | [highlight element] |
-| Color logic | [color logic] |
 
 ```chart
 { "kind": "...", "title": "Complete-sentence takeaway", "data": [...] }
@@ -149,16 +129,6 @@ Rules in: [...]. Rules out: [...].
 
 Source: [Tool/system]   |   Period: [date range and sample size]
 
-**Chart brief**
-
-| Field | Spec |
-| --- | --- |
-| Type | [chart type] |
-| X-axis | [x-axis] |
-| Y-axis | [y-axis] |
-| Highlight | [highlight element] |
-| Color logic | [color logic] |
-
 ```chart
 { "kind": "...", "title": "Complete-sentence takeaway", "data": [...] }
 ```
@@ -168,16 +138,6 @@ Rules in: [...]. Rules out: [...].
 ### Cut 4 (optional) — [Cross-check ruling out a competing explanation]
 
 Source: [Tool/system]   |   Period: [date range and sample size]
-
-**Chart brief**
-
-| Field | Spec |
-| --- | --- |
-| Type | [chart type] |
-| X-axis | [x-axis] |
-| Y-axis | [y-axis] |
-| Highlight | [highlight element] |
-| Color logic | [color logic] |
 
 ```chart
 { "kind": "...", "title": "Complete-sentence takeaway", "data": [...] }
