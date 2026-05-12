@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS evidences (
     payload_md TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'generating',
     error TEXT,
+    template_version INTEGER,
     FOREIGN KEY (brief_id) REFERENCES briefs(id)
 );
 """
@@ -63,6 +64,10 @@ def init_db() -> None:
             c.execute("ALTER TABLE prds ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'")
         if "error" not in cols:
             c.execute("ALTER TABLE prds ADD COLUMN error TEXT")
+        # Same for evidences (template_version was added later).
+        ev_cols = {row[1] for row in c.execute("PRAGMA table_info(evidences)").fetchall()}
+        if ev_cols and "template_version" not in ev_cols:
+            c.execute("ALTER TABLE evidences ADD COLUMN template_version INTEGER")
 
 
 @contextmanager
@@ -235,15 +240,38 @@ def log_ask(question: str, answer: str, citations: list) -> None:
 
 # ----- Evidence pages ---------------------------------------------------------
 
-def start_evidence(brief_id: int, insight_index: int, title: str) -> int:
+def start_evidence(
+    brief_id: int,
+    insight_index: int,
+    title: str,
+    template_version: int | None = None,
+) -> int:
     """Insert an empty evidence row in 'generating' state. Returns the new id."""
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO evidences (brief_id, insight_index, title, payload_md, status) "
-            "VALUES (?, ?, ?, '', 'generating')",
-            (brief_id, insight_index, title),
+            "INSERT INTO evidences (brief_id, insight_index, title, payload_md, status, template_version) "
+            "VALUES (?, ?, ?, '', 'generating', ?)",
+            (brief_id, insight_index, title, template_version),
         )
         return cur.lastrowid
+
+
+def invalidate_stale_evidences(current_version: int) -> int:
+    """Mark any ready/generating evidence whose `template_version` differs
+    from `current_version` as 'invalidated'. Returns the number of rows.
+
+    `find_existing_evidence` only returns ready/generating rows, so
+    invalidated docs are skipped — the next view triggers a fresh
+    generation under the current prompt.
+    """
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE evidences SET status='invalidated' "
+            "WHERE status IN ('ready', 'generating') "
+            "  AND (template_version IS NULL OR template_version != ?)",
+            (current_version,),
+        )
+        return cur.rowcount or 0
 
 
 def complete_evidence(evidence_id: int, title: str, md: str) -> None:
@@ -267,7 +295,7 @@ def get_evidence(evidence_id: int) -> dict | None:
     with conn() as c:
         row = c.execute(
             "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
-            "status, error FROM evidences WHERE id=?",
+            "status, error, template_version FROM evidences WHERE id=?",
             (evidence_id,),
         ).fetchone()
     return dict(row) if row else None
@@ -278,7 +306,7 @@ def find_existing_evidence(brief_id: int, insight_index: int) -> dict | None:
     with conn() as c:
         row = c.execute(
             "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
-            "status, error FROM evidences "
+            "status, error, template_version FROM evidences "
             "WHERE brief_id=? AND insight_index=? AND status IN ('ready','generating') "
             "ORDER BY id DESC LIMIT 1",
             (brief_id, insight_index),

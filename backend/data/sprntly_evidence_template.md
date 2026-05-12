@@ -83,17 +83,6 @@ Rules in: [...]. Rules out: [...].
 
 [Paragraph 2 — what changed recently or why this analysis is timely. Optional. Cut if not strictly needed.]
 
-### Data sources
-
-| Source | Type | What it contributes |
-| --- | --- | --- |
-| [Source 1 — e.g. Mixpanel] | 1P Product | [What it contributes — e.g. funnel drop-off rates, session data] |
-| [Source 2 — e.g. Stripe] | 1P Revenue | [What it contributes — e.g. subscription cancellations, cohort churn] |
-| [Source 3 — e.g. Gong] | 1P Sales/CS | [What it contributes — e.g. cancellation call reason analysis] |
-| [Source 4 — e.g. Zendesk] | 1P Support | [What it contributes — e.g. ticket volume and theme classification] |
-| [Source 5 — e.g. App Store] | 3P Review | [What it contributes — e.g. 1-star review theme analysis] |
-| [Source 6 — e.g. Competitive] | 3P Market | [What it contributes — e.g. competitor pricing or feature audit] |
-
 ────────────────────────────────────────────────────────────
 
 ## 2. Business impact
@@ -241,7 +230,6 @@ Delete this section before sharing with stakeholders.
 | Subtitle = behavior + scale | The subtitle states the specific behavior observed and the scale of the problem. It is the most important sentence in the document for a senior reader. |
 | Bottom line = narrative with evidence | Each beat introduces a chart. Write the paragraph first, then drop the chart in. The paragraph tells the reader what to look for; the chart proves it. Delete beats you don't need; add beats if the story requires them. |
 | Beat count is flexible | 1 beat for a simple finding, 5–6 for a complex multi-dimensional problem. Every chart must be introduced by a paragraph that frames it and followed by Rules in / Rules out. |
-| Data sources are explicit | Every source in Section 3 must appear in the Data sources table. No orphaned data. |
 | Qualitative confirms quantitative | Section 3's qualitative bullets are not decoration. They should either confirm the quantitative story or add a dimension the data can't capture. |
 | Synthesis is for the skipper | Section 4 is for a senior reader who skipped the evidence. Write it as if the reader saw nothing else. |
 | Hypothesis is the deliverable | Everything in this document builds toward Section 5. If the hypothesis is not specific enough to design an A/B test from, the analysis is not finished. |

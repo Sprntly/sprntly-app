@@ -17,6 +17,16 @@
 BRIEF_SCHEMA_VERSION = 3
 
 
+# Bumped whenever the EVIDENCE prompt or template changes meaningfully.
+# Stamped into every saved evidence row; on startup, cached evidence docs
+# with a different version are invalidated so the next view regenerates
+# them under the current prompt.
+#
+#  1 — original evidence prompt + template
+#  2 — Dropped the "Data sources" subsection from §1 Business context
+EVIDENCE_TEMPLATE_VERSION = 2
+
+
 BRIEF_SYSTEM = """\
 You are Sprntly, a product-memory assistant for product managers. Your output \
 is presented to a PM as a Weekly Product Brief — a small set of finding cards \
@@ -399,10 +409,10 @@ that no chart would help.
 Every numeric value MUST come from the insight/corpus — never invent \
 numbers. Always close every fenced block with ``` on its own line.
 
-For markdown tables (Analyst/Team meta, Estimated impact, Data sources, \
-Business impact, Chart briefs), ALWAYS include the separator row right under \
-the header (`| --- | --- | ... |`). Without it, downstream renderers treat \
-the table as plain text.
+For markdown tables (Analyst/Team meta, Estimated impact, Business impact, \
+Chart briefs), ALWAYS include the separator row right under the header \
+(`| --- | --- | ... |`). Without it, downstream renderers treat the table \
+as plain text.
 
 Do NOT include the "How to use this template" section in the generated \
 document — it is instructions for you, not part of the output. End the \

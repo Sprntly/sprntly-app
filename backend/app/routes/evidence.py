@@ -11,6 +11,7 @@ from app.db import (
     start_evidence,
 )
 from app.evidence_runner import generate_evidence
+from app.prompts import EVIDENCE_TEMPLATE_VERSION
 
 router = APIRouter(prefix="/v1/evidence", tags=["evidence"])
 
@@ -59,6 +60,7 @@ async def generate(
         brief_id=body.brief_id,
         insight_index=body.insight_index,
         title=title,
+        template_version=EVIDENCE_TEMPLATE_VERSION,
     )
     asyncio.create_task(
         generate_evidence(evidence_id, body.brief_id, body.insight_index)
