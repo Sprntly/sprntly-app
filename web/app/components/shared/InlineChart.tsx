@@ -238,8 +238,11 @@ function GaugeChart({ data }: { data: PrdChartDatum[] }) {
   const arcPath = (fromPct: number, toPct: number) => {
     const p0 = ptAt(fromPct)
     const p1 = ptAt(toPct)
-    const large = Math.abs(toPct - fromPct) > 0.5 ? 1 : 0
-    return `M ${p0.x.toFixed(2)} ${p0.y.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`
+    // Gauge is a 180° semicircle — every sub-arc is < 180°, so the
+    // large-arc-flag is always 0. (The previous threshold of `>0.5`
+    // incorrectly picked the major arc for current values past 50%,
+    // routing the arc through the bottom and clipping off-canvas.)
+    return `M ${p0.x.toFixed(2)} ${p0.y.toFixed(2)} A ${r} ${r} 0 0 1 ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`
   }
 
   // Target tick mark — short radial line crossing the arc.
