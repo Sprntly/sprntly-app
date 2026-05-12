@@ -633,6 +633,23 @@
   .main.main--reading .prd-foot {
     padding: 12px 18px;
   }
+  /** Weekly brief only — extra vertical rhythm (headline · company row · cards). */
+  .main.main--brief .main-header {
+    margin-bottom: 30px;
+  }
+  .main.main--brief .main-title--brief {
+    font-size: clamp(19px, 3.1vw, 34px);
+    line-height: 1.12;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .main.main--brief .wb-doc-header-grid {
+    margin-bottom: 24px;
+  }
+  .main.main--brief .wb-card-stack {
+    gap: 14px;
+  }
   .main-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 26px; gap: 20px; }
   .main-title { font-family: var(--font-display); font-weight: 600; font-size: 32px; letter-spacing: -0.025em; line-height: 1.1; margin: 0 0 6px; }
   .main-title span { color: var(--accent); }

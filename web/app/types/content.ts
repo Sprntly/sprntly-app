@@ -117,22 +117,20 @@ export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
     target: "brief",
   },
   {
-    id: "home-prompt-ask",
+    id: "home-prompt-revenue",
     icon: "chart",
-    title: "Compare our segments",
-    desc: "Opens Ask with a retention question ready to send.",
+    title: "What are the biggest revenue drivers",
+    desc: "Fills Ask so you can edit or send.",
     target: "ondemand",
-    prompt:
-      "Compare retention across our top three customer segments — what differs, what might explain it, and what we should validate next.",
+    prompt: "What are the biggest revenue drivers",
   },
   {
-    id: "home-prompt-brief",
-    icon: "diamond",
-    title: "Challenge the ranking",
-    desc: "Opens the brief with a question in the side assistant.",
-    target: "brief",
-    prompt:
-      "Why is the #1 finding ranked higher than #2? What evidence supports that ordering?",
+    id: "home-prompt-cost",
+    icon: "document",
+    title: "What are the biggest cost drivers",
+    desc: "Fills Ask so you can edit or send.",
+    target: "ondemand",
+    prompt: "What are the biggest cost drivers",
   },
 ]
 

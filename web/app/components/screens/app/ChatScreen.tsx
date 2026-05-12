@@ -58,7 +58,7 @@ export function ChatScreen() {
   const conversationsRef = useRef(conversations)
   conversationsRef.current = conversations
 
-  const name = content.userName?.split(/\s+/)[0] ?? "there"
+  const name = content.userName?.split(/\s+/)[0] ?? "David"
   const homeCards = content.homeStarterCards.filter((c) => c.id !== "home-goto-ask")
 
   useEffect(() => {
@@ -307,9 +307,7 @@ export function ChatScreen() {
                           content.homeHeadline
                         ) : (
                           <>
-                            Hi, {name}.
-                            <br />
-                            <span>What should we ship next?</span>
+                            Hi <span>{name}</span>, what should we build today?
                           </>
                         )}
                       </h1>

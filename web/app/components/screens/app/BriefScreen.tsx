@@ -78,19 +78,10 @@ export function BriefScreen() {
   )
 
   return (
-    <AppLayout mainClassName="main--reading">
+    <AppLayout mainClassName="main--reading main--brief">
       <div className="main-header">
         <div>
-          <h1
-            className="main-title"
-            style={{
-              fontSize: "clamp(15px, 1.65vw, 22px)",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              lineHeight: 1.2,
-            }}
-          >
+          <h1 className="main-title main-title--brief">
             Sprntly found three most important things to drive your goal
           </h1>
         </div>
