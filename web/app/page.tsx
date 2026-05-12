@@ -26,7 +26,6 @@ import {
   ChatScreen,
   BriefScreen,
   DetailScreen,
-  EvidenceScreen,
   PrdScreen,
   PastScreen,
   ShippedScreen,
@@ -96,8 +95,6 @@ function AppContent() {
         return <BriefScreen />
       case "detail":
         return <DetailScreen />
-      case "evidence":
-        return <EvidenceScreen />
       case "prd":
         return <PrdScreen />
       case "ondemand":

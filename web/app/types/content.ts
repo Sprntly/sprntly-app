@@ -338,9 +338,6 @@ export interface AppContentState {
   /** Pre-built drill-down state per finding, indexed by `BriefFindingRow.detailKey`. */
   briefDetails: Record<string, DetailState>
   prd: PrdState | null
-  /** Generated Evidence Page doc — same PrdState shape (markdown sections
-   *  with tables and `chart` blocks) so it can reuse the markdown adapter. */
-  evidence: PrdState | null
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]

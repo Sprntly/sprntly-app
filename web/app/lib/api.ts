@@ -147,36 +147,6 @@ export type PrdRecord = {
   error?: string | null
 }
 
-export type EvidenceStartResponse = {
-  evidence_id: number
-  status: "generating" | "ready" | "failed"
-  title: string
-}
-
-export type EvidenceRecord = {
-  id: number
-  brief_id: number
-  insight_index: number
-  generated_at: string
-  title: string
-  payload_md: string
-  status: "generating" | "ready" | "failed"
-  error?: string | null
-}
-
-export const evidenceApi = {
-  /** Kicks off Evidence Page generation in the background. Returns
-   *  immediately with an evidence_id; client should poll
-   *  evidenceApi.get(id) until status === 'ready'. */
-  generate: (briefId: number, insightIndex: number, force = false) =>
-    api.post<EvidenceStartResponse>("/v1/evidence/generate", {
-      brief_id: briefId,
-      insight_index: insightIndex,
-      force,
-    }),
-  get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
-}
-
 export const prdApi = {
   /** Kicks off PRD generation in the background. Returns immediately with a
    *  prd_id; client should poll prdApi.get(id) until status === 'ready'. */

@@ -9,7 +9,7 @@ from app import auth, db
 from app.brief_runner import auto_generate_all
 from app.config import settings
 from app.prompts import BRIEF_SCHEMA_VERSION
-from app.routes import ask, brief, evidence, health, prd
+from app.routes import ask, brief, health, prd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -46,4 +46,3 @@ app.include_router(auth.router)
 app.include_router(brief.router)
 app.include_router(ask.router)
 app.include_router(prd.router)
-app.include_router(evidence.router)
