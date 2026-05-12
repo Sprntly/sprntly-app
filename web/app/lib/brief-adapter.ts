@@ -13,9 +13,6 @@ import type {
 } from "../types/content"
 import type { Brief, ChartHint, ConvergenceItem, Insight } from "./api"
 
-const DOC_SUBLINE =
-  "Generic template · Works for any product, company, or finding type"
-
 type TagMeta = {
   tagType: BriefTagType
   tagLabel: string
@@ -474,7 +471,7 @@ export function briefToBriefState(brief: Brief): BriefState {
   return {
     weekRange: brief.week_label || null,
     subline: brief.summary_headline || null,
-    docSubline: hasFindings ? DOC_SUBLINE : null,
+    docSubline: null,
     docKicker: brief.summary_headline?.trim() || null,
     docHeader: hasFindings && insights.length > 0 ? buildDocHeader(brief, insights) : null,
     docFooter: hasFindings && insights.length > 0 ? buildDocFooter(insights) : null,

@@ -98,7 +98,18 @@ export function BriefScreen() {
     <AppLayout>
       <div className="main-header">
         <div>
-          <h1 className="main-title">Weekly Product Brief</h1>
+          <h1
+            className="main-title"
+            style={{
+              fontSize: "clamp(15px, 1.65vw, 22px)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              lineHeight: 1.2,
+            }}
+          >
+            Sprntly found three most important things to drive your goal
+          </h1>
           <p className="main-sub">{headerSub}</p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -155,7 +166,6 @@ export function BriefScreen() {
 
           {brief.docHeader ? (
             <>
-              <h2 className="wb-section-title">Brief header</h2>
               <div className="wb-doc-header-grid">
                 <div className="wb-doc-header-cell">
                   <div className="wb-doc-header-label">Company</div>
@@ -173,12 +183,6 @@ export function BriefScreen() {
               <hr className="wb-rule" />
             </>
           ) : null}
-
-          <h2 className="wb-section-title">Finding cards</h2>
-          <p className="wb-findings-hint">
-            Each card follows the same structure. The live brief pulls from your API. Aim for 3–5
-            cards per brief.
-          </p>
 
           <div className="wb-card-stack">
             {flatFindings.map((f, i) => (
