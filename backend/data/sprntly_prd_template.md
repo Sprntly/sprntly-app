@@ -1,22 +1,24 @@
-# [Surface] — [What we're shipping] PRD
+# [Surface] — [What we're shipping]
 
 Replace bracket text. Title under 12 words. Format: [Surface] — [What we're shipping].
-
-**TL;DR** — [Three sentences max. Sentence 1: the problem. Sentence 2: the proposed fix. Sentence 3: the projected impact with concrete numbers.]
-
-A senior reading only the TL;DR should know whether to read the rest. Lead with numbers.
 
 Author: [Name] | Status: [Draft / In Review / Approved] | Target ship: [Date]
 
 ────────────────────────────────────────────────────────────
 
+## TL;DR
+
+Sentence 1: the problem with the key number. Sentence 2: the proposed fix. Sentence 3: the projected impact — concrete numbers only. No adjectives. A senior reading only this should know whether to read the rest.
+
+[Sentence 1 — problem + key number.] [Sentence 2 — proposed fix.] [Sentence 3 — projected impact in concrete numbers.]
+
+────────────────────────────────────────────────────────────
+
 ## 1. Context
 
-1–2 short paragraphs. Why now? What does the reader need to know about the business, surface, and customer? Don't explain the problem yet — that's section 2.
+[Paragraph 1 — the relevant product surface, customer segment, what is true today. 3–5 sentences max. Do not explain the problem yet — that is Section 2.]
 
-[Paragraph 1 — the relevant product surface, customer segment, what's true today.]
-
-[Paragraph 2 — what changed recently or why it's timely. Optional.]
+[Paragraph 2 — what changed recently or why this is timely. Optional. Cut if not strictly needed.]
 
 ────────────────────────────────────────────────────────────
 
@@ -24,200 +26,184 @@ Author: [Name] | Status: [Draft / In Review / Approved] | Target ship: [Date]
 
 ### User problem
 
-Frame from the user's POV. What are they trying to do? Where does it fail? What's the cost? Use their language. One short paragraph — a beat-by-beat narrative works well.
-
 [A [user persona] is trying to [goal]. They [step-by-step what happens]. They run into [friction] which causes [pain]. As a result, [behavioral consequence].]
 
-### Business problem
-
-Translate to business terms. Quantify wherever possible.
+### Business impact
 
 | Dimension | Impact |
 | --- | --- |
-| Affected user volume | [# users / claims / sessions per month or year] |
+| Affected user volume | [# users / sessions / month] |
 | Cost per affected user | [$ / churn pp / NPS pts] |
-| Annualized business cost | [$X/yr] |
-| Trajectory | [Growing / stable / shrinking; why] |
+| Annualized business cost | [$X / yr] |
+| Trajectory | [Growing / stable / shrinking — one sentence why] |
 
 ────────────────────────────────────────────────────────────
 
 ## 3. Evidence
 
-3 to 4 cuts of data. Each cut is a separate H3 with a one-sentence headline finding. For each cut, choose the presentation format that best communicates the data — an infographic (bar / line / pie / stat), a table, or prose.
+Evidence confidence: [High / Medium / Low]   |   If not High, add one sentence on the data gap.
 
-If a cut has visual shape, present it visually using a fenced `chart` block (see "How to embed an infographic" at the bottom of this template). If a cut is a logical or causal argument that doesn't reduce to a clean visual, write the paragraph. If it's a flat list of values, use a markdown table.
+### Cut 1 — [One-sentence headline finding with the number]
 
-End the section with Qualitative signals (bullets) and In their own words (user quotes). The whole section should be readable in 90 seconds.
+Source: [Tool/system]   |   Date range: [e.g. Q1–Q3 2025 / trailing 12 months]
 
-### Cut 1: [One-sentence headline finding with the number]
+**Chart brief**
 
-Place the presentation first — chart, table, or paragraph. Then 1–3 sentences interpreting it: state what the data rules in and what it rules out.
+| Field | Spec |
+| --- | --- |
+| Type | [funnel / line / grouped bar / comparison bar / scatter] |
+| X-axis | [specific axis label — e.g. 'Claim step', not just 'Steps'] |
+| Y-axis | [specific axis label — e.g. 'Completion rate (%)', not just '%'] |
+| Highlight | [name the one bar or data point that carries the story] |
+| Color logic | [red = problem state   |   green = healthy state   |   two colors max] |
 
-[Presentation goes here — embed a chart block, a markdown table, or a paragraph.]
+[Infographic goes here — full content width. Build after filling chart brief above.]
 
-Rules in: [the hypothesis the cut supports]. Rules out: [hypotheses the cut eliminates].
+Rules in: [one sentence — the hypothesis this cut supports]. Rules out: [one sentence — the competing hypothesis this eliminates].
 
-### Cut 2: [Headline finding]
+### Cut 2 — [One-sentence headline with the number]
 
-[Presentation goes here.]
+Source: [Tool/system]   |   Date range: [range]
 
-[1–3 sentence interpretation.]
+**Chart brief**
 
-### Cut 3: [Headline finding]
+| Field | Spec |
+| --- | --- |
+| Type | [chart type] |
+| X-axis | [x-axis] |
+| Y-axis | [y-axis] |
+| Highlight | [highlight element] |
+| Color logic | [color logic] |
 
-[Presentation goes here.]
+[Infographic goes here — full content width.]
 
-[1–3 sentence interpretation.]
+Rules in: [one sentence]. Rules out: [one sentence].
 
-### Cut 4 (optional): [Headline finding — cross-check ruling out a competing explanation]
+### Cut 3 — [One-sentence headline with the number]
 
-Optional. Use when there's a tempting alternative hypothesis worth pre-empting.
+Source: [Tool/system]   |   Date range: [range]
 
-[Presentation goes here.]
+**Chart brief**
 
-[1–3 sentence interpretation.]
+| Field | Spec |
+| --- | --- |
+| Type | [chart type] |
+| X-axis | [x-axis] |
+| Y-axis | [y-axis] |
+| Highlight | [highlight element] |
+| Color logic | [color logic] |
+
+[Infographic goes here — full content width.]
+
+Rules in: [one sentence]. Rules out: [one sentence].
+
+### Cut 4 (optional) — [Use only to pre-empt a tempting competing explanation]
+
+Source: [Tool/system]   |   Date range: [range]
+
+**Chart brief**
+
+| Field | Spec |
+| --- | --- |
+| Type | [chart type] |
+| X-axis | [x-axis] |
+| Y-axis | [y-axis] |
+| Highlight | [highlight element] |
+| Color logic | [color logic] |
+
+[Infographic goes here — full content width.]
+
+Rules in: [one sentence]. Rules out: [one sentence].
 
 ### Qualitative signals
 
-Bullets only. 3–5 lines. Volume, source, trend if known.
+Format each bullet: `[Source] — "[theme keyword]" — [volume: X/month or X reviews] — [trend: +Y% YoY or stable]`.
 
-- [Source 1 — e.g., "X monthly Zendesk tickets matching [theme]; +Y% YoY"]
-- [Source 2 — e.g., "~Z one-star App Store reviews citing [theme]"]
-- [Source 3 — e.g., "[theme] is the #N support call reason"]
+- [Source 1 — theme — volume — trend]
+- [Source 2 — theme — volume — trend]
+- [Source 3 — theme — volume — trend]
 
 ### In their own words
 
-3–5 short, real user quotes. Attribute by source channel. Never invent quotes — if you don't have one, leave the bullet out.
+Real quotes only. Never invent. 1–2 sentences. Attribute by channel, not individual. 3–5 max.
 
-- "[Verbatim user quote, 1–2 sentences max. Keep customer language; don't sanitize.]" — [Source channel — Zendesk / App Store / Reddit / Gong]
-- "[Quote 2 — ideally from a different channel for breadth.]" — [Source]
-- "[Quote 3 — ideally one that names the symptom or root cause directly.]" — [Source]
-- "[Quote 4 — if you have a particularly strong call/transcript moment.]" — [Source]
+- "[Verbatim quote.]" — [Zendesk / App Store / Reddit / Gong]
+- "[Verbatim quote.]" — [Source]
+- "[Verbatim quote.]" — [Source]
 
 ────────────────────────────────────────────────────────────
 
 ## 4. Hypothesis
 
-One paragraph. Format: "If we [X], then [Y will move from current to target], because [causal mechanism from Section 3]. [Optional secondary effect or future-proofing claim]."
-
-[If we [proposed change], then [primary metric will move from current to target], because [the mechanism described in Section 3]. [Secondary benefit].]
+If we [proposed change], then [primary metric will move from X to Y], because [causal mechanism from Section 3]. [Optional secondary benefit.]
 
 ────────────────────────────────────────────────────────────
 
 ## 5. Solution Requirements
 
-What the system must do. Not how. Three subsections: Functional, Configuration, Telemetry. If multi-component, add a 4th per component.
+[One sentence at the highest level — what is being inserted into which flow, and whether user-facing UX changes.]
 
-[1 sentence at the highest level. Often: "Insert [X] into the existing [Y] flow. User-facing UX [does/does not] change."]
-
-### Functional requirements
-
-What the feature does. Each bullet = one verifiable behavior.
-
-- [Behavior 1 — the core happy-path action]
-- [Behavior 2 — quantified target / threshold]
-- [Behavior 3 — algorithmic detail or fallback]
-- [Behavior 4 — edge case (skip / no-op)]
-- [Behavior 5 — platform constraint (threading, queue)]
-- [Behavior 6 — dependency constraint (no third-party / specific library)]
-- [Behavior 7 — error handling (replace silent failure)]
-
-### Configuration
-
-Feature flags, remote config, defaults. Always include the default at launch and the safe-value range.
-
-- [Feature flag — e.g., feature_x_enabled (boolean, default off until rollout)]
-- [Remote config — e.g., feature_x_threshold (numeric, default Y, range A–B)]
-
-### Telemetry
-
-Events the implementation must emit. Specify event name + field schema.
-
-- [event_started — fields: input_size, device_model, os_version, ...context]
-- [event_completed — fields: input_size, output_size, duration_ms, ...result]
-- [event_skipped — fields: input_size, reason]
-- [event_failed — fields: input_size, device_model, os_version, error_code]
+| Requirement | Category | Detail |
+| --- | --- | --- |
+| [Behavior 1] | Functional | [Core happy-path action — what the system does] |
+| [Behavior 2] | Functional | [Quantified target or threshold] |
+| [Behavior 3] | Functional | [Algorithmic detail or fallback] |
+| [Behavior 4] | Functional | [Edge case — skip / no-op condition] |
+| [Behavior 5] | Functional | [Error handling — replace silent failure with explicit state] |
+| [flag_name_enabled] | Feature flag | [boolean, default: false, safe range: on/off] |
+| [config_threshold] | Remote config | [numeric, default: X, range: A–B, updated by: team] |
+| [event_started] | Telemetry | [fields: user_id, device, os, context_field_1, context_field_2] |
+| [event_completed] | Telemetry | [fields: user_id, output_field, duration_ms, result_field] |
+| [event_failed] | Telemetry | [fields: user_id, device, os, error_code] |
 
 ────────────────────────────────────────────────────────────
 
 ## 6. Acceptance Criteria
 
-Each row = one Given/When/Then. Engineering treats these as the contract for completion. Cover happy path, edge cases (offline, low memory, slow network), feature flag behavior (on/off), and external contracts (metadata, schema).
-
 | # | Given / When / Then | Verified by |
 | --- | --- | --- |
-| AC1 | [Happy path — "Given a [target user/device], when the user does X, then [primary observable behavior]"] | [Integration test / unit test / QA] |
-| AC2 | [Performance bound — "Given any [supported device], when [action] runs, then it completes in <Xms at P95"] | [Performance test in CI] |
-| AC3 | [External contract — "Given [output] reviewed by [downstream system/team], then accuracy/quality is within [bound] of baseline"] | [Audit / external team sign-off] |
-| AC4 | [Error handling — "Given a failure, when it occurs, then user sees explicit error with retry CTA"] | [QA with simulated failures] |
-| AC5 | [Edge case — offline mode, low memory, very small/very large input] | [Scenario test] |
-| AC6 | [Skip / no-op — "Given input already meets target, when processing runs, then it is skipped"] | [Unit test] |
-| AC7 | [Feature flag off — always include this row] | [QA with flag toggled] |
-| AC8 | [Data preservation — metadata, encoding, ordering preserved through transformation] | [Unit test against external contract] |
+| AC1 | Happy path — Given [target user], when [action], then [primary behavior] | Integration test |
+| AC2 | Performance — Given any supported device, when [action] runs, then completes in <Xms at P95 | Perf test in CI |
+| AC3 | Error handling — Given a failure, when it occurs, then user sees explicit error + retry | QA simulated failure |
+| AC4 | Feature flag off — Given flag=false, when user reaches [surface], then legacy behavior renders | QA flag toggled |
+| AC5 | Edge case — [offline / low memory / very large input] behaves as specified | Scenario test |
 
 ────────────────────────────────────────────────────────────
 
 ## 7. Metrics
 
-One table. Three categories: Primary (the one being moved), Secondary (leading indicators), Guardrails (must-not-degrade). Always specify current and target.
-
 | Category | Metric | Current | Target |
 | --- | --- | --- | --- |
-| Primary | [The one metric the hypothesis is trying to move] | [X%] | [Y%] |
-| Secondary | [Leading indicator 1] | [X%] | [Y%] |
-| Secondary | [Leading indicator 2] | [X/mo] | [Y/mo] |
-| Secondary | [Leading indicator 3] | [X] | [Y] |
-| Guardrail | [Quality bound] | [Baseline] | [Within Xpp] |
-| Guardrail | [Reliability bound] | [Baseline] | [Within X%] |
-| Guardrail | [Performance bound] | [Baseline] | [≤ baseline] |
+| Primary | [the one metric the hypothesis moves] | [X%] | [Y%] |
+| Secondary | [leading indicator 1] | [X%] | [Y%] |
+| Secondary | [leading indicator 2] | [X] | [Y] |
+| Guardrail | [must-not-degrade metric] | [baseline] | [within Xpp] |
+| Guardrail | [reliability or performance bound] | [baseline] | [≤ baseline] |
 
 ────────────────────────────────────────────────────────────
 
-## 8. Definition of Done (for coding agent)
+## 8. Definition of Done
 
-Checklist a coding agent uses to know when to stop. Every bullet objectively verifiable.
+Ready to merge when ALL of the following are true:
 
-The change is ready to merge to release branch when ALL of the following are true:
-
-- All [N] acceptance criteria pass in CI
-- [Implementation lives in specific file/module]
-- [Threading/queue requirement]
-- [Library/dependency constraint]
-- [Algorithm specifics]
-- [Edge-case branches]
-- [External contract verified]
-- [Feature flags wired through remote-config service; readable at decision time]
-- [All telemetry events emit with the schema specified in section 5]
-- [UI surface — explicitly stated]
-- [Memory bound verified via profiler]
-- [Performance bound verified via CI test]
-- [Unit tests cover the new logic paths]
-- [Integration test against staging endpoint passes]
-- [Sentry release tagged with feature flag name]
-- [PR description includes link to this PRD and the ticket number]
+- All acceptance criteria pass in CI
+- Implementation lives in [specific file / module]
+- Feature flags wired through remote-config service; readable at decision time
+- All telemetry events emit with schema specified in Section 5
+- P95 latency verified in CI performance test
+- Unit tests cover new logic paths including edge cases
+- Integration test against staging endpoint passes
+- PR description links to this PRD and the ticket number
 
 ────────────────────────────────────────────────────────────
 
 ## 9. Test Plan
 
-Three subsections: Pre-launch (validation), Rollout (A/B + staged %), Post-launch (monitoring). Each bullet has a duration, scope, and exit criterion.
-
-### Pre-launch
-
-- [Internal dogfood — duration, audience, exit criterion]
-- [Closed beta — duration, sample size, exit criterion including external sign-off if applicable]
-
-### Rollout
-
-- [A/B design — control vs treatment ratio, sample size, MDE, duration]
-- [Rollout schedule — e.g., 1% → 10% → 50% → 100% over [N] days]
-- [Kill criteria — always specify automatic rollback triggers]
-
-### Post-launch
-
-- [Monitoring — dashboard owner and review cadence]
-- [30-day retro — always include]
-- [60- or 90-day check if applicable — for reputational metrics that lag]
+| Phase | Detail |
+| --- | --- |
+| Pre-launch | [Internal dogfood — duration, audience, exit criterion]<br>[Closed beta — duration, sample size, exit criterion] |
+| Rollout | [A/B design — 50/50, sample size, MDE, duration]<br>[Schedule — 1% → 10% → 50% → 100% over N days]<br>[Kill criteria — automatic rollback triggers] |
+| Post-launch | [Monitoring — dashboard owner + review cadence]<br>[30-day retro — always include]<br>[90-day check — for metrics that lag] |
 
 ────────────────────────────────────────────────────────────
 
@@ -302,3 +288,21 @@ Rules:
 - The `title` is a complete-sentence takeaway, not a label like "Failure rate".
 - Numeric values must come from the corpus. Never invent data points.
 - Don't manufacture a chart that doesn't carry information. Prefer prose if a sentence would say it faster.
+
+────────────────────────────────────────────────────────────
+
+## How to use this template
+
+Delete this section before sharing with stakeholders.
+
+| Rule | What it means |
+| --- | --- |
+| Fill every section | Write `N/A — <one sentence>` if a section truly doesn't apply. Never leave brackets unfilled. |
+| Numbers beat adjectives | 'Significantly' / 'substantially' / 'meaningful' are banned from TL;DR and Hypothesis. |
+| Evidence confidence first | If you can't rate Evidence as High, the PRD isn't ready. Go gather more data. |
+| Charts are the default | Every cut with quantitative data → infographic. Fill chart brief before building. Prose only for logical arguments with no numbers. |
+| Chart brief is mandatory | If you can't fill all five chart brief fields, you don't yet understand your data. Resolve before building. |
+| Rules in / out = 2 sentences | One sentence each, labeled. If you need more, the cut is doing too much — split it. |
+| Solution table = behaviors | Each row is one verifiable behavior. Not how, only what. One row per requirement. |
+| Quotes: real only | Never invent. Drop the bullet if you don't have the quote. 3–5 max across channels. |
+| 3–5 pages | Cut Context §1 if not needed. Cut Cut 4 if you only have 3 strong cuts. Never cut: TL;DR, business impact table, evidence charts, AC table, metrics table, DoD. |

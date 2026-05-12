@@ -171,34 +171,69 @@ Corpus:
 
 PRD_SYSTEM = """\
 You are Sprntly's PRD generator. You output PRDs in the exact format described \
-by the supplied template. You ground every quantitative claim in the supplied \
-brief insight (which itself was grounded in source corpus). You never invent \
-data points. The output is markdown — section headings as in the template, \
-with each section filled in concretely."""
+by the supplied template — sections numbered 1–9, with a TL;DR before \
+Section 1 and a 'How to embed an infographic' aid omitted from the final PRD. \
+You ground every quantitative claim in the supplied brief insight (which \
+itself was grounded in source corpus). You never invent data points. The \
+output is markdown — section headings as in the template, with each section \
+filled in concretely. Numbers beat adjectives: words like 'significantly', \
+'substantially', 'meaningful', and 'considerable' are banned from TL;DR and \
+the Hypothesis."""
 
 
 PRD_USER_TEMPLATE = """\
 Generate a PRD for the following insight. Use the template format below — \
-preserve all section numbers, headings, subsection structure, and markdown \
-tables exactly as shown. Fill each section with concrete content derived \
-from the insight and corpus. Do NOT keep the placeholder examples like \
-"[Component name]" or "[X%]" — replace each with real content from the \
-insight/corpus. If a section truly cannot be filled from the available data, \
-write "N/A — <one-sentence reason>" rather than dropping the heading. \
-Markdown output only, no JSON, no commentary outside the PRD.
+preserve the title format, the section numbers (TL;DR, then 1–9), headings, \
+subsection structure, and every markdown table exactly as shown. Fill each \
+section with concrete content derived from the insight and corpus. Do NOT \
+keep the placeholder examples like "[Component name]" or "[X%]" — replace \
+each with real content. If a section truly cannot be filled from the \
+available data, write "N/A — <one-sentence reason>" rather than dropping the \
+heading. Markdown output only, no JSON, no commentary outside the PRD.
 
-For Section 3 (Evidence), at least TWO of the 3–4 cuts MUST include a \
-chart block — a PRD without infographics fails review. Embed each chart \
-as a fenced code block with language `chart` (no other language) and a \
-JSON body that strictly matches this schema:
+Hard structural rules:
+
+- **TL;DR** is exactly THREE sentences in this order: (1) the problem with the \
+key number; (2) the proposed fix; (3) the projected impact in concrete \
+numbers. No adjectives. A senior reader who only reads TL;DR should know \
+whether to read the rest.
+- **Section 3 (Evidence)** has 3 to 4 cuts. EVERY cut must include a filled \
+**Chart brief** table BEFORE the infographic, with all five rows (Type, \
+X-axis, Y-axis, Highlight, Color logic) filled with specific values — not \
+"steps" but "Claim step", not "%" but "Completion rate (%)". At least TWO \
+of the cuts MUST include a `chart` fenced block — a PRD without infographics \
+fails review. After every chart, end the cut with a single line of the form: \
+`Rules in: <one sentence>. Rules out: <one sentence>.` Both labeled, both \
+present, one sentence each.
+- **Section 3 (Evidence)** ends with two H3 subsections — `Qualitative \
+signals` (3–5 bullets in the format `[Source] — "[theme]" — [volume] — \
+[trend]`) and `In their own words` (3–5 verbatim quotes attributed by \
+channel). Never invent a quote; drop the bullet if no real quote exists.
+- **Section 5 (Solution Requirements)** is a SINGLE markdown table with \
+columns `Requirement | Category | Detail`. Category values are exactly: \
+`Functional`, `Feature flag`, `Remote config`, `Telemetry`. One verifiable \
+behavior per row (the *what*, not the *how*).
+- **Section 7 (Metrics)** uses the table's `Category` column with exactly \
+these values: `Primary` (one row only — the metric the hypothesis moves), \
+`Secondary` (1–3 leading indicators), `Guardrail` (1–3 must-not-degrade \
+metrics). Always specify Current and Target.
+- **Section 9 (Test Plan)** is a markdown table with columns `Phase | Detail`. \
+Phase values are exactly `Pre-launch`, `Rollout`, `Post-launch`. Use \
+`<br>` to separate multiple bullets within a Detail cell.
+- **Evidence confidence** line at the top of Section 3 is mandatory: \
+`Evidence confidence: High | Medium | Low`. If Medium or Low, append a \
+single sentence explaining the data gap.
+
+Embed each chart as a fenced code block with language `chart` (no other \
+language) and a JSON body that strictly matches this schema:
 
 ```chart
-{
+{{
   "kind": "bar" | "line" | "pie" | "stat",
   "title": "Complete-sentence takeaway as the title",
   "subtitle": "optional source line",
-  "data": [{"label": "string", "value": <number-or-string>}]
-}
+  "data": [{{"label": "string", "value": <number-or-string>}}]
+}}
 ```
 
 Pick the kind to match the data shape: bar = category comparisons, line = \
@@ -211,14 +246,14 @@ Every numeric value in a chart must come from the insight/corpus — never \
 invent data. Always close every fenced block with ``` on its own line. \
 Bold key terms with **double asterisks**.
 
-For markdown tables (Business problem in §2, AC in §6, Metrics in §7, and \
-any flat-data cuts you write in Evidence), ALWAYS include the separator \
-row right under the header: `| --- | --- | ... |`. Without it, downstream \
-renderers treat the table as plain text.
+For markdown tables (Chart brief in §3, Business impact in §2, Solution \
+Requirements in §5, AC in §6, Metrics in §7, Test Plan in §9), ALWAYS \
+include the separator row right under the header: `| --- | --- | ... |`. \
+Without it, downstream renderers treat the table as plain text.
 
-Do NOT include the "How to embed an infographic" section itself in the \
-generated PRD — it's instructions for you, not part of the output. End the \
-PRD at the last "─────" divider after Section 9.
+Do NOT include the "How to embed an infographic" or "How to use this \
+template" sections in the generated PRD — they are instructions for you, not \
+part of the output. End the PRD at the last "─────" divider after Section 9.
 
 INSIGHT TO TURN INTO A PRD:
 
