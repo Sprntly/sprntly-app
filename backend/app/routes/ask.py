@@ -21,6 +21,13 @@ router = APIRouter(prefix="/v1/ask", tags=["ask"])
 CACHE_HIT_DELAY_MIN_SECONDS = 5.0
 CACHE_HIT_DELAY_MAX_SECONDS = 7.0
 
+# Briefly wait on a still-warming cache row before falling through to a
+# parallel LLM call. After a backend restart the warming semaphore can be
+# draining for ~30-60s; an early click would otherwise pay full generation
+# cost and race the warm task.
+GENERATING_POLL_TIMEOUT_SECONDS = 25.0
+GENERATING_POLL_INTERVAL_SECONDS = 0.5
+
 
 # Tool-use schema for the Ask endpoint. Defined here (not in prompts.py)
 # because it's how we extract the response, not part of the prompt text.
@@ -76,6 +83,19 @@ def ask(
     # without an LLM call, with a small random delay so the response
     # doesn't appear suspiciously instant.
     cached = find_cached_ask(body.dataset, body.question)
+    # If a warm task is still in flight (typical post-restart while the
+    # warming semaphore drains), wait for it instead of firing a parallel
+    # LLM call — the user perceives real generation time, so we skip the
+    # synthetic delay on the way out.
+    waited_on_generation = False
+    if cached and cached.get("status") == "generating":
+        deadline = time.monotonic() + GENERATING_POLL_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(GENERATING_POLL_INTERVAL_SECONDS)
+            cached = find_cached_ask(body.dataset, body.question)
+            if not cached or cached.get("status") != "generating":
+                waited_on_generation = True
+                break
     if cached and cached.get("status") == "ready":
         try:
             payload = json.loads(cached["response_json"])
@@ -83,9 +103,12 @@ def ask(
             # Corrupt cache row — fall through and regenerate.
             pass
         else:
-            time.sleep(
-                random.uniform(CACHE_HIT_DELAY_MIN_SECONDS, CACHE_HIT_DELAY_MAX_SECONDS)
-            )
+            if not waited_on_generation:
+                time.sleep(
+                    random.uniform(
+                        CACHE_HIT_DELAY_MIN_SECONDS, CACHE_HIT_DELAY_MAX_SECONDS
+                    )
+                )
             return payload
 
     # 2) Cache miss → standard LLM call.
