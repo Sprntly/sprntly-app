@@ -72,6 +72,15 @@ class AskIn(BaseModel):
     dataset: str = "asurion"
 
 
+def _strip_citations(payload: dict) -> dict:
+    """Citations stay in the LLM's grounding (so answers remain evidence-bound)
+    but are not surfaced to the UI — the citation cards clutter the Ask reply.
+    Always pass the response through this before returning to the client.
+    """
+    payload["citations"] = []
+    return payload
+
+
 @router.post("")
 def ask(
     body: AskIn,
@@ -109,7 +118,7 @@ def ask(
                         CACHE_HIT_DELAY_MIN_SECONDS, CACHE_HIT_DELAY_MAX_SECONDS
                     )
                 )
-            return payload
+            return _strip_citations(payload)
 
     # 2) Cache miss → standard LLM call.
     corpus = load_corpus(body.dataset)
@@ -132,4 +141,4 @@ def ask(
         answer=payload.get("answer", ""),
         citations=payload.get("citations", []),
     )
-    return payload
+    return _strip_citations(payload)
