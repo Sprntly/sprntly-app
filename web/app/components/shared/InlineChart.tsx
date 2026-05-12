@@ -43,7 +43,9 @@ export function InlineChart({
         {kind === "bar" ? <BarChart data={data} /> : null}
         {kind === "line" ? <LineChart data={data} /> : null}
         {kind === "pie" ? <PieChart data={data} /> : null}
+        {kind === "donut" ? <PieChart data={data} donut /> : null}
         {kind === "stat" ? <StatChart data={data} /> : null}
+        {kind === "funnel" ? <FunnelChart data={data} /> : null}
       </div>
     </figure>
   )
@@ -128,11 +130,14 @@ function LineChart({ data }: { data: PrdChartDatum[] }) {
   )
 }
 
-function PieChart({ data }: { data: PrdChartDatum[] }) {
+function PieChart({ data, donut = false }: { data: PrdChartDatum[]; donut?: boolean }) {
   const total = data.reduce((sum, d) => sum + toNum(d.value), 0) || 1
   const cx = 90
   const cy = 90
   const r = 80
+  // Donut variant cuts a circular hole in the middle. The hole renders as
+  // an extra path with the page background color, layered above the slices.
+  const innerR = donut ? r * 0.55 : 0
   let acc = 0
   const slices = data.map((d, i) => {
     const v = toNum(d.value)
@@ -160,6 +165,9 @@ function PieChart({ data }: { data: PrdChartDatum[] }) {
         {slices.map((s, i) => (
           <path key={i} d={s.path} fill={s.color} />
         ))}
+        {donut ? (
+          <circle cx={cx} cy={cy} r={innerR} fill="var(--surface)" />
+        ) : null}
       </svg>
       <ul className="prd-pie-legend">
         {slices.map((s, i) => (
@@ -174,6 +182,35 @@ function PieChart({ data }: { data: PrdChartDatum[] }) {
         ))}
       </ul>
     </div>
+  )
+}
+
+function FunnelChart({ data }: { data: PrdChartDatum[] }) {
+  // Each step is a trapezoid stacked vertically. Width scales linearly with
+  // value (max value → full width, smallest → narrower). Labels render to
+  // the LEFT of each trapezoid, value to the right — no overlap regardless
+  // of label length, unlike a line chart's horizontal x-axis.
+  const max = Math.max(...data.map((d) => toNum(d.value)), 1)
+  return (
+    <ul className="prd-funnel">
+      {data.map((d, i) => {
+        const v = toNum(d.value)
+        const widthPct = Math.max(8, (v / max) * 100)
+        const color = CHART_COLORS[i % CHART_COLORS.length]
+        return (
+          <li key={i} className="prd-funnel-row">
+            <span className="prd-funnel-label">{d.label}</span>
+            <span className="prd-funnel-track">
+              <span
+                className="prd-funnel-fill"
+                style={{ width: `${widthPct.toFixed(1)}%`, background: color }}
+              />
+            </span>
+            <span className="prd-funnel-val">{fmtVal(d.value)}</span>
+          </li>
+        )
+      })}
+    </ul>
   )
 }
 

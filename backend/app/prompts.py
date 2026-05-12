@@ -27,7 +27,13 @@ BRIEF_SCHEMA_VERSION = 3
 #  3 — Softened the "Mix kinds" rule to a prefer-when-data-allows hint
 #  4 — Push hard for visual variety: prefer stat/pie/line over bar where
 #      the data allows; bars should be the minority, not majority.
-EVIDENCE_TEMPLATE_VERSION = 4
+#  5 — Restrict `line` to time series with SHORT (≤12 char) x-axis labels.
+#      Funnels / sequential steps with long step names → `bar`. The line
+#      renderer's horizontal x-axis text overlaps with long labels.
+#  6 — Expanded available kinds: added `funnel` and `donut`. Dropped the
+#      hard line-char restriction; funnels with long step names should now
+#      use the `funnel` kind (trapezoid stack, side labels, no overlap).
+EVIDENCE_TEMPLATE_VERSION = 6
 
 
 # Bumped whenever the PRD prompt or template changes meaningfully. Same
@@ -200,7 +206,7 @@ language) and a JSON body that strictly matches this schema:
 
 ```chart
 {{
-  "kind": "bar" | "line" | "pie" | "stat",
+  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "funnel",
   "title": "Complete-sentence takeaway as the title",
   "subtitle": "optional source line",
   "data": [{{"label": "string", "value": <number-or-string>}}]
@@ -390,22 +396,39 @@ language) and a JSON body that strictly matches this schema:
 
 ```chart
 {{
-  "kind": "bar" | "line" | "pie" | "stat",
+  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "funnel",
   "title": "Complete-sentence takeaway as the title",
   "subtitle": "optional source line",
   "data": [{{"label": "string", "value": <number-or-string>}}]
 }}
 ```
 
-Available kinds — match the data shape:
-- `bar` for category comparisons (devices, segments, cohorts).
-- `line` for time series or sequential progressions (funnel cohorts day 1 → day 30, weekly trends, before/after on a timeline).
-- `pie` for share-of-whole that sums to ~100 (% has feature vs doesn't, % converts vs drops).
-- `stat` for 2–4 hero numbers when a comparison reduces to a couple of headline values (e.g. "iPhone 15 Pro: 24% fail · every other device: 1% fail" → stat block with two numbers, far more striking than a bar chart).
+Available kinds — pick the one that's prettiest AND clearest for the data:
+- `bar` — many-category comparisons (5+ devices, segments, cohorts) where \
+each row's value needs to be read precisely.
+- `line` — smooth time-series with short x-axis labels (e.g. "Q1'25", \
+"Week 12", "Day 7"). If category labels are long descriptive strings, \
+prefer `funnel` instead.
+- `funnel` — sequential drop-off steps where each step has a descriptive \
+name (claim funnel, signup flow, cohort progression day 1 → day 30). \
+Trapezoidal width-scaled bars with side labels — no overlap regardless of \
+label length, and the funnel shape itself tells the drop-off story.
+- `pie` — share-of-whole that sums to ~100 with 2–5 slices.
+- `donut` — same as pie but with a center hole. Use when the visual feel \
+should be modern / KPI-style rather than classic slice.
+- `stat` — 2–4 hero numbers when a comparison reduces to a couple of \
+headline values (e.g. "iPhone 15 Pro: 24% fail · every other device: 1% \
+fail"). Far more striking than a bar chart for low-cardinality contrasts.
 
-Push hard for **visual variety** — an evidence doc that's 7 bar charts in a row reads as a wall of horizontal stripes. Aim for at least 3 distinct chart kinds across the document. Whenever a cut reduces to a single dominant number vs a baseline, prefer `stat` over `bar`. Whenever a cut is "X% do Y vs (100-X)% do something else", prefer `pie` over `bar`. When you have a sequential progression (cohort over time, funnel by step), use `line`. Reserve `bar` for true many-category comparisons (5+ items with no natural alternative framing).
+Push for **visual variety** — an evidence doc that's 7 of the same chart \
+kind in a row feels monotonous. Aim for at least 3 distinct chart kinds \
+across the document, picking the one that fits each cut's shape AND reads \
+prettiest in context. Funnels for sequential steps, donut for share-of- \
+whole, stat for headline contrasts, bar for true many-category data — \
+let the mix make the page visually rich.
 
-Never force a kind that doesn't fit the data. But before you reach for `bar` on a cut with ≤4 items, ask: "would a `stat` block say this more punchily?" Bar charts are the safe default; they should be the minority of your charts, not the majority.
+Never force a kind that doesn't fit the data. Pretty matters: if `stat` \
+would look striking and `bar` would look like a bar wall, pick `stat`.
 
 Use a markdown table only when the cut is a flat list of values that no chart would help.
 

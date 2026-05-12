@@ -10,7 +10,7 @@ import type {
 } from "../types/content"
 
 const HEADING_RULE = /^─+$/
-const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "stat"]
+const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "donut", "stat", "funnel"]
 
 function splitRow(line: string): string[] {
   let s = line.trim()
