@@ -140,7 +140,7 @@ export function PrdScreen() {
   )
 }
 
-function PrdSections({
+export function PrdSections({
   sections,
 }: {
   sections: PrdState["sections"]
