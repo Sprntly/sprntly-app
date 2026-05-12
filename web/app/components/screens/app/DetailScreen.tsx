@@ -1,23 +1,31 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
-import type { DetailEvidenceSection } from "../../../types/content"
-import { InlineChart } from "../../shared/InlineChart"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
+import { PrdSections } from "./PrdScreen"
 
 export function DetailScreen() {
   const { goTo, setAIBarValue, expandAiPanel, showToast } = useNavigation()
   const { content, setContent } = useContent()
   const d = content.detail
-  const [generating, setGenerating] = useState(false)
-  const [generatingEvidence, setGeneratingEvidence] = useState(false)
+  const evidence = content.evidence
+  const [generatingPrd, setGeneratingPrd] = useState(false)
+  const [evidenceState, setEvidenceState] = useState<
+    | { kind: "idle" }
+    | { kind: "loading" }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" })
+  /** Tracks which (briefId, insightIndex) the current `content.evidence`
+   * came from, so we know when to drop it and refetch on detail change. */
+  const loadedKeyRef = useRef<string | null>(null)
 
+  // Hydrate `content.detail` from `briefDetails` map when arriving cold.
   useEffect(() => {
     if (content.detail) return
     const key = pickDefaultDetailKey(content.briefDetails ?? {})
@@ -26,12 +34,43 @@ export function DetailScreen() {
     if (next) setContent({ detail: next })
   }, [content.detail, content.briefDetails, setContent])
 
+  // Auto-fire evidence generation whenever the finding changes. The backend
+  // dedupes via find_existing_evidence, so a previously generated doc returns
+  // ~instantly; only the first view per (brief, insight) pays the LLM cost.
+  useEffect(() => {
+    if (!d?.meta) return
+    const key = `${d.meta.briefId}:${d.meta.insightIndex}`
+    if (loadedKeyRef.current === key && evidence) return
+    let cancelled = false
+    setEvidenceState({ kind: "loading" })
+    setContent({ evidence: null })
+    loadedKeyRef.current = key
+    runEvidenceGeneration(d.meta)
+      .then((result) => {
+        if (cancelled) return
+        if (!result.ok) {
+          setEvidenceState({ kind: "error", message: result.message })
+          return
+        }
+        setContent({ evidence: result.evidence })
+        setEvidenceState({ kind: "idle" })
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        const msg = e instanceof Error ? e.message : String(e)
+        setEvidenceState({ kind: "error", message: msg })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [d?.meta?.briefId, d?.meta?.insightIndex, setContent])
+
   const handleGeneratePrd = async () => {
     if (!d?.meta) {
       showToast("Can't generate PRD", "Open this evidence from the brief first.")
       return
     }
-    setGenerating(true)
+    setGeneratingPrd(true)
     try {
       const result = await runPrdGeneration(d.meta)
       if (!result.ok) {
@@ -44,32 +83,7 @@ export function DetailScreen() {
       const msg = e instanceof Error ? e.message : String(e)
       showToast("PRD generation failed", msg.slice(0, 200))
     } finally {
-      setGenerating(false)
-    }
-  }
-
-  const handleViewFullEvidence = async () => {
-    if (!d?.meta) {
-      showToast(
-        "Can't open full evidence",
-        "Open this finding from the weekly brief first.",
-      )
-      return
-    }
-    setGeneratingEvidence(true)
-    try {
-      const result = await runEvidenceGeneration(d.meta)
-      if (!result.ok) {
-        showToast("Evidence generation failed", result.message.slice(0, 200))
-        return
-      }
-      setContent({ evidence: result.evidence })
-      goTo("evidence")
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      showToast("Evidence generation failed", msg.slice(0, 200))
-    } finally {
-      setGeneratingEvidence(false)
+      setGeneratingPrd(false)
     }
   }
 
@@ -81,7 +95,7 @@ export function DetailScreen() {
         </a>
         <EmptyPane
           title="No evidence loaded"
-          hint="The Evidence view is built from the current weekly brief (`/v1/brief/current`). If the API returns no insights yet, or the app cannot reach your EC2 host (wrong NEXT_PUBLIC_API_URL, CORS, or auth), this stays empty. Open Weekly brief first, or confirm the brief payload includes an `insights` array."
+          hint="Open a finding from this week's brief to view the full evidence."
           placeholders={3}
         />
       </AppLayout>
@@ -103,7 +117,6 @@ export function DetailScreen() {
               </span>
             ))}
           </div>
-          <h1 className="detail-title">{d.title}</h1>
         </div>
         <button
           type="button"
@@ -118,126 +131,44 @@ export function DetailScreen() {
         </button>
       </div>
 
-      <p className="detail-summary">{d.summary}</p>
-
-      {d.metrics.length > 0 ? (
-        <div className="impact-estimate">
-          <div className="impact-estimate-eyebrow">Estimated impact</div>
-          <div className="impact-estimate-row">
-            {d.metrics.slice(0, 3).map((m, i) => (
-              <div key={i} className="impact-estimate-item">
-                <div className={`impact-estimate-val ${m.valueClass ?? ""}`}>{m.value}</div>
-                <div className="impact-estimate-lbl">{m.label}</div>
-              </div>
-            ))}
+      {evidence ? (
+        <div className="prd-frame">
+          <div className="prd-body">
+            {evidence.metaLine ? (
+              <div className="prd-meta">{evidence.metaLine}</div>
+            ) : null}
+            <h1 className="prd-title">{evidence.title}</h1>
+            <PrdSections sections={evidence.sections} />
           </div>
         </div>
+      ) : evidenceState.kind === "loading" ? (
+        <EmptyPane
+          title="Generating evidence…"
+          hint="Pulling the data-science slicing, infographics, qualitative signals, and hypothesis for this finding."
+          placeholders={4}
+        />
+      ) : evidenceState.kind === "error" ? (
+        <EmptyPane
+          title="Couldn't load full evidence"
+          hint={evidenceState.message}
+          placeholders={0}
+        />
       ) : null}
 
-      {d.evidenceSections.map((section, i) => (
-        <EvidenceSectionBlock key={i} section={section} />
-      ))}
-
-      {d.cta ? (
-        <div className="detail-cta-actions detail-cta-actions-end">
-          <button type="button" className="btn" onClick={() => goTo("brief")}>
-            {d.cta.dismissLabel}
-          </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={handleViewFullEvidence}
-            disabled={generatingEvidence}
-          >
-            {generatingEvidence ? "Generating evidence…" : "View full evidence →"}
-          </button>
-          <button
-            type="button"
-            className="btn btn-accent"
-            onClick={handleGeneratePrd}
-            disabled={generating}
-          >
-            {generating ? "Generating PRD…" : d.cta.primaryLabel}
-          </button>
-        </div>
-      ) : null}
-    </AppLayout>
-  )
-}
-
-function EvidenceSectionBlock({ section }: { section: DetailEvidenceSection }) {
-  return (
-    <div className="evidence-section">
-      <h2 className="evidence-title">{section.sectionTitle}</h2>
-      {section.charts?.length
-        ? section.charts.map((c, i) => (
-            <div key={i} className="evidence-card">
-              <InlineChart
-                kind={c.kind}
-                title={c.title}
-                subtitle={c.subtitle}
-                data={c.data}
-              />
-            </div>
-          ))
-        : null}
-      {section.html ? (
-        <div className="evidence-card">
-          <div
-            className="chart-box"
-            dangerouslySetInnerHTML={{ __html: section.html }}
-          />
-        </div>
-      ) : null}
-      {section.quoteRows?.map((row, i) => (
-        <div key={i} className="evidence-card">
-          <EvidenceRow
-            source={row.source}
-            quote={row.quote}
-            meta={row.meta}
-            badge={row.badge}
-          />
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function EvidenceRow({
-  source,
-  quote,
-  meta,
-  badge,
-}: {
-  source: string
-  quote: string
-  meta: string[]
-  badge?: string
-}) {
-  return (
-    <div className="evidence-row">
-      <div className="evidence-source">{source}</div>
-      <div className="evidence-body">
-        <div className="evidence-quote">{quote}</div>
-        <div className="evidence-meta">
-          {meta.map((m, i) => (
-            <span key={i}>{m}</span>
-          ))}
-          {badge ? (
-            <span
-              style={{
-                color: "var(--accent-ink)",
-                background: "var(--accent-soft)",
-                padding: "1px 6px",
-                borderRadius: 3,
-              }}
-            >
-              {badge}
-            </span>
-          ) : null}
-        </div>
+      <div className="detail-cta-actions detail-cta-actions-end">
+        <button type="button" className="btn" onClick={() => goTo("brief")}>
+          Snooze
+        </button>
+        <button
+          type="button"
+          className="btn btn-accent"
+          onClick={handleGeneratePrd}
+          disabled={generatingPrd}
+        >
+          {generatingPrd ? "Generating PRD…" : "Generate PRD"}
+        </button>
       </div>
-    </div>
+    </AppLayout>
   )
 }
 

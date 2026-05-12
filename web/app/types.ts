@@ -10,7 +10,6 @@ export type ScreenId =
   | "chat"
   | "brief"
   | "detail"
-  | "evidence"
   | "prd"
   | "ondemand"
   | "past"
@@ -34,7 +33,6 @@ export const APP_SCREENS: ScreenId[] = [
   "chat",
   "brief",
   "detail",
-  "evidence",
   "prd",
   "ondemand",
   "past",
@@ -57,7 +55,6 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   chat: "Home",
   brief: "Weekly brief",
   detail: "Evidence",
-  evidence: "Evidence page",
   prd: "PRD",
   ondemand: "Home",
   past: "Past briefs",
@@ -72,7 +69,7 @@ export function getMainChromeTitle(screen: ScreenId): string {
 }
 
 /** Bottom contextual ask bar — Brief, Evidence, PRD only. Home uses in-page chat. */
-export const AI_BAR_SCREENS: ScreenId[] = ["brief", "detail", "evidence", "prd"]
+export const AI_BAR_SCREENS: ScreenId[] = ["brief", "detail", "prd"]
 
 export const AI_CONTEXTS: Record<
   string,
@@ -100,14 +97,6 @@ export const AI_CONTEXTS: Record<
       "Run a sensitivity analysis on the revenue model",
       "Pull more similar tickets",
       "Who has context on SMS verification?",
-    ],
-  },
-  evidence: {
-    path: "/ evidence page",
-    suggest: [
-      "Sharpen the hypothesis statement",
-      "Stress-test the rule-in / rule-out logic",
-      "Suggest a competing explanation we should rule out",
     ],
   },
   prd: {
