@@ -8,17 +8,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import auth, db
 from app.brief_runner import auto_generate_all
 from app.config import settings
+from app.prompts import BRIEF_SCHEMA_VERSION
 from app.routes import ask, brief, health, prd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    # Demote any cached brief whose payload schema doesn't match the current
+    # code. auto_generate_all will then treat affected datasets as empty and
+    # regenerate them under the new schema on the next tick.
+    invalidated = db.invalidate_stale_briefs(BRIEF_SCHEMA_VERSION)
+    if invalidated:
+        logger.info("Invalidated %d stale brief(s) (schema bump → v%d)", invalidated, BRIEF_SCHEMA_VERSION)
     # Kick off brief generation in the background so the service starts fast.
     # auto_generate_all is idempotent: it skips datasets that already have a
-    # cached brief in SQLite.
+    # cached brief in SQLite at the current schema version.
     asyncio.create_task(auto_generate_all())
     yield
 

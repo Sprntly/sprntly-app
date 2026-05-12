@@ -7,7 +7,7 @@ import logging
 from app.corpus import load_corpus
 from app.db import get_current_brief, save_brief
 from app.llm import call_json
-from app.prompts import BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
+from app.prompts import BRIEF_SCHEMA_VERSION, BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,12 @@ def _run_sync(dataset: str) -> None:
     corpus = load_corpus(dataset)
     user = BRIEF_USER_TEMPLATE.format(dataset=dataset, corpus=corpus.joined())
     payload = call_json(system=BRIEF_SYSTEM, user=user)
-    save_brief(dataset, payload.get("week_label", ""), payload)
+    save_brief(
+        dataset,
+        payload.get("week_label", ""),
+        payload,
+        schema_version=BRIEF_SCHEMA_VERSION,
+    )
 
 
 async def auto_generate_brief(dataset: str) -> None:

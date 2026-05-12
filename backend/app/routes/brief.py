@@ -7,7 +7,7 @@ from app.brief_runner import auto_generate_brief, get_status
 from app.corpus import load_corpus
 from app.db import get_brief_by_id, get_current_brief, save_brief
 from app.llm import call_json
-from app.prompts import BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
+from app.prompts import BRIEF_SCHEMA_VERSION, BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
 
 router = APIRouter(prefix="/v1/brief", tags=["brief"])
 
@@ -90,5 +90,10 @@ def generate(
     user = BRIEF_USER_TEMPLATE.format(dataset=dataset, corpus=corpus.joined())
     payload = call_json(system=BRIEF_SYSTEM, user=user)
     week_label = payload.get("week_label", "")
-    brief_id = save_brief(dataset=dataset, week_label=week_label, payload=payload)
+    brief_id = save_brief(
+        dataset=dataset,
+        week_label=week_label,
+        payload=payload,
+        schema_version=BRIEF_SCHEMA_VERSION,
+    )
     return {"brief_id": brief_id, **payload}

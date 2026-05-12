@@ -101,7 +101,14 @@ def get_brief_by_id(brief_id: int) -> dict | None:
     }
 
 
-def save_brief(dataset: str, week_label: str, payload: dict) -> int:
+def save_brief(
+    dataset: str,
+    week_label: str,
+    payload: dict,
+    schema_version: int | None = None,
+) -> int:
+    if schema_version is not None:
+        payload = {**payload, "_schema_version": schema_version}
     with conn() as c:
         c.execute(
             "UPDATE briefs SET is_current=0 WHERE dataset=?", (dataset,)
@@ -112,6 +119,36 @@ def save_brief(dataset: str, week_label: str, payload: dict) -> int:
             (dataset, week_label, json.dumps(payload)),
         )
         return cur.lastrowid
+
+
+def invalidate_stale_briefs(current_version: int) -> int:
+    """Demote any `is_current=1` brief whose `_schema_version` differs from
+    `current_version`. Returns the number of rows invalidated.
+
+    Called on service startup so a schema bump triggers auto-regeneration
+    without manual /v1/brief/regenerate calls or DB surgery.
+    """
+    invalidated = 0
+    with conn() as c:
+        rows = c.execute(
+            "SELECT id, payload_json FROM briefs WHERE is_current=1"
+        ).fetchall()
+        stale_ids: list[int] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError):
+                payload = {}
+            if payload.get("_schema_version") != current_version:
+                stale_ids.append(row["id"])
+        if stale_ids:
+            placeholders = ",".join("?" for _ in stale_ids)
+            c.execute(
+                f"UPDATE briefs SET is_current=0 WHERE id IN ({placeholders})",
+                stale_ids,
+            )
+            invalidated = len(stale_ids)
+    return invalidated
 
 
 def save_prd(brief_id: int, insight_index: int, title: str, md: str) -> int:
