@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 _status: dict[str, str] = {}
 _errors: dict[str, str] = {}
 
+# Bound how many drill-down warming tasks run at once. Anthropic handles
+# parallel calls, but firing 6+ in a burst on every restart competes for
+# rate limit and bandwidth — each call ends up slower than in isolation,
+# and a user clicking "View evidence" during the burst waits behind the
+# queue. Two concurrent warm tasks at a time keeps throughput high without
+# starving user-triggered calls (which don't go through this gate).
+_WARM_SEMA = asyncio.Semaphore(2)
+
 
 def get_status(dataset: str) -> dict:
     """Return one of: ready, generating, failed, empty (+ error message if any)."""
@@ -74,12 +82,13 @@ async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
         template_version=EVIDENCE_TEMPLATE_VERSION,
     )
     logger.info(
-        "Warming evidence ev_id=%s brief_id=%s insight_index=%s",
+        "Warming evidence ev_id=%s brief_id=%s insight_index=%s (waiting on sema)",
         ev_id,
         brief_id,
         insight_index,
     )
-    await generate_evidence(ev_id, brief_id, insight_index)
+    async with _WARM_SEMA:
+        await generate_evidence(ev_id, brief_id, insight_index)
 
 
 async def _warm_prd(brief_id: int, insight_index: int, title: str) -> None:
@@ -100,26 +109,35 @@ async def _warm_prd(brief_id: int, insight_index: int, title: str) -> None:
         template_version=PRD_TEMPLATE_VERSION,
     )
     logger.info(
-        "Warming PRD prd_id=%s brief_id=%s insight_index=%s",
+        "Warming PRD prd_id=%s brief_id=%s insight_index=%s (waiting on sema)",
         prd_id,
         brief_id,
         insight_index,
     )
-    await generate_prd(prd_id, brief_id, insight_index)
+    async with _WARM_SEMA:
+        await generate_prd(prd_id, brief_id, insight_index)
 
 
 def _warm_drilldowns(brief: dict) -> None:
     """Fan out evidence + PRD generation for every insight in this brief.
-    Each warm-task runs concurrently; cached entries return immediately
-    (dedupe lives in _warm_evidence / _warm_prd).
+    Warm tasks share a semaphore (_WARM_SEMA) so at most 2 run at once;
+    cached entries return immediately (dedupe lives in _warm_evidence /
+    _warm_prd).
+
+    Evidence is scheduled before PRD because users click "View evidence"
+    first — they shouldn't queue behind PRD warming.
     """
     brief_id = brief.get("id")
     if not brief_id:
         return
     insights = brief.get("insights") or []
+    # Pass 1: all evidence — these get the early semaphore slots.
     for i, ins in enumerate(insights):
         title = (ins or {}).get("title") or f"Insight #{i + 1}"
         asyncio.create_task(_warm_evidence(brief_id, i, title))
+    # Pass 2: all PRDs — they wait behind evidence for sema slots.
+    for i, ins in enumerate(insights):
+        title = (ins or {}).get("title") or f"Insight #{i + 1}"
         asyncio.create_task(_warm_prd(brief_id, i, title))
 
 
