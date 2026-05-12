@@ -160,8 +160,6 @@ export function BriefScreen() {
         />
       ) : (
         <div className="wb-doc">
-          {brief.docKicker ? <p className="wb-doc-kicker">{brief.docKicker}</p> : null}
-
           <hr className="wb-rule" />
 
           {brief.docHeader ? (
