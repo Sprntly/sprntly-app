@@ -1,9 +1,50 @@
 "use client"
 
-import ReactMarkdown from "react-markdown"
+import { isValidElement, type ReactNode } from "react"
+import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AskResponse } from "../../lib/api"
 import { useAnswerSimulatedStream } from "../../lib/useAnswerSimulatedStream"
+import { InlineChart, parseChartBody } from "./InlineChart"
+
+/** Pull a plain-text body out of react-markdown's `code` children prop. */
+function flattenText(node: ReactNode): string {
+  if (node == null || node === false) return ""
+  if (typeof node === "string") return node
+  if (typeof node === "number") return String(node)
+  if (Array.isArray(node)) return node.map(flattenText).join("")
+  if (isValidElement(node)) {
+    const props = node.props as { children?: ReactNode }
+    return flattenText(props.children)
+  }
+  return ""
+}
+
+const askMarkdownComponents: Components = {
+  // Fenced ```chart blocks render as inline SVG infographics. Other fenced
+  // blocks fall through to the default <code><pre> rendering.
+  code({ className, children, ...rest }) {
+    const lang = /language-([\w-]+)/.exec(className || "")?.[1]
+    if (lang === "chart") {
+      const spec = parseChartBody(flattenText(children))
+      if (spec) {
+        return (
+          <InlineChart
+            kind={spec.kind}
+            title={spec.title}
+            subtitle={spec.subtitle}
+            data={spec.data}
+          />
+        )
+      }
+    }
+    return (
+      <code className={className} {...rest}>
+        {children}
+      </code>
+    )
+  },
+}
 
 export function AskReplyBody({
   reply,
@@ -26,7 +67,9 @@ export function AskReplyBody({
       <div
         className={`ai-bar-reply-answer${isStreaming ? " ai-bar-reply-answer--streaming" : ""}`}
       >
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{visible}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={askMarkdownComponents}>
+          {visible}
+        </ReactMarkdown>
       </div>
       {done && reply.key_points?.length ? (
         <ul className="ai-bar-reply-kp ai-bar-reply-kp--stream-reveal">
