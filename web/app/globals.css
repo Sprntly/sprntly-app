@@ -1266,7 +1266,7 @@
   .prd-bar-fill { height: 100%; border-radius: 6px; transition: width 0.3s ease; }
   .prd-bar-val { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; text-align: right; }
 
-  .prd-line { width: 100%; height: 200px; display: block; }
+  .prd-line { width: 100%; height: auto; display: block; }
   .prd-line-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 3; }
   .prd-line-axis { font-size: 10px; fill: var(--muted); font-family: var(--font-mono); }
 
