@@ -5,7 +5,7 @@ from app.auth import require_session
 from app.corpus import load_corpus
 from app.db import log_ask
 from app.llm import call_json
-from app.prompts import ASK_SYSTEM, ASK_USER_TEMPLATE
+from app.prompts import ASK_SYSTEM, ASK_USER_TEMPLATE_QUESTION_ONLY
 
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
 
@@ -60,13 +60,17 @@ def ask(
 ):
     require_session(sprintly_session)
     corpus = load_corpus(body.dataset)
-    user = ASK_USER_TEMPLATE.format(question=body.question, corpus=corpus.joined())
+    # The corpus is constant per dataset, so we pass it as a cacheable prefix
+    # — repeat /v1/ask calls within the cache TTL skip re-encoding it.
+    cacheable = f"Corpus:\n\n{corpus.joined()}"
+    user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=body.question)
     # Lower than the call_json default (16k) — Ask answers run on the home
     # surface and load time matters more than max answer length. Brief and
     # PRD generation keep the default headroom.
     payload = call_json(
         system=ASK_SYSTEM,
         user=user,
+        user_cacheable_prefix=cacheable,
         schema=ASK_RESPONSE_SCHEMA,
         max_tokens=12000,
     )

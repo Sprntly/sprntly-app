@@ -225,10 +225,13 @@ outside the JSON, no markdown fences around the JSON itself."""
 
 
 ASK_USER_TEMPLATE = """\
-Question:
-{question}
+Corpus:
 
-Answer using ONLY the corpus below. Return JSON of this shape:
+{corpus}
+
+---
+
+Answer the question below using ONLY the corpus above. Return JSON of this shape:
 
 {{
   "answer": "<markdown-formatted answer per the formatting rules in the system prompt. For quantitative questions, include 1–4 `chart` fenced blocks embedded inline.>",
@@ -240,9 +243,31 @@ Answer using ONLY the corpus below. Return JSON of this shape:
   "unanswered": "<empty string if fully answered, else what data is missing>"
 }}
 
-Corpus:
+Question:
+{question}
+"""
 
-{corpus}
+
+# Post-corpus portion of ASK_USER_TEMPLATE, used when the corpus is passed
+# separately as a cacheable prefix. Keeps the schema + question together so
+# the model still answers based on the (cached) corpus above.
+ASK_USER_TEMPLATE_QUESTION_ONLY = """\
+---
+
+Answer the question below using ONLY the corpus above. Return JSON of this shape:
+
+{{
+  "answer": "<markdown-formatted answer per the formatting rules in the system prompt. For quantitative questions, include 1–4 `chart` fenced blocks embedded inline.>",
+  "key_points": ["<bullet 1>", "<bullet 2>", "..."],
+  "citations": [
+    {{ "source": "<source doc name>", "evidence": "<exact phrase or number from that doc>" }}
+  ],
+  "confidence": <float 0-1>,
+  "unanswered": "<empty string if fully answered, else what data is missing>"
+}}
+
+Question:
+{question}
 """
 
 

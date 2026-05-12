@@ -20,6 +20,50 @@ def get_client() -> Anthropic:
     return _client
 
 
+def _build_base_kwargs(
+    *,
+    model: str,
+    max_tokens: int,
+    system: str,
+    user: str,
+    user_cacheable_prefix: str | None,
+) -> dict:
+    """Build the kwargs dict passed to `messages.create`.
+
+    If `user_cacheable_prefix` is None, returns the simple `content=str` form
+    used by every existing caller — behavior is unchanged. Otherwise builds
+    content as a list of text blocks, with `cache_control: ephemeral` on the
+    prefix (and on the system prompt when it's substantial enough to be
+    worth caching).
+    """
+    if user_cacheable_prefix is None:
+        return {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+    system_param: list[dict] = [
+        {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        if len(system) > 1000
+        else {"type": "text", "text": system}
+    ]
+    content = [
+        {
+            "type": "text",
+            "text": user_cacheable_prefix,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": user},
+    ]
+    return {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system_param,
+        "messages": [{"role": "user", "content": content}],
+    }
+
+
 def call_json(
     *,
     system: str,
@@ -27,6 +71,7 @@ def call_json(
     model: str = DEFAULT_MODEL,
     max_tokens: int = 16000,
     schema: dict | None = None,
+    user_cacheable_prefix: str | None = None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
 
@@ -38,14 +83,20 @@ def call_json(
     If `schema` is None, falls back to parsing the model's text response as
     JSON (used by endpoints whose payload is simple enough to round-trip
     safely).
+
+    If `user_cacheable_prefix` is provided, it is sent as a separate text
+    block before `user` with `cache_control: ephemeral` set, so subsequent
+    calls within the cache TTL reuse the prefix tokens. When the system
+    prompt is also substantial (>1000 chars), it gets the same treatment.
     """
     client = get_client()
-    base_kwargs: dict = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    }
+    base_kwargs: dict = _build_base_kwargs(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        user=user,
+        user_cacheable_prefix=user_cacheable_prefix,
+    )
     if schema is not None:
         tool = {
             "name": "submit_response",
