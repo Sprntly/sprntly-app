@@ -216,6 +216,22 @@ def invalidate_stale_prds(current_version: int) -> int:
         return cur.rowcount or 0
 
 
+def invalidate_orphan_generating_prds() -> int:
+    """Mark every status='generating' PRD as 'invalidated'.
+
+    Call this from lifespan startup: any in-flight row is by definition
+    orphaned (the worker thread that was generating it died with the
+    previous process). Leaving them stuck causes user clicks to dedupe to
+    a row that will never complete; this clears them so the next warming
+    tick regenerates fresh.
+    """
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE prds SET status='invalidated' WHERE status='generating'"
+        )
+        return cur.rowcount or 0
+
+
 def complete_prd(prd_id: int, title: str, md: str) -> None:
     with conn() as c:
         c.execute(
@@ -296,6 +312,22 @@ def invalidate_stale_evidences(current_version: int) -> int:
             "WHERE status IN ('ready', 'generating') "
             "  AND (template_version IS NULL OR template_version != ?)",
             (current_version,),
+        )
+        return cur.rowcount or 0
+
+
+def invalidate_orphan_generating_evidences() -> int:
+    """Mark every status='generating' evidence row as 'invalidated'.
+
+    Same rationale as invalidate_orphan_generating_prds — on startup, any
+    in-flight generation is orphaned because the worker thread died with
+    the previous process. Without this, a user clicking "View evidence"
+    on an insight whose previous warming crashed mid-generation polls
+    forever.
+    """
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE evidences SET status='invalidated' WHERE status='generating'"
         )
         return cur.rowcount or 0
 

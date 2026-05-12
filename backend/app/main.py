@@ -41,6 +41,17 @@ async def lifespan(app: FastAPI):
             prd_invalidated,
             PRD_TEMPLATE_VERSION,
         )
+    # Demote any orphaned 'generating' rows. The worker thread that owned
+    # them died with the previous process; without this, find_existing_*
+    # returns them and user clicks dedupe to a row that will never finish.
+    ev_orphans = db.invalidate_orphan_generating_evidences()
+    prd_orphans = db.invalidate_orphan_generating_prds()
+    if ev_orphans or prd_orphans:
+        logger.info(
+            "Invalidated %d orphan generating evidence(s) and %d PRD(s)",
+            ev_orphans,
+            prd_orphans,
+        )
     # Kick off brief generation in the background so the service starts fast.
     # auto_generate_all is idempotent: it skips datasets that already have a
     # cached brief in SQLite at the current schema version.

@@ -35,9 +35,9 @@ _errors: dict[str, str] = {}
 # parallel calls, but firing 6+ in a burst on every restart competes for
 # rate limit and bandwidth — each call ends up slower than in isolation,
 # and a user clicking "View evidence" during the burst waits behind the
-# queue. Two concurrent warm tasks at a time keeps throughput high without
-# starving user-triggered calls (which don't go through this gate).
-_WARM_SEMA = asyncio.Semaphore(2)
+# queue. 3 lets all 3 evidence calls for a brief run concurrently so no
+# insight queues behind another; PRD warming fills slots as they free.
+_WARM_SEMA = asyncio.Semaphore(3)
 
 
 def get_status(dataset: str) -> dict:
