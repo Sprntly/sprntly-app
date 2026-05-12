@@ -3,25 +3,17 @@
 import { useCallback, useMemo, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
-import { isBriefEmpty, type BriefFindingRow, type PastWeekRow } from "../../../types/content"
+import { isBriefEmpty, type BriefFindingRow } from "../../../types/content"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
 export function BriefScreen() {
-  const {
-    goTo,
-    setAIBarValue,
-    expandAiPanel,
-    reviewPastOpen,
-    setReviewPastOpen,
-    showToast,
-  } = useNavigation()
+  const { goTo, setAIBarValue, expandAiPanel, showToast } = useNavigation()
   const { content, setContent } = useContent()
-  const { brief, pastWeeks, briefDetails } = content
+  const { brief, briefDetails } = content
 
   const [prdBusyKey, setPrdBusyKey] = useState<string | null>(null)
-  const [pastFilter, setPastFilter] = useState<"week" | "month" | "all">("week")
 
   const openEvidenceFor = (detailKey: string | undefined) => {
     if (detailKey && briefDetails?.[detailKey]) {
@@ -79,10 +71,6 @@ export function BriefScreen() {
   )
 
   const empty = isBriefEmpty(brief)
-  const totalPastFindings = useMemo(
-    () => pastWeeks.reduce((n, w) => n + w.findings.length, 0),
-    [pastWeeks],
-  )
 
   const flatFindings = useMemo(
     () => brief.sections.flatMap((s) => s.findings),
@@ -106,44 +94,6 @@ export function BriefScreen() {
             Sprntly found three most important things to drive your goal
           </h1>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <div className="review-past-wrap">
-            <button
-              type="button"
-              className="btn"
-              disabled={pastWeeks.length === 0}
-              onClick={(e) => {
-                e.stopPropagation()
-                if (pastWeeks.length === 0) return
-                setReviewPastOpen(!reviewPastOpen)
-              }}
-            >
-              <ClockIcon />
-              Review past
-              <ChevronDownIcon />
-            </button>
-            {reviewPastOpen && pastWeeks.length > 0 && (
-              <ReviewPastMenu
-                weeks={pastWeeks}
-                filter={pastFilter}
-                onFilterChange={setPastFilter}
-                onItemClick={() => {
-                  setReviewPastOpen(false)
-                  goTo("detail")
-                }}
-                onViewAll={() => {
-                  setReviewPastOpen(false)
-                  goTo("past")
-                }}
-                totalShown={totalPastFindings}
-              />
-            )}
-          </div>
-          <button type="button" className="btn">
-            <ShareIcon />
-            Share in Slack
-          </button>
-        </div>
       </div>
 
       {empty ? (
@@ -154,8 +104,6 @@ export function BriefScreen() {
         />
       ) : (
         <div className="wb-doc">
-          <hr className="wb-rule" />
-
           {brief.docHeader ? (
             <>
               <div className="wb-doc-header-grid">
@@ -172,7 +120,6 @@ export function BriefScreen() {
                   <div className="wb-doc-header-value">{brief.docHeader.productArea}</div>
                 </div>
               </div>
-              <hr className="wb-rule" />
             </>
           ) : null}
 
@@ -260,148 +207,5 @@ function TemplateFindingCard({
         </div>
       </div>
     </article>
-  )
-}
-
-function ReviewPastMenu({
-  weeks,
-  filter,
-  onFilterChange,
-  onItemClick,
-  onViewAll,
-  totalShown,
-}: {
-  weeks: PastWeekRow[]
-  filter: "week" | "month" | "all"
-  onFilterChange: (f: "week" | "month" | "all") => void
-  onItemClick: () => void
-  onViewAll: () => void
-  totalShown: number
-}) {
-  return (
-    <div className="review-past-menu open">
-      <div className="review-past-head">
-        <div className="review-past-title">Past briefs</div>
-        <div className="review-past-sub">Status of every finding we&apos;ve surfaced</div>
-      </div>
-      <div className="review-past-filters">
-        {(["week", "month", "all"] as const).map((f) => (
-          <button
-            key={f}
-            type="button"
-            className={`review-past-filter ${filter === f ? "active" : ""}`}
-            onClick={() => onFilterChange(f)}
-          >
-            {f === "week" ? "Past weeks" : f === "month" ? "Past months" : "All time"}
-          </button>
-        ))}
-      </div>
-      <div className="review-past-body">
-        {weeks.map((week) => (
-          <ReviewPastGroup
-            key={week.date + week.label}
-            date={`${week.date} · ${week.label}`}
-            count={week.findings.length}
-            items={week.findings}
-            onClick={onItemClick}
-          />
-        ))}
-      </div>
-      <div className="review-past-foot">
-        <span>
-          {totalShown > 0 ? `Showing ${totalShown} finding${totalShown === 1 ? "" : "s"}` : "No findings"}
-        </span>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onViewAll}>
-          View all →
-        </button>
-      </div>
-    </div>
-  )
-}
-
-function ReviewPastGroup({
-  date,
-  count,
-  items,
-  onClick,
-}: {
-  date: string
-  count: number
-  items: PastWeekRow["findings"]
-  onClick: () => void
-}) {
-  return (
-    <div className="rp-group">
-      <div className="rp-group-head">
-        <div className="rp-group-date">{date}</div>
-        <div className="rp-group-count">{count} findings</div>
-      </div>
-      {items.map((item, i) => (
-        <div key={i} className="rp-item" onClick={onClick}>
-          <div className="rp-item-title">{item.title}</div>
-          <div className="rp-item-meta">
-            <span className={`rp-status ${item.status}`}>
-              {item.status === "in-progress"
-                ? "In progress"
-                : item.status === "logged"
-                  ? "Logged"
-                  : item.status === "in-motion"
-                    ? "PRD drafted"
-                    : item.status === "not-started"
-                      ? "Not started"
-                      : item.status === "shipped"
-                        ? "Shipped"
-                        : "Declined"}
-            </span>
-            <span className={`rp-item-sub ${item.positive ? "pos" : ""}`}>{item.sub}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function ClockIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 8v4l3 3" />
-      <circle cx="12" cy="12" r="10" />
-    </svg>
-  )
-}
-
-function ChevronDownIcon() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-      <path d="M5 7L1 3h8z" />
-    </svg>
-  )
-}
-
-function ShareIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
-      <polyline points="16 6 12 2 8 6" />
-      <line x1="12" y1="2" x2="12" y2="15" />
-    </svg>
   )
 }

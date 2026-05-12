@@ -72,7 +72,7 @@
   }
   .app-main-chrome-inner {
     max-width: 100%;
-    padding: 0 40px;
+    padding: 0 24px;
     min-height: var(--app-shell-header-min);
     display: flex;
     align-items: center;
@@ -594,15 +594,18 @@
     flex-wrap: wrap;
   }
 
-  .main { padding: 24px 40px 200px; max-width: 1120px; margin: 0 auto; width: 100%; }
-  /** Weekly brief, Evidence, PRD — tighter horizontal rhythm than generic `.main`. */
+  .main { padding: 24px 24px 200px; max-width: 1120px; margin: 0 auto; width: 100%; }
+  /** Weekly brief, Evidence, PRD — same max width as hub screens, less outer gutter + bottom pad. */
   .main.main--reading {
-    max-width: 960px;
-    padding: 16px 24px 96px;
+    max-width: 1120px;
+    padding: 12px 24px 56px;
   }
   .main.main--reading .main-header {
     margin-bottom: 18px;
     gap: 16px;
+  }
+  .main.main--reading .main-title {
+    color: var(--accent);
   }
   .main.main--reading .detail-back {
     margin-bottom: 12px;
@@ -612,6 +615,7 @@
   }
   .main.main--reading .detail-summary {
     margin-bottom: 20px;
+    max-width: none;
   }
   .main.main--reading .detail-grid {
     margin-bottom: 24px;
@@ -837,8 +841,8 @@
 
   /* ---------- Weekly Product Brief (document template) ---------- */
   .wb-doc {
-    max-width: 880px;
-    margin: 0 auto 36px;
+    max-width: 100%;
+    margin: 0 0 28px;
     padding: 0;
     box-sizing: border-box;
   }
@@ -865,7 +869,7 @@
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 16px 24px;
-    margin-bottom: 4px;
+    margin-bottom: 16px;
   }
   .wb-doc-header-label {
     font-size: 11px;
@@ -1605,6 +1609,14 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  /* Context + chips + reply scroll above; composer stays at bottom of the rail. */
+  html[data-ai-panel-layout="side"] .ai-bar-stack {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
   .ai-bar:focus-within { border-color: var(--ink); box-shadow: var(--shadow-lg); }
   html[data-ai-panel-layout="side"] .ai-bar:focus-within {
@@ -2569,7 +2581,7 @@
   @media (max-width: 640px) {
     .app-main-chrome-inner { padding-left: 20px; padding-right: 20px; }
     .main.main--reading {
-      padding: 14px 16px 72px;
+      padding: 12px 16px 48px;
     }
     .chat-wrap--landing { padding-left: 20px; padding-right: 20px; }
     .chat-landing-focus { min-height: 0; padding-top: 16px; padding-bottom: 32px; }

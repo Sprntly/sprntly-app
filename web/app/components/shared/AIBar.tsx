@@ -346,65 +346,67 @@ export function AIBar() {
           </div>
         ) : (
           <div className={`ai-bar${isSide ? " ai-bar--side" : ""}`}>
-            <div className="ai-bar-ctx">
-              {isSide ? (
-                <button
-                  type="button"
-                  className="ai-bar-collapse-btn"
-                  onClick={toggleAiPanelCollapsed}
-                  aria-label="Collapse assistant"
-                  title="Collapse assistant"
-                >
-                  {/* Double chevron right — collapse toward the right edge (right-docked rail). */}
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-                    <g
-                      stroke="currentColor"
-                      strokeWidth="1.75"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      fill="none"
-                    >
-                      <polyline points="7 6 11 12 7 18" />
-                      <polyline points="12 6 16 12 12 18" />
-                    </g>
-                  </svg>
-                </button>
-              ) : null}
-              <div className="ai-bar-ctx-badge">
-                <IconSparkle size={14} />
-              </div>
-              <span>Asking about</span>
-              <span className="ai-bar-ctx-path">{context.path}</span>
-              <span className="ai-bar-ctx-hint">
-                Highlight any text to ask · <kbd>Cmd</kbd> <kbd>K</kbd>
-              </span>
-            </div>
-            {chips.length > 0 ? (
-              <div className="ai-bar-suggest">
-                {chips.map((s) => (
-                  <button key={s} className="ai-bar-chip" type="button" onClick={() => handleChipClick(s)}>
-                    {s}
+            <div className="ai-bar-stack">
+              <div className="ai-bar-ctx">
+                {isSide ? (
+                  <button
+                    type="button"
+                    className="ai-bar-collapse-btn"
+                    onClick={toggleAiPanelCollapsed}
+                    aria-label="Collapse assistant"
+                    title="Collapse assistant"
+                  >
+                    {/* Double chevron right — collapse toward the right edge (right-docked rail). */}
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                      <g
+                        stroke="currentColor"
+                        strokeWidth="1.75"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        fill="none"
+                      >
+                        <polyline points="7 6 11 12 7 18" />
+                        <polyline points="12 6 16 12 12 18" />
+                      </g>
+                    </svg>
                   </button>
-                ))}
-              </div>
-            ) : null}
-            {showReplyBlock ? (
-              <div className="ai-bar-reply">
-                {lastSubmittedQuestion ? (
-                  <div className="ai-bar-reply-question">
-                    <div className="ai-bar-reply-question-label">Your question</div>
-                    <div className="ai-bar-reply-question-text">{lastSubmittedQuestion}</div>
-                  </div>
                 ) : null}
-                {submitting ? (
-                  <AssistantThinkingSkeleton compact />
-                ) : askError ? (
-                  <div className="ai-bar-reply-error">{askError}</div>
-                ) : lastReply ? (
-                  <AskReplyBody reply={lastReply} animateIn simulateTyping omitCitations />
-                ) : null}
+                <div className="ai-bar-ctx-badge">
+                  <IconSparkle size={14} />
+                </div>
+                <span>Asking about</span>
+                <span className="ai-bar-ctx-path">{context.path}</span>
+                <span className="ai-bar-ctx-hint">
+                  Highlight any text to ask · <kbd>Cmd</kbd> <kbd>K</kbd>
+                </span>
               </div>
-            ) : null}
+              {chips.length > 0 ? (
+                <div className="ai-bar-suggest">
+                  {chips.map((s) => (
+                    <button key={s} className="ai-bar-chip" type="button" onClick={() => handleChipClick(s)}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {showReplyBlock ? (
+                <div className="ai-bar-reply">
+                  {lastSubmittedQuestion ? (
+                    <div className="ai-bar-reply-question">
+                      <div className="ai-bar-reply-question-label">Your question</div>
+                      <div className="ai-bar-reply-question-text">{lastSubmittedQuestion}</div>
+                    </div>
+                  ) : null}
+                  {submitting ? (
+                    <AssistantThinkingSkeleton compact />
+                  ) : askError ? (
+                    <div className="ai-bar-reply-error">{askError}</div>
+                  ) : lastReply ? (
+                    <AskReplyBody reply={lastReply} animateIn simulateTyping omitCitations />
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
             <div className="ai-bar-input-row">
               <div className="ai-bar-textarea-shell">
                 <textarea

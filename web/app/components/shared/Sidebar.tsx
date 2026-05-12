@@ -1,13 +1,30 @@
 "use client"
 
+import { useCallback, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
+import { useAuth } from "../../lib/auth"
 import type { ScreenId } from "../../types"
 import { IconBrief, IconEvidence, IconHome, IconPrd, IconSettings } from "./sidebar-icons"
 
 export function Sidebar() {
   const { currentScreen, goTo, sidebarCollapsed, toggleSidebar } = useNavigation()
   const { content } = useContent()
+  const { signOut } = useAuth()
+  const signingOutRef = useRef(false)
+  const [signingOut, setSigningOut] = useState(false)
+
+  const handleSignOut = useCallback(async () => {
+    if (signingOutRef.current) return
+    signingOutRef.current = true
+    setSigningOut(true)
+    try {
+      await signOut()
+    } finally {
+      signingOutRef.current = false
+      setSigningOut(false)
+    }
+  }, [signOut])
 
   const NavItem = ({
     screen,
@@ -122,8 +139,39 @@ export function Sidebar() {
           <div className="sb-user-info">
             <div className="sb-user-name">{displayName}</div>
           </div>
+          <button
+            type="button"
+            className="sb-signout"
+            onClick={() => void handleSignOut()}
+            disabled={signingOut}
+            title="Sign out"
+            aria-label="Sign out"
+          >
+            <SignOutIcon />
+          </button>
         </div>
       </div>
     </aside>
+  )
+}
+
+function SignOutIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M16 17l5-5-5-5M21 12H9"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   )
 }
