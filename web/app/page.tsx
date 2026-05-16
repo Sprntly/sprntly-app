@@ -37,9 +37,15 @@ import { useAuth } from "./lib/auth"
 import { useBriefHydration } from "./lib/useBriefHydration"
 
 function AppContent() {
+  // Active dataset is set by the onboarding wizard via localStorage; default
+  // to asurion for backwards-compat with existing demo links. PR 3 adds a
+  // proper switcher UI in the sidebar.
+  const activeDataset =
+    (typeof window !== "undefined" && window.localStorage.getItem("sprntly_active_dataset")) ||
+    "asurion"
   // Hydrate ContentContext.brief from /v1/brief/current.
   // Polls /v1/brief/status if the backend is still generating.
-  useBriefHydration("asurion")
+  useBriefHydration(activeDataset)
 
   const { currentScreen, closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } =
     useNavigation()

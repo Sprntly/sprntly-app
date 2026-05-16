@@ -20,17 +20,24 @@ export class ApiError extends Error {
 }
 
 async function request<T>(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
+  const isForm = typeof FormData !== "undefined" && body instanceof FormData
   const res = await fetch(`${API_URL}${path}`, {
     method,
     credentials: "include",
-    headers: body
+    headers: isForm
+      ? { Accept: "application/json" }
+      : body
       ? { "Content-Type": "application/json", Accept: "application/json" }
       : { Accept: "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
+    body: isForm
+      ? (body as FormData)
+      : body
+      ? JSON.stringify(body)
+      : undefined,
   })
   let parsed: unknown = null
   const text = await res.text()
@@ -50,6 +57,7 @@ async function request<T>(
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
+  delete: <T>(path: string) => request<T>("DELETE", path),
 }
 
 // ---- typed wrappers ---------------------------------------------------------
@@ -175,6 +183,61 @@ export const evidenceApi = {
       force,
     }),
   get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
+}
+
+// ---- datasets ---------------------------------------------------------------
+
+export type DatasetSummary = {
+  slug: string
+  display_name: string
+  created_at: string
+  has_brief: boolean
+  brief_id: number | null
+  raw_file_count: number
+  md_file_count: number
+}
+
+export type CreateDatasetResponse = {
+  slug: string
+  display_name: string
+  data_dir: string
+}
+
+export type IngestedFile = {
+  filename: string
+  md_path: string
+  md_chars: number
+}
+
+export type UploadFilesResponse = {
+  slug: string
+  ingested: IngestedFile[]
+  errors: { filename: string; error: string }[]
+}
+
+export const datasetsApi = {
+  list: () => api.get<{ datasets: DatasetSummary[] }>("/v1/datasets"),
+  create: (slug: string, displayName: string) =>
+    api.post<CreateDatasetResponse>("/v1/datasets", {
+      slug,
+      display_name: displayName,
+    }),
+  uploadFiles: (slug: string, files: File[]) => {
+    const form = new FormData()
+    for (const f of files) form.append("files", f, f.name)
+    return api.post<UploadFilesResponse>(
+      `/v1/datasets/${encodeURIComponent(slug)}/files`,
+      form,
+    )
+  },
+  generate: (slug: string) =>
+    api.post<{ started: boolean; dataset: string }>(
+      `/v1/datasets/${encodeURIComponent(slug)}/generate`,
+    ),
+  remove: (slug: string) =>
+    api.delete<{ deleted: true; slug: string }>(
+      `/v1/datasets/${encodeURIComponent(slug)}`,
+    ),
 }
 
 export const prdApi = {
