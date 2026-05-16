@@ -5,11 +5,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import auth, db
+from app import auth, db, datasets as datasets_service
 from app.brief_runner import auto_generate_all
 from app.config import settings
 from app.prompts import ASK_CACHE_VERSION, BRIEF_SCHEMA_VERSION, EVIDENCE_TEMPLATE_VERSION, PRD_TEMPLATE_VERSION
-from app.routes import ask, brief, evidence, health, prd
+from app.routes import ask, brief, datasets as datasets_routes, evidence, health, prd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    # Register any on-disk datasets that don't have a DB row yet — covers the
+    # pre-existing `asurion` corpus and any sibling dirs added manually.
+    seeded = datasets_service.seed_filesystem_datasets()
+    if seeded:
+        logger.info("Seeded %d on-disk dataset(s) into the datasets table", seeded)
     # Demote any cached brief whose payload schema doesn't match the current
     # code. auto_generate_all will then treat affected datasets as empty and
     # regenerate them under the new schema on the next tick.
@@ -81,6 +86,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(ask.router)
 app.include_router(prd.router)

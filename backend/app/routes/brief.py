@@ -14,7 +14,7 @@ router = APIRouter(prefix="/v1/brief", tags=["brief"])
 
 @router.get("/current")
 def current(
-    dataset: str = "asurion",
+    dataset: str,
     sprintly_session: str | None = Cookie(default=None),
 ):
     """Return the latest cached brief for a dataset.
@@ -32,7 +32,7 @@ def current(
 
 @router.get("/status")
 def status(
-    dataset: str = "asurion",
+    dataset: str,
     sprintly_session: str | None = Cookie(default=None),
 ):
     """Lightweight poll endpoint for the frontend.
@@ -49,7 +49,7 @@ def status(
 
 @router.post("/regenerate")
 async def regenerate(
-    dataset: str = "asurion",
+    dataset: str,
     sprintly_session: str | None = Cookie(default=None),
 ):
     """Force a fresh brief generation in the background. Returns immediately.
@@ -77,7 +77,7 @@ def by_id(
 
 @router.post("/generate")
 def generate(
-    dataset: str = "asurion",
+    dataset: str,
     sprintly_session: str | None = Cookie(default=None),
 ):
     """Synchronously generate a fresh brief and return it.

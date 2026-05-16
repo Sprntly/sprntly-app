@@ -16,6 +16,14 @@ venv/
 *.db-shm
 *.db-wal
 
+# Claude Code local state
+.claude/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
 # Node / Next.js
 node_modules/
 .next/

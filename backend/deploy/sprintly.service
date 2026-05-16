@@ -7,6 +7,11 @@ Type=simple
 User=ec2-user
 WorkingDirectory=/home/ec2-user/Sprntly/backend
 EnvironmentFile=/home/ec2-user/Sprntly/backend/.env
+# Persist uploads outside the repo so `git reset --hard` in deploy doesn't wipe them.
+# Templates stay in-repo (TEMPLATE_DIR); user content lives in DATA_DIR.
+Environment="DATA_DIR=/var/lib/sprntly/data"
+Environment="TEMPLATE_DIR=/home/ec2-user/Sprntly/backend/data"
+Environment="DB_PATH=/var/lib/sprntly/data/sprintly.db"
 ExecStart=/home/ec2-user/Sprntly/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5

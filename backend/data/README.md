@@ -42,14 +42,18 @@ backend/data/
 
 ## Adding a new dataset
 
-1. Drop original `.docx` / `.xlsx` files into `backend/data/<dataset>/raw/`
+**Preferred (live API):** use the onboarding wizard at `/demo/onboard` or POST to `/v1/datasets` + `/v1/datasets/{slug}/files`. The backend converts uploads to markdown in-process and seeds the `datasets` table automatically.
+
+**Offline (developer):**
+
+1. Drop original `.docx` / `.xlsx` / `.pdf` / `.txt` files into `backend/data/<dataset>/raw/`
 2. Run the converter:
    ```bash
-   pip install python-docx openpyxl
+   pip install python-docx openpyxl pypdf
    python scripts/convert_dataset.py --in backend/data/<dataset>/raw --out backend/data/<dataset>
    ```
 3. Files matching `expected_output*` automatically land in `_reference/` and are kept out of the LLM context.
-4. Add `<dataset>` to `AUTO_DATASETS` in `app/brief_runner.py` if you want briefs auto-generated for it on backend startup.
+4. Restart the backend — `seed_filesystem_datasets()` registers the new folder in the `datasets` table on boot.
 
 ## Re-converting an existing dataset
 
