@@ -3,9 +3,8 @@ as plain strings for inclusion in LLM prompts. No vector store yet — at this
 size (single dataset, ~50KB) just feed everything in.
 """
 from dataclasses import dataclass
-from pathlib import Path
 
-from app.config import DATA_DIR
+from app.config import settings
 
 
 @dataclass(frozen=True)
@@ -31,7 +30,7 @@ class Corpus:
 
 
 def load_corpus(dataset: str = "asurion") -> Corpus:
-    base = DATA_DIR / dataset
+    base = settings.data_path / dataset
     if not base.exists():
         raise FileNotFoundError(f"Dataset {dataset!r} not found at {base}")
     docs: list[CorpusDoc] = []
@@ -46,8 +45,9 @@ def load_corpus(dataset: str = "asurion") -> Corpus:
 
 
 def load_prd_template() -> str:
-    return (DATA_DIR / "sprntly_prd_template.md").read_text()
+    # Templates ship in-repo (TEMPLATE_DIR), separate from user uploads (DATA_DIR).
+    return (settings.template_path / "sprntly_prd_template.md").read_text()
 
 
 def load_evidence_template() -> str:
-    return (DATA_DIR / "sprntly_evidence_template.md").read_text()
+    return (settings.template_path / "sprntly_evidence_template.md").read_text()

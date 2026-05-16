@@ -69,7 +69,7 @@ ASK_RESPONSE_SCHEMA: dict = {
 
 class AskIn(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)
-    dataset: str = "asurion"
+    dataset: str
 
 
 def _strip_citations(payload: dict) -> dict:

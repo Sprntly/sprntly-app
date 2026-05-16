@@ -184,10 +184,13 @@ async def auto_generate_brief(dataset: str) -> None:
     _warm_drilldowns(brief, dataset=dataset)
 
 
-# Datasets the service will auto-generate briefs for on startup.
-AUTO_DATASETS: tuple[str, ...] = ("asurion",)
-
-
 async def auto_generate_all() -> None:
-    for dataset in AUTO_DATASETS:
+    """Generate briefs for every dataset registered in the DB.
+
+    Replaces the previous hardcoded `AUTO_DATASETS = ("asurion",)` tuple.
+    A startup hook in main.py seeds the table from disk first, so existing
+    on-disk corpora are picked up automatically.
+    """
+    from app.db import list_dataset_slugs
+    for dataset in list_dataset_slugs():
         await auto_generate_brief(dataset)
