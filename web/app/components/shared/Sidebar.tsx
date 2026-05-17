@@ -6,8 +6,14 @@ import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
 import type { ScreenId } from "../../types"
 import { IconBrief, IconEvidence, IconHome, IconPrd, IconSettings } from "./sidebar-icons"
+import { DatasetSwitcher } from "./DatasetSwitcher"
 
-export function Sidebar() {
+interface SidebarProps {
+  activeDataset?: string
+  onSwitchDataset?: (slug: string) => void
+}
+
+export function Sidebar({ activeDataset, onSwitchDataset }: SidebarProps = {}) {
   const { currentScreen, goTo, sidebarCollapsed, toggleSidebar } = useNavigation()
   const { content } = useContent()
   const { signOut } = useAuth()
@@ -108,6 +114,10 @@ export function Sidebar() {
           </button>
         </div>
       </div>
+
+      {activeDataset && onSwitchDataset && !sidebarCollapsed && (
+        <DatasetSwitcher activeSlug={activeDataset} onSwitch={onSwitchDataset} />
+      )}
 
       <div className="sb-body">
         <div className="sb-section-title">Overview</div>
