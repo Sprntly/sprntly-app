@@ -4,6 +4,7 @@ import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { NavigationProvider, useNavigation } from "./context/NavigationContext"
 import { ContentProvider } from "./context/ContentContext"
+import { DatasetProvider, useDataset } from "./context/DatasetContext"
 import {
   AIBar,
   Toast,
@@ -11,6 +12,7 @@ import {
   InviteModal,
   ClaudeDrawer,
   TicketDrawer,
+  EmptyDatasetBanner,
 } from "./components/shared"
 import {
   Onboarding1,
@@ -37,14 +39,10 @@ import { useAuth } from "./lib/auth"
 import { useBriefHydration } from "./lib/useBriefHydration"
 
 function AppContent() {
-  // Active dataset is set by the onboarding wizard via localStorage; default
-  // to asurion for backwards-compat with existing demo links. PR 3 adds a
-  // proper switcher UI in the sidebar.
-  const activeDataset =
-    (typeof window !== "undefined" && window.localStorage.getItem("sprntly_active_dataset")) ||
-    "asurion"
-  // Hydrate ContentContext.brief from /v1/brief/current.
-  // Polls /v1/brief/status if the backend is still generating.
+  // Active dataset comes from the DatasetProvider (URL ?dataset=… +
+  // localStorage). Sidebar's DatasetSwitcher updates it; we re-hydrate
+  // the brief whenever it changes.
+  const { activeDataset } = useDataset()
   useBriefHydration(activeDataset)
 
   const { currentScreen, closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } =
@@ -122,6 +120,7 @@ function AppContent() {
 
   return (
     <>
+      <EmptyDatasetBanner />
       {renderScreen()}
       <AIBar />
       <Toast />
@@ -168,11 +167,13 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 export default function HomePage() {
   return (
     <AuthGate>
-      <NavigationProvider>
-        <ContentProvider>
-          <AppContent />
-        </ContentProvider>
-      </NavigationProvider>
+      <DatasetProvider>
+        <NavigationProvider>
+          <ContentProvider>
+            <AppContent />
+          </ContentProvider>
+        </NavigationProvider>
+      </DatasetProvider>
     </AuthGate>
   )
 }
