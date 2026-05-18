@@ -87,9 +87,7 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
               aria-selected={d.slug === activeSlug}
             >
               <span className="row-name">{d.display_name}</span>
-              <span className="row-meta">
-                {d.has_brief ? "ready" : "no brief"} · {d.md_file_count} src
-              </span>
+              <span className="row-meta">{d.has_brief ? "ready" : "no brief"}</span>
             </button>
           ))}
           <div className="ds-sep" />
