@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { dedupeFiles, suggestedSlug } from "../onboard-helpers"
+import {
+  dedupeFiles,
+  GEN_STAGES,
+  progressForElapsed,
+  stageForElapsed,
+  suggestedSlug,
+} from "../onboard-helpers"
 
 describe("suggestedSlug", () => {
   it("lowercases and replaces spaces with underscores", () => {
@@ -47,5 +53,42 @@ describe("dedupeFiles", () => {
     const b = mkFile("b.txt", 1)
     const a2 = mkFile("a.txt", 1)
     expect(dedupeFiles([b, a, a2]).map((f) => f.name)).toEqual(["b.txt", "a.txt"])
+  })
+})
+
+describe("stageForElapsed", () => {
+  it("reads at the very start", () => {
+    expect(stageForElapsed(0)).toBe("reading")
+  })
+  it("still reading just under the cutoff", () => {
+    expect(stageForElapsed(14_999)).toBe("reading")
+  })
+  it("drafts at and past 15s", () => {
+    expect(stageForElapsed(15_000)).toBe("drafting")
+    expect(stageForElapsed(45_000)).toBe("drafting")
+  })
+  it("polishes at and past 60s", () => {
+    expect(stageForElapsed(60_000)).toBe("polishing")
+    expect(stageForElapsed(120_000)).toBe("polishing")
+  })
+  it("GEN_STAGES ordering matches stage progression", () => {
+    expect(GEN_STAGES.map((s) => s.id)).toEqual(["reading", "drafting", "polishing"])
+  })
+})
+
+describe("progressForElapsed", () => {
+  it("is 0 at t=0", () => {
+    expect(progressForElapsed(0)).toBe(0)
+  })
+  it("is strictly increasing", () => {
+    expect(progressForElapsed(5_000)).toBeLessThan(progressForElapsed(15_000))
+    expect(progressForElapsed(15_000)).toBeLessThan(progressForElapsed(60_000))
+  })
+  it("is capped at 0.97 — never claims done before backend says so", () => {
+    expect(progressForElapsed(10 * 60 * 1000)).toBeLessThanOrEqual(0.97)
+    expect(progressForElapsed(60 * 60 * 1000)).toBeLessThanOrEqual(0.97)
+  })
+  it("is past 50% by 30s (one half-life)", () => {
+    expect(progressForElapsed(30_000)).toBeGreaterThanOrEqual(0.5)
   })
 })
