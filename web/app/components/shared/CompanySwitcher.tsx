@@ -60,7 +60,6 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
         aria-expanded={open}
         data-testid="company-switcher"
       >
-        <span className="ds-label">Company</span>
         <span className="ds-name" title={active.display_name}>
           {active.display_name}
         </span>
@@ -94,7 +93,12 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
             </button>
           ))}
           <div className="ds-sep" />
-          <Link href="/onboard" className="ds-row ds-onboard" onClick={() => setOpen(false)}>
+          <Link
+            href="/onboard"
+            className="ds-row ds-onboard"
+            style={{ color: "#e6e6ea", textDecoration: "none" }}
+            onClick={() => setOpen(false)}
+          >
             + Onboard a company
           </Link>
         </div>
