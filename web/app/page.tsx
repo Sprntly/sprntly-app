@@ -4,7 +4,7 @@ import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { NavigationProvider, useNavigation } from "./context/NavigationContext"
 import { ContentProvider } from "./context/ContentContext"
-import { DatasetProvider, useDataset } from "./context/DatasetContext"
+import { CompanyProvider, useCompany } from "./context/CompanyContext"
 import {
   AIBar,
   Toast,
@@ -12,7 +12,7 @@ import {
   InviteModal,
   ClaudeDrawer,
   TicketDrawer,
-  EmptyDatasetBanner,
+  EmptyCompanyBanner,
 } from "./components/shared"
 import {
   Onboarding1,
@@ -39,11 +39,11 @@ import { useAuth } from "./lib/auth"
 import { useBriefHydration } from "./lib/useBriefHydration"
 
 function AppContent() {
-  // Active dataset comes from the DatasetProvider (URL ?dataset=… +
-  // localStorage). Sidebar's DatasetSwitcher updates it; we re-hydrate
+  // Active company comes from the CompanyProvider (URL ?company=… +
+  // localStorage). Sidebar's CompanySwitcher updates it; we re-hydrate
   // the brief whenever it changes.
-  const { activeDataset } = useDataset()
-  useBriefHydration(activeDataset)
+  const { activeCompany } = useCompany()
+  useBriefHydration(activeCompany)
 
   const { currentScreen, closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } =
     useNavigation()
@@ -120,7 +120,7 @@ function AppContent() {
 
   return (
     <>
-      <EmptyDatasetBanner />
+      <EmptyCompanyBanner />
       {renderScreen()}
       <AIBar />
       <Toast />
@@ -167,13 +167,13 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 export default function HomePage() {
   return (
     <AuthGate>
-      <DatasetProvider>
+      <CompanyProvider>
         <NavigationProvider>
           <ContentProvider>
             <AppContent />
           </ContentProvider>
         </NavigationProvider>
-      </DatasetProvider>
+      </CompanyProvider>
     </AuthGate>
   )
 }

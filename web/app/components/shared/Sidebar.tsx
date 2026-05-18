@@ -6,14 +6,14 @@ import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
 import type { ScreenId } from "../../types"
 import { IconBrief, IconEvidence, IconHome, IconPrd, IconSettings } from "./sidebar-icons"
-import { DatasetSwitcher } from "./DatasetSwitcher"
+import { CompanySwitcher } from "./CompanySwitcher"
 
 interface SidebarProps {
-  activeDataset?: string
-  onSwitchDataset?: (slug: string) => void
+  activeCompany?: string
+  onSwitchCompany?: (slug: string) => void
 }
 
-export function Sidebar({ activeDataset, onSwitchDataset }: SidebarProps = {}) {
+export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
   const { currentScreen, goTo, sidebarCollapsed, toggleSidebar } = useNavigation()
   const { content } = useContent()
   const { signOut } = useAuth()
@@ -115,8 +115,8 @@ export function Sidebar({ activeDataset, onSwitchDataset }: SidebarProps = {}) {
         </div>
       </div>
 
-      {activeDataset && onSwitchDataset && !sidebarCollapsed && (
-        <DatasetSwitcher activeSlug={activeDataset} onSwitch={onSwitchDataset} />
+      {activeCompany && onSwitchCompany && !sidebarCollapsed && (
+        <CompanySwitcher activeSlug={activeCompany} onSwitch={onSwitchCompany} />
       )}
 
       <div className="sb-body">

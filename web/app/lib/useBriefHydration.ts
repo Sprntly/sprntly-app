@@ -21,9 +21,9 @@ const MAX_POLL_MS = 5 * 60 * 1000 // 5 min ceiling on polling
  * If the backend is still generating, poll /v1/brief/status until ready
  * (or for at most 5 minutes), then re-fetch.
  *
- * Safe to call from anywhere inside the AuthGate. Re-runs on dataset change.
+ * Safe to call from anywhere inside the AuthGate. Re-runs on company change.
  */
-export function useBriefHydration(dataset: string = "asurion"): HydrationState {
+export function useBriefHydration(company: string = "asurion"): HydrationState {
   const { setContent } = useContent()
   const [state, setState] = useState<HydrationState>({ kind: "idle" })
   const cancelled = useRef(false)
@@ -36,7 +36,7 @@ export function useBriefHydration(dataset: string = "asurion"): HydrationState {
 
     async function loadBrief(): Promise<void> {
       try {
-        const brief = await briefApi.current(dataset)
+        const brief = await briefApi.current(company)
         if (cancelled.current) return
         setContent(briefToContentPatch(brief))
         setState({ kind: "ready", brief })
@@ -58,7 +58,7 @@ export function useBriefHydration(dataset: string = "asurion"): HydrationState {
     async function pollUntilReady(): Promise<void> {
       while (!cancelled.current && Date.now() - start < MAX_POLL_MS) {
         try {
-          const s = await briefApi.status(dataset)
+          const s = await briefApi.status(company)
           if (cancelled.current) return
           if (s.status === "ready") {
             // Brief is now cached — fetch it
@@ -88,7 +88,7 @@ export function useBriefHydration(dataset: string = "asurion"): HydrationState {
     return () => {
       cancelled.current = true
     }
-  }, [dataset, setContent])
+  }, [company, setContent])
 
   return state
 }
