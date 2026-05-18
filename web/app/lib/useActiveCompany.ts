@@ -2,25 +2,25 @@
 
 import { useCallback, useEffect, useState } from "react"
 
-const LS_KEY = "sprntly_active_dataset"
+const LS_KEY = "sprntly_active_company"
 const DEFAULT_SLUG = "asurion"
 
 /**
- * Active-dataset state for the demo. Resolution order:
- *   1. ?dataset=… URL query
- *   2. localStorage["sprntly_active_dataset"]
- *   3. "asurion" (back-compat with the original single-dataset demo)
+ * Active-company state for the demo. Resolution order:
+ *   1. ?company=… URL query
+ *   2. localStorage["sprntly_active_company"]
+ *   3. "asurion" (back-compat with the original single-company demo)
  *
  * Writes back to both localStorage and the URL so reload + share-the-link
  * both work. URL changes via history.replaceState; we never reload.
  */
-export function resolveInitialDataset(
+export function resolveInitialCompany(
   search: string | null,
   storage: Storage | null,
 ): string {
   if (search) {
     try {
-      const v = new URLSearchParams(search).get("dataset")
+      const v = new URLSearchParams(search).get("company")
       if (v && v.length >= 2) return v
     } catch {
       // bad query, fall through
@@ -33,10 +33,10 @@ export function resolveInitialDataset(
   return DEFAULT_SLUG
 }
 
-export function useActiveDataset(): [string, (slug: string) => void] {
+export function useActiveCompany(): [string, (slug: string) => void] {
   const [slug, setSlugState] = useState<string>(() => {
     if (typeof window === "undefined") return DEFAULT_SLUG
-    return resolveInitialDataset(window.location.search, window.localStorage)
+    return resolveInitialCompany(window.location.search, window.localStorage)
   })
 
   // Keep storage + URL in sync whenever slug changes.
@@ -48,8 +48,8 @@ export function useActiveDataset(): [string, (slug: string) => void] {
       // localStorage may be disabled in some browsers; not fatal.
     }
     const url = new URL(window.location.href)
-    if (url.searchParams.get("dataset") !== slug) {
-      url.searchParams.set("dataset", slug)
+    if (url.searchParams.get("company") !== slug) {
+      url.searchParams.set("company", slug)
       window.history.replaceState({}, "", url.toString())
     }
   }, [slug])

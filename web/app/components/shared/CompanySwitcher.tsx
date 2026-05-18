@@ -2,26 +2,26 @@
 
 import { useEffect, useRef, useState } from "react"
 import Link from "next/link"
-import { datasetsApi, type DatasetSummary, ApiError } from "../../lib/api"
+import { companiesApi, type CompanySummary, ApiError } from "../../lib/api"
 
 interface Props {
   activeSlug: string
   onSwitch: (slug: string) => void
 }
 
-export function DatasetSwitcher({ activeSlug, onSwitch }: Props) {
+export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
   const [open, setOpen] = useState(false)
-  const [datasets, setDatasets] = useState<DatasetSummary[] | null>(null)
+  const [companies, setCompanies] = useState<CompanySummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    datasetsApi
+    companiesApi
       .list()
       .then((r) => {
         if (cancelled) return
-        setDatasets(r.datasets)
+        setCompanies(r.companies)
       })
       .catch((e) => {
         if (cancelled) return
@@ -47,8 +47,8 @@ export function DatasetSwitcher({ activeSlug, onSwitch }: Props) {
   }, [open])
 
   const active =
-    datasets?.find((d) => d.slug === activeSlug) ??
-    ({ slug: activeSlug, display_name: activeSlug } as DatasetSummary)
+    companies?.find((d) => d.slug === activeSlug) ??
+    ({ slug: activeSlug, display_name: activeSlug } as CompanySummary)
 
   return (
     <div className="ds-wrap" ref={wrapRef}>
@@ -58,9 +58,9 @@ export function DatasetSwitcher({ activeSlug, onSwitch }: Props) {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        data-testid="dataset-switcher"
+        data-testid="company-switcher"
       >
-        <span className="ds-label">Dataset</span>
+        <span className="ds-label">Company</span>
         <span className="ds-name" title={active.display_name}>
           {active.display_name}
         </span>
@@ -71,11 +71,11 @@ export function DatasetSwitcher({ activeSlug, onSwitch }: Props) {
       {open && (
         <div className="ds-menu" role="listbox">
           {error && <div className="ds-err">{error}</div>}
-          {datasets === null && !error && <div className="ds-empty">Loading…</div>}
-          {datasets?.length === 0 && (
-            <div className="ds-empty">No datasets yet.</div>
+          {companies === null && !error && <div className="ds-empty">Loading…</div>}
+          {companies?.length === 0 && (
+            <div className="ds-empty">No companies yet.</div>
           )}
-          {datasets?.map((d) => (
+          {companies?.map((d) => (
             <button
               key={d.slug}
               type="button"

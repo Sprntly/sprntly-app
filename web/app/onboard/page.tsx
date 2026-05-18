@@ -6,7 +6,7 @@ import { useAuth } from "../lib/auth"
 import {
   ApiError,
   briefApi,
-  datasetsApi,
+  companiesApi,
   type IngestedFile,
   type UploadFilesResponse,
 } from "../lib/api"
@@ -65,22 +65,22 @@ export default function OnboardPage() {
     [displayName, slug, submitting],
   )
 
-  async function onCreateDataset(e: React.FormEvent) {
+  async function onCreateCompany(e: React.FormEvent) {
     e.preventDefault()
     if (!canCreate) return
     setCreateError(null)
     setSubmitting(true)
     try {
-      await datasetsApi.create(slug, displayName.trim())
+      await companiesApi.create(slug, displayName.trim())
       setStep("upload")
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        setCreateError(`A dataset named "${slug}" already exists. Pick a different slug.`)
+        setCreateError(`A company named "${slug}" already exists. Pick a different slug.`)
       } else if (e instanceof ApiError && e.status === 422) {
         const body = e.body as { detail?: string } | null
         setCreateError(body?.detail || "Slug must be 2–63 chars, lowercase, with - or _ only.")
       } else {
-        setCreateError("Couldn't create dataset. Try again in a moment.")
+        setCreateError("Couldn't create company. Try again in a moment.")
       }
     } finally {
       setSubmitting(false)
@@ -97,7 +97,7 @@ export default function OnboardPage() {
     if (files.length === 0 || uploading) return
     setUploading(true)
     try {
-      const r = await datasetsApi.uploadFiles(slug, files)
+      const r = await companiesApi.uploadFiles(slug, files)
       setUploadResult(r)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -119,7 +119,7 @@ export default function OnboardPage() {
     setGenerateError(null)
     setStep("generate")
     try {
-      await datasetsApi.generate(slug)
+      await companiesApi.generate(slug)
       // Poll status until ready or 5 min cap. 2s cadence so the transition to
       // "ready" feels instant when Claude finishes (was 5s — too laggy).
       while (Date.now() - start < 5 * 60 * 1000) {
@@ -146,9 +146,9 @@ export default function OnboardPage() {
   }
 
   function onGoToDemo() {
-    // Persist the active dataset so the demo page hydrates against it.
+    // Persist the active company so the demo page hydrates against it.
     if (typeof window !== "undefined") {
-      window.localStorage.setItem("sprntly_active_dataset", slug)
+      window.localStorage.setItem("sprntly_active_company", slug)
     }
     router.replace("/")
   }
@@ -166,7 +166,7 @@ export default function OnboardPage() {
         </div>
 
         {step === "name" && (
-          <form onSubmit={onCreateDataset}>
+          <form onSubmit={onCreateCompany}>
             <h1 className="title">Onboard a company</h1>
             <p className="blurb">
               Sprntly turns your sources into a weekly brief. Start with a name; we&apos;ll ingest your files in the next step.
@@ -196,12 +196,12 @@ export default function OnboardPage() {
                 data-testid="onboard-slug"
               />
               <span className="hint">
-                Lowercase letters, digits, _ and -. This becomes the dataset ID and the URL path.
+                Lowercase letters, digits, _ and -. This becomes the company ID and the URL path.
               </span>
             </label>
             {createError && <div className="err">{createError}</div>}
             <button type="submit" className="primary" disabled={!canCreate} data-testid="onboard-create-btn">
-              {submitting ? "Creating..." : "Create dataset"}
+              {submitting ? "Creating..." : "Create company"}
             </button>
           </form>
         )}

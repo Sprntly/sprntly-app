@@ -74,7 +74,7 @@ export interface BriefState {
   docSubline: string | null
   /** Optional one-line week summary from the API (`summary_headline`). */
   docKicker: string | null
-  /** Template “Brief header” row — derived from dataset + insights until the API adds fields. */
+  /** Template “Brief header” row — derived from company + insights until the API adds fields. */
   docHeader: BriefDocHeader | null
   /** Template footer strip (three columns) — derived from metrics + convergence. */
   docFooter: BriefDocFooter | null

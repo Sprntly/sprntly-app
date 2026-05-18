@@ -2,7 +2,7 @@
 
 import { ReactNode } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
-import { useDataset } from "../../../context/DatasetContext"
+import { useCompany } from "../../../context/CompanyContext"
 import { MainChromeStrip } from "../../shared/MainChromeStrip"
 import { Sidebar } from "../../shared/Sidebar"
 
@@ -16,14 +16,14 @@ interface AppLayoutProps {
 
 export function AppLayout({ children, style, mainStyle, mainClassName }: AppLayoutProps) {
   const { sidebarCollapsed } = useNavigation()
-  const { activeDataset, setActiveDataset } = useDataset()
+  const { activeCompany, setActiveCompany } = useCompany()
   const mainCls = ["main", mainClassName].filter(Boolean).join(" ")
   return (
     <div
       className={`app${sidebarCollapsed ? " app--sidebar-collapsed" : ""}`}
       style={style}
     >
-      <Sidebar activeDataset={activeDataset} onSwitchDataset={setActiveDataset} />
+      <Sidebar activeCompany={activeCompany} onSwitchCompany={setActiveCompany} />
       <div className="main-column">
         <MainChromeStrip />
         <main className={mainCls} style={mainStyle}>

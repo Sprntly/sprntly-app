@@ -2,27 +2,27 @@
 
 import { useEffect, useState } from "react"
 import Link from "next/link"
-import { ApiError, datasetsApi } from "../../lib/api"
+import { ApiError, companiesApi } from "../../lib/api"
 
 /**
  * One-shot empty-state banner that appears at the top of the demo when no
- * datasets are registered. Onboarded users won't see it again. Network errors
+ * companies are registered. Onboarded users won't see it again. Network errors
  * stay silent — the banner is purely additive UX.
  */
-export function EmptyDatasetBanner() {
+export function EmptyCompanyBanner() {
   const [empty, setEmpty] = useState<boolean | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    datasetsApi
+    companiesApi
       .list()
       .then((r) => {
-        if (!cancelled) setEmpty(r.datasets.length === 0)
+        if (!cancelled) setEmpty(r.companies.length === 0)
       })
       .catch((e) => {
         // 401 → auth gate handles redirect; anything else → don't show banner.
         if (!cancelled) setEmpty(false)
-        if (!(e instanceof ApiError)) console.warn("EmptyDatasetBanner list failed:", e)
+        if (!(e instanceof ApiError)) console.warn("EmptyCompanyBanner list failed:", e)
       })
     return () => {
       cancelled = true
@@ -34,7 +34,7 @@ export function EmptyDatasetBanner() {
   return (
     <div className="empty-banner" role="region" aria-label="Onboarding required">
       <div className="msg">
-        <strong>No datasets yet.</strong> Upload your first company&apos;s sources to see a weekly brief.
+        <strong>No companies yet.</strong> Upload your first company&apos;s sources to see a weekly brief.
       </div>
       <Link href="/onboard" className="cta">
         Onboard a company →

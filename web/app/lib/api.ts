@@ -1,6 +1,10 @@
 /**
  * Thin client for the Sprntly backend at api.sprntly.ai.
  * All requests include the session cookie via credentials: 'include'.
+ *
+ * Backend wire format still uses `dataset` (the DB column name) — these
+ * wrappers expose `company` to the rest of the app and translate at the
+ * request/response boundary.
  */
 
 // Default to the deployed backend so `npm run dev` works out of the box
@@ -98,7 +102,7 @@ export type Insight = {
 }
 export type Brief = {
   id: number
-  dataset: string
+  company: string
   generated_at: string
   week_label: string
   summary_headline: string
@@ -106,22 +110,45 @@ export type Brief = {
 }
 
 export type BriefStatus = {
-  dataset: string
+  company: string
   status: "ready" | "generating" | "failed" | "empty"
   error?: string
 }
 
+// Wire shapes from the backend — kept around so we can map cleanly.
+type WireBrief = Omit<Brief, "company"> & { dataset: string }
+type WireBriefStatus = Omit<BriefStatus, "company"> & { dataset: string }
+
+function briefFromWire(b: WireBrief): Brief {
+  const { dataset, ...rest } = b
+  return { ...rest, company: dataset }
+}
+
+function briefStatusFromWire(s: WireBriefStatus): BriefStatus {
+  const { dataset, ...rest } = s
+  return { ...rest, company: dataset }
+}
+
 export const briefApi = {
-  current: (dataset: string = "asurion") =>
-    api.get<Brief>(`/v1/brief/current?dataset=${encodeURIComponent(dataset)}`),
-  byId: (id: number) => api.get<Brief>(`/v1/brief/${id}`),
-  status: (dataset: string = "asurion") =>
-    api.get<BriefStatus>(`/v1/brief/status?dataset=${encodeURIComponent(dataset)}`),
-  regenerate: (dataset: string = "asurion") =>
-    api.post<{ started: boolean; dataset: string }>(
-      `/v1/brief/regenerate?dataset=${encodeURIComponent(dataset)}`,
-    ),
-  generate: () => api.post<Brief & { brief_id: number }>("/v1/brief/generate"),
+  current: (company: string = "asurion") =>
+    api
+      .get<WireBrief>(`/v1/brief/current?dataset=${encodeURIComponent(company)}`)
+      .then(briefFromWire),
+  byId: (id: number) => api.get<WireBrief>(`/v1/brief/${id}`).then(briefFromWire),
+  status: (company: string = "asurion") =>
+    api
+      .get<WireBriefStatus>(`/v1/brief/status?dataset=${encodeURIComponent(company)}`)
+      .then(briefStatusFromWire),
+  regenerate: (company: string = "asurion") =>
+    api
+      .post<{ started: boolean; dataset: string }>(
+        `/v1/brief/regenerate?dataset=${encodeURIComponent(company)}`,
+      )
+      .then((r) => ({ started: r.started, company: r.dataset })),
+  generate: () =>
+    api
+      .post<WireBrief & { brief_id: number }>("/v1/brief/generate")
+      .then((b) => ({ ...briefFromWire(b), brief_id: b.brief_id })),
 }
 
 export type AskCitation = { source: string; evidence: string }
@@ -134,8 +161,8 @@ export type AskResponse = {
 }
 
 export const askApi = {
-  ask: (question: string, dataset: string = "asurion") =>
-    api.post<AskResponse>("/v1/ask", { question, dataset }),
+  ask: (question: string, company: string = "asurion") =>
+    api.post<AskResponse>("/v1/ask", { question, dataset: company }),
 }
 
 export type PrdStartResponse = {
@@ -185,9 +212,9 @@ export const evidenceApi = {
   get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
 }
 
-// ---- datasets ---------------------------------------------------------------
+// ---- companies --------------------------------------------------------------
 
-export type DatasetSummary = {
+export type CompanySummary = {
   slug: string
   display_name: string
   created_at: string
@@ -197,7 +224,7 @@ export type DatasetSummary = {
   md_file_count: number
 }
 
-export type CreateDatasetResponse = {
+export type CreateCompanyResponse = {
   slug: string
   display_name: string
   data_dir: string
@@ -215,10 +242,13 @@ export type UploadFilesResponse = {
   errors: { filename: string; error: string }[]
 }
 
-export const datasetsApi = {
-  list: () => api.get<{ datasets: DatasetSummary[] }>("/v1/datasets"),
+export const companiesApi = {
+  list: () =>
+    api
+      .get<{ datasets: CompanySummary[] }>("/v1/datasets")
+      .then((r) => ({ companies: r.datasets })),
   create: (slug: string, displayName: string) =>
-    api.post<CreateDatasetResponse>("/v1/datasets", {
+    api.post<CreateCompanyResponse>("/v1/datasets", {
       slug,
       display_name: displayName,
     }),
@@ -231,9 +261,11 @@ export const datasetsApi = {
     )
   },
   generate: (slug: string) =>
-    api.post<{ started: boolean; dataset: string }>(
-      `/v1/datasets/${encodeURIComponent(slug)}/generate`,
-    ),
+    api
+      .post<{ started: boolean; dataset: string }>(
+        `/v1/datasets/${encodeURIComponent(slug)}/generate`,
+      )
+      .then((r) => ({ started: r.started, company: r.dataset })),
   remove: (slug: string) =>
     api.delete<{ deleted: true; slug: string }>(
       `/v1/datasets/${encodeURIComponent(slug)}`,

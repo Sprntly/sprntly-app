@@ -217,9 +217,9 @@ function heroMetricsFor(
   }))
 }
 
-function prettyDataset(dataset: string): string {
-  const d = (dataset || "company").trim()
-  return d.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+function prettyCompany(company: string): string {
+  const c = (company || "company").trim()
+  return c.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
 function signalLineFromInsight(insight: Insight): string {
@@ -262,7 +262,7 @@ function buildDocHeader(brief: Brief, insights: Insight[]): BriefDocHeader {
       ? `${first.domain} · ${first.subdomain}`
       : first.domain || "Product"
   return {
-    company: prettyDataset(brief.dataset || ""),
+    company: prettyCompany(brief.company || ""),
     weekOf: brief.week_label || brief.generated_at?.slice(0, 10) || "—",
     productArea,
   }
