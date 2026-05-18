@@ -10,7 +10,13 @@ import {
   type IngestedFile,
   type UploadFilesResponse,
 } from "../lib/api"
-import { dedupeFiles, suggestedSlug } from "../lib/onboard-helpers"
+import {
+  dedupeFiles,
+  GEN_STAGES,
+  progressForElapsed,
+  stageForElapsed,
+  suggestedSlug,
+} from "../lib/onboard-helpers"
 
 type Step = "name" | "upload" | "generate" | "ready"
 
@@ -32,6 +38,18 @@ export default function OnboardPage() {
 
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
+  const [genStartedAt, setGenStartedAt] = useState<number | null>(null)
+  const [elapsedMs, setElapsedMs] = useState(0)
+
+  // Tick once a second while generating so the UI updates the stage label,
+  // elapsed counter, and progress bar without the polling loop having to fire.
+  useEffect(() => {
+    if (!generating || genStartedAt == null) return
+    const id = setInterval(() => {
+      setElapsedMs(Date.now() - genStartedAt)
+    }, 1000)
+    return () => clearInterval(id)
+  }, [generating, genStartedAt])
 
   useEffect(() => {
     if (auth.kind === "anonymous") router.replace("/sign-in")
@@ -94,16 +112,20 @@ export default function OnboardPage() {
   }
 
   async function onGenerate() {
+    const start = Date.now()
+    setGenStartedAt(start)
+    setElapsedMs(0)
     setGenerating(true)
     setGenerateError(null)
     setStep("generate")
     try {
       await datasetsApi.generate(slug)
-      // Poll status until ready or 5 min cap.
-      const start = Date.now()
+      // Poll status until ready or 5 min cap. 2s cadence so the transition to
+      // "ready" feels instant when Claude finishes (was 5s — too laggy).
       while (Date.now() - start < 5 * 60 * 1000) {
         const s = await briefApi.status(slug)
         if (s.status === "ready") {
+          setElapsedMs(Date.now() - start)
           setGenerating(false)
           setStep("ready")
           return
@@ -113,7 +135,7 @@ export default function OnboardPage() {
           setGenerating(false)
           return
         }
-        await sleep(5000)
+        await sleep(2000)
       }
       setGenerateError("Brief is taking longer than expected. Check the demo page later.")
       setGenerating(false)
@@ -238,9 +260,9 @@ export default function OnboardPage() {
           <div>
             <h1 className="title">Generating your first brief</h1>
             <p className="blurb">
-              We&apos;re reading <strong>{uploadResult?.ingested.length ?? 0}</strong> source{(uploadResult?.ingested.length ?? 0) === 1 ? "" : "s"} and writing 3–5 insights. This usually takes 30–90 seconds.
+              Reading <strong>{uploadResult?.ingested.length ?? 0}</strong> source{(uploadResult?.ingested.length ?? 0) === 1 ? "" : "s"} into the corpus and writing 3–5 actionable insights. This usually takes 30–90 seconds.
             </p>
-            {generating && <div className="spinner" aria-label="Generating" />}
+            <GenProgress elapsedMs={elapsedMs} active={generating} />
             {generateError && (
               <>
                 <div className="err">{generateError}</div>
@@ -349,16 +371,53 @@ export default function OnboardPage() {
         .filelist li { display: flex; gap: 12px; align-items: center; font-size: 13px; }
         .fn { flex: 1; font-family: "JetBrains Mono", monospace; }
         .fs { color: #7a7a85; font-size: 12px; }
-        .spinner {
-          width: 28px;
-          height: 28px;
-          border-radius: 50%;
-          border: 3px solid #2a2a32;
-          border-top-color: #e6e6ea;
-          animation: spin 0.8s linear infinite;
-          margin: 16px 0;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
+      `}</style>
+    </div>
+  )
+}
+
+function GenProgress({ elapsedMs, active }: { elapsedMs: number; active: boolean }) {
+  const currentStage = stageForElapsed(elapsedMs)
+  const pct = active ? Math.round(progressForElapsed(elapsedMs) * 100) : 100
+  const seconds = Math.floor(elapsedMs / 1000)
+  return (
+    <div className="genp">
+      <div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+        <div className="bar-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <ul className="stages">
+        {GEN_STAGES.map((s) => {
+          const idx = GEN_STAGES.findIndex((x) => x.id === s.id)
+          const curIdx = GEN_STAGES.findIndex((x) => x.id === currentStage)
+          const state = !active && idx <= curIdx ? "done" : idx < curIdx ? "done" : idx === curIdx ? "current" : "pending"
+          return (
+            <li key={s.id} className={`stage stage-${state}`}>
+              <span className="dot" />
+              <div className="copy">
+                <span className="label">{s.label}</span>
+                <span className="desc">{s.description}</span>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+      <div className="elapsed">
+        {active ? `Working for ${seconds}s…` : `Finished in ${seconds}s`}
+      </div>
+      <style jsx>{`
+        .genp { display: flex; flex-direction: column; gap: 14px; margin: 18px 0 6px; }
+        .bar { height: 4px; background: #232329; border-radius: 999px; overflow: hidden; }
+        .bar-fill { height: 100%; background: linear-gradient(90deg, #4a8c5b, #6fbf7f); transition: width 0.6s ease-out; }
+        .stages { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+        .stage { display: flex; gap: 12px; align-items: flex-start; }
+        .stage .dot { flex: none; width: 10px; height: 10px; margin-top: 5px; border-radius: 50%; background: #2a2a32; transition: background 0.15s; }
+        .stage-current .dot { background: #e6e6ea; box-shadow: 0 0 0 4px rgba(230, 230, 234, 0.12); }
+        .stage-done .dot { background: #4a8c5b; }
+        .copy { display: flex; flex-direction: column; }
+        .label { font-size: 13px; font-weight: 500; color: #e6e6ea; }
+        .stage-pending .label { color: #7a7a85; }
+        .desc { font-size: 12px; color: #7a7a85; }
+        .elapsed { font-size: 12px; color: #7a7a85; font-family: "JetBrains Mono", monospace; }
       `}</style>
     </div>
   )
