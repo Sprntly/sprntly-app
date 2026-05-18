@@ -36,7 +36,18 @@ export function EmptyCompanyBanner() {
       <div className="msg">
         <strong>No companies yet.</strong> Upload your first company&apos;s sources to see a weekly brief.
       </div>
-      <Link href="/onboard" className="cta">
+      <Link
+        href="/onboard"
+        style={{
+          background: "#e6e6ea",
+          color: "#0a0a0c",
+          fontWeight: 600,
+          fontSize: 13,
+          padding: "8px 14px",
+          borderRadius: 8,
+          textDecoration: "none",
+        }}
+      >
         Onboard a company →
       </Link>
       <style jsx>{`
@@ -51,16 +62,6 @@ export function EmptyCompanyBanner() {
           font-size: 14px;
         }
         .msg { flex: 1; }
-        .cta {
-          background: #e6e6ea;
-          color: #0a0a0c;
-          font-weight: 600;
-          font-size: 13px;
-          padding: 8px 14px;
-          border-radius: 8px;
-          text-decoration: none;
-        }
-        .cta:hover { background: #ffffff; }
       `}</style>
     </div>
   )
