@@ -1,13 +1,13 @@
 import type { NextConfig } from "next"
 
-// The demo is mounted at /demo on sprntly.ai via a Vercel rewrite from the
-// marketing repo (vercel.json: /demo/* -> https://api.sprntly.ai/demo/*).
-// We build with `output: 'export'` so we can serve the result as plain static
-// files via nginx on EC2 — no Node server, no Vercel project required.
+// Optional base path for legacy `/demo` hosting (set NEXT_PUBLIC_BASE_PATH=/demo).
+// Default: app routes at `/`, `/brief`, `/evidence`, etc.
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH?.replace(/\/$/, "") || ""
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   output: "export",
-  basePath: "/demo",
+  ...(basePath ? { basePath } : {}),
   trailingSlash: false,
   images: {
     unoptimized: true,

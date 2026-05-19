@@ -12,8 +12,27 @@ npm install   # only needed once
 npm run dev
 ```
 
-Visit <http://localhost:3000>. Use the picker bar at the top or the sidebar to
-move between screens.
+Visit <http://localhost:3000>. Use the sidebar to move between screens; each
+module has its own URL (see **Routes** below).
+
+### Routes
+
+| Screen | URL |
+|--------|-----|
+| Home (Ask) | `/` |
+| Weekly brief | `/brief` |
+| Evidence | `/evidence` |
+| PRD | `/prd` |
+| Past briefs | `/past` |
+| Shipped | `/shipped` |
+| Settings | `/settings` |
+| Team | `/team` |
+| Connectors | `/connectors` |
+| Onboarding | `/onboarding/1` … `/onboarding/8` |
+| Sign in | `/sign-in` |
+
+`goTo("brief")` and sidebar clicks use Next.js navigation (`app/lib/routes.ts`).
+Production builds served under `/demo` set `NEXT_PUBLIC_BASE_PATH=/demo` in CI.
 
 ## How it works
 
@@ -57,7 +76,13 @@ web-mockup/
 │   ├── types/content.ts            # Serializable shapes for `setContent`
 │   ├── globals.css                 # Design system (lifted from HTML)
 │   ├── layout.tsx                  # Google Fonts + metadata
-│   └── page.tsx                    # NavigationProvider + ContentProvider + AppContent
+│   ├── (app)/                      # Authenticated app routes + shared shell
+│   │   ├── layout.tsx              # Auth, providers, AIBar, modals
+│   │   ├── page.tsx                # Home
+│   │   ├── brief/page.tsx
+│   │   ├── evidence/page.tsx
+│   │   └── …
+│   └── sign-in/page.tsx
 ├── public/
 │   └── sprntly.js                  # (no longer used — kept for reference)
 ├── package.json
@@ -67,11 +92,12 @@ web-mockup/
 
 ### Navigation
 
-All navigation is controlled by the `NavigationContext`:
+Navigation uses the Next.js App Router. `NavigationContext` derives
+`currentScreen` from the URL and `goTo(screen)` calls `router.push`:
 
 ```tsx
 const { currentScreen, goTo } = useNavigation()
-goTo("brief")  // switches to the brief screen
+goTo("brief")  // navigates to /brief (or /demo/brief when basePath is set)
 ```
 
 ### Product data (`ContentContext`)

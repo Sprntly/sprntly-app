@@ -76,7 +76,7 @@ export const AI_CONTEXTS: Record<
   { path: string; suggest: string[] }
 > = {
   chat: {
-    path: "/ home",
+    path: "/",
     suggest: [
       "Open this week's brief",
       "Help me prioritize my roadmap",
@@ -84,7 +84,7 @@ export const AI_CONTEXTS: Record<
     ],
   },
   brief: {
-    path: "/ weekly brief",
+    path: "/brief",
     suggest: [
       "Why is #01 ranked higher than #02?",
       "Show the raw signals behind the SMS issue",
@@ -92,7 +92,7 @@ export const AI_CONTEXTS: Record<
     ],
   },
   detail: {
-    path: "/ evidence",
+    path: "/evidence",
     suggest: [
       "Run a sensitivity analysis on the revenue model",
       "Pull more similar tickets",
@@ -100,7 +100,7 @@ export const AI_CONTEXTS: Record<
     ],
   },
   prd: {
-    path: "/ PRD",
+    path: "/prd",
     suggest: [
       "Make the test plan more rigorous",
       "Add rollback criteria",
@@ -108,7 +108,7 @@ export const AI_CONTEXTS: Record<
     ],
   },
   ondemand: {
-    path: "/ ask sprntly",
+    path: "/",
     suggest: [
       "Generate a Q3 strategy",
       "Draft a PRD for team folder permissions",
@@ -116,32 +116,32 @@ export const AI_CONTEXTS: Record<
     ],
   },
   past: {
-    path: "/ past briefs",
+    path: "/past",
     suggest: [
       "Which finding type ships most?",
       "Any declined findings worth reconsidering?",
     ],
   },
   shipped: {
-    path: "/ shipped",
+    path: "/shipped",
     suggest: [
       "What moved our core metric most?",
       "Which shipped items underperformed estimates?",
     ],
   },
   settings: {
-    path: "/ settings",
+    path: "/settings",
     suggest: [
       "Recommend a delivery cadence for my role",
       "Should I upgrade to Growth?",
     ],
   },
   team: {
-    path: "/ team",
+    path: "/team",
     suggest: ["Who opens the brief most often?", "Suggest who to invite from Slack"],
   },
   connectors: {
-    path: "/ connectors",
+    path: "/connectors",
     suggest: [
       "Which unconnected source would help most?",
       "What would Mixpanel add?",

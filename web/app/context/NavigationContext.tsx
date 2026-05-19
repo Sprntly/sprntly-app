@@ -6,10 +6,13 @@ import {
   useState,
   useCallback,
   useEffect,
+  useMemo,
   type ReactNode,
 } from "react"
+import { usePathname, useRouter } from "next/navigation"
 import type { ScreenId } from "../types"
 import type { AskResponse } from "../lib/api"
+import { pathForScreen, screenIdFromPathname } from "../lib/routes"
 
 /** Top search hands off `/v1/ask` results to Ask Sprntly (in-page thread) without a second request. */
 export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: string }
@@ -25,30 +28,30 @@ export const AI_PANEL_COLLAPSED_WIDTH = 84
 interface NavigationContextType {
   currentScreen: ScreenId
   goTo: (screen: ScreenId) => void
-  
+
   // Drawer state
   activeDrawer: "claude" | "ticket" | null
   openDrawer: (drawer: "claude" | "ticket") => void
   closeDrawers: () => void
-  
+
   // Modal state
   activeModal: "approve" | "invite" | null
   openModal: (modal: "approve" | "invite") => void
   closeModal: () => void
-  
+
   // Share menu
   shareMenuOpen: boolean
   setShareMenuOpen: (open: boolean) => void
-  
+
   // Review past menu
   reviewPastOpen: boolean
   setReviewPastOpen: (open: boolean) => void
-  
+
   // Toast
   toast: { title: string; sub: string; link?: string } | null
   showToast: (title: string, sub: string, link?: string) => void
   hideToast: () => void
-  
+
   // AI bar
   aiBarValue: string
   setAIBarValue: (value: string) => void
@@ -77,8 +80,10 @@ interface NavigationContextType {
 const NavigationContext = createContext<NavigationContextType | null>(null)
 
 export function NavigationProvider({ children }: { children: ReactNode }) {
-  /** Default to app Home — onboarding (ob-1…ob-8) is still reachable from flows that call `goTo`. */
-  const [currentScreen, setCurrentScreen] = useState<ScreenId>("chat")
+  const router = useRouter()
+  const pathname = usePathname()
+  const currentScreen = useMemo(() => screenIdFromPathname(pathname), [pathname])
+
   const [activeDrawer, setActiveDrawer] = useState<"claude" | "ticket" | null>(null)
   const [activeModal, setActiveModal] = useState<"approve" | "invite" | null>(null)
   const [shareMenuOpen, setShareMenuOpen] = useState(false)
@@ -175,18 +180,21 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
-  const goTo = useCallback((screen: ScreenId) => {
-    const next = screen === "ondemand" ? "chat" : screen
-    setCurrentScreen(next)
-    setActiveDrawer(null)
-    setActiveModal(null)
-    setShareMenuOpen(false)
-    setReviewPastOpen(false)
-    if (next !== "chat") {
-      setPendingOndemandDraft(null)
-    }
-    window.scrollTo({ top: 0, behavior: "instant" })
-  }, [])
+  const goTo = useCallback(
+    (screen: ScreenId) => {
+      const path = pathForScreen(screen)
+      setActiveDrawer(null)
+      setActiveModal(null)
+      setShareMenuOpen(false)
+      setReviewPastOpen(false)
+      if (screen !== "chat" && screen !== "ondemand") {
+        setPendingOndemandDraft(null)
+      }
+      router.push(path)
+      window.scrollTo({ top: 0, behavior: "instant" })
+    },
+    [router],
+  )
 
   const openDrawer = useCallback((drawer: "claude" | "ticket") => {
     setActiveDrawer(drawer)
