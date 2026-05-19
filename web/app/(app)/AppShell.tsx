@@ -10,10 +10,12 @@ import {
   ClaudeDrawer,
   TicketDrawer,
 } from "../components/shared"
+import { useCompany } from "../context/CompanyContext"
 import { useBriefHydration } from "../lib/useBriefHydration"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  useBriefHydration("asurion")
+  const { activeCompany } = useCompany()
+  useBriefHydration(activeCompany)
 
   const { closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } = useNavigation()
 

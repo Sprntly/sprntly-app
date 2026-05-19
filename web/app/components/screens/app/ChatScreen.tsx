@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
+import { useCompany } from "../../../context/CompanyContext"
 import type { ChatHomeCard } from "../../../types/content"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
@@ -45,6 +46,7 @@ export function ChatScreen() {
     showToast,
   } = useNavigation()
   const { content, setContent } = useContent()
+  const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
   const [thread, setThread] = useState<ThreadTurn[]>([])
@@ -136,7 +138,7 @@ export function ChatScreen() {
       pushPendingConversation(id, query)
       setActiveConv(0)
       try {
-        const res = await askApi.ask(query)
+        const res = await askApi.ask(query, activeCompany)
         setThread((t) => t.map((turn) => (turn.id === id ? { ...turn, reply: res } : turn)))
         finalizeConversationTurn(id, { reply: res })
       } catch (e) {
@@ -165,7 +167,7 @@ export function ChatScreen() {
         setBusy(false)
       }
     },
-    [finalizeConversationTurn, pushPendingConversation, showToast],
+    [activeCompany, finalizeConversationTurn, pushPendingConversation, showToast],
   )
 
   const handleComposerSubmit = () => {

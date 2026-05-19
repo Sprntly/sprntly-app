@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
+import { useCompany } from "../../context/CompanyContext"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, askApi, type AskResponse } from "../../lib/api"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
@@ -32,6 +33,7 @@ export function AIBar() {
     expandAiPanel,
   } = useNavigation()
   const { content, setContent } = useContent()
+  const { activeCompany } = useCompany()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const wasPanelCollapsed = useRef(aiPanelCollapsed)
   const [submitting, setSubmitting] = useState(false)
@@ -217,7 +219,7 @@ export function AIBar() {
     setLastReply(null)
     setLastSubmittedQuestion(q)
     try {
-      const res = await askApi.ask(q)
+      const res = await askApi.ask(q, activeCompany)
       setLastReply(res)
       setAIBarValue("")
       const ta = textareaRef.current
@@ -267,6 +269,7 @@ export function AIBar() {
       setSubmitting(false)
     }
   }, [
+    activeCompany,
     aiBarValue,
     content.conversations,
     expandAiPanel,
