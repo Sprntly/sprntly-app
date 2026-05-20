@@ -5,7 +5,14 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
 import type { ScreenId } from "../../types"
-import { IconBrief, IconEvidence, IconHome, IconPrd, IconSettings } from "./sidebar-icons"
+import {
+  IconBrief,
+  IconEvidence,
+  IconHome,
+  IconPrd,
+  IconSettings,
+  IconSources,
+} from "./sidebar-icons"
 import { CompanySwitcher } from "./CompanySwitcher"
 
 interface SidebarProps {
@@ -140,6 +147,7 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         <div className="sb-spacer" />
 
         <div className="sb-section-title">Workspace</div>
+        <NavItem screen="sources" icon={<IconSources />} label="Sources" />
         <NavItem screen="settings" icon={<IconSettings />} label="Settings" />
       </div>
 

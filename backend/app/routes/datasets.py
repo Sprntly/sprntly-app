@@ -1,10 +1,12 @@
 """HTTP layer for dataset onboarding.
 
-  GET    /v1/datasets               -> list
-  POST   /v1/datasets                -> create {slug, display_name}
-  POST   /v1/datasets/{slug}/files   -> multipart upload (one or more files)
-  POST   /v1/datasets/{slug}/generate -> kick brief generation (async)
-  DELETE /v1/datasets/{slug}          -> remove DB row (files left in place)
+  GET    /v1/datasets                       -> list
+  POST   /v1/datasets                        -> create {slug, display_name}
+  GET    /v1/datasets/{slug}/files           -> list source files for a dataset
+  POST   /v1/datasets/{slug}/files           -> multipart upload (one or more files)
+  DELETE /v1/datasets/{slug}/files/{filename}-> remove a single source file
+  POST   /v1/datasets/{slug}/generate        -> kick brief generation (async)
+  DELETE /v1/datasets/{slug}                  -> remove DB row (files left in place)
 
 All routes require the demo session cookie.
 """
@@ -12,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Cookie, File, Form, HTTPException, UploadFile
@@ -20,7 +24,7 @@ from pydantic import BaseModel
 from app import datasets
 from app.auth import require_session
 from app.brief_runner import auto_generate_brief
-from app.ingest import UnsupportedFileType
+from app.ingest import UnsupportedFileType, md_filename
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/datasets", tags=["datasets"])
@@ -107,6 +111,102 @@ async def upload_files(
             "md_chars": ingested.md_chars,
         })
     return {"slug": slug, "ingested": results, "errors": errors}
+
+
+@router.get("/{slug}/files")
+def list_files(
+    slug: str,
+    sprintly_session: Annotated[str | None, Cookie()] = None,
+):
+    """List source files (raw originals) for a dataset, newest first."""
+    require_session(sprintly_session)
+    from app import db
+    if not db.dataset_exists(slug):
+        raise HTTPException(404, f"Dataset {slug!r} does not exist")
+
+    raw_dir = datasets.raw_path(slug)
+    base_dir = datasets.dataset_path(slug)
+    files: list[dict] = []
+    if raw_dir.exists():
+        for p in raw_dir.iterdir():
+            if not p.is_file():
+                continue
+            # Compute md_chars by checking the converted .md sibling. The
+            # ingest path uses md_filename(original) as the base name and
+            # appends .1, .2, … on collisions. We can't know which numbered
+            # sibling belongs to which raw upload (the mapping isn't stored),
+            # so we report the canonical name first, then fall back to
+            # numbered variants. Practically there's one .md per upload.
+            md_chars = 0
+            md_base = md_filename(p.name)
+            md_candidates = [base_dir / md_base]
+            stem = Path(md_base).stem
+            for n in range(1, 11):
+                md_candidates.append(base_dir / f"{stem}.{n}.md")
+            for md_path in md_candidates:
+                if md_path.exists():
+                    try:
+                        md_chars = len(md_path.read_text())
+                    except Exception:  # pragma: no cover — unreadable .md
+                        md_chars = 0
+                    break
+
+            stat = p.stat()
+            files.append({
+                "filename": p.name,
+                "kind": p.suffix.lower().lstrip("."),
+                "size_bytes": stat.st_size,
+                "md_chars": md_chars,
+                "added_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+            })
+
+    files.sort(key=lambda f: f["added_at"], reverse=True)
+    return {"slug": slug, "files": files}
+
+
+@router.delete("/{slug}/files/{filename}")
+def delete_file(
+    slug: str,
+    filename: str,
+    sprintly_session: Annotated[str | None, Cookie()] = None,
+):
+    """Remove one source file: the raw original plus any matching .md siblings."""
+    require_session(sprintly_session)
+
+    # Defense in depth — reject anything that isn't a plain basename. FastAPI
+    # already prevents path segments in {filename}, but a bare ".." or a
+    # dotfile would slip through path validation.
+    if filename != Path(filename).name or filename.startswith("."):
+        raise HTTPException(422, "filename must be a plain basename")
+
+    from app import db
+    if not db.dataset_exists(slug):
+        raise HTTPException(404, f"Dataset {slug!r} does not exist")
+
+    raw_target = datasets.raw_path(slug) / filename
+    if not raw_target.exists() or not raw_target.is_file():
+        raise HTTPException(404, f"File {filename!r} not found in dataset {slug!r}")
+
+    raw_target.unlink()
+    raw_removed = True
+
+    base_dir = datasets.dataset_path(slug)
+    md_base = md_filename(filename)
+    md_removed = False
+    md_candidates = [base_dir / md_base]
+    stem = Path(md_base).stem
+    for n in range(1, 11):
+        md_candidates.append(base_dir / f"{stem}.{n}.md")
+    for md_path in md_candidates:
+        if md_path.exists() and md_path.is_file():
+            md_path.unlink()
+            md_removed = True
+
+    return {
+        "slug": slug,
+        "filename": filename,
+        "removed": {"raw": raw_removed, "md": md_removed},
+    }
 
 
 @router.post("/{slug}/generate")

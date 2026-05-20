@@ -17,6 +17,7 @@ export type ScreenId =
   | "settings"
   | "team"
   | "connectors"
+  | "sources"
 
 export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-1",
@@ -40,6 +41,7 @@ export const APP_SCREENS: ScreenId[] = [
   "settings",
   "team",
   "connectors",
+  "sources",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
@@ -62,6 +64,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   settings: "Settings",
   team: "Team",
   connectors: "Connectors",
+  sources: "Sources",
 }
 
 export function getMainChromeTitle(screen: ScreenId): string {
@@ -145,6 +148,13 @@ export const AI_CONTEXTS: Record<
     suggest: [
       "Which unconnected source would help most?",
       "What would Mixpanel add?",
+    ],
+  },
+  sources: {
+    path: "/sources",
+    suggest: [
+      "Which source contributed the most to last week's brief?",
+      "Are any sources stale or duplicated?",
     ],
   },
 }

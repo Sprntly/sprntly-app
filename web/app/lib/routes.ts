@@ -20,6 +20,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   settings: "/settings",
   team: "/team",
   connectors: "/connectors",
+  sources: "/sources",
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -32,6 +33,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/settings": "settings",
   "/team": "team",
   "/connectors": "connectors",
+  "/sources": "sources",
 }
 
 for (let step = 1; step <= 8; step++) {

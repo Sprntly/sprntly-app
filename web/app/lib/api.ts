@@ -290,6 +290,34 @@ export const companiesApi = {
     ),
 }
 
+// ---- sources ----------------------------------------------------------------
+
+export type SourceFile = {
+  filename: string
+  kind: string
+  size_bytes: number
+  md_chars: number
+  added_at: string
+}
+export type ListSourcesResponse = { slug: string; files: SourceFile[] }
+export type DeleteSourceResponse = {
+  slug: string
+  filename: string
+  removed: { raw: boolean; md: boolean }
+}
+
+export const sourcesApi = {
+  list: (slug: string) =>
+    api.get<ListSourcesResponse>(
+      `/v1/datasets/${encodeURIComponent(slug)}/files`,
+    ),
+  remove: (slug: string, filename: string) =>
+    api.delete<DeleteSourceResponse>(
+      `/v1/datasets/${encodeURIComponent(slug)}/files/${encodeURIComponent(filename)}`,
+    ),
+  // upload/regen reuse companiesApi.uploadFiles + companiesApi.generate.
+}
+
 export const prdApi = {
   /** Kicks off PRD generation in the background. Returns immediately with a
    *  prd_id; client should poll prdApi.get(id) until status === 'ready'. */

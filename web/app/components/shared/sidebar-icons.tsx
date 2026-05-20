@@ -56,6 +56,15 @@ export function IconAsk() {
   )
 }
 
+export function IconSources() {
+  return (
+    <svg {...common}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <path d="M8 13h8M8 17h5" />
+    </svg>
+  )
+}
+
 export function IconSettings() {
   return (
     <svg {...common}>
