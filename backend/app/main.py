@@ -8,8 +8,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import auth, db, datasets as datasets_service
 from app.brief_runner import auto_generate_all
 from app.config import settings
-from app.prompts import ASK_CACHE_VERSION, BRIEF_SCHEMA_VERSION, EVIDENCE_TEMPLATE_VERSION, PRD_TEMPLATE_VERSION
-from app.routes import ask, brief, datasets as datasets_routes, evidence, health, prd
+from app.prompts import (
+    ASK_CACHE_VERSION,
+    BRIEF_SCHEMA_VERSION,
+    EVIDENCE_TEMPLATE_VERSION,
+    EVIDENCE_V2_TEMPLATE_VERSION,
+    PRD_TEMPLATE_VERSION,
+)
+from app.routes import (
+    ask,
+    brief,
+    datasets as datasets_routes,
+    evidence,
+    evidence_v2,
+    health,
+    prd,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,6 +51,16 @@ async def lifespan(app: FastAPI):
             "Invalidated %d stale evidence doc(s) (template bump → v%d)",
             ev_invalidated,
             EVIDENCE_TEMPLATE_VERSION,
+        )
+    # Variant-scoped: a v1 bump doesn't touch v2 rows and vice versa.
+    ev_v2_invalidated = db.invalidate_stale_evidences(
+        EVIDENCE_V2_TEMPLATE_VERSION, variant="v2"
+    )
+    if ev_v2_invalidated:
+        logger.info(
+            "Invalidated %d stale evidence-v2 doc(s) (template bump → v%d)",
+            ev_v2_invalidated,
+            EVIDENCE_V2_TEMPLATE_VERSION,
         )
     # And the same for PRDs.
     prd_invalidated = db.invalidate_stale_prds(PRD_TEMPLATE_VERSION)
@@ -91,3 +115,4 @@ app.include_router(brief.router)
 app.include_router(ask.router)
 app.include_router(prd.router)
 app.include_router(evidence.router)
+app.include_router(evidence_v2.router)

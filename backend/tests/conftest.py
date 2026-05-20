@@ -47,6 +47,7 @@ _RELOAD_ORDER = [
     "app.routes.brief",
     "app.routes.ask",
     "app.routes.evidence",
+    "app.routes.evidence_v2",
     "app.routes.prd",
     "app.main",
 ]
@@ -78,7 +79,11 @@ def tmp_data_dir(tmp_path: Path, repo_root: Path) -> Path:
     """A clean DATA_DIR seeded with the PRD/evidence templates."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    for name in ("sprntly_prd_template.md", "sprntly_evidence_template.md"):
+    for name in (
+        "sprntly_prd_template.md",
+        "sprntly_evidence_template.md",
+        "sprntly_evidence_v2_template.md",
+    ):
         src = repo_root / "data" / name
         if src.exists():
             shutil.copy(src, data_dir / name)

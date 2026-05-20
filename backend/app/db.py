@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS evidences (
     status TEXT NOT NULL DEFAULT 'generating',
     error TEXT,
     template_version INTEGER,
+    variant TEXT NOT NULL DEFAULT 'v1',
     FOREIGN KEY (brief_id) REFERENCES briefs(id)
 );
 
@@ -91,6 +92,11 @@ def init_db() -> None:
         ev_cols = {row[1] for row in c.execute("PRAGMA table_info(evidences)").fetchall()}
         if ev_cols and "template_version" not in ev_cols:
             c.execute("ALTER TABLE evidences ADD COLUMN template_version INTEGER")
+        # variant column added with the v2 sample-build; existing rows are v1.
+        if ev_cols and "variant" not in ev_cols:
+            c.execute(
+                "ALTER TABLE evidences ADD COLUMN variant TEXT NOT NULL DEFAULT 'v1'"
+            )
 
 
 @contextmanager
@@ -307,31 +313,35 @@ def start_evidence(
     insight_index: int,
     title: str,
     template_version: int | None = None,
+    variant: str = "v1",
 ) -> int:
     """Insert an empty evidence row in 'generating' state. Returns the new id."""
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO evidences (brief_id, insight_index, title, payload_md, status, template_version) "
-            "VALUES (?, ?, ?, '', 'generating', ?)",
-            (brief_id, insight_index, title, template_version),
+            "INSERT INTO evidences (brief_id, insight_index, title, payload_md, status, template_version, variant) "
+            "VALUES (?, ?, ?, '', 'generating', ?, ?)",
+            (brief_id, insight_index, title, template_version, variant),
         )
         return cur.lastrowid
 
 
-def invalidate_stale_evidences(current_version: int) -> int:
-    """Mark any ready/generating evidence whose `template_version` differs
-    from `current_version` as 'invalidated'. Returns the number of rows.
+def invalidate_stale_evidences(current_version: int, variant: str = "v1") -> int:
+    """Mark any ready/generating evidence (of the given variant) whose
+    `template_version` differs from `current_version` as 'invalidated'.
+    Returns the number of rows.
 
-    `find_existing_evidence` only returns ready/generating rows, so
-    invalidated docs are skipped — the next view triggers a fresh
-    generation under the current prompt.
+    Variant-scoped so a v1 template bump doesn't invalidate v2 rows and
+    vice versa. `find_existing_evidence` only returns ready/generating
+    rows, so invalidated docs are skipped — the next view triggers a
+    fresh generation under the current prompt.
     """
     with conn() as c:
         cur = c.execute(
             "UPDATE evidences SET status='invalidated' "
             "WHERE status IN ('ready', 'generating') "
+            "  AND variant = ? "
             "  AND (template_version IS NULL OR template_version != ?)",
-            (current_version,),
+            (variant, current_version),
         )
         return cur.rowcount or 0
 
@@ -373,21 +383,27 @@ def get_evidence(evidence_id: int) -> dict | None:
     with conn() as c:
         row = c.execute(
             "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
-            "status, error, template_version FROM evidences WHERE id=?",
+            "status, error, template_version, variant FROM evidences WHERE id=?",
             (evidence_id,),
         ).fetchone()
     return dict(row) if row else None
 
 
-def find_existing_evidence(brief_id: int, insight_index: int) -> dict | None:
-    """Return the most recent ready/generating evidence for a (brief, insight)."""
+def find_existing_evidence(
+    brief_id: int, insight_index: int, variant: str = "v1"
+) -> dict | None:
+    """Return the most recent ready/generating evidence (of the given variant)
+    for a (brief, insight). Variant-scoped so v1 and v2 generation paths
+    don't dedupe against each other.
+    """
     with conn() as c:
         row = c.execute(
             "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
-            "status, error, template_version FROM evidences "
-            "WHERE brief_id=? AND insight_index=? AND status IN ('ready','generating') "
+            "status, error, template_version, variant FROM evidences "
+            "WHERE brief_id=? AND insight_index=? AND variant=? "
+            "  AND status IN ('ready','generating') "
             "ORDER BY id DESC LIMIT 1",
-            (brief_id, insight_index),
+            (brief_id, insight_index, variant),
         ).fetchone()
     return dict(row) if row else None
 

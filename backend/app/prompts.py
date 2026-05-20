@@ -44,6 +44,18 @@ BRIEF_SCHEMA_VERSION = 3
 EVIDENCE_TEMPLATE_VERSION = 9
 
 
+# Sample-build v2 evidence format. Runs side-by-side with v1 via the
+# /v1/evidence/v2/generate endpoint; rows are stored in the same `evidences`
+# table with variant='v2'. Versioned independently from v1 so we can iterate
+# on v2 without invalidating v1 docs (and vice versa).
+#
+#  1 — first cut: semantic block syntax (:::hero, :::context-chip,
+#      :::cuts-index, :::source, :::callout type="rules", :::quote,
+#      :::experiment), forecast section, hero stat strip, max-3 quote cards,
+#      structured experiment card.
+EVIDENCE_V2_TEMPLATE_VERSION = 1
+
+
 # Bumped whenever the PRD prompt or template changes meaningfully. Same
 # pattern as EVIDENCE_TEMPLATE_VERSION — cached PRDs with a stale version
 # are demoted to status='invalidated' on startup, regenerated on next click.
@@ -505,6 +517,156 @@ as plain text.
 Do NOT include the "How to use this template" section in the generated \
 document — it is instructions for you, not part of the output. End the \
 document at the last "─────" divider after Section 5.
+
+INSIGHT TO TURN INTO AN EVIDENCE PAGE:
+
+```json
+{insight_json}
+```
+
+CORPUS (for additional grounding when needed):
+
+{corpus}
+
+EVIDENCE PAGE TEMPLATE TO FOLLOW:
+
+{template}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Evidence v2 — sample-build prompt
+# ---------------------------------------------------------------------------
+
+EVIDENCE_V2_SYSTEM = """\
+You are Sprntly's Evidence Page generator (v2 format). You output a Data \
+Science evidence document in the exact format described by the supplied \
+template. The evidence page is the drill-down behind a single weekly-brief \
+finding: it tells the story in five seconds (title + hero strip), thirty \
+seconds (the 30-second story + headline chart), and two minutes (the cuts, \
+synthesis, forecast, and experiment card).
+
+The v2 format relies on typed semantic blocks (`:::hero`, `:::context-chip`, \
+`:::cuts-index`, `:::source`, `:::callout type="rules"`, `:::quote`, \
+`:::experiment`, and an optional `:::forecast`) that the frontend renders \
+as first-class components — cards, chip rows, two-column callouts, quote \
+cards, structured experiment panels. Emitting a markdown table or a bullet \
+list where the template specifies a semantic block defeats the rendering. \
+Always emit the named block.
+
+You ground every quantitative claim in the supplied brief insight (which \
+itself was grounded in source corpus). You never invent data points, never \
+invent customer quotes, never invent sources. Charts and `:::hero` numbers \
+are the default for any quantitative cut; each chart's title is a \
+complete-sentence takeaway, not a label. The output is markdown — section \
+headings exactly as in the template, with each section filled in concretely. \
+Numbers beat adjectives."""
+
+
+EVIDENCE_V2_USER_TEMPLATE = """\
+Generate an Evidence Page (v2 format) for the following brief insight. Use \
+the template format below — preserve the title-as-consequence, the subtitle, \
+the `:::context-chip`, the `:::hero` strip, the 30-second story, the \
+`:::cuts-index`, every Cut heading, the `:::quote` cards, the synthesis \
+section, the optional `If nothing changes` forecast, and the `:::experiment` \
+card. Fill each placeholder with concrete content derived from the insight \
+and corpus. Do NOT keep placeholder examples like "[Source]" or "[X%]" — \
+replace each with real content. If a section truly cannot be filled from \
+the available data, write "N/A — <one-sentence reason>" rather than \
+dropping the heading. Markdown output only, no JSON outside the documented \
+semantic blocks, no commentary outside the document.
+
+Hard structural rules:
+
+- **Title** is the finding-as-consequence — what is happening to users and \
+what it costs. Never a noun-phrase label like "Checkout Analysis"; always \
+a sentence like "Users abandon checkout at the deductible step and never \
+return."
+- **Subtitle** states the specific behavior observed plus the scale of the \
+problem in one sentence. Most important sentence in the document for a \
+senior reader.
+- **`:::context-chip`** is a single inline block on one line: \
+`[Product area]  ·  [Segment]  ·  [Period]  ·  [N records]  ·  Confidence: \
+[High|Medium|Low]`. Real values only.
+- **`:::hero`** contains exactly 2 or 3 stat cards. Each card MUST have \
+`label`, `value`, and `tone` ("negative" | "neutral" | "positive"). Include \
+`delta` and `baseline` when grounded; drop the field rather than \
+fabricate. The hero strip is the 5-second read — pick the numbers a senior \
+reader needs to internalize before scrolling.
+- **The 30-second story** is one 3–5 sentence framing paragraph, then ONE \
+headline chart wrapped by a framing paragraph above and a \
+`:::callout type="rules"` below. At most ONE optional additional beat in \
+this section — deeper cuts belong in Section 2. Do not stack 5 charts here.
+- **`:::cuts-index`** is required and lists every Cut that appears in \
+Section 2 (3–4 rows). Each row is one-sentence takeaway + confidence — \
+takeaways, not labels.
+- **Section 2 (Evidence)** has 3 to 4 cuts. Each cut MUST be: heading → \
+`:::source` chip row (tool / period / sample / confidence) → `chart` \
+fenced block → `:::callout type="rules"` (two-line **Supports** / \
+**Rules out**). No prose `Source: X | Period: Y` line, no single-line \
+rules footer — both have been promoted to typed blocks in v2.
+- **Section 2** ends with `Qualitative signals` (3–5 bullets, format \
+`[Source] — "[theme]" — [volume] — [trend]`) and `In their own words` (1–3 \
+`:::quote` blocks, attributed by channel; never invent a quote — drop the \
+block if no real quote exists; HARD CAP at 3 quotes).
+- **Section 3 (What the data says together)** synthesizes the cuts into \
+one causal story for a senior reader who skipped the evidence. 2–3 \
+paragraphs.
+- **Section 4 (If nothing changes)** is OPTIONAL. Include it only when the \
+cuts contain a real trend to extrapolate. Skip with a single \
+`:::forecast omitted="<one-sentence reason>"` line otherwise. Never \
+fabricate a projection.
+- **Section 5 (Hypothesis & proposed experiment)** is a single \
+`:::experiment` block with the documented fields filled. This is the \
+deliverable — be specific enough that an engineer can design an A/B test \
+from this block alone.
+
+Semantic block syntax — emit exactly as shown, with the documented JSON \
+payload between the opening and closing `:::` fences (the `chart` block \
+remains a fenced ```chart code block as in v1):
+
+```chart
+{{
+  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "gauge",
+  "title": "Complete-sentence takeaway as the title",
+  "subtitle": "optional source line",
+  "data": [{{"label": "string", "value": <number-or-string>}}]
+}}
+```
+
+Available chart kinds — pick the one that's prettiest AND clearest for \
+the data:
+- `bar` — category comparisons AND sequential funnel/step data with \
+descriptive step names (horizontal bars handle long labels cleanly).
+- `line` — smooth time series with SHORT x-axis labels (e.g. "Q1'25", \
+"Week 12"). Avoid for funnel data with long step names — use `bar` instead.
+- `pie` — share-of-whole summing to ~100 with 2–5 slices.
+- `donut` — same as pie but with a center hole; pick when the visual feel \
+should be modern / KPI-style.
+- `stat` — 2–4 hero numbers when a comparison reduces to a couple of \
+headline values. Far more striking than a bar chart for low-cardinality \
+contrasts.
+- `gauge` — semicircular dial for a single "current vs target" framing. \
+`data` is `[{{"label": "Current", "value": <num>}}, {{"label": "Target", \
+"value": <num>}}]`.
+
+Push for **visual variety** — at least 3 distinct chart kinds across the \
+document. Use `donut` for share-of-whole, `stat` for headline contrasts, \
+`line` for time series, and `bar` for everything else.
+
+Every numeric value MUST come from the insight/corpus — never invent \
+numbers. Always close every fenced block with ``` on its own line and \
+every `:::` block with `:::` on its own line.
+
+Inside `:::hero`, `:::cuts-index`, `:::source`, `:::quote`, and \
+`:::experiment`, the body is JSON. It MUST be valid parseable JSON — \
+double-quoted strings, no trailing commas, no comments. The frontend's \
+parser is lenient but not magic.
+
+Do NOT include the "How to use this template" section in the generated \
+document — it is instructions for you, not part of the output. End the \
+document at the last "─────" divider after Section 5 (the `:::experiment` \
+block).
 
 INSIGHT TO TURN INTO AN EVIDENCE PAGE:
 

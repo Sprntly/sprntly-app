@@ -300,6 +300,48 @@ export type PrdChartKind = "bar" | "line" | "pie" | "donut" | "stat" | "gauge"
 
 export type PrdChartDatum = { label: string; value: number | string }
 
+/** Evidence v2 semantic-block section variants — additive on PrdSection so
+ *  the v2 adapter can return the same `PrdState` shape and reuse storage on
+ *  AppContentState.evidence. v1 renderer (PrdSections) ignores unknown
+ *  types; v2 renderer (EvidenceV2Sections) handles them explicitly. */
+export type EvidenceV2Tone = "negative" | "neutral" | "positive"
+export type EvidenceV2Confidence = "High" | "Medium" | "Low"
+
+export interface EvidenceV2HeroCard {
+  label: string
+  value: string
+  delta?: string
+  baseline?: string
+  tone: EvidenceV2Tone
+}
+
+export interface EvidenceV2CutsIndexRow {
+  n: number
+  headline: string
+  confidence: EvidenceV2Confidence
+}
+
+export interface EvidenceV2SourceChip {
+  kind: "tool" | "period" | "sample" | "confidence" | string
+  label: string
+}
+
+export interface EvidenceV2ExperimentMetric {
+  name: string
+  current: string
+  target: string
+  mechanism: string
+}
+
+export interface EvidenceV2Experiment {
+  change: string
+  primary_metric: EvidenceV2ExperimentMetric
+  secondary_effects?: string[]
+  sample_size: string
+  duration: string
+  risks?: string[]
+}
+
 export type PrdSection =
   | { type: "h2"; text: string }
   | { type: "p"; text: string }
@@ -312,6 +354,15 @@ export type PrdSection =
       subtitle?: string
       data: PrdChartDatum[]
     }
+  // ---- Evidence v2 variants ----
+  | { type: "v2-hero"; cards: EvidenceV2HeroCard[] }
+  | { type: "v2-context-chip"; text: string }
+  | { type: "v2-cuts-index"; rows: EvidenceV2CutsIndexRow[] }
+  | { type: "v2-source"; chips: EvidenceV2SourceChip[] }
+  | { type: "v2-rules-callout"; supports: string; rulesOut: string }
+  | { type: "v2-quote"; body: string; channel: string; context?: string }
+  | { type: "v2-experiment"; experiment: EvidenceV2Experiment }
+  | { type: "v2-forecast-omitted"; reason: string }
 
 export interface PrdState {
   metaLine: string

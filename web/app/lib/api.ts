@@ -212,6 +212,24 @@ export const evidenceApi = {
   get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
 }
 
+/** Sample-build v2 evidence format. Backend stores v2 rows in the same
+ *  `evidences` table with `variant: "v2"`; v1 and v2 ids do not overlap
+ *  but they don't dedupe against each other either. */
+export type EvidenceV2StartResponse = EvidenceStartResponse & {
+  variant: "v2"
+}
+export type EvidenceV2Record = EvidenceRecord & { variant: "v2" }
+
+export const evidenceV2Api = {
+  generate: (briefId: number, insightIndex: number, force = false) =>
+    api.post<EvidenceV2StartResponse>("/v1/evidence/v2/generate", {
+      brief_id: briefId,
+      insight_index: insightIndex,
+      force,
+    }),
+  get: (id: number) => api.get<EvidenceV2Record>(`/v1/evidence/v2/${id}`),
+}
+
 // ---- companies --------------------------------------------------------------
 
 export type CompanySummary = {

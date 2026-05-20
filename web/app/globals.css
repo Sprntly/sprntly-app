@@ -2666,3 +2666,385 @@
     background: var(--surface);
     opacity: 0.65;
   }
+
+  /* ===========================================================
+     Evidence v2 — semantic blocks
+     prefix `evv2-` to keep it isolated from the v1 PRD selectors
+     =========================================================== */
+
+  /* --- Hero stat strip --- */
+  .evv2-hero {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 14px 0 22px;
+  }
+  .evv2-hero-card {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px 16px 16px;
+    background: var(--surface);
+    position: relative;
+    overflow: hidden;
+  }
+  .evv2-hero-card::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--muted-2);
+  }
+  .evv2-tone-negative.evv2-hero-card::before { background: var(--danger); }
+  .evv2-tone-positive.evv2-hero-card::before { background: var(--accent); }
+  .evv2-tone-neutral.evv2-hero-card::before  { background: var(--muted-2); }
+  .evv2-hero-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--muted);
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .evv2-hero-value {
+    font-family: var(--font-display);
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--ink);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+  }
+  .evv2-tone-negative .evv2-hero-value { color: var(--danger); }
+  .evv2-tone-positive .evv2-hero-value { color: var(--accent); }
+  .evv2-hero-delta {
+    font-size: 11.5px;
+    color: var(--ink-3);
+    margin-top: 6px;
+    font-weight: 600;
+  }
+  .evv2-hero-baseline {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+  }
+
+  /* --- Context chip --- */
+  .evv2-context-chip {
+    display: inline-block;
+    padding: 6px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: 11.5px;
+    color: var(--ink-3);
+    margin: 6px 0 14px;
+    font-family: var(--font-mono);
+    letter-spacing: 0.01em;
+  }
+
+  /* --- Cuts at a glance index --- */
+  .evv2-cuts-index {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+    margin: 8px 0 18px;
+    overflow: hidden;
+  }
+  .evv2-cuts-index-row {
+    display: grid;
+    grid-template-columns: 64px 1fr auto;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .evv2-cuts-index-row:last-child { border-bottom: none; }
+  .evv2-cuts-index-n {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+  }
+  .evv2-cuts-index-headline {
+    font-size: 13.5px;
+    color: var(--ink-2);
+    line-height: 1.45;
+  }
+
+  /* --- Source chip row --- */
+  .evv2-source {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0 10px;
+  }
+  .evv2-source-chip {
+    display: inline-flex;
+    align-items: stretch;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 11px;
+    font-family: var(--font-mono);
+  }
+  .evv2-source-kind {
+    background: var(--surface-3);
+    color: var(--muted);
+    padding: 3px 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    border-right: 1px solid var(--line);
+  }
+  .evv2-source-label {
+    padding: 3px 8px;
+    color: var(--ink-2);
+    background: var(--surface);
+  }
+
+  /* --- Confidence chip (also used in cuts-index and source row) --- */
+  .evv2-conf {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .evv2-conf-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .evv2-conf-high { background: var(--accent-soft); color: var(--accent-ink); }
+  .evv2-conf-medium { background: var(--celeb-soft); color: var(--celeb); }
+  .evv2-conf-low { background: var(--danger-soft); color: var(--danger); }
+
+  /* --- Rules in / Rules out callout --- */
+  .evv2-rules {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 10px 0 22px;
+  }
+  .evv2-rules-half {
+    padding: 10px 14px 12px;
+  }
+  .evv2-rules-supports { background: var(--accent-soft); }
+  .evv2-rules-out      { background: var(--danger-soft); border-left: 1px solid var(--line); }
+  .evv2-rules-h {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    margin-bottom: 4px;
+  }
+  .evv2-rules-supports .evv2-rules-h { color: var(--accent-ink); }
+  .evv2-rules-out      .evv2-rules-h { color: var(--danger); }
+  .evv2-rules-body {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  @media (max-width: 600px) {
+    .evv2-rules { grid-template-columns: 1fr; }
+    .evv2-rules-out { border-left: none; border-top: 1px solid var(--line); }
+  }
+
+  /* --- Quote card --- */
+  .evv2-quote {
+    position: relative;
+    margin: 12px 0 16px;
+    padding: 18px 22px 16px 48px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface-2);
+  }
+  .evv2-quote-mark {
+    position: absolute;
+    top: 0;
+    left: 14px;
+    font-family: var(--font-display);
+    font-size: 52px;
+    line-height: 1;
+    color: var(--accent-2);
+    font-weight: 700;
+  }
+  .evv2-quote-body {
+    margin: 0 0 8px;
+    font-size: 14.5px;
+    line-height: 1.6;
+    color: var(--ink);
+    font-style: italic;
+  }
+  .evv2-quote-caption {
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+  }
+  .evv2-quote-channel {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--ink-3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .evv2-quote-context {
+    font-style: italic;
+    color: var(--muted);
+  }
+
+  /* --- Experiment card --- */
+  .evv2-experiment {
+    margin: 18px 0 12px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .evv2-experiment-head {
+    padding: 10px 18px;
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    border-bottom: 1px solid var(--line);
+  }
+  .evv2-experiment-row {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 16px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  .evv2-experiment-row:last-child { border-bottom: none; }
+  .evv2-experiment-k {
+    font-size: 10.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    font-weight: 600;
+    padding-top: 2px;
+  }
+  .evv2-experiment-v {
+    font-size: 13.5px;
+    color: var(--ink-2);
+    line-height: 1.55;
+  }
+  .evv2-experiment-metric {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .evv2-experiment-metric-name {
+    font-weight: 600;
+    color: var(--ink);
+    font-size: 13.5px;
+  }
+  .evv2-experiment-metric-move {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 3px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface-2);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .evv2-experiment-current { color: var(--muted); text-decoration: line-through; }
+  .evv2-experiment-target  { color: var(--accent); font-weight: 700; }
+  .evv2-experiment-arrow   { color: var(--ink-4); }
+  .evv2-experiment-mechanism {
+    font-size: 12.5px;
+    color: var(--ink-3);
+    margin-top: 4px;
+  }
+  .evv2-experiment-pill {
+    display: inline-block;
+    padding: 3px 9px;
+    margin-right: 6px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface-2);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+  }
+  .evv2-experiment-list {
+    margin: 0;
+    padding-left: 18px;
+  }
+  .evv2-experiment-list li {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    margin-bottom: 4px;
+  }
+  @media (max-width: 600px) {
+    .evv2-experiment-row { grid-template-columns: 1fr; gap: 4px; }
+  }
+
+  /* --- Forecast omitted notice --- */
+  .evv2-forecast-omitted {
+    margin: 10px 0 18px;
+    padding: 10px 14px;
+    border: 1px dashed var(--line-strong);
+    border-radius: 8px;
+    background: var(--surface-2);
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+  .evv2-forecast-omitted strong {
+    color: var(--ink);
+    font-weight: 700;
+    margin-right: 4px;
+  }
+
+  /* --- v1 / v2 format toggle (DetailScreen) --- */
+  .evv2-format-toggle {
+    display: inline-flex;
+    align-self: flex-start;
+    margin-top: 6px;
+    margin-right: 8px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    padding: 2px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  .evv2-format-toggle button {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    padding: 4px 11px;
+    border-radius: 999px;
+    cursor: pointer;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .evv2-format-toggle button.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .evv2-format-toggle button:not(.active):hover {
+    color: var(--ink-3);
+  }
