@@ -5,15 +5,23 @@ import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { isBriefEmpty, type BriefFindingRow } from "../../../types/content"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
+import type {
+  BriefV2CompactFinding,
+  BriefV2HeroFinding,
+} from "../../../lib/brief-v2-adapter"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
+import { BriefV2Render } from "../../shared/BriefV2Sections"
+
+type BriefFormat = "v1" | "v2"
 
 export function BriefScreen() {
   const { goTo, setAIBarValue, expandAiPanel, showToast } = useNavigation()
   const { content, setContent } = useContent()
-  const { brief, briefDetails } = content
+  const { brief, briefV2, briefDetails } = content
 
   const [prdBusyKey, setPrdBusyKey] = useState<string | null>(null)
+  const [format, setFormat] = useState<BriefFormat>("v1")
 
   const openEvidenceFor = (detailKey: string | undefined) => {
     if (detailKey && briefDetails?.[detailKey]) {
@@ -27,8 +35,16 @@ export function BriefScreen() {
     setAIBarValue(question)
   }
 
+  /** Shared between v1 finding-rows and v2 cards — both expose the same
+   *  three fields the runner needs, so we keep one handler and convert at
+   *  the call site rather than duplicating the PRD-generation flow. */
+  type SecondaryTarget = Pick<
+    BriefFindingRow,
+    "detailKey" | "secondaryCtaBehavior" | "title"
+  >
+
   const handleSecondaryCta = useCallback(
-    async (f: BriefFindingRow) => {
+    async (f: SecondaryTarget) => {
       const key = f.detailKey
       if (f.secondaryCtaBehavior === "generate_prd") {
         if (!key || !briefDetails?.[key]) {
@@ -70,12 +86,26 @@ export function BriefScreen() {
     [briefDetails, expandAiPanel, goTo, setContent, showToast],
   )
 
+  const handleV2Secondary = useCallback(
+    (card: BriefV2HeroFinding | BriefV2CompactFinding) => {
+      void handleSecondaryCta({
+        detailKey: card.detailKey,
+        secondaryCtaBehavior: card.secondaryCtaBehavior,
+        title: card.title,
+      })
+    },
+    [handleSecondaryCta],
+  )
+
   const empty = isBriefEmpty(brief)
 
   const flatFindings = useMemo(
     () => brief.sections.flatMap((s) => s.findings),
     [brief.sections],
   )
+
+  // Toggle disabled until v2 state is hydrated (first brief load completes).
+  const v2Ready = Boolean(briefV2 && (briefV2.hero || briefV2.supporting.length))
 
   return (
     <AppLayout mainClassName="main--reading main--brief">
@@ -85,6 +115,11 @@ export function BriefScreen() {
             Sprntly found three most important things to drive your goal
           </h1>
         </div>
+        <BriefFormatToggle
+          value={format}
+          disabled={!v2Ready}
+          onChange={setFormat}
+        />
       </div>
 
       {empty ? (
@@ -92,6 +127,16 @@ export function BriefScreen() {
           title="No findings in this brief"
           hint="When `/v1/brief/current` returns insights, the adapter maps them into finding cards (Build / Fix / Optimize) with evidence and PRD links."
           placeholders={4}
+        />
+      ) : format === "v2" && briefV2 ? (
+        <BriefV2Render
+          state={briefV2}
+          callbacks={{
+            prdBusyKey,
+            onViewEvidence: openEvidenceFor,
+            onAskAI: handleAskAI,
+            onSecondary: handleV2Secondary,
+          }}
         />
       ) : (
         <div className="wb-doc">
@@ -198,5 +243,48 @@ function TemplateFindingCard({
         </div>
       </div>
     </article>
+  )
+}
+
+function BriefFormatToggle({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: BriefFormat
+  disabled: boolean
+  onChange: (next: BriefFormat) => void
+}) {
+  // Reuses the .evv2-format-toggle pill styling (see globals.css), originally
+  // introduced for the evidence v1/v2 switcher and now shared with brief.
+  return (
+    <div
+      className="evv2-format-toggle"
+      role="radiogroup"
+      aria-label="Brief format"
+    >
+      <button
+        type="button"
+        role="radio"
+        aria-checked={value === "v1"}
+        className={value === "v1" ? "active" : ""}
+        onClick={() => onChange("v1")}
+        disabled={disabled}
+        title="Current brief layout"
+      >
+        v1
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={value === "v2"}
+        className={value === "v2" ? "active" : ""}
+        onClick={() => onChange("v2")}
+        disabled={disabled}
+        title="Brief v2 — hero finding + supporting cards + KPI strip"
+      >
+        v2
+      </button>
+    </div>
   )
 }

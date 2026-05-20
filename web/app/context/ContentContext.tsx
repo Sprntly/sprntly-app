@@ -38,6 +38,7 @@ const EMPTY: AppContentState = {
     metaLines: [],
     sections: [],
   },
+  briefV2: null,
   pastWeeks: [],
   shipped: { stats: [], primary: [], supporting: [] },
   conversations: [],

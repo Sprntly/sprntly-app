@@ -14,7 +14,11 @@
 #      emphasis on why_this_ranks / why_alternatives_dont_hold /
 #      verification_metrics (still allowed, no longer required), richer
 #      `subtitle` to buttress the headline.
-BRIEF_SCHEMA_VERSION = 3
+#  4 — Optional `is_headline: bool` per insight. The Brief v2 render
+#      promotes one insight to a hero card; the LLM marks exactly one
+#      insight `true`. Frontend falls back to highest `confidence` when
+#      zero or multiple are marked, so older briefs stay renderable.
+BRIEF_SCHEMA_VERSION = 4
 
 
 # Bumped whenever the EVIDENCE prompt or template changes meaningfully.
@@ -156,7 +160,8 @@ Return JSON with this shape:
       "chart_hints": [
         {{ "kind": "bar" | "line" | "pie" | "stat", "title": "<Complete-sentence takeaway as the chart title, e.g. 'iPhone 15 Pro fails at 23% upload — every other device <2%'. Not a label like 'Failure rate'.>", "subtitle": "<optional source line>",
            "data": [{{"label": "<label>", "value": <num>}}, ...] }}
-      ]
+      ],
+      "is_headline": <true | false — OPTIONAL. Mark EXACTLY ONE insight in the array as `true` — the hero finding a senior reader should internalize first (highest impact × highest confidence). Omit the field on the rest, or set false. If zero or multiple are marked, the renderer falls back to highest `confidence`.>
     }}
   ]
 }}
@@ -188,6 +193,9 @@ first entry's `value` is rendered as the card's headline impact pill.
 - Do NOT include cross-checks that are flat (rule them out, don't list them).
 - Every numeric value (including `chart_hints`) MUST come from the corpus — \
 never invent numbers.
+- `is_headline`: mark exactly ONE insight `true` — the one with the clearest \
+dollar impact AND highest confidence (the card a senior reader should read \
+first). Omit the field on the others. Never mark two.
 
 Corpus:
 

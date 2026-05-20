@@ -99,6 +99,10 @@ export type Insight = {
   convergence: ConvergenceItem[]
   user_quotes: UserQuote[]
   chart_hints: ChartHint[]
+  /** v4 schema: LLM marks exactly one insight as the hero finding for the
+   *  Brief v2 render. Older briefs omit it; frontend falls back to
+   *  highest-confidence selection in that case. */
+  is_headline?: boolean
 }
 export type Brief = {
   id: number

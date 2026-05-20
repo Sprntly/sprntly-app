@@ -12,6 +12,7 @@ import type {
   DetailState,
 } from "../types/content"
 import type { Brief, ChartHint, ConvergenceItem, Insight } from "./api"
+import { briefToBriefV2State } from "./brief-v2-adapter"
 
 type TagMeta = {
   tagType: BriefTagType
@@ -523,6 +524,7 @@ export type BriefHydrationPatch = Partial<AppContentState>
 export function briefToContentPatch(brief: Brief): BriefHydrationPatch {
   return {
     brief: briefToBriefState(brief),
+    briefV2: briefToBriefV2State(brief),
     briefDetails: briefToDetailMap(brief),
   }
 }
