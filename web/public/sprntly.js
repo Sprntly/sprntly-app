@@ -143,7 +143,7 @@
   // Send to Claude / create ticket confirmations
   function sendToClaude() {
     closeDrawers();
-    showToast('Sent to Claude Code', 'Claude is scoping the work — we\'ll ping Slack when the PR opens.', 'Track progress →');
+    showToast('Prototype generation started', 'The coding agent is scoping the work — we\'ll ping Slack when the PR opens.', 'Track progress →');
   }
   function createTicket() {
     closeDrawers();

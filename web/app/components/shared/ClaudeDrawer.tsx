@@ -170,8 +170,8 @@ export function ClaudeDrawer() {
   const handleSend = () => {
     closeDrawers()
     showToast(
-      "Sent to Claude Code",
-      "Claude is scoping the work — we'll ping Slack when the PR opens.",
+      "Prototype generation started",
+      "The coding agent is scoping the work — we'll ping Slack when the PR opens.",
       "Track progress →",
     )
   }
@@ -185,7 +185,7 @@ export function ClaudeDrawer() {
             <span className="drawer-icon">
               <IconSparkle size={15} />
             </span>
-            Send to Claude Code
+            Generate Prototype
           </h3>
           <button type="button" className="drawer-close" onClick={closeDrawers} aria-label="Close">
             <IconClose size={18} />
@@ -193,9 +193,10 @@ export function ClaudeDrawer() {
         </div>
         <div className="drawer-body">
           <p className="drawer-sub">
-            Claude Code receives the PRD plus this context package for{" "}
-            <strong>{subject}</strong>. It'll scope the work, implement across
-            the right files, and open a PR against <strong>main</strong>.
+            Turn this PRD into a working prototype of{" "}
+            <strong>{subject}</strong>. A coding agent scopes the work,
+            implements it across the right files, and opens a review-ready PR
+            on <strong>main</strong>.
           </p>
 
           {items.length === 0 ? (
@@ -264,7 +265,7 @@ export function ClaudeDrawer() {
             >
               <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                 <IconSparkle size={16} />
-                Send to Claude Code
+                Generate Prototype
               </span>
             </button>
           </div>

@@ -40,7 +40,7 @@ export function ApproveModal() {
             <div className="modal-option-icon">
               <IconSparkle size={18} />
             </div>
-            <div className="modal-option-name">Send to Claude Code</div>
+            <div className="modal-option-name">Generate Prototype</div>
             <div className="modal-option-desc">
               Full context package → Claude Code scopes, implements, opens a PR
               against main.

@@ -2057,7 +2057,7 @@
     <div class="modal-options">
       <div class="modal-option" onclick="openDrawer('drawerClaude'); closeApproveModal();">
         <div class="modal-option-icon">⌘</div>
-        <div class="modal-option-name">Send to Claude Code</div>
+        <div class="modal-option-name">Generate Prototype</div>
         <div class="modal-option-desc">Full context package → Claude Code scopes, implements, opens a PR against main.</div>
       </div>
       <div class="modal-option" onclick="openDrawer('drawerJira'); closeApproveModal();">
@@ -2118,11 +2118,11 @@
 
 <aside class="drawer" id="drawerClaude">
   <div class="drawer-head">
-    <h3 class="drawer-title"><span class="drawer-icon">⌘</span>Send to Claude Code</h3>
+    <h3 class="drawer-title"><span class="drawer-icon">⌘</span>Generate Prototype</h3>
     <button class="drawer-close" onclick="closeDrawers()">✕</button>
   </div>
   <div class="drawer-body">
-    <p class="drawer-sub">Claude Code receives the PRD plus this context package. It'll scope the work, implement across the right files, and open a PR against <strong>main</strong>.</p>
+    <p class="drawer-sub">Turn this PRD into a working prototype. A coding agent scopes the work, implements it across the right files, and opens a review-ready PR on <strong>main</strong>.</p>
     <div class="ctx-section">
       <div class="ctx-section-head">
         <div class="ctx-section-title"><input type="checkbox" checked />Problem &amp; context</div>
@@ -2185,7 +2185,7 @@
     <span style="font-size: 11.5px; color: var(--muted);">Runs on connected GitHub repo</span>
     <div style="display: flex; gap: 8px;">
       <button class="btn" onclick="closeDrawers()">Cancel</button>
-      <button class="btn btn-accent" onclick="sendToClaude()">✦ Send to Claude Code</button>
+      <button class="btn btn-accent" onclick="sendToClaude()">✦ Generate Prototype</button>
     </div>
   </div>
 </aside>
@@ -2272,8 +2272,8 @@
 <div class="toast" id="toast">
   <div class="toast-icon" id="toastIcon">✓</div>
   <div class="toast-body">
-    <div class="toast-title" id="toastTitle">Sent to Claude Code</div>
-    <div class="toast-sub" id="toastSub">Claude is scoping the work — we'll ping Slack when the PR opens.</div>
+    <div class="toast-title" id="toastTitle">Prototype generation started</div>
+    <div class="toast-sub" id="toastSub">The coding agent is scoping the work — we'll ping Slack when the PR opens.</div>
   </div>
   <button class="toast-close" onclick="hideToast()">✕</button>
 </div>
