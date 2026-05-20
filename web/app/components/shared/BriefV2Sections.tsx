@@ -169,9 +169,12 @@ function CompactFindingCard({
 }
 
 function ConfidenceBadge({ value }: { value: number }) {
+  // Confidence comes from the LLM as a 0–1 float; render as a percent so
+  // the meaning is self-evident without needing the user to know the scale.
+  const pct = Math.round((value ?? 0) * 100)
   return (
     <span className="briefv2-confidence" title="Model confidence">
-      {(value ?? 0).toFixed(2)}
+      Confidence {pct}%
     </span>
   )
 }

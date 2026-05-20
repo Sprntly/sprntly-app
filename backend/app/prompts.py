@@ -18,7 +18,12 @@
 #      promotes one insight to a hero card; the LLM marks exactly one
 #      insight `true`. Frontend falls back to highest `confidence` when
 #      zero or multiple are marked, so older briefs stay renderable.
-BRIEF_SCHEMA_VERSION = 4
+#  5 — Forbid placeholder syntax in output values (literal `$X`,
+#      `<X>`, `$X/week, growing`, etc.). The v4 prompt's "if unknown"
+#      fallback was being emitted verbatim by the model when no dollar
+#      figure could be grounded; v5 removes that escape hatch and tells
+#      the model to drop the `$` and use a qualitative label instead.
+BRIEF_SCHEMA_VERSION = 5
 
 
 # Bumped whenever the EVIDENCE prompt or template changes meaningfully.
@@ -135,7 +140,7 @@ Return JSON with this shape:
       "title": "<ONE-sentence headline. Lead with the number. Show the gap vs. baseline, competitor, or cohort. Format: [Metric] for [segment] is [X] vs. [Y] for [comparison] — [one sharp observation that names the gap]. No adjectives.>",
       "subtitle": "<2–4 sentences that buttress the title — they explain what is actually happening, the scale of the user behavior, and why this matters in the business's own words. The title states the problem; this paragraph makes it whole. Narrative prose, no bullets.>",
       "metrics": [
-        {{ "label": "<impact label, e.g. 'LTV impact', 'ARR at risk', 'recovered/yr'>", "value": "<dollar figure formatted by tag: something_new (BUILD)→'+$<X>M LTV / yr' or '+$<X>M ARR / yr'; something_better (OPTIMIZE)→'+$<X>M ARR upside' or '+$<X>M LTV / yr'; something_broken (FIX)→'$<X>M recovered / yr'. If unknown, '$X/week, growing'.>" }},
+        {{ "label": "<impact label, e.g. 'LTV impact', 'ARR at risk', 'recovered/yr'>", "value": "<REAL dollar figure with a corpus-grounded number — substitute the actual number in: something_new (BUILD)→'+$12M LTV / yr' or '+$8M ARR / yr'; something_better (OPTIMIZE)→'+$15M ARR upside' or '+$9M LTV / yr'; something_broken (FIX)→'$143M recovered / yr'. NEVER ship placeholder syntax like '$X', '<X>', or '$X/week, growing' — those are template markers, not output. If no dollar figure can be grounded, omit the dollar sign entirely and use a qualitative label such as 'ARR upside · TBD' or 'Recovery candidate'.>" }},
         {{ "label": "<scale label, e.g. 'users affected', 'calls/mo', 'churn source'>", "value": "<number with unit>" }},
         {{ "label": "<effort label, e.g. '2-week sprint', 'pricing review', '1 sprint'>", "value": "<short label>" }}
       ],
@@ -193,6 +198,11 @@ first entry's `value` is rendered as the card's headline impact pill.
 - Do NOT include cross-checks that are flat (rule them out, don't list them).
 - Every numeric value (including `chart_hints`) MUST come from the corpus — \
 never invent numbers.
+- NEVER emit placeholder syntax in output values: literal `$X`, `<X>`, \
+`<value>`, `<number>`, `[X]`, `$X/week, growing`, or any angle-bracketed \
+template marker is a bug. Those tokens are scaffolding in this prompt, not \
+output. If you can't ground a dollar amount, drop the `$` and use a short \
+qualitative label (e.g. `ARR upside · TBD`) instead.
 - `is_headline`: mark exactly ONE insight `true` — the one with the clearest \
 dollar impact AND highest confidence (the card a senior reader should read \
 first). Omit the field on the others. Never mark two.
