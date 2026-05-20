@@ -49,9 +49,9 @@ def load_prd_template() -> str:
     return (settings.template_path / "sprntly_prd_template.md").read_text()
 
 
+def load_prd_v2_template() -> str:
+    return (settings.template_path / "sprntly_prd_v2_template.md").read_text()
+
+
 def load_evidence_template() -> str:
     return (settings.template_path / "sprntly_evidence_template.md").read_text()
-
-
-def load_evidence_v2_template() -> str:
-    return (settings.template_path / "sprntly_evidence_v2_template.md").read_text()

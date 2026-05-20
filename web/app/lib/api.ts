@@ -186,6 +186,9 @@ export type EvidenceStartResponse = {
   evidence_id: number
   status: "generating" | "ready" | "failed"
   title: string
+  /** Storage variant — `v2` for new rows; historical `v1` rows in prod
+   *  remain readable. Implementation detail; UI shouldn't switch on it. */
+  variant?: string
 }
 
 export type EvidenceRecord = {
@@ -197,6 +200,7 @@ export type EvidenceRecord = {
   payload_md: string
   status: "generating" | "ready" | "failed"
   error?: string | null
+  variant?: string
 }
 
 export const evidenceApi = {
@@ -210,24 +214,6 @@ export const evidenceApi = {
       force,
     }),
   get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
-}
-
-/** Sample-build v2 evidence format. Backend stores v2 rows in the same
- *  `evidences` table with `variant: "v2"`; v1 and v2 ids do not overlap
- *  but they don't dedupe against each other either. */
-export type EvidenceV2StartResponse = EvidenceStartResponse & {
-  variant: "v2"
-}
-export type EvidenceV2Record = EvidenceRecord & { variant: "v2" }
-
-export const evidenceV2Api = {
-  generate: (briefId: number, insightIndex: number, force = false) =>
-    api.post<EvidenceV2StartResponse>("/v1/evidence/v2/generate", {
-      brief_id: briefId,
-      insight_index: insightIndex,
-      force,
-    }),
-  get: (id: number) => api.get<EvidenceV2Record>(`/v1/evidence/v2/${id}`),
 }
 
 // ---- companies --------------------------------------------------------------
@@ -331,4 +317,21 @@ export const prdApi = {
   get: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
   /** Old name retained for compatibility. */
   byId: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
+}
+
+/** Sample-build v2 PRD format. Backend stores v2 rows in the same `prds`
+ *  table with `variant: "v2"`; v1 and v2 ids do not overlap but they don't
+ *  dedupe against each other either. GET `/v1/prd/v2/{id}` returns 409 if
+ *  the id resolves to a v1 row. */
+export type PrdV2StartResponse = PrdStartResponse & { variant: "v2" }
+export type PrdV2Record = PrdRecord & { variant: "v2" }
+
+export const prdV2Api = {
+  generate: (briefId: number, insightIndex: number, force = false) =>
+    api.post<PrdV2StartResponse>("/v1/prd/v2/generate", {
+      brief_id: briefId,
+      insight_index: insightIndex,
+      force,
+    }),
+  get: (id: number) => api.get<PrdV2Record>(`/v1/prd/v2/${id}`),
 }

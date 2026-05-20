@@ -269,28 +269,3 @@ At the current monotonic +9% QoQ trajectory in abandonment volume, the next 90 d
 ```
 
 Cumulative cost of inaction over the projection window: ~$36M in lost annualized revenue and 264k additional abandons through Q1 2026.
-
-────────────────────────────────────────────────────────────
-
-## 5. Hypothesis & proposed experiment
-
-:::experiment
-{
-  "change": "Move the deductible disclosure from step 4 of the claim funnel to step 1 (the plan-tier summary), and frame it as part of the upfront price rather than a post-confirmation fee.",
-  "primary_metric": {
-    "name": "Screen-repair funnel completion rate",
-    "current": "43%",
-    "target": "58%",
-    "mechanism": "Removing the surprise eliminates the abandonment trigger documented in Cuts 1–3. Cut 4 confirms the abandoners are otherwise high-intent, so capturing them is realistic, not aspirational."
-  },
-  "secondary_effects": [
-    "Expect a 1–2 pp dip in step-1 entry rate as users self-select out before investing time — this is a feature, not a bug; those users were going to abandon anyway."
-  ],
-  "sample_size": "12,000 sessions per arm — powered to detect a 4pp lift at 95% confidence, 80% power",
-  "duration": "3 weeks at current screen-repair traffic",
-  "risks": [
-    "Plan-tier conversion could drop if upfront price framing makes the lower-deductible tier look more attractive — instrument tier-mix as a guardrail metric.",
-    "iOS app review cycle may delay rollout; web-only A/B can run in parallel as a leading indicator."
-  ]
-}
-:::

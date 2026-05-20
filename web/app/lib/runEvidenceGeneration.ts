@@ -1,13 +1,13 @@
 import { evidenceApi } from "./api"
-import { markdownToPrdState } from "./prd-adapter"
+import { markdownToEvidenceState } from "./evidence-adapter"
 import type { DetailState, PrdState } from "../types/content"
 
 export type EvidenceGenResult =
   | { ok: true; evidence: PrdState }
   | { ok: false; message: string }
 
-/** Polls until the Evidence Page is ready, then returns the parsed PrdState
- *  (same markdown adapter, since the doc is markdown + chart blocks). */
+/** Polls until the Evidence Page is ready, then parses the markdown with
+ *  the evidence adapter (typed semantic blocks + standard markdown). */
 export async function runEvidenceGeneration(
   meta: DetailState["meta"],
 ): Promise<EvidenceGenResult> {
@@ -29,7 +29,7 @@ export async function runEvidenceGeneration(
     }
   }
   if (doc.status !== "ready") {
-    return { ok: false, message: "Timed out waiting for Evidence" }
+    return { ok: false, message: "Timed out waiting for evidence" }
   }
-  return { ok: true, evidence: markdownToPrdState(doc.payload_md) }
+  return { ok: true, evidence: markdownToEvidenceState(doc.payload_md) }
 }

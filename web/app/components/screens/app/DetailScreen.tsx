@@ -5,14 +5,10 @@ import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
-import { runEvidenceV2Generation } from "../../../lib/runEvidenceV2Generation"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
-import { PrdSections } from "./PrdScreen"
-import { EvidenceV2Sections } from "../../shared/EvidenceV2Sections"
-
-type EvidenceFormat = "v1" | "v2"
+import { EvidenceSections } from "../../shared/EvidenceSections"
 
 export function DetailScreen() {
   const { goTo, setAIBarValue, expandAiPanel, showToast } = useNavigation()
@@ -25,10 +21,7 @@ export function DetailScreen() {
     | { kind: "loading" }
     | { kind: "error"; message: string }
   >({ kind: "idle" })
-  /** Sample-build toggle: render the v2 evidence format alongside v1 so we
-   *  can A/B the layout without breaking anything. Re-fetches when toggled. */
-  const [format, setFormat] = useState<EvidenceFormat>("v1")
-  /** Tracks which (briefId, insightIndex, format) the current `content.evidence`
+  /** Tracks which (briefId, insightIndex) the current `content.evidence`
    * came from, so we know when to drop it and refetch on detail change. */
   const loadedKeyRef = useRef<string | null>(null)
 
@@ -41,21 +34,19 @@ export function DetailScreen() {
     if (next) setContent({ detail: next })
   }, [content.detail, content.briefDetails, setContent])
 
-  // Auto-fire evidence generation whenever the finding (or selected format)
-  // changes. Backend dedupes via find_existing_evidence per variant, so a
-  // previously generated doc returns ~instantly; only the first view per
-  // (brief, insight, format) pays the LLM cost.
+  // Auto-fire evidence generation whenever the finding changes. Backend
+  // dedupes via find_existing_evidence, so a previously generated doc
+  // returns ~instantly; only the first view per (brief, insight) pays
+  // the LLM cost.
   useEffect(() => {
     if (!d?.meta) return
-    const key = `${d.meta.briefId}:${d.meta.insightIndex}:${format}`
+    const key = `${d.meta.briefId}:${d.meta.insightIndex}`
     if (loadedKeyRef.current === key && evidence) return
     let cancelled = false
     setEvidenceState({ kind: "loading" })
     setContent({ evidence: null })
     loadedKeyRef.current = key
-    const runner =
-      format === "v2" ? runEvidenceV2Generation : runEvidenceGeneration
-    runner(d.meta)
+    runEvidenceGeneration(d.meta)
       .then((result) => {
         if (cancelled) return
         if (!result.ok) {
@@ -73,7 +64,7 @@ export function DetailScreen() {
     return () => {
       cancelled = true
     }
-  }, [d?.meta?.briefId, d?.meta?.insightIndex, format, setContent])
+  }, [d?.meta?.briefId, d?.meta?.insightIndex, setContent])
 
   const handleGeneratePrd = async () => {
     if (!d?.meta) {
@@ -87,7 +78,9 @@ export function DetailScreen() {
         showToast("PRD generation failed", result.message.slice(0, 200))
         return
       }
-      setContent({ prd: result.prd })
+      // Persist the source pointer so PrdScreen can refetch a v2 doc
+      // against the same brief insight when the user toggles formats.
+      setContent({ prd: result.prd, prdMeta: d.meta })
       goTo("prd")
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -128,7 +121,6 @@ export function DetailScreen() {
             ))}
           </div>
         </div>
-        <FormatToggle value={format} onChange={setFormat} />
         <button
           type="button"
           className="ask-ai-btn"
@@ -149,11 +141,7 @@ export function DetailScreen() {
               <div className="prd-meta">{evidence.metaLine}</div>
             ) : null}
             <h1 className="prd-title">{evidence.title}</h1>
-            {format === "v2" ? (
-              <EvidenceV2Sections sections={evidence.sections} />
-            ) : (
-              <PrdSections sections={evidence.sections} />
-            )}
+            <EvidenceSections sections={evidence.sections} />
           </div>
         </div>
       ) : evidenceState.kind === "loading" ? (
@@ -184,43 +172,6 @@ export function DetailScreen() {
         </button>
       </div>
     </AppLayout>
-  )
-}
-
-function FormatToggle({
-  value,
-  onChange,
-}: {
-  value: EvidenceFormat
-  onChange: (next: EvidenceFormat) => void
-}) {
-  return (
-    <div
-      className="evv2-format-toggle"
-      role="radiogroup"
-      aria-label="Evidence format"
-    >
-      <button
-        type="button"
-        role="radio"
-        aria-checked={value === "v1"}
-        className={value === "v1" ? "active" : ""}
-        onClick={() => onChange("v1")}
-        title="Current evidence format"
-      >
-        v1
-      </button>
-      <button
-        type="button"
-        role="radio"
-        aria-checked={value === "v2"}
-        className={value === "v2" ? "active" : ""}
-        onClick={() => onChange("v2")}
-        title="Sample-build v2 format"
-      >
-        v2
-      </button>
-    </div>
   )
 }
 

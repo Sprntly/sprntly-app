@@ -69,7 +69,7 @@ async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
     already cached. Errors are swallowed — drill-down warming is a perf
     optimization, not a correctness requirement.
     """
-    if find_existing_evidence(brief_id, insight_index):
+    if find_existing_evidence(brief_id, insight_index, variant="v2"):
         logger.info(
             "Evidence already cached brief_id=%s insight_index=%s, skipping warm",
             brief_id,
@@ -81,6 +81,7 @@ async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
         insight_index=insight_index,
         title=title,
         template_version=EVIDENCE_TEMPLATE_VERSION,
+        variant="v2",
     )
     logger.info(
         "Warming evidence ev_id=%s brief_id=%s insight_index=%s (waiting on sema)",

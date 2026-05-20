@@ -12,17 +12,17 @@ from app.prompts import (
     ASK_CACHE_VERSION,
     BRIEF_SCHEMA_VERSION,
     EVIDENCE_TEMPLATE_VERSION,
-    EVIDENCE_V2_TEMPLATE_VERSION,
     PRD_TEMPLATE_VERSION,
+    PRD_V2_TEMPLATE_VERSION,
 )
 from app.routes import (
     ask,
     brief,
     datasets as datasets_routes,
     evidence,
-    evidence_v2,
     health,
     prd,
+    prd_v2,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -45,22 +45,16 @@ async def lifespan(app: FastAPI):
         logger.info("Invalidated %d stale brief(s) (schema bump → v%d)", invalidated, BRIEF_SCHEMA_VERSION)
     # Same for cached evidence docs — mismatched template_version → status
     # 'invalidated' so the next view regenerates under the current prompt.
-    ev_invalidated = db.invalidate_stale_evidences(EVIDENCE_TEMPLATE_VERSION)
+    # Variant-scoped to v2 (the only variant we generate now); historical
+    # v1 rows are read-only and left untouched.
+    ev_invalidated = db.invalidate_stale_evidences(
+        EVIDENCE_TEMPLATE_VERSION, variant="v2"
+    )
     if ev_invalidated:
         logger.info(
             "Invalidated %d stale evidence doc(s) (template bump → v%d)",
             ev_invalidated,
             EVIDENCE_TEMPLATE_VERSION,
-        )
-    # Variant-scoped: a v1 bump doesn't touch v2 rows and vice versa.
-    ev_v2_invalidated = db.invalidate_stale_evidences(
-        EVIDENCE_V2_TEMPLATE_VERSION, variant="v2"
-    )
-    if ev_v2_invalidated:
-        logger.info(
-            "Invalidated %d stale evidence-v2 doc(s) (template bump → v%d)",
-            ev_v2_invalidated,
-            EVIDENCE_V2_TEMPLATE_VERSION,
         )
     # And the same for PRDs.
     prd_invalidated = db.invalidate_stale_prds(PRD_TEMPLATE_VERSION)
@@ -69,6 +63,16 @@ async def lifespan(app: FastAPI):
             "Invalidated %d stale PRD(s) (template bump → v%d)",
             prd_invalidated,
             PRD_TEMPLATE_VERSION,
+        )
+    # Variant-scoped: a v1 bump doesn't touch v2 rows and vice versa.
+    prd_v2_invalidated = db.invalidate_stale_prds(
+        PRD_V2_TEMPLATE_VERSION, variant="v2"
+    )
+    if prd_v2_invalidated:
+        logger.info(
+            "Invalidated %d stale PRD-v2 doc(s) (template bump → v%d)",
+            prd_v2_invalidated,
+            PRD_V2_TEMPLATE_VERSION,
         )
     # Same for cached Ask responses (the predefined-prompt warm cache).
     ask_invalidated = db.invalidate_stale_cached_asks(ASK_CACHE_VERSION)
@@ -114,5 +118,5 @@ app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(ask.router)
 app.include_router(prd.router)
+app.include_router(prd_v2.router)
 app.include_router(evidence.router)
-app.include_router(evidence_v2.router)

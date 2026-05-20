@@ -1,7 +1,7 @@
-"""Tests for app.evidence_runner._run_sync_v2 — the v2 sample-build worker.
+"""Tests for app.prd_runner._run_sync_v2 — the v2 sample-build worker.
 
-Mirrors test_evidence_runner.py; the async wrapper `generate_evidence_v2`
-is the same `asyncio.to_thread + exception → fail_evidence` shim.
+Mirrors test_prd_runner.py; the async wrapper `generate_prd_v2` is the
+same `asyncio.to_thread + exception → fail_prd` shim.
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from app import evidence_runner
+from app import prd_runner
 
 
 def _seed_corpus(data_dir, dataset="asurion", body="some corpus body"):
@@ -33,13 +33,13 @@ def _seed_brief(db_mod, dataset="asurion", insights=None):
 
 # ---- happy path -------------------------------------------------------------
 
-def test_run_sync_v2_happy_path_completes_evidence(
+def test_run_sync_v2_happy_path_completes_prd(
     isolated_settings, fake_llm, monkeypatch
 ):
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
-    evidence_id = db_mod.start_evidence(
+    prd_id = db_mod.start_prd(
         brief_id=brief_id,
         insight_index=0,
         title="t",
@@ -47,12 +47,12 @@ def test_run_sync_v2_happy_path_completes_evidence(
         variant="v2",
     )
     monkeypatch.setattr(
-        evidence_runner, "call_md", lambda **kw: "# Final v2 markdown"
+        prd_runner, "call_md", lambda **kw: "# Final v2 markdown"
     )
 
-    evidence_runner._run_sync_v2(evidence_id, brief_id, 0)
+    prd_runner._run_sync_v2(prd_id, brief_id, 0)
 
-    row = db_mod.get_evidence(evidence_id)
+    row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
     assert row["payload_md"] == "# Final v2 markdown"
     assert row["title"] == "Insight A"
@@ -66,7 +66,7 @@ def test_run_sync_v2_passes_v2_template_and_system_prompt(
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
-    evidence_id = db_mod.start_evidence(
+    prd_id = db_mod.start_prd(
         brief_id=brief_id,
         insight_index=0,
         title="t",
@@ -80,34 +80,34 @@ def test_run_sync_v2_passes_v2_template_and_system_prompt(
         captured.update(kwargs)
         return "# md"
 
-    monkeypatch.setattr(evidence_runner, "call_md", _capture)
-    evidence_runner._run_sync_v2(evidence_id, brief_id, 0)
+    monkeypatch.setattr(prd_runner, "call_md", _capture)
+    prd_runner._run_sync_v2(prd_id, brief_id, 0)
 
     # v2 system prompt carries this exact phrase; v1 system prompt does not.
     assert "v2 format" in captured["system"]
     # v2 template carries this exact block; v1 template does not.
-    assert ":::hero" in captured["user"]
+    assert ":::tldr" in captured["user"]
 
 
 def test_run_sync_v2_missing_brief_raises(isolated_settings):
     with pytest.raises(RuntimeError):
-        evidence_runner._run_sync_v2(1, brief_id=9999, insight_index=0)
+        prd_runner._run_sync_v2(1, brief_id=9999, insight_index=0)
 
 
 def test_run_sync_v2_out_of_range_insight_raises(isolated_settings):
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod, insights=[{"title": "only-one"}])
     with pytest.raises(RuntimeError):
-        evidence_runner._run_sync_v2(1, brief_id=brief_id, insight_index=5)
+        prd_runner._run_sync_v2(1, brief_id=brief_id, insight_index=5)
 
 
-def test_generate_evidence_v2_records_failure_in_db(
+def test_generate_prd_v2_records_failure_in_db(
     isolated_settings, monkeypatch
 ):
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
-    evidence_id = db_mod.start_evidence(
+    prd_id = db_mod.start_prd(
         brief_id=brief_id,
         insight_index=0,
         title="t",
@@ -118,9 +118,9 @@ def test_generate_evidence_v2_records_failure_in_db(
     def _boom(**_kw):
         raise ValueError("LLM exploded")
 
-    monkeypatch.setattr(evidence_runner, "call_md", _boom)
-    asyncio.run(evidence_runner.generate_evidence_v2(evidence_id, brief_id, 0))
+    monkeypatch.setattr(prd_runner, "call_md", _boom)
+    asyncio.run(prd_runner.generate_prd_v2(prd_id, brief_id, 0))
 
-    row = db_mod.get_evidence(evidence_id)
+    row = db_mod.get_prd(prd_id)
     assert row["status"] == "failed"
     assert "ValueError" in (row["error"] or "")

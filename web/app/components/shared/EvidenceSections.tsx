@@ -1,18 +1,17 @@
 /**
- * Renderer for the v2 evidence format. Handles every variant in PrdSection,
- * including the v2-prefixed semantic blocks (hero strip, context chip,
- * cuts index, source chips, rules callout, quote cards, experiment card,
- * forecast-omitted notice). Falls back to InlineChart / standard markdown
- * blocks for the legacy variants (`p`, `h2`, `ul`, `table`, `chart`).
+ * Renderer for the evidence document. Handles every variant in PrdSection,
+ * including the semantic blocks (hero strip, context chip, cuts index,
+ * source chips, rules callout, quote cards, forecast-omitted notice) plus
+ * standard markdown primitives (`p`, `h2`, `ul`, `table`, `chart`).
  *
  * Each block type is a small subcomponent below for legibility and so
- * styles colocate with markup.
+ * styles colocate with markup. Section types are still prefixed `v2-*`
+ * for historical reasons; they're the canonical evidence blocks (no v1).
  */
 "use client"
 
 import type {
   EvidenceV2CutsIndexRow,
-  EvidenceV2Experiment,
   EvidenceV2HeroCard,
   EvidenceV2SourceChip,
   PrdSection,
@@ -21,7 +20,7 @@ import type {
 import { renderInline } from "../../lib/inline-md"
 import { InlineChart } from "./InlineChart"
 
-export function EvidenceV2Sections({
+export function EvidenceSections({
   sections,
 }: {
   sections: PrdState["sections"]
@@ -99,8 +98,6 @@ function RenderBlock({ block }: { block: PrdSection }) {
           context={block.context}
         />
       )
-    case "v2-experiment":
-      return <ExperimentCard experiment={block.experiment} />
     case "v2-forecast-omitted":
       return <ForecastOmitted reason={block.reason} />
     default:
@@ -228,85 +225,6 @@ function QuoteCard({
         {context ? <span className="evv2-quote-context">{context}</span> : null}
       </figcaption>
     </figure>
-  )
-}
-
-function ExperimentCard({ experiment }: { experiment: EvidenceV2Experiment }) {
-  const pm = experiment.primary_metric
-  return (
-    <div className="evv2-experiment">
-      <div className="evv2-experiment-head">Proposed experiment</div>
-
-      <div className="evv2-experiment-row">
-        <div className="evv2-experiment-k">Change</div>
-        <div className="evv2-experiment-v">{renderInline(experiment.change)}</div>
-      </div>
-
-      <div className="evv2-experiment-row">
-        <div className="evv2-experiment-k">Primary metric</div>
-        <div className="evv2-experiment-v">
-          <div className="evv2-experiment-metric">
-            <span className="evv2-experiment-metric-name">{pm.name}</span>
-            <span className="evv2-experiment-metric-move">
-              <span className="evv2-experiment-current">{pm.current}</span>
-              <span className="evv2-experiment-arrow" aria-hidden="true">
-                →
-              </span>
-              <span className="evv2-experiment-target">{pm.target}</span>
-            </span>
-          </div>
-          {pm.mechanism ? (
-            <div className="evv2-experiment-mechanism">
-              {renderInline(pm.mechanism)}
-            </div>
-          ) : null}
-        </div>
-      </div>
-
-      {experiment.sample_size || experiment.duration ? (
-        <div className="evv2-experiment-row">
-          <div className="evv2-experiment-k">Test plan</div>
-          <div className="evv2-experiment-v">
-            {experiment.sample_size ? (
-              <span className="evv2-experiment-pill">
-                {experiment.sample_size}
-              </span>
-            ) : null}
-            {experiment.duration ? (
-              <span className="evv2-experiment-pill">
-                {experiment.duration}
-              </span>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-
-      {experiment.secondary_effects && experiment.secondary_effects.length > 0 ? (
-        <div className="evv2-experiment-row">
-          <div className="evv2-experiment-k">Secondary effects</div>
-          <div className="evv2-experiment-v">
-            <ul className="evv2-experiment-list">
-              {experiment.secondary_effects.map((s, i) => (
-                <li key={i}>{renderInline(s)}</li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      ) : null}
-
-      {experiment.risks && experiment.risks.length > 0 ? (
-        <div className="evv2-experiment-row">
-          <div className="evv2-experiment-k">Risks</div>
-          <div className="evv2-experiment-v">
-            <ul className="evv2-experiment-list">
-              {experiment.risks.map((s, i) => (
-                <li key={i}>{renderInline(s)}</li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      ) : null}
-    </div>
   )
 }
 

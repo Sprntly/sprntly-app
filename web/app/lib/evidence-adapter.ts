@@ -1,11 +1,13 @@
 /**
- * Convert the v2 evidence Markdown into a PrdState with v2 semantic-block
- * sections (`v2-hero`, `v2-context-chip`, `v2-cuts-index`, `v2-source`,
- * `v2-rules-callout`, `v2-quote`, `v2-experiment`, `v2-forecast-omitted`).
+ * Convert evidence Markdown into a PrdState with semantic-block sections
+ * (`v2-hero`, `v2-context-chip`, `v2-cuts-index`, `v2-source`,
+ * `v2-rules-callout`, `v2-quote`, `v2-forecast-omitted`).
  *
- * Reuses the v1 chart/table/heading/paragraph parsing from prd-adapter
- * (re-implemented here rather than imported so the v1 path stays untouched
- * if we ever want to tweak v2 parsing independently).
+ * The `v2-*` prefix on the section types is historical — it dates back to
+ * the original v1/v2 sample-build split. After v2 was promoted to be the
+ * only evidence format the prefix was kept (the churn of renaming across
+ * the renderer + types wasn't worth it). These are the canonical evidence
+ * blocks; no v1 exists.
  *
  * Lenient on JSON-inside-blocks: if a `:::hero` body fails to parse, the
  * block becomes a plain paragraph with the raw body so the doc doesn't
@@ -13,7 +15,6 @@
  */
 import type {
   EvidenceV2Confidence,
-  EvidenceV2Experiment,
   EvidenceV2HeroCard,
   EvidenceV2Tone,
   PrdChartDatum,
@@ -187,36 +188,6 @@ function parseQuoteBlock(body: string): PrdSection | null {
   }
 }
 
-function parseExperimentBlock(body: string): PrdSection | null {
-  const parsed = tryParseJson(body)
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
-  const obj = parsed as Record<string, unknown>
-  const change = typeof obj.change === "string" ? obj.change : ""
-  const pm = obj.primary_metric
-  if (!change || !pm || typeof pm !== "object") return null
-  const pmObj = pm as Record<string, unknown>
-  const primary_metric = {
-    name: typeof pmObj.name === "string" ? pmObj.name : "",
-    current: typeof pmObj.current === "string" ? pmObj.current : "",
-    target: typeof pmObj.target === "string" ? pmObj.target : "",
-    mechanism: typeof pmObj.mechanism === "string" ? pmObj.mechanism : "",
-  }
-  if (!primary_metric.name) return null
-  const experiment: EvidenceV2Experiment = {
-    change,
-    primary_metric,
-    secondary_effects: Array.isArray(obj.secondary_effects)
-      ? (obj.secondary_effects as unknown[]).map(String).filter(Boolean)
-      : undefined,
-    sample_size: typeof obj.sample_size === "string" ? obj.sample_size : "",
-    duration: typeof obj.duration === "string" ? obj.duration : "",
-    risks: Array.isArray(obj.risks)
-      ? (obj.risks as unknown[]).map(String).filter(Boolean)
-      : undefined,
-  }
-  return { type: "v2-experiment", experiment }
-}
-
 function parseRulesCalloutBlock(body: string): PrdSection | null {
   // Body is two `**Supports:** ...` and `**Rules out:** ...` lines (or just
   // `Supports:` / `Rules out:` with no bold). Be forgiving.
@@ -309,10 +280,6 @@ function parseSemanticBlock(
     }
     case "quote":
       return [parseQuoteBlock(body) ?? fallbackParagraphFromBlock(name, body)]
-    case "experiment":
-      return [
-        parseExperimentBlock(body) ?? fallbackParagraphFromBlock(name, body),
-      ]
     case "forecast": {
       const reason = parseAttr(attrs, "omitted")
       if (reason != null) {
@@ -330,7 +297,7 @@ function parseSemanticBlock(
 
 /* ---------- main entry ---------- */
 
-export function markdownToEvidenceV2State(markdown: string): PrdState {
+export function markdownToEvidenceState(markdown: string): PrdState {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n")
   let title = ""
   const sections: PrdSection[] = []
@@ -459,7 +426,7 @@ export function markdownToEvidenceV2State(markdown: string): PrdState {
 
   return {
     metaLine: `Generated ${new Date().toLocaleDateString()}`,
-    title: title || "Evidence (v2)",
+    title: title || "Evidence",
     sections,
   }
 }

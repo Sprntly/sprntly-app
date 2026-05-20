@@ -22,38 +22,18 @@ BRIEF_SCHEMA_VERSION = 3
 # with a different version are invalidated so the next view regenerates
 # them under the current prompt.
 #
-#  1 — original evidence prompt + template
-#  2 — Dropped the "Data sources" subsection from §1 Business context
-#  3 — Softened the "Mix kinds" rule to a prefer-when-data-allows hint
-#  4 — Push hard for visual variety: prefer stat/pie/line over bar where
-#      the data allows; bars should be the minority, not majority.
-#  5 — Restrict `line` to time series with SHORT (≤12 char) x-axis labels.
-#      Funnels / sequential steps with long step names → `bar`. The line
-#      renderer's horizontal x-axis text overlaps with long labels.
-#  6 — Expanded available kinds: added `funnel` and `donut`. Dropped the
-#      hard line-char restriction; funnels with long step names should now
-#      use the `funnel` kind (trapezoid stack, side labels, no overlap).
-#  7 — Dropped `funnel` kind (the trapezoid-clip rendering looked worse
-#      than bar). LLM now uses `bar` for sequential-step / funnel data.
-#  8 — Added `gauge` kind (semicircular dial showing current vs target).
-#      Fits insights framed as "current X vs target/baseline Y".
-#  9 — Dropped the "Chart brief" tables from Section 3 cuts. Each cut now
-#      goes straight from Source/Period line → chart → Rules in/out. The
-#      Type/X-axis/Y-axis/Highlight/Color-logic table was redundant
-#      scaffolding (chart title + visual already convey it).
-EVIDENCE_TEMPLATE_VERSION = 9
-
-
-# Sample-build v2 evidence format. Runs side-by-side with v1 via the
-# /v1/evidence/v2/generate endpoint; rows are stored in the same `evidences`
-# table with variant='v2'. Versioned independently from v1 so we can iterate
-# on v2 without invalidating v1 docs (and vice versa).
+# (Renamed from EVIDENCE_V2_TEMPLATE_VERSION when v2 was promoted to be
+# the only evidence format. New rows are stored with variant='v2'; the
+# version counter restarts from this rename — 1 was the original v2
+# launch with Section 5, 2 drops it.)
 #
-#  1 — first cut: semantic block syntax (:::hero, :::context-chip,
-#      :::cuts-index, :::source, :::callout type="rules", :::quote,
-#      :::experiment), forecast section, hero stat strip, max-3 quote cards,
-#      structured experiment card.
-EVIDENCE_V2_TEMPLATE_VERSION = 1
+#  1 — first cut: semantic blocks (:::hero, :::context-chip, :::cuts-index,
+#      :::source, :::callout type="rules", :::quote, :::experiment),
+#      forecast section.
+#  2 — Dropped :::experiment / Section 5. The testable hypothesis +
+#      experiment design live in the PRD, not here. Evidence is data
+#      science only; ends at Section 4.
+EVIDENCE_TEMPLATE_VERSION = 2
 
 
 # Bumped whenever the PRD prompt or template changes meaningfully. Same
@@ -64,6 +44,20 @@ EVIDENCE_V2_TEMPLATE_VERSION = 1
 #  2 — Removed the Evidence section (§3) from the PRD output; renumbered
 #      §4–9 → §3–8. Evidence lives in its own Sprntly Evidence Page now.
 PRD_TEMPLATE_VERSION = 2
+
+
+# Sample-build v2 PRD format. Runs side-by-side with v1 via the
+# /v1/prd/v2/generate endpoint; rows are stored in the same `prds` table
+# with variant='v2'. Versioned independently from v1 so we can iterate on v2
+# without invalidating v1 docs (and vice versa).
+#
+#  1 — first cut: typed semantic block syntax (:::tldr, :::context-chip,
+#      :::problem, :::hypothesis, :::requirements, :::acceptance-criteria,
+#      :::metrics, :::risks, :::milestones, :::dod). Each block renders as a
+#      first-class frontend component (cards, tables, chip rows), so the
+#      LLM must emit the named block — not a markdown table or bullet list —
+#      everywhere the template specifies one.
+PRD_V2_TEMPLATE_VERSION = 1
 
 
 # Bumped whenever the predefined Ask prompts list changes or the underlying
@@ -400,125 +394,144 @@ PRD TEMPLATE TO FOLLOW:
 """
 
 
-EVIDENCE_SYSTEM = """\
-You are Sprntly's Evidence Page generator. You output a Data Science evidence \
-document in the exact format described by the supplied template. The evidence \
-page is the drill-down behind a single weekly-brief finding: it explains what \
-is happening, walks through the data-science slicing that proves the cause, \
-and ends with a testable hypothesis.
+# ---------------------------------------------------------------------------
+# PRD v2 — sample-build prompt
+# ---------------------------------------------------------------------------
 
-You ground every quantitative claim in the supplied brief insight (which \
-itself was grounded in source corpus). You never invent data points, never \
-invent customer quotes. Charts are the default for any quantitative cut; \
-each chart's title is a complete-sentence takeaway, not a label. The output \
-is markdown — section headings and tables exactly as in the template, with \
-each section filled in concretely. Numbers beat adjectives."""
+PRD_V2_SYSTEM = """\
+You are Sprntly's PRD generator (v2 format). You output a Product \
+Requirements Document in the exact format described by the supplied \
+template. The v2 PRD is the shipping spec: a senior reader scans it in \
+five seconds (title + `:::tldr`), reads it in two minutes (problem, \
+hypothesis, requirements, AC, metrics), and an engineer can build from it \
+without follow-up.
+
+The v2 format relies on typed semantic blocks (`:::tldr`, \
+`:::context-chip`, `:::problem`, `:::hypothesis`, `:::requirements`, \
+`:::acceptance-criteria`, `:::metrics`, `:::risks`, `:::milestones`, \
+`:::dod`) that the frontend renders as first-class components — impact \
+cards, chip rows, structured requirement tables, AC grids, metrics panels, \
+risk matrices, milestone timelines, and DoD checklists. Emitting a \
+markdown table or a bullet list where the template specifies a semantic \
+block defeats the rendering. Always emit the named block.
+
+Internally you ALWAYS reason through the full evidence first: the supplied \
+brief insight, the convergence sources, the chart_hints, the impact_math, \
+and the corpus the insight was derived from. Every numeric claim, every \
+mechanism in `:::hypothesis`, every metric in `:::metrics`, and every \
+acceptance criterion threshold MUST be grounded in that evidence — \
+falsifiable by a reader who can pull the same data. You never invent \
+numbers, never invent users, never invent sources.
+
+But the PRD output does NOT include a rendered Evidence section. The \
+Evidence is shipped as its own Sprntly Evidence Page (data cuts, chart \
+briefs, quantitative slicing, customer quotes — all live there). Do not \
+duplicate any of that into the PRD output. The PRD is the shipping spec; \
+the Evidence is the supporting analysis. Treat them as two documents with \
+one shared truth.
+
+The output is markdown — section headings exactly as in the template, with \
+each section filled in concretely. Numbers beat adjectives: words like \
+'significantly', 'substantially', 'meaningful', and 'considerable' are \
+banned from `:::tldr` and `:::hypothesis`."""
 
 
-EVIDENCE_USER_TEMPLATE = """\
-Generate an Evidence Page for the following brief insight. Use the template \
-format below — preserve the title-as-consequence, subtitle-as-behavior+scale, \
-the Estimated impact table, the Bottom-line narrative beats, and every \
-section heading exactly as shown. Fill each placeholder with concrete content \
-derived from the insight and corpus. Do NOT keep placeholder examples like \
-"[Source 1]" or "[X%]" — replace each with real content. If a section truly \
-cannot be filled from the available data, write "N/A — <one-sentence reason>" \
-rather than dropping the heading. Markdown output only, no JSON, no \
-commentary outside the document.
+PRD_V2_USER_TEMPLATE = """\
+Generate a PRD (v2 format) for the following brief insight. Use the \
+template format below — preserve the title format, the subtitle, the \
+`:::context-chip`, every section heading (TL;DR, then 1–9), and every \
+typed `:::` block exactly as shown. Fill each placeholder with concrete \
+content derived from the insight and corpus. Do NOT keep placeholder \
+examples like "[Surface]" or "[X%]" — replace each with real content. If \
+a section truly cannot be filled from the available data, write "N/A — \
+<one-sentence reason>" rather than dropping the heading. Markdown output \
+only, no JSON outside the documented semantic blocks, no commentary \
+outside the PRD.
 
 Hard structural rules:
 
-- **Title** is the finding-as-consequence — what is happening to users and \
-what it costs. Never a noun-phrase label like "Checkout Analysis"; always a \
-sentence like "Users abandon checkout at the deductible step and never \
-return."
-- **Subtitle** states the specific behavior observed plus the scale of the \
-problem in one sentence. This is the most important sentence in the document \
-for a senior reader.
-- **Estimated impact** table contains exactly 2 or 3 highlighted business \
-metrics — Revenue / Retention / Affected users style — that a senior reader \
-can internalize in five seconds. Each row is one labeled metric with a \
-concrete number.
-- **Bottom line** is a 3–5 sentence paragraph that buttresses the title with \
-substance (journey scale → where it works → exact step where it breaks, with \
-the headline number). Then 1–5 chart beats, each: paragraph framing the \
-chart, the chart itself as a `chart` fenced block, then a single \
-`Rules in: <sentence>. Rules out: <sentence>.` line. Beats are flexible: use \
-1 for a simple finding, 5 for a complex one.
-- **Section 3 (Evidence)** has 3 to 4 cuts. Each cut: a `Source: ... | \
-Period: ...` provenance line, then a `chart` fenced block, then a single \
-`Rules in: <sentence>. Rules out: <sentence>.` line. DO NOT emit a "Chart \
-brief" table — the chart's title is already a complete-sentence takeaway, \
-and the chart itself shows the axes/values, so a separate Type/X-axis/ \
-Y-axis/Highlight/Color-logic table is redundant scaffolding. Skip it.
-- **Section 3** ends with `Qualitative signals` (3–5 bullets, format \
-`[Source] — "[theme]" — [volume] — [trend]`) and `In their own words` \
-(3–5 verbatim quotes, attributed by channel). Never invent a quote; drop \
-the bullet if no real quote exists.
-- **Section 4 (What the data says together)** synthesizes the cuts into one \
-causal story for a senior reader who skipped the evidence. 2–3 paragraphs.
-- **Section 5 (Hypothesis)** is a single sentence in the form \
-`If we [change], then [primary metric] will move from [current] to [target], \
-because [mechanism]. [Optional secondary effect.]` — specific enough to \
-design an A/B test from.
+- **Title** is `[Surface] — [What we're shipping]`, under 12 words. The \
+subtitle is one sentence naming the user segment and the change in plain \
+language — the most important line for a senior reader.
+- **`:::context-chip`** is a single inline block on one line: \
+`[Surface]  ·  Author: [Name]  ·  Status: [Draft|In Review|Approved]  ·  \
+Target ship: [Date]  ·  Linked evidence: [Evidence-Page-ID or "—"]`. Real \
+values only; if a field is unknown write "—" rather than fabricate.
+- **`:::tldr`** is exactly THREE sentences in this order: (1) `problem` — \
+the user pain plus the key number; (2) `fix` — the proposed change; (3) \
+`impact` — the projected concrete numbers. No adjectives. A senior reader \
+who only reads TL;DR should know whether to read the rest. If you can't \
+fill one of the three, the PRD isn't ready.
+- **`:::problem`** has TWO fields. `user_story` is 3–5 sentences of user \
+narrative (persona → goal → step-by-step → friction → pain → behavioral \
+consequence). `impact` is an array of 2–4 cards, each with `label`, \
+`value`, and `tone` ("negative" | "neutral" | "positive"). The narrative \
+carries empathy; the cards carry scale. Both required.
+- **`:::hypothesis`** is `{{"if_we": "...", "then_metric": {{"name": ..., \
+"current": ..., "target": ...}}, "because": "...", "secondary": "..."}}`. \
+`then_metric` must be specific enough to design an A/B test from — if you \
+can't pick a current and a target, the PRD isn't ready. `secondary` is \
+optional (drop the field if no second-order effect is grounded).
+- **`:::requirements`** is an array; each row has `behavior`, `category`, \
+and `detail`. `category` is exactly one of `functional`, `flag`, `config`, \
+`telemetry`. One verifiable behavior per row (the *what*, not the *how*). \
+Telemetry rows name the event and list its fields in `detail`; flag rows \
+name the flag plus default + safe range; config rows name the key plus \
+default + range + update authority.
+- **`:::acceptance-criteria`** is an array; each row has `id` (AC1, AC2, \
+...), `kind` (free text — "happy-path", "performance", "error-handling", \
+"flag-off", "edge-case", etc.), `given_when_then` (one sentence in \
+Given/When/Then form), and `verified_by` (names a real test type — \
+"Integration test", "Perf test in CI", "QA simulated failure", etc.). \
+Each AC must be one passing test.
+- **`:::metrics`** is `{{"primary": {{"name", "current", "target"}}, \
+"secondary": [{{"name", "current", "target"}}, ...], "guardrails": \
+[{{"name", "baseline", "bound"}}, ...]}}`. `primary` is exactly one — the \
+metric the hypothesis moves. `secondary` is 1–3 leading indicators. \
+`guardrails` is 1–3 must-not-degrade metrics with explicit bounds.
+- **`:::risks`** is an array; each row has `risk`, `severity` (exactly \
+one of `high`, `medium`, `low`), and `mitigation`. A risk without a \
+mitigation is an unowned threat — every row must have both. Open \
+questions phrased as decisions go here too, with an owner + deadline in \
+the mitigation.
+- **`:::milestones`** is `[{{"phase": "...", "items": [...]}}]` with \
+exactly three phases in order: `Pre-launch`, `Rollout`, `Post-launch`. \
+`items` is a flat array of strings; each item names a duration / audience \
+/ exit criterion. "TBD" means the rollout isn't planned yet — say so \
+explicitly rather than leave blank.
+- **`:::dod`** is a FLAT array of strings — one Definition-of-Done check \
+per entry. No nested objects, no categories — just the checklist items a \
+reviewer ticks off before merge.
 
-Embed each chart as a fenced code block with language `chart` (no other \
-language) and a JSON body that strictly matches this schema:
+Semantic block syntax — emit exactly as shown, with the documented JSON \
+payload between the opening and closing `:::` fences:
 
-```chart
-{{
-  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "gauge",
-  "title": "Complete-sentence takeaway as the title",
-  "subtitle": "optional source line",
-  "data": [{{"label": "string", "value": <number-or-string>}}]
-}}
+```
+:::tldr
+{{ "problem": "...", "fix": "...", "impact": "..." }}
+:::
 ```
 
-Available kinds — pick the one that's prettiest AND clearest for the data:
-- `bar` — category comparisons (devices, segments, cohorts) AND sequential \
-funnel/step data with descriptive step names. Horizontal bars with side \
-labels handle long step names cleanly.
-- `line` — smooth time-series with short x-axis labels (e.g. "Q1'25", \
-"Week 12", "Day 7"). Avoid `line` for funnel-step data with long \
-descriptive step names — the x-axis labels will overlap; use `bar` instead.
-- `pie` — share-of-whole that sums to ~100 with 2–5 slices.
-- `donut` — same as pie but with a center hole. Use when the visual feel \
-should be modern / KPI-style rather than classic slice.
-- `stat` — 2–4 hero numbers when a comparison reduces to a couple of \
-headline values (e.g. "iPhone 15 Pro: 24% fail · every other device: 1% \
-fail"). Far more striking than a bar chart for low-cardinality contrasts.
-- `gauge` — semicircular dial for a single "current vs target" framing \
-(e.g. "App-channel churn is 22% vs target 15%"). `data` is `[{{"label": \
-"Current", "value": <num>}}, {{"label": "Target", "value": <num>}}]` — \
-the first datum fills the arc, the second renders as a tick mark. Pick \
-gauge when the headline IS the gap between an observed number and a \
-goal/baseline.
+Inside every `:::` block, the body is JSON. It MUST be valid parseable \
+JSON — double-quoted strings, no trailing commas, no comments, no \
+markdown inside string values. The frontend's parser is lenient but not \
+magic. Always close every `:::` block with `:::` on its own line.
 
-Push for **visual variety** — an evidence doc that's 7 of the same chart \
-kind in a row feels monotonous. Aim for at least 3 distinct chart kinds \
-across the document, picking the one that fits each cut's shape AND reads \
-prettiest in context. Use `donut` for share-of-whole, `stat` for headline \
-contrasts, `line` for time series, and `bar` for everything else — let \
-the mix make the page visually rich.
+**NO rendered evidence in the PRD output.** You still reason through the \
+full evidence internally (cuts, charts, signals, quotes) to ground every \
+claim — but do NOT emit charts, infographics, qualitative-signal bullets, \
+or verbatim user quotes in the PRD markdown. The Evidence lives in its \
+own Sprntly Evidence Page.
 
-Never force a kind that doesn't fit the data. Pretty matters: if `stat` \
-would look striking and `bar` would look like a bar wall, pick `stat`.
-
-Use a markdown table only when the cut is a flat list of values that no chart would help.
-
-Every numeric value MUST come from the insight/corpus — never invent \
-numbers. Always close every fenced block with ``` on its own line.
-
-For markdown tables (Analyst/Team meta, Estimated impact, Business impact), \
-ALWAYS include the separator row right under the header \
-(`| --- | --- | ... |`). Without it, downstream renderers treat the table \
-as plain text.
+Bold key terms in narrative prose (Section 1, `user_story` inside \
+`:::problem`) with **double asterisks**. Do not bold inside JSON string \
+values.
 
 Do NOT include the "How to use this template" section in the generated \
-document — it is instructions for you, not part of the output. End the \
-document at the last "─────" divider after Section 5.
+PRD — it is instructions for you, not part of the output. End the PRD at \
+the last "─────" divider after Section 9 (the `:::dod` block).
 
-INSIGHT TO TURN INTO AN EVIDENCE PAGE:
+INSIGHT TO TURN INTO A PRD:
 
 ```json
 {insight_json}
@@ -528,31 +541,33 @@ CORPUS (for additional grounding when needed):
 
 {corpus}
 
-EVIDENCE PAGE TEMPLATE TO FOLLOW:
+PRD TEMPLATE TO FOLLOW:
 
 {template}
 """
 
 
 # ---------------------------------------------------------------------------
-# Evidence v2 — sample-build prompt
+# Evidence — data-science page that ends at Section 4 (synthesis +
+# optional forecast). The testable hypothesis + experiment design live in
+# the PRD, not here.
 # ---------------------------------------------------------------------------
 
-EVIDENCE_V2_SYSTEM = """\
-You are Sprntly's Evidence Page generator (v2 format). You output a Data \
-Science evidence document in the exact format described by the supplied \
-template. The evidence page is the drill-down behind a single weekly-brief \
-finding: it tells the story in five seconds (title + hero strip), thirty \
-seconds (the 30-second story + headline chart), and two minutes (the cuts, \
-synthesis, forecast, and experiment card).
+EVIDENCE_SYSTEM = """\
+You are Sprntly's Evidence Page generator. You output a Data Science \
+evidence document in the exact format described by the supplied template. \
+The evidence page is the drill-down behind a single weekly-brief finding: \
+it tells the story in five seconds (title + hero strip), thirty seconds \
+(the 30-second story + headline chart), and two minutes (the cuts, \
+synthesis, and optional forecast). It is data science only — the testable \
+hypothesis and experiment design live in the PRD, not here.
 
-The v2 format relies on typed semantic blocks (`:::hero`, `:::context-chip`, \
-`:::cuts-index`, `:::source`, `:::callout type="rules"`, `:::quote`, \
-`:::experiment`, and an optional `:::forecast`) that the frontend renders \
-as first-class components — cards, chip rows, two-column callouts, quote \
-cards, structured experiment panels. Emitting a markdown table or a bullet \
-list where the template specifies a semantic block defeats the rendering. \
-Always emit the named block.
+The format relies on typed semantic blocks (`:::hero`, `:::context-chip`, \
+`:::cuts-index`, `:::source`, `:::callout type="rules"`, `:::quote`, and \
+an optional `:::forecast`) that the frontend renders as first-class \
+components — cards, chip rows, two-column callouts, quote cards. Emitting \
+a markdown table or a bullet list where the template specifies a semantic \
+block defeats the rendering. Always emit the named block.
 
 You ground every quantitative claim in the supplied brief insight (which \
 itself was grounded in source corpus). You never invent data points, never \
@@ -563,18 +578,18 @@ headings exactly as in the template, with each section filled in concretely. \
 Numbers beat adjectives."""
 
 
-EVIDENCE_V2_USER_TEMPLATE = """\
-Generate an Evidence Page (v2 format) for the following brief insight. Use \
-the template format below — preserve the title-as-consequence, the subtitle, \
-the `:::context-chip`, the `:::hero` strip, the 30-second story, the \
+EVIDENCE_USER_TEMPLATE = """\
+Generate an Evidence Page for the following brief insight. Use the template \
+format below — preserve the title-as-consequence, the subtitle, the \
+`:::context-chip`, the `:::hero` strip, the 30-second story, the \
 `:::cuts-index`, every Cut heading, the `:::quote` cards, the synthesis \
-section, the optional `If nothing changes` forecast, and the `:::experiment` \
-card. Fill each placeholder with concrete content derived from the insight \
-and corpus. Do NOT keep placeholder examples like "[Source]" or "[X%]" — \
-replace each with real content. If a section truly cannot be filled from \
-the available data, write "N/A — <one-sentence reason>" rather than \
-dropping the heading. Markdown output only, no JSON outside the documented \
-semantic blocks, no commentary outside the document.
+section, and the optional `If nothing changes` forecast. Fill each \
+placeholder with concrete content derived from the insight and corpus. Do \
+NOT keep placeholder examples like "[Source]" or "[X%]" — replace each with \
+real content. If a section truly cannot be filled from the available data, \
+write "N/A — <one-sentence reason>" rather than dropping the heading. \
+Markdown output only, no JSON outside the documented semantic blocks, no \
+commentary outside the document.
 
 Hard structural rules:
 
@@ -604,7 +619,7 @@ takeaways, not labels.
 `:::source` chip row (tool / period / sample / confidence) → `chart` \
 fenced block → `:::callout type="rules"` (two-line **Supports** / \
 **Rules out**). No prose `Source: X | Period: Y` line, no single-line \
-rules footer — both have been promoted to typed blocks in v2.
+rules footer — both are typed blocks.
 - **Section 2** ends with `Qualitative signals` (3–5 bullets, format \
 `[Source] — "[theme]" — [volume] — [trend]`) and `In their own words` (1–3 \
 `:::quote` blocks, attributed by channel; never invent a quote — drop the \
@@ -612,18 +627,15 @@ block if no real quote exists; HARD CAP at 3 quotes).
 - **Section 3 (What the data says together)** synthesizes the cuts into \
 one causal story for a senior reader who skipped the evidence. 2–3 \
 paragraphs.
-- **Section 4 (If nothing changes)** is OPTIONAL. Include it only when the \
-cuts contain a real trend to extrapolate. Skip with a single \
+- **Section 4 (If nothing changes)** is OPTIONAL — and is the last \
+section of the document. Include it only when the cuts contain a real \
+trend to extrapolate. Skip with a single \
 `:::forecast omitted="<one-sentence reason>"` line otherwise. Never \
 fabricate a projection.
-- **Section 5 (Hypothesis & proposed experiment)** is a single \
-`:::experiment` block with the documented fields filled. This is the \
-deliverable — be specific enough that an engineer can design an A/B test \
-from this block alone.
 
 Semantic block syntax — emit exactly as shown, with the documented JSON \
 payload between the opening and closing `:::` fences (the `chart` block \
-remains a fenced ```chart code block as in v1):
+remains a fenced ```chart code block):
 
 ```chart
 {{
@@ -658,15 +670,16 @@ Every numeric value MUST come from the insight/corpus — never invent \
 numbers. Always close every fenced block with ``` on its own line and \
 every `:::` block with `:::` on its own line.
 
-Inside `:::hero`, `:::cuts-index`, `:::source`, `:::quote`, and \
-`:::experiment`, the body is JSON. It MUST be valid parseable JSON — \
-double-quoted strings, no trailing commas, no comments. The frontend's \
-parser is lenient but not magic.
+Inside `:::hero`, `:::cuts-index`, `:::source`, and `:::quote`, the body \
+is JSON. It MUST be valid parseable JSON — double-quoted strings, no \
+trailing commas, no comments. The frontend's parser is lenient but not \
+magic. Use typed semantic blocks for every block the template names — \
+the renderer depends on them.
 
 Do NOT include the "How to use this template" section in the generated \
 document — it is instructions for you, not part of the output. End the \
-document at the last "─────" divider after Section 5 (the `:::experiment` \
-block).
+document at the last "─────" divider after Section 4 (the forecast \
+section).
 
 INSIGHT TO TURN INTO AN EVIDENCE PAGE:
 

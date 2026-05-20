@@ -1,15 +1,14 @@
-"""Sample-build endpoints for the v2 evidence format.
+"""Sample-build endpoints for the v2 PRD format.
 
-Runs side-by-side with /v1/evidence/* (v1 stays untouched). Rows live in
-the same `evidences` table, distinguished by the `variant` column. Trigger
-via:
+Runs side-by-side with /v1/prd/* (v1 stays untouched). Rows live in the
+same `prds` table, distinguished by the `variant` column. Trigger via:
 
-    POST /v1/evidence/v2/generate  {"brief_id": N, "insight_index": M, "force": false}
-    GET  /v1/evidence/v2/{evidence_id}
+    POST /v1/prd/v2/generate  {"brief_id": N, "insight_index": M, "force": false}
+    GET  /v1/prd/v2/{prd_id}
 
 The POST is fire-and-forget: it inserts a row in `generating` state,
-schedules `generate_evidence_v2` in the background, and returns the
-evidence_id immediately. Poll the GET until status == 'ready'.
+schedules `generate_prd_v2` in the background, and returns the prd_id
+immediately. Poll the GET until status == 'ready'.
 """
 import asyncio
 
@@ -18,15 +17,15 @@ from pydantic import BaseModel, Field
 
 from app.auth import require_session
 from app.db import (
-    find_existing_evidence,
+    find_existing_prd,
     get_brief_by_id,
-    get_evidence,
-    start_evidence,
+    get_prd,
+    start_prd,
 )
-from app.evidence_runner import generate_evidence_v2
-from app.prompts import EVIDENCE_V2_TEMPLATE_VERSION
+from app.prd_runner import generate_prd_v2
+from app.prompts import PRD_V2_TEMPLATE_VERSION
 
-router = APIRouter(prefix="/v1/evidence/v2", tags=["evidence-v2"])
+router = APIRouter(prefix="/v1/prd/v2", tags=["prd-v2"])
 
 _VARIANT = "v2"
 
@@ -42,10 +41,10 @@ async def generate_v2(
     body: GenerateV2In,
     sprintly_session: str | None = Cookie(default=None),
 ):
-    """Kick off v2 evidence generation in the background.
+    """Kick off v2 PRD generation in the background.
 
-    Returns immediately with the evidence_id. If a ready/generating v2
-    doc already exists for (brief, insight) and `force` is false, returns
+    Returns immediately with the prd_id. If a ready/generating v2 PRD
+    already exists for (brief, insight) and `force` is false, returns
     the existing row — same dedupe semantics as v1.
     """
     require_session(sprintly_session)
@@ -62,12 +61,12 @@ async def generate_v2(
         )
 
     if not body.force:
-        existing = find_existing_evidence(
+        existing = find_existing_prd(
             body.brief_id, body.insight_index, variant=_VARIANT
         )
         if existing:
             return {
-                "evidence_id": existing["id"],
+                "prd_id": existing["id"],
                 "status": existing["status"],
                 "title": existing["title"],
                 "variant": _VARIANT,
@@ -75,43 +74,43 @@ async def generate_v2(
 
     insight = insights[body.insight_index]
     title = insight.get("title") or f"Insight #{body.insight_index + 1}"
-    evidence_id = start_evidence(
+    prd_id = start_prd(
         brief_id=body.brief_id,
         insight_index=body.insight_index,
         title=title,
-        template_version=EVIDENCE_V2_TEMPLATE_VERSION,
+        template_version=PRD_V2_TEMPLATE_VERSION,
         variant=_VARIANT,
     )
     asyncio.create_task(
-        generate_evidence_v2(evidence_id, body.brief_id, body.insight_index)
+        generate_prd_v2(prd_id, body.brief_id, body.insight_index)
     )
     return {
-        "evidence_id": evidence_id,
+        "prd_id": prd_id,
         "status": "generating",
         "title": title,
         "variant": _VARIANT,
     }
 
 
-@router.get("/{evidence_id}")
+@router.get("/{prd_id}")
 def get_v2(
-    evidence_id: int,
+    prd_id: int,
     sprintly_session: str | None = Cookie(default=None),
 ):
-    """Fetch a v2 evidence row. 404 if missing; 409 if the id belongs to v1.
+    """Fetch a v2 PRD row. 404 if missing; 409 if the id belongs to v1.
 
-    The v1 endpoint (GET /v1/evidence/{id}) can also read v2 rows since
-    they share a table, but this v2 endpoint enforces the variant so a
-    caller that asks for v2 by id doesn't accidentally get a v1 doc.
+    The v1 endpoint (GET /v1/prd/{id}) can also read v2 rows since they
+    share a table, but this v2 endpoint enforces the variant so a caller
+    that asks for v2 by id doesn't accidentally get a v1 doc.
     """
     require_session(sprintly_session)
-    row = get_evidence(evidence_id)
+    row = get_prd(prd_id)
     if not row:
-        raise HTTPException(404, "Evidence not found")
+        raise HTTPException(404, "PRD not found")
     if row.get("variant") != _VARIANT:
         raise HTTPException(
             409,
-            f"evidence_id={evidence_id} is variant={row.get('variant')!r}, "
+            f"prd_id={prd_id} is variant={row.get('variant')!r}, "
             f"not {_VARIANT!r}",
         )
     return row

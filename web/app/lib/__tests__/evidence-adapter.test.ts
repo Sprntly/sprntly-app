@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest"
-import { markdownToEvidenceV2State } from "../evidence-v2-adapter"
+import { markdownToEvidenceState } from "../evidence-adapter"
 
-describe("markdownToEvidenceV2State", () => {
+describe("markdownToEvidenceState", () => {
   it("extracts the title from the first H1", () => {
-    const out = markdownToEvidenceV2State("# The Title\n\nbody")
+    const out = markdownToEvidenceState("# The Title\n\nbody")
     expect(out.title).toBe("The Title")
   })
 
   it("falls back to a default title when no H1 is present", () => {
-    const out = markdownToEvidenceV2State("body only")
-    expect(out.title).toBe("Evidence (v2)")
+    const out = markdownToEvidenceState("body only")
+    expect(out.title).toBe("Evidence")
   })
 
   it("parses an H2 + paragraph + bullet list as PRD primitives", () => {
-    const out = markdownToEvidenceV2State(
+    const out = markdownToEvidenceState(
       ["# T", "", "## Section", "", "Paragraph one.", "", "- item 1", "- item 2"].join("\n"),
     )
     const types = out.sections.map((s) => s.type)
@@ -34,7 +34,7 @@ describe("markdownToEvidenceV2State", () => {
       ]),
       ":::",
     ].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const hero = out.sections[0]
     if (hero.type !== "v2-hero") throw new Error("expected v2-hero")
     expect(hero.cards).toHaveLength(2)
@@ -52,7 +52,7 @@ describe("markdownToEvidenceV2State", () => {
       ]),
       ":::",
     ].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const hero = out.sections[0]
     if (hero.type !== "v2-hero") throw new Error("expected v2-hero")
     expect(hero.cards[0].tone).toBe("neutral")
@@ -61,7 +61,7 @@ describe("markdownToEvidenceV2State", () => {
 
   it("parses :::context-chip as plain text", () => {
     const md = [":::context-chip", "Claims · Q3 2025 · n=42", ":::"].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const c = out.sections[0]
     expect(c.type).toBe("v2-context-chip")
     if (c.type === "v2-context-chip") expect(c.text).toBe("Claims · Q3 2025 · n=42")
@@ -76,7 +76,7 @@ describe("markdownToEvidenceV2State", () => {
       ]),
       ":::",
     ].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const c = out.sections[0]
     if (c.type !== "v2-cuts-index") throw new Error("expected v2-cuts-index")
     expect(c.rows[0].confidence).toBe("High")
@@ -93,7 +93,7 @@ describe("markdownToEvidenceV2State", () => {
       ]),
       ":::",
     ].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const c = out.sections[0]
     if (c.type !== "v2-source") throw new Error("expected v2-source")
     expect(c.chips).toHaveLength(3)
@@ -107,7 +107,7 @@ describe("markdownToEvidenceV2State", () => {
       "**Rules out:** Not Y.",
       ":::",
     ].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const c = out.sections[0]
     if (c.type !== "v2-rules-callout") throw new Error("expected v2-rules-callout")
     expect(c.supports).toBe("It supports X.")
@@ -124,7 +124,7 @@ describe("markdownToEvidenceV2State", () => {
       }),
       ":::",
     ].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const c = out.sections[0]
     if (c.type !== "v2-quote") throw new Error("expected v2-quote")
     expect(c.body).toContain("deductible")
@@ -132,36 +132,9 @@ describe("markdownToEvidenceV2State", () => {
     expect(c.context).toBe("Aug 2025")
   })
 
-  it("parses :::experiment into the structured experiment shape", () => {
-    const md = [
-      ":::experiment",
-      JSON.stringify({
-        change: "Move price upfront",
-        primary_metric: {
-          name: "Funnel completion",
-          current: "43%",
-          target: "58%",
-          mechanism: "Removes surprise abandonment",
-        },
-        sample_size: "12k/arm",
-        duration: "3 weeks",
-        secondary_effects: ["Maybe lower entry rate"],
-        risks: ["Tier mix shifts"],
-      }),
-      ":::",
-    ].join("\n")
-    const out = markdownToEvidenceV2State(md)
-    const c = out.sections[0]
-    if (c.type !== "v2-experiment") throw new Error("expected v2-experiment")
-    expect(c.experiment.change).toBe("Move price upfront")
-    expect(c.experiment.primary_metric.target).toBe("58%")
-    expect(c.experiment.secondary_effects).toEqual(["Maybe lower entry rate"])
-    expect(c.experiment.risks).toEqual(["Tier mix shifts"])
-  })
-
   it("parses :::forecast omitted=\"...\" as a forecast-omitted section", () => {
     const md = `:::forecast omitted="no trend basis"`
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const c = out.sections[0]
     if (c.type !== "v2-forecast-omitted")
       throw new Error("expected v2-forecast-omitted")
@@ -170,7 +143,7 @@ describe("markdownToEvidenceV2State", () => {
 
   it("falls back to a paragraph for a malformed JSON-bodied block", () => {
     const md = [":::hero", "{this is not json", ":::"].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const c = out.sections[0]
     expect(c.type).toBe("p")
     if (c.type === "p") {
@@ -195,7 +168,7 @@ describe("markdownToEvidenceV2State", () => {
       }),
       "```",
     ].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const types = out.sections.map((s) => s.type)
     expect(types).toEqual(["v2-hero", "chart"])
   })
@@ -208,7 +181,7 @@ describe("markdownToEvidenceV2State", () => {
       "noise after",
       ":::",
     ].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const c = out.sections[0]
     if (c.type !== "v2-cuts-index") throw new Error("expected v2-cuts-index")
     expect(c.rows[0].headline).toBe("ok")
@@ -224,7 +197,7 @@ describe("markdownToEvidenceV2State", () => {
       "",
       "body",
     ].join("\n")
-    const out = markdownToEvidenceV2State(md)
+    const out = markdownToEvidenceState(md)
     const types = out.sections.map((s) => s.type)
     expect(types).toEqual(["h2", "p"])
   })

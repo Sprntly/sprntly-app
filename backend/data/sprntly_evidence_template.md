@@ -1,149 +1,165 @@
 # [Finding stated as a consequence — what is happening and why it matters]
 
-[Subtitle: the specific behavior observed + the scale of the problem — e.g. '57% of screen repair claimants walk away at the deductible screen and never come back']
+[Subtitle: the specific behavior observed + the scale of the problem in one sentence — e.g. '57% of screen repair claimants walk away at the deductible screen and never come back']
 
-[Product area]  ·  [Analysis series name]  ·  [Period]  ·  [N records analyzed]
-
-| Meta | Value |
-| --- | --- |
-| Analyst / Team | [Analyst name or team — e.g. Data Science & Product Analytics] |
-| Analysis period | [Date range — e.g. Q1–Q3 2025 / trailing 12 months] |
-| Data volume | [N events / users / sessions / records analyzed] |
+:::context-chip
+[Product area]  ·  [Customer segment]  ·  [Period]  ·  [N records analyzed]  ·  Confidence: [High | Medium | Low]
+:::
 
 ────────────────────────────────────────────────────────────
 
-## Estimated impact
+## Impact at a glance
 
-Two to three highlighted business numbers — what this is costing, and what changes if it's fixed. Pick the ones a senior reader needs to internalize in five seconds.
-
-| Metric | Value |
-| --- | --- |
-| [e.g. Revenue at risk] | [$X M / yr] |
-| [e.g. Retention impact] | [+/-X pp] |
-| [e.g. Affected users] | [N / month] |
+:::hero
+[
+  {
+    "label": "[e.g. Revenue at risk]",
+    "value": "[$143M / yr]",
+    "delta": "[+18% YoY | optional — drop the field if N/A]",
+    "baseline": "[vs. $1.2B category | optional]",
+    "tone": "negative | neutral | positive"
+  },
+  {
+    "label": "[e.g. Affected users]",
+    "value": "[218k / mo]",
+    "delta": "[+9% QoQ]",
+    "baseline": "[12% of monthly actives]",
+    "tone": "negative"
+  },
+  {
+    "label": "[e.g. Retention impact]",
+    "value": "[-4.2 pp]",
+    "delta": "[steady]",
+    "baseline": "[goal: +1 pp by Q4]",
+    "tone": "negative"
+  }
+]
+:::
 
 ────────────────────────────────────────────────────────────
 
-## Bottom line
+## The 30-second story
 
-[Paragraph that buttresses the title with concrete substance: 3–5 sentences that establish the scale of the journey, where it works, and the exact step where it breaks — with the headline number stated plainly. The title states the problem; this paragraph makes it whole. Mirror the depth of a PRD's TL;DR + Context combined, not just a one-liner.]
+[3–5 sentence paragraph that buttresses the title with concrete substance: scale of the journey → where it works → exact step where it breaks → the headline number plainly stated. This is the most important paragraph in the document for a reader who will only read one paragraph.]
 
-[Introduce the first chart: tell the reader what to look for — e.g. 'The chart below shows the full funnel. Four steps lose fewer than 5% of users each. One step loses 57%.']
+[Paragraph framing the headline chart: tell the reader what to look for in the next chart in one or two sentences.]
 
 ```chart
 {
-  "kind": "bar" | "line" | "pie" | "stat",
+  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "gauge",
   "title": "Complete-sentence takeaway as the title",
   "subtitle": "optional source line",
-  "data": [{"label": "string", "value": <number-or-string>}]
+  "data": [{"label": "string", "value": "<number-or-string>"}]
 }
 ```
 
-Rules in: [One sentence: the hypothesis this chart supports.] Rules out: [One sentence: the alternative this chart eliminates.]
+:::callout type="rules"
+**Supports:** [One sentence: the hypothesis this chart supports.]
+**Rules out:** [One sentence: the alternative this chart eliminates.]
+:::
 
-[Beat 2 — Describe what happens to users after the drop-off point. Focus on downstream behavior: do they return, do they churn, how fast? Compare to users who completed the flow.]
-
-```chart
-{ "kind": "...", "title": "...", "data": [...] }
-```
-
-Rules in: [...]. Rules out: [...].
-
-[Beat 3 — Name the cause explicitly. Do not hedge. Use data to show why users behave this way — price gap, UX failure, bug, missing feature, competitor alternative. Quantify the gap wherever possible.]
-
-```chart
-{ "kind": "...", "title": "...", "data": [...] }
-```
-
-Rules in: [...]. Rules out: [...].
-
-[Beat 4 (optional) — Rule out the natural alternative: 'maybe these users were already low-intent.' Show tenure, payment history, NPS, or other pre-event signals that prove the drop-off event itself is the cause, not pre-existing intent.]
-
-```chart
-{ "kind": "...", "title": "...", "data": [...] }
-```
-
-Rules in: [...]. Rules out: [...].
-
-[Beat 5 (optional) — Additional signal: competitive landscape, seasonal pattern, platform breakdown, or a cross-check from a second data source.]
-
-```chart
-{ "kind": "...", "title": "...", "data": [...] }
-```
-
-Rules in: [...]. Rules out: [...].
-
-[Synthesis: state the root cause in one sentence, plainly. No hedging. Then state the business impact if nothing changes. E.g. 'This is not a UX problem — it is a pricing strategy problem. Until the gap closes, $143M walks out annually. The rest of this document traces the full evidence chain and ends with a testable hypothesis.']
+[Optional additional beat — only if a single chart can't carry the story. Each beat = framing paragraph → chart → rules callout. Cap at 3 beats in this section; deeper cuts belong in Section 2.]
 
 ────────────────────────────────────────────────────────────
 
-## 1. Business context
+## 1. Evidence at a glance
 
-[Paragraph 1 — the product surface, the customer segment, and the current state. 3–5 sentences. Do not explain the problem yet — that is Section 2.]
+[3–4 row mini-index — one row per cut below. Each row is a one-sentence takeaway with its confidence. Helps a reader decide which cuts to read fully and which to skim. Use this exact block syntax so the frontend can render it as a compact scannable list.]
 
-[Paragraph 2 — what changed recently or why this analysis is timely. Optional. Cut if not strictly needed.]
-
-────────────────────────────────────────────────────────────
-
-## 2. Business impact
-
-[One sentence: name the business goal this analysis connects to. E.g. 'This finding directly impacts 30-day retention and ARR, two of the three core business goals for H2 2025.']
-
-| Dimension | Impact |
-| --- | --- |
-| Affected user / event volume | [# users / sessions / events per month or year — be specific] |
-| Cost per affected user | [$X / churn pp / LTV lost / NPS pts] |
-| Annualized business cost | [$X/yr — revenue at risk, LTV gap, efficiency loss] |
-| Trajectory | [Growing / stable / shrinking — one sentence on direction and why] |
-| Business goal linked | [Retention / Revenue / Activation / Engagement / Cost reduction / NPS] |
+:::cuts-index
+[
+  { "n": 1, "headline": "[One-sentence takeaway with the number]", "confidence": "High" },
+  { "n": 2, "headline": "[One-sentence takeaway with the number]", "confidence": "High" },
+  { "n": 3, "headline": "[One-sentence takeaway with the number]", "confidence": "Medium" },
+  { "n": 4, "headline": "[Cross-check ruling out a competing explanation]", "confidence": "Medium" }
+]
+:::
 
 ────────────────────────────────────────────────────────────
 
-## 3. Evidence
+## 2. Evidence
 
-The data-science slicing of the data — why we got to the conclusion above. Every cut is visualized with the infographic type that best communicates the shape of the data (bar / line / pie / stat). Self-explanatory titles, no labels.
-
-Evidence confidence: [High / Medium / Low]   |   If not High, state what additional data would change the rating.
+The data-science slicing of the data — why we got to the conclusion above. Every cut is visualized with the chart type that best communicates the shape of the data. Each cut is self-contained: provenance chip row → chart → rules callout.
 
 ### Cut 1 — [One-sentence headline finding with the number]
 
-Source: [Tool/system]   |   Period: [date range and sample size]
+:::source
+[
+  { "kind": "tool",  "label": "[Mixpanel | Snowflake | Amplitude | Zendesk | App Store | Gong | G2]" },
+  { "kind": "period","label": "[Q1–Q3 2025]" },
+  { "kind": "sample","label": "[n = 14,200 sessions]" },
+  { "kind": "confidence","label": "High | Medium | Low" }
+]
+:::
 
 ```chart
 { "kind": "...", "title": "Complete-sentence takeaway", "data": [...] }
 ```
 
-Rules in: [One sentence: the hypothesis this cut supports.] Rules out: [One sentence: the competing hypothesis this eliminates.]
+:::callout type="rules"
+**Supports:** [One sentence: the hypothesis this cut supports.]
+**Rules out:** [One sentence: the competing hypothesis this eliminates.]
+:::
 
 ### Cut 2 — [One-sentence headline with the number]
 
-Source: [Tool/system]   |   Period: [date range and sample size]
+:::source
+[
+  { "kind": "tool",  "label": "[Source]" },
+  { "kind": "period","label": "[Period]" },
+  { "kind": "sample","label": "[n = ...]" },
+  { "kind": "confidence","label": "High | Medium | Low" }
+]
+:::
 
 ```chart
 { "kind": "...", "title": "Complete-sentence takeaway", "data": [...] }
 ```
 
-Rules in: [...]. Rules out: [...].
+:::callout type="rules"
+**Supports:** [...]
+**Rules out:** [...]
+:::
 
 ### Cut 3 — [One-sentence headline with the number]
 
-Source: [Tool/system]   |   Period: [date range and sample size]
+:::source
+[
+  { "kind": "tool",  "label": "[Source]" },
+  { "kind": "period","label": "[Period]" },
+  { "kind": "sample","label": "[n = ...]" },
+  { "kind": "confidence","label": "High | Medium | Low" }
+]
+:::
 
 ```chart
 { "kind": "...", "title": "Complete-sentence takeaway", "data": [...] }
 ```
 
-Rules in: [...]. Rules out: [...].
+:::callout type="rules"
+**Supports:** [...]
+**Rules out:** [...]
+:::
 
 ### Cut 4 (optional) — [Cross-check ruling out a competing explanation]
 
-Source: [Tool/system]   |   Period: [date range and sample size]
+:::source
+[
+  { "kind": "tool",  "label": "[Source]" },
+  { "kind": "period","label": "[Period]" },
+  { "kind": "sample","label": "[n = ...]" },
+  { "kind": "confidence","label": "High | Medium | Low" }
+]
+:::
 
 ```chart
 { "kind": "...", "title": "Complete-sentence takeaway", "data": [...] }
 ```
 
-Rules in: [...]. Rules out: [...].
+:::callout type="rules"
+**Supports:** [...]
+**Rules out:** [...]
+:::
 
 ### Qualitative signals
 
@@ -156,27 +172,62 @@ Format each bullet: `[Source] — "[theme keyword]" — [volume: X tickets/month
 
 ### In their own words
 
-Real quotes only. Never invent. 1–2 sentences each. Attribute by channel, not individual. 3–5 max.
+Verbatim customer quotes rendered as cards. Real quotes only — never invent. 1–2 sentences each, max 3 quotes. Use this block syntax so the frontend can render each as a card with oversized open-quote, italic body, and channel chip.
 
-- "[Verbatim quote — keep customer language, do not sanitize.]" — [Zendesk / App Store / Reddit / Gong / G2]
-- "[Verbatim quote from a different channel for breadth.]" — [Source]
-- "[Verbatim quote that names the symptom or root cause directly.]" — [Source]
+:::quote
+{
+  "body": "[Verbatim quote — keep customer language, do not sanitize.]",
+  "channel": "[Zendesk | App Store | Reddit | Gong | G2]",
+  "context": "[optional: ticket date / rating / call segment]"
+}
+:::
+
+:::quote
+{
+  "body": "[Verbatim quote from a different channel for breadth.]",
+  "channel": "[Source]",
+  "context": "[optional]"
+}
+:::
+
+:::quote
+{
+  "body": "[Verbatim quote that names the symptom or root cause directly.]",
+  "channel": "[Source]",
+  "context": "[optional]"
+}
+:::
 
 ────────────────────────────────────────────────────────────
 
-## 4. What the data says together
+## 3. What the data says together
 
-[Paragraph 1: summarize what the quantitative cuts collectively establish. Name the mechanism. Do not just list the charts — synthesize them into one causal story. 3–4 sentences.]
+[Paragraph 1: synthesize the cuts into one causal story. Name the mechanism plainly. 3–4 sentences.]
 
-[Paragraph 2: add what the qualitative signals contribute. How do customer voices and 3P signals confirm, sharpen, or add nuance to the quantitative picture? 2–3 sentences.]
+[Paragraph 2: what the qualitative signals add. How do customer voices confirm, sharpen, or add nuance to the quantitative picture? 2–3 sentences.]
 
-[Synthesis statement: one or two sentences that state, plainly, what the PM or engineer now knows that justifies action. E.g. 'Taken together, the data establishes that the deductible screen is a pricing problem, not a product problem — and that fixing it is worth $143M ARR.']
+[Synthesis statement: one or two sentences that state, plainly, what the PM or engineer now knows that justifies action.]
 
 ────────────────────────────────────────────────────────────
 
-## 5. Hypothesis
+## 4. If nothing changes
 
-If we [specific change], then [primary metric] will move from [current] to [target], because [mechanism from the evidence above]. [Optional secondary effect].
+[One-sentence projection: extrapolate the current trend 90 days out, grounded in cuts above. Skip this whole section if the cuts don't contain a real trend to extrapolate — write `:::forecast omitted="no trend basis"` and stop.]
+
+```chart
+{
+  "kind": "line",
+  "title": "Projected [metric] through [date] if no intervention",
+  "subtitle": "Linear projection from [base period]",
+  "data": [
+    { "label": "[period 1]", "value": "[actual]" },
+    { "label": "[period 2]", "value": "[actual]" },
+    { "label": "[period 3 — projected]", "value": "[projected]" }
+  ]
+}
+```
+
+[One sentence stating the cumulative cost of inaction over the projection window — e.g. '~$36M ARR lost and 12,400 additional abandons through Q1 2026.']
 
 ────────────────────────────────────────────────────────────
 
@@ -186,12 +237,12 @@ Delete this section before sharing with stakeholders.
 
 | Rule | What it means |
 | --- | --- |
-| Title = consequence, not label | The title names what is happening to users and what it costs. Never use a noun-phrase label ('Checkout Analysis'). Always use a finding-as-consequence ('Users are abandoning checkout at payment and not returning'). |
-| Subtitle = behavior + scale | The subtitle states the specific behavior observed and the scale of the problem. It is the most important sentence in the document for a senior reader. |
-| Bottom line = narrative with evidence | Each beat introduces a chart. Write the paragraph first, then drop the chart in. The paragraph tells the reader what to look for; the chart proves it. Delete beats you don't need; add beats if the story requires them. |
-| Beat count is flexible | 1 beat for a simple finding, 5–6 for a complex multi-dimensional problem. Every chart must be introduced by a paragraph that frames it and followed by Rules in / Rules out. |
-| Qualitative confirms quantitative | Section 3's qualitative bullets are not decoration. They should either confirm the quantitative story or add a dimension the data can't capture. |
-| Synthesis is for the skipper | Section 4 is for a senior reader who skipped the evidence. Write it as if the reader saw nothing else. |
-| Hypothesis is the deliverable | Everything in this document builds toward Section 5. If the hypothesis is not specific enough to design an A/B test from, the analysis is not finished. |
-| Business goal is always named | The impact table must name which business goal (Retention / Revenue / Activation / Engagement / Cost / NPS) this finding connects to. |
-| Never invent quotes | If you do not have a real quote, drop the bullet. Invented quotes destroy credibility. |
+| Title = consequence, not label | Title names what is happening to users and what it costs. Never a noun-phrase label. |
+| Subtitle = behavior + scale | Most important sentence for a senior reader. |
+| Hero strip = 3 numbers, 5 seconds | The `:::hero` block is the dashboard moment. Three cards max — pick the numbers a senior reader needs to internalize before scrolling. |
+| Confidence is always visible | Chip on every cut + on the context chip up top. If overall confidence is not High, say what would change it. |
+| Cuts index before evidence | The `:::cuts-index` block lets readers skim. Headlines are takeaways, not labels. |
+| Quote cards, max 3 | Quotes are emotional anchors. Three striking quotes beats six bullet-list quotes. Never invent. |
+| Semantic blocks (`:::name`) are first-class | The frontend renders each named block as a real component. Do not collapse a `:::hero` into a markdown table or a `:::quote` into a bullet — the rendering depends on the block. |
+| Forecast section may be omitted | If cuts don't support a trend extrapolation, write `:::forecast omitted="<reason>"` rather than fabricating a projection. |
+| Never invent numbers, quotes, sources | Every figure must trace to the insight or corpus. Drop anything you can't ground. |
