@@ -3712,6 +3712,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-wrap: wrap;
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -3722,10 +3723,12 @@
     padding: 3px 8px;
     background: var(--surface-3);
     border-radius: 5px;
+    white-space: nowrap;
   }
   .briefv2-card-eyebrow {
     font-weight: 600;
     color: var(--muted);
+    white-space: nowrap;
   }
   .briefv2-card-metric {
     margin-left: auto;
@@ -3734,6 +3737,19 @@
     font-size: 12.5px;
     text-transform: none;
     letter-spacing: 0;
+    white-space: nowrap;
+  }
+  .briefv2-confidence {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    letter-spacing: 0;
+    text-transform: none;
+    white-space: nowrap;
   }
   .briefv2-card-headline {
     font-size: 17px;
@@ -3812,57 +3828,51 @@
   .briefv2-card-actions {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding-top: 4px;
-    border-top: 1px solid var(--line);
-    margin-top: 2px;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: wrap;
     padding-top: 12px;
+    margin-top: 2px;
+    border-top: 1px solid var(--line);
   }
-  .briefv2-card-confidence {
-    font-size: 11px;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .briefv2-card-actions-right {
-    margin-left: auto;
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  .briefv2-card-link {
-    background: none;
-    border: none;
-    color: var(--accent);
-    font-size: 12.5px;
-    font-weight: 600;
-    cursor: pointer;
-    padding: 4px 6px;
-  }
-  .briefv2-card-ask {
-    background: var(--surface-2);
+  .briefv2-action {
+    appearance: none;
     border: 1px solid var(--line);
+    background: var(--surface);
     color: var(--ink-2);
     font-size: 12px;
     font-weight: 600;
-    padding: 6px 10px;
-    border-radius: 8px;
-    cursor: pointer;
-  }
-  .briefv2-card-secondary {
-    background: var(--ink);
-    color: var(--surface);
-    border: none;
-    font-size: 12.5px;
-    font-weight: 600;
+    line-height: 1;
     padding: 7px 12px;
     border-radius: 8px;
     cursor: pointer;
+    white-space: nowrap;
+    transition: background 120ms ease, border-color 120ms ease;
   }
-  .briefv2-card-secondary:disabled { opacity: 0.5; cursor: default; }
-  .briefv2-card-secondary--fix { background: #B73B3B; color: #fff; }
-  .briefv2-card-secondary--optimize { background: #2F7A4F; color: #fff; }
-  .briefv2-card-secondary--build { background: #4B6BD8; color: #fff; }
+  .briefv2-action:hover:not(:disabled) {
+    background: var(--surface-2);
+    border-color: var(--line-strong, var(--line));
+  }
+  .briefv2-action:disabled { opacity: 0.55; cursor: default; }
+  .briefv2-action--primary {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--surface);
+  }
+  .briefv2-action--primary:hover:not(:disabled) {
+    background: var(--ink);
+    border-color: var(--ink);
+    opacity: 0.92;
+  }
+  .briefv2-action--fix.briefv2-action--primary {
+    background: #B73B3B; border-color: #B73B3B; color: #fff;
+  }
+  .briefv2-action--optimize.briefv2-action--primary {
+    background: #2F7A4F; border-color: #2F7A4F; color: #fff;
+  }
+  .briefv2-action--build.briefv2-action--primary {
+    background: #4B6BD8; border-color: #4B6BD8; color: #fff;
+  }
   .briefv2-sources {
     font-size: 11.5px;
     color: var(--muted);

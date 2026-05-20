@@ -103,6 +103,7 @@ function HeroFindingCard({
           <span className="briefv2-card-action">{card.actionLabel}</span>
           <span className="briefv2-card-eyebrow">HEADLINE FINDING</span>
           <span className="briefv2-card-metric">{card.metricHighlight}</span>
+          <ConfidenceBadge value={card.confidence} />
         </div>
         <h2 className="briefv2-card-headline">{card.title}</h2>
         <p className="briefv2-card-body">{card.body}</p>
@@ -119,7 +120,6 @@ function HeroFindingCard({
         ) : null}
         {card.quote ? <HeroQuote quote={card.quote} /> : null}
         <CardActions
-          confidence={card.confidence}
           busy={busy}
           secondaryLabel={card.secondaryCtaLabel}
           accent={card.actionAccent}
@@ -150,12 +150,12 @@ function CompactFindingCard({
         <div className="briefv2-card-top">
           <span className="briefv2-card-action">{card.actionLabel}</span>
           <span className="briefv2-card-metric">{card.metricHighlight}</span>
+          <ConfidenceBadge value={card.confidence} />
         </div>
         <h3 className="briefv2-card-headline">{card.title}</h3>
         <p className="briefv2-card-body">{card.body}</p>
         <ConvergenceChipRow rows={card.convergence} extra={card.extraConvergenceCount} />
         <CardActions
-          confidence={card.confidence}
           busy={busy}
           secondaryLabel={card.secondaryCtaLabel}
           accent={card.actionAccent}
@@ -165,6 +165,14 @@ function CompactFindingCard({
         />
       </div>
     </article>
+  )
+}
+
+function ConfidenceBadge({ value }: { value: number }) {
+  return (
+    <span className="briefv2-confidence" title="Model confidence">
+      {(value ?? 0).toFixed(2)}
+    </span>
   )
 }
 
@@ -210,7 +218,6 @@ function HeroQuote({ quote }: { quote: { body: string; source: string } }) {
 }
 
 function CardActions({
-  confidence,
   busy,
   secondaryLabel,
   accent,
@@ -218,7 +225,6 @@ function CardActions({
   onAskAI,
   onSecondary,
 }: {
-  confidence: number
   busy: boolean
   secondaryLabel: string
   accent: string
@@ -226,27 +232,35 @@ function CardActions({
   onAskAI: () => void
   onSecondary: () => void
 }) {
+  // Strip a trailing arrow from the label — the button affordance carries
+  // the directionality; the glyph just wraps awkwardly on narrow cards.
+  const cleanSecondary = busy
+    ? "Generating…"
+    : secondaryLabel.replace(/\s*→\s*$/, "")
   return (
     <div className="briefv2-card-actions">
-      <div className="briefv2-card-confidence">
-        Confidence {(confidence ?? 0).toFixed(2)}
-      </div>
-      <div className="briefv2-card-actions-right">
-        <button type="button" className="briefv2-card-link" onClick={onViewEvidence}>
-          View evidence →
-        </button>
-        <button type="button" className="briefv2-card-ask" onClick={onAskAI}>
-          Ask Sprntly
-        </button>
-        <button
-          type="button"
-          className={`briefv2-card-secondary briefv2-card-secondary--${accent}`}
-          onClick={onSecondary}
-          disabled={busy}
-        >
-          {busy ? "Generating…" : secondaryLabel}
-        </button>
-      </div>
+      <button
+        type="button"
+        className="briefv2-action briefv2-action--ghost"
+        onClick={onViewEvidence}
+      >
+        View evidence
+      </button>
+      <button
+        type="button"
+        className="briefv2-action briefv2-action--ghost"
+        onClick={onAskAI}
+      >
+        Ask
+      </button>
+      <button
+        type="button"
+        className={`briefv2-action briefv2-action--primary briefv2-action--${accent}`}
+        onClick={onSecondary}
+        disabled={busy}
+      >
+        {cleanSecondary}
+      </button>
     </div>
   )
 }
