@@ -242,16 +242,16 @@ function CardActions({
       <button
         type="button"
         className="briefv2-action briefv2-action--ghost"
-        onClick={onViewEvidence}
+        onClick={onAskAI}
       >
-        View evidence
+        Ask
       </button>
       <button
         type="button"
         className="briefv2-action briefv2-action--ghost"
-        onClick={onAskAI}
+        onClick={onViewEvidence}
       >
-        Ask
+        View evidence
       </button>
       <button
         type="button"
