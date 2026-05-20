@@ -48,7 +48,6 @@ _RELOAD_ORDER = [
     "app.routes.ask",
     "app.routes.evidence",
     "app.routes.prd",
-    "app.routes.prd_v2",
     "app.main",
 ]
 
@@ -81,7 +80,6 @@ def tmp_data_dir(tmp_path: Path, repo_root: Path) -> Path:
     data_dir.mkdir()
     for name in (
         "sprntly_prd_template.md",
-        "sprntly_prd_v2_template.md",
         "sprntly_evidence_template.md",
     ):
         src = repo_root / "data" / name

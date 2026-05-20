@@ -1,22 +1,30 @@
 # [Surface] — [What we're shipping]
 
-Replace bracket text. Title under 12 words. Format: [Surface] — [What we're shipping].
+[Subtitle: one sentence stating who this is for and what changes, e.g. 'For US iPhone screen-repair claimants, move deductible disclosure to step 1 of the claim funnel.']
 
-Author: [Name] | Status: [Draft / In Review / Approved] | Target ship: [Date]
+:::context-chip
+[Surface]  ·  Author: [Name]  ·  Status: [Draft | In Review | Approved]  ·  Target ship: [Date]  ·  Linked evidence: [Evidence-Page-ID or "—"]
+:::
 
 ────────────────────────────────────────────────────────────
 
 ## TL;DR
 
-Sentence 1: the problem with the key number. Sentence 2: the proposed fix. Sentence 3: the projected impact — concrete numbers only. No adjectives. A senior reading only this should know whether to read the rest.
+Problem → Fix → Impact triptych. Numbers only; no adjectives. Anyone reading just this block should know whether to read the rest.
 
-[Sentence 1 — problem + key number.] [Sentence 2 — proposed fix.] [Sentence 3 — projected impact in concrete numbers.]
+:::tldr
+{
+  "problem": "[One sentence: the user pain + key number, e.g. '57% of screen-repair claimants abandon at the deductible step']",
+  "fix": "[One sentence: the proposed change, e.g. 'Move deductible disclosure to step 1; frame as part of upfront price']",
+  "impact": "[One sentence: projected concrete numbers, e.g. 'Funnel completion 43% → 58%, +$143M ARR']"
+}
+:::
 
 ────────────────────────────────────────────────────────────
 
 ## 1. Context
 
-[Paragraph 1 — the relevant product surface, customer segment, what is true today. 3–5 sentences max. Do not explain the problem yet — that is Section 2.]
+[Paragraph 1 — the relevant product surface, customer segment, what is true today. 3–5 sentences. Do not explain the problem yet — that is Section 2.]
 
 [Paragraph 2 — what changed recently or why this is timely. Optional. Cut if not strictly needed.]
 
@@ -24,92 +32,149 @@ Sentence 1: the problem with the key number. Sentence 2: the proposed fix. Sente
 
 ## 2. Problem
 
-### User problem
-
-[A [user persona] is trying to [goal]. They [step-by-step what happens]. They run into [friction] which causes [pain]. As a result, [behavioral consequence].]
-
-### Business impact
-
-| Dimension | Impact |
-| --- | --- |
-| Affected user volume | [# users / sessions / month] |
-| Cost per affected user | [$ / churn pp / NPS pts] |
-| Annualized business cost | [$X / yr] |
-| Trajectory | [Growing / stable / shrinking — one sentence why] |
+:::problem
+{
+  "user_story": "[A [user persona] is trying to [goal]. They [step-by-step what happens]. They run into [friction] which causes [pain]. As a result, [behavioral consequence]. 3–5 sentences.]",
+  "impact": [
+    { "label": "Affected users",    "value": "[# users / month]",       "tone": "negative" },
+    { "label": "Cost per user",     "value": "[$ / churn pp / NPS pts]","tone": "negative" },
+    { "label": "Annualized cost",   "value": "[$X / yr]",                "tone": "negative" },
+    { "label": "Trajectory",        "value": "[Growing +X% QoQ | Stable | Shrinking]", "tone": "neutral" }
+  ]
+}
+:::
 
 ────────────────────────────────────────────────────────────
 
 ## 3. Hypothesis
 
-If we [proposed change], then [primary metric will move from X to Y], because [the underlying mechanism from the problem above]. [Optional secondary benefit.]
+:::hypothesis
+{
+  "if_we": "[Specific change — e.g. 'Move the deductible disclosure to step 1 of the claim funnel']",
+  "then_metric": {
+    "name": "[e.g. Funnel completion rate]",
+    "current": "[43%]",
+    "target": "[58%]"
+  },
+  "because": "[The mechanism from the problem above — one sentence]",
+  "secondary": "[Optional second-order effect — e.g. 'Expect a 1–2pp dip in step-1 entry rate as low-intent users self-select out earlier']"
+}
+:::
 
 ────────────────────────────────────────────────────────────
 
 ## 4. Solution Requirements
 
-[One sentence at the highest level — what is being inserted into which flow, and whether user-facing UX changes.]
+Each row is a verifiable behavior, flag, config, or telemetry event. One row per requirement. Not how — only what.
 
-| Requirement | Category | Detail |
-| --- | --- | --- |
-| [Behavior 1] | Functional | [Core happy-path action — what the system does] |
-| [Behavior 2] | Functional | [Quantified target or threshold] |
-| [Behavior 3] | Functional | [Algorithmic detail or fallback] |
-| [Behavior 4] | Functional | [Edge case — skip / no-op condition] |
-| [Behavior 5] | Functional | [Error handling — replace silent failure with explicit state] |
-| [flag_name_enabled] | Feature flag | [boolean, default: false, safe range: on/off] |
-| [config_threshold] | Remote config | [numeric, default: X, range: A–B, updated by: team] |
-| [event_started] | Telemetry | [fields: user_id, device, os, context_field_1, context_field_2] |
-| [event_completed] | Telemetry | [fields: user_id, output_field, duration_ms, result_field] |
-| [event_failed] | Telemetry | [fields: user_id, device, os, error_code] |
+:::requirements
+[
+  { "behavior": "[Behavior 1 — core happy-path action]",            "category": "functional", "detail": "[What the system does]" },
+  { "behavior": "[Behavior 2 — quantified target or threshold]",    "category": "functional", "detail": "[Concrete number / bound]" },
+  { "behavior": "[Behavior 3 — algorithmic detail or fallback]",    "category": "functional", "detail": "[Decision rule / fallback]" },
+  { "behavior": "[Behavior 4 — edge case]",                          "category": "functional", "detail": "[Skip / no-op condition]" },
+  { "behavior": "[Behavior 5 — error handling]",                     "category": "functional", "detail": "[Explicit error state]" },
+  { "behavior": "[flag_name_enabled]",                               "category": "flag",        "detail": "boolean, default: false, safe range: on/off" },
+  { "behavior": "[config_threshold]",                                "category": "config",      "detail": "[numeric, default: X, range: A–B, updated by: team]" },
+  { "behavior": "[event_started]",                                    "category": "telemetry",   "detail": "[fields: user_id, device, os, context_field_1]" },
+  { "behavior": "[event_completed]",                                  "category": "telemetry",   "detail": "[fields: user_id, output_field, duration_ms, result_field]" },
+  { "behavior": "[event_failed]",                                     "category": "telemetry",   "detail": "[fields: user_id, device, os, error_code]" }
+]
+:::
 
 ────────────────────────────────────────────────────────────
 
 ## 5. Acceptance Criteria
 
-| # | Given / When / Then | Verified by |
-| --- | --- | --- |
-| AC1 | Happy path — Given [target user], when [action], then [primary behavior] | Integration test |
-| AC2 | Performance — Given any supported device, when [action] runs, then completes in <Xms at P95 | Perf test in CI |
-| AC3 | Error handling — Given a failure, when it occurs, then user sees explicit error + retry | QA simulated failure |
-| AC4 | Feature flag off — Given flag=false, when user reaches [surface], then legacy behavior renders | QA flag toggled |
-| AC5 | Edge case — [offline / low memory / very large input] behaves as specified | Scenario test |
+:::acceptance-criteria
+[
+  { "id": "AC1", "kind": "happy-path",
+    "given_when_then": "Given [target user], when [action], then [primary behavior]",
+    "verified_by": "Integration test" },
+  { "id": "AC2", "kind": "performance",
+    "given_when_then": "Given any supported device, when [action] runs, then completes in <Xms at P95",
+    "verified_by": "Perf test in CI" },
+  { "id": "AC3", "kind": "error-handling",
+    "given_when_then": "Given a failure, when it occurs, then user sees explicit error + retry",
+    "verified_by": "QA simulated failure" },
+  { "id": "AC4", "kind": "flag-off",
+    "given_when_then": "Given flag=false, when user reaches [surface], then legacy behavior renders",
+    "verified_by": "QA flag toggled" },
+  { "id": "AC5", "kind": "edge-case",
+    "given_when_then": "Given [offline / low memory / very large input], when [action], then [degraded but explicit behavior]",
+    "verified_by": "Scenario test" }
+]
+:::
 
 ────────────────────────────────────────────────────────────
 
 ## 6. Metrics
 
-| Category | Metric | Current | Target |
-| --- | --- | --- | --- |
-| Primary | [the one metric the hypothesis moves] | [X%] | [Y%] |
-| Secondary | [leading indicator 1] | [X%] | [Y%] |
-| Secondary | [leading indicator 2] | [X] | [Y] |
-| Guardrail | [must-not-degrade metric] | [baseline] | [within Xpp] |
-| Guardrail | [reliability or performance bound] | [baseline] | [≤ baseline] |
+:::metrics
+{
+  "primary": { "name": "[the one metric the hypothesis moves]", "current": "[X%]", "target": "[Y%]" },
+  "secondary": [
+    { "name": "[leading indicator 1]", "current": "[X%]", "target": "[Y%]" },
+    { "name": "[leading indicator 2]", "current": "[X]",  "target": "[Y]" }
+  ],
+  "guardrails": [
+    { "name": "[must-not-degrade metric]",            "baseline": "[X]",       "bound": "[within Xpp]" },
+    { "name": "[reliability or performance bound]",   "baseline": "[baseline]", "bound": "[≤ baseline]" }
+  ]
+}
+:::
 
 ────────────────────────────────────────────────────────────
 
-## 7. Definition of Done
+## 7. Risks & Open Questions
 
-Ready to merge when ALL of the following are true:
-
-- All acceptance criteria pass in CI
-- Implementation lives in [specific file / module]
-- Feature flags wired through remote-config service; readable at decision time
-- All telemetry events emit with schema specified in Section 4
-- P95 latency verified in CI performance test
-- Unit tests cover new logic paths including edge cases
-- Integration test against staging endpoint passes
-- PR description links to this PRD and the ticket number
+:::risks
+[
+  { "risk": "[Risk 1 — what could go wrong]", "severity": "high | medium | low", "mitigation": "[Specific instrumentation, rollback trigger, or scope cut]" },
+  { "risk": "[Risk 2]",                       "severity": "medium",              "mitigation": "[…]" },
+  { "risk": "[Open question — phrased as a decision to be made]", "severity": "low", "mitigation": "[Owner + decision deadline]" }
+]
+:::
 
 ────────────────────────────────────────────────────────────
 
-## 8. Test Plan
+## 8. Rollout & Test Plan
 
-| Phase | Detail |
-| --- | --- |
-| Pre-launch | [Internal dogfood — duration, audience, exit criterion]<br>[Closed beta — duration, sample size, exit criterion] |
-| Rollout | [A/B design — 50/50, sample size, MDE, duration]<br>[Schedule — 1% → 10% → 50% → 100% over N days]<br>[Kill criteria — automatic rollback triggers] |
-| Post-launch | [Monitoring — dashboard owner + review cadence]<br>[30-day retro — always include]<br>[90-day check — for metrics that lag] |
+:::milestones
+[
+  { "phase": "Pre-launch", "items": [
+      "[Internal dogfood — duration, audience, exit criterion]",
+      "[Closed beta — duration, sample size, exit criterion]"
+  ]},
+  { "phase": "Rollout", "items": [
+      "[A/B design — 50/50, sample size, MDE, duration]",
+      "[Schedule — 1% → 10% → 50% → 100% over N days]",
+      "[Kill criteria — automatic rollback triggers]"
+  ]},
+  { "phase": "Post-launch", "items": [
+      "[Monitoring — dashboard owner + review cadence]",
+      "[30-day retro — always include]",
+      "[90-day check — for metrics that lag]"
+  ]}
+]
+:::
+
+────────────────────────────────────────────────────────────
+
+## 9. Definition of Done
+
+:::dod
+[
+  "All acceptance criteria pass in CI",
+  "Implementation lives in [specific file / module]",
+  "Feature flags wired through remote-config service; readable at decision time",
+  "All telemetry events emit with schema specified in Section 4",
+  "P95 latency verified in CI performance test",
+  "Unit tests cover new logic paths including edge cases",
+  "Integration test against staging endpoint passes",
+  "PR description links to this PRD and the ticket number"
+]
+:::
 
 ────────────────────────────────────────────────────────────
 
@@ -119,7 +184,15 @@ Delete this section before sharing with stakeholders.
 
 | Rule | What it means |
 | --- | --- |
-| Fill every section | Write `N/A — <one sentence>` if a section truly doesn't apply. Never leave brackets unfilled. |
-| Numbers beat adjectives | 'Significantly' / 'substantially' / 'meaningful' are banned from TL;DR and Hypothesis. |
-| Solution table = behaviors | Each row is one verifiable behavior. Not how, only what. One row per requirement. |
-| 3–5 pages | Cut Context §1 if not needed. Never cut: TL;DR, business impact table, AC table, metrics table, DoD. |
+| Title = surface + change | Title under 12 words. Format: `[Surface] — [What we're shipping]`. |
+| Subtitle = who + change | One sentence stating the user segment and the change in plain language. Most important line for a senior reader. |
+| `:::tldr` is the 5-second read | Three sentences — problem, fix, impact. Numbers only. If you can't fill one of the three, the PRD isn't ready. |
+| `:::problem` couples narrative + numbers | User story prose carries the empathy; impact cards carry the scale. Both required. |
+| `:::hypothesis` is a moveable contract | `then_metric` must be specific enough to design an A/B from. If you can't pick a current and target, the PRD isn't ready. |
+| `:::requirements` rows are behaviors, not how | One verifiable behavior per row. Categories: `functional` (default), `flag`, `config`, `telemetry`. |
+| `:::acceptance-criteria` row = a passing test | Each AC is one Given/When/Then with a `verified_by` that names a real test type. |
+| `:::metrics` separates primary from guardrail | Primary moves; secondary indicate movement; guardrails must not degrade. |
+| `:::risks` requires mitigations | A risk without a mitigation is an unowned threat. Every row must have both. |
+| `:::milestones` are testable | Each item names a duration / audience / exit criterion. "TBD" means the rollout isn't planned yet. |
+| Semantic blocks (`:::name`) are first-class | The frontend renders each named block as a real component. Do not collapse a `:::tldr` into a paragraph or a `:::metrics` into a markdown table — the rendering depends on the block. |
+| Never invent numbers, users, or sources | Every figure traces to the linked evidence or corpus. Drop anything you can't ground. |

@@ -78,8 +78,8 @@ export function DetailScreen() {
         showToast("PRD generation failed", result.message.slice(0, 200))
         return
       }
-      // Persist the source pointer so PrdScreen can refetch a v2 doc
-      // against the same brief insight when the user toggles formats.
+      // Persist the source pointer so PrdScreen can refetch / regenerate
+      // against the same brief insight.
       setContent({ prd: result.prd, prdMeta: d.meta })
       goTo("prd")
     } catch (e) {

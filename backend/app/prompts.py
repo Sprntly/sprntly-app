@@ -40,24 +40,19 @@ EVIDENCE_TEMPLATE_VERSION = 2
 # pattern as EVIDENCE_TEMPLATE_VERSION — cached PRDs with a stale version
 # are demoted to status='invalidated' on startup, regenerated on next click.
 #
-#  1 — original PRD prompt + template
-#  2 — Removed the Evidence section (§3) from the PRD output; renumbered
-#      §4–9 → §3–8. Evidence lives in its own Sprntly Evidence Page now.
-PRD_TEMPLATE_VERSION = 2
-
-
-# Sample-build v2 PRD format. Runs side-by-side with v1 via the
-# /v1/prd/v2/generate endpoint; rows are stored in the same `prds` table
-# with variant='v2'. Versioned independently from v1 so we can iterate on v2
-# without invalidating v1 docs (and vice versa).
+# (Renamed from PRD_V2_TEMPLATE_VERSION when v2 was promoted to be the
+# only PRD format. New rows are stored with variant='v2'; the version
+# counter restarts from this rename — 1 was the original v2 launch, 2 is
+# the canonical-promotion bump that invalidates cached v2 docs so they
+# re-render under the unified renderer.)
 #
 #  1 — first cut: typed semantic block syntax (:::tldr, :::context-chip,
 #      :::problem, :::hypothesis, :::requirements, :::acceptance-criteria,
-#      :::metrics, :::risks, :::milestones, :::dod). Each block renders as a
-#      first-class frontend component (cards, tables, chip rows), so the
-#      LLM must emit the named block — not a markdown table or bullet list —
-#      everywhere the template specifies one.
-PRD_V2_TEMPLATE_VERSION = 1
+#      :::metrics, :::risks, :::milestones, :::dod). Each block renders as
+#      a first-class frontend component.
+#  2 — Promoted to canonical: same content shape, version bump forces a
+#      regen of any cached doc so it lands on the post-promotion code path.
+PRD_TEMPLATE_VERSION = 2
 
 
 # Bumped whenever the predefined Ask prompts list changes or the underlying
@@ -309,105 +304,14 @@ Question:
 
 
 PRD_SYSTEM = """\
-You are Sprntly's PRD generator. You output PRDs in the exact format \
-described by the supplied template — sections numbered 1–8, with a TL;DR \
-before Section 1.
+You are Sprntly's PRD generator. You output a Product Requirements \
+Document in the exact format described by the supplied template. The PRD \
+is the shipping spec: a senior reader scans it in five seconds (title + \
+`:::tldr`), reads it in two minutes (problem, hypothesis, requirements, \
+AC, metrics), and an engineer can build from it without follow-up.
 
-Internally you ALWAYS reason through the full evidence first: the supplied \
-brief insight, the convergence sources, the chart_hints, the impact_math, \
-and the corpus the insight was derived from. Every numeric claim, every \
-mechanism in the Hypothesis, every metric in §6, and every Acceptance \
-Criterion threshold MUST be grounded in that evidence — falsifiable by a \
-reader who can pull the same data. You never invent numbers.
-
-But the PRD output does NOT include a rendered Evidence section. The \
-Evidence is shipped as its own Sprntly Evidence Page (data cuts, chart \
-briefs, Rules in / out, qualitative signals, customer quotes — all live \
-there). Do not duplicate any of that into the PRD output. The PRD is the \
-shipping spec; the Evidence is the supporting analysis. Treat them as two \
-documents with one shared truth.
-
-The output is markdown — section headings as in the template, each filled \
-in concretely. Numbers beat adjectives: words like 'significantly', \
-'substantially', 'meaningful', and 'considerable' are banned from TL;DR \
-and the Hypothesis."""
-
-
-PRD_USER_TEMPLATE = """\
-Generate a PRD for the following insight. Use the template format below — \
-preserve the title format, the section numbers (TL;DR, then 1–8), headings, \
-subsection structure, and every markdown table exactly as shown. Fill each \
-section with concrete content derived from the insight and corpus. Do NOT \
-keep the placeholder examples like "[Component name]" or "[X%]" — replace \
-each with real content. If a section truly cannot be filled from the \
-available data, write "N/A — <one-sentence reason>" rather than dropping the \
-heading. Markdown output only, no JSON, no commentary outside the PRD.
-
-Hard structural rules:
-
-- **TL;DR** is exactly THREE sentences in this order: (1) the problem with the \
-key number; (2) the proposed fix; (3) the projected impact in concrete \
-numbers. No adjectives. A senior reader who only reads TL;DR should know \
-whether to read the rest.
-- **NO rendered evidence in the PRD output.** You still reason through the \
-full evidence internally (cuts, charts, signals, quotes) to ground every \
-claim — but do NOT emit a "Section 3 Evidence" or any cuts, chart briefs, \
-infographics, qualitative-signal bullets, or verbatim user quotes in the \
-markdown. The Evidence lives in its own Sprntly Evidence Page. Section 3 \
-in the PRD is `Hypothesis`.
-- **Section 4 (Solution Requirements)** is a SINGLE markdown table with \
-columns `Requirement | Category | Detail`. Category values are exactly: \
-`Functional`, `Feature flag`, `Remote config`, `Telemetry`. One verifiable \
-behavior per row (the *what*, not the *how*).
-- **Section 6 (Metrics)** uses the table's `Category` column with exactly \
-these values: `Primary` (one row only — the metric the hypothesis moves), \
-`Secondary` (1–3 leading indicators), `Guardrail` (1–3 must-not-degrade \
-metrics). Always specify Current and Target.
-- **Section 8 (Test Plan)** is a markdown table with columns `Phase | Detail`. \
-Phase values are exactly `Pre-launch`, `Rollout`, `Post-launch`. Use `<br>` \
-to separate multiple bullets within a Detail cell.
-
-For markdown tables (Business impact in §2, Solution Requirements in §4, \
-AC in §5, Metrics in §6, Test Plan in §8), ALWAYS include the separator row \
-right under the header: `| --- | --- | ... |`. Without it, downstream \
-renderers treat the table as plain text.
-
-Bold key terms with **double asterisks**.
-
-Do NOT include the "How to use this template" footer in the generated PRD — \
-it is instructions for you, not part of the output. End the PRD at the last \
-"─────" divider after Section 8.
-
-INSIGHT TO TURN INTO A PRD:
-
-```json
-{insight_json}
-```
-
-CORPUS (for additional grounding when needed):
-
-{corpus}
-
-PRD TEMPLATE TO FOLLOW:
-
-{template}
-"""
-
-
-# ---------------------------------------------------------------------------
-# PRD v2 — sample-build prompt
-# ---------------------------------------------------------------------------
-
-PRD_V2_SYSTEM = """\
-You are Sprntly's PRD generator (v2 format). You output a Product \
-Requirements Document in the exact format described by the supplied \
-template. The v2 PRD is the shipping spec: a senior reader scans it in \
-five seconds (title + `:::tldr`), reads it in two minutes (problem, \
-hypothesis, requirements, AC, metrics), and an engineer can build from it \
-without follow-up.
-
-The v2 format relies on typed semantic blocks (`:::tldr`, \
-`:::context-chip`, `:::problem`, `:::hypothesis`, `:::requirements`, \
+The format relies on typed semantic blocks (`:::tldr`, `:::context-chip`, \
+`:::problem`, `:::hypothesis`, `:::requirements`, \
 `:::acceptance-criteria`, `:::metrics`, `:::risks`, `:::milestones`, \
 `:::dod`) that the frontend renders as first-class components — impact \
 cards, chip rows, structured requirement tables, AC grids, metrics panels, \
@@ -436,17 +340,16 @@ each section filled in concretely. Numbers beat adjectives: words like \
 banned from `:::tldr` and `:::hypothesis`."""
 
 
-PRD_V2_USER_TEMPLATE = """\
-Generate a PRD (v2 format) for the following brief insight. Use the \
-template format below — preserve the title format, the subtitle, the \
-`:::context-chip`, every section heading (TL;DR, then 1–9), and every \
-typed `:::` block exactly as shown. Fill each placeholder with concrete \
-content derived from the insight and corpus. Do NOT keep placeholder \
-examples like "[Surface]" or "[X%]" — replace each with real content. If \
-a section truly cannot be filled from the available data, write "N/A — \
-<one-sentence reason>" rather than dropping the heading. Markdown output \
-only, no JSON outside the documented semantic blocks, no commentary \
-outside the PRD.
+PRD_USER_TEMPLATE = """\
+Generate a PRD for the following brief insight. Use the template format \
+below — preserve the title format, the subtitle, the `:::context-chip`, \
+every section heading (TL;DR, then 1–9), and every typed `:::` block \
+exactly as shown. Fill each placeholder with concrete content derived from \
+the insight and corpus. Do NOT keep placeholder examples like "[Surface]" \
+or "[X%]" — replace each with real content. If a section truly cannot be \
+filled from the available data, write "N/A — <one-sentence reason>" \
+rather than dropping the heading. Markdown output only, no JSON outside \
+the documented semantic blocks, no commentary outside the PRD.
 
 Hard structural rules:
 

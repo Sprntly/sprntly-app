@@ -1,4 +1,9 @@
-"""Tests for app.prd_runner._run_sync — same shape as evidence_runner tests."""
+"""Tests for app.prd_runner._run_sync — same shape as evidence_runner tests.
+
+New rows are written with variant='v2' by the route; the runner itself
+doesn't touch variant — it just produces markdown and calls
+`complete_prd` against the existing row.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -16,21 +21,29 @@ def _seed_corpus(data_dir, dataset="asurion", body="corpus body"):
 
 def _seed_brief(db_mod, dataset="asurion", insights=None):
     if insights is None:
-        insights = [{"title": "Insight A"}]
-    payload = {"summary_headline": "stub", "insights": insights, "_schema_version": 1}
+        insights = [{"title": "Insight A", "subtitle": "behaviour"}]
+    payload = {
+        "summary_headline": "stub",
+        "insights": insights,
+        "_schema_version": 1,
+    }
     return db_mod.save_brief(
         dataset=dataset, week_label="Week of stub", payload=payload, schema_version=1
     )
 
 
 def test_run_sync_happy_path_completes_prd(
-    isolated_settings, monkeypatch
+    isolated_settings, fake_llm, monkeypatch
 ):
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
     prd_id = db_mod.start_prd(
-        brief_id=brief_id, insight_index=0, title="t", template_version=1
+        brief_id=brief_id,
+        insight_index=0,
+        title="t",
+        template_version=1,
+        variant="v2",
     )
     monkeypatch.setattr(prd_runner, "call_md", lambda **kw: "# PRD body")
 
@@ -40,14 +53,49 @@ def test_run_sync_happy_path_completes_prd(
     assert row["status"] == "ready"
     assert row["payload_md"] == "# PRD body"
     assert row["title"] == "Insight A"
+    assert row["variant"] == "v2"
 
 
-def test_run_sync_uses_fallback_title(isolated_settings, monkeypatch):
+def test_run_sync_passes_canonical_prompt_and_template(
+    isolated_settings, fake_llm, monkeypatch
+):
+    """The canonical runner must use the semantic-block prompt + template
+    that was promoted from v2 — `:::tldr` is in the template and
+    'semantic blocks' is in the system prompt."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = db_mod.start_prd(
+        brief_id=brief_id,
+        insight_index=0,
+        title="t",
+        template_version=1,
+        variant="v2",
+    )
+
+    captured: dict = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return "# md"
+
+    monkeypatch.setattr(prd_runner, "call_md", _capture)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    assert "semantic blocks" in captured["system"]
+    assert ":::tldr" in captured["user"]
+
+
+def test_run_sync_uses_fallback_title(isolated_settings, fake_llm, monkeypatch):
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod, insights=[{}])
     prd_id = db_mod.start_prd(
-        brief_id=brief_id, insight_index=0, title="placeholder", template_version=1
+        brief_id=brief_id,
+        insight_index=0,
+        title="placeholder",
+        template_version=1,
+        variant="v2",
     )
     monkeypatch.setattr(prd_runner, "call_md", lambda **kw: "# md")
 
@@ -73,7 +121,11 @@ def test_generate_prd_records_failure_in_db(isolated_settings, monkeypatch):
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
     prd_id = db_mod.start_prd(
-        brief_id=brief_id, insight_index=0, title="t", template_version=1
+        brief_id=brief_id,
+        insight_index=0,
+        title="t",
+        template_version=1,
+        variant="v2",
     )
 
     def _boom(**_kw):

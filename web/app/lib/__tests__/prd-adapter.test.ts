@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest"
-import { markdownToPrdV2State } from "../prd-v2-adapter"
+import { markdownToPrdState } from "../prd-adapter"
 
-describe("markdownToPrdV2State", () => {
+describe("markdownToPrdState", () => {
   it("extracts the title from the first H1", () => {
-    const out = markdownToPrdV2State("# The PRD\n\nbody")
+    const out = markdownToPrdState("# The PRD\n\nbody")
     expect(out.title).toBe("The PRD")
   })
 
   it("falls back to a default title when no H1 is present", () => {
-    const out = markdownToPrdV2State("body only")
-    expect(out.title).toBe("PRD (v2)")
+    const out = markdownToPrdState("body only")
+    expect(out.title).toBe("PRD")
   })
 
   it("parses an H2 + paragraph + bullet list as PRD primitives", () => {
-    const out = markdownToPrdV2State(
+    const out = markdownToPrdState(
       ["# T", "", "## Section", "", "Paragraph.", "", "- one", "- two"].join("\n"),
     )
     const types = out.sections.map((s) => s.type)
@@ -29,7 +29,7 @@ describe("markdownToPrdV2State", () => {
       "Claims · Author: A. Jain · Status: Draft",
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
     expect(c.type).toBe("v2-context-chip")
     if (c.type === "v2-context-chip") {
@@ -37,7 +37,7 @@ describe("markdownToPrdV2State", () => {
     }
   })
 
-  it("parses :::tldr into v2-prd-tldr with problem/fix/impact", () => {
+  it("parses :::tldr into prd-tldr with problem/fix/impact", () => {
     const md = [
       ":::tldr",
       JSON.stringify({
@@ -47,9 +47,9 @@ describe("markdownToPrdV2State", () => {
       }),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-tldr") throw new Error("expected v2-prd-tldr")
+    if (c.type !== "prd-tldr") throw new Error("expected prd-tldr")
     expect(c.problem).toContain("57%")
     expect(c.fix).toContain("step 1")
     expect(c.impact).toContain("$143M")
@@ -68,9 +68,9 @@ describe("markdownToPrdV2State", () => {
       }),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-problem") throw new Error("expected v2-prd-problem")
+    if (c.type !== "prd-problem") throw new Error("expected prd-problem")
     expect(c.userStory).toContain("claimant")
     expect(c.impact).toHaveLength(3)
     expect(c.impact[0].tone).toBe("negative")
@@ -95,10 +95,10 @@ describe("markdownToPrdV2State", () => {
       }),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-hypothesis")
-      throw new Error("expected v2-prd-hypothesis")
+    if (c.type !== "prd-hypothesis")
+      throw new Error("expected prd-hypothesis")
     expect(c.ifWe).toBe("Move disclosure")
     expect(c.thenMetric.target).toBe("58%")
     expect(c.because).toContain("Surprise")
@@ -116,10 +116,10 @@ describe("markdownToPrdV2State", () => {
       ]),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-requirements")
-      throw new Error("expected v2-prd-requirements")
+    if (c.type !== "prd-requirements")
+      throw new Error("expected prd-requirements")
     expect(c.rows).toHaveLength(3)
     expect(c.rows[0].category).toBe("functional")
     expect(c.rows[1].category).toBe("flag")
@@ -145,10 +145,10 @@ describe("markdownToPrdV2State", () => {
       ]),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-acceptance-criteria")
-      throw new Error("expected v2-prd-acceptance-criteria")
+    if (c.type !== "prd-acceptance-criteria")
+      throw new Error("expected prd-acceptance-criteria")
     expect(c.rows).toHaveLength(2)
     expect(c.rows[0].givenWhenThen).toContain("Given X")
     expect(c.rows[0].verifiedBy).toBe("Integration test")
@@ -169,10 +169,10 @@ describe("markdownToPrdV2State", () => {
       }),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-metrics")
-      throw new Error("expected v2-prd-metrics")
+    if (c.type !== "prd-metrics")
+      throw new Error("expected prd-metrics")
     expect(c.primary.name).toBe("Funnel completion")
     expect(c.primary.target).toBe("58%")
     expect(c.secondary).toHaveLength(1)
@@ -188,9 +188,9 @@ describe("markdownToPrdV2State", () => {
       ]),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-risks") throw new Error("expected v2-prd-risks")
+    if (c.type !== "prd-risks") throw new Error("expected prd-risks")
     expect(c.rows[0].severity).toBe("medium")
     // Unknown severities are preserved (lowercased) — renderer falls back
     // to the neutral chip styling.
@@ -210,10 +210,10 @@ describe("markdownToPrdV2State", () => {
       ]),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-milestones")
-      throw new Error("expected v2-prd-milestones")
+    if (c.type !== "prd-milestones")
+      throw new Error("expected prd-milestones")
     expect(c.phases).toHaveLength(2)
     expect(c.phases[0].phase).toBe("Pre-launch")
     expect(c.phases[0].items).toHaveLength(2)
@@ -230,16 +230,16 @@ describe("markdownToPrdV2State", () => {
       ]),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-dod") throw new Error("expected v2-prd-dod")
+    if (c.type !== "prd-dod") throw new Error("expected prd-dod")
     expect(c.items).toHaveLength(3)
     expect(c.items[0]).toContain("AC pass")
   })
 
   it("falls back to a paragraph for a malformed JSON-bodied block", () => {
     const md = [":::tldr", "{this is not json", ":::"].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
     expect(c.type).toBe("p")
     if (c.type === "p") {
@@ -269,9 +269,9 @@ describe("markdownToPrdV2State", () => {
       JSON.stringify({ problem: "p", fix: "f", impact: "i" }),
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const types = out.sections.map((s) => s.type)
-    expect(types).toEqual(["h2", "chart", "v2-prd-tldr"])
+    expect(types).toEqual(["h2", "chart", "prd-tldr"])
   })
 
   it("salvages JSON when the requirements body has surrounding noise", () => {
@@ -284,10 +284,10 @@ describe("markdownToPrdV2State", () => {
       "noise after",
       ":::",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
-    if (c.type !== "v2-prd-requirements")
-      throw new Error("expected v2-prd-requirements")
+    if (c.type !== "prd-requirements")
+      throw new Error("expected prd-requirements")
     expect(c.rows[0].behavior).toBe("X")
   })
 
@@ -301,14 +301,14 @@ describe("markdownToPrdV2State", () => {
       "",
       "body",
     ].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const types = out.sections.map((s) => s.type)
     expect(types).toEqual(["h2", "p"])
   })
 
   it("treats unknown :::name blocks as paragraph fallback", () => {
     const md = [":::mystery", "some body", ":::"].join("\n")
-    const out = markdownToPrdV2State(md)
+    const out = markdownToPrdState(md)
     const c = out.sections[0]
     expect(c.type).toBe("p")
     if (c.type === "p") {

@@ -221,7 +221,12 @@ def start_prd(
     template_version: int | None = None,
     variant: str = "v1",
 ) -> int:
-    """Insert an empty PRD row in 'generating' state. Returns the new id."""
+    """Insert an empty PRD row in 'generating' state. Returns the new id.
+
+    `variant` is kept as a kwarg (default 'v1' for backward-compat with
+    the DB column) for cross-format isolation if we ever add a future
+    format. Current callers pass 'v2'.
+    """
     with conn() as c:
         cur = c.execute(
             "INSERT INTO prds (brief_id, insight_index, title, payload_md, status, template_version, variant) "
@@ -236,10 +241,10 @@ def invalidate_stale_prds(current_version: int, variant: str = "v1") -> int:
     `template_version` differs from `current_version` as 'invalidated'.
     Returns the number of rows.
 
-    Variant-scoped so a v1 template bump doesn't invalidate v2 rows and
-    vice versa. `find_existing_prd` only returns ready/generating rows, so
-    invalidated PRDs are skipped — the next click regenerates them under
-    the current prompt.
+    Variant-scoped so a bump on one PRD format doesn't invalidate rows
+    of another. `find_existing_prd` only returns ready/generating rows,
+    so invalidated PRDs are skipped — the next click regenerates them
+    under the current prompt.
     """
     with conn() as c:
         cur = c.execute(
@@ -299,7 +304,7 @@ def find_existing_prd(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:
     """Return the most recent ready/generating PRD (of the given variant) for
-    a (brief, insight). Variant-scoped so v1 and v2 generation paths don't
+    a (brief, insight). Variant-scoped so distinct PRD formats don't
     dedupe against each other.
     """
     with conn() as c:

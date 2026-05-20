@@ -326,59 +326,57 @@ export interface EvidenceV2SourceChip {
   label: string
 }
 
-/** PRD v2 semantic-block section variants — additive on PrdSection. The v1
- *  renderer (`PrdSections`) ignores unknown types; the v2 renderer
- *  (`PrdV2Sections`) dispatches each `v2-prd-*` variant to a dedicated
- *  subcomponent. Prefix `v2-prd-` keeps the namespace clear from
- *  evidence v2's `v2-*` variants, with `v2-context-chip` deliberately
- *  shared across both formats so a single renderer handles it. */
-export interface PrdV2ProblemImpactCell {
+/** PRD semantic-block section variants — additive on PrdSection. The
+ *  renderer (`PrdSections`) dispatches each `prd-*` variant to a
+ *  dedicated subcomponent. `v2-context-chip` is deliberately shared with
+ *  the evidence renderer so a single component handles both formats. */
+export interface PrdProblemImpactCell {
   label: string
   value: string
   tone?: EvidenceV2Tone
 }
 
-export interface PrdV2MetricPoint {
+export interface PrdMetricPoint {
   name: string
   current: string
   target: string
 }
 
-export interface PrdV2Guardrail {
+export interface PrdGuardrail {
   name: string
   baseline: string
   bound: string
 }
 
-export type PrdV2RequirementCategory =
+export type PrdRequirementCategory =
   | "functional"
   | "flag"
   | "config"
   | "telemetry"
   | string
 
-export interface PrdV2RequirementRow {
+export interface PrdRequirementRow {
   behavior: string
-  category: PrdV2RequirementCategory
+  category: PrdRequirementCategory
   detail: string
 }
 
-export interface PrdV2AcceptanceCriterionRow {
+export interface PrdAcceptanceCriterionRow {
   id: string
   kind: string
   givenWhenThen: string
   verifiedBy: string
 }
 
-export type PrdV2RiskSeverity = "high" | "medium" | "low" | string
+export type PrdRiskSeverity = "high" | "medium" | "low" | string
 
-export interface PrdV2RiskRow {
+export interface PrdRiskRow {
   risk: string
-  severity: PrdV2RiskSeverity
+  severity: PrdRiskSeverity
   mitigation: string
 }
 
-export interface PrdV2MilestonePhase {
+export interface PrdMilestonePhase {
   phase: string
   items: string[]
 }
@@ -395,7 +393,7 @@ export type PrdSection =
       subtitle?: string
       data: PrdChartDatum[]
     }
-  // ---- Evidence v2 variants ----
+  // ---- Evidence variants ----
   | { type: "v2-hero"; cards: EvidenceV2HeroCard[] }
   | { type: "v2-context-chip"; text: string }
   | { type: "v2-cuts-index"; rows: EvidenceV2CutsIndexRow[] }
@@ -403,34 +401,34 @@ export type PrdSection =
   | { type: "v2-rules-callout"; supports: string; rulesOut: string }
   | { type: "v2-quote"; body: string; channel: string; context?: string }
   | { type: "v2-forecast-omitted"; reason: string }
-  // ---- PRD v2 variants ----
-  | { type: "v2-prd-tldr"; problem: string; fix: string; impact: string }
+  // ---- PRD variants ----
+  | { type: "prd-tldr"; problem: string; fix: string; impact: string }
   | {
-      type: "v2-prd-problem"
+      type: "prd-problem"
       userStory: string
-      impact: PrdV2ProblemImpactCell[]
+      impact: PrdProblemImpactCell[]
     }
   | {
-      type: "v2-prd-hypothesis"
+      type: "prd-hypothesis"
       ifWe: string
-      thenMetric: PrdV2MetricPoint
+      thenMetric: PrdMetricPoint
       because: string
       secondary?: string
     }
-  | { type: "v2-prd-requirements"; rows: PrdV2RequirementRow[] }
+  | { type: "prd-requirements"; rows: PrdRequirementRow[] }
   | {
-      type: "v2-prd-acceptance-criteria"
-      rows: PrdV2AcceptanceCriterionRow[]
+      type: "prd-acceptance-criteria"
+      rows: PrdAcceptanceCriterionRow[]
     }
   | {
-      type: "v2-prd-metrics"
-      primary: PrdV2MetricPoint
-      secondary: PrdV2MetricPoint[]
-      guardrails: PrdV2Guardrail[]
+      type: "prd-metrics"
+      primary: PrdMetricPoint
+      secondary: PrdMetricPoint[]
+      guardrails: PrdGuardrail[]
     }
-  | { type: "v2-prd-risks"; rows: PrdV2RiskRow[] }
-  | { type: "v2-prd-milestones"; phases: PrdV2MilestonePhase[] }
-  | { type: "v2-prd-dod"; items: string[] }
+  | { type: "prd-risks"; rows: PrdRiskRow[] }
+  | { type: "prd-milestones"; phases: PrdMilestonePhase[] }
+  | { type: "prd-dod"; items: string[] }
 
 export interface PrdState {
   metaLine: string
@@ -455,9 +453,9 @@ export interface AppContentState {
   /** Pre-built drill-down state per finding, indexed by `BriefFindingRow.detailKey`. */
   briefDetails: Record<string, DetailState>
   prd: PrdState | null
-  /** Pointer to the brief insight that produced `prd`, so PrdScreen can
-   *  refetch a v2 doc against the same source when the user toggles the
-   *  format. Populated by DetailScreen.handleGeneratePrd alongside `prd`. */
+  /** Pointer to the brief insight that produced `prd`, kept around so
+   *  PrdScreen can refetch / regenerate against the same source.
+   *  Populated by DetailScreen.handleGeneratePrd alongside `prd`. */
   prdMeta: { briefId: number; insightIndex: number } | null
   /** Generated Evidence Page doc — same PrdState shape (markdown sections
    *  with tables and `chart` blocks) so it can reuse the markdown adapter. */

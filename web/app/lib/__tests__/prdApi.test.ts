@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { API_URL, prdV2Api } from "../api"
+import { API_URL, prdApi } from "../api"
 
 type MockResponse = {
   ok: boolean
@@ -15,7 +15,7 @@ function jsonResponse(status: number, body: unknown): MockResponse {
   }
 }
 
-describe("prdV2Api", () => {
+describe("prdApi", () => {
   let fetchMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
@@ -28,7 +28,7 @@ describe("prdV2Api", () => {
   })
 
   describe("generate", () => {
-    it("POSTs /v1/prd/v2/generate with brief_id + insight_index (force defaults false)", async () => {
+    it("POSTs /v1/prd/generate with brief_id + insight_index (force defaults false)", async () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse(202, {
           prd_id: 42,
@@ -37,12 +37,12 @@ describe("prdV2Api", () => {
           variant: "v2",
         }),
       )
-      const r = await prdV2Api.generate(7, 2)
+      const r = await prdApi.generate(7, 2)
       expect(r.prd_id).toBe(42)
       expect(r.variant).toBe("v2")
       expect(fetchMock).toHaveBeenCalledTimes(1)
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-      expect(url).toBe(`${API_URL}/v1/prd/v2/generate`)
+      expect(url).toBe(`${API_URL}/v1/prd/generate`)
       expect(init.method).toBe("POST")
       expect(init.credentials).toBe("include")
       const body = JSON.parse(init.body as string)
@@ -58,7 +58,7 @@ describe("prdV2Api", () => {
           variant: "v2",
         }),
       )
-      await prdV2Api.generate(1, 0, true)
+      await prdApi.generate(1, 0, true)
       const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
       const body = JSON.parse(init.body as string)
       expect(body.force).toBe(true)
@@ -68,14 +68,14 @@ describe("prdV2Api", () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse(404, { detail: "brief not found" }),
       )
-      await expect(prdV2Api.generate(999, 0)).rejects.toMatchObject({
+      await expect(prdApi.generate(999, 0)).rejects.toMatchObject({
         status: 404,
       })
     })
   })
 
   describe("get", () => {
-    it("GETs /v1/prd/v2/{id} with credentials included", async () => {
+    it("GETs /v1/prd/{id} with credentials included", async () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse(200, {
           id: 5,
@@ -88,20 +88,30 @@ describe("prdV2Api", () => {
           variant: "v2",
         }),
       )
-      const r = await prdV2Api.get(5)
+      const r = await prdApi.get(5)
       expect(r.id).toBe(5)
       expect(r.variant).toBe("v2")
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-      expect(url).toBe(`${API_URL}/v1/prd/v2/5`)
+      expect(url).toBe(`${API_URL}/v1/prd/5`)
       expect(init.method).toBe("GET")
       expect(init.credentials).toBe("include")
     })
 
-    it("propagates 409 when the id resolves to a v1 row (per contract)", async () => {
+    it("returns a historical v1 row without erroring (GET is permissive)", async () => {
       fetchMock.mockResolvedValueOnce(
-        jsonResponse(409, { detail: "id resolves to v1 row" }),
+        jsonResponse(200, {
+          id: 7,
+          brief_id: 1,
+          insight_index: 0,
+          generated_at: "2026-01-01T00:00:00Z",
+          title: "legacy",
+          payload_md: "# legacy",
+          status: "ready",
+          variant: "v1",
+        }),
       )
-      await expect(prdV2Api.get(99)).rejects.toMatchObject({ status: 409 })
+      const r = await prdApi.get(7)
+      expect(r.variant).toBe("v1")
     })
   })
 })

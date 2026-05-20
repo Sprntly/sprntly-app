@@ -1,31 +1,35 @@
 /**
- * Renderer for the v2 PRD format. Dispatches every variant in PrdSection,
- * including the v2-prd-* semantic blocks (tldr triptych, problem +
+ * Renderer for the PRD format. Dispatches every variant in PrdSection,
+ * including the prd-* semantic blocks (tldr triptych, problem +
  * impact-cells, hypothesis card, requirements table, acceptance-criteria
  * list, metrics hero, risks list, milestone phases, definition-of-done
  * checklist). Also handles the shared `v2-context-chip` (same component
- * shape as evidence v2) plus the standard h2/p/ul/table/chart primitives.
+ * shape as evidence) plus the standard h2/p/ul/table/chart primitives.
  *
  * Each block type is a small subcomponent below for legibility and so
  * styles colocate with markup. Mirrors EvidenceSections.tsx structure.
+ *
+ * CSS class names retain the historical `prdv2-` prefix (the rename to
+ * canonical only touched names visible to TS code; CSS rules in
+ * globals.css are untouched to keep this change reviewable).
  */
 "use client"
 
 import type {
+  PrdAcceptanceCriterionRow,
+  PrdGuardrail,
+  PrdMetricPoint,
+  PrdMilestonePhase,
+  PrdProblemImpactCell,
+  PrdRequirementRow,
+  PrdRiskRow,
   PrdSection,
   PrdState,
-  PrdV2AcceptanceCriterionRow,
-  PrdV2Guardrail,
-  PrdV2MetricPoint,
-  PrdV2MilestonePhase,
-  PrdV2ProblemImpactCell,
-  PrdV2RequirementRow,
-  PrdV2RiskRow,
 } from "../../types/content"
 import { renderInline } from "../../lib/inline-md"
 import { InlineChart } from "./InlineChart"
 
-export function PrdV2Sections({
+export function PrdSections({
   sections,
 }: {
   sections: PrdState["sections"]
@@ -85,10 +89,10 @@ function RenderBlock({ block }: { block: PrdSection }) {
       )
     case "v2-context-chip":
       // Shared with evidence — same look. Inline the tiny component to
-      // keep PrdV2Sections self-contained (no cross-import from
+      // keep PrdSections self-contained (no cross-import from
       // EvidenceSections).
       return <div className="evv2-context-chip">{renderInline(block.text)}</div>
-    case "v2-prd-tldr":
+    case "prd-tldr":
       return (
         <TldrTriptych
           problem={block.problem}
@@ -96,9 +100,9 @@ function RenderBlock({ block }: { block: PrdSection }) {
           impact={block.impact}
         />
       )
-    case "v2-prd-problem":
+    case "prd-problem":
       return <ProblemBlock userStory={block.userStory} impact={block.impact} />
-    case "v2-prd-hypothesis":
+    case "prd-hypothesis":
       return (
         <HypothesisCard
           ifWe={block.ifWe}
@@ -107,11 +111,11 @@ function RenderBlock({ block }: { block: PrdSection }) {
           secondary={block.secondary}
         />
       )
-    case "v2-prd-requirements":
+    case "prd-requirements":
       return <RequirementsList rows={block.rows} />
-    case "v2-prd-acceptance-criteria":
+    case "prd-acceptance-criteria":
       return <AcceptanceCriteriaList rows={block.rows} />
-    case "v2-prd-metrics":
+    case "prd-metrics":
       return (
         <MetricsBlock
           primary={block.primary}
@@ -119,11 +123,11 @@ function RenderBlock({ block }: { block: PrdSection }) {
           guardrails={block.guardrails}
         />
       )
-    case "v2-prd-risks":
+    case "prd-risks":
       return <RisksList rows={block.rows} />
-    case "v2-prd-milestones":
+    case "prd-milestones":
       return <MilestonesBlock phases={block.phases} />
-    case "v2-prd-dod":
+    case "prd-dod":
       return <DodChecklist items={block.items} />
     default:
       // Evidence variants and any unknown future blocks render as no-op
@@ -172,7 +176,7 @@ function ProblemBlock({
   impact,
 }: {
   userStory: string
-  impact: PrdV2ProblemImpactCell[]
+  impact: PrdProblemImpactCell[]
 }) {
   return (
     <div className="prdv2-problem">
@@ -203,7 +207,7 @@ function HypothesisCard({
   secondary,
 }: {
   ifWe: string
-  thenMetric: PrdV2MetricPoint
+  thenMetric: PrdMetricPoint
   because: string
   secondary?: string
 }) {
@@ -247,7 +251,7 @@ function HypothesisCard({
   )
 }
 
-function RequirementsList({ rows }: { rows: PrdV2RequirementRow[] }) {
+function RequirementsList({ rows }: { rows: PrdRequirementRow[] }) {
   return (
     <div className="prdv2-reqs">
       {rows.map((r, i) => (
@@ -270,7 +274,7 @@ function RequirementsList({ rows }: { rows: PrdV2RequirementRow[] }) {
 function AcceptanceCriteriaList({
   rows,
 }: {
-  rows: PrdV2AcceptanceCriterionRow[]
+  rows: PrdAcceptanceCriterionRow[]
 }) {
   return (
     <div className="prdv2-ac">
@@ -298,9 +302,9 @@ function MetricsBlock({
   secondary,
   guardrails,
 }: {
-  primary: PrdV2MetricPoint
-  secondary: PrdV2MetricPoint[]
-  guardrails: PrdV2Guardrail[]
+  primary: PrdMetricPoint
+  secondary: PrdMetricPoint[]
+  guardrails: PrdGuardrail[]
 }) {
   return (
     <div className="prdv2-metrics">
@@ -360,7 +364,7 @@ function MetricsBlock({
   )
 }
 
-function RisksList({ rows }: { rows: PrdV2RiskRow[] }) {
+function RisksList({ rows }: { rows: PrdRiskRow[] }) {
   return (
     <div className="prdv2-risks">
       {rows.map((r, i) => (
@@ -385,7 +389,7 @@ function RisksList({ rows }: { rows: PrdV2RiskRow[] }) {
   )
 }
 
-function MilestonesBlock({ phases }: { phases: PrdV2MilestonePhase[] }) {
+function MilestonesBlock({ phases }: { phases: PrdMilestonePhase[] }) {
   return (
     <div className="prdv2-milestones">
       {phases.map((p, i) => (
