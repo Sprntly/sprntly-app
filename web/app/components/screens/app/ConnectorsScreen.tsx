@@ -13,7 +13,7 @@ import {
   CONNECTOR_CATALOG,
   CONNECTOR_IDS_WITH_OAUTH,
 } from "../../../lib/connectorsCatalog"
-import { pathForScreen } from "../../../lib/routes"
+import { publicPath } from "../../../lib/public-path"
 import { AppLayout } from "./AppLayout"
 import { IconGrid } from "../../shared/app-icons"
 
@@ -103,8 +103,7 @@ export function ConnectorsScreen() {
       showToast("Connector connected", `Provider: ${connected}`)
     }
 
-    const clean = pathForScreen("connectors")
-    window.history.replaceState(null, "", clean)
+    window.history.replaceState(null, "", publicPath("/connectors"))
     void reload()
   }, [showToast, reload])
 

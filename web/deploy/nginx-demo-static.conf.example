@@ -1,0 +1,18 @@
+# Example nginx snippet for serving the Next static export under /demo on api.sprntly.ai.
+# Merge into your server { } block (paths may differ on your EC2 host).
+#
+# Static files: rsync target is /var/www/sprntly-demo/ (see deploy-frontend.yml).
+
+    location /demo/ {
+        alias /var/www/sprntly-demo/;
+        try_files $uri $uri/ $uri.html /demo/index.html;
+    }
+
+    # Optional: short URL for Google OAuth / legal (app is built with basePath /demo)
+    location = /privacy {
+        return 301 /demo/privacy;
+    }
+
+    location = /terms {
+        return 301 /demo/terms;
+    }

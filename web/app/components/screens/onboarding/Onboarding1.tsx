@@ -1,5 +1,6 @@
 "use client"
 
+import { publicPath } from "../../../lib/public-path"
 import { useNavigation } from "../../../context/NavigationContext"
 import { OnboardingLayout } from "./OnboardingLayout"
 
@@ -73,11 +74,11 @@ export function Onboarding1() {
         }}
       >
         By continuing you agree to our{" "}
-        <a href="/terms" style={{ color: "var(--ink-3)" }}>
+        <a href={publicPath("/terms")} style={{ color: "var(--ink-3)" }}>
           terms
         </a>{" "}
         and{" "}
-        <a href="/privacy" style={{ color: "var(--ink-3)" }}>
+        <a href={publicPath("/privacy")} style={{ color: "var(--ink-3)" }}>
           privacy policy
         </a>
         .

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../lib/auth"
 import { ApiError } from "../lib/api"
+import { publicPath } from "../lib/public-path"
 
 export default function SignInPage() {
   const auth = useAuth()
@@ -63,7 +64,9 @@ export default function SignInPage() {
           Don&apos;t have a password? Email{" "}
           <a href="mailto:apurvajain.kota@gmail.com">apurvajain.kota@gmail.com</a>
           <br />
-          <a href="/privacy">Privacy Policy</a>
+          <a href={publicPath("/privacy")}>Privacy Policy</a>
+          {" · "}
+          <a href={publicPath("/terms")}>Terms of Use</a>
         </div>
       </form>
       <style jsx>{`
