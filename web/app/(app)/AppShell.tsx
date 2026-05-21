@@ -11,11 +11,27 @@ import {
   TicketDrawer,
 } from "../components/shared"
 import { useCompany } from "../context/CompanyContext"
+import { useContent } from "../context/ContentContext"
+import { connectorsApi } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { activeCompany } = useCompany()
+  const { setContent } = useContent()
   useBriefHydration(activeCompany)
+
+  useEffect(() => {
+    void connectorsApi
+      .list()
+      .then((r) => {
+        setContent({
+          connectedConnectorIds: r.connections
+            .filter((c) => c.status === "active")
+            .map((c) => c.provider),
+        })
+      })
+      .catch(() => {})
+  }, [setContent])
 
   const { closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } = useNavigation()
 

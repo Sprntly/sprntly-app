@@ -10,6 +10,7 @@ import {
   IconEvidence,
   IconHome,
   IconPrd,
+  IconConnectors,
   IconSettings,
   IconSources,
 } from "./sidebar-icons"
@@ -148,6 +149,16 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
 
         <div className="sb-section-title">Workspace</div>
         <NavItem screen="sources" icon={<IconSources />} label="Sources" />
+        <NavItem
+          screen="connectors"
+          icon={<IconConnectors />}
+          label="Connectors"
+          count={
+            content.connectedConnectorIds.length > 0
+              ? content.connectedConnectorIds.length
+              : undefined
+          }
+        />
         <NavItem screen="settings" icon={<IconSettings />} label="Settings" />
       </div>
 
