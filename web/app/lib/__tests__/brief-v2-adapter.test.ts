@@ -154,13 +154,14 @@ describe("briefToBriefV2State", () => {
     expect(out.supporting.map((s) => s.detailKey)).toEqual(["fix-1", "fix-2"])
   })
 
-  it("builds a KPI strip with up to three tiles drawn from real metrics", () => {
+  it("builds a KPI strip from the hero's first two metrics — no source count tile", () => {
     const out = briefToBriefV2State(
       makeBrief([makeInsight({ tag: "something_broken", title: "X" })]),
     )
     expect(out.kpiTiles.length).toBeGreaterThanOrEqual(1)
-    expect(out.kpiTiles.length).toBeLessThanOrEqual(3)
+    expect(out.kpiTiles.length).toBeLessThanOrEqual(2)
     expect(out.kpiTiles[0].value).toBe("$143M/yr")
+    expect(out.kpiTiles.map((t) => t.label)).not.toContain("Sources this week")
   })
 
   it("surfaces summary_headline as the headline string", () => {

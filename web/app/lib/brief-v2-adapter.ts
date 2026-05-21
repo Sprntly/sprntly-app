@@ -280,8 +280,11 @@ function prettyCompany(company: string): string {
 
 function buildKpiTiles(insights: Insight[]): BriefV2KpiTile[] {
   // Tile 1: lead impact metric (from hero) — tone follows hero tag.
-  // Tile 2: secondary scale metric (across all insights, count + label).
-  // Tile 3: source diversity (count of unique convergence sources).
+  // Tile 2: secondary scale metric (hero's second metric, or the first
+  // metric of the next-strongest insight as a fallback).
+  // The source-count tile used to live here but felt like instrumentation
+  // rather than a business signal; sources are still listed below the
+  // card stack via `sourcesLine`.
   if (insights.length === 0) return []
   const heroIdx = pickHeroIndex(insights)
   const hero = insights[heroIdx]
@@ -299,8 +302,6 @@ function buildKpiTiles(insights: Insight[]): BriefV2KpiTile[] {
     tiles.push({ label: m0.label || "Lead impact", value: String(m0.value), tone })
   }
 
-  // Aggregate scale across findings: pick the second metric on the hero if
-  // present, otherwise the first metric of the next-strongest insight.
   const m1 = hero.metrics?.[1]
   if (m1) {
     tiles.push({ label: m1.label || "Scale", value: String(m1.value), tone: "neutral" })
@@ -310,21 +311,7 @@ function buildKpiTiles(insights: Insight[]): BriefV2KpiTile[] {
     if (om) tiles.push({ label: om.label || "Scale", value: String(om.value), tone: "neutral" })
   }
 
-  const sources = new Set<string>()
-  for (const ins of insights) {
-    for (const c of ins.convergence || []) {
-      if (c.source) sources.add(c.source)
-    }
-  }
-  if (sources.size > 0) {
-    tiles.push({
-      label: "Sources this week",
-      value: String(sources.size),
-      tone: "neutral",
-    })
-  }
-
-  return tiles.slice(0, 3)
+  return tiles
 }
 
 function buildSourcesLine(insights: Insight[]): string {

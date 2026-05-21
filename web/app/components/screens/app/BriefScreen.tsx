@@ -1,9 +1,8 @@
 "use client"
 
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
-import { isBriefEmpty, type BriefFindingRow } from "../../../types/content"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
 import type {
   BriefV2CompactFinding,
@@ -13,15 +12,12 @@ import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { BriefV2Render } from "../../shared/BriefV2Sections"
 
-type BriefFormat = "v1" | "v2"
-
 export function BriefScreen() {
   const { goTo, setAIBarValue, expandAiPanel, showToast } = useNavigation()
   const { content, setContent } = useContent()
-  const { brief, briefV2, briefDetails } = content
+  const { briefV2, briefDetails } = content
 
   const [prdBusyKey, setPrdBusyKey] = useState<string | null>(null)
-  const [format, setFormat] = useState<BriefFormat>("v1")
 
   const openEvidenceFor = (detailKey: string | undefined) => {
     if (detailKey && briefDetails?.[detailKey]) {
@@ -35,20 +31,15 @@ export function BriefScreen() {
     setAIBarValue(question)
   }
 
-  /** Shared between v1 finding-rows and v2 cards — both expose the same
-   *  three fields the runner needs, so we keep one handler and convert at
-   *  the call site rather than duplicating the PRD-generation flow. */
-  type SecondaryTarget = Pick<
-    BriefFindingRow,
-    "detailKey" | "secondaryCtaBehavior" | "title"
-  >
-
-  const handleSecondaryCta = useCallback(
-    async (f: SecondaryTarget) => {
-      const key = f.detailKey
-      if (f.secondaryCtaBehavior === "generate_prd") {
+  const handleSecondary = useCallback(
+    async (card: BriefV2HeroFinding | BriefV2CompactFinding) => {
+      const key = card.detailKey
+      if (card.secondaryCtaBehavior === "generate_prd") {
         if (!key || !briefDetails?.[key]) {
-          showToast("Can't generate PRD", "Open evidence from a finding with a linked brief first.")
+          showToast(
+            "Can't generate PRD",
+            "Open evidence from a finding with a linked brief first.",
+          )
           return
         }
         const meta = briefDetails[key].meta
@@ -79,212 +70,34 @@ export function BriefScreen() {
       }
       expandAiPanel()
       setAIBarValue(
-        prompts[f.secondaryCtaBehavior] ??
-          `Help me think through next steps for: ${f.title.slice(0, 120)}`,
+        prompts[card.secondaryCtaBehavior] ??
+          `Help me think through next steps for: ${card.title.slice(0, 120)}`,
       )
     },
     [briefDetails, expandAiPanel, goTo, setContent, showToast],
   )
 
-  const handleV2Secondary = useCallback(
-    (card: BriefV2HeroFinding | BriefV2CompactFinding) => {
-      void handleSecondaryCta({
-        detailKey: card.detailKey,
-        secondaryCtaBehavior: card.secondaryCtaBehavior,
-        title: card.title,
-      })
-    },
-    [handleSecondaryCta],
-  )
-
-  const empty = isBriefEmpty(brief)
-
-  const flatFindings = useMemo(
-    () => brief.sections.flatMap((s) => s.findings),
-    [brief.sections],
-  )
-
-  // Toggle disabled until v2 state is hydrated (first brief load completes).
-  const v2Ready = Boolean(briefV2 && (briefV2.hero || briefV2.supporting.length))
+  const empty = !briefV2 || (!briefV2.hero && briefV2.supporting.length === 0)
 
   return (
     <AppLayout mainClassName="main--reading main--brief">
-      <div className="main-header">
-        <div>
-          <h1 className="main-title main-title--brief">
-            Sprntly found three most important things to drive your goal
-          </h1>
-        </div>
-        <BriefFormatToggle
-          value={format}
-          disabled={!v2Ready}
-          onChange={setFormat}
-        />
-      </div>
-
       {empty ? (
         <EmptyPane
           title="No findings in this brief"
-          hint="When `/v1/brief/current` returns insights, the adapter maps them into finding cards (Build / Fix / Optimize) with evidence and PRD links."
+          hint="When `/v1/brief/current` returns insights, the adapter promotes one to a hero card with chart + quote and lays the rest out as supporting findings."
           placeholders={4}
         />
-      ) : format === "v2" && briefV2 ? (
+      ) : (
         <BriefV2Render
           state={briefV2}
           callbacks={{
             prdBusyKey,
             onViewEvidence: openEvidenceFor,
             onAskAI: handleAskAI,
-            onSecondary: handleV2Secondary,
+            onSecondary: handleSecondary,
           }}
         />
-      ) : (
-        <div className="wb-doc">
-          {brief.docHeader ? (
-            <>
-              <div className="wb-doc-header-grid">
-                <div className="wb-doc-header-cell">
-                  <div className="wb-doc-header-label">Company</div>
-                  <div className="wb-doc-header-value">{brief.docHeader.company}</div>
-                </div>
-                <div className="wb-doc-header-cell">
-                  <div className="wb-doc-header-label">Week of</div>
-                  <div className="wb-doc-header-value">{brief.docHeader.weekOf}</div>
-                </div>
-                <div className="wb-doc-header-cell">
-                  <div className="wb-doc-header-label">Product area</div>
-                  <div className="wb-doc-header-value">{brief.docHeader.productArea}</div>
-                </div>
-              </div>
-            </>
-          ) : null}
-
-          <div className="wb-card-stack">
-            {flatFindings.map((f, i) => (
-              <TemplateFindingCard
-                key={f.detailKey ?? `${i}`}
-                finding={f}
-                prdBusy={prdBusyKey === f.detailKey}
-                onViewEvidence={() => openEvidenceFor(f.detailKey)}
-                onSecondary={() => void handleSecondaryCta(f)}
-                onAskAI={() => handleAskAI(f.askQuestion)}
-              />
-            ))}
-          </div>
-
-          {brief.docFooter ? (
-            <div className="wb-footer">
-              <div className="wb-footer-grid">
-                <div className="wb-footer-col">
-                  <div className="wb-footer-head">Total at risk / upside</div>
-                  <div className="wb-footer-body">{brief.docFooter.totalAtRiskOrUpside}</div>
-                </div>
-                <div className="wb-footer-col">
-                  <div className="wb-footer-head">Recoverable (near-term)</div>
-                  <div className="wb-footer-body">{brief.docFooter.recoverableRange}</div>
-                </div>
-                <div className="wb-footer-col">
-                  <div className="wb-footer-head">Sources this week</div>
-                  <div className="wb-footer-body">{brief.docFooter.sourcesThisWeek}</div>
-                </div>
-              </div>
-            </div>
-          ) : null}
-        </div>
       )}
     </AppLayout>
-  )
-}
-
-function TemplateFindingCard({
-  finding: f,
-  prdBusy,
-  onViewEvidence,
-  onSecondary,
-  onAskAI,
-}: {
-  finding: BriefFindingRow
-  prdBusy: boolean
-  onViewEvidence: () => void
-  onSecondary: () => void
-  onAskAI: () => void
-}) {
-  const accent = f.actionAccent
-  return (
-    <article className={`wb-card wb-card--${accent}`}>
-      <div className="wb-card-inner">
-        <div className="wb-card-top">
-          <span className="wb-card-action">{f.actionLabel}</span>
-          <span className="wb-card-metric">{f.metricHighlight}</span>
-        </div>
-        <h3 className="wb-card-headline">{f.title}</h3>
-        <p className="wb-card-body">{f.desc}</p>
-        <p className="wb-card-signals">{f.signalLine}</p>
-        <div className="wb-card-confidence">Confidence {(f.confidence ?? 0).toFixed(2)}</div>
-        <div className="wb-card-actions">
-          <button type="button" className="wb-card-link" onClick={onViewEvidence}>
-            View evidence →
-          </button>
-          <div className="wb-card-actions-right">
-            <button type="button" className="wb-card-ask" onClick={onAskAI}>
-              Ask Sprntly
-            </button>
-            <button
-              type="button"
-              className={`wb-card-secondary wb-card-secondary--${accent}`}
-              onClick={onSecondary}
-              disabled={prdBusy && f.secondaryCtaBehavior === "generate_prd"}
-            >
-              {prdBusy && f.secondaryCtaBehavior === "generate_prd"
-                ? "Generating…"
-                : f.secondaryCtaLabel}
-            </button>
-          </div>
-        </div>
-      </div>
-    </article>
-  )
-}
-
-function BriefFormatToggle({
-  value,
-  disabled,
-  onChange,
-}: {
-  value: BriefFormat
-  disabled: boolean
-  onChange: (next: BriefFormat) => void
-}) {
-  // Reuses the .evv2-format-toggle pill styling (see globals.css), originally
-  // introduced for the evidence v1/v2 switcher and now shared with brief.
-  return (
-    <div
-      className="evv2-format-toggle"
-      role="radiogroup"
-      aria-label="Brief format"
-    >
-      <button
-        type="button"
-        role="radio"
-        aria-checked={value === "v1"}
-        className={value === "v1" ? "active" : ""}
-        onClick={() => onChange("v1")}
-        disabled={disabled}
-        title="Current brief layout"
-      >
-        v1
-      </button>
-      <button
-        type="button"
-        role="radio"
-        aria-checked={value === "v2"}
-        className={value === "v2" ? "active" : ""}
-        onClick={() => onChange("v2")}
-        disabled={disabled}
-        title="Brief v2 — hero finding + supporting cards + KPI strip"
-      >
-        v2
-      </button>
-    </div>
   )
 }
