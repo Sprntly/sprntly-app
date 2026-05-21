@@ -62,6 +62,8 @@ export default function SignInPage() {
         <div className="signin-footer">
           Don&apos;t have a password? Email{" "}
           <a href="mailto:apurvajain.kota@gmail.com">apurvajain.kota@gmail.com</a>
+          <br />
+          <a href="/privacy">Privacy Policy</a>
         </div>
       </form>
       <style jsx>{`

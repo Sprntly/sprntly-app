@@ -73,11 +73,11 @@ export function Onboarding1() {
         }}
       >
         By continuing you agree to our{" "}
-        <a href="#" style={{ color: "var(--ink-3)" }}>
+        <a href="/terms" style={{ color: "var(--ink-3)" }}>
           terms
         </a>{" "}
         and{" "}
-        <a href="#" style={{ color: "var(--ink-3)" }}>
+        <a href="/privacy" style={{ color: "var(--ink-3)" }}>
           privacy policy
         </a>
         .
