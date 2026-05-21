@@ -37,8 +37,16 @@ Run tests: `python -m pytest tests/`.
 - `POST /v1/ask` — `{question, dataset}`
 - `GET /v1/evidence/{id}`, `POST /v1/evidence` — drill-downs
 - `GET /v1/prd/{id}`, `POST /v1/prd` — PRD generation
+- `GET /v1/connectors` — list OAuth connections (no tokens in response)
+- `GET /v1/connectors/google-drive/authorize?dataset=…` — start Google OAuth (session required)
+- `GET /v1/connectors/google-drive/callback` — Google redirect target (configure in GCP)
+- `DELETE /v1/connectors/google-drive` — disconnect
 
 The `dataset` query/body parameter is **required** on `/v1/brief/*` and `/v1/ask` — there is no default. The frontend always passes the active slug.
+
+### Google Drive connector env
+
+Set on EC2 `backend/.env` (see `.env.example`): `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`, `TOKEN_ENCRYPTION_KEY`, `FRONTEND_URL`. GCP redirect URI must match `GOOGLE_OAUTH_REDIRECT_URI` exactly. File sync from Drive is not implemented yet — OAuth connect/disconnect only.
 
 ## Data storage
 

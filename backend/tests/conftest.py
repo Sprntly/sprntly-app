@@ -48,6 +48,9 @@ _RELOAD_ORDER = [
     "app.routes.ask",
     "app.routes.evidence",
     "app.routes.prd",
+    "app.connectors.tokens",
+    "app.connectors.google_oauth",
+    "app.routes.connectors",
     "app.main",
 ]
 

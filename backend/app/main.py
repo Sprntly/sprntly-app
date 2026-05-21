@@ -17,6 +17,7 @@ from app.prompts import (
 from app.routes import (
     ask,
     brief,
+    connectors,
     datasets as datasets_routes,
     evidence,
     health,
@@ -105,6 +106,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(ask.router)

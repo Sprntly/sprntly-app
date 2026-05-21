@@ -29,6 +29,13 @@ class Settings(BaseSettings):
 
     db_path: str = str(REPO_ROOT / "data" / "sprintly.db")
 
+    # Google Drive connector (OAuth)
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_oauth_redirect_uri: str = ""
+    token_encryption_key: str = ""
+    frontend_url: str = "http://localhost:3000"
+
     @property
     def origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]

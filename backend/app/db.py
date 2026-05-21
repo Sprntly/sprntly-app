@@ -1,7 +1,9 @@
 """SQLite store for the demo. One brief at a time per dataset; one Q&A history per session."""
 import json
 import sqlite3
+import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import settings
@@ -73,6 +75,20 @@ CREATE TABLE IF NOT EXISTS datasets (
     slug TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS connections (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'active',
+    google_email TEXT,
+    scopes TEXT NOT NULL DEFAULT '',
+    token_json_encrypted TEXT NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    last_sync_at TEXT,
+    last_sync_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -552,6 +568,108 @@ def list_dataset_slugs() -> list[str]:
     with conn() as c:
         rows = c.execute("SELECT slug FROM datasets ORDER BY slug ASC").fetchall()
     return [r["slug"] for r in rows]
+
+
+# ----- Connections (OAuth integrations) ---------------------------------------
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def upsert_connection(
+    *,
+    provider: str,
+    token_encrypted: str,
+    scopes: str,
+    google_email: str | None = None,
+    config_json: str = "{}",
+    status: str = "active",
+) -> dict:
+    now = _utc_now()
+    with conn() as c:
+        existing = c.execute(
+            "SELECT id FROM connections WHERE provider=?", (provider,)
+        ).fetchone()
+        if existing:
+            c.execute(
+                "UPDATE connections SET status=?, google_email=?, scopes=?, "
+                "token_json_encrypted=?, config_json=?, last_sync_error=NULL, updated_at=? "
+                "WHERE provider=?",
+                (
+                    status,
+                    google_email,
+                    scopes,
+                    token_encrypted,
+                    config_json,
+                    now,
+                    provider,
+                ),
+            )
+            row_id = existing["id"]
+        else:
+            row_id = uuid.uuid4().hex
+            c.execute(
+                "INSERT INTO connections "
+                "(id, provider, status, google_email, scopes, token_json_encrypted, "
+                "config_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row_id,
+                    provider,
+                    status,
+                    google_email,
+                    scopes,
+                    token_encrypted,
+                    config_json,
+                    now,
+                    now,
+                ),
+            )
+    row = get_connection(provider)
+    assert row is not None
+    return row
+
+
+def get_connection(provider: str) -> dict | None:
+    with conn() as c:
+        row = c.execute(
+            "SELECT id, provider, status, google_email, scopes, token_json_encrypted, "
+            "config_json, last_sync_at, last_sync_error, created_at, updated_at "
+            "FROM connections WHERE provider=?",
+            (provider,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_connections() -> list[dict]:
+    with conn() as c:
+        rows = c.execute(
+            "SELECT id, provider, status, google_email, scopes, token_json_encrypted, "
+            "config_json, last_sync_at, last_sync_error, created_at, updated_at "
+            "FROM connections ORDER BY provider ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_connection(provider: str) -> bool:
+    with conn() as c:
+        cur = c.execute("DELETE FROM connections WHERE provider=?", (provider,))
+        return (cur.rowcount or 0) > 0
+
+
+def update_connection_sync(
+    provider: str,
+    *,
+    last_sync_at: str | None = None,
+    last_sync_error: str | None = None,
+) -> None:
+    now = _utc_now()
+    with conn() as c:
+        c.execute(
+            "UPDATE connections SET last_sync_at=?, last_sync_error=?, updated_at=? "
+            "WHERE provider=?",
+            (last_sync_at or now, last_sync_error, now, provider),
+        )
 
 
 def delete_dataset(slug: str) -> bool:
