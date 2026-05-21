@@ -94,10 +94,17 @@ async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
 
 
 async def _warm_prd(brief_id: int, insight_index: int, title: str) -> None:
-    """Generate a PRD for (brief_id, insight_index) unless one is already
-    cached. Errors are swallowed for the same reason as _warm_evidence.
+    """Generate a v2 PRD for (brief_id, insight_index) unless one is
+    already cached. Errors are swallowed for the same reason as
+    _warm_evidence.
+
+    Variant must be pinned to "v2" everywhere: without it, find_existing_prd
+    defaults to variant="v1" and matches legacy v1 rows left over from
+    before the v2 promotion — the warmer concludes "cached, skip" while
+    the prd route (which writes/reads v2) still has nothing to dedupe
+    against, and the user pays the full LLM cost on first click.
     """
-    if find_existing_prd(brief_id, insight_index):
+    if find_existing_prd(brief_id, insight_index, variant="v2"):
         logger.info(
             "PRD already cached brief_id=%s insight_index=%s, skipping warm",
             brief_id,
@@ -109,6 +116,7 @@ async def _warm_prd(brief_id: int, insight_index: int, title: str) -> None:
         insight_index=insight_index,
         title=title,
         template_version=PRD_TEMPLATE_VERSION,
+        variant="v2",
     )
     logger.info(
         "Warming PRD prd_id=%s brief_id=%s insight_index=%s (waiting on sema)",
