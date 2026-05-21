@@ -308,17 +308,45 @@ export type ConnectionSummary = {
   status: "active" | "error" | "revoked" | string
   google_email: string | null
   scopes: string
-  config: { dataset?: string; folder_id?: string }
+  config: { dataset?: string; folder_id?: string; folder_name?: string }
   last_sync_at: string | null
   last_sync_error: string | null
   created_at: string
   updated_at: string
 }
 
+export type GoogleDriveSyncResult = {
+  dataset: string
+  folder_id: string
+  synced: { filename: string; md_path: string; md_chars: number }[]
+  skipped: { name: string; reason: string }[]
+  errors: { name: string; error: string }[]
+}
+
+export type DriveFolderBrowse = {
+  current: { id: string; name: string }
+  parent: { id: string; name: string } | null
+  folders: { id: string; name: string }[]
+}
+
 export const connectorsApi = {
   list: () => api.get<{ connections: ConnectionSummary[] }>("/v1/connectors"),
   disconnectGoogleDrive: () =>
     api.delete<{ deleted: true; provider: string }>("/v1/connectors/google-drive"),
+  browseGoogleDriveFolders: (parentId = "root") =>
+    api.get<DriveFolderBrowse>(
+      `/v1/connectors/google-drive/folders?parent_id=${encodeURIComponent(parentId)}`,
+    ),
+  setGoogleDriveConfig: (folderId: string, dataset?: string, folderName?: string) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+      "/v1/connectors/google-drive/config",
+      { folder_id: folderId, folder_name: folderName, dataset },
+    ),
+  syncGoogleDrive: (dataset?: string, folderId?: string) =>
+    api.post<GoogleDriveSyncResult>("/v1/connectors/google-drive/sync", {
+      dataset,
+      folder_id: folderId,
+    }),
   /** Full-page navigation — OAuth must not use fetch. */
   googleDriveAuthorizeUrl: (dataset: string) =>
     `${API_URL}/v1/connectors/google-drive/authorize?dataset=${encodeURIComponent(dataset)}`,

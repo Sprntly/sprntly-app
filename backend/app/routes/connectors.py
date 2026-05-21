@@ -3,6 +3,9 @@
   GET    /v1/connectors                         -> list (no secrets)
   GET    /v1/connectors/google-drive/authorize  -> redirect to Google
   GET    /v1/connectors/google-drive/callback   -> OAuth callback
+  GET    /v1/connectors/google-drive/folders      -> browse folders to select
+  POST   /v1/connectors/google-drive/config     -> save folder + dataset
+  POST   /v1/connectors/google-drive/sync       -> pull folder into corpus
   DELETE /v1/connectors/google-drive            -> disconnect
 """
 from __future__ import annotations
@@ -15,11 +18,19 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Cookie, HTTPException
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request
+from pydantic import BaseModel
 
 from app import db
 from app.auth import require_session
 from app.config import settings
 from app.connectors import google_oauth
+from app.connectors.google_drive_sync import (
+    SyncConfigError,
+    browse_folders,
+    merge_config,
+    parse_folder_id,
+    sync_google_drive,
+)
 from app.connectors.tokens import (
     TokenEncryptionError,
     decrypt_token_json,
@@ -110,6 +121,68 @@ def google_drive_callback(code: str, state: str):
 
     q = urlencode({"connected": google_oauth.GOOGLE_DRIVE_PROVIDER})
     return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+
+
+class GoogleDriveConfigIn(BaseModel):
+    folder_id: str
+    folder_name: str | None = None
+    dataset: str | None = None
+
+
+class GoogleDriveSyncIn(BaseModel):
+    dataset: str | None = None
+    folder_id: str | None = None
+
+
+@router.get("/google-drive/folders")
+def google_drive_list_folders(
+    parent_id: str | None = None,
+    sprintly_session: Annotated[str | None, Cookie()] = None,
+):
+    require_session(sprintly_session)
+    try:
+        return browse_folders(parent_id)
+    except SyncConfigError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/google-drive/config")
+def google_drive_config(
+    body: GoogleDriveConfigIn,
+    sprintly_session: Annotated[str | None, Cookie()] = None,
+):
+    require_session(sprintly_session)
+    row = db.get_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Google Drive is not connected")
+    try:
+        fid = parse_folder_id(body.folder_id)
+    except SyncConfigError as e:
+        raise HTTPException(422, str(e)) from e
+    patch: dict = {"folder_id": fid}
+    if body.folder_name:
+        patch["folder_name"] = body.folder_name.strip()
+    if body.dataset:
+        patch["dataset"] = body.dataset.strip()
+    updated = merge_config(row, patch)
+    return {"ok": True, "config": updated}
+
+
+@router.post("/google-drive/sync")
+def google_drive_sync(
+    body: GoogleDriveSyncIn | None = None,
+    sprintly_session: Annotated[str | None, Cookie()] = None,
+):
+    require_session(sprintly_session)
+    payload = body or GoogleDriveSyncIn()
+    try:
+        result = sync_google_drive(
+            dataset=payload.dataset,
+            folder_id=payload.folder_id,
+        )
+    except SyncConfigError as e:
+        raise HTTPException(400, str(e)) from e
+    return result.to_dict()
 
 
 @router.delete("/google-drive")

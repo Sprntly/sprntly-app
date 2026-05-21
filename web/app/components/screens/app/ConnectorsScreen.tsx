@@ -14,6 +14,7 @@ import {
   CONNECTOR_IDS_WITH_OAUTH,
 } from "../../../lib/connectorsCatalog"
 import { publicPath } from "../../../lib/public-path"
+import { GoogleDriveFolderPicker } from "../../connectors/GoogleDriveFolderPicker"
 import { AppLayout } from "./AppLayout"
 import { IconGrid } from "../../shared/app-icons"
 
@@ -28,7 +29,11 @@ function formatSyncHint(conn: ConnectionSummary | undefined): string | null {
       return `Last sync ${conn.last_sync_at}`
     }
   }
-  return "Connected — file sync coming soon"
+  if (!conn.config.folder_id) {
+    return "Connected — choose a folder below"
+  }
+  const label = conn.config.folder_name ?? "folder"
+  return `Syncing “${label}” — run Sync now to update Sources`
 }
 
 export function ConnectorsScreen() {
@@ -40,6 +45,7 @@ export function ConnectorsScreen() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
+  const [syncing, setSyncing] = useState(false)
 
   const connectionByProvider = useMemo(() => {
     const m = new Map<string, ConnectionSummary>()
@@ -97,7 +103,7 @@ export function ConnectorsScreen() {
     if (connected === "google_drive") {
       showToast(
         "Google Drive connected",
-        "OAuth succeeded. File sync from your Drive folder is not enabled yet.",
+        "Choose which Drive folder to sync, then run Sync now.",
       )
     } else {
       showToast("Connector connected", `Provider: ${connected}`)
@@ -109,6 +115,39 @@ export function ConnectorsScreen() {
 
   const connectGoogleDrive = () => {
     window.location.href = connectorsApi.googleDriveAuthorizeUrl(activeCompany)
+  }
+
+  const driveConn = connectionByProvider.get("google_drive")
+
+  const runSync = async () => {
+    if (!driveConn?.config.folder_id) {
+      showToast("Choose a folder first", "Select a Drive folder below before syncing.")
+      return
+    }
+    setSyncing(true)
+    try {
+      const r = await connectorsApi.syncGoogleDrive(activeCompany)
+      const n = r.synced.length
+      const sk = r.skipped.length
+      const err = r.errors.length
+      showToast(
+        n ? `Synced ${n} file${n === 1 ? "" : "s"}` : "Sync complete",
+        [
+          sk ? `${sk} skipped` : null,
+          err ? `${err} failed` : null,
+          n ? "Check Sources for imported files." : "No new files to import.",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      )
+      await reload()
+    } catch (e) {
+      const msg =
+        e instanceof ApiError ? `API ${e.status}` : e instanceof Error ? e.message : String(e)
+      showToast("Sync failed", msg)
+    } finally {
+      setSyncing(false)
+    }
   }
 
   const disconnectGoogleDrive = async () => {
@@ -241,18 +280,39 @@ export function ConnectorsScreen() {
                           <span className="conn-mgmt-sync-hint">{hint}</span>
                         ) : null}
                         {isDrive ? (
-                          <button
-                            type="button"
-                            className="btn btn-sm conn-mgmt-disconnect"
-                            disabled={disconnecting}
-                            onClick={() => void disconnectGoogleDrive()}
-                          >
-                            Disconnect
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-primary"
+                              disabled={syncing}
+                              onClick={() => void runSync()}
+                            >
+                              {syncing ? "Syncing…" : "Sync now"}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm conn-mgmt-disconnect"
+                              disabled={disconnecting}
+                              onClick={() => void disconnectGoogleDrive()}
+                            >
+                              Disconnect
+                            </button>
+                          </>
                         ) : null}
                       </div>
                     )
                   })}
+                  {connectedItems.some((i) => i.id === "google_drive") && driveConn ? (
+                    <GoogleDriveFolderPicker
+                      dataset={activeCompany}
+                      selectedFolderId={driveConn.config.folder_id}
+                      selectedFolderName={driveConn.config.folder_name}
+                      onSelected={() => {
+                        showToast("Folder connected", "Run Sync now to import files.")
+                        void reload()
+                      }}
+                    />
+                  ) : null}
                 </div>
               ) : null}
               {availableItems.length > 0 ? (

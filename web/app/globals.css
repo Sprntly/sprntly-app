@@ -2484,6 +2484,147 @@
     cursor: not-allowed;
   }
   .conn-mgmt-available-chip:disabled::after { content: none; }
+  .conn-drive-setup {
+    width: 100%;
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .conn-drive-selected {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    padding: 10px 14px;
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    background: var(--accent-soft);
+    font-size: 13px;
+  }
+  .conn-drive-selected-label {
+    font-size: 11px;
+    color: var(--muted);
+    width: 100%;
+  }
+  .conn-drive-browser {
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-2);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .conn-drive-browser-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .conn-drive-browser-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .conn-drive-browser-cancel {
+    border: none;
+    background: none;
+    font-size: 12px;
+    color: var(--ink-3);
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .conn-drive-crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    font-size: 12px;
+  }
+  .conn-drive-crumb {
+    border: none;
+    background: none;
+    padding: 2px 4px;
+    border-radius: 4px;
+    color: var(--accent-ink);
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .conn-drive-crumb:disabled {
+    color: var(--ink);
+    cursor: default;
+    font-weight: 600;
+  }
+  .conn-drive-crumb:not(:disabled):hover { background: var(--surface-3); }
+  .conn-drive-crumb-sep { color: var(--muted); margin: 0 2px; }
+  .conn-drive-list {
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+  .conn-drive-row-open {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 12px;
+    border: none;
+    border-bottom: 1px solid var(--line);
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--ink);
+  }
+  .conn-drive-row:last-child .conn-drive-row-open { border-bottom: none; }
+  .conn-drive-row-open:hover { background: var(--surface-2); }
+  .conn-drive-folder-icon {
+    flex-shrink: 0;
+    width: 18px;
+    height: 14px;
+    border: 1.5px solid var(--ink-3);
+    border-radius: 2px;
+    position: relative;
+  }
+  .conn-drive-folder-icon::before {
+    content: "";
+    position: absolute;
+    top: -4px;
+    left: 2px;
+    width: 8px;
+    height: 4px;
+    border: 1.5px solid var(--ink-3);
+    border-bottom: none;
+    border-radius: 2px 2px 0 0;
+  }
+  .conn-drive-row-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .conn-drive-list-empty {
+    margin: 0;
+    padding: 16px 12px;
+    font-size: 12px;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .conn-drive-error {
+    margin: 0;
+    font-size: 12px;
+    color: var(--neg);
+  }
+  .conn-drive-browser-actions { display: flex; gap: 8px; }
+  .conn-drive-hint {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
   .conn-mgmt-connected-pill {
     display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px 5px 5px;
     background: var(--accent-soft); border: 1px solid var(--accent);

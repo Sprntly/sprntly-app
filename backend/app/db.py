@@ -657,6 +657,36 @@ def delete_connection(provider: str) -> bool:
         return (cur.rowcount or 0) > 0
 
 
+def patch_connection_config(provider: str, config: dict) -> dict | None:
+    """Merge keys into config_json. Returns the updated row."""
+    row = get_connection(provider)
+    if not row:
+        return None
+    existing: dict = {}
+    try:
+        existing = json.loads(row.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        existing = {}
+    existing.update(config)
+    now = _utc_now()
+    blob = json.dumps(existing)
+    with conn() as c:
+        c.execute(
+            "UPDATE connections SET config_json=?, updated_at=? WHERE provider=?",
+            (blob, now, provider),
+        )
+    return get_connection(provider)
+
+
+def update_connection_tokens(provider: str, token_encrypted: str) -> None:
+    now = _utc_now()
+    with conn() as c:
+        c.execute(
+            "UPDATE connections SET token_json_encrypted=?, updated_at=? WHERE provider=?",
+            (token_encrypted, now, provider),
+        )
+
+
 def update_connection_sync(
     provider: str,
     *,
