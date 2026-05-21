@@ -1,0 +1,64 @@
+name: Sync backend env to EC2
+
+# Manual one-shot to upsert backend runtime env vars into the EC2
+# systemd EnvironmentFile (~/Sprntly/backend/.env). Once written, the
+# values persist there independent of any GitHub Actions state — so the
+# backend keeps running even if a later workflow can't reach this repo.
+#
+# Trigger: gh workflow run "Sync backend env to EC2" --repo jainapurva/Sprntly
+# Re-run any time secrets/variables change in the repo settings.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: sync-backend-env
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upsert env vars and restart sprintly.service
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GOOGLE_CLIENT_ID:          ${{ vars.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET:      ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REDIRECT_URI: ${{ vars.GOOGLE_OAUTH_REDIRECT_URI }}
+          TOKEN_ENCRYPTION_KEY:      ${{ secrets.TOKEN_ENCRYPTION_KEY }}
+          FRONTEND_URL:              ${{ vars.FRONTEND_URL }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          # `envs` whitelists which workflow env vars get forwarded to the
+          # remote shell — without this, the script can't see them.
+          envs: GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET,GOOGLE_OAUTH_REDIRECT_URI,TOKEN_ENCRYPTION_KEY,FRONTEND_URL
+          script: |
+            set -e
+            ENV_FILE=~/Sprntly/backend/.env
+            touch "$ENV_FILE"
+            chmod 600 "$ENV_FILE"
+            upsert() {
+              local key="$1"
+              local val="$2"
+              # Idempotent: drop any existing line for this key, then
+              # append the fresh value. python-dotenv reads raw values
+              # (no quoting needed, the trailing `=` padding on the
+              # Fernet key is preserved).
+              sed -i.bak "/^${key}=/d" "$ENV_FILE"
+              rm -f "${ENV_FILE}.bak"
+              echo "${key}=${val}" >> "$ENV_FILE"
+            }
+            upsert GOOGLE_CLIENT_ID          "$GOOGLE_CLIENT_ID"
+            upsert GOOGLE_CLIENT_SECRET      "$GOOGLE_CLIENT_SECRET"
+            upsert GOOGLE_OAUTH_REDIRECT_URI "$GOOGLE_OAUTH_REDIRECT_URI"
+            upsert TOKEN_ENCRYPTION_KEY      "$TOKEN_ENCRYPTION_KEY"
+            upsert FRONTEND_URL              "$FRONTEND_URL"
+            UPDATED=$(grep -cE '^(GOOGLE_|TOKEN_ENCRYPTION_KEY|FRONTEND_URL)=' "$ENV_FILE")
+            echo "Wrote ${UPDATED}/5 keys to ${ENV_FILE}"
+            sudo /bin/systemctl restart sprintly
+            sleep 3
+            curl -fsS http://127.0.0.1:8000/healthz
+            echo "Backend healthy after env sync."
