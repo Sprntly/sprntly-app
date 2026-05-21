@@ -1,36 +1,144 @@
 "use client"
 
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCompany } from "../../../context/CompanyContext"
 import { useContent } from "../../../context/ContentContext"
+import { useNavigation } from "../../../context/NavigationContext"
+import {
+  ApiError,
+  connectorsApi,
+  type ConnectionSummary,
+} from "../../../lib/api"
+import {
+  CONNECTOR_CATALOG,
+  CONNECTOR_IDS_WITH_OAUTH,
+} from "../../../lib/connectorsCatalog"
+import { pathForScreen } from "../../../lib/routes"
 import { AppLayout } from "./AppLayout"
-import { EmptyPane } from "../../shared/EmptyPane"
 import { IconGrid } from "../../shared/app-icons"
 
-export function ConnectorsScreen() {
-  const { content } = useContent()
-  const categories = content.connectorCategories
-  const connected = new Set(content.connectedConnectorIds)
+function formatSyncHint(conn: ConnectionSummary | undefined): string | null {
+  if (!conn) return null
+  if (conn.last_sync_error) return `Sync error: ${conn.last_sync_error}`
+  if (conn.last_sync_at) {
+    try {
+      const d = new Date(conn.last_sync_at)
+      return `Last sync ${d.toLocaleString()}`
+    } catch {
+      return `Last sync ${conn.last_sync_at}`
+    }
+  }
+  return "Connected — file sync coming soon"
+}
 
-  if (categories.length === 0) {
-    return (
-      <AppLayout>
-        <div className="main-header">
-          <div>
-            <h1 className="main-title">Connectors</h1>
-            <p className="main-sub">
-              The more sources you connect, the sharper your weekly brief becomes.
-            </p>
-          </div>
-        </div>
-        <EmptyPane
-          title="No connector catalog loaded"
-          hint="Populate `content.connectorCategories` (groups + items) and `content.connectedConnectorIds` from Airbyte or your connections table."
-          placeholders={6}
-        />
-      </AppLayout>
-    )
+export function ConnectorsScreen() {
+  const { activeCompany } = useCompany()
+  const { setContent } = useContent()
+  const { showToast } = useNavigation()
+
+  const [connections, setConnections] = useState<ConnectionSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [disconnecting, setDisconnecting] = useState(false)
+
+  const connectionByProvider = useMemo(() => {
+    const m = new Map<string, ConnectionSummary>()
+    for (const c of connections) {
+      if (c.status === "active") m.set(c.provider, c)
+    }
+    return m
+  }, [connections])
+
+  const connectedIds = useMemo(
+    () => [...connectionByProvider.keys()],
+    [connectionByProvider],
+  )
+
+  const reload = useCallback(async () => {
+    setLoadError(null)
+    try {
+      const r = await connectorsApi.list()
+      setConnections(r.connections)
+      setContent({
+        connectorCategories: CONNECTOR_CATALOG,
+        connectedConnectorIds: r.connections
+          .filter((c) => c.status === "active")
+          .map((c) => c.provider),
+      })
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? `API ${e.status}`
+          : e instanceof Error
+            ? e.message
+            : String(e)
+      setLoadError(msg)
+      setConnections([])
+      setContent({
+        connectorCategories: CONNECTOR_CATALOG,
+        connectedConnectorIds: [],
+      })
+    } finally {
+      setLoading(false)
+    }
+  }, [setContent])
+
+  useEffect(() => {
+    setLoading(true)
+    void reload()
+  }, [reload])
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const params = new URLSearchParams(window.location.search)
+    const connected = params.get("connected")
+    if (!connected) return
+
+    if (connected === "google_drive") {
+      showToast(
+        "Google Drive connected",
+        "OAuth succeeded. File sync from your Drive folder is not enabled yet.",
+      )
+    } else {
+      showToast("Connector connected", `Provider: ${connected}`)
+    }
+
+    const clean = pathForScreen("connectors")
+    window.history.replaceState(null, "", clean)
+    void reload()
+  }, [showToast, reload])
+
+  const connectGoogleDrive = () => {
+    window.location.href = connectorsApi.googleDriveAuthorizeUrl(activeCompany)
   }
 
-  const connectedCount = content.connectedConnectorIds.length
+  const disconnectGoogleDrive = async () => {
+    if (disconnecting) return
+    setDisconnecting(true)
+    try {
+      await connectorsApi.disconnectGoogleDrive()
+      showToast("Google Drive disconnected", "Tokens removed from Sprntly.")
+      await reload()
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? `API ${e.status}`
+          : e instanceof Error
+            ? e.message
+            : String(e)
+      showToast("Couldn't disconnect", msg)
+    } finally {
+      setDisconnecting(false)
+    }
+  }
+
+  const onChipClick = (itemId: string) => {
+    if (itemId === "google_drive") connectGoogleDrive()
+  }
+
+  const categories = CONNECTOR_CATALOG
+  const connected = new Set(connectedIds)
+  const connectedCount = connectedIds.length
   const totalItems = categories.reduce((n, c) => n + c.items.length, 0)
 
   return (
@@ -40,8 +148,13 @@ export function ConnectorsScreen() {
           <div className="conn-summary-eyebrow">Signal coverage</div>
           <h1 className="conn-summary-headline">
             <span>{connectedCount} connected</span> of {totalItems} integrations in
-            your catalog — wire live metrics from your sync service when ready.
+            your catalog.
           </h1>
+          {loadError ? (
+            <p className="main-sub" style={{ marginTop: 8, color: "var(--neg)" }}>
+              Could not load connections: {loadError}
+            </p>
+          ) : null}
           <div className="conn-summary-stats">
             <div className="conn-summary-stat">
               <strong className="pos">{connectedCount}</strong>Connected
@@ -73,6 +186,12 @@ export function ConnectorsScreen() {
         </button>
       </div>
 
+      {loading ? (
+        <p className="conn-mgmt-empty" style={{ padding: "24px 20px" }}>
+          Loading connections…
+        </p>
+      ) : null}
+
       {categories.map((cat) => {
         const connectedItems = cat.items.filter((i) => connected.has(i.id))
         const availableItems = cat.items.filter((i) => !connected.has(i.id))
@@ -101,22 +220,66 @@ export function ConnectorsScreen() {
             <div className="conn-mgmt-body">
               {connectedItems.length > 0 ? (
                 <div className="conn-mgmt-connected-list">
-                  {connectedItems.map((item) => (
-                    <div key={item.id} className="conn-mgmt-connected-pill">
-                      <div className="conn-logo">{item.logo}</div>
-                      {item.name}
-                    </div>
-                  ))}
+                  {connectedItems.map((item) => {
+                    const conn = connectionByProvider.get(item.id)
+                    const hint = formatSyncHint(conn)
+                    const isDrive = item.id === "google_drive"
+                    return (
+                      <div key={item.id} className="conn-mgmt-connected-row">
+                        <div className="conn-mgmt-connected-pill">
+                          <div className="conn-logo">{item.logo}</div>
+                          <span>
+                            {item.name}
+                            {conn?.google_email ? (
+                              <span className="conn-mgmt-email">
+                                {" "}
+                                · {conn.google_email}
+                              </span>
+                            ) : null}
+                          </span>
+                        </div>
+                        {hint ? (
+                          <span className="conn-mgmt-sync-hint">{hint}</span>
+                        ) : null}
+                        {isDrive ? (
+                          <button
+                            type="button"
+                            className="btn btn-sm conn-mgmt-disconnect"
+                            disabled={disconnecting}
+                            onClick={() => void disconnectGoogleDrive()}
+                          >
+                            Disconnect
+                          </button>
+                        ) : null}
+                      </div>
+                    )
+                  })}
                 </div>
               ) : null}
               {availableItems.length > 0 ? (
                 <div className="conn-mgmt-available">
-                  {availableItems.map((item) => (
-                    <div key={item.id} className="conn-mgmt-available-chip">
-                      <div className="conn-logo">{item.logo}</div>
-                      {item.name}
-                    </div>
-                  ))}
+                  {availableItems.map((item) => {
+                    const canConnect = CONNECTOR_IDS_WITH_OAUTH.has(item.id)
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="conn-mgmt-available-chip"
+                        disabled={!canConnect}
+                        title={
+                          canConnect
+                            ? item.id === "google_drive"
+                              ? `Connect Drive for dataset “${activeCompany}”`
+                              : "Connect"
+                            : "Coming soon"
+                        }
+                        onClick={() => onChipClick(item.id)}
+                      >
+                        <div className="conn-logo">{item.logo}</div>
+                        {item.name}
+                      </button>
+                    )
+                  })}
                 </div>
               ) : connectedItems.length === 0 ? (
                 <div className="conn-mgmt-empty">No integrations listed for this group.</div>

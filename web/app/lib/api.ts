@@ -300,6 +300,30 @@ export type DeleteSourceResponse = {
   removed: { raw: boolean; md: boolean }
 }
 
+// ---- connectors -------------------------------------------------------------
+
+export type ConnectionSummary = {
+  id: string
+  provider: "google_drive" | string
+  status: "active" | "error" | "revoked" | string
+  google_email: string | null
+  scopes: string
+  config: { dataset?: string; folder_id?: string }
+  last_sync_at: string | null
+  last_sync_error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export const connectorsApi = {
+  list: () => api.get<{ connections: ConnectionSummary[] }>("/v1/connectors"),
+  disconnectGoogleDrive: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/google-drive"),
+  /** Full-page navigation — OAuth must not use fetch. */
+  googleDriveAuthorizeUrl: (dataset: string) =>
+    `${API_URL}/v1/connectors/google-drive/authorize?dataset=${encodeURIComponent(dataset)}`,
+}
+
 export const sourcesApi = {
   list: (slug: string) =>
     api.get<ListSourcesResponse>(
