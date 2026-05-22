@@ -6,7 +6,12 @@ from cryptography.fernet import Fernet
 
 from app import db
 from app.connectors import google_oauth
-from app.connectors.google_drive_sync import SyncConfigError, parse_folder_id, sync_google_drive
+from app.connectors.google_drive_sync import (
+    SyncConfigError,
+    drive_http_error_message,
+    parse_folder_id,
+    sync_google_drive,
+)
 from app.connectors.tokens import encrypt_token_json
 
 
@@ -36,6 +41,16 @@ def drive_connected(isolated_settings, monkeypatch):
 
     datasets_mod.create_dataset  # ensure module loaded
     (isolated_settings["data_dir"] / "acme" / "raw").mkdir(parents=True, exist_ok=True)
+
+
+def test_drive_http_error_access_not_configured():
+    err = MagicMock()
+    err.resp = MagicMock(status=403)
+    err.content = (
+        b'{"error":{"message":"Drive API disabled","errors":[{"reason":"accessNotConfigured"}]}}'
+    )
+    msg = drive_http_error_message(err)
+    assert "not enabled" in msg.lower()
 
 
 def test_parse_folder_id_accepts_url():

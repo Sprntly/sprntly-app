@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import Resource
 from googleapiclient.errors import HttpError
@@ -63,6 +64,32 @@ class SyncConfigError(ValueError):
     pass
 
 
+def drive_http_error_message(err: HttpError) -> str:
+    """Turn a Drive API HttpError into a short, user-facing message."""
+    try:
+        payload = json.loads(err.content.decode())
+        err_obj = payload.get("error") or {}
+        msg = err_obj.get("message") or str(err)
+        reasons = err_obj.get("errors") or []
+        reason = reasons[0].get("reason") if reasons else ""
+    except (TypeError, ValueError, AttributeError, IndexError, KeyError):
+        msg = str(err)
+        reason = ""
+
+    if reason == "accessNotConfigured":
+        return (
+            "Google Drive API is not enabled for this OAuth app — enable "
+            "“Google Drive API” in Google Cloud Console, then disconnect and "
+            "reconnect Drive."
+        )
+    if err.resp is not None and err.resp.status in (401, 403):
+        return (
+            f"Google Drive access denied ({msg}). Disconnect and reconnect "
+            "Google Drive to refresh permissions."
+        )
+    return f"Google Drive API error: {msg}"
+
+
 def parse_folder_id(value: str) -> str:
     """Accept a raw folder ID or a drive.google.com folder URL."""
     raw = (value or "").strip()
@@ -101,8 +128,17 @@ def _refresh_credentials(row: dict):
     creds = credentials_from_token_json(
         decrypt_token_json(row["token_json_encrypted"])
     )
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+    if creds.expired:
+        if not creds.refresh_token:
+            raise SyncConfigError(
+                "Google Drive session expired — disconnect and connect again."
+            )
+        try:
+            creds.refresh(Request())
+        except RefreshError as e:
+            raise SyncConfigError(
+                "Google Drive authorization expired — disconnect and connect again."
+            ) from e
         db.update_connection_tokens(
             google_oauth.GOOGLE_DRIVE_PROVIDER,
             encrypt_token_json(creds.to_json()),
@@ -153,12 +189,12 @@ def browse_folders(parent_id: str | None = None) -> dict:
             else:
                 parent_meta = {"id": "root", "name": "My Drive"}
         except HttpError as e:
-            raise SyncConfigError(f"Could not read folder: {e}") from e
+            raise SyncConfigError(drive_http_error_message(e)) from e
 
     try:
         children = _list_child_folders(service, pid)
     except HttpError as e:
-        raise SyncConfigError(f"Drive API error: {e}") from e
+        raise SyncConfigError(drive_http_error_message(e)) from e
 
     return {
         "current": {"id": pid, "name": current_name},
@@ -180,9 +216,10 @@ def _list_child_folders(service: Resource, parent_id: str) -> list[dict]:
             .list(
                 q=q,
                 fields="nextPageToken, files(id, name)",
-                orderBy="folder,name",
+                orderBy="name",
                 pageSize=100,
                 pageToken=page_token,
+                spaces="drive",
             )
             .execute()
         )

@@ -143,6 +143,7 @@ def google_drive_list_folders(
     try:
         return browse_folders(parent_id)
     except SyncConfigError as e:
+        logger.warning("Drive folder browse failed: %s", e)
         raise HTTPException(400, str(e)) from e
 
 

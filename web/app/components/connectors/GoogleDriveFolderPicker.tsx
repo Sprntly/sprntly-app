@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { ApiError, connectorsApi, type DriveFolderBrowse } from "../../lib/api"
+import { ApiError, apiErrorMessage, connectorsApi, type DriveFolderBrowse } from "../../lib/api"
 
 type Crumb = { id: string; name: string }
 
@@ -37,7 +37,11 @@ export function GoogleDriveFolderPicker({
       setBrowse(r)
     } catch (e) {
       const msg =
-        e instanceof ApiError ? `API ${e.status}` : e instanceof Error ? e.message : String(e)
+        e instanceof ApiError
+          ? apiErrorMessage(e.status, e.body)
+          : e instanceof Error
+            ? e.message
+            : String(e)
       setError(msg)
       setBrowse(null)
     } finally {
@@ -72,7 +76,11 @@ export function GoogleDriveFolderPicker({
       onSelected()
     } catch (e) {
       const msg =
-        e instanceof ApiError ? `API ${e.status}` : e instanceof Error ? e.message : String(e)
+        e instanceof ApiError
+          ? apiErrorMessage(e.status, e.body)
+          : e instanceof Error
+            ? e.message
+            : String(e)
       setError(msg)
     } finally {
       setSaving(false)

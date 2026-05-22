@@ -17,10 +17,31 @@ export class ApiError extends Error {
   status: number
   body: unknown
   constructor(status: number, body: unknown, message?: string) {
-    super(message || `API ${status}`)
+    super(message || apiErrorMessage(status, body))
     this.status = status
     this.body = body
   }
+}
+
+/** FastAPI `detail` (string or validation list) for failed requests. */
+export function apiErrorMessage(status: number, body: unknown): string {
+  if (body && typeof body === "object" && "detail" in body) {
+    const detail = (body as { detail: unknown }).detail
+    if (typeof detail === "string" && detail.trim()) return detail
+    if (Array.isArray(detail)) {
+      const parts = detail
+        .map((x) => {
+          if (typeof x === "object" && x && "msg" in x) {
+            return String((x as { msg: string }).msg)
+          }
+          return String(x)
+        })
+        .filter(Boolean)
+      if (parts.length) return parts.join(" · ")
+    }
+  }
+  if (typeof body === "string" && body.trim()) return body
+  return `Request failed (${status})`
 }
 
 async function request<T>(
