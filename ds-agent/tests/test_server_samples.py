@@ -13,45 +13,47 @@ from fastapi.testclient import TestClient
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_PASSWORD", "letmein")
     monkeypatch.setenv("AGENT_COOKIE_SECRET", "test-cookie-secret-min-32-chars-long")
-    monkeypatch.setenv("AGENT_COOKIE_SECURE", "0")
     monkeypatch.setenv("AGENT_UPLOAD_DIR", str(tmp_path / "uploads"))
     from ds_agent.server.app import create_app
     return TestClient(create_app())
 
 
-def _login(client):
-    assert client.post("/api/login", json={"password": "letmein"}).status_code == 200
+def _login(client) -> dict[str, str]:
+    """Returns Authorization headers for a fresh logged-in client."""
+    r = client.post("/api/login", json={"password": "letmein"})
+    assert r.status_code == 200
+    return {"Authorization": f"Bearer {r.json()['token']}"}
 
 
 def test_samples_listed(client):
-    _login(client)
-    r = client.get("/api/samples")
+    headers = _login(client)
+    r = client.get("/api/samples", headers=headers)
     assert r.status_code == 200
     samples = r.json()["samples"]
     assert any(s["id"] == "saas_retention" for s in samples)
 
 
 def test_load_sample_sets_dataset(client):
-    _login(client)
-    r = client.post("/api/load-sample", json={"sample_id": "saas_retention"})
+    headers = _login(client)
+    r = client.post("/api/load-sample", json={"sample_id": "saas_retention"}, headers=headers)
     assert r.status_code == 200
-    state = client.get("/api/state").json()
+    state = client.get("/api/state", headers=headers).json()
     assert state["has_dataset"] is True
     assert state["goal_metric"] == "retention_30d"
     assert "saas" in (state["dataset_label"] or "").lower()
 
 
 def test_unknown_sample_404s(client):
-    _login(client)
-    r = client.post("/api/load-sample", json={"sample_id": "bogus"})
+    headers = _login(client)
+    r = client.post("/api/load-sample", json={"sample_id": "bogus"}, headers=headers)
     assert r.status_code == 404
 
 
 def test_reset_clears_dataset(client):
-    _login(client)
-    client.post("/api/load-sample", json={"sample_id": "saas_retention"})
-    client.post("/api/reset")
-    state = client.get("/api/state").json()
+    headers = _login(client)
+    client.post("/api/load-sample", json={"sample_id": "saas_retention"}, headers=headers)
+    client.post("/api/reset", headers=headers)
+    state = client.get("/api/state", headers=headers).json()
     assert state["has_dataset"] is False
     assert state["goal_metric"] is None
 

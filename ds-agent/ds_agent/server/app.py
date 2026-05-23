@@ -29,11 +29,9 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
-    Request,
-    Response,
     UploadFile,
 )
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -101,19 +99,20 @@ def create_app() -> FastAPI:
     # ───── auth ─────
 
     @app.post("/api/login")
-    def login(body: LoginBody, response: Response) -> dict[str, Any]:
+    def login(body: LoginBody) -> dict[str, Any]:
         # Constant-time compare so we don't leak password length / prefix.
         if not secrets.compare_digest(body.password, cfg.password):
             raise HTTPException(401, "invalid_password")
-        sid = _auth.issue_session(response, cfg, serializer)
+        sid, token = _auth.issue_token(serializer)
         sessions.get_or_create(sid)
-        return {"ok": True}
+        # Client stores `token` in localStorage and sends it back as
+        # `Authorization: Bearer <token>` on every subsequent request.
+        return {"ok": True, "token": token}
 
     @app.post("/api/logout")
-    def logout(response: Response, sid: str | None = Depends(optional)) -> dict[str, Any]:
+    def logout(sid: str | None = Depends(optional)) -> dict[str, Any]:
         if sid:
             sessions.reset(sid)
-        _auth.clear_session(response)
         return {"ok": True}
 
     @app.get("/api/session")

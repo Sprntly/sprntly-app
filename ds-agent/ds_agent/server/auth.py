@@ -1,8 +1,10 @@
-"""Shared-password auth + signed session cookies.
+"""Shared-password auth.
 
-We keep this deliberately small: one env-var password, signed session
-cookies that carry just a `session_id`, and a short helper to load
-config on startup. No DB, no user table.
+Sessions ride on a signed token. The client receives it in the login
+response body, stashes it in `localStorage`, and sends it back on every
+request as `Authorization: Bearer <token>`. We do NOT use cookies —
+they were unreliable through the Vercel rewrite for some browser
+configurations (privacy blockers, strict SameSite, etc.).
 """
 
 from __future__ import annotations
@@ -11,98 +13,83 @@ import os
 import secrets
 from dataclasses import dataclass
 
-from fastapi import Cookie, HTTPException, Response
+from fastapi import Header, HTTPException
 from itsdangerous import BadSignature, URLSafeSerializer
 
 
-COOKIE_NAME = "sprntly_agent_session"
-COOKIE_MAX_AGE_S = 60 * 60 * 24 * 7  # 7 days
+_TOKEN_MAX_AGE_S = 60 * 60 * 24 * 7  # 7 days; enforced via signed payload, see below
 
 
 @dataclass(frozen=True)
 class AuthConfig:
     password: str
-    cookie_secret: str
-    cookie_secure: bool
+    cookie_secret: str  # still called cookie_secret for env-var continuity
 
 
 def load_config() -> AuthConfig:
-    """Read auth config from env. Fails loudly if AGENT_PASSWORD is missing.
-
-    We *don't* generate a random AGENT_PASSWORD if unset — that would let
-    the service boot in an unreachable state. We *do* derive a stable
-    fallback for AGENT_COOKIE_SECRET if it's not provided, which means
-    sessions reset on each restart (acceptable for a pilot tool).
-    """
+    """Read auth config from env. Fails loudly if AGENT_PASSWORD is missing."""
     password = os.environ.get("AGENT_PASSWORD")
     if not password:
         raise RuntimeError(
-            "AGENT_PASSWORD env var is required. Set it in /etc/sprntly-agent.env "
-            "before starting sprntly-agent.service."
+            "AGENT_PASSWORD env var is required. Set it in "
+            "/home/ec2-user/Sprntly/ds-agent/.env before starting "
+            "sprntly-agent.service."
         )
     cookie_secret = os.environ.get("AGENT_COOKIE_SECRET") or secrets.token_urlsafe(32)
-    cookie_secure = os.environ.get("AGENT_COOKIE_SECURE", "1") == "1"
-    return AuthConfig(
-        password=password, cookie_secret=cookie_secret, cookie_secure=cookie_secure
-    )
+    return AuthConfig(password=password, cookie_secret=cookie_secret)
 
 
 def make_serializer(cfg: AuthConfig) -> URLSafeSerializer:
     return URLSafeSerializer(cfg.cookie_secret, salt="sprntly-agent-session")
 
 
-def issue_session(response: Response, cfg: AuthConfig, serializer: URLSafeSerializer) -> str:
-    """Create a fresh session id, sign it into the cookie, return the id."""
+def issue_token(serializer: URLSafeSerializer) -> tuple[str, str]:
+    """Create a fresh session id, return (session_id, signed_token)."""
     session_id = secrets.token_urlsafe(24)
     token = serializer.dumps({"sid": session_id})
-    response.set_cookie(
-        key=COOKIE_NAME,
-        value=token,
-        max_age=COOKIE_MAX_AGE_S,
-        httponly=True,
-        secure=cfg.cookie_secure,
-        samesite="lax",
-        path="/",
-    )
-    return session_id
+    return session_id, token
 
 
-def clear_session(response: Response) -> None:
-    response.delete_cookie(key=COOKIE_NAME, path="/")
+def require_session(serializer: URLSafeSerializer):
+    """FastAPI dependency. Reads the token from the Authorization header
+    (`Bearer <token>`); 401s if absent or invalid."""
 
-
-def require_session(
-    serializer: URLSafeSerializer,
-):
-    """Build a FastAPI dependency that returns the session id or 401s."""
-
-    def _dep(sprntly_agent_session: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> str:
-        if not sprntly_agent_session:
-            raise HTTPException(status_code=401, detail="not_authenticated")
-        try:
-            payload = serializer.loads(sprntly_agent_session)
-        except BadSignature:
-            raise HTTPException(status_code=401, detail="bad_session")
-        sid = payload.get("sid")
+    def _dep(authorization: str | None = Header(default=None)) -> str:
+        sid = _decode_authorization(serializer, authorization)
         if not sid:
-            raise HTTPException(status_code=401, detail="malformed_session")
+            raise HTTPException(status_code=401, detail="not_authenticated")
         return sid
 
     return _dep
 
 
-def optional_session(
-    serializer: URLSafeSerializer,
-):
+def optional_session(serializer: URLSafeSerializer):
     """Like require_session but returns None instead of raising."""
 
-    def _dep(sprntly_agent_session: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> str | None:
-        if not sprntly_agent_session:
-            return None
-        try:
-            payload = serializer.loads(sprntly_agent_session)
-        except BadSignature:
-            return None
-        return payload.get("sid")
+    def _dep(authorization: str | None = Header(default=None)) -> str | None:
+        return _decode_authorization(serializer, authorization)
 
     return _dep
+
+
+def _decode_authorization(
+    serializer: URLSafeSerializer, authorization: str | None
+) -> str | None:
+    if not authorization:
+        return None
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    if not token:
+        return None
+    try:
+        payload = serializer.loads(token)
+    except BadSignature:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    sid = payload.get("sid")
+    if not isinstance(sid, str) or not sid:
+        return None
+    return sid

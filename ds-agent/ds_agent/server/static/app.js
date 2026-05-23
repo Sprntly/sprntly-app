@@ -1,5 +1,10 @@
 /* Sprntly DS-Agent UI — vanilla.
  *
+ * Auth: bearer token in localStorage. The login response returns a
+ * `token` field that we stash and send back as `Authorization: Bearer
+ * <token>` on every subsequent request. No cookies — they were
+ * unreliable through the Vercel rewrite for some browser configs.
+ *
  * All endpoints live under /agent on the public side (nginx prefix) and
  * under / inside this app (FastAPI). We use absolute /agent/api/... so
  * the UI works on the prod domain and on a direct localhost dev server.
@@ -8,6 +13,11 @@
 const API = {
   base: window.location.pathname.startsWith("/agent") ? "/agent/api" : "/api",
 };
+
+const TOKEN_KEY = "sprntly_agent_token";
+function getToken() { return localStorage.getItem(TOKEN_KEY); }
+function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+function clearToken() { localStorage.removeItem(TOKEN_KEY); }
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -34,13 +44,23 @@ const chatSubmit = $("#chat-submit");
 const chatStatus = $("#chat-status");
 
 
+function authHeaders() {
+  const t = getToken();
+  return t ? { Authorization: "Bearer " + t } : {};
+}
+
 async function api(path, opts = {}) {
+  const baseHeaders = opts.body instanceof FormData
+    ? { ...authHeaders() }
+    : { "Content-Type": "application/json", ...authHeaders() };
   const res = await fetch(API.base + path, {
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+    headers: { ...baseHeaders, ...(opts.headers || {}) },
     ...opts,
   });
-  if (res.status === 401) return { _unauthenticated: true };
+  if (res.status === 401) {
+    clearToken();
+    return { _unauthenticated: true };
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (e) {}
@@ -54,6 +74,10 @@ async function api(path, opts = {}) {
 // ───── auth flow ─────
 
 async function checkSession() {
+  if (!getToken()) {
+    showLogin();
+    return;
+  }
   const resp = await api("/session", { method: "GET" });
   if (resp._unauthenticated) {
     showLogin();
@@ -74,16 +98,18 @@ loginForm.addEventListener("submit", async (e) => {
   loginSubmit.disabled = true;
   loginSubmit.textContent = "Signing in…";
   try {
-    const resp = await fetch(API.base + "/login", {
+    const res = await fetch(API.base + "/login", {
       method: "POST",
-      credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password: loginPwd.value }),
     });
-    if (!resp.ok) {
-      const j = await resp.json().catch(() => ({}));
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
       throw new Error(j.detail || "Sign-in failed.");
     }
+    const body = await res.json();
+    if (!body.token) throw new Error("Server didn't return a session token.");
+    setToken(body.token);
     await enterChat();
   } catch (err) {
     loginErr.textContent = err.message === "invalid_password" ? "Wrong password." : err.message;
@@ -95,7 +121,8 @@ loginForm.addEventListener("submit", async (e) => {
 });
 
 logoutBtn.addEventListener("click", async () => {
-  await api("/logout", { method: "POST" });
+  try { await api("/logout", { method: "POST" }); } catch (e) {}
+  clearToken();
   loginPwd.value = "";
   messagesEl.innerHTML = "";
   showLogin();
@@ -166,9 +193,14 @@ fileInput.addEventListener("change", async () => {
   try {
     const res = await fetch(API.base + "/upload", {
       method: "POST",
-      credentials: "same-origin",
+      headers: authHeaders(),
       body: fd,
     });
+    if (res.status === 401) {
+      clearToken();
+      showLogin();
+      return;
+    }
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
       throw new Error(j.detail || "Upload failed.");
