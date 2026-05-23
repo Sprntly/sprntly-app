@@ -39,6 +39,11 @@ input, textarea {
 }
 
 .screen { min-height: 100vh; }
+/* The `hidden` HTML attribute means `display: none` — but `#login-screen`
+ * etc. have their own `display: grid|flex|...` rule that wins over the
+ * UA default. Re-assert it explicitly so the hidden screen actually
+ * disappears instead of just being below the fold. */
+[hidden] { display: none !important; }
 
 /* ─── Brand ─── */
 .brand {
