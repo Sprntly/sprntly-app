@@ -1,0 +1,16 @@
+[Unit]
+Description=Sprntly DS Agent (chat UI for the data-science pipeline)
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/Sprntly/ds-agent
+EnvironmentFile=/home/ec2-user/Sprntly/ds-agent/.env
+Environment="AGENT_UPLOAD_DIR=/var/lib/sprntly-agent/uploads"
+ExecStart=/home/ec2-user/Sprntly/ds-agent/.venv/bin/uvicorn ds_agent.server.__main__:app --host 127.0.0.1 --port 8002
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

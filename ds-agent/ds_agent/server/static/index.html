@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sprntly · DS Agent</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="stylesheet" href="/agent/static/style.css">
+</head>
+<body>
+
+<!-- Login screen -->
+<div id="login-screen" class="screen">
+  <div class="login-card">
+    <div class="brand"><span class="brand-dot"></span> Sprntly · DS Agent</div>
+    <p class="login-sub">Private preview. Enter the access password to continue.</p>
+    <form id="login-form">
+      <input type="password" id="login-password" placeholder="Access password" autocomplete="current-password" required>
+      <button type="submit" id="login-submit">Sign in →</button>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+  </div>
+</div>
+
+<!-- Chat screen -->
+<div id="chat-screen" class="screen" hidden>
+  <header class="topbar">
+    <div class="brand"><span class="brand-dot"></span> Sprntly · DS Agent</div>
+    <div class="topbar-right">
+      <span id="dataset-label" class="dataset-pill"></span>
+      <button id="reset-btn" class="ghost-btn" type="button">Reset</button>
+      <button id="logout-btn" class="ghost-btn" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Dataset picker (shown when no dataset is loaded) -->
+    <section id="picker" class="picker" hidden>
+      <h1>Pick a dataset to start.</h1>
+      <p class="picker-sub">Upload your own CSV, or try a bundled sample. The agent runs locally on the EC2 instance — your data doesn't leave Sprntly's servers.</p>
+
+      <div class="picker-grid">
+        <div class="picker-card" id="upload-card">
+          <h3>Upload your CSV</h3>
+          <p>One row per user, columns can be anything. Aim for &lt; 100k rows.</p>
+          <label class="upload-label">
+            <input type="file" id="file-input" accept=".csv" hidden>
+            <span class="upload-btn">Choose file</span>
+          </label>
+        </div>
+        <div class="picker-card" id="samples-card">
+          <h3>Or try a sample</h3>
+          <div id="samples-list" class="samples-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Chat (shown after dataset is loaded) -->
+    <section id="chat-pane" class="chat-pane" hidden>
+      <div id="messages" class="messages"></div>
+      <form id="chat-form" class="composer">
+        <textarea
+          id="chat-input"
+          placeholder="Ask anything about the data — or just type 'go' to let the agent dive in."
+          rows="2"
+        ></textarea>
+        <button type="submit" id="chat-submit">Send</button>
+      </form>
+      <p id="chat-status" class="chat-status" hidden></p>
+    </section>
+  </main>
+</div>
+
+<script src="/agent/static/app.js"></script>
+</body>
+</html>
