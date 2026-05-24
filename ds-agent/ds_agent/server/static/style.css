@@ -276,6 +276,15 @@ input, textarea {
   transition: transform 0.15s;
 }
 .code-bundle[open] summary::before { transform: rotate(90deg); }
+.code-bundle.live summary {
+  background: linear-gradient(90deg, #F3F4F6 0%, #EAF3EF 50%, #F3F4F6 100%);
+  background-size: 200% 100%;
+  animation: code-bundle-pulse 1.4s ease-in-out infinite;
+}
+@keyframes code-bundle-pulse {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
 .code-bundle summary .label { flex: 1; }
 .code-bundle summary .badge {
   font-size: 0.7rem;

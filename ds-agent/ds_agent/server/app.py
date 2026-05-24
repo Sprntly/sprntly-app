@@ -20,12 +20,12 @@ Routes (all live under the nginx `/agent/` prefix at deploy time):
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import shutil
 import tempfile
 import uuid
-from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -230,10 +230,10 @@ def create_app() -> FastAPI:
         s.messages = []
         return {"ok": True}
 
-    # ───── chat ─────
+    # ───── chat (streaming NDJSON) ─────
 
     @app.post("/api/chat")
-    def chat(body: ChatBody, sid: str = Depends(require)) -> dict[str, Any]:
+    def chat(body: ChatBody, sid: str = Depends(require)) -> StreamingResponse:
         s = sessions.get_or_create(sid)
         if not s.has_files:
             raise HTTPException(400, "no_dataset_loaded")
@@ -241,16 +241,29 @@ def create_app() -> FastAPI:
         if not msg:
             raise HTTPException(400, "empty_message")
         try:
-            result = _runner().turn(s, msg)
+            runner = _runner()
         except RuntimeError as exc:
             raise HTTPException(500, f"chat_error:{exc}") from exc
 
-        return {
-            "assistant": result.assistant_text,
-            "code_executions": [
-                asdict(ce) if is_dataclass(ce) else ce for ce in result.code_executions
-            ],
-        }
+        def _ndjson():
+            try:
+                for ev in runner.stream_turn(s, msg):
+                    yield (json.dumps(ev, default=str) + "\n").encode("utf-8")
+            except Exception as exc:  # noqa: BLE001
+                # Last-resort error event in the stream.
+                yield (
+                    json.dumps({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
+                    + "\n"
+                ).encode("utf-8")
+
+        # NDJSON over HTTP. Vercel proxies the stream and keeps the
+        # connection alive because the first chunk (the kickoff event from
+        # the runner) arrives well within the 30s window.
+        return StreamingResponse(
+            _ndjson(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     # ───── sandbox-artifact proxy ─────
 

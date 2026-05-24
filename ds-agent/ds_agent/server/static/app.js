@@ -231,11 +231,62 @@ function renderMessage(role, text, codeExecutions = []) {
     el.appendChild(renderCodeBundle(ce));
   }
   messagesEl.appendChild(el);
+  return el;
 }
 
-function renderCodeBundle(ce) {
+/**
+ * Make an empty assistant message slot that we'll progressively fill as
+ * NDJSON events stream in. Returns helpers the caller uses to append
+ * text deltas and code bundles in order.
+ */
+function makeStreamingAssistantSlot() {
+  const el = document.createElement("div");
+  el.className = "msg assistant";
+  const textEl = document.createElement("div");
+  textEl.className = "msg-text";
+  el.appendChild(textEl);
+  messagesEl.appendChild(el);
+
+  // Live-rendered code bundles keyed by server_tool_use id.
+  const bundlesById = new Map();
+
+  return {
+    appendText(chunk) {
+      textEl.textContent += chunk;
+      scrollToBottom();
+    },
+    startCode(id, code) {
+      const ce = { code: code || "", stdout: "", stderr: "", file_ids: [] };
+      const bundle = renderCodeBundle(ce, { live: true });
+      bundlesById.set(id, { ce, bundle });
+      el.appendChild(bundle);
+      scrollToBottom();
+    },
+    finishCode(id, result) {
+      const slot = bundlesById.get(id);
+      if (!slot) return;
+      Object.assign(slot.ce, result);
+      // Re-render in place.
+      const fresh = renderCodeBundle(slot.ce);
+      slot.bundle.replaceWith(fresh);
+      slot.bundle = fresh;
+      scrollToBottom();
+    },
+    finalize() {
+      if (!textEl.textContent.trim()) {
+        textEl.remove();
+      }
+    },
+  };
+}
+
+function renderCodeBundle(ce, opts = {}) {
   const wrap = document.createElement("details");
   wrap.className = "code-bundle";
+  // Auto-expand bundles that produced charts (the chart IS the finding).
+  const hasCharts = !!(ce.file_ids && ce.file_ids.length);
+  if (hasCharts) wrap.open = true;
+  if (opts.live) wrap.classList.add("live");
 
   const summary = document.createElement("summary");
   const label = document.createElement("span");
@@ -330,21 +381,83 @@ async function sendMessage(text) {
   chatInput.disabled = true;
   chatSubmit.disabled = true;
   setChatStatus("Agent is thinking…");
+
+  const slot = makeStreamingAssistantSlot();
+
   try {
-    const resp = await api("/chat", {
+    const res = await fetch(API.base + "/chat", {
       method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ message: text }),
     });
-    if (resp._unauthenticated) { showLogin(); return; }
-    renderMessage("assistant", resp.assistant || "(no reply)", resp.code_executions || []);
-    scrollToBottom();
+    if (res.status === 401) { clearToken(); showLogin(); return; }
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = (await res.json()).detail || detail; } catch (e) {}
+      throw new Error(detail);
+    }
+
+    // Read newline-delimited JSON from the stream.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let receivedAny = false;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        receivedAny = true;
+        let ev;
+        try { ev = JSON.parse(line); }
+        catch (e) { console.warn("bad NDJSON line:", line); continue; }
+        handleStreamEvent(slot, ev);
+      }
+    }
+    if (!receivedAny) {
+      slot.appendText("(no reply)");
+    }
+    slot.finalize();
     setChatStatus(null);
   } catch (err) {
+    slot.appendText(`\n\n[error: ${err.message}]`);
     setChatStatus("Chat error: " + err.message, true);
   } finally {
     chatInput.disabled = false;
     chatSubmit.disabled = false;
     chatInput.focus();
+  }
+}
+
+function handleStreamEvent(slot, ev) {
+  switch (ev.type) {
+    case "text_delta":
+      slot.appendText(ev.text || "");
+      break;
+    case "code_start":
+      slot.startCode(ev.id, ev.code);
+      break;
+    case "code_result":
+      slot.finishCode(ev.id, {
+        stdout: ev.stdout,
+        stderr: ev.stderr,
+        return_code: ev.return_code,
+        file_ids: ev.file_ids || [],
+        error_code: ev.error_code,
+      });
+      break;
+    case "done":
+      break;
+    case "error":
+      slot.appendText(`\n\n[error: ${ev.error}]`);
+      break;
+    default:
+      // Ignore unknown event types so server can add new ones.
   }
 }
 
@@ -366,7 +479,12 @@ chatInput.addEventListener("keydown", (e) => {
 // ───── autopilot opening message ─────
 
 function autopilotKickoff() {
-  sendMessage("I just loaded a dataset. Take a look and tell me what you'd analyze.");
+  sendMessage(
+    "Run a full analysis of this data. Find every meaningful insight — data " +
+    "quality, distributions, drivers of the goal metric, segments, time " +
+    "trends if present, and anything weird. Save a chart for each finding. " +
+    "End with a ranked TL;DR for the PM."
+  );
 }
 
 
