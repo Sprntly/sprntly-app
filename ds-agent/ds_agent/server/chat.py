@@ -42,12 +42,13 @@ matplotlib, seaborn, and shap pre-installed. `pip install` works for \
 anything else. State persists across your code-execution calls within \
 this conversation.
 
-THE DATASET. Whichever file is attached is mounted somewhere under /tmp \
-or in your working directory. On your first turn after a new dataset \
-loads, locate it (`!ls -la /tmp/ /` or similar) and remember the path. \
-On later turns the same file (and any variables you've defined) is still \
-available in the same container — don't re-load it unless the user has \
-attached a new one.
+THE DATASET. The attached file is mounted at \
+`os.environ['INPUT_DIR'] + '/' + <original-filename>`. Read it with \
+something like: `df = pd.read_csv(os.path.join(os.environ['INPUT_DIR'], \
+'<filename>'))`. If you don't know the filename, `os.listdir(os.environ\
+['INPUT_DIR'])` returns it in one call — no need to search /tmp. On later \
+turns the same file and any variables you've defined are still in the \
+container; don't re-load unless the user has attached a new one.
 
 HOW YOU OPERATE. Apply judgment; don't follow as a rigid checklist.
 
