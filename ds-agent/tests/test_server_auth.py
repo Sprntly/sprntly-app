@@ -55,9 +55,9 @@ def test_health_is_public(client):
 
 def test_session_requires_auth(client):
     assert client.get("/api/session").status_code == 401
-    assert client.get("/api/state").status_code == 401
-    assert client.post("/api/chat", json={"message": "hi"}).status_code == 401
-    assert client.post("/api/reset").status_code == 401
+    assert client.get("/api/agents/ds/state").status_code == 401
+    assert client.post("/api/agents/ds/chat", json={"message": "hi"}).status_code == 401
+    assert client.post("/api/agents/ds/reset").status_code == 401
 
 
 def test_login_wrong_password(client):
@@ -77,7 +77,13 @@ def test_session_with_bearer_token(client):
     assert r.status_code == 200
     body = r.json()
     assert body["authenticated"] is True
-    assert body["has_dataset"] is False
+
+
+def test_hub_lists_ds_agent(client):
+    r = client.get("/api/agents")
+    assert r.status_code == 200
+    ids = {a["id"] for a in r.json()["agents"]}
+    assert "ds" in ids
 
 
 def test_session_with_bad_token(client):
@@ -93,6 +99,6 @@ def test_session_with_wrong_scheme(client):
 
 def test_chat_requires_dataset(client):
     token = _login(client)
-    r = client.post("/api/chat", json={"message": "go"}, headers=_auth(token))
+    r = client.post("/api/agents/ds/chat", json={"message": "go"}, headers=_auth(token))
     assert r.status_code == 400
     assert r.json()["detail"] == "no_dataset_loaded"

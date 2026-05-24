@@ -1,21 +1,26 @@
 """FastAPI app served at api.sprntly.ai/agent/ (proxied behind nginx).
 
-Routes (all live under the nginx `/agent/` prefix at deploy time):
+Top-level URL layout (after nginx strips the /agent/ prefix):
 
-    GET  /                          — login page or chat UI (HTML)
-    GET  /health                    — unauth health probe
-    POST /api/login                 — exchange password for bearer token
-    POST /api/logout                — clear session server-side
-    GET  /api/session               — current session info (or 401)
-    GET  /api/samples               — list bundled sample datasets
-    POST /api/load-sample           — load a sample by id into the session
-    POST /api/upload                — upload one or many files (csv/json/parquet/
-                                      xlsx/txt/pdf/...) or a zip
-    GET  /api/state                 — files + transcript snapshot for the UI
-    POST /api/chat                  — send one user message, get assistant reply
-    POST /api/reset                 — wipe chat history + loaded files
-    GET  /api/files/{file_id}       — proxy-download a file written by the
-                                      sandbox (charts, derived CSVs)
+    /                                      hub: cards landing page (HTML)
+    /{agent_id}                            chat UI for one agent (HTML)
+    /health                                unauth probe
+    /static/...                            JS/CSS/samples
+
+Per-agent JSON API (path-prefixed so sessions and state never collide
+between agents):
+
+    POST /api/login                        -> bearer token (global)
+    POST /api/logout                       -> drops all sessions for this user
+    GET  /api/session                      -> {authenticated: true}
+    GET  /api/agents                       -> list of agent cards for the hub
+    GET  /api/agents/{id}/state            -> per-agent files + transcript
+    GET  /api/agents/{id}/samples
+    POST /api/agents/{id}/load-sample
+    POST /api/agents/{id}/upload           -> multipart files
+    POST /api/agents/{id}/chat             -> NDJSON streaming
+    POST /api/agents/{id}/reset
+    GET  /api/files/{file_id}              -> proxy chart download (shared)
 """
 
 from __future__ import annotations
@@ -41,8 +46,10 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import agents as _agents
 from . import auth as _auth
 from . import tools as _files
+from .agents import AgentConfig
 from .chat import ChatRunner
 from .state import FileEntry, SessionState, SessionStore
 
@@ -72,12 +79,12 @@ def create_app() -> FastAPI:
     cfg = _auth.load_config()
     serializer = _auth.make_serializer(cfg)
     sessions = SessionStore()
-    _runner_holder: dict[str, ChatRunner] = {}
+    _runner_cache: dict[str, ChatRunner] = {}
 
-    def _runner() -> ChatRunner:
-        if "r" not in _runner_holder:
-            _runner_holder["r"] = ChatRunner()
-        return _runner_holder["r"]
+    def _runner_for(agent: AgentConfig) -> ChatRunner:
+        if agent.id not in _runner_cache:
+            _runner_cache[agent.id] = ChatRunner(agent)
+        return _runner_cache[agent.id]
 
     _anthropic_holder: dict[str, Anthropic] = {}
 
@@ -89,7 +96,7 @@ def create_app() -> FastAPI:
             _anthropic_holder["c"] = Anthropic(api_key=key)
         return _anthropic_holder["c"]
 
-    app = FastAPI(title="Sprntly Data Science Agent", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Sprntly Agents", docs_url=None, redoc_url=None)
 
     if _STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -97,7 +104,13 @@ def create_app() -> FastAPI:
     require = _auth.require_session(serializer)
     optional = _auth.optional_session(serializer)
 
-    # ───── health & root ─────
+    def _resolve_agent(agent_id: str) -> AgentConfig:
+        agent = _agents.get(agent_id)
+        if not agent:
+            raise HTTPException(404, "unknown_agent")
+        return agent
+
+    # ───── public ─────
 
     @app.get("/health", response_class=PlainTextResponse)
     def health() -> str:
@@ -105,6 +118,21 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=FileResponse)
     def root() -> FileResponse:
+        # Single HTML for hub + chat; client-side JS routes on pathname.
+        index = _STATIC_DIR / "index.html"
+        if not index.exists():
+            raise HTTPException(500, "ui_not_bundled")
+        return FileResponse(str(index))
+
+    # Per-agent landing — same HTML; the JS picks up agent_id from
+    # window.location.pathname.
+    @app.get("/{agent_id}", response_class=FileResponse)
+    def agent_page(agent_id: str) -> FileResponse:
+        if agent_id in _agents.RESERVED_AGENT_IDS:
+            raise HTTPException(404, "not_found")
+        # Don't 404 on unknown agent ids here — let the client render a
+        # "unknown agent" state from /api/agents, so a typo doesn't bounce
+        # an authenticated user out to a generic 404.
         index = _STATIC_DIR / "index.html"
         if not index.exists():
             raise HTTPException(500, "ui_not_bundled")
@@ -117,61 +145,80 @@ def create_app() -> FastAPI:
         if not secrets.compare_digest(body.password, cfg.password):
             raise HTTPException(401, "invalid_password")
         sid, token = _auth.issue_token(serializer)
-        sessions.get_or_create(sid)
         return {"ok": True, "token": token}
 
     @app.post("/api/logout")
     def logout(sid: str | None = Depends(optional)) -> dict[str, Any]:
         if sid:
-            _wipe_session_files(sessions.get_or_create(sid))
+            for s in sessions.all_for_sid(sid):
+                _wipe_session_files(s)
             sessions.reset(sid)
         return {"ok": True}
 
     @app.get("/api/session")
     def session_info(sid: str = Depends(require)) -> dict[str, Any]:
-        s = sessions.get_or_create(sid)
+        return {"authenticated": True}
+
+    # ───── hub: list of agents ─────
+
+    @app.get("/api/agents")
+    def list_agents() -> dict[str, Any]:
         return {
-            "authenticated": True,
-            "has_dataset": s.has_files,
-            "dataset_label": s.dataset_label,
-            "file_count": len(s.files),
+            "agents": [
+                {
+                    "id": a.id,
+                    "name": a.name,
+                    "tagline": a.tagline,
+                    "icon": a.icon,
+                    "description": a.description,
+                    "status": a.status,
+                    "accepts_files": a.accepts_files,
+                }
+                for a in _agents.AGENTS.values()
+            ]
         }
 
-    # ───── dataset ─────
+    # ───── per-agent: dataset ─────
 
-    @app.get("/api/samples")
-    def list_samples() -> dict[str, Any]:
-        return {"samples": _list_samples()}
+    @app.get("/api/agents/{agent_id}/samples")
+    def list_samples(agent_id: str) -> dict[str, Any]:
+        agent = _resolve_agent(agent_id)
+        return {"samples": _list_samples(agent)}
 
-    @app.post("/api/load-sample")
-    def load_sample(body: LoadSampleBody, sid: str = Depends(require)) -> dict[str, Any]:
-        sample = _find_sample(body.sample_id)
+    @app.post("/api/agents/{agent_id}/load-sample")
+    def load_sample(
+        agent_id: str, body: LoadSampleBody, sid: str = Depends(require)
+    ) -> dict[str, Any]:
+        agent = _resolve_agent(agent_id)
+        sample = _find_sample(body.sample_id, agent)
         if not sample:
             raise HTTPException(404, "unknown_sample")
-        s = sessions.get_or_create(sid)
+        s = sessions.get_or_create(sid, agent.id)
         _reset_dataset(s)
         _attach_files(s, [(Path(sample["path"]), sample["label"])])
         return {"ok": True, "label": s.dataset_label, "file_count": len(s.files)}
 
-    @app.post("/api/upload")
+    @app.post("/api/agents/{agent_id}/upload")
     async def upload_files(
+        agent_id: str,
         sid: str = Depends(require),
         files: list[UploadFile] = File(...),
     ) -> dict[str, Any]:
+        agent = _resolve_agent(agent_id)
+        if not agent.accepts_files:
+            raise HTTPException(400, "agent_does_not_accept_files")
         if not files:
             raise HTTPException(400, "no_files")
 
-        s = sessions.get_or_create(sid)
-        # Per-upload workdir (zip extractions go here; raw files copied here too).
-        workdir = _UPLOAD_DIR / sid / uuid.uuid4().hex
+        s = sessions.get_or_create(sid, agent.id)
+        workdir = _UPLOAD_DIR / f"{sid}__{agent.id}" / uuid.uuid4().hex
         workdir.mkdir(parents=True, exist_ok=True)
 
-        # Spool each upload to disk so the staging code can inspect them.
         sources: list[tuple[Path, str]] = []
         for up in files:
             if not up.filename:
                 raise HTTPException(400, "missing_filename")
-            target = workdir / Path(up.filename).name  # strip any client-side path
+            target = workdir / Path(up.filename).name
             with target.open("wb") as out:
                 shutil.copyfileobj(up.file, out)
             sources.append((target, up.filename))
@@ -184,11 +231,10 @@ def create_app() -> FastAPI:
 
         try:
             uploaded = _files.upload_staged(staged)
-        except Exception as exc:  # noqa: BLE001 — surface Files API errors as 502
+        except Exception as exc:  # noqa: BLE001
             shutil.rmtree(workdir, ignore_errors=True)
             raise HTTPException(502, f"files_api_error:{type(exc).__name__}") from exc
 
-        # Replace any prior files (we treat each /upload as a "new analysis context").
         _wipe_session_files(s)
         s.files = [
             FileEntry(
@@ -210,19 +256,29 @@ def create_app() -> FastAPI:
             "files": [{"label": f.label, "size_bytes": f.size_bytes} for f in s.files],
         }
 
-    @app.get("/api/state")
-    def state(sid: str = Depends(require)) -> dict[str, Any]:
-        s = sessions.get_or_create(sid)
+    @app.get("/api/agents/{agent_id}/state")
+    def state(agent_id: str, sid: str = Depends(require)) -> dict[str, Any]:
+        agent = _resolve_agent(agent_id)
+        s = sessions.get_or_create(sid, agent.id)
         return {
+            "agent": {
+                "id": agent.id,
+                "name": agent.name,
+                "icon": agent.icon,
+                "tagline": agent.tagline,
+                "accepts_files": agent.accepts_files,
+                "kickoff_message": agent.kickoff_message,
+            },
             "has_dataset": s.has_files,
             "dataset_label": s.dataset_label,
             "files": [{"label": f.label, "size_bytes": f.size_bytes} for f in s.files],
             "messages": _visible_transcript(s.messages),
         }
 
-    @app.post("/api/reset")
-    def reset(sid: str = Depends(require)) -> dict[str, Any]:
-        s = sessions.get_or_create(sid)
+    @app.post("/api/agents/{agent_id}/reset")
+    def reset(agent_id: str, sid: str = Depends(require)) -> dict[str, Any]:
+        agent = _resolve_agent(agent_id)
+        s = sessions.get_or_create(sid, agent.id)
         _wipe_session_files(s)
         s.files = []
         s.dataset_label = None
@@ -230,18 +286,21 @@ def create_app() -> FastAPI:
         s.messages = []
         return {"ok": True}
 
-    # ───── chat (streaming NDJSON) ─────
+    # ───── per-agent: chat (streaming NDJSON) ─────
 
-    @app.post("/api/chat")
-    def chat(body: ChatBody, sid: str = Depends(require)) -> StreamingResponse:
-        s = sessions.get_or_create(sid)
-        if not s.has_files:
+    @app.post("/api/agents/{agent_id}/chat")
+    def chat(
+        agent_id: str, body: ChatBody, sid: str = Depends(require)
+    ) -> StreamingResponse:
+        agent = _resolve_agent(agent_id)
+        s = sessions.get_or_create(sid, agent.id)
+        if agent.accepts_files and not s.has_files:
             raise HTTPException(400, "no_dataset_loaded")
         msg = body.message.strip()
         if not msg:
             raise HTTPException(400, "empty_message")
         try:
-            runner = _runner()
+            runner = _runner_for(agent)
         except RuntimeError as exc:
             raise HTTPException(500, f"chat_error:{exc}") from exc
 
@@ -250,22 +309,18 @@ def create_app() -> FastAPI:
                 for ev in runner.stream_turn(s, msg):
                     yield (json.dumps(ev, default=str) + "\n").encode("utf-8")
             except Exception as exc:  # noqa: BLE001
-                # Last-resort error event in the stream.
                 yield (
                     json.dumps({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
                     + "\n"
                 ).encode("utf-8")
 
-        # NDJSON over HTTP. Vercel proxies the stream and keeps the
-        # connection alive because the first chunk (the kickoff event from
-        # the runner) arrives well within the 30s window.
         return StreamingResponse(
             _ndjson(),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
 
-    # ───── sandbox-artifact proxy ─────
+    # ───── shared: sandbox-artifact proxy ─────
 
     @app.get("/api/files/{file_id}")
     def download_file(file_id: str, sid: str = Depends(require)) -> StreamingResponse:
@@ -291,7 +346,6 @@ def create_app() -> FastAPI:
 
 
 def _reset_dataset(s: SessionState) -> None:
-    """Clear file state without touching anything else; used before loading a new sample."""
     _wipe_session_files(s)
     s.files = []
     s.dataset_label = None
@@ -300,9 +354,11 @@ def _reset_dataset(s: SessionState) -> None:
 
 
 def _attach_files(s: SessionState, sources: list[tuple[Path, str]]) -> None:
-    """For samples — skip the multi-file staging pipeline (single trusted file)."""
     uploaded = _files.upload_staged(
-        [_files.StagedFile(local_path=p, label=label, size_bytes=p.stat().st_size) for p, label in sources]
+        [
+            _files.StagedFile(local_path=p, label=label, size_bytes=p.stat().st_size)
+            for p, label in sources
+        ]
     )
     s.files = [
         FileEntry(
@@ -328,7 +384,6 @@ def _summarize_label(files: list[FileEntry]) -> str:
 
 
 def _wipe_session_files(s: SessionState) -> None:
-    """Delete every Anthropic file + local upload tied to this session."""
     for f in s.files:
         _files.delete_file(f.anthropic_file_id)
         if str(f.local_path).startswith(str(_UPLOAD_DIR)):
@@ -336,8 +391,7 @@ def _wipe_session_files(s: SessionState) -> None:
                 f.local_path.unlink(missing_ok=True)
             except OSError:
                 pass
-    # Tidy up per-session upload workdir if empty.
-    session_dir = _UPLOAD_DIR / s.sid
+    session_dir = _UPLOAD_DIR / f"{s.sid}__{s.agent_id}"
     if session_dir.exists():
         for sub in session_dir.iterdir():
             if sub.is_dir():
@@ -347,16 +401,19 @@ def _wipe_session_files(s: SessionState) -> None:
                     pass
 
 
-def _list_samples() -> list[dict[str, str]]:
+def _list_samples(agent: AgentConfig) -> list[dict[str, Any]]:
     if not _SAMPLES_DIR.exists():
         return []
     samples = []
-    for path in sorted(_SAMPLES_DIR.glob("*.csv")):
-        meta = _SAMPLES_META.get(path.stem, {})
+    for sample_id in agent.samples:
+        path = _SAMPLES_DIR / f"{sample_id}.csv"
+        if not path.exists():
+            continue
+        meta = _SAMPLES_META.get(sample_id, {})
         samples.append(
             {
-                "id": path.stem,
-                "label": meta.get("label", path.stem),
+                "id": sample_id,
+                "label": meta.get("label", sample_id),
                 "description": meta.get("description", ""),
                 "row_count": meta.get("row_count", 0),
             }
@@ -364,7 +421,9 @@ def _list_samples() -> list[dict[str, str]]:
     return samples
 
 
-def _find_sample(sample_id: str) -> dict[str, Any] | None:
+def _find_sample(sample_id: str, agent: AgentConfig) -> dict[str, Any] | None:
+    if sample_id not in agent.samples:
+        return None
     path = _SAMPLES_DIR / f"{sample_id}.csv"
     if not path.exists():
         return None
@@ -386,7 +445,6 @@ _SAMPLES_META: dict[str, dict[str, Any]] = {
 
 
 def _visible_transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Strip Anthropic-specific blocks for UI consumption."""
     out: list[dict[str, Any]] = []
     for m in messages:
         if m["role"] == "user":
@@ -398,7 +456,6 @@ def _visible_transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     text_parts.append(block.get("text", ""))
             if text_parts:
                 out.append({"role": "user", "text": "\n".join(text_parts).strip()})
-
         elif m["role"] == "assistant":
             text_parts = []
             for block in m["content"] if isinstance(m["content"], list) else []:

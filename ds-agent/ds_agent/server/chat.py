@@ -26,6 +26,7 @@ from typing import Any, Iterator
 
 from anthropic import Anthropic
 
+from .agents import AgentConfig
 from .state import SessionState
 
 
@@ -35,7 +36,9 @@ _EFFORT = os.environ.get("AGENT_EFFORT", "high")  # low | medium | high | xhigh 
 _MAX_PAUSE_RESUMES = 5
 
 
-_SYSTEM_PROMPT = """You are Sprntly's senior data scientist.
+# Kept here for any caller that still imports it; the live system prompt
+# now comes from AgentConfig.system_prompt.
+_LEGACY_SYSTEM_PROMPT = """You are Sprntly's senior data scientist.
 
 You have one tool: a Python sandbox (`code_execution`) with pandas, numpy, \
 scipy, scikit-learn, statsmodels, matplotlib, seaborn, shap, openpyxl, pypdf \
@@ -135,10 +138,16 @@ class TurnResult:
 
 
 class ChatRunner:
-    def __init__(self, api_key: str | None = None, model: str = _MODEL) -> None:
+    def __init__(
+        self,
+        agent: AgentConfig,
+        api_key: str | None = None,
+        model: str = _MODEL,
+    ) -> None:
         key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not key:
             raise RuntimeError("ANTHROPIC_API_KEY is required for the agent service.")
+        self.agent = agent
         self.client = Anthropic(api_key=key)
         self.model = model
 
@@ -185,7 +194,7 @@ class ChatRunner:
                 "system": [
                     {
                         "type": "text",
-                        "text": _SYSTEM_PROMPT,
+                        "text": self.agent.system_prompt,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],

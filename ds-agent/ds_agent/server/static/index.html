@@ -3,16 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sprntly · DS Agent</title>
+<title>Sprntly · Agents</title>
 <meta name="robots" content="noindex, nofollow">
 <link rel="stylesheet" href="/agent/static/style.css">
 </head>
 <body>
 
-<!-- Login screen -->
+<!-- Login -->
 <div id="login-screen" class="screen">
   <div class="login-card">
-    <div class="brand"><span class="brand-dot"></span> Sprntly · DS Agent</div>
+    <div class="brand"><span class="brand-dot"></span> Sprntly · Agents</div>
     <p class="login-sub">Private preview. Enter the access password to continue.</p>
     <form id="login-form">
       <input type="password" id="login-password" placeholder="Access password" autocomplete="current-password" required>
@@ -22,10 +22,29 @@
   </div>
 </div>
 
-<!-- Chat screen -->
+<!-- Hub: agent cards -->
+<div id="hub-screen" class="screen" hidden>
+  <header class="topbar">
+    <div class="brand"><span class="brand-dot"></span> Sprntly · Agents</div>
+    <div class="topbar-right">
+      <button id="hub-logout-btn" class="ghost-btn" type="button">Sign out</button>
+    </div>
+  </header>
+  <main class="hub-main">
+    <h1 class="hub-title">Pick an agent.</h1>
+    <p class="hub-sub">Each agent is a focused capability. Tap a card to start.</p>
+    <div id="hub-cards" class="hub-cards"></div>
+  </main>
+</div>
+
+<!-- Agent chat -->
 <div id="chat-screen" class="screen" hidden>
   <header class="topbar">
-    <div class="brand"><span class="brand-dot"></span> Sprntly · DS Agent</div>
+    <div class="brand">
+      <a href="/agent" id="back-to-hub" class="back-link">←</a>
+      <span class="brand-dot"></span>
+      <span id="agent-name">Sprntly · Agent</span>
+    </div>
     <div class="topbar-right">
       <span id="dataset-label" class="dataset-pill"></span>
       <button id="reset-btn" class="ghost-btn" type="button">Reset</button>
@@ -34,15 +53,14 @@
   </header>
 
   <main class="layout">
-    <!-- Dataset picker (shown when no dataset is loaded) -->
     <section id="picker" class="picker" hidden>
-      <h1>Pick a dataset to start.</h1>
-      <p class="picker-sub">Upload your own CSV, or try a bundled sample. The agent runs locally on the EC2 instance — your data doesn't leave Sprntly's servers.</p>
+      <h1 id="picker-title">Pick a dataset to start.</h1>
+      <p class="picker-sub" id="picker-sub">Upload your own files (CSV / Excel / JSON / Parquet / PDF / text / zip — up to 20 files, 100 MB total), or try a bundled sample. The agent runs locally on the EC2 instance.</p>
 
       <div class="picker-grid">
         <div class="picker-card" id="upload-card">
           <h3>Upload your data</h3>
-          <p>One or more files, or a zip. CSV / Excel / JSON / Parquet / PDF / text. Up to 20 files, 100 MB total.</p>
+          <p>One or more files, or a zip. CSV / Excel / JSON / Parquet / PDF / text.</p>
           <label class="upload-label">
             <input type="file" id="file-input" accept=".csv,.tsv,.json,.jsonl,.ndjson,.parquet,.feather,.xlsx,.xls,.txt,.md,.log,.pdf,.html,.htm,.zip" multiple hidden>
             <span class="upload-btn">Choose files</span>
@@ -55,7 +73,6 @@
       </div>
     </section>
 
-    <!-- Chat (shown after dataset is loaded) -->
     <section id="chat-pane" class="chat-pane" hidden>
       <div id="messages" class="messages"></div>
       <form id="chat-form" class="composer">

@@ -80,9 +80,9 @@ def _read_ndjson(response) -> list[dict[str, Any]]:
 
 def test_chat_streams_ndjson(client):
     headers = _login(client)
-    client.post("/api/load-sample", json={"sample_id": "saas_retention"}, headers=headers)
+    client.post("/api/agents/ds/load-sample", json={"sample_id": "saas_retention"}, headers=headers)
     with client.stream(
-        "POST", "/api/chat", json={"message": "go"}, headers=headers
+        "POST", "/api/agents/ds/chat", json={"message": "go"}, headers=headers
     ) as r:
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("application/x-ndjson")
@@ -105,14 +105,14 @@ def test_chat_streams_ndjson(client):
 
 def test_chat_empty_message_400s(client):
     headers = _login(client)
-    client.post("/api/load-sample", json={"sample_id": "saas_retention"}, headers=headers)
-    r = client.post("/api/chat", json={"message": "  "}, headers=headers)
+    client.post("/api/agents/ds/load-sample", json={"sample_id": "saas_retention"}, headers=headers)
+    r = client.post("/api/agents/ds/chat", json={"message": "  "}, headers=headers)
     assert r.status_code == 400
     assert r.json()["detail"] == "empty_message"
 
 
 def test_chat_requires_dataset(client):
     headers = _login(client)
-    r = client.post("/api/chat", json={"message": "go"}, headers=headers)
+    r = client.post("/api/agents/ds/chat", json={"message": "go"}, headers=headers)
     assert r.status_code == 400
     assert r.json()["detail"] == "no_dataset_loaded"

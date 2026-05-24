@@ -6,9 +6,24 @@
  * collapsible <details> blocks inside the assistant message.
  */
 
-const API = {
-  base: window.location.pathname.startsWith("/agent") ? "/agent/api" : "/api",
-};
+// Routing — single bundle serves both hub (/agent or /) and per-agent
+// chat (/agent/{id} or /{id}). nginx may strip /agent/ in production;
+// in dev the prefix is just empty. agentId is null on the hub.
+const ROUTE = (function () {
+  const path = window.location.pathname;
+  const prefix = path.startsWith("/agent") ? "/agent" : "";
+  const rest = path.slice(prefix.length).replace(/^\/+|\/+$/g, "");
+  return {
+    prefix,
+    apiBase: prefix + "/api",
+    agentId: rest || null,
+    hubUrl: prefix || "/",
+  };
+})();
+const API = { base: ROUTE.apiBase };
+const AGENT_BASE = ROUTE.agentId
+  ? `${ROUTE.apiBase}/agents/${encodeURIComponent(ROUTE.agentId)}`
+  : null;
 
 const TOKEN_KEY = "sprntly_agent_token";
 function getToken() { return localStorage.getItem(TOKEN_KEY); }
@@ -18,6 +33,10 @@ function clearToken() { localStorage.removeItem(TOKEN_KEY); }
 const $ = (sel) => document.querySelector(sel);
 
 const loginScreen = $("#login-screen");
+const hubScreen = $("#hub-screen");
+const hubCards = $("#hub-cards");
+const hubLogoutBtn = $("#hub-logout-btn");
+const agentNameEl = $("#agent-name");
 const chatScreen = $("#chat-screen");
 const loginForm = $("#login-form");
 const loginPwd = $("#login-password");
@@ -45,10 +64,19 @@ function authHeaders() {
 }
 
 async function api(path, opts = {}) {
+  return apiAt(API.base + path, opts);
+}
+
+async function agentApi(path, opts = {}) {
+  if (!AGENT_BASE) throw new Error("no_agent_in_route");
+  return apiAt(AGENT_BASE + path, opts);
+}
+
+async function apiAt(url, opts = {}) {
   const baseHeaders = opts.body instanceof FormData
     ? { ...authHeaders() }
     : { "Content-Type": "application/json", ...authHeaders() };
-  const res = await fetch(API.base + path, {
+  const res = await fetch(url, {
     headers: { ...baseHeaders, ...(opts.headers || {}) },
     ...opts,
   });
@@ -69,22 +97,57 @@ async function api(path, opts = {}) {
 // ───── auth flow ─────
 
 async function checkSession() {
-  if (!getToken()) {
-    showLogin();
-    return;
-  }
+  if (!getToken()) { showLogin(); return; }
   const resp = await api("/session", { method: "GET" });
-  if (resp._unauthenticated) {
-    showLogin();
-    return;
-  }
-  await enterChat();
+  if (resp._unauthenticated) { showLogin(); return; }
+  await enterAuthed();
 }
 
 function showLogin() {
+  hubScreen.hidden = true;
   chatScreen.hidden = true;
   loginScreen.hidden = false;
   loginPwd.focus();
+}
+
+async function enterAuthed() {
+  loginScreen.hidden = true;
+  if (ROUTE.agentId === null) {
+    await showHub();
+  } else {
+    await enterChat();
+  }
+}
+
+async function showHub() {
+  chatScreen.hidden = true;
+  hubScreen.hidden = false;
+  hubCards.innerHTML = '<p style="color:var(--text-3)">Loading agents…</p>';
+  const resp = await api("/agents", { method: "GET" });
+  if (resp._unauthenticated) { showLogin(); return; }
+  hubCards.innerHTML = "";
+  for (const a of resp.agents || []) {
+    const disabled = a.status === "coming-soon";
+    const card = document.createElement(disabled ? "div" : "a");
+    card.className = "hub-card";
+    if (disabled) {
+      card.setAttribute("data-disabled", "true");
+    } else {
+      card.href = ROUTE.prefix + "/" + a.id;
+    }
+    card.innerHTML = `
+      <div class="icon"></div>
+      <div class="name"><span></span><span class="status"></span></div>
+      <div class="tagline"></div>
+    `;
+    card.querySelector(".icon").textContent = a.icon || "🤖";
+    card.querySelector(".name > span:first-child").textContent = a.name;
+    const statusEl = card.querySelector(".status");
+    statusEl.textContent = a.status === "coming-soon" ? "Coming soon" : a.status;
+    statusEl.classList.add(a.status);
+    card.querySelector(".tagline").textContent = a.tagline || a.description || "";
+    hubCards.appendChild(card);
+  }
 }
 
 loginForm.addEventListener("submit", async (e) => {
@@ -115,26 +178,42 @@ loginForm.addEventListener("submit", async (e) => {
   }
 });
 
-logoutBtn.addEventListener("click", async () => {
-  try { await api("/logout", { method: "POST" }); } catch (e) {}
-  clearToken();
-  loginPwd.value = "";
-  messagesEl.innerHTML = "";
-  showLogin();
-});
+function bindLogout(btn) {
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    try { await api("/logout", { method: "POST" }); } catch (e) {}
+    clearToken();
+    loginPwd.value = "";
+    if (messagesEl) messagesEl.innerHTML = "";
+    showLogin();
+  });
+}
+bindLogout(logoutBtn);
+bindLogout(hubLogoutBtn);
 
 
 // ───── chat shell ─────
 
 async function enterChat() {
+  hubScreen.hidden = true;
   loginScreen.hidden = true;
   chatScreen.hidden = false;
   await refreshState();
 }
 
 async function refreshState() {
-  const state = await api("/state", { method: "GET" });
-  if (state._unauthenticated) { showLogin(); return; }
+  if (!AGENT_BASE) { showHub(); return; }
+  const res = await fetch(AGENT_BASE + "/state", { headers: authHeaders() });
+  if (res.status === 401) { clearToken(); showLogin(); return; }
+  if (res.status === 404) {
+    // Unknown agent id — bounce to hub
+    window.location.href = ROUTE.hubUrl;
+    return;
+  }
+  const state = await res.json();
+  if (agentNameEl && state.agent) {
+    agentNameEl.textContent = `${state.agent.icon || ""} ${state.agent.name}`.trim();
+  }
   if (!state.has_dataset) {
     picker.hidden = false;
     chatPane.hidden = true;
@@ -156,7 +235,7 @@ async function refreshState() {
 
 async function loadSamples() {
   samplesList.innerHTML = "";
-  const { samples } = await api("/samples", { method: "GET" });
+  const { samples } = await agentApi("/samples", { method: "GET" });
   for (const s of samples) {
     const row = document.createElement("div");
     row.className = "sample-item";
@@ -171,7 +250,7 @@ async function loadSamples() {
     row.querySelector(".desc").textContent = s.description;
     row.querySelector(".sample-pick").addEventListener("click", async () => {
       row.querySelector(".sample-pick").textContent = "Loading…";
-      await api("/load-sample", { method: "POST", body: JSON.stringify({ sample_id: s.id }) });
+      await agentApi("/load-sample", { method: "POST", body: JSON.stringify({ sample_id: s.id }) });
       await refreshState();
       autopilotKickoff();
     });
@@ -186,7 +265,7 @@ fileInput.addEventListener("change", async () => {
   for (const f of files) fd.append("files", f, f.name);
   setChatStatus(files.length === 1 ? "Uploading…" : `Uploading ${files.length} files…`);
   try {
-    const res = await fetch(API.base + "/upload", {
+    const res = await fetch(AGENT_BASE + "/upload", {
       method: "POST",
       headers: authHeaders(),
       body: fd,
@@ -211,7 +290,7 @@ fileInput.addEventListener("change", async () => {
 
 resetBtn.addEventListener("click", async () => {
   if (!confirm("Reset the session? This clears the loaded dataset and chat history.")) return;
-  await api("/reset", { method: "POST" });
+  await agentApi("/reset", { method: "POST" });
   await refreshState();
 });
 
@@ -548,7 +627,7 @@ async function sendMessage(text) {
   const slot = makeStreamingAssistantSlot();
 
   try {
-    const res = await fetch(API.base + "/chat", {
+    const res = await fetch(AGENT_BASE + "/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ message: text }),

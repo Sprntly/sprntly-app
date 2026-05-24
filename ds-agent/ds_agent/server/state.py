@@ -1,13 +1,7 @@
-"""In-memory per-session state.
+"""In-memory per-(session, agent) state.
 
-A session can have **multiple files attached** (e.g. a CSV plus a
-README, or several tables from a zip). Each `FileEntry` carries:
-  - `local_path` — the file on the agent host (kept for cleanup)
-  - `label` — the display name (also what the file is named inside
-    the sandbox, after zip-path flattening if applicable)
-  - `anthropic_file_id` — the Files API id Claude reads from
-  - `attached` — True after we've sent a container_upload block for
-    it; subsequent turns don't re-attach
+A user can have multiple agents open in different tabs without their
+conversations colliding. The store keys on `(sid, agent_id)`.
 """
 
 from __future__ import annotations
@@ -31,16 +25,15 @@ class FileEntry:
 @dataclass
 class SessionState:
     sid: str
+    agent_id: str
     created_at: float = field(default_factory=time.time)
 
     files: list[FileEntry] = field(default_factory=list)
-    # Short display label: "data.csv" or "3 files: x.csv, y.csv, z.pdf"
     dataset_label: str | None = None
 
-    # Code-execution container — persists across turns within a session.
+    anthropic_file_attached: bool = False
     container_id: str | None = None
 
-    # Anthropic messages list — full content blocks, fed back each turn.
     messages: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -55,24 +48,35 @@ class SessionState:
 class SessionStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._sessions: dict[str, SessionState] = {}
+        self._sessions: dict[tuple[str, str], SessionState] = {}
 
-    def get_or_create(self, sid: str) -> SessionState:
+    def get_or_create(self, sid: str, agent_id: str) -> SessionState:
         with self._lock:
-            existing = self._sessions.get(sid)
+            key = (sid, agent_id)
+            existing = self._sessions.get(key)
             if existing is None:
-                existing = SessionState(sid=sid)
-                self._sessions[sid] = existing
+                existing = SessionState(sid=sid, agent_id=agent_id)
+                self._sessions[key] = existing
             return existing
 
-    def reset(self, sid: str) -> None:
+    def reset(self, sid: str, agent_id: str | None = None) -> None:
+        """Drop session(s). If agent_id is None, drop ALL sessions for this sid (logout)."""
         with self._lock:
-            self._sessions.pop(sid, None)
+            if agent_id is None:
+                keys = [k for k in self._sessions if k[0] == sid]
+                for k in keys:
+                    del self._sessions[k]
+            else:
+                self._sessions.pop((sid, agent_id), None)
+
+    def all_for_sid(self, sid: str) -> list[SessionState]:
+        with self._lock:
+            return [v for k, v in self._sessions.items() if k[0] == sid]
 
     def gc(self, max_age_s: int = 60 * 60 * 24) -> int:
         cutoff = time.time() - max_age_s
         with self._lock:
-            stale = [s for s, st in self._sessions.items() if st.created_at < cutoff]
-            for s in stale:
-                del self._sessions[s]
+            stale = [k for k, st in self._sessions.items() if st.created_at < cutoff]
+            for k in stale:
+                del self._sessions[k]
             return len(stale)
