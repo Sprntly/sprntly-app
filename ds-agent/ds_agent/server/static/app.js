@@ -1,13 +1,9 @@
 /* Sprntly DS-Agent UI — vanilla.
  *
- * Auth: bearer token in localStorage. The login response returns a
- * `token` field that we stash and send back as `Authorization: Bearer
- * <token>` on every subsequent request. No cookies — they were
- * unreliable through the Vercel rewrite for some browser configs.
- *
- * All endpoints live under /agent on the public side (nginx prefix) and
- * under / inside this app (FastAPI). We use absolute /agent/api/... so
- * the UI works on the prod domain and on a direct localhost dev server.
+ * Auth: bearer token in localStorage.
+ * Chat: each assistant turn can include zero or more code-execution
+ * bundles (code + stdout + stderr + chart images). They render as
+ * collapsible <details> blocks inside the assistant message.
  */
 
 const API = {
@@ -20,7 +16,6 @@ function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
 function clearToken() { localStorage.removeItem(TOKEN_KEY); }
 
 const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
 
 const loginScreen = $("#login-screen");
 const chatScreen = $("#chat-screen");
@@ -220,24 +215,100 @@ resetBtn.addEventListener("click", async () => {
 });
 
 
-// ───── chat ─────
+// ───── chat rendering ─────
 
-function renderMessage(role, text, toolCalls = []) {
+function renderMessage(role, text, codeExecutions = []) {
   const el = document.createElement("div");
   el.className = `msg ${role}`;
-  el.textContent = text;
-  if (toolCalls && toolCalls.length) {
-    const chips = document.createElement("div");
-    chips.className = "msg-tool-chips";
-    for (const t of toolCalls) {
-      const c = document.createElement("span");
-      c.className = "tool-chip" + (t.is_error ? " error" : "");
-      c.textContent = t.name + (t.is_error ? " ✗" : "");
-      chips.appendChild(c);
-    }
-    el.appendChild(chips);
+  if (text) {
+    const t = document.createElement("div");
+    t.className = "msg-text";
+    t.textContent = text;
+    el.appendChild(t);
+  }
+  for (const ce of codeExecutions || []) {
+    el.appendChild(renderCodeBundle(ce));
   }
   messagesEl.appendChild(el);
+}
+
+function renderCodeBundle(ce) {
+  const wrap = document.createElement("details");
+  wrap.className = "code-bundle";
+
+  const summary = document.createElement("summary");
+  const label = document.createElement("span");
+  label.className = "label";
+  label.textContent = summaryLabel(ce);
+  summary.appendChild(label);
+
+  if (ce.error_code) {
+    const badge = document.createElement("span");
+    badge.className = "badge error";
+    badge.textContent = ce.error_code;
+    summary.appendChild(badge);
+  } else if (typeof ce.return_code === "number" && ce.return_code !== 0) {
+    const badge = document.createElement("span");
+    badge.className = "badge error";
+    badge.textContent = `exit ${ce.return_code}`;
+    summary.appendChild(badge);
+  }
+
+  wrap.appendChild(summary);
+
+  if (ce.code) {
+    const pre = document.createElement("pre");
+    pre.className = "code-src";
+    pre.textContent = ce.code;
+    wrap.appendChild(pre);
+  }
+  if (ce.stdout) {
+    const pre = document.createElement("pre");
+    pre.className = "code-stdout";
+    pre.textContent = ce.stdout;
+    wrap.appendChild(pre);
+  }
+  if (ce.stderr) {
+    const pre = document.createElement("pre");
+    pre.className = "code-stderr";
+    pre.textContent = ce.stderr;
+    wrap.appendChild(pre);
+  }
+  if (ce.file_ids && ce.file_ids.length) {
+    const charts = document.createElement("div");
+    charts.className = "code-charts";
+    for (const fid of ce.file_ids) {
+      const img = document.createElement("img");
+      img.alt = "generated artifact";
+      // <img> can't carry the Authorization header, so fetch as blob.
+      loadAuthedImage(fid).then((url) => { if (url) img.src = url; });
+      charts.appendChild(img);
+    }
+    wrap.appendChild(charts);
+  }
+  return wrap;
+}
+
+async function loadAuthedImage(fileId) {
+  try {
+    const res = await fetch(API.base + "/files/" + encodeURIComponent(fileId), {
+      headers: authHeaders(),
+    });
+    if (!res.ok) return null;
+    return URL.createObjectURL(await res.blob());
+  } catch (e) {
+    return null;
+  }
+}
+
+function summaryLabel(ce) {
+  if (ce.error_code) return "Sandbox error";
+  const lines = (ce.code || "").split("\n");
+  const firstNonEmpty = lines.find((l) => l.trim());
+  if (firstNonEmpty) {
+    return "Ran: " + firstNonEmpty.trim().slice(0, 80);
+  }
+  return "Tool call";
 }
 
 function scrollToBottom() {
@@ -264,7 +335,7 @@ async function sendMessage(text) {
       body: JSON.stringify({ message: text }),
     });
     if (resp._unauthenticated) { showLogin(); return; }
-    renderMessage("assistant", resp.assistant || "(no reply)", resp.tool_calls);
+    renderMessage("assistant", resp.assistant || "(no reply)", resp.code_executions || []);
     scrollToBottom();
     setChatStatus(null);
   } catch (err) {
@@ -292,8 +363,6 @@ chatInput.addEventListener("keydown", (e) => {
 
 
 // ───── autopilot opening message ─────
-// After a dataset is loaded for the first time we seed the conversation
-// so the agent immediately runs describe_dataset + suggests a goal metric.
 
 function autopilotKickoff() {
   sendMessage("I just loaded a dataset. Take a look and tell me what you'd analyze.");

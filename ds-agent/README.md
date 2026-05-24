@@ -1,31 +1,28 @@
 # Sprntly DS Agent
 
-A data-science chat agent that runs against analytics CSVs and surfaces ranked behavioral drivers, confidence-scored.
+A data-science chat agent: a product manager loads a CSV and chats with Claude. Claude has a Python sandbox (Anthropic's server-side `code_execution` tool) and writes its own analyses — pandas, sklearn, scipy, statsmodels, matplotlib, shap pre-installed — instead of running a fixed pipeline.
 
-The pipeline is described in detail in the [internal spec](https://drive.google.com/drive/u/0/folders/1VsvqdKwVqrjp6w4kzMyF5BzlHRn6QzSP); this is the first slice — Stage 1 (Pattern Discovery) wired into a chat UI.
+The original spec is in the [internal Drive folder](https://drive.google.com/drive/u/0/folders/1VsvqdKwVqrjp6w4kzMyF5BzlHRn6QzSP). The first attempt — a fixed PCA + SHAP + stratified pipeline wrapped as tools the chat agent could call — is preserved under `ds_agent/legacy/` for reference. It was replaced because tool-wrapping a fixed pipeline meant the agent could only find patterns we'd coded for. The current design gives the agent code-execution and lets it decide what to compute.
 
 ## Layout
 
 ```
 ds-agent/
-├── ds_agent/                 # core pipeline + chat web service
-│   ├── ingest.py             # CSV intake + data-quality assessment
+├── ds_agent/
 │   ├── synthetic.py          # synthetic SaaS dataset (ground-truth effects planted)
-│   ├── stages/
-│   │   └── pattern_discovery.py   # Stage 1: PCA + SHAP + Stratified
-│   ├── confidence.py         # 5-factor HIGH/MEDIUM/LOW scoring
-│   ├── synthesis.py          # one-shot narrative writer (used by tools)
-│   ├── pipeline.py           # orchestrator + cross-method consolidation
-│   ├── output.py             # spec §3.3 JSON shape
-│   ├── cli.py                # `ds-agent gen-synthetic` / `ds-agent run`
-│   └── server/               # FastAPI chat service at /agent
-│       ├── app.py            # routes
-│       ├── auth.py           # shared-password + signed-cookie sessions
-│       ├── chat.py           # tool-using Claude loop
-│       ├── tools.py          # ds-agent tools exposed to the LLM
-│       ├── state.py          # in-process per-session store
-│       ├── static/           # vanilla HTML/CSS/JS UI
-│       └── samples/          # bundled sample CSVs
+│   ├── cli.py                # `ds-agent gen-synthetic`
+│   ├── server/               # FastAPI chat service at /agent
+│   │   ├── app.py            # routes
+│   │   ├── auth.py           # bearer-token sessions
+│   │   ├── chat.py           # Claude loop with server-side code_execution
+│   │   ├── tools.py          # Files API uploader (CSV → Anthropic)
+│   │   ├── state.py          # in-process per-session store
+│   │   ├── static/           # vanilla HTML/CSS/JS UI
+│   │   └── samples/          # bundled sample CSVs
+│   └── legacy/               # archived first attempt — fixed PCA + SHAP pipeline,
+│                             # confidence scoring, narrative writer. Kept for
+│                             # comparison / partial reuse; not imported by the
+│                             # running service.
 ├── deploy/
 │   ├── sprntly-agent.service # systemd unit
 │   └── setup.sh              # one-shot installer for EC2
@@ -77,7 +74,6 @@ Subsequent deploys land via the `Deploy ds-agent to EC2` GitHub Actions workflow
 
 ## What's not done yet
 
-- Stages 2–5 of the spec (Temporal, Tail, Causal, Interactions) — currently null in the output JSON.
-- Streaming responses on `/api/chat` (the UI shows a "Agent is thinking…" status instead).
+- Streaming `/api/chat` responses — the UI shows "Agent is thinking…" and the connection can take a while on heavy turns. **Note:** Vercel terminates rewrites at ~150s, so longer analyses fail through `sprntly.ai/agent`. Hit `api.sprntly.ai/agent` directly (no Vercel proxy) for slower work; `proxy_read_timeout` on nginx is 600s.
 - Per-user usage tracking (single shared password for v1).
-- Connectors for Amplitude / Mixpanel / GA4 / Pendo / PostHog — only CSV ingest today.
+- Connectors for Amplitude / Mixpanel / GA4 / Pendo / PostHog — only CSV upload today.

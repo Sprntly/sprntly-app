@@ -248,23 +248,78 @@ input, textarea {
   border: 1px solid var(--border);
   margin-right: 60px;
 }
-.msg-tool-chips {
-  margin-top: 8px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+/* ─── Code-execution bundles inside assistant messages ─── */
+.code-bundle {
+  margin: 10px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #FAFAF7;
 }
-.tool-chip {
-  font-size: 0.74rem;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #F3F4F6;
-  color: var(--text-3);
+.code-bundle summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px 12px;
+  font-size: 0.78rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-3);
+  background: #F3F4F6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
 }
-.tool-chip.error {
+.code-bundle summary::-webkit-details-marker { display: none; }
+.code-bundle summary::before {
+  content: "▸";
+  font-size: 0.7rem;
+  transition: transform 0.15s;
+}
+.code-bundle[open] summary::before { transform: rotate(90deg); }
+.code-bundle summary .label { flex: 1; }
+.code-bundle summary .badge {
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+}
+.code-bundle summary .badge.error {
   background: #FEE4E2;
+  border-color: #FCA5A1;
   color: var(--error);
+}
+.code-bundle pre {
+  margin: 0;
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  color: var(--text);
+  background: #FFFFFF;
+  border-top: 1px solid var(--border);
+  max-height: 360px;
+  overflow: auto;
+}
+.code-bundle pre.code-stdout { color: var(--text-2); background: #FAFAF7; }
+.code-bundle pre.code-stderr { color: var(--error); background: #FEF6F5; }
+.code-bundle pre.code-section-empty { display: none; }
+.code-bundle .code-charts {
+  padding: 8px 12px 12px;
+  background: #FFFFFF;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.code-bundle .code-charts img {
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #FFFFFF;
 }
 
 .composer {

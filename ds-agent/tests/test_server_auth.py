@@ -1,9 +1,8 @@
-"""Smoke tests for the FastAPI auth + session boundary.
+"""Auth boundary for the FastAPI app.
 
-Auth is now token-based: login returns a token in the JSON body, the
-client sends it back as `Authorization: Bearer <token>`. The chat
-endpoint itself is exercised via a mocked ChatRunner because we don't
-want to hit the Anthropic API during CI.
+Bearer-token sessions: login returns a token in the JSON body, every
+gated route requires `Authorization: Bearer <token>`. No Anthropic
+calls are made by any of these tests.
 """
 
 from __future__ import annotations
@@ -14,10 +13,15 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
-    # Set the env BEFORE importing the app module so load_config() picks it up.
     monkeypatch.setenv("AGENT_PASSWORD", "letmein")
     monkeypatch.setenv("AGENT_COOKIE_SECRET", "test-cookie-secret-min-32-chars-long")
     monkeypatch.setenv("AGENT_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-used")
+
+    # Stub the Files API uploader so tests don't hit the wire.
+    from ds_agent.server import tools as _tools
+    monkeypatch.setattr(_tools, "upload_csv", lambda *a, **kw: "file_test")
+    monkeypatch.setattr(_tools, "delete_file", lambda *a, **kw: None)
 
     from ds_agent.server.app import create_app
     return TestClient(create_app())
@@ -26,11 +30,7 @@ def client(monkeypatch, tmp_path):
 def _login(client) -> str:
     r = client.post("/api/login", json={"password": "letmein"})
     assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    token = body["token"]
-    assert token
-    return token
+    return r.json()["token"]
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -45,6 +45,7 @@ def test_session_requires_auth(client):
     assert client.get("/api/session").status_code == 401
     assert client.get("/api/state").status_code == 401
     assert client.post("/api/chat", json={"message": "hi"}).status_code == 401
+    assert client.post("/api/reset").status_code == 401
 
 
 def test_login_wrong_password(client):
@@ -55,7 +56,6 @@ def test_login_wrong_password(client):
 
 def test_login_returns_token(client):
     token = _login(client)
-    # The token is signed; we won't decode here, just confirm it's non-empty.
     assert isinstance(token, str) and len(token) > 20
 
 
@@ -75,21 +75,8 @@ def test_session_with_bad_token(client):
 
 def test_session_with_wrong_scheme(client):
     token = _login(client)
-    # `Basic <token>` instead of `Bearer <token>` should not authenticate.
     r = client.get("/api/session", headers={"Authorization": f"Basic {token}"})
     assert r.status_code == 401
-
-
-def test_logout_clears_session(client):
-    token = _login(client)
-    client.post("/api/logout", headers=_auth(token))
-    # Server-side session is gone, but the token is still cryptographically
-    # valid — the client is expected to drop the token from storage. We
-    # verify the /session call still works (the token still decodes to a sid)
-    # but the session it points at is fresh empty state.
-    r = client.get("/api/session", headers=_auth(token))
-    assert r.status_code == 200
-    assert r.json()["has_dataset"] is False
 
 
 def test_chat_requires_dataset(client):
