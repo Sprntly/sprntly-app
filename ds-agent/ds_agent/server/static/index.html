@@ -41,11 +41,11 @@
 
       <div class="picker-grid">
         <div class="picker-card" id="upload-card">
-          <h3>Upload your CSV</h3>
-          <p>One row per user, columns can be anything. Aim for &lt; 100k rows.</p>
+          <h3>Upload your data</h3>
+          <p>One or more files, or a zip. CSV / Excel / JSON / Parquet / PDF / text. Up to 20 files, 100 MB total.</p>
           <label class="upload-label">
-            <input type="file" id="file-input" accept=".csv" hidden>
-            <span class="upload-btn">Choose file</span>
+            <input type="file" id="file-input" accept=".csv,.tsv,.json,.jsonl,.ndjson,.parquet,.feather,.xlsx,.xls,.txt,.md,.log,.pdf,.html,.htm,.zip" multiple hidden>
+            <span class="upload-btn">Choose files</span>
           </label>
         </div>
         <div class="picker-card" id="samples-card">

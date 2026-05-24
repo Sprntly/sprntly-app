@@ -35,20 +35,29 @@ _MAX_PAUSE_RESUMES = 5
 
 _SYSTEM_PROMPT = """You are Sprntly's senior data scientist.
 
-A product manager has loaded a dataset (CSV) into your session. They want \
-insights they can act on this week. You have one tool: a Python sandbox \
-(`code_execution`) with pandas, numpy, scipy, scikit-learn, statsmodels, \
-matplotlib, seaborn, and shap pre-installed. `pip install` works for \
-anything else. State persists across your code-execution calls within \
-this conversation.
+A product manager has loaded one or more files into your session. They \
+want insights they can act on this week. You have one tool: a Python \
+sandbox (`code_execution`) with pandas, numpy, scipy, scikit-learn, \
+statsmodels, matplotlib, seaborn, shap, openpyxl, pypdf pre-installed. \
+`pip install` works for anything else. State persists across your \
+code-execution calls within this conversation.
 
-THE DATASET. The attached file is mounted at \
-`os.environ['INPUT_DIR'] + '/' + <original-filename>`. Read it with \
-something like: `df = pd.read_csv(os.path.join(os.environ['INPUT_DIR'], \
-'<filename>'))`. If you don't know the filename, `os.listdir(os.environ\
-['INPUT_DIR'])` returns it in one call — no need to search /tmp. On later \
-turns the same file and any variables you've defined are still in the \
-container; don't re-load unless the user has attached a new one.
+THE FILES. Every attached file is mounted at \
+`os.environ['INPUT_DIR'] + '/' + <filename>`. If multiple files are \
+attached, treat them as related — they belong to one analysis. Spend \
+your first turn calling `os.listdir(os.environ['INPUT_DIR'])` and \
+peeking at each (header rows for CSVs, summary for PDFs/text). Build a \
+mental model of how they relate before diving in: are they multiple \
+tables that join? A data file plus a README/spec? Several samples of \
+the same shape? File extensions: .csv/.tsv/.json/.jsonl → pandas; \
+.parquet → pd.read_parquet; .xlsx/.xls → pd.read_excel; .pdf → pypdf; \
+.txt/.md → plain read. Filenames sometimes carry path info via `__` \
+separators (e.g. `archive__data__users.csv` came from \
+`archive.zip/data/users.csv`) — use that to infer structure.
+
+On later turns the same files and any variables you've defined are \
+still in the container; don't re-load unless the user has attached \
+something new.
 
 HOW YOU OPERATE. Apply judgment; don't follow as a rigid checklist.
 
@@ -112,15 +121,22 @@ class ChatRunner:
         self.model = model
 
     def turn(self, session: SessionState, user_message: str) -> TurnResult:
-        # Build the user content. Attach the file via container_upload only
-        # on the first turn after a (new) dataset loaded.
+        # Build the user content. Attach every still-unattached file as
+        # its own container_upload block on this turn; later turns reuse
+        # the existing container.
         user_content: list[dict[str, Any]] = [{"type": "text", "text": user_message}]
-        if session.anthropic_file_id and not session.anthropic_file_attached:
+        unattached = session.unattached_files
+        for f in unattached:
             user_content.append(
-                {"type": "container_upload", "file_id": session.anthropic_file_id}
+                {"type": "container_upload", "file_id": f.anthropic_file_id}
             )
 
         session.messages.append({"role": "user", "content": user_content})
+        # Mark them attached now — if the API call fails the session is
+        # already in an inconsistent state anyway (half-turn), so don't
+        # waste cycles rolling back per-file flags.
+        for f in unattached:
+            f.attached = True
 
         text_chunks: list[str] = []
         executions: list[CodeExecution] = []

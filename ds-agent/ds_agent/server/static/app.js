@@ -180,11 +180,11 @@ async function loadSamples() {
 }
 
 fileInput.addEventListener("change", async () => {
-  const file = fileInput.files[0];
-  if (!file) return;
+  const files = Array.from(fileInput.files || []);
+  if (!files.length) return;
   const fd = new FormData();
-  fd.append("file", file);
-  setChatStatus("Uploading…");
+  for (const f of files) fd.append("files", f, f.name);
+  setChatStatus(files.length === 1 ? "Uploading…" : `Uploading ${files.length} files…`);
   try {
     const res = await fetch(API.base + "/upload", {
       method: "POST",
@@ -201,6 +201,7 @@ fileInput.addEventListener("change", async () => {
       throw new Error(j.detail || "Upload failed.");
     }
     setChatStatus(null);
+    fileInput.value = "";  // allow re-selecting the same files
     await refreshState();
     autopilotKickoff();
   } catch (err) {

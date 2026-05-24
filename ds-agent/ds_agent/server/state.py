@@ -1,14 +1,13 @@
 """In-memory per-session state.
 
-Holds:
-  - the locally-stored CSV path (display + download-only — Claude never reads it directly)
-  - the Anthropic Files-API file_id that mirrors it (Claude reads via that)
-  - the code-execution container_id so successive turns share state
-  - the chat transcript (Anthropic message list, fed back on each turn)
-  - rendered code-execution bundles (for the UI to show inline)
-
-Lifetime is the process — fine for a pilot. If the service restarts,
-sessions vanish.
+A session can have **multiple files attached** (e.g. a CSV plus a
+README, or several tables from a zip). Each `FileEntry` carries:
+  - `local_path` — the file on the agent host (kept for cleanup)
+  - `label` — the display name (also what the file is named inside
+    the sandbox, after zip-path flattening if applicable)
+  - `anthropic_file_id` — the Files API id Claude reads from
+  - `attached` — True after we've sent a container_upload block for
+    it; subsequent turns don't re-attach
 """
 
 from __future__ import annotations
@@ -21,28 +20,36 @@ from typing import Any
 
 
 @dataclass
+class FileEntry:
+    local_path: Path
+    label: str
+    anthropic_file_id: str
+    size_bytes: int
+    attached: bool = False
+
+
+@dataclass
 class SessionState:
     sid: str
     created_at: float = field(default_factory=time.time)
 
-    # Local copy of the user's CSV (for ingest helpers and reset cleanup).
-    csv_path: Path | None = None
+    files: list[FileEntry] = field(default_factory=list)
+    # Short display label: "data.csv" or "3 files: x.csv, y.csv, z.pdf"
     dataset_label: str | None = None
 
-    # The same CSV uploaded to Anthropic's Files API, so Claude's sandbox
-    # can read it via a `container_upload` content block on the next turn.
-    anthropic_file_id: str | None = None
-    # Set True after we've attached the file to one message; subsequent
-    # turns use the same container and don't need to re-attach.
-    anthropic_file_attached: bool = False
-
-    # The code-execution container Claude is using. Anthropic returns it
-    # in `response.container.id`; passing it back on the next request
-    # reuses the same filesystem + installed packages + variables.
+    # Code-execution container — persists across turns within a session.
     container_id: str | None = None
 
-    # Anthropic messages list — each entry is {"role": "user"|"assistant", "content": ...}
+    # Anthropic messages list — full content blocks, fed back each turn.
     messages: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def has_files(self) -> bool:
+        return bool(self.files)
+
+    @property
+    def unattached_files(self) -> list[FileEntry]:
+        return [f for f in self.files if not f.attached]
 
 
 class SessionStore:
@@ -63,7 +70,6 @@ class SessionStore:
             self._sessions.pop(sid, None)
 
     def gc(self, max_age_s: int = 60 * 60 * 24) -> int:
-        """Drop sessions older than max_age_s. Returns number purged."""
         cutoff = time.time() - max_age_s
         with self._lock:
             stale = [s for s, st in self._sessions.items() if st.created_at < cutoff]

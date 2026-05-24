@@ -20,7 +20,19 @@ def client(monkeypatch, tmp_path):
 
     # Stub the Files API uploader so tests don't hit the wire.
     from ds_agent.server import tools as _tools
-    monkeypatch.setattr(_tools, "upload_csv", lambda *a, **kw: "file_test")
+
+    def _fake_upload(staged):
+        return [
+            _tools.UploadedFile(
+                local_path=s.local_path,
+                label=s.label,
+                size_bytes=s.size_bytes,
+                anthropic_file_id=f"file_{i}",
+            )
+            for i, s in enumerate(staged)
+        ]
+
+    monkeypatch.setattr(_tools, "upload_staged", _fake_upload)
     monkeypatch.setattr(_tools, "delete_file", lambda *a, **kw: None)
 
     from ds_agent.server.app import create_app

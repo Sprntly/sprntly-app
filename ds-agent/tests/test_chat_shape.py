@@ -37,7 +37,19 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-used")
 
     from ds_agent.server import tools as _tools
-    monkeypatch.setattr(_tools, "upload_csv", lambda *a, **kw: "file_test")
+
+    def _fake_upload(staged):
+        return [
+            _tools.UploadedFile(
+                local_path=s.local_path,
+                label=s.label,
+                size_bytes=s.size_bytes,
+                anthropic_file_id=f"file_{i}",
+            )
+            for i, s in enumerate(staged)
+        ]
+
+    monkeypatch.setattr(_tools, "upload_staged", _fake_upload)
     monkeypatch.setattr(_tools, "delete_file", lambda *a, **kw: None)
 
     # `app.py` imports ChatRunner by name at module load and the lazy
