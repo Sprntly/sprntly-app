@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS connections (
     provider TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'active',
     google_email TEXT,
+    account_label TEXT,
     scopes TEXT NOT NULL DEFAULT '',
     token_json_encrypted TEXT NOT NULL,
     config_json TEXT NOT NULL DEFAULT '{}',
@@ -119,6 +120,11 @@ def init_db() -> None:
             c.execute(
                 "ALTER TABLE evidences ADD COLUMN variant TEXT NOT NULL DEFAULT 'v1'"
             )
+        # Generic account label for non-Google connectors (Figma email, GitHub login).
+        # Boxes that pre-date this migration get the column added in place.
+        conn_cols = {row[1] for row in c.execute("PRAGMA table_info(connections)").fetchall()}
+        if conn_cols and "account_label" not in conn_cols:
+            c.execute("ALTER TABLE connections ADD COLUMN account_label TEXT")
 
 
 @contextmanager
@@ -582,6 +588,7 @@ def upsert_connection(
     token_encrypted: str,
     scopes: str,
     google_email: str | None = None,
+    account_label: str | None = None,
     config_json: str = "{}",
     status: str = "active",
 ) -> dict:
@@ -592,12 +599,13 @@ def upsert_connection(
         ).fetchone()
         if existing:
             c.execute(
-                "UPDATE connections SET status=?, google_email=?, scopes=?, "
+                "UPDATE connections SET status=?, google_email=?, account_label=?, scopes=?, "
                 "token_json_encrypted=?, config_json=?, last_sync_error=NULL, updated_at=? "
                 "WHERE provider=?",
                 (
                     status,
                     google_email,
+                    account_label,
                     scopes,
                     token_encrypted,
                     config_json,
@@ -610,14 +618,15 @@ def upsert_connection(
             row_id = uuid.uuid4().hex
             c.execute(
                 "INSERT INTO connections "
-                "(id, provider, status, google_email, scopes, token_json_encrypted, "
-                "config_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, provider, status, google_email, account_label, scopes, "
+                "token_json_encrypted, config_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     row_id,
                     provider,
                     status,
                     google_email,
+                    account_label,
                     scopes,
                     token_encrypted,
                     config_json,
@@ -633,7 +642,7 @@ def upsert_connection(
 def get_connection(provider: str) -> dict | None:
     with conn() as c:
         row = c.execute(
-            "SELECT id, provider, status, google_email, scopes, token_json_encrypted, "
+            "SELECT id, provider, status, google_email, account_label, scopes, token_json_encrypted, "
             "config_json, last_sync_at, last_sync_error, created_at, updated_at "
             "FROM connections WHERE provider=?",
             (provider,),
@@ -644,7 +653,7 @@ def get_connection(provider: str) -> dict | None:
 def list_connections() -> list[dict]:
     with conn() as c:
         rows = c.execute(
-            "SELECT id, provider, status, google_email, scopes, token_json_encrypted, "
+            "SELECT id, provider, status, google_email, account_label, scopes, token_json_encrypted, "
             "config_json, last_sync_at, last_sync_error, created_at, updated_at "
             "FROM connections ORDER BY provider ASC"
         ).fetchall()
