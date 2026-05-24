@@ -188,14 +188,14 @@ class ChatRunner:
             if session.container_id:
                 kwargs["container"] = session.container_id
 
-            # Stream this Claude turn. We emit text deltas live, and emit
-            # code_start / code_result whenever a block of those types stops.
+            # Stream this Claude turn. Text deltas + code_start fire live;
+            # tool result blocks land fully populated in `final_message` after
+            # the stream completes (the per-event snapshot doesn't carry
+            # server-side tool result content), so we emit code_result from
+            # the final message at the end.
             stop_reason = "end_turn"
+            emitted_code_starts: set[str] = set()
             with self.client.messages.stream(**kwargs) as stream:
-                # Track which content_blocks we've emitted code_start for.
-                # The Anthropic SDK accumulates the final block at
-                # stream.current_message_snapshot, so on content_block_stop
-                # we can read the fully-resolved block.
                 for event in stream:
                     et = getattr(event, "type", None)
 
@@ -203,7 +203,7 @@ class ChatRunner:
                         delta = event.delta
                         if getattr(delta, "type", None) == "text_delta":
                             yield {"type": "text_delta", "text": delta.text}
-                        # input_json_delta (tool input being constructed) — skip,
+                        # input_json_delta (tool input being constructed) — skip;
                         # we emit code on content_block_stop with the full code.
 
                     elif et == "content_block_stop":
@@ -219,28 +219,47 @@ class ChatRunner:
                                     or block.input.get("command")
                                     or ""
                                 )
+                            emitted_code_starts.add(block.id)
                             yield {
                                 "type": "code_start",
                                 "id": block.id,
                                 "code": code,
                             }
-                        elif btype in (
-                            "bash_code_execution_tool_result",
-                            "code_execution_tool_result",
-                            "text_editor_code_execution_tool_result",
-                        ):
-                            ev = {
-                                "type": "code_result",
-                                "id": getattr(block, "tool_use_id", None),
-                            }
-                            ev.update(_extract_result(block))
-                            yield ev
 
                     elif et == "message_delta":
                         if getattr(event.delta, "stop_reason", None):
                             stop_reason = event.delta.stop_reason
 
                 final_message = stream.get_final_message()
+
+            # Emit code_result events from the fully-assembled final message.
+            # Walk in order so the UI can pair them with the code_start events
+            # by tool_use_id.
+            for block in final_message.content:
+                btype = getattr(block, "type", None)
+                if btype in (
+                    "bash_code_execution_tool_result",
+                    "code_execution_tool_result",
+                    "text_editor_code_execution_tool_result",
+                ):
+                    ev = {
+                        "type": "code_result",
+                        "id": getattr(block, "tool_use_id", None),
+                    }
+                    ev.update(_extract_result(block))
+                    yield ev
+                elif btype == "server_tool_use" and block.id not in emitted_code_starts:
+                    # Defensive: if we somehow missed the streaming code_start
+                    # for this server_tool_use, emit it now so the UI has the
+                    # pair.
+                    code = ""
+                    if isinstance(block.input, dict):
+                        code = (
+                            block.input.get("code")
+                            or block.input.get("command")
+                            or ""
+                        )
+                    yield {"type": "code_start", "id": block.id, "code": code}
 
             # Capture / refresh the container id.
             container = getattr(final_message, "container", None)
