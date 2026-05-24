@@ -350,23 +350,30 @@ def _get_resolved_block(stream: Any, index: int) -> Any:
 
 
 def _extract_result(block: Any) -> dict[str, Any]:
-    """Pull stdout/stderr/return_code/file refs out of a tool-result block."""
+    """Pull stdout/stderr/return_code/file refs out of a tool-result block.
+
+    Handles both pydantic-model content (returned by non-streaming
+    messages.create) and plain-dict content (returned inside the
+    streaming SDK's final_message). Same shape, different access
+    pattern.
+    """
     content = getattr(block, "content", None)
     if content is None:
         return {"stdout": "", "stderr": "", "return_code": None, "file_ids": [], "error_code": "no_content"}
-    rtype = getattr(content, "type", None)
+
+    rtype = _attr(content, "type")
 
     if rtype and rtype.endswith("_result") and not rtype.endswith("error_result"):
         file_ids: list[str] = []
-        for f in getattr(content, "content", None) or []:
-            ftype = getattr(f, "type", None)
-            file_id = getattr(f, "file_id", None)
+        for f in _attr(content, "content") or []:
+            ftype = _attr(f, "type")
+            file_id = _attr(f, "file_id")
             if file_id and ftype and ftype.endswith("_output"):
                 file_ids.append(file_id)
         return {
-            "stdout": getattr(content, "stdout", "") or "",
-            "stderr": getattr(content, "stderr", "") or "",
-            "return_code": getattr(content, "return_code", None),
+            "stdout": _attr(content, "stdout") or "",
+            "stderr": _attr(content, "stderr") or "",
+            "return_code": _attr(content, "return_code"),
             "file_ids": file_ids,
             "error_code": None,
         }
@@ -376,5 +383,12 @@ def _extract_result(block: Any) -> dict[str, Any]:
         "stderr": "",
         "return_code": None,
         "file_ids": [],
-        "error_code": getattr(content, "error_code", None) or rtype or "unknown_error",
+        "error_code": _attr(content, "error_code") or rtype or "unknown_error",
     }
+
+
+def _attr(obj: Any, name: str) -> Any:
+    """Access `name` on either a dict or an object."""
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
