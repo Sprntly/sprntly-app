@@ -224,7 +224,12 @@ function renderMessage(role, text, codeExecutions = []) {
   if (text) {
     const t = document.createElement("div");
     t.className = "msg-text";
-    t.textContent = text;
+    if (role === "assistant") {
+      t.classList.add("md");
+      t.innerHTML = renderMarkdown(text);
+    } else {
+      t.textContent = text;
+    }
     el.appendChild(t);
   }
   for (const ce of codeExecutions || []) {
@@ -243,16 +248,20 @@ function makeStreamingAssistantSlot() {
   const el = document.createElement("div");
   el.className = "msg assistant";
   const textEl = document.createElement("div");
-  textEl.className = "msg-text";
+  textEl.className = "msg-text md";
   el.appendChild(textEl);
   messagesEl.appendChild(el);
 
+  // Accumulated raw text; we re-render markdown on each delta so the user
+  // sees formatting take shape live.
+  let buffer = "";
   // Live-rendered code bundles keyed by server_tool_use id.
   const bundlesById = new Map();
 
   return {
     appendText(chunk) {
-      textEl.textContent += chunk;
+      buffer += chunk;
+      textEl.innerHTML = renderMarkdown(buffer);
       scrollToBottom();
     },
     startCode(id, code) {
@@ -273,11 +282,165 @@ function makeStreamingAssistantSlot() {
       scrollToBottom();
     },
     finalize() {
-      if (!textEl.textContent.trim()) {
+      if (!buffer.trim()) {
         textEl.remove();
       }
     },
   };
+}
+
+
+// ───── markdown rendering ─────
+// Tiny, dependency-free renderer for the subset of Markdown Claude emits:
+// headings, bold/italic, inline code, fenced code, lists, tables,
+// horizontal rules, paragraphs. Inputs are HTML-escaped first so any raw
+// HTML in Claude's output renders as text, not DOM.
+
+function renderMarkdown(src) {
+  const FENCE_OPEN = "\u0001SPRNTLY_FENCE_";
+  const FENCE_CLOSE = "\u0001";
+  const ICODE_OPEN = "\u0002SPRNTLY_ICODE_";
+  const ICODE_CLOSE = "\u0002";
+
+  const text = (src || "").replace(/\r\n?/g, "\n");
+  let safe = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  // Pull out fenced code blocks first.
+  const fences = [];
+  safe = safe.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, _lang, code) => {
+    fences.push(code);
+    return FENCE_OPEN + (fences.length - 1) + FENCE_CLOSE;
+  });
+
+  const lines = safe.split("\n");
+  const out = [];
+  let inList = null;
+  let inTable = null;
+  let paraBuf = [];
+
+  const flushPara = () => {
+    if (paraBuf.length) {
+      out.push("<p>" + inlineMd(paraBuf.join(" ").trim()) + "</p>");
+      paraBuf = [];
+    }
+  };
+  const flushList = () => {
+    if (inList) { out.push(`</${inList}>`); inList = null; }
+  };
+  const flushTable = () => {
+    if (!inTable) return;
+    out.push('<div class="md-table-wrap"><table class="md-table">');
+    out.push("<thead><tr>");
+    for (const h of inTable.headers) out.push(`<th>${inlineMd(h)}</th>`);
+    out.push("</tr></thead><tbody>");
+    for (const row of inTable.rows) {
+      out.push("<tr>");
+      for (const c of row) out.push(`<td>${inlineMd(c)}</td>`);
+      out.push("</tr>");
+    }
+    out.push("</tbody></table></div>");
+    inTable = null;
+  };
+  const flushAll = () => { flushPara(); flushList(); flushTable(); };
+
+  const fenceRe = new RegExp("^" + FENCE_OPEN + "(\\d+)" + FENCE_CLOSE + "$");
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const line = raw.replace(/\s+$/, "");
+
+    if (!line.trim()) { flushAll(); continue; }
+
+    const fenceMatch = line.match(fenceRe);
+    if (fenceMatch) {
+      flushAll();
+      const code = fences[Number(fenceMatch[1])] || "";
+      out.push(`<pre class="md-code">${code}</pre>`);
+      continue;
+    }
+
+    let m = line.match(/^(#{1,6})\s+(.+)$/);
+    if (m) {
+      flushAll();
+      const lvl = Math.min(6, m[1].length);
+      out.push(`<h${lvl} class="md-h${lvl}">${inlineMd(m[2])}</h${lvl}>`);
+      continue;
+    }
+
+    if (/^(-{3,}|_{3,}|\*{3,})$/.test(line.trim())) {
+      flushAll();
+      out.push('<hr class="md-hr">');
+      continue;
+    }
+
+    // Tables — require | header | and a | --- | separator on next line.
+    if (!inTable && /^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length) {
+      const next = lines[i + 1].trim();
+      if (/^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?$/.test(next)) {
+        flushPara(); flushList();
+        const headers = splitTableRow(line);
+        const rows = [];
+        let j = i + 2;
+        while (j < lines.length && /^\s*\|.*\|\s*$/.test(lines[j])) {
+          rows.push(splitTableRow(lines[j]));
+          j++;
+        }
+        inTable = { headers, rows };
+        flushTable();
+        i = j - 1;
+        continue;
+      }
+    }
+
+    m = line.match(/^\s*[-*+]\s+(.*)$/);
+    if (m) {
+      flushPara(); flushTable();
+      if (inList !== "ul") { flushList(); out.push('<ul class="md-ul">'); inList = "ul"; }
+      out.push(`<li>${inlineMd(m[1])}</li>`);
+      continue;
+    }
+
+    m = line.match(/^\s*\d+\.\s+(.*)$/);
+    if (m) {
+      flushPara(); flushTable();
+      if (inList !== "ol") { flushList(); out.push('<ol class="md-ol">'); inList = "ol"; }
+      out.push(`<li>${inlineMd(m[1])}</li>`);
+      continue;
+    }
+
+    flushList(); flushTable();
+    paraBuf.push(line.trim());
+  }
+  flushAll();
+
+  return out.join("\n");
+}
+
+function splitTableRow(line) {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+}
+
+function inlineMd(s) {
+  const ICODE_OPEN = "\u0002SPRNTLY_ICODE_";
+  const ICODE_CLOSE = "\u0002";
+  const codeSpans = [];
+  let out = s.replace(/`([^`\n]+)`/g, (_, code) => {
+    codeSpans.push(code);
+    return ICODE_OPEN + (codeSpans.length - 1) + ICODE_CLOSE;
+  });
+  // Bold (** or __)
+  out = out.replace(/\*\*([^*\n]+?)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/__([^_\n]+?)__/g, "<strong>$1</strong>");
+  // Italic (* or _)
+  out = out.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, "$1<em>$2</em>");
+  out = out.replace(/(^|[^_\w])_([^_\n]+?)_(?!\w)/g, "$1<em>$2</em>");
+  // Restore inline code spans.
+  const icodeRe = new RegExp(ICODE_OPEN + "(\\d+)" + ICODE_CLOSE, "g");
+  out = out.replace(icodeRe, (_, n) => `<code class="md-icode">${codeSpans[Number(n)]}</code>`);
+  return out;
 }
 
 function renderCodeBundle(ce, opts = {}) {
