@@ -19,6 +19,7 @@ def upsert_connection(
     token_encrypted: str,
     scopes: str,
     google_email: str | None = None,
+    account_label: str | None = None,
     config_json: str = "{}",
     status: str = "active",
 ) -> dict:
@@ -29,12 +30,13 @@ def upsert_connection(
         ).fetchone()
         if existing:
             c.execute(
-                "UPDATE connections SET status=?, google_email=?, scopes=?, "
+                "UPDATE connections SET status=?, google_email=?, account_label=?, scopes=?, "
                 "token_json_encrypted=?, config_json=?, last_sync_error=NULL, updated_at=? "
                 "WHERE provider=?",
                 (
                     status,
                     google_email,
+                    account_label,
                     scopes,
                     token_encrypted,
                     config_json,
@@ -46,14 +48,15 @@ def upsert_connection(
             row_id = uuid.uuid4().hex
             c.execute(
                 "INSERT INTO connections "
-                "(id, provider, status, google_email, scopes, token_json_encrypted, "
-                "config_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, provider, status, google_email, account_label, scopes, "
+                "token_json_encrypted, config_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     row_id,
                     provider,
                     status,
                     google_email,
+                    account_label,
                     scopes,
                     token_encrypted,
                     config_json,
@@ -76,6 +79,7 @@ def upsert_connection(
             "provider": provider,
             "status": status,
             "google_email": google_email,
+            "account_label": account_label,
             "scopes": scopes,
             "token_json_encrypted": token_encrypted,
             "config": config_obj,
@@ -88,8 +92,9 @@ def upsert_connection(
 def get_connection(provider: str) -> dict | None:
     with conn() as c:
         row = c.execute(
-            "SELECT id, provider, status, google_email, scopes, token_json_encrypted, "
-            "config_json, last_sync_at, last_sync_error, created_at, updated_at "
+            "SELECT id, provider, status, google_email, account_label, scopes, "
+            "token_json_encrypted, config_json, last_sync_at, last_sync_error, "
+            "created_at, updated_at "
             "FROM connections WHERE provider=?",
             (provider,),
         ).fetchone()
@@ -99,8 +104,9 @@ def get_connection(provider: str) -> dict | None:
 def list_connections() -> list[dict]:
     with conn() as c:
         rows = c.execute(
-            "SELECT id, provider, status, google_email, scopes, token_json_encrypted, "
-            "config_json, last_sync_at, last_sync_error, created_at, updated_at "
+            "SELECT id, provider, status, google_email, account_label, scopes, "
+            "token_json_encrypted, config_json, last_sync_at, last_sync_error, "
+            "created_at, updated_at "
             "FROM connections ORDER BY provider ASC"
         ).fetchall()
     return [dict(r) for r in rows]

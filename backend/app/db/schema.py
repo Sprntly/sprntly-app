@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS connections (
     provider TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'active',
     google_email TEXT,
+    -- Generic identifier for non-Google connectors: "alice@co.com" for
+    -- Figma, "@octocat" for GitHub. Google still uses google_email.
+    account_label TEXT,
     scopes TEXT NOT NULL DEFAULT '',
     token_json_encrypted TEXT NOT NULL,
     config_json TEXT NOT NULL DEFAULT '{}',
@@ -119,3 +122,8 @@ def init_db() -> None:
             c.execute(
                 "ALTER TABLE evidences ADD COLUMN variant TEXT NOT NULL DEFAULT 'v1'"
             )
+        # Generic account label for non-Google connectors. Boxes that
+        # pre-date this column get it added in place; old rows keep NULL.
+        conn_cols = {row[1] for row in c.execute("PRAGMA table_info(connections)").fetchall()}
+        if conn_cols and "account_label" not in conn_cols:
+            c.execute("ALTER TABLE connections ADD COLUMN account_label TEXT")

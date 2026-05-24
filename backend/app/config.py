@@ -41,10 +41,28 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     # Shadow-write inserts to Supabase alongside SQLite. Reads stay on
-    # SQLite. Defaults off so the flag has to be flipped per environment;
-    # PR #6 (backfill) flips it to true on EC2 after backfill parity is
-    # confirmed.
+    # SQLite. Defaults off so the flag has to be flipped per environment.
     supabase_dual_write: bool = False
+
+    # Figma connector (OAuth 2.0)
+    figma_client_id: str = ""
+    figma_client_secret: str = ""
+    figma_oauth_redirect_uri: str = ""
+
+    # GitHub connector (GitHub App with user-to-server OAuth)
+    github_app_id: str = ""
+    github_app_client_id: str = ""
+    github_app_client_secret: str = ""
+    # Private key as a PEM string (-----BEGIN ... -----END ...). When stored in
+    # .env, newlines should be literal \n; we normalize at load time.
+    github_app_private_key: str = ""
+    github_oauth_redirect_uri: str = ""
+    github_webhook_secret: str = ""
+
+    @property
+    def github_app_private_key_pem(self) -> str:
+        """Normalize the PEM: turn literal `\\n` sequences into real newlines."""
+        return (self.github_app_private_key or "").replace("\\n", "\n")
 
     @property
     def origins_list(self) -> list[str]:
