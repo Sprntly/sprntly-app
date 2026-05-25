@@ -1,4 +1,9 @@
-name: Deploy backend to EC2
+name: Deploy backend to api.sprntly.ai
+
+# SSHes to EC2, fast-forwards ~/Sprntly to origin/main (the on-box clone
+# tracks Sprntly/sprntly-app, where the canonical backend lives), pip-installs,
+# and restarts sprintly.service. Demo backend changes do NOT go through here —
+# only sprntly-app deploys the backend.
 
 on:
   push:
@@ -28,9 +33,9 @@ jobs:
             cd ~/Sprntly
             git fetch --quiet origin main
             git reset --hard origin/main
-            # Ensure the persistent uploads dir exists outside the repo so git
-            # resets don't wipe user-uploaded datasets. First deploy after the
-            # dynamic-datasets PR migrates existing data/asurion/ into place.
+            # Persistent uploads dir lives outside the repo so git resets don't
+            # wipe user data. First deploy after the dynamic-datasets PR
+            # migrates the existing asurion corpus into place.
             sudo mkdir -p /var/lib/sprntly/data
             sudo chown -R $(whoami):$(whoami) /var/lib/sprntly
             if [ -d ~/Sprntly/backend/data/asurion ] && [ ! -d /var/lib/sprntly/data/asurion ]; then
@@ -40,6 +45,14 @@ jobs:
             cd backend
             ./.venv/bin/pip install -q -r requirements.txt
             sudo /bin/systemctl restart sprintly
-            sleep 3
+            # Wait up to 15s for FastAPI to bind. Avoids races when two deploys
+            # restart the service close together.
+            for i in $(seq 1 15); do
+              if curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
+                echo "sprintly.service healthy after ${i}s"
+                break
+              fi
+              sleep 1
+            done
             curl -fsS http://127.0.0.1:8000/healthz
             echo "Deploy OK: $(git -C ~/Sprntly rev-parse --short HEAD)"

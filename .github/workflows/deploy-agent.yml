@@ -1,4 +1,8 @@
-name: Deploy ds-agent to EC2
+name: Deploy ds-agent to api.sprntly.ai/agent
+
+# Deploys the DS chat agent to its own systemd unit on EC2 (port 8002,
+# nginx serves it at api.sprntly.ai/agent/). Lives in sprntly-app only —
+# sprntly-demo does not deploy the agent.
 
 on:
   push:
@@ -46,6 +50,14 @@ jobs:
             sudo cp deploy/sprntly-agent.service /etc/systemd/system/sprntly-agent.service
             sudo systemctl daemon-reload
             sudo systemctl restart sprntly-agent.service
-            sleep 3
+            # Wait up to 15s for the agent to bind. Avoids races when the
+            # backend deploy restarts concurrently.
+            for i in $(seq 1 15); do
+              if curl -fsS http://127.0.0.1:8002/health >/dev/null 2>&1; then
+                echo "sprntly-agent.service healthy after ${i}s"
+                break
+              fi
+              sleep 1
+            done
             curl -fsS http://127.0.0.1:8002/health
             echo "Agent deploy OK: $(git -C ~/Sprntly rev-parse --short HEAD)"

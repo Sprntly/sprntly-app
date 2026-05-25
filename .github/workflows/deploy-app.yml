@@ -1,15 +1,19 @@
-name: Deploy app frontend to EC2 (app.sprntly.ai)
+name: Deploy to app.sprntly.ai
+
+# Builds the static Next export and rsyncs it to /var/www/sprntly-app/ on
+# EC2, which nginx serves at https://app.sprntly.ai/. Backend deploys are
+# in deploy-backend.yml; this workflow only touches the frontend bundle.
 
 on:
   push:
     branches: [main]
     paths:
       - 'web/**'
-      - '.github/workflows/deploy-frontend.yml'
+      - '.github/workflows/deploy-app.yml'
   workflow_dispatch:
 
 concurrency:
-  group: deploy-frontend
+  group: deploy-app
   cancel-in-progress: false
 
 jobs:
@@ -42,7 +46,7 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Rsync to EC2
+      - name: Rsync to EC2 (/var/www/sprntly-app/)
         env:
           EC2_USER: ${{ secrets.EC2_USER }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -52,7 +56,14 @@ jobs:
             web/out/ \
             "$EC2_USER@$EC2_HOST:/var/www/sprntly-app/"
 
-      - name: Smoke test
+      - name: Smoke test app.sprntly.ai (retry up to 15s)
         run: |
-          curl -fsS -o /dev/null -w "app index: HTTP %{http_code}\n" https://app.sprntly.ai/
+          for i in $(seq 1 15); do
+            if curl -fsS -o /dev/null https://app.sprntly.ai/; then
+              echo "app.sprntly.ai healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null -w "app index:   HTTP %{http_code}\n" https://app.sprntly.ai/
           curl -fsS -o /dev/null -w "app sign-in: HTTP %{http_code}\n" https://app.sprntly.ai/sign-in
