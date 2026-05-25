@@ -10,11 +10,11 @@ Two distinct token modes live in a GitHub App:
 
   - App-as-app JWT + installation tokens — the app proves it is
     itself by signing a short JWT with its RSA private key, then
-    swaps the JWT for a 1-hour installation access_token. Used for
-    repo operations that happen WITHOUT a user present (cron jobs,
-    webhook handlers). `make_app_jwt()` is wired in below; the
-    installation-token route is intentionally not implemented yet
-    — add it when we actually need server-side repo operations.
+    swaps the JWT for an installation access_token (1-hour TTL) that
+    grants the App's declared permissions on whichever repos the
+    installer chose. Used for server-side repo operations (creating
+    PRs, reading repos) without a user present. Cached in-process
+    with a 55-min TTL.
 
 The stored user-OAuth payload is GitHub's literal token response plus
 an `obtained_at` epoch, JSON-encoded then Fernet-encrypted (same
@@ -185,3 +185,104 @@ def make_app_jwt() -> str:
         "iss": str(settings.github_app_id),
     }
     return jwt.encode(payload, settings.github_app_private_key_pem, algorithm=JWT_ALG_APP)
+
+
+# ─────────────────────── installation tokens ───────────────────────
+
+# Tokens live 1 hour; we refresh ~5 min early.
+_INSTALL_TOKEN_TTL_SAFETY_S = 5 * 60
+_install_token_cache: dict[int, tuple[str, int]] = {}
+
+
+def get_installation_token(installation_id: int) -> str:
+    """Return a fresh installation access_token, caching by installation_id.
+
+    Hits POST https://api.github.com/app/installations/{id}/access_tokens with
+    an App JWT in the Authorization header. The returned token grants the
+    App's declared permissions on whichever repos this installation has access
+    to. Auto-refreshes 5 minutes before GitHub-side expiry.
+    """
+    now = int(time.time())
+    cached = _install_token_cache.get(installation_id)
+    if cached and cached[1] - now > _INSTALL_TOKEN_TTL_SAFETY_S:
+        return cached[0]
+
+    if not github_app_configured():
+        raise HTTPException(500, "GitHub App not configured")
+
+    resp = requests.post(
+        f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+        headers={
+            "Authorization": f"Bearer {make_app_jwt()}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=15,
+    )
+    if not resp.ok:
+        logger.warning(
+            "Installation token fetch failed: %s %s",
+            resp.status_code,
+            resp.text[:300],
+        )
+        raise HTTPException(502, f"GitHub installation token fetch failed: {resp.status_code}")
+    payload = resp.json()
+    token = payload.get("token")
+    if not token:
+        raise HTTPException(502, "GitHub did not return an installation token")
+
+    # Parse ISO-8601 expires_at; fall back to "now + 1 hour" if missing.
+    exp_iso = payload.get("expires_at")
+    expires_epoch = now + 3600
+    if exp_iso:
+        try:
+            import datetime as _dt
+            expires_epoch = int(
+                _dt.datetime.strptime(exp_iso, "%Y-%m-%dT%H:%M:%SZ")
+                .replace(tzinfo=_dt.timezone.utc)
+                .timestamp()
+            )
+        except ValueError:
+            pass
+    _install_token_cache[installation_id] = (token, expires_epoch)
+    return token
+
+
+def headers_for_installation(installation_id: int) -> dict[str, str]:
+    """Convenience: ready-to-use Authorization/Accept headers for the GitHub REST API."""
+    return {
+        "Authorization": f"Bearer {get_installation_token(installation_id)}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def clear_installation_token_cache(installation_id: int | None = None) -> None:
+    """Drop one or all cached installation tokens. Used on uninstall events."""
+    if installation_id is None:
+        _install_token_cache.clear()
+    else:
+        _install_token_cache.pop(installation_id, None)
+
+
+# ─────────────────────── webhook signature verification ───────────────────────
+
+
+def verify_webhook_signature(raw_body: bytes, sig_header: str | None) -> bool:
+    """Verify the `X-Hub-Signature-256` header against GITHUB_WEBHOOK_SECRET.
+
+    GitHub sends `sha256=<hex>`; we hmac-sha256 the raw body with the
+    configured secret and compare in constant time. Returns False if the
+    secret isn't configured, the header is missing, or the digests don't
+    match.
+    """
+    import hashlib
+    import hmac
+    secret = (settings.github_webhook_secret or "").strip()
+    if not secret or not sig_header:
+        return False
+    if not sig_header.startswith("sha256="):
+        return False
+    expected = sig_header.split("=", 1)[1]
+    digest = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, digest)

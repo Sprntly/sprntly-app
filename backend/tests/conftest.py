@@ -60,6 +60,8 @@ _RELOAD_ORDER = [
     "app.routes.prd",
     "app.connectors.tokens",
     "app.connectors.google_oauth",
+    "app.connectors.figma_oauth",
+    "app.connectors.github_app",
     "app.routes.connectors",
     "app.main",
 ]

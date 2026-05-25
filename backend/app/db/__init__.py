@@ -88,6 +88,16 @@ from app.db.connections import (
     upsert_connection,
 )
 
+# GitHub App (webhook-driven)
+from app.db.github import (
+    delete_github_installation,
+    get_github_installation,
+    list_github_installations,
+    list_open_pull_requests,
+    upsert_github_installation,
+    upsert_github_pull_request,
+)
+
 __all__ = [
     # client
     "conn",
@@ -141,4 +151,11 @@ __all__ = [
     "update_connection_sync",
     "update_connection_tokens",
     "upsert_connection",
+    # github (webhook-driven)
+    "delete_github_installation",
+    "get_github_installation",
+    "list_github_installations",
+    "list_open_pull_requests",
+    "upsert_github_installation",
+    "upsert_github_pull_request",
 ]

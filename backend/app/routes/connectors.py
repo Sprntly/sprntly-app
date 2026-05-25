@@ -16,16 +16,20 @@
   GET    /v1/connectors/github/authorize        -> redirect to GitHub
   GET    /v1/connectors/github/callback         -> OAuth callback
   DELETE /v1/connectors/github                  -> disconnect
+  POST   /v1/connectors/github/webhook          -> GitHub App event sink
+  GET    /v1/connectors/github/installations    -> list installs we know about
+  GET    /v1/connectors/github/pull-requests    -> list tracked open PRs
 """
 from __future__ import annotations
 
 import json
 import logging
+from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import Depends, APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from google.auth.transport.requests import Request
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from pydantic import BaseModel
 
 from app import db
@@ -205,7 +209,7 @@ def google_drive_disconnect(_session: dict = Depends(require_session)):
             decrypt_token_json(row["token_json_encrypted"])
         )
         if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            creds.refresh(GoogleAuthRequest())
         google_oauth.try_revoke_credentials(creds)
     except Exception:
         logger.warning("Could not revoke Google token on disconnect", exc_info=True)
@@ -312,3 +316,155 @@ def github_disconnect(_session: dict = Depends(require_session)):
         raise HTTPException(404, "GitHub is not connected")
     db.delete_connection(github_app.GITHUB_PROVIDER)
     return {"deleted": True, "provider": github_app.GITHUB_PROVIDER}
+
+
+@router.get("/github/installations")
+def github_list_installations(_session: dict = Depends(require_session)):
+    return {"installations": db.list_github_installations()}
+
+
+@router.get("/github/pull-requests")
+def github_list_open_prs(
+    installation_id: int | None = None,
+    _session: dict = Depends(require_session),
+):
+    return {"pull_requests": db.list_open_pull_requests(installation_id)}
+
+
+# ─────────────────────── GitHub webhook ───────────────────────
+
+# We acknowledge anything we don't act on with 200 so GitHub doesn't
+# keep retrying. Only signature failures + unparseable bodies 4xx.
+_WEBHOOK_HANDLED_EVENTS = {
+    "installation",
+    "installation_repositories",
+    "pull_request",
+    "ping",
+}
+
+
+def _excerpt(body: str | None, limit: int = 500) -> str | None:
+    if not body:
+        return None
+    body = body.strip()
+    return body[:limit]
+
+
+def _handle_installation_event(payload: dict) -> None:
+    action = payload.get("action")
+    install = payload.get("installation") or {}
+    install_id = install.get("id")
+    if not install_id:
+        return
+    if action in {"created", "new_permissions_accepted", "unsuspend"}:
+        account = install.get("account") or {}
+        db.upsert_github_installation(
+            installation_id=int(install_id),
+            account_id=int(account.get("id") or 0),
+            account_login=str(account.get("login") or ""),
+            account_type=str(account.get("type") or "User"),
+            repository_selection=str(install.get("repository_selection") or "selected"),
+            suspended=False,
+            permissions=install.get("permissions") or {},
+            events=install.get("events") or [],
+        )
+    elif action == "suspend":
+        existing = db.get_github_installation(int(install_id))
+        if existing:
+            account = install.get("account") or {}
+            db.upsert_github_installation(
+                installation_id=int(install_id),
+                account_id=int(account.get("id") or existing["account_id"]),
+                account_login=str(account.get("login") or existing["account_login"]),
+                account_type=str(account.get("type") or existing["account_type"]),
+                repository_selection=str(
+                    install.get("repository_selection") or existing["repository_selection"]
+                ),
+                suspended=True,
+                permissions=install.get("permissions") or {},
+                events=install.get("events") or [],
+            )
+    elif action == "deleted":
+        db.delete_github_installation(int(install_id))
+        github_app.clear_installation_token_cache(int(install_id))
+
+
+def _handle_installation_repositories_event(payload: dict) -> None:
+    install = payload.get("installation") or {}
+    install_id = install.get("id")
+    if not install_id:
+        return
+    # repository_selection may flip "selected" <-> "all".
+    existing = db.get_github_installation(int(install_id))
+    if not existing:
+        return
+    account = install.get("account") or {}
+    db.upsert_github_installation(
+        installation_id=int(install_id),
+        account_id=int(account.get("id") or existing["account_id"]),
+        account_login=str(account.get("login") or existing["account_login"]),
+        account_type=str(account.get("type") or existing["account_type"]),
+        repository_selection=str(
+            install.get("repository_selection") or existing["repository_selection"]
+        ),
+        suspended=bool(existing["suspended"]),
+        permissions=install.get("permissions") or json.loads(existing["permissions_json"] or "{}"),
+        events=install.get("events") or json.loads(existing["events_json"] or "[]"),
+    )
+
+
+def _handle_pull_request_event(payload: dict) -> None:
+    install = payload.get("installation") or {}
+    install_id = install.get("id")
+    pr = payload.get("pull_request") or {}
+    repo = payload.get("repository") or {}
+    if not install_id or not pr or not repo:
+        return
+    state = pr.get("state") or "open"
+    if pr.get("merged"):
+        state = "merged"
+    db.upsert_github_pull_request(
+        installation_id=int(install_id),
+        repo_full_name=str(repo.get("full_name") or ""),
+        pr_number=int(pr.get("number") or 0),
+        title=str(pr.get("title") or ""),
+        state=state,
+        is_draft=bool(pr.get("draft")),
+        author_login=(pr.get("user") or {}).get("login"),
+        head_ref=(pr.get("head") or {}).get("ref"),
+        base_ref=(pr.get("base") or {}).get("ref"),
+        html_url=pr.get("html_url"),
+        body_excerpt=_excerpt(pr.get("body")),
+        pr_created_at=pr.get("created_at"),
+        pr_updated_at=pr.get("updated_at"),
+    )
+
+
+@router.post("/github/webhook")
+async def github_webhook(
+    request: Request,
+    x_github_event: Annotated[str | None, Header(alias="X-GitHub-Event")] = None,
+    x_hub_signature_256: Annotated[str | None, Header(alias="X-Hub-Signature-256")] = None,
+    x_github_delivery: Annotated[str | None, Header(alias="X-GitHub-Delivery")] = None,
+):
+    raw = await request.body()
+    if not github_app.verify_webhook_signature(raw, x_hub_signature_256):
+        raise HTTPException(401, "Invalid webhook signature")
+    try:
+        payload = json.loads(raw.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise HTTPException(400, "Webhook body is not valid JSON") from e
+
+    event = (x_github_event or "").strip()
+    if event == "ping":
+        return {"ok": True, "event": "ping"}
+    if event == "installation":
+        _handle_installation_event(payload)
+    elif event == "installation_repositories":
+        _handle_installation_repositories_event(payload)
+    elif event == "pull_request":
+        _handle_pull_request_event(payload)
+    else:
+        logger.info("GitHub webhook: ignoring event %s delivery=%s", event, x_github_delivery)
+        return {"ok": True, "event": event, "handled": False}
+    return {"ok": True, "event": event, "handled": True}

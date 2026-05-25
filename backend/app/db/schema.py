@@ -96,6 +96,42 @@ CREATE TABLE IF NOT EXISTS connections (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- GitHub App installations. One row per install_id. account_type is
+-- 'User' or 'Organization'; repository_selection is 'all' or 'selected'.
+CREATE TABLE IF NOT EXISTS github_installations (
+    installation_id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    account_login TEXT NOT NULL,
+    account_type TEXT NOT NULL,
+    repository_selection TEXT NOT NULL DEFAULT 'selected',
+    suspended INTEGER NOT NULL DEFAULT 0,
+    permissions_json TEXT NOT NULL DEFAULT '{}',
+    events_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Open PRs tracked from webhook events.
+CREATE TABLE IF NOT EXISTS github_pull_requests (
+    installation_id INTEGER NOT NULL,
+    repo_full_name TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'open',
+    is_draft INTEGER NOT NULL DEFAULT 0,
+    author_login TEXT,
+    head_ref TEXT,
+    base_ref TEXT,
+    html_url TEXT,
+    body_excerpt TEXT,
+    pr_created_at TEXT,
+    pr_updated_at TEXT,
+    last_event_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (repo_full_name, pr_number)
+);
+CREATE INDEX IF NOT EXISTS github_pull_requests_install
+    ON github_pull_requests(installation_id, state);
 """
 
 
