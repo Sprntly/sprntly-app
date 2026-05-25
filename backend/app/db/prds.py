@@ -4,7 +4,7 @@
 distinguishes the v1 sample-build template from v2; v1 rows in prod
 remain readable through this column.
 """
-from app.db.client import conn
+from app.db.client import conn, shadow_write
 
 
 def save_prd(brief_id: int, insight_index: int, title: str, md: str) -> int:
@@ -15,7 +15,15 @@ def save_prd(brief_id: int, insight_index: int, title: str, md: str) -> int:
             "VALUES (?, ?, ?, ?, 'ready')",
             (brief_id, insight_index, title, md),
         )
-        return cur.lastrowid
+        new_id = cur.lastrowid
+    shadow_write("prds", {
+        "brief_id": brief_id,
+        "insight_index": insight_index,
+        "title": title,
+        "payload_md": md,
+        "status": "ready",
+    })
+    return new_id
 
 
 def start_prd(
@@ -32,7 +40,17 @@ def start_prd(
             "VALUES (?, ?, ?, '', 'generating', ?, ?)",
             (brief_id, insight_index, title, template_version, variant),
         )
-        return cur.lastrowid
+        new_id = cur.lastrowid
+    shadow_write("prds", {
+        "brief_id": brief_id,
+        "insight_index": insight_index,
+        "title": title,
+        "payload_md": "",
+        "status": "generating",
+        "template_version": template_version,
+        "variant": variant,
+    })
+    return new_id
 
 
 def invalidate_stale_prds(current_version: int, variant: str = "v1") -> int:

@@ -3,7 +3,7 @@
 Kept as a separate table (and module) because the two have different
 lifecycles (evidence regenerates more often) and different templates.
 """
-from app.db.client import conn
+from app.db.client import conn, shadow_write
 
 
 def start_evidence(
@@ -20,7 +20,17 @@ def start_evidence(
             "VALUES (?, ?, ?, '', 'generating', ?, ?)",
             (brief_id, insight_index, title, template_version, variant),
         )
-        return cur.lastrowid
+        new_id = cur.lastrowid
+    shadow_write("evidences", {
+        "brief_id": brief_id,
+        "insight_index": insight_index,
+        "title": title,
+        "payload_md": "",
+        "status": "generating",
+        "template_version": template_version,
+        "variant": variant,
+    })
+    return new_id
 
 
 def invalidate_stale_evidences(current_version: int, variant: str = "v1") -> int:

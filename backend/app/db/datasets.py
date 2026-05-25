@@ -3,7 +3,7 @@
 Memory note: the user-facing term is "company"; "dataset" is the
 internal/DB name. The API/UI layer translates at the boundary.
 """
-from app.db.client import conn
+from app.db.client import conn, shadow_write
 
 
 def insert_dataset(slug: str, display_name: str) -> None:
@@ -16,6 +16,13 @@ def insert_dataset(slug: str, display_name: str) -> None:
             "INSERT OR IGNORE INTO datasets (slug, display_name) VALUES (?, ?)",
             (slug, display_name),
         )
+    # `slug` is the PK; upsert keeps Supabase idempotent like SQLite's
+    # `INSERT OR IGNORE`.
+    shadow_write(
+        "datasets",
+        {"slug": slug, "display_name": display_name},
+        on_conflict="slug",
+    )
 
 
 def dataset_exists(slug: str) -> bool:

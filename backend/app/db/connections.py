@@ -10,7 +10,7 @@ directly; new providers should use account_label.
 import json
 import uuid
 
-from app.db.client import conn, utc_now
+from app.db.client import conn, shadow_write, utc_now
 
 
 def upsert_connection(
@@ -63,6 +63,25 @@ def upsert_connection(
             )
     row = get_connection(provider)
     assert row is not None
+    # `provider` is UNIQUE in Supabase too; upsert by it. config_json
+    # field name maps to jsonb `config` in the Supabase schema.
+    config_obj: dict = {}
+    try:
+        config_obj = json.loads(row.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        config_obj = {}
+    shadow_write(
+        "connections",
+        {
+            "provider": provider,
+            "status": status,
+            "google_email": google_email,
+            "scopes": scopes,
+            "token_json_encrypted": token_encrypted,
+            "config": config_obj,
+        },
+        on_conflict="provider",
+    )
     return row
 
 
