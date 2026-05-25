@@ -2,7 +2,7 @@ import json
 import random
 import time
 
-from fastapi import APIRouter, Cookie
+from fastapi import Depends, APIRouter
 from pydantic import BaseModel, Field
 
 from app.auth import require_session
@@ -84,9 +84,8 @@ def _strip_citations(payload: dict) -> dict:
 @router.post("")
 def ask(
     body: AskIn,
-    sprintly_session: str | None = Cookie(default=None),
+    _session: dict = Depends(require_session),
 ):
-    require_session(sprintly_session)
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. Returns
     # without an LLM call, with a small random delay so the response

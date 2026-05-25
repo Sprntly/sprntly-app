@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, File, Form, HTTPException, UploadFile
+from fastapi import Depends, APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app import datasets
@@ -40,17 +40,15 @@ class CreateDatasetIn(BaseModel):
 
 
 @router.get("")
-def list_all(sprintly_session: Annotated[str | None, Cookie()] = None):
-    require_session(sprintly_session)
+def list_all(_session: dict = Depends(require_session),):
     return {"datasets": datasets.list_datasets()}
 
 
 @router.post("")
 def create(
     body: CreateDatasetIn,
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
-    require_session(sprintly_session)
     try:
         out = datasets.create_dataset(slug=body.slug, display_name=body.display_name)
     except datasets.DatasetAlreadyExists as e:
@@ -66,14 +64,13 @@ def create(
 async def upload_files(
     slug: str,
     files: Annotated[list[UploadFile], File(description="Source files to ingest")],
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
     """Accept one or more files; convert each to markdown; persist both.
 
     Partial success is acceptable: if 4 of 5 files convert and 1 fails, the
     response includes a per-file result so the frontend can show ✓/✗ on each.
     """
-    require_session(sprintly_session)
     if not datasets.dataset_path(slug).exists():
         # Hit the DB too — folder might exist from a stale dir without a row.
         try:
@@ -116,10 +113,9 @@ async def upload_files(
 @router.get("/{slug}/files")
 def list_files(
     slug: str,
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
     """List source files (raw originals) for a dataset, newest first."""
-    require_session(sprintly_session)
     from app import db
     if not db.dataset_exists(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")
@@ -168,11 +164,9 @@ def list_files(
 def delete_file(
     slug: str,
     filename: str,
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
     """Remove one source file: the raw original plus any matching .md siblings."""
-    require_session(sprintly_session)
-
     # Defense in depth — reject anything that isn't a plain basename. FastAPI
     # already prevents path segments in {filename}, but a bare ".." or a
     # dotfile would slip through path validation.
@@ -212,10 +206,9 @@ def delete_file(
 @router.post("/{slug}/generate")
 async def generate(
     slug: str,
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
     """Fire-and-forget brief generation. Frontend polls /v1/brief/status?dataset=slug."""
-    require_session(sprintly_session)
     from app import db
     if not db.dataset_exists(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")
@@ -226,9 +219,8 @@ async def generate(
 @router.delete("/{slug}")
 def delete(
     slug: str,
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
-    require_session(sprintly_session)
     from app import db
     if not db.delete_dataset(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")

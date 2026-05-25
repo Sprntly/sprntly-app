@@ -1,6 +1,6 @@
 import asyncio
 
-from fastapi import APIRouter, Cookie, HTTPException
+from fastapi import Depends, APIRouter, HTTPException
 
 from app.auth import require_session
 from app.brief_runner import auto_generate_brief, get_status
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/v1/brief", tags=["brief"])
 @router.get("/current")
 def current(
     dataset: str,
-    sprintly_session: str | None = Cookie(default=None),
+    _session: dict = Depends(require_session),
 ):
     """Return the latest cached brief for a dataset.
 
@@ -23,7 +23,6 @@ def current(
     auto-generation status (`empty | generating | failed`). Frontend can
     poll `/v1/brief/status` while this is anything other than `ready`.
     """
-    require_session(sprintly_session)
     brief = get_current_brief(dataset)
     if brief:
         return brief
@@ -33,7 +32,7 @@ def current(
 @router.get("/status")
 def status(
     dataset: str,
-    sprintly_session: str | None = Cookie(default=None),
+    _session: dict = Depends(require_session),
 ):
     """Lightweight poll endpoint for the frontend.
 
@@ -43,14 +42,13 @@ def status(
       - "failed": last attempt failed (see `error`); will retry on service restart
       - "empty": nothing has been attempted yet
     """
-    require_session(sprintly_session)
     return {"dataset": dataset, **get_status(dataset)}
 
 
 @router.post("/regenerate")
 async def regenerate(
     dataset: str,
-    sprintly_session: str | None = Cookie(default=None),
+    _session: dict = Depends(require_session),
 ):
     """Force a fresh brief generation in the background. Returns immediately.
 
@@ -58,7 +56,6 @@ async def regenerate(
     service. Existing cached brief (if any) stays in place until the new
     generation completes successfully.
     """
-    require_session(sprintly_session)
     asyncio.create_task(auto_generate_brief(dataset))
     return {"started": True, "dataset": dataset}
 
@@ -66,9 +63,8 @@ async def regenerate(
 @router.get("/{brief_id}")
 def by_id(
     brief_id: int,
-    sprintly_session: str | None = Cookie(default=None),
+    _session: dict = Depends(require_session),
 ):
-    require_session(sprintly_session)
     brief = get_brief_by_id(brief_id)
     if not brief:
         raise HTTPException(404, "Brief not found")
@@ -78,14 +74,13 @@ def by_id(
 @router.post("/generate")
 def generate(
     dataset: str,
-    sprintly_session: str | None = Cookie(default=None),
+    _session: dict = Depends(require_session),
 ):
     """Synchronously generate a fresh brief and return it.
 
     Note: invokes Claude. Costs tokens. Blocks until done (~30s). Use
     /v1/brief/regenerate for fire-and-forget behavior instead.
     """
-    require_session(sprintly_session)
     corpus = load_corpus(dataset)
     user = BRIEF_USER_TEMPLATE.format(dataset=dataset, corpus=corpus.joined())
     payload = call_json(system=BRIEF_SYSTEM, user=user)
