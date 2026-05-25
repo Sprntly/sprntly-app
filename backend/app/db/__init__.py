@@ -1,0 +1,144 @@
+"""SQLite store, organized by domain.
+
+The package replaces the monolithic backend/app/db.py. Public API is
+preserved: anywhere that previously did `from app import db;
+db.get_current_brief(...)` or `from app.db import save_brief` continues
+to work because every function is re-exported here.
+
+Submodule layout:
+  client.py       — sqlite3 conn() context manager + utc_now timestamp
+  schema.py       — CREATE TABLE DDL + idempotent ALTERs in init_db()
+  briefs.py       — weekly briefs (is_current row per dataset)
+  prds.py         — PRDs (generating → ready, variant-scoped)
+  evidences.py    — evidence pages (same shape, different lifecycle)
+  asks.py         — ask_log (append-only) + cached_asks
+  datasets.py     — dataset slug registry
+  connections.py  — OAuth tokens (Google / Figma / GitHub)
+
+Next phase will add a Supabase client alongside the sqlite one in
+client.py; per-domain submodules will gain dual-write helpers behind a
+flag without changing the public API.
+"""
+# Connection + timestamp helpers
+from app.db.client import conn, utc_now, _utc_now
+
+# Schema bootstrap
+from app.db.schema import SCHEMA, init_db
+
+# Briefs
+from app.db.briefs import (
+    get_brief_by_id,
+    get_current_brief,
+    invalidate_stale_briefs,
+    save_brief,
+)
+
+# PRDs
+from app.db.prds import (
+    complete_prd,
+    fail_prd,
+    find_existing_prd,
+    get_prd,
+    invalidate_orphan_generating_prds,
+    invalidate_stale_prds,
+    save_prd,
+    start_prd,
+)
+
+# Evidence pages
+from app.db.evidences import (
+    complete_evidence,
+    fail_evidence,
+    find_existing_evidence,
+    get_evidence,
+    invalidate_orphan_generating_evidences,
+    invalidate_stale_evidences,
+    start_evidence,
+)
+
+# Asks (log + cache)
+from app.db.asks import (
+    complete_cached_ask,
+    fail_cached_ask,
+    find_cached_ask,
+    invalidate_orphan_generating_cached_asks,
+    invalidate_stale_cached_asks,
+    log_ask,
+    start_cached_ask,
+)
+
+# Datasets
+from app.db.datasets import (
+    dataset_exists,
+    delete_dataset,
+    get_dataset,
+    insert_dataset,
+    list_dataset_slugs,
+    list_datasets,
+)
+
+# Connections (OAuth)
+from app.db.connections import (
+    delete_connection,
+    get_connection,
+    list_connections,
+    patch_connection_config,
+    update_connection_sync,
+    update_connection_tokens,
+    upsert_connection,
+)
+
+__all__ = [
+    # client
+    "conn",
+    "utc_now",
+    "_utc_now",
+    # schema
+    "SCHEMA",
+    "init_db",
+    # briefs
+    "get_brief_by_id",
+    "get_current_brief",
+    "invalidate_stale_briefs",
+    "save_brief",
+    # prds
+    "complete_prd",
+    "fail_prd",
+    "find_existing_prd",
+    "get_prd",
+    "invalidate_orphan_generating_prds",
+    "invalidate_stale_prds",
+    "save_prd",
+    "start_prd",
+    # evidences
+    "complete_evidence",
+    "fail_evidence",
+    "find_existing_evidence",
+    "get_evidence",
+    "invalidate_orphan_generating_evidences",
+    "invalidate_stale_evidences",
+    "start_evidence",
+    # asks
+    "complete_cached_ask",
+    "fail_cached_ask",
+    "find_cached_ask",
+    "invalidate_orphan_generating_cached_asks",
+    "invalidate_stale_cached_asks",
+    "log_ask",
+    "start_cached_ask",
+    # datasets
+    "dataset_exists",
+    "delete_dataset",
+    "get_dataset",
+    "insert_dataset",
+    "list_dataset_slugs",
+    "list_datasets",
+    # connections
+    "delete_connection",
+    "get_connection",
+    "list_connections",
+    "patch_connection_config",
+    "update_connection_sync",
+    "update_connection_tokens",
+    "upsert_connection",
+]
