@@ -1,4 +1,4 @@
-name: Deploy frontend to EC2
+name: Deploy app frontend to EC2 (app.sprntly.ai)
 
 on:
   push:
@@ -27,7 +27,6 @@ jobs:
       - name: Build static export
         env:
           NEXT_PUBLIC_API_URL: https://api.sprntly.ai
-          NEXT_PUBLIC_BASE_PATH: /demo
         run: |
           cd web
           npm ci --no-audit --no-fund
@@ -51,9 +50,9 @@ jobs:
           rsync -az --delete \
             -e "ssh -i ~/.ssh/id_ed25519" \
             web/out/ \
-            "$EC2_USER@$EC2_HOST:/var/www/sprntly-demo/"
+            "$EC2_USER@$EC2_HOST:/var/www/sprntly-app/"
 
       - name: Smoke test
         run: |
-          curl -fsS -o /dev/null -w "demo index: HTTP %{http_code}\n" https://api.sprntly.ai/demo/
-          curl -fsS -o /dev/null -w "demo sign-in: HTTP %{http_code}\n" https://api.sprntly.ai/demo/sign-in
+          curl -fsS -o /dev/null -w "app index: HTTP %{http_code}\n" https://app.sprntly.ai/
+          curl -fsS -o /dev/null -w "app sign-in: HTTP %{http_code}\n" https://app.sprntly.ai/sign-in

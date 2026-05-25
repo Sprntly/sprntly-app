@@ -1,6 +1,6 @@
 # Sprntly Backend
 
-FastAPI backend for [Sprntly](https://www.sprntly.ai). Deployed to AWS EC2 at `api.sprntly.ai`. Called by the Next.js demo at `sprntly.ai/demo`.
+FastAPI backend for [Sprntly](https://www.sprntly.ai). Deployed to AWS EC2 at `api.sprntly.ai`. Called by the production app at `app.sprntly.ai` and the demo at `demo.sprntly.ai`.
 
 ## Stack
 

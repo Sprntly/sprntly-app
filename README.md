@@ -4,7 +4,7 @@ Monorepo for the [Sprntly](https://www.sprntly.ai) demo product (Cursor for prod
 
 ```
 backend/    FastAPI on EC2 — api.sprntly.ai
-web/        Next.js demo (added soon) — sprntly.ai/demo via Vercel rewrite
+web/        Next.js app — app.sprntly.ai (subdomain served from EC2 nginx)
 ```
 
 ## Auto-deploy
@@ -18,4 +18,5 @@ Every push to `main` rebuilds:
 
 - Backend README: [`backend/README.md`](backend/README.md) (currently the project README, will be split out)
 - API base URL: `https://api.sprntly.ai`
-- Demo: `https://sprntly.ai/demo` (once the rewrite is in place)
+- App: `https://app.sprntly.ai` (this repo)
+- Demo: `https://demo.sprntly.ai` (Sprntly/sprntly-demo repo)
