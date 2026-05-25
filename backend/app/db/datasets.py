@@ -70,4 +70,25 @@ def delete_dataset(slug: str) -> bool:
     """
     with conn() as c:
         cur = c.execute("DELETE FROM datasets WHERE slug=?", (slug,))
-        return (cur.rowcount or 0) > 0
+        deleted = (cur.rowcount or 0) > 0
+    _shadow_delete_dataset(slug)
+    return deleted
+
+
+def _shadow_delete_dataset(slug: str) -> None:
+    """Mirror a dataset delete to Supabase. No-op when dual-write off."""
+    from app.config import settings
+    from app.db.client import supabase_client
+    if not settings.supabase_dual_write:
+        return
+    client = supabase_client()
+    if client is None:
+        return
+    try:
+        client.table("datasets").delete().eq("slug", slug).execute()
+    except Exception as e:
+        import logging
+        logging.getLogger("app.db.datasets").warning(
+            "Supabase shadow-delete on datasets failed: %s: %s",
+            type(e).__name__, str(e)[:200],
+        )
