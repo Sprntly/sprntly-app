@@ -109,7 +109,12 @@ def list_connections() -> list[dict]:
 def delete_connection(provider: str) -> bool:
     with conn() as c:
         cur = c.execute("DELETE FROM connections WHERE provider=?", (provider,))
-        return (cur.rowcount or 0) > 0
+        deleted = (cur.rowcount or 0) > 0
+    # Mirror the delete to Supabase. We don't shadow_write() here since
+    # the helper is insert/upsert-shaped; deletes go straight via the
+    # client.
+    _shadow_delete_connection(provider)
+    return deleted
 
 
 def patch_connection_config(provider: str, config: dict) -> dict | None:
@@ -130,6 +135,15 @@ def patch_connection_config(provider: str, config: dict) -> dict | None:
             "UPDATE connections SET config_json=?, updated_at=? WHERE provider=?",
             (blob, now, provider),
         )
+    # Mirror — upsert by provider so we don't have to know the Supabase ID.
+    shadow_write(
+        "connections",
+        {
+            "provider": provider,
+            "config": existing,
+        },
+        on_conflict="provider",
+    )
     return get_connection(provider)
 
 
@@ -140,6 +154,11 @@ def update_connection_tokens(provider: str, token_encrypted: str) -> None:
             "UPDATE connections SET token_json_encrypted=?, updated_at=? WHERE provider=?",
             (token_encrypted, now, provider),
         )
+    shadow_write(
+        "connections",
+        {"provider": provider, "token_json_encrypted": token_encrypted},
+        on_conflict="provider",
+    )
 
 
 def update_connection_sync(
@@ -154,4 +173,34 @@ def update_connection_sync(
             "UPDATE connections SET last_sync_at=?, last_sync_error=?, updated_at=? "
             "WHERE provider=?",
             (last_sync_at or now, last_sync_error, now, provider),
+        )
+    shadow_write(
+        "connections",
+        {
+            "provider": provider,
+            "last_sync_at": last_sync_at or now,
+            "last_sync_error": last_sync_error,
+        },
+        on_conflict="provider",
+    )
+
+
+def _shadow_delete_connection(provider: str) -> None:
+    """Mirror a connection delete to Supabase. No-op when dual-write off
+    or unconfigured. Errors are logged + swallowed.
+    """
+    from app.config import settings
+    from app.db.client import supabase_client
+    if not settings.supabase_dual_write:
+        return
+    client = supabase_client()
+    if client is None:
+        return
+    try:
+        client.table("connections").delete().eq("provider", provider).execute()
+    except Exception as e:
+        import logging
+        logging.getLogger("app.db.connections").warning(
+            "Supabase shadow-delete on connections failed: %s: %s",
+            type(e).__name__, str(e)[:200],
         )
