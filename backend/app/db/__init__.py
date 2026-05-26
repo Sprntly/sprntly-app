@@ -19,10 +19,10 @@ Next phase will add a Supabase client alongside the sqlite one in
 client.py; per-domain submodules will gain dual-write helpers behind a
 flag without changing the public API.
 """
-# Connection + timestamp helpers
-from app.db.client import conn, utc_now, _utc_now
+# Timestamp helper + Supabase client accessor
+from app.db.client import supabase_client, utc_now, _utc_now
 
-# Schema bootstrap
+# Schema bootstrap (no-op shim after the Supabase cutover)
 from app.db.schema import SCHEMA, init_db
 
 # Briefs
@@ -100,7 +100,7 @@ from app.db.github import (
 
 __all__ = [
     # client
-    "conn",
+    "supabase_client",
     "utc_now",
     "_utc_now",
     # schema

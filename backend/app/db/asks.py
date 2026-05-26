@@ -6,23 +6,19 @@ cached_asks: pre-computed answers keyed by (dataset, question), feeds
 """
 import json
 
-from app.db.client import conn, shadow_write
+from app.db.client import require_client
 
 
 # ─────────────────────── ask_log (append-only) ───────────────────────
 
 
 def log_ask(question: str, answer: str, citations: list) -> None:
-    with conn() as c:
-        c.execute(
-            "INSERT INTO ask_log (question, answer, citations_json) VALUES (?, ?, ?)",
-            (question, answer, json.dumps(citations)),
-        )
-    shadow_write("ask_log", {
+    c = require_client()
+    c.table("ask_log").insert({
         "question": question,
         "answer": answer,
         "citations": citations,
-    })
+    }).execute()
 
 
 # ─────────────────────── cached_asks ───────────────────────
@@ -41,75 +37,88 @@ def _normalize_q(q: str) -> str:
 def start_cached_ask(
     dataset: str, question: str, cache_version: int | None = None
 ) -> int:
-    """Insert a stub cache row in 'generating' state; return new id."""
-    normalized = _normalize_q(question)
-    with conn() as c:
-        cur = c.execute(
-            "INSERT INTO cached_asks (dataset, question, response_json, status, cache_version) "
-            "VALUES (?, ?, '', 'generating', ?)",
-            (dataset, normalized, cache_version),
-        )
-        new_id = cur.lastrowid
-    shadow_write("cached_asks", {
+    c = require_client()
+    resp = c.table("cached_asks").insert({
         "dataset": dataset,
-        "question": normalized,
+        "question": _normalize_q(question),
         "response": {},
         "status": "generating",
         "cache_version": cache_version,
-    })
-    return new_id
+    }).execute()
+    return resp.data[0]["id"]
 
 
 def complete_cached_ask(cache_id: int, response_json: str) -> None:
-    with conn() as c:
-        c.execute(
-            "UPDATE cached_asks SET response_json=?, status='ready', error=NULL "
-            "WHERE id=?",
-            (response_json, cache_id),
-        )
+    """response_json is a JSON-string from the caller (legacy contract).
+    We decode and store as jsonb in Supabase.
+    """
+    try:
+        decoded = json.loads(response_json) if response_json else {}
+    except (TypeError, ValueError):
+        decoded = {}
+    c = require_client()
+    c.table("cached_asks").update({
+        "response": decoded,
+        "status": "ready",
+        "error": None,
+    }).eq("id", cache_id).execute()
 
 
 def fail_cached_ask(cache_id: int, error: str) -> None:
-    with conn() as c:
-        c.execute(
-            "UPDATE cached_asks SET status='failed', error=? WHERE id=?",
-            (error[:500], cache_id),
-        )
+    c = require_client()
+    c.table("cached_asks").update({
+        "status": "failed",
+        "error": (error or "")[:500],
+    }).eq("id", cache_id).execute()
 
 
 def find_cached_ask(dataset: str, question: str) -> dict | None:
-    """Most recent ready/generating cached Ask for a question."""
-    with conn() as c:
-        row = c.execute(
-            "SELECT id, dataset, question, response_json, status, error, "
-            "cache_version, generated_at FROM cached_asks "
-            "WHERE dataset=? AND question=? AND status IN ('ready', 'generating') "
-            "ORDER BY id DESC LIMIT 1",
-            (dataset, _normalize_q(question)),
-        ).fetchone()
-    return dict(row) if row else None
+    """Most recent ready/generating cached Ask for a question.
+
+    Returns the SQLite-shaped dict — `response_json` (string), not
+    `response` (jsonb) — so callers don't change.
+    """
+    c = require_client()
+    resp = (
+        c.table("cached_asks")
+        .select("*")
+        .eq("dataset", dataset)
+        .eq("question", _normalize_q(question))
+        .in_("status", ["ready", "generating"])
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        return None
+    row = resp.data[0]
+    # Translate jsonb back to JSON string for back-compat.
+    row["response_json"] = json.dumps(row.get("response") or {})
+    return row
 
 
 def invalidate_stale_cached_asks(current_version: int) -> int:
-    """Demote cached asks whose cache_version != current_version."""
-    with conn() as c:
-        cur = c.execute(
-            "UPDATE cached_asks SET status='invalidated' "
-            "WHERE status IN ('ready', 'generating') "
-            "  AND (cache_version IS NULL OR cache_version != ?)",
-            (current_version,),
-        )
-        return cur.rowcount or 0
+    c = require_client()
+    rows = (
+        c.table("cached_asks")
+        .select("id, cache_version")
+        .in_("status", ["ready", "generating"])
+        .execute()
+        .data
+    )
+    stale_ids = [
+        r["id"] for r in rows
+        if r.get("cache_version") is None or r["cache_version"] != current_version
+    ]
+    if stale_ids:
+        c.table("cached_asks").update({"status": "invalidated"}).in_("id", stale_ids).execute()
+    return len(stale_ids)
 
 
 def invalidate_orphan_generating_cached_asks() -> int:
-    """Mark every status='generating' cached ask as 'invalidated'.
-
-    Worker threads die with the previous process; without this, a hit on
-    such a row would dedupe to a doc that will never complete.
-    """
-    with conn() as c:
-        cur = c.execute(
-            "UPDATE cached_asks SET status='invalidated' WHERE status='generating'"
-        )
-        return cur.rowcount or 0
+    c = require_client()
+    rows = c.table("cached_asks").select("id").eq("status", "generating").execute().data
+    ids = [r["id"] for r in rows]
+    if ids:
+        c.table("cached_asks").update({"status": "invalidated"}).in_("id", ids).execute()
+    return len(ids)

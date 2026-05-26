@@ -1,29 +1,22 @@
-"""PRDs — one row per generation attempt for a (brief, insight_index) pair.
+"""PRDs — backed by the `prds` table in Supabase.
 
-`status` walks generating → ready (or failed/invalidated). `variant`
-distinguishes the v1 sample-build template from v2; v1 rows in prod
-remain readable through this column.
+One row per generation attempt for a (brief_id, insight_index, variant).
+`status` walks generating → ready (or failed/invalidated).
 """
-from app.db.client import conn, shadow_write
+from app.db.client import require_client
 
 
 def save_prd(brief_id: int, insight_index: int, title: str, md: str) -> int:
     """Insert a complete PRD (sync flow). Status='ready'."""
-    with conn() as c:
-        cur = c.execute(
-            "INSERT INTO prds (brief_id, insight_index, title, payload_md, status) "
-            "VALUES (?, ?, ?, ?, 'ready')",
-            (brief_id, insight_index, title, md),
-        )
-        new_id = cur.lastrowid
-    shadow_write("prds", {
+    c = require_client()
+    resp = c.table("prds").insert({
         "brief_id": brief_id,
         "insight_index": insight_index,
         "title": title,
         "payload_md": md,
         "status": "ready",
-    })
-    return new_id
+    }).execute()
+    return resp.data[0]["id"]
 
 
 def start_prd(
@@ -34,14 +27,8 @@ def start_prd(
     variant: str = "v1",
 ) -> int:
     """Insert an empty PRD row in 'generating' state. Returns the new id."""
-    with conn() as c:
-        cur = c.execute(
-            "INSERT INTO prds (brief_id, insight_index, title, payload_md, status, template_version, variant) "
-            "VALUES (?, ?, ?, '', 'generating', ?, ?)",
-            (brief_id, insight_index, title, template_version, variant),
-        )
-        new_id = cur.lastrowid
-    shadow_write("prds", {
+    c = require_client()
+    resp = c.table("prds").insert({
         "brief_id": brief_id,
         "insight_index": insight_index,
         "title": title,
@@ -49,8 +36,8 @@ def start_prd(
         "status": "generating",
         "template_version": template_version,
         "variant": variant,
-    })
-    return new_id
+    }).execute()
+    return resp.data[0]["id"]
 
 
 def invalidate_stale_prds(current_version: int, variant: str = "v1") -> int:
@@ -58,57 +45,62 @@ def invalidate_stale_prds(current_version: int, variant: str = "v1") -> int:
     whose template_version differs from current_version as 'invalidated'.
     Returns affected row count.
     """
-    with conn() as c:
-        cur = c.execute(
-            "UPDATE prds SET status='invalidated' "
-            "WHERE status IN ('ready', 'generating') "
-            "  AND variant = ? "
-            "  AND (template_version IS NULL OR template_version != ?)",
-            (variant, current_version),
-        )
-        return cur.rowcount or 0
+    c = require_client()
+    # Find candidates first (PostgREST doesn't expose a single SQL
+    # statement with a NULL-or-not-equal predicate, so we filter here).
+    rows = (
+        c.table("prds")
+        .select("id, template_version")
+        .in_("status", ["ready", "generating"])
+        .eq("variant", variant)
+        .execute()
+        .data
+    )
+    stale_ids = [
+        r["id"] for r in rows
+        if r.get("template_version") is None or r["template_version"] != current_version
+    ]
+    if stale_ids:
+        c.table("prds").update({"status": "invalidated"}).in_("id", stale_ids).execute()
+    return len(stale_ids)
 
 
 def invalidate_orphan_generating_prds() -> int:
     """Mark every status='generating' PRD as 'invalidated'.
 
-    Call from lifespan startup: in-flight rows are orphaned because the
-    worker thread that was generating them died with the previous
-    process. Leaving them stuck causes user clicks to dedupe to a row
-    that will never complete.
+    Called from lifespan startup: any in-flight row is orphaned because
+    the worker that was generating it died with the previous process.
     """
-    with conn() as c:
-        cur = c.execute(
-            "UPDATE prds SET status='invalidated' WHERE status='generating'"
-        )
-        return cur.rowcount or 0
+    c = require_client()
+    rows = c.table("prds").select("id").eq("status", "generating").execute().data
+    ids = [r["id"] for r in rows]
+    if ids:
+        c.table("prds").update({"status": "invalidated"}).in_("id", ids).execute()
+    return len(ids)
 
 
 def complete_prd(prd_id: int, title: str, md: str) -> None:
-    with conn() as c:
-        c.execute(
-            "UPDATE prds SET title=?, payload_md=?, status='ready', error=NULL "
-            "WHERE id=?",
-            (title, md, prd_id),
-        )
+    c = require_client()
+    c.table("prds").update({
+        "title": title,
+        "payload_md": md,
+        "status": "ready",
+        "error": None,
+    }).eq("id", prd_id).execute()
 
 
 def fail_prd(prd_id: int, error: str) -> None:
-    with conn() as c:
-        c.execute(
-            "UPDATE prds SET status='failed', error=? WHERE id=?",
-            (error[:500], prd_id),
-        )
+    c = require_client()
+    c.table("prds").update({
+        "status": "failed",
+        "error": (error or "")[:500],
+    }).eq("id", prd_id).execute()
 
 
 def get_prd(prd_id: int) -> dict | None:
-    with conn() as c:
-        row = c.execute(
-            "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
-            "status, error, template_version, variant FROM prds WHERE id=?",
-            (prd_id,),
-        ).fetchone()
-    return dict(row) if row else None
+    c = require_client()
+    resp = c.table("prds").select("*").eq("id", prd_id).limit(1).execute()
+    return resp.data[0] if resp.data else None
 
 
 def find_existing_prd(
@@ -118,13 +110,16 @@ def find_existing_prd(
     (brief, insight). Variant-scoped so distinct PRD formats don't
     dedupe against each other.
     """
-    with conn() as c:
-        row = c.execute(
-            "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
-            "status, error, template_version, variant FROM prds "
-            "WHERE brief_id=? AND insight_index=? AND variant=? "
-            "  AND status IN ('ready','generating') "
-            "ORDER BY id DESC LIMIT 1",
-            (brief_id, insight_index, variant),
-        ).fetchone()
-    return dict(row) if row else None
+    c = require_client()
+    resp = (
+        c.table("prds")
+        .select("*")
+        .eq("brief_id", brief_id)
+        .eq("insight_index", insight_index)
+        .eq("variant", variant)
+        .in_("status", ["ready", "generating"])
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None

@@ -6,11 +6,29 @@ generic identifier shown in the connectors UI ("alice@co.com" for
 Figma, "@octocat" for GitHub, the user's email for Google Drive).
 `google_email` is kept around for the existing Drive UI that reads it
 directly; new providers should use account_label.
+
+Back-compat note: the prior SQLite shape exposed `config` as a JSON
+string under the key `config_json`. We preserve that key in returned
+dicts so existing callers (google_drive_sync.py, routes/connectors.py)
+don't have to change.
 """
 import json
 import uuid
+from typing import Any
 
-from app.db.client import conn, shadow_write, utc_now
+from app.db.client import require_client, utc_now
+
+
+def _to_legacy_shape(row: dict) -> dict:
+    """Add back-compat `config_json` (string) to rows that have `config`."""
+    config = row.get("config")
+    if isinstance(config, dict):
+        row["config_json"] = json.dumps(config)
+    elif isinstance(config, str):
+        row["config_json"] = config
+    elif config is None:
+        row["config_json"] = "{}"
+    return row
 
 
 def upsert_connection(
@@ -23,148 +41,80 @@ def upsert_connection(
     config_json: str = "{}",
     status: str = "active",
 ) -> dict:
-    now = utc_now()
-    with conn() as c:
-        existing = c.execute(
-            "SELECT id FROM connections WHERE provider=?", (provider,)
-        ).fetchone()
-        if existing:
-            c.execute(
-                "UPDATE connections SET status=?, google_email=?, account_label=?, scopes=?, "
-                "token_json_encrypted=?, config_json=?, last_sync_error=NULL, updated_at=? "
-                "WHERE provider=?",
-                (
-                    status,
-                    google_email,
-                    account_label,
-                    scopes,
-                    token_encrypted,
-                    config_json,
-                    now,
-                    provider,
-                ),
-            )
-        else:
-            row_id = uuid.uuid4().hex
-            c.execute(
-                "INSERT INTO connections "
-                "(id, provider, status, google_email, account_label, scopes, "
-                "token_json_encrypted, config_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    row_id,
-                    provider,
-                    status,
-                    google_email,
-                    account_label,
-                    scopes,
-                    token_encrypted,
-                    config_json,
-                    now,
-                    now,
-                ),
-            )
-    row = get_connection(provider)
-    assert row is not None
-    # `provider` is UNIQUE in Supabase too; upsert by it. config_json
-    # field name maps to jsonb `config` in the Supabase schema.
-    config_obj: dict = {}
+    c = require_client()
+    # Parse the legacy JSON-string config back to a dict for jsonb storage.
     try:
-        config_obj = json.loads(row.get("config_json") or "{}")
+        config_obj: Any = json.loads(config_json) if config_json else {}
     except (TypeError, ValueError):
         config_obj = {}
-    shadow_write(
-        "connections",
-        {
-            "provider": provider,
-            "status": status,
-            "google_email": google_email,
-            "account_label": account_label,
-            "scopes": scopes,
-            "token_json_encrypted": token_encrypted,
-            "config": config_obj,
-        },
-        on_conflict="provider",
-    )
+
+    existing = get_connection(provider)
+    now = utc_now()
+    payload = {
+        "provider": provider,
+        "status": status,
+        "google_email": google_email,
+        "account_label": account_label,
+        "scopes": scopes,
+        "token_json_encrypted": token_encrypted,
+        "config": config_obj,
+        "last_sync_error": None,
+        "updated_at": now,
+    }
+    if not existing:
+        payload["id"] = uuid.uuid4().hex
+        payload["created_at"] = now
+    c.table("connections").upsert(payload, on_conflict="provider").execute()
+    row = get_connection(provider)
+    assert row is not None
     return row
 
 
 def get_connection(provider: str) -> dict | None:
-    with conn() as c:
-        row = c.execute(
-            "SELECT id, provider, status, google_email, account_label, scopes, "
-            "token_json_encrypted, config_json, last_sync_at, last_sync_error, "
-            "created_at, updated_at "
-            "FROM connections WHERE provider=?",
-            (provider,),
-        ).fetchone()
-    return dict(row) if row else None
+    c = require_client()
+    resp = c.table("connections").select("*").eq("provider", provider).limit(1).execute()
+    if not resp.data:
+        return None
+    return _to_legacy_shape(resp.data[0])
 
 
 def list_connections() -> list[dict]:
-    with conn() as c:
-        rows = c.execute(
-            "SELECT id, provider, status, google_email, account_label, scopes, "
-            "token_json_encrypted, config_json, last_sync_at, last_sync_error, "
-            "created_at, updated_at "
-            "FROM connections ORDER BY provider ASC"
-        ).fetchall()
-    return [dict(r) for r in rows]
+    c = require_client()
+    resp = c.table("connections").select("*").order("provider", desc=False).execute()
+    return [_to_legacy_shape(r) for r in (resp.data or [])]
 
 
 def delete_connection(provider: str) -> bool:
-    with conn() as c:
-        cur = c.execute("DELETE FROM connections WHERE provider=?", (provider,))
-        deleted = (cur.rowcount or 0) > 0
-    # Mirror the delete to Supabase. We don't shadow_write() here since
-    # the helper is insert/upsert-shaped; deletes go straight via the
-    # client.
-    _shadow_delete_connection(provider)
-    return deleted
+    c = require_client()
+    resp = c.table("connections").delete().eq("provider", provider).execute()
+    return bool(resp.count) if resp.count is not None else True
 
 
 def patch_connection_config(provider: str, config: dict) -> dict | None:
-    """Merge keys into config_json. Returns the updated row."""
-    row = get_connection(provider)
-    if not row:
+    """Merge keys into config (jsonb). Returns the updated row in legacy shape."""
+    existing = get_connection(provider)
+    if not existing:
         return None
-    existing: dict = {}
+    current: dict = {}
     try:
-        existing = json.loads(row.get("config_json") or "{}")
+        current = json.loads(existing.get("config_json") or "{}")
     except (TypeError, ValueError):
-        existing = {}
-    existing.update(config)
-    now = utc_now()
-    blob = json.dumps(existing)
-    with conn() as c:
-        c.execute(
-            "UPDATE connections SET config_json=?, updated_at=? WHERE provider=?",
-            (blob, now, provider),
-        )
-    # Mirror — upsert by provider so we don't have to know the Supabase ID.
-    shadow_write(
-        "connections",
-        {
-            "provider": provider,
-            "config": existing,
-        },
-        on_conflict="provider",
-    )
+        current = {}
+    current.update(config)
+    c = require_client()
+    c.table("connections").update({
+        "config": current,
+        "updated_at": utc_now(),
+    }).eq("provider", provider).execute()
     return get_connection(provider)
 
 
 def update_connection_tokens(provider: str, token_encrypted: str) -> None:
-    now = utc_now()
-    with conn() as c:
-        c.execute(
-            "UPDATE connections SET token_json_encrypted=?, updated_at=? WHERE provider=?",
-            (token_encrypted, now, provider),
-        )
-    shadow_write(
-        "connections",
-        {"provider": provider, "token_json_encrypted": token_encrypted},
-        on_conflict="provider",
-    )
+    c = require_client()
+    c.table("connections").update({
+        "token_json_encrypted": token_encrypted,
+        "updated_at": utc_now(),
+    }).eq("provider", provider).execute()
 
 
 def update_connection_sync(
@@ -174,39 +124,9 @@ def update_connection_sync(
     last_sync_error: str | None = None,
 ) -> None:
     now = utc_now()
-    with conn() as c:
-        c.execute(
-            "UPDATE connections SET last_sync_at=?, last_sync_error=?, updated_at=? "
-            "WHERE provider=?",
-            (last_sync_at or now, last_sync_error, now, provider),
-        )
-    shadow_write(
-        "connections",
-        {
-            "provider": provider,
-            "last_sync_at": last_sync_at or now,
-            "last_sync_error": last_sync_error,
-        },
-        on_conflict="provider",
-    )
-
-
-def _shadow_delete_connection(provider: str) -> None:
-    """Mirror a connection delete to Supabase. No-op when dual-write off
-    or unconfigured. Errors are logged + swallowed.
-    """
-    from app.config import settings
-    from app.db.client import supabase_client
-    if not settings.supabase_dual_write:
-        return
-    client = supabase_client()
-    if client is None:
-        return
-    try:
-        client.table("connections").delete().eq("provider", provider).execute()
-    except Exception as e:
-        import logging
-        logging.getLogger("app.db.connections").warning(
-            "Supabase shadow-delete on connections failed: %s: %s",
-            type(e).__name__, str(e)[:200],
-        )
+    c = require_client()
+    c.table("connections").update({
+        "last_sync_at": last_sync_at or now,
+        "last_sync_error": last_sync_error,
+        "updated_at": now,
+    }).eq("provider", provider).execute()

@@ -1,9 +1,9 @@
-"""Evidence pages — same shape as PRDs but for the Evidence Page generator.
+"""Evidence pages — same shape as PRDs but for the Evidence generator.
 
-Kept as a separate table (and module) because the two have different
-lifecycles (evidence regenerates more often) and different templates.
+Kept as a separate table because the two have different lifecycles
+(evidence regenerates more often) and different templates.
 """
-from app.db.client import conn, shadow_write
+from app.db.client import require_client
 
 
 def start_evidence(
@@ -13,15 +13,8 @@ def start_evidence(
     template_version: int | None = None,
     variant: str = "v1",
 ) -> int:
-    """Insert an empty evidence row in 'generating' state. Returns the new id."""
-    with conn() as c:
-        cur = c.execute(
-            "INSERT INTO evidences (brief_id, insight_index, title, payload_md, status, template_version, variant) "
-            "VALUES (?, ?, ?, '', 'generating', ?, ?)",
-            (brief_id, insight_index, title, template_version, variant),
-        )
-        new_id = cur.lastrowid
-    shadow_write("evidences", {
+    c = require_client()
+    resp = c.table("evidences").insert({
         "brief_id": brief_id,
         "insight_index": insight_index,
         "title": title,
@@ -29,83 +22,75 @@ def start_evidence(
         "status": "generating",
         "template_version": template_version,
         "variant": variant,
-    })
-    return new_id
+    }).execute()
+    return resp.data[0]["id"]
 
 
 def invalidate_stale_evidences(current_version: int, variant: str = "v1") -> int:
-    """Variant-scoped: mark any ready/generating evidence (of this variant)
-    whose template_version differs from current_version as 'invalidated'.
-    Returns affected row count.
-    """
-    with conn() as c:
-        cur = c.execute(
-            "UPDATE evidences SET status='invalidated' "
-            "WHERE status IN ('ready', 'generating') "
-            "  AND variant = ? "
-            "  AND (template_version IS NULL OR template_version != ?)",
-            (variant, current_version),
-        )
-        return cur.rowcount or 0
+    c = require_client()
+    rows = (
+        c.table("evidences")
+        .select("id, template_version")
+        .in_("status", ["ready", "generating"])
+        .eq("variant", variant)
+        .execute()
+        .data
+    )
+    stale_ids = [
+        r["id"] for r in rows
+        if r.get("template_version") is None or r["template_version"] != current_version
+    ]
+    if stale_ids:
+        c.table("evidences").update({"status": "invalidated"}).in_("id", stale_ids).execute()
+    return len(stale_ids)
 
 
 def invalidate_orphan_generating_evidences() -> int:
-    """Mark every status='generating' evidence row as 'invalidated'.
-
-    Same rationale as invalidate_orphan_generating_prds — on startup, any
-    in-flight generation is orphaned because the worker thread died with
-    the previous process. Without this, a user clicking "View evidence"
-    on an insight whose previous warming crashed mid-generation polls
-    forever.
-    """
-    with conn() as c:
-        cur = c.execute(
-            "UPDATE evidences SET status='invalidated' WHERE status='generating'"
-        )
-        return cur.rowcount or 0
+    c = require_client()
+    rows = c.table("evidences").select("id").eq("status", "generating").execute().data
+    ids = [r["id"] for r in rows]
+    if ids:
+        c.table("evidences").update({"status": "invalidated"}).in_("id", ids).execute()
+    return len(ids)
 
 
 def complete_evidence(evidence_id: int, title: str, md: str) -> None:
-    with conn() as c:
-        c.execute(
-            "UPDATE evidences SET title=?, payload_md=?, status='ready', error=NULL "
-            "WHERE id=?",
-            (title, md, evidence_id),
-        )
+    c = require_client()
+    c.table("evidences").update({
+        "title": title,
+        "payload_md": md,
+        "status": "ready",
+        "error": None,
+    }).eq("id", evidence_id).execute()
 
 
 def fail_evidence(evidence_id: int, error: str) -> None:
-    with conn() as c:
-        c.execute(
-            "UPDATE evidences SET status='failed', error=? WHERE id=?",
-            (error[:500], evidence_id),
-        )
+    c = require_client()
+    c.table("evidences").update({
+        "status": "failed",
+        "error": (error or "")[:500],
+    }).eq("id", evidence_id).execute()
 
 
 def get_evidence(evidence_id: int) -> dict | None:
-    with conn() as c:
-        row = c.execute(
-            "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
-            "status, error, template_version, variant FROM evidences WHERE id=?",
-            (evidence_id,),
-        ).fetchone()
-    return dict(row) if row else None
+    c = require_client()
+    resp = c.table("evidences").select("*").eq("id", evidence_id).limit(1).execute()
+    return resp.data[0] if resp.data else None
 
 
 def find_existing_evidence(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:
-    """Most recent ready/generating evidence (of the given variant) for a
-    (brief, insight). Variant-scoped so v1 and v2 generation paths don't
-    dedupe against each other.
-    """
-    with conn() as c:
-        row = c.execute(
-            "SELECT id, brief_id, insight_index, generated_at, title, payload_md, "
-            "status, error, template_version, variant FROM evidences "
-            "WHERE brief_id=? AND insight_index=? AND variant=? "
-            "  AND status IN ('ready','generating') "
-            "ORDER BY id DESC LIMIT 1",
-            (brief_id, insight_index, variant),
-        ).fetchone()
-    return dict(row) if row else None
+    c = require_client()
+    resp = (
+        c.table("evidences")
+        .select("*")
+        .eq("brief_id", brief_id)
+        .eq("insight_index", insight_index)
+        .eq("variant", variant)
+        .in_("status", ["ready", "generating"])
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None

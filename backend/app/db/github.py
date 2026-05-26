@@ -1,16 +1,33 @@
 """GitHub App installations + tracked PRs.
 
-Fed by the GitHub App webhook (`POST /v1/connectors/github/webhook`):
+Fed by the webhook at `POST /v1/connectors/github/webhook`:
   - `installation` events → upsert/delete in github_installations
   - `installation_repositories` → re-upsert with new repo selection
   - `pull_request` events → upsert in github_pull_requests
 
-Kept here so the rest of the codebase can answer "show me open PRs"
-without re-hitting the GitHub API.
+Back-compat note: the prior SQLite shape exposed `permissions` /
+`events` as JSON-string columns suffixed `_json`. We preserve those
+keys in returned dicts so existing callers don't have to change.
 """
 import json
 
-from app.db.client import conn, utc_now
+from app.db.client import require_client, utc_now
+
+
+def _legacy_install(row: dict) -> dict:
+    """Add `permissions_json` and `events_json` (strings) for back-compat."""
+    perms = row.get("permissions")
+    events = row.get("events")
+    row["permissions_json"] = json.dumps(perms) if isinstance(perms, (dict, list)) else (
+        perms or "{}"
+    )
+    row["events_json"] = json.dumps(events) if isinstance(events, (dict, list)) else (
+        events or "[]"
+    )
+    # Boolean -> 0/1 for callers (and tests) that used the SQLite int.
+    if isinstance(row.get("suspended"), bool):
+        row["suspended"] = 1 if row["suspended"] else 0
+    return row
 
 
 # ─────────────────────── github_installations ───────────────────────
@@ -27,69 +44,66 @@ def upsert_github_installation(
     permissions: dict | None = None,
     events: list | None = None,
 ) -> dict:
+    c = require_client()
     now = utc_now()
-    with conn() as c:
-        existing = c.execute(
-            "SELECT installation_id FROM github_installations WHERE installation_id=?",
-            (installation_id,),
-        ).fetchone()
-        perms = json.dumps(permissions or {})
-        evts = json.dumps(events or [])
-        if existing:
-            c.execute(
-                "UPDATE github_installations SET account_id=?, account_login=?, "
-                "account_type=?, repository_selection=?, suspended=?, "
-                "permissions_json=?, events_json=?, updated_at=? "
-                "WHERE installation_id=?",
-                (account_id, account_login, account_type, repository_selection,
-                 1 if suspended else 0, perms, evts, now, installation_id),
-            )
-        else:
-            c.execute(
-                "INSERT INTO github_installations (installation_id, account_id, "
-                "account_login, account_type, repository_selection, suspended, "
-                "permissions_json, events_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (installation_id, account_id, account_login, account_type,
-                 repository_selection, 1 if suspended else 0, perms, evts, now, now),
-            )
+    existing = get_github_installation(installation_id)
+    payload = {
+        "installation_id": installation_id,
+        "account_id": account_id,
+        "account_login": account_login,
+        "account_type": account_type,
+        "repository_selection": repository_selection,
+        "suspended": suspended,
+        "permissions": permissions or {},
+        "events": events or [],
+        "updated_at": now,
+    }
+    if not existing:
+        payload["created_at"] = now
+    c.table("github_installations").upsert(
+        payload, on_conflict="installation_id"
+    ).execute()
     return get_github_installation(installation_id)  # type: ignore[return-value]
 
 
 def get_github_installation(installation_id: int) -> dict | None:
-    with conn() as c:
-        row = c.execute(
-            "SELECT installation_id, account_id, account_login, account_type, "
-            "repository_selection, suspended, permissions_json, events_json, "
-            "created_at, updated_at FROM github_installations WHERE installation_id=?",
-            (installation_id,),
-        ).fetchone()
-    return dict(row) if row else None
+    c = require_client()
+    resp = (
+        c.table("github_installations")
+        .select("*")
+        .eq("installation_id", installation_id)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        return None
+    return _legacy_install(resp.data[0])
 
 
 def list_github_installations() -> list[dict]:
-    with conn() as c:
-        rows = c.execute(
-            "SELECT installation_id, account_id, account_login, account_type, "
-            "repository_selection, suspended, permissions_json, events_json, "
-            "created_at, updated_at FROM github_installations "
-            "ORDER BY account_login ASC"
-        ).fetchall()
-    return [dict(r) for r in rows]
+    c = require_client()
+    resp = (
+        c.table("github_installations")
+        .select("*")
+        .order("account_login", desc=False)
+        .execute()
+    )
+    return [_legacy_install(r) for r in (resp.data or [])]
 
 
 def delete_github_installation(installation_id: int) -> bool:
-    with conn() as c:
-        cur = c.execute(
-            "DELETE FROM github_installations WHERE installation_id=?",
-            (installation_id,),
-        )
-        # Also drop any tracked PRs for this install — they're inaccessible now.
-        c.execute(
-            "DELETE FROM github_pull_requests WHERE installation_id=?",
-            (installation_id,),
-        )
-        return (cur.rowcount or 0) > 0
+    c = require_client()
+    # Drop tracked PRs first — they're scoped to this install.
+    c.table("github_pull_requests").delete().eq(
+        "installation_id", installation_id
+    ).execute()
+    resp = (
+        c.table("github_installations")
+        .delete()
+        .eq("installation_id", installation_id)
+        .execute()
+    )
+    return bool(resp.count) if resp.count is not None else True
 
 
 # ─────────────────────── github_pull_requests ───────────────────────
@@ -111,46 +125,38 @@ def upsert_github_pull_request(
     pr_created_at: str | None = None,
     pr_updated_at: str | None = None,
 ) -> None:
-    now = utc_now()
-    with conn() as c:
-        c.execute(
-            "INSERT INTO github_pull_requests (installation_id, repo_full_name, "
-            "pr_number, title, state, is_draft, author_login, head_ref, base_ref, "
-            "html_url, body_excerpt, pr_created_at, pr_updated_at, last_event_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(repo_full_name, pr_number) DO UPDATE SET "
-            "installation_id=excluded.installation_id, title=excluded.title, "
-            "state=excluded.state, is_draft=excluded.is_draft, "
-            "author_login=excluded.author_login, head_ref=excluded.head_ref, "
-            "base_ref=excluded.base_ref, html_url=excluded.html_url, "
-            "body_excerpt=excluded.body_excerpt, pr_updated_at=excluded.pr_updated_at, "
-            "last_event_at=excluded.last_event_at",
-            (
-                installation_id, repo_full_name, pr_number, title, state,
-                1 if is_draft else 0, author_login, head_ref, base_ref,
-                html_url, body_excerpt, pr_created_at, pr_updated_at, now,
-            ),
-        )
+    c = require_client()
+    c.table("github_pull_requests").upsert(
+        {
+            "installation_id": installation_id,
+            "repo_full_name": repo_full_name,
+            "pr_number": pr_number,
+            "title": title,
+            "state": state,
+            "is_draft": is_draft,
+            "author_login": author_login,
+            "head_ref": head_ref,
+            "base_ref": base_ref,
+            "html_url": html_url,
+            "body_excerpt": body_excerpt,
+            "pr_created_at": pr_created_at,
+            "pr_updated_at": pr_updated_at,
+            "last_event_at": utc_now(),
+        },
+        # Composite PK — pass primary key columns to PostgREST.
+        on_conflict="repo_full_name,pr_number",
+    ).execute()
 
 
 def list_open_pull_requests(installation_id: int | None = None) -> list[dict]:
-    with conn() as c:
-        if installation_id is not None:
-            rows = c.execute(
-                "SELECT installation_id, repo_full_name, pr_number, title, state, "
-                "is_draft, author_login, head_ref, base_ref, html_url, body_excerpt, "
-                "pr_created_at, pr_updated_at, last_event_at "
-                "FROM github_pull_requests "
-                "WHERE installation_id=? AND state='open' "
-                "ORDER BY pr_updated_at DESC",
-                (installation_id,),
-            ).fetchall()
-        else:
-            rows = c.execute(
-                "SELECT installation_id, repo_full_name, pr_number, title, state, "
-                "is_draft, author_login, head_ref, base_ref, html_url, body_excerpt, "
-                "pr_created_at, pr_updated_at, last_event_at "
-                "FROM github_pull_requests WHERE state='open' "
-                "ORDER BY pr_updated_at DESC"
-            ).fetchall()
-    return [dict(r) for r in rows]
+    c = require_client()
+    q = c.table("github_pull_requests").select("*").eq("state", "open")
+    if installation_id is not None:
+        q = q.eq("installation_id", installation_id)
+    resp = q.order("pr_updated_at", desc=True).execute()
+    rows = resp.data or []
+    # is_draft: Supabase bool -> back-compat int.
+    for r in rows:
+        if isinstance(r.get("is_draft"), bool):
+            r["is_draft"] = 1 if r["is_draft"] else 0
+    return rows
