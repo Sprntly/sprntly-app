@@ -145,6 +145,19 @@ CREATE TABLE cached_asks (
     generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE cached_briefs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id  TEXT NOT NULL,
+    week_start    TEXT NOT NULL,
+    dataset_slug  TEXT,
+    payload       TEXT NOT NULL DEFAULT '{}',
+    status        TEXT NOT NULL DEFAULT 'ready',
+    error         TEXT,
+    generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX cached_briefs_workspace_week_idx
+    ON cached_briefs (workspace_id, week_start);
+
 CREATE TABLE datasets (
     slug         TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,

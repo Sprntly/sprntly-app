@@ -4,6 +4,7 @@ import logging
 from fastapi import Depends, APIRouter, HTTPException
 
 from app.auth import require_session
+from app.brief.comprehensive import run_brief_comprehensive
 from app.brief_runner import auto_generate_brief, get_status
 from app.corpus import load_corpus
 from app.db import get_brief_by_id, get_current_brief, save_brief
@@ -92,6 +93,45 @@ async def regenerate(
         logger.exception("Brief regenerate failed for dataset=%s", dataset)
         raise HTTPException(502, f"Brief regeneration failed: {exc}") from exc
     return {"started": True, "dataset": dataset, "brief": brief.model_dump(mode="json")}
+
+
+@router.post("/comprehensive/regenerate")
+async def regenerate_comprehensive(
+    dataset: str,
+    _session: dict = Depends(require_session),
+):
+    """Manual trigger for the Monday Comprehensive flow.
+
+    Spec source: Master PRD §4.2. Runs DS Comprehensive + Synthesis 11-step
+    assembly and persists the result. Subsequent calls within the same
+    ISO-week hit the `cached_briefs` row this call writes (the Monday
+    scheduled run overwrites it). Use `/v1/brief/regenerate` for the
+    Synthesis-only path (faster, signal-only, no DS).
+    """
+    workspace_id = dataset  # transitional — slug doubles as workspace_id
+    graph = _get_graph_facade()
+    try:
+        brief = await asyncio.to_thread(
+            run_brief_comprehensive,
+            workspace_id,
+            dataset,
+            graph,
+            call_json,
+            None,  # ds_runner — default lazy-imports ds_agent
+        )
+    except Exception as exc:  # pragma: no cover — observability bubble-up
+        logger.exception(
+            "Comprehensive Brief regenerate failed for dataset=%s", dataset
+        )
+        raise HTTPException(
+            502, f"Comprehensive Brief regeneration failed: {exc}"
+        ) from exc
+    return {
+        "started": True,
+        "dataset": dataset,
+        "tier": "comprehensive",
+        "brief": brief.model_dump(mode="json"),
+    }
 
 
 @router.post("/regenerate-legacy")
