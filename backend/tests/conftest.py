@@ -67,6 +67,15 @@ _RELOAD_ORDER = [
     "app.connectors.figma_oauth",
     "app.connectors.github_app",
     "app.routes.connectors",
+    "app.research.profile",
+    "app.research.profile_service",
+    "app.research.monitors.base",
+    "app.research.monitors.app_store_monitor",
+    "app.research.monitors.changelog_monitor",
+    "app.research.monitors.jobs_monitor",
+    "app.research.monitors.social_monitor",
+    "app.research.monitors",
+    "app.routes.research_profiles",
     "app.main",
 ]
 
@@ -195,6 +204,37 @@ CREATE TABLE github_pull_requests (
     pr_updated_at   TEXT,
     last_event_at   TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (repo_full_name, pr_number)
+);
+
+CREATE TABLE competitor_profiles (
+    id                       TEXT PRIMARY KEY,
+    workspace_id             TEXT NOT NULL,
+    name                     TEXT NOT NULL,
+    product_url              TEXT,
+    app_store_ios_url        TEXT,
+    app_store_android_url    TEXT,
+    g2_url                   TEXT,
+    capterra_url             TEXT,
+    changelog_url            TEXT,
+    careers_url              TEXT,
+    twitter_handle           TEXT,
+    monitoring_enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE competitor_signals (
+    id                       TEXT PRIMARY KEY,
+    competitor_profile_id    TEXT NOT NULL,
+    source                   TEXT NOT NULL,
+    signal_type              TEXT NOT NULL,
+    title                    TEXT NOT NULL,
+    body                     TEXT NOT NULL DEFAULT '',
+    url                      TEXT,
+    sentiment                TEXT,
+    published_at             TEXT NOT NULL,
+    fetched_at               TEXT NOT NULL DEFAULT (datetime('now')),
+    raw_payload_json         TEXT NOT NULL DEFAULT '{}'
 );
 """
 
