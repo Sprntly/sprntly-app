@@ -27,9 +27,22 @@ def _seed_brief(db_mod, dataset="asurion", insights=None):
         "insights": insights,
         "_schema_version": 1,
     }
+    # Datasets are now validated by the PRD route; register the slug so
+    # the runner has a real company row to attribute the generation to.
+    db_mod.insert_dataset(slug=dataset, display_name=dataset.title())
     return db_mod.save_brief(
         dataset=dataset, week_label="Week of stub", payload=payload, schema_version=1
     )
+
+
+# Minimal v2 PRD that satisfies _validate_required_blocks. Tests that
+# don't care about content use this as the `call_md` return value.
+_VALID_PRD_MD = (
+    "# Stub PRD\n\n"
+    ':::problem\n{"user_story": "A user tries x", "impact": []}\n:::\n\n'
+    ':::requirements\n[{"behavior": "x"}]\n:::\n\n'
+    ':::acceptance-criteria\n[{"id": "AC1"}]\n:::\n'
+)
 
 
 def test_run_sync_happy_path_completes_prd(
@@ -45,13 +58,13 @@ def test_run_sync_happy_path_completes_prd(
         template_version=1,
         variant="v2",
     )
-    monkeypatch.setattr(prd_runner, "call_md", lambda **kw: "# PRD body")
+    monkeypatch.setattr(prd_runner, "call_md", lambda **kw: _VALID_PRD_MD)
 
     prd_runner._run_sync(prd_id, brief_id, 0)
 
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
-    assert row["payload_md"] == "# PRD body"
+    assert row["payload_md"] == _VALID_PRD_MD
     assert row["title"] == "Insight A"
     assert row["variant"] == "v2"
 
@@ -77,7 +90,7 @@ def test_run_sync_passes_canonical_prompt_and_template(
 
     def _capture(**kwargs):
         captured.update(kwargs)
-        return "# md"
+        return _VALID_PRD_MD
 
     monkeypatch.setattr(prd_runner, "call_md", _capture)
     prd_runner._run_sync(prd_id, brief_id, 0)
@@ -97,7 +110,7 @@ def test_run_sync_uses_fallback_title(isolated_settings, fake_llm, monkeypatch):
         template_version=1,
         variant="v2",
     )
-    monkeypatch.setattr(prd_runner, "call_md", lambda **kw: "# md")
+    monkeypatch.setattr(prd_runner, "call_md", lambda **kw: _VALID_PRD_MD)
 
     prd_runner._run_sync(prd_id, brief_id, 0)
     row = db_mod.get_prd(prd_id)

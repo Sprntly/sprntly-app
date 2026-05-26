@@ -25,9 +25,24 @@ def _save_brief_with_insights(db_mod, dataset="asurion", insights=None):
         "insights": insights,
         "_schema_version": 1,
     }
+    # Datasets are now validated by the PRD route; register the slug so
+    # /v1/prd/generate doesn't 404 on the dataset check.
+    db_mod.insert_dataset(slug=dataset, display_name=dataset.title())
     return db_mod.save_brief(
         dataset=dataset, week_label="Week of stub", payload=payload, schema_version=1
     )
+
+
+# Minimal v2 PRD that satisfies the route's post-generation smoke check.
+_VALID_PRD_MD = (
+    "# Stub PRD\n\n"
+    ":::tldr\n"
+    '{"problem": "p", "fix": "f", "impact": "i"}\n'
+    ":::\n\n"
+    ':::problem\n{"user_story": "A user tries x", "impact": []}\n:::\n\n'
+    ':::requirements\n[{"behavior": "x"}]\n:::\n\n'
+    ':::acceptance-criteria\n[{"id": "AC1"}]\n:::\n'
+)
 
 
 # ---- GET /v1/prd/{id} -------------------------------------------------------
@@ -94,6 +109,34 @@ def test_generate_missing_brief_returns_404(app_client, isolated_settings):
         "/v1/prd/generate", json={"brief_id": 9999, "insight_index": 0}
     )
     assert resp.status_code == 404
+
+
+def test_generate_missing_dataset_returns_404(app_client, isolated_settings):
+    """A brief that references a since-deleted dataset must 404 from
+    /v1/prd/generate rather than silently kick off a generation against
+    a missing corpus."""
+    db_mod = isolated_settings["db"]
+    # Seed a brief whose dataset slug is NOT registered in the datasets
+    # table — _save_brief_with_insights would register it, so insert the
+    # brief directly without the dataset row.
+    payload = {
+        "summary_headline": "stub",
+        "insights": [{"title": "Insight A"}],
+        "_schema_version": 1,
+    }
+    brief_id = db_mod.save_brief(
+        dataset="ghost-company",
+        week_label="Week of stub",
+        payload=payload,
+        schema_version=1,
+    )
+
+    resp = app_client.post(
+        "/v1/prd/generate",
+        json={"brief_id": brief_id, "insight_index": 0},
+    )
+    assert resp.status_code == 404
+    assert "ghost-company" in resp.json()["detail"]
 
 
 def test_generate_out_of_range_insight_returns_400(app_client, isolated_settings):
@@ -192,7 +235,10 @@ def test_generate_renders_v2_semantic_blocks_via_canonical_path(
         "# Claims — Move deductible upfront\n\n"
         ":::tldr\n"
         '{"problem": "57% abandon", "fix": "step 1", "impact": "+$143M"}\n'
-        ":::\n"
+        ":::\n\n"
+        ':::problem\n{"user_story": "A claimant tries to file", "impact": []}\n:::\n\n'
+        ':::requirements\n[{"behavior": "move deductible"}]\n:::\n\n'
+        ':::acceptance-criteria\n[{"id": "AC1"}]\n:::\n'
     )
 
     def _capture(**kwargs):

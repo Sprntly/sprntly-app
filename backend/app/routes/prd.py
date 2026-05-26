@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import require_session
 from app.db import (
+    dataset_exists,
     find_existing_prd,
     get_brief_by_id,
     get_prd,
@@ -55,6 +56,12 @@ async def generate(
     brief = get_brief_by_id(body.brief_id)
     if not brief:
         raise HTTPException(404, f"brief_id={body.brief_id} not found")
+    # The brief carries the dataset (company) slug; reject the request if
+    # that company is no longer registered so we don't run a generation
+    # against a deleted/renamed corpus.
+    dataset = brief.get("dataset")
+    if dataset and not dataset_exists(dataset):
+        raise HTTPException(404, f"dataset={dataset!r} not found")
     insights = brief.get("insights") or []
     if not (0 <= body.insight_index < len(insights)):
         raise HTTPException(
