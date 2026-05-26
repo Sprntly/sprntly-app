@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS connections (
     provider TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'active',
     google_email TEXT,
+    -- Generic identifier for non-Google connectors: "alice@co.com" for
+    -- Figma, "@octocat" for GitHub. Google still uses google_email.
+    account_label TEXT,
     scopes TEXT NOT NULL DEFAULT '',
     token_json_encrypted TEXT NOT NULL,
     config_json TEXT NOT NULL DEFAULT '{}',
@@ -93,6 +96,42 @@ CREATE TABLE IF NOT EXISTS connections (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- GitHub App installations. One row per install_id. account_type is
+-- 'User' or 'Organization'; repository_selection is 'all' or 'selected'.
+CREATE TABLE IF NOT EXISTS github_installations (
+    installation_id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL,
+    account_login TEXT NOT NULL,
+    account_type TEXT NOT NULL,
+    repository_selection TEXT NOT NULL DEFAULT 'selected',
+    suspended INTEGER NOT NULL DEFAULT 0,
+    permissions_json TEXT NOT NULL DEFAULT '{}',
+    events_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Open PRs tracked from webhook events.
+CREATE TABLE IF NOT EXISTS github_pull_requests (
+    installation_id INTEGER NOT NULL,
+    repo_full_name TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'open',
+    is_draft INTEGER NOT NULL DEFAULT 0,
+    author_login TEXT,
+    head_ref TEXT,
+    base_ref TEXT,
+    html_url TEXT,
+    body_excerpt TEXT,
+    pr_created_at TEXT,
+    pr_updated_at TEXT,
+    last_event_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (repo_full_name, pr_number)
+);
+CREATE INDEX IF NOT EXISTS github_pull_requests_install
+    ON github_pull_requests(installation_id, state);
 """
 
 
@@ -119,3 +158,8 @@ def init_db() -> None:
             c.execute(
                 "ALTER TABLE evidences ADD COLUMN variant TEXT NOT NULL DEFAULT 'v1'"
             )
+        # Generic account label for non-Google connectors. Boxes that
+        # pre-date this column get it added in place; old rows keep NULL.
+        conn_cols = {row[1] for row in c.execute("PRAGMA table_info(connections)").fetchall()}
+        if conn_cols and "account_label" not in conn_cols:
+            c.execute("ALTER TABLE connections ADD COLUMN account_label TEXT")
