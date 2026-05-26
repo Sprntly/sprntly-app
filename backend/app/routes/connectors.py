@@ -12,6 +12,8 @@
   GET    /v1/connectors/figma/authorize         -> redirect to Figma
   GET    /v1/connectors/figma/callback          -> OAuth callback
   DELETE /v1/connectors/figma                   -> disconnect
+  GET    /v1/connectors/figma/files/{key}       -> file structure (Design Agent input)
+  GET    /v1/connectors/figma/files/{key}/styles -> design tokens (Design Agent input)
 
   GET    /v1/connectors/github/authorize        -> redirect to GitHub
   GET    /v1/connectors/github/callback         -> OAuth callback
@@ -19,6 +21,7 @@
   POST   /v1/connectors/github/webhook          -> GitHub App event sink
   GET    /v1/connectors/github/installations    -> list installs we know about
   GET    /v1/connectors/github/pull-requests    -> list tracked open PRs
+  GET    /v1/connectors/github/repos            -> user's accessible repos (Engineer Agent input)
 """
 from __future__ import annotations
 
@@ -267,6 +270,39 @@ def figma_disconnect(_session: dict = Depends(require_session)):
     return {"deleted": True, "provider": figma_oauth.FIGMA_PROVIDER}
 
 
+def _figma_access_token() -> str:
+    """Decrypt the stored Figma token. Raises 404 if not connected."""
+    row = db.get_connection(figma_oauth.FIGMA_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Figma is not connected")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except (TokenEncryptionError, json.JSONDecodeError) as e:
+        raise HTTPException(500, "Figma token unreadable") from e
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(500, "Figma token has no access_token")
+    return access_token
+
+
+@router.get("/figma/files/{key}")
+def figma_get_file(key: str, depth: int = 2, _session: dict = Depends(require_session)):
+    """Fetch a Figma file's top-level structure. Used by Design Agent to
+    extract frames/pages and to ground prototype generation in the team's
+    actual canvases."""
+    token = _figma_access_token()
+    return figma_oauth.fetch_file(token, key, depth=depth)
+
+
+@router.get("/figma/files/{key}/styles")
+def figma_get_file_styles(key: str, _session: dict = Depends(require_session)):
+    """Fetch published styles for a Figma file. Used by Design Agent to
+    extract design tokens (colors, fonts, effects) for Scenario A
+    (Figma-connected) prototype generation."""
+    token = _figma_access_token()
+    return figma_oauth.fetch_file_styles(token, key)
+
+
 # ─────────────────────── GitHub (App, user-OAuth half) ───────────────────────
 
 
@@ -329,6 +365,30 @@ def github_list_open_prs(
     _session: dict = Depends(require_session),
 ):
     return {"pull_requests": db.list_open_pull_requests(installation_id)}
+
+
+def _github_access_token() -> str:
+    """Decrypt the stored GitHub user OAuth token. Raises 404 if not connected."""
+    row = db.get_connection(github_app.GITHUB_PROVIDER)
+    if not row:
+        raise HTTPException(404, "GitHub is not connected")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except (TokenEncryptionError, json.JSONDecodeError) as e:
+        raise HTTPException(500, "GitHub token unreadable") from e
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(500, "GitHub token has no access_token")
+    return access_token
+
+
+@router.get("/github/repos")
+def github_list_repos(per_page: int = 50, _session: dict = Depends(require_session)):
+    """List repos the connected user can access. Engineer Agent uses this
+    to discover the codebase context for a workspace; installation tokens
+    will be used later for read-write operations."""
+    token = _github_access_token()
+    return {"repositories": github_app.fetch_user_repos(token, per_page=per_page)}
 
 
 # ─────────────────────── GitHub webhook ───────────────────────

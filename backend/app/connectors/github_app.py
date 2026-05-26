@@ -286,3 +286,47 @@ def verify_webhook_signature(raw_body: bytes, sig_header: str | None) -> bool:
     expected = sig_header.split("=", 1)[1]
     digest = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, digest)
+
+
+# ─────────────────────── data API helpers (Engineer Agent input) ───────────────────────
+
+GITHUB_API_BASE = "https://api.github.com"
+
+
+def fetch_user_repos(access_token: str, per_page: int = 50) -> list[dict[str, Any]]:
+    """List repos the user can access via their OAuth token (first page).
+
+    Returns the trimmed list — full_name, name, private, html_url, default_branch,
+    description, updated_at, stargazers_count. The full Engineer Agent will
+    later pull file trees via installation tokens; this is the lightweight
+    inventory call the UI uses.
+    """
+    resp = requests.get(
+        f"{GITHUB_API_BASE}/user/repos",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        params={"per_page": per_page, "sort": "updated", "affiliation": "owner,collaborator,organization_member"},
+        timeout=20,
+    )
+    if not resp.ok:
+        logger.warning(
+            "GitHub /user/repos failed: %s %s", resp.status_code, resp.text[:200]
+        )
+        raise HTTPException(resp.status_code, "GitHub repos fetch failed")
+    raw = resp.json()
+    return [
+        {
+            "full_name": r.get("full_name"),
+            "name": r.get("name"),
+            "private": bool(r.get("private")),
+            "html_url": r.get("html_url"),
+            "default_branch": r.get("default_branch"),
+            "description": r.get("description"),
+            "updated_at": r.get("updated_at"),
+            "stargazers_count": r.get("stargazers_count", 0),
+        }
+        for r in (raw or [])
+    ]

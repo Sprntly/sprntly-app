@@ -105,6 +105,16 @@ export function ConnectorsScreen() {
         "Google Drive connected",
         "Choose which Drive folder to sync, then run Sync now.",
       )
+    } else if (connected === "figma") {
+      showToast(
+        "Figma connected",
+        "Sprntly can now read your files for design-token extraction.",
+      )
+    } else if (connected === "github") {
+      showToast(
+        "GitHub connected",
+        "Install the Sprntly app on the repos you want covered.",
+      )
     } else {
       showToast("Connector connected", `Provider: ${connected}`)
     }
@@ -115,6 +125,14 @@ export function ConnectorsScreen() {
 
   const connectGoogleDrive = () => {
     window.location.href = connectorsApi.googleDriveAuthorizeUrl(activeCompany)
+  }
+
+  const connectFigma = () => {
+    window.location.href = connectorsApi.figmaAuthorizeUrl()
+  }
+
+  const connectGithub = () => {
+    window.location.href = connectorsApi.githubAuthorizeUrl()
   }
 
   const driveConn = connectionByProvider.get("google_drive")
@@ -170,8 +188,34 @@ export function ConnectorsScreen() {
     }
   }
 
+  const disconnectProvider = async (
+    provider: "figma" | "github",
+    label: string,
+  ) => {
+    if (disconnecting) return
+    setDisconnecting(true)
+    try {
+      if (provider === "figma") await connectorsApi.disconnectFigma()
+      else await connectorsApi.disconnectGithub()
+      showToast(`${label} disconnected`, "Tokens removed from Sprntly.")
+      await reload()
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? `API ${e.status}`
+          : e instanceof Error
+            ? e.message
+            : String(e)
+      showToast("Couldn't disconnect", msg)
+    } finally {
+      setDisconnecting(false)
+    }
+  }
+
   const onChipClick = (itemId: string) => {
     if (itemId === "google_drive") connectGoogleDrive()
+    else if (itemId === "figma") connectFigma()
+    else if (itemId === "github") connectGithub()
   }
 
   const categories = CONNECTOR_CATALOG
@@ -262,16 +306,18 @@ export function ConnectorsScreen() {
                     const conn = connectionByProvider.get(item.id)
                     const hint = formatSyncHint(conn)
                     const isDrive = item.id === "google_drive"
+                    const accountLabel =
+                      conn?.google_email ?? conn?.account_label ?? null
                     return (
                       <div key={item.id} className="conn-mgmt-connected-row">
                         <div className="conn-mgmt-connected-pill">
                           <div className="conn-logo">{item.logo}</div>
                           <span>
                             {item.name}
-                            {conn?.google_email ? (
+                            {accountLabel ? (
                               <span className="conn-mgmt-email">
                                 {" "}
-                                · {conn.google_email}
+                                · {accountLabel}
                               </span>
                             ) : null}
                           </span>
@@ -298,6 +344,20 @@ export function ConnectorsScreen() {
                               Disconnect
                             </button>
                           </>
+                        ) : item.id === "figma" || item.id === "github" ? (
+                          <button
+                            type="button"
+                            className="btn btn-sm conn-mgmt-disconnect"
+                            disabled={disconnecting}
+                            onClick={() =>
+                              void disconnectProvider(
+                                item.id as "figma" | "github",
+                                item.name,
+                              )
+                            }
+                          >
+                            Disconnect
+                          </button>
                         ) : null}
                       </div>
                     )

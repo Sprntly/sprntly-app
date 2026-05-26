@@ -138,3 +138,51 @@ def token_payload_to_store(token_json: dict[str, Any]) -> str:
     payload = dict(token_json)
     payload["obtained_at"] = int(time.time())
     return json.dumps(payload)
+
+
+# ─────────────────────── data API helpers (Design Agent input) ───────────────────────
+
+FIGMA_API_BASE = "https://api.figma.com/v1"
+
+
+def fetch_file(access_token: str, file_key: str, depth: int = 2) -> dict[str, Any]:
+    """Fetch a Figma file's top-level structure for the Design Agent.
+
+    Returns the JSON payload from GET /v1/files/{key} with ?depth=N to limit
+    tree traversal. depth=2 surfaces pages + their direct child frames without
+    pulling every vector node. Caller is responsible for token refresh.
+    """
+    resp = requests.get(
+        f"{FIGMA_API_BASE}/files/{file_key}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={"depth": depth},
+        timeout=20,
+    )
+    if not resp.ok:
+        logger.warning(
+            "Figma /files/%s failed: %s %s", file_key, resp.status_code, resp.text[:200]
+        )
+        raise HTTPException(resp.status_code, "Figma file fetch failed")
+    return resp.json()
+
+
+def fetch_file_styles(access_token: str, file_key: str) -> dict[str, Any]:
+    """Fetch published styles (colors, fonts, effects) for a Figma file.
+
+    Powers design-token extraction for the Design Agent. Returns the raw
+    /v1/files/{key}/styles JSON.
+    """
+    resp = requests.get(
+        f"{FIGMA_API_BASE}/files/{file_key}/styles",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=15,
+    )
+    if not resp.ok:
+        logger.warning(
+            "Figma /files/%s/styles failed: %s %s",
+            file_key,
+            resp.status_code,
+            resp.text[:200],
+        )
+        raise HTTPException(resp.status_code, "Figma styles fetch failed")
+    return resp.json()

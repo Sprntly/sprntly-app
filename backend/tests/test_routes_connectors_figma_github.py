@@ -233,6 +233,86 @@ def test_github_disconnect(github_client):
     assert r.json()["deleted"] is True
 
 
+# ─────────────────────── Figma data endpoints (Design Agent input) ───────────────────────
+
+
+def _seed_figma_token(token: str = "fig-access") -> None:
+    from app.connectors import figma_oauth
+    from app.connectors.tokens import encrypt_token_json
+    import app.db as db_mod
+    db_mod.upsert_connection(
+        provider=figma_oauth.FIGMA_PROVIDER,
+        token_encrypted=encrypt_token_json(json.dumps({"access_token": token})),
+        scopes=figma_oauth.DEFAULT_SCOPES,
+        account_label="alice@co.com",
+    )
+
+
+def test_figma_get_file_requires_connection(figma_client):
+    r = figma_client.get("/v1/connectors/figma/files/abc123")
+    assert r.status_code == 404
+
+
+def test_figma_get_file_returns_figma_payload(figma_client):
+    _seed_figma_token()
+    fake_doc = {"name": "Design System", "document": {"id": "0:1", "children": []}}
+    with patch(
+        "app.routes.connectors.figma_oauth.fetch_file", return_value=fake_doc
+    ) as mock_fetch:
+        r = figma_client.get("/v1/connectors/figma/files/abc123?depth=3")
+    assert r.status_code == 200
+    assert r.json() == fake_doc
+    mock_fetch.assert_called_once_with("fig-access", "abc123", depth=3)
+
+
+def test_figma_get_file_styles_returns_figma_payload(figma_client):
+    _seed_figma_token()
+    fake_styles = {"meta": {"styles": [{"key": "S:1", "name": "Brand/Primary"}]}}
+    with patch(
+        "app.routes.connectors.figma_oauth.fetch_file_styles", return_value=fake_styles
+    ) as mock_fetch:
+        r = figma_client.get("/v1/connectors/figma/files/abc123/styles")
+    assert r.status_code == 200
+    assert r.json() == fake_styles
+    mock_fetch.assert_called_once_with("fig-access", "abc123")
+
+
+# ─────────────────────── GitHub data endpoints (Engineer Agent input) ───────────────────────
+
+
+def _seed_github_token(token: str = "gho_xxx") -> None:
+    from app.connectors import github_app
+    from app.connectors.tokens import encrypt_token_json
+    import app.db as db_mod
+    db_mod.upsert_connection(
+        provider=github_app.GITHUB_PROVIDER,
+        token_encrypted=encrypt_token_json(json.dumps({"access_token": token})),
+        scopes="read:user user:email",
+        account_label="@octocat",
+    )
+
+
+def test_github_repos_requires_connection(github_client):
+    r = github_client.get("/v1/connectors/github/repos")
+    assert r.status_code == 404
+
+
+def test_github_repos_returns_trimmed_list(github_client):
+    _seed_github_token()
+    fake_repos = [
+        {"full_name": "octocat/hello", "name": "hello", "private": False,
+         "html_url": "https://github.com/octocat/hello", "default_branch": "main",
+         "description": "Hi", "updated_at": "2026-05-20T00:00:00Z", "stargazers_count": 3},
+    ]
+    with patch(
+        "app.routes.connectors.github_app.fetch_user_repos", return_value=fake_repos
+    ) as mock_fetch:
+        r = github_client.get("/v1/connectors/github/repos?per_page=10")
+    assert r.status_code == 200
+    assert r.json() == {"repositories": fake_repos}
+    mock_fetch.assert_called_once_with("gho_xxx", per_page=10)
+
+
 def test_github_app_jwt_signs_with_rs256(monkeypatch, isolated_settings):
     """Smoke-test the app-as-app JWT helper end-to-end against a generated key."""
     from cryptography.hazmat.primitives import serialization

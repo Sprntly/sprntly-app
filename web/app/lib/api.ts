@@ -341,15 +341,27 @@ export type DeleteSourceResponse = {
 
 export type ConnectionSummary = {
   id: string
-  provider: "google_drive" | string
+  provider: "google_drive" | "figma" | "github" | string
   status: "active" | "error" | "revoked" | string
   google_email: string | null
+  account_label?: string | null
   scopes: string
   config: { dataset?: string; folder_id?: string; folder_name?: string }
   last_sync_at: string | null
   last_sync_error: string | null
   created_at: string
   updated_at: string
+}
+
+export type GitHubRepo = {
+  full_name: string
+  name: string
+  private: boolean
+  html_url: string
+  default_branch: string
+  description: string | null
+  updated_at: string
+  stargazers_count: number
 }
 
 export type GoogleDriveSyncResult = {
@@ -387,6 +399,28 @@ export const connectorsApi = {
   /** Full-page navigation — OAuth must not use fetch. */
   googleDriveAuthorizeUrl: (dataset: string) =>
     `${API_URL}/v1/connectors/google-drive/authorize?dataset=${encodeURIComponent(dataset)}`,
+
+  // ---- Figma ---------------------------------------------------------------
+  figmaAuthorizeUrl: () => `${API_URL}/v1/connectors/figma/authorize`,
+  disconnectFigma: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/figma"),
+  getFigmaFile: (key: string, depth = 2) =>
+    api.get<Record<string, unknown>>(
+      `/v1/connectors/figma/files/${encodeURIComponent(key)}?depth=${encodeURIComponent(String(depth))}`,
+    ),
+  getFigmaFileStyles: (key: string) =>
+    api.get<Record<string, unknown>>(
+      `/v1/connectors/figma/files/${encodeURIComponent(key)}/styles`,
+    ),
+
+  // ---- GitHub --------------------------------------------------------------
+  githubAuthorizeUrl: () => `${API_URL}/v1/connectors/github/authorize`,
+  disconnectGithub: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/github"),
+  listGithubRepos: (perPage = 50) =>
+    api.get<{ repositories: GitHubRepo[] }>(
+      `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
+    ),
 }
 
 export const sourcesApi = {

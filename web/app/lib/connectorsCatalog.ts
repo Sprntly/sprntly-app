@@ -34,6 +34,24 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "zendesk", logo: "Zn", name: "Zendesk" },
     ],
   },
+  {
+    key: "code",
+    title: "Code & deployments",
+    subtitle:
+      "Repos, PRs, and deployment signals — ground Engineer Agent scoping in the real codebase.",
+    items: [
+      { id: "github", logo: "GH", name: "GitHub" },
+    ],
+  },
+  {
+    key: "design",
+    title: "Design",
+    subtitle:
+      "Design tokens and frames the Design Agent uses to generate on-brand prototypes.",
+    items: [
+      { id: "figma", logo: "Fi", name: "Figma" },
+    ],
+  },
 ]
 
-export const CONNECTOR_IDS_WITH_OAUTH = new Set(["google_drive"])
+export const CONNECTOR_IDS_WITH_OAUTH = new Set(["google_drive", "figma", "github"])
