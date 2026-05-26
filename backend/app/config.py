@@ -59,6 +59,28 @@ class Settings(BaseSettings):
     github_oauth_redirect_uri: str = ""
     github_webhook_secret: str = ""
 
+    # Knowledge Graph backend selection.
+    #   "sqlite" — transitional. KG entities live in the existing sprintly.db
+    #              via new kg_* tables. Used during the FalkorDB rollout.
+    #   "falkor" — production. Graphiti + FalkorDB + Cognee per the spec.
+    # Flipping requires the FalkorDB Docker container running (see
+    # deploy/docker-compose.kg.yml) AND the P1-10 / P1-11 PRs merged.
+    graph_backend: str = "sqlite"
+
+    # FalkorDB connection — only consulted when graph_backend=="falkor".
+    falkordb_host: str = "127.0.0.1"
+    falkordb_port: int = 6379
+    falkordb_password: str = ""  # 127.0.0.1-only listener; no password needed
+
+    # Cognee paths for ECL pipeline storage.
+    cognee_data_path: str = "/var/lib/sprntly/cognee/data"
+    cognee_system_path: str = "/var/lib/sprntly/cognee/system"
+
+    # Delta classifier (spec §6.2). Spec doc named claude-sonnet-4-6;
+    # overriding to the current model. Configurable so we can roll
+    # forward without redeploying code.
+    delta_classifier_model: str = "claude-sonnet-4-7"
+
     @property
     def github_app_private_key_pem(self) -> str:
         """Normalize the PEM: turn literal `\\n` sequences into real newlines."""

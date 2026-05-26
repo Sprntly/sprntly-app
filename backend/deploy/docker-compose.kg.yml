@@ -1,0 +1,68 @@
+# FalkorDB sidecar for Sprntly's Knowledge Graph.
+#
+# Brought up on the existing EC2 box alongside sprintly.service /
+# sprintly-demo.service / sprntly-agent.service. Lives on a separate
+# port (6379, Redis-compatible) so it doesn't conflict with the existing
+# uvicorn services.
+#
+# Setup on EC2:
+#   sudo dnf install -y docker docker-compose-plugin
+#   sudo systemctl enable --now docker
+#   sudo usermod -aG docker ec2-user           # log out + back in
+#   sudo mkdir -p /var/lib/sprntly/falkordb /var/lib/sprntly/cognee/data /var/lib/sprntly/cognee/system
+#   sudo chown -R ec2-user:ec2-user /var/lib/sprntly
+#   cd ~/Sprntly/backend/deploy
+#   docker compose -f docker-compose.kg.yml up -d
+#   docker compose -f docker-compose.kg.yml ps    # verify falkordb is healthy
+#
+# Verification:
+#   redis-cli -h 127.0.0.1 -p 6379 PING          # expect: PONG
+#   curl http://127.0.0.1:3000                   # FalkorDB Browser UI
+#
+# To enable in the backend:
+#   ~/Sprntly/backend/.env:
+#     GRAPH_BACKEND=falkor
+#     FALKORDB_HOST=127.0.0.1
+#     FALKORDB_PORT=6379
+#     COGNEE_DATA_PATH=/var/lib/sprntly/cognee/data
+#     COGNEE_SYSTEM_PATH=/var/lib/sprntly/cognee/system
+#   sudo systemctl restart sprintly
+#
+# Rollback: GRAPH_BACKEND=sqlite + systemctl restart. The SQLite backend
+# is the safe fallback; no data loss since signals/hypotheses/decisions
+# are persisted there until P1-10 swaps everything to FalkorDB.
+
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: sprntly-falkordb
+    restart: unless-stopped
+    ports:
+      # Redis-compatible protocol (the Python client connects here).
+      - "127.0.0.1:6379:6379"
+      # Web UI for graph exploration during dev/ops.
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - /var/lib/sprntly/falkordb:/data
+    environment:
+      # FalkorDB inherits Redis env vars. We don't set a password here
+      # because the listener is bound to 127.0.0.1 only — no remote
+      # access. Layer 7 isolation comes from the systemd User=ec2-user
+      # constraint on sprintly.service.
+      - FALKORDB_ARGS=--save 60 1000 --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "-h", "127.0.0.1", "-p", "6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+# No Cognee container — Cognee runs in-process inside sprintly.service.
+# It reads/writes to COGNEE_DATA_PATH and COGNEE_SYSTEM_PATH on the
+# host filesystem and uses the FalkorDB service above as its graph
+# store via the falkor adapter.
