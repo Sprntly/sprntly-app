@@ -67,6 +67,14 @@ _RELOAD_ORDER = [
     "app.connectors.figma_oauth",
     "app.connectors.github_app",
     "app.routes.connectors",
+    "app.research.models",
+    "app.research.sources.app_store",
+    "app.research.sources.changelog",
+    "app.research.sources.review_sites",
+    "app.research.sources",
+    "app.research.digest",
+    "app.research",
+    "app.routes.research",
     "app.main",
 ]
 
