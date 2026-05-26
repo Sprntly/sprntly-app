@@ -22,6 +22,7 @@ from app.routes import (
     evidence,
     health,
     prd,
+    synthesis,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -112,3 +113,4 @@ app.include_router(brief.router)
 app.include_router(ask.router)
 app.include_router(prd.router)
 app.include_router(evidence.router)
+app.include_router(synthesis.router)

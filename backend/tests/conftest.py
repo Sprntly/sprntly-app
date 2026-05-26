@@ -67,6 +67,9 @@ _RELOAD_ORDER = [
     "app.connectors.figma_oauth",
     "app.connectors.github_app",
     "app.routes.connectors",
+    "app.synthesis.on_demand",
+    "app.synthesis",
+    "app.routes.synthesis",
     "app.main",
 ]
 
@@ -279,6 +282,8 @@ def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
         "app.routes.ask",
         "app.routes.evidence",
         "app.routes.prd",
+        "app.synthesis.on_demand",
+        "app.routes.synthesis",
     ):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "call_json"):
