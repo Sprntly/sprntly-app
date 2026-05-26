@@ -9,7 +9,40 @@ Entity + edge models:
     from app.graph.entities import Workspace, Signal, Hypothesis, Decision, Outcome, Artifact
     from app.graph.edges import Edge, EdgeType
 """
-from app.graph.edges import Edge, EdgeType, EDGE_DIRECTION_TABLE
+from app.graph.edges import (
+    Edge,
+    EdgeType,
+    EDGE_DIRECTION_TABLE,
+    EDGE_METADATA_SCHEMA,
+    SupportsMetadata,
+    ContradictsMetadata,
+    PromotedToMetadata,
+    MotivatedMetadata,
+    ResultedInMetadata,
+    ValidatesMetadata,
+    UpdatesWeightMetadata,
+    ScopedToMetadata,
+    InformsMetadata,
+    ExpressedAsMetadata,
+    VisualizesMetadata,
+    make_supports_edge,
+    make_contradicts_edge,
+    make_promoted_to_edge,
+    make_motivated_edge,
+    make_resulted_in_edge,
+    make_validates_edge,
+    make_updates_weight_edge,
+    make_scoped_to_edge,
+    make_informs_edge,
+    make_expressed_as_edge,
+    make_visualizes_edge,
+)
+from app.graph.provenance import (
+    ProvenanceChain,
+    ProvenanceWalkStep,
+    trace_outcome_provenance,
+    trace_provenance,
+)
 from app.graph.entities import (
     Artifact,
     ArtifactType,
@@ -72,6 +105,36 @@ __all__ = [
     "Edge",
     "EdgeType",
     "EDGE_DIRECTION_TABLE",
+    "EDGE_METADATA_SCHEMA",
+    # edge metadata schemas
+    "SupportsMetadata",
+    "ContradictsMetadata",
+    "PromotedToMetadata",
+    "MotivatedMetadata",
+    "ResultedInMetadata",
+    "ValidatesMetadata",
+    "UpdatesWeightMetadata",
+    "ScopedToMetadata",
+    "InformsMetadata",
+    "ExpressedAsMetadata",
+    "VisualizesMetadata",
+    # edge helper constructors
+    "make_supports_edge",
+    "make_contradicts_edge",
+    "make_promoted_to_edge",
+    "make_motivated_edge",
+    "make_resulted_in_edge",
+    "make_validates_edge",
+    "make_updates_weight_edge",
+    "make_scoped_to_edge",
+    "make_informs_edge",
+    "make_expressed_as_edge",
+    "make_visualizes_edge",
+    # provenance
+    "ProvenanceChain",
+    "ProvenanceWalkStep",
+    "trace_provenance",
+    "trace_outcome_provenance",
     # exceptions
     "GraphError",
     "NotConnectedError",

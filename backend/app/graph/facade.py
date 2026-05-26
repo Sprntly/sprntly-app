@@ -224,3 +224,24 @@ class GraphFacade:
         """Workspace + top 10 active hypotheses + last 5 decisions + last
         3 measured outcomes. Hard latency budget: ≤500ms (spec §10)."""
         return self._backend.load_session_context(workspace_id)
+
+    # ──────────── Provenance walks (spec query pattern §7) ────────────
+
+    def trace_provenance(self, workspace_id: str, decision_id: str):
+        """Walk PROMOTED_TO + SUPPORTS edges backwards from a Decision to
+        the originating Signals.
+
+        Returns a ProvenanceChain. See app.graph.provenance for details.
+        """
+        # Local import to avoid a circular import at module load time
+        # (provenance.py type-hints GraphFacade).
+        from app.graph.provenance import trace_provenance
+
+        return trace_provenance(self, workspace_id, decision_id)
+
+    def trace_outcome_provenance(self, workspace_id: str, outcome_id: str):
+        """Walk RESULTED_IN + MOTIVATED + PROMOTED_TO + SUPPORTS edges
+        backwards from an Outcome to the originating Signals."""
+        from app.graph.provenance import trace_outcome_provenance
+
+        return trace_outcome_provenance(self, workspace_id, outcome_id)
