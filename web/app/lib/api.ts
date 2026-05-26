@@ -87,10 +87,26 @@ export const api = {
 
 // ---- typed wrappers ---------------------------------------------------------
 
-export type AuthMe = { scope: string; expires_at: string }
+export type Audience = "app" | "demo"
+
+// Per-audience session presence reported by /v1/auth/me. Either field
+// may be null if no live session exists for that audience.
+export type AuthMe = {
+  app: { expires_at: string } | null
+  demo: { expires_at: string } | null
+}
+
+// Pick the audience from the hostname. app.sprntly.ai → "app";
+// anything else (demo.sprntly.ai, localhost, sprntly.ai/demo) → "demo".
+// SSR-safe: falls back to "demo" when window is undefined.
+function inferAudience(): Audience {
+  if (typeof window === "undefined") return "demo"
+  return window.location.hostname.startsWith("app.") ? "app" : "demo"
+}
 
 export const auth = {
-  login: (password: string) => api.post<{ ok: true }>("/v1/auth/login", { password }),
+  login: (password: string, audience: Audience = inferAudience()) =>
+    api.post<{ ok: true; audience: Audience }>("/v1/auth/login", { password, audience }),
   logout: () => api.post<{ ok: true }>("/v1/auth/logout"),
   me: () => api.get<AuthMe>("/v1/auth/me"),
 }

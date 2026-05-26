@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Cookie, HTTPException
+from fastapi import Depends, APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request
 from pydantic import BaseModel
@@ -64,8 +63,7 @@ def _public_connection(row: dict) -> dict:
 
 
 @router.get("")
-def list_connections(sprintly_session: Annotated[str | None, Cookie()] = None):
-    require_session(sprintly_session)
+def list_connections(_session: dict = Depends(require_session),):
     rows = db.list_connections()
     return {"connections": [_public_connection(r) for r in rows]}
 
@@ -73,9 +71,8 @@ def list_connections(sprintly_session: Annotated[str | None, Cookie()] = None):
 @router.get("/google-drive/authorize")
 def google_drive_authorize(
     dataset: str | None = None,
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
-    require_session(sprintly_session)
     state = google_oauth.sign_oauth_state(dataset=dataset)
     flow = google_oauth.build_flow()
     url, _ = flow.authorization_url(
@@ -137,9 +134,8 @@ class GoogleDriveSyncIn(BaseModel):
 @router.get("/google-drive/folders")
 def google_drive_list_folders(
     parent_id: str | None = None,
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
-    require_session(sprintly_session)
     try:
         return browse_folders(parent_id)
     except SyncConfigError as e:
@@ -150,9 +146,8 @@ def google_drive_list_folders(
 @router.post("/google-drive/config")
 def google_drive_config(
     body: GoogleDriveConfigIn,
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
-    require_session(sprintly_session)
     row = db.get_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise HTTPException(404, "Google Drive is not connected")
@@ -172,9 +167,8 @@ def google_drive_config(
 @router.post("/google-drive/sync")
 def google_drive_sync(
     body: GoogleDriveSyncIn | None = None,
-    sprintly_session: Annotated[str | None, Cookie()] = None,
+    _session: dict = Depends(require_session),
 ):
-    require_session(sprintly_session)
     payload = body or GoogleDriveSyncIn()
     try:
         result = sync_google_drive(
@@ -187,8 +181,7 @@ def google_drive_sync(
 
 
 @router.delete("/google-drive")
-def google_drive_disconnect(sprintly_session: Annotated[str | None, Cookie()] = None):
-    require_session(sprintly_session)
+def google_drive_disconnect(_session: dict = Depends(require_session),):
     row = db.get_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise HTTPException(404, "Google Drive is not connected")

@@ -17,7 +17,7 @@ old bookmarks keep resolving.
 """
 import asyncio
 
-from fastapi import APIRouter, Cookie, HTTPException
+from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import require_session
@@ -44,7 +44,7 @@ class GenerateIn(BaseModel):
 @router.post("/generate")
 async def generate(
     body: GenerateIn,
-    sprintly_session: str | None = Cookie(default=None),
+    _session: dict = Depends(require_session),
 ):
     """Kick off evidence generation in the background.
 
@@ -52,8 +52,6 @@ async def generate(
     already exists for (brief, insight) and `force` is false, returns
     the existing row.
     """
-    require_session(sprintly_session)
-
     brief = get_brief_by_id(body.brief_id)
     if not brief:
         raise HTTPException(404, f"brief_id={body.brief_id} not found")
@@ -100,7 +98,7 @@ async def generate(
 @router.get("/{evidence_id}")
 def get(
     evidence_id: int,
-    sprintly_session: str | None = Cookie(default=None),
+    _session: dict = Depends(require_session),
 ):
     """Fetch an evidence row by id.
 
@@ -108,7 +106,6 @@ def get(
     bookmarks don't 409. The `variant` field on the response identifies
     which format the row was generated under.
     """
-    require_session(sprintly_session)
     row = get_evidence(evidence_id)
     if not row:
         raise HTTPException(404, "Evidence not found")
