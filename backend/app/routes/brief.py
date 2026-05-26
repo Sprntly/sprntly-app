@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from fastapi import Depends, APIRouter, HTTPException
 
@@ -6,10 +7,23 @@ from app.auth import require_session
 from app.brief_runner import auto_generate_brief, get_status
 from app.corpus import load_corpus
 from app.db import get_brief_by_id, get_current_brief, save_brief
+from app.graph import GraphFacade
 from app.llm import call_json
 from app.prompts import BRIEF_SCHEMA_VERSION, BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
+from app.synthesis.brief_assembly import assemble_brief
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/brief", tags=["brief"])
+
+
+def _get_graph_facade() -> GraphFacade:
+    """Per-request facade. The from_env() path picks up GRAPH_BACKEND
+    (sqlite by default) and is safe to invoke repeatedly — no network
+    state."""
+    facade = GraphFacade.from_env()
+    facade.initialize()
+    return facade
 
 
 @router.get("/current")
@@ -50,12 +64,44 @@ async def regenerate(
     dataset: str,
     _session: dict = Depends(require_session),
 ):
-    """Force a fresh brief generation in the background. Returns immediately.
+    """Run the Synthesis Agent's scheduled-mode 11-step Brief Assembly
+    pipeline against the KG for `dataset` (treated as the workspace_id
+    until full multi-tenant routing lands).
 
-    Use case: API key was just fixed, want to retry without restarting the
-    service. Existing cached brief (if any) stays in place until the new
-    generation completes successfully.
+    Spec source: Synthesis_Agent_Spec §3.2. Replaces the monolithic
+    `brief_runner.auto_generate_brief` flow that called Claude in one
+    shot with no structured cross-source reasoning. The legacy runner
+    remains importable (other callers may still depend on it during
+    the migration window) but is no longer wired to this endpoint.
+
+    Returns 200 + the generated Brief synchronously. The new pipeline
+    completes in seconds — it does ONE LLM call, not five — so we
+    don't need the legacy fire-and-forget shape.
     """
+    workspace_id = dataset  # transitional — slug doubles as workspace_id
+    graph = _get_graph_facade()
+    try:
+        brief = await asyncio.to_thread(
+            assemble_brief,
+            workspace_id,
+            None,  # no DS Agent output in this transitional path
+            graph,
+            call_json,
+        )
+    except Exception as exc:  # pragma: no cover — bubble up for observability
+        logger.exception("Brief regenerate failed for dataset=%s", dataset)
+        raise HTTPException(502, f"Brief regeneration failed: {exc}") from exc
+    return {"started": True, "dataset": dataset, "brief": brief.model_dump(mode="json")}
+
+
+@router.post("/regenerate-legacy")
+async def regenerate_legacy(
+    dataset: str,
+    _session: dict = Depends(require_session),
+):
+    """Legacy: fire-and-forget regeneration through the monolithic
+    `brief_runner`. Kept for migration so the existing UI button
+    doesn't break while we cut over to the 11-step pipeline."""
     asyncio.create_task(auto_generate_brief(dataset))
     return {"started": True, "dataset": dataset}
 
