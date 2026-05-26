@@ -45,6 +45,7 @@ _RELOAD_ORDER = [
     "app.db.datasets",
     "app.db.connections",
     "app.db.github",
+    "app.db.prototypes",
     "app.db",
     "app.corpus",
     "app.auth",
@@ -62,6 +63,7 @@ _RELOAD_ORDER = [
     "app.routes.ask",
     "app.routes.evidence",
     "app.routes.prd",
+    "app.routes.design",
     "app.connectors.tokens",
     "app.connectors.google_oauth",
     "app.connectors.figma_oauth",
@@ -195,6 +197,31 @@ CREATE TABLE github_pull_requests (
     pr_updated_at   TEXT,
     last_event_at   TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (repo_full_name, pr_number)
+);
+
+CREATE TABLE prototypes (
+    id              TEXT PRIMARY KEY,
+    workspace_id    TEXT NOT NULL,
+    artifact_id     TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'generating',
+    inputs          TEXT NOT NULL DEFAULT '{}',
+    output_payload  TEXT NOT NULL DEFAULT '{}',
+    output_url      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at    TEXT,
+    exported_at     TEXT
+);
+
+CREATE TABLE prototype_comments (
+    id              TEXT PRIMARY KEY,
+    prototype_id    TEXT NOT NULL,
+    author_user_id  TEXT NOT NULL,
+    section_id      TEXT NOT NULL,
+    text            TEXT NOT NULL,
+    classification  TEXT,
+    resolved        INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 

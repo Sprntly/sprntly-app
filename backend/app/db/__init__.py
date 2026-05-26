@@ -98,6 +98,17 @@ from app.db.github import (
     upsert_github_pull_request,
 )
 
+# Design Agent prototypes
+from app.db.prototypes import (
+    get_prototype,
+    insert_prototype,
+    insert_prototype_comment,
+    list_prototype_comments,
+    mark_comments_resolved,
+    patch_comment_classification,
+    update_prototype,
+)
+
 __all__ = [
     # client
     "supabase_client",
@@ -158,4 +169,12 @@ __all__ = [
     "list_open_pull_requests",
     "upsert_github_installation",
     "upsert_github_pull_request",
+    # design prototypes
+    "get_prototype",
+    "insert_prototype",
+    "insert_prototype_comment",
+    "list_prototype_comments",
+    "mark_comments_resolved",
+    "patch_comment_classification",
+    "update_prototype",
 ]
