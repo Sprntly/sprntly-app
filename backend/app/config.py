@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     token_encryption_key: str = ""
     frontend_url: str = "http://localhost:3000"
 
+    # Supabase — set in EC2 + GH secrets. Backend uses the service-role
+    # key (bypasses RLS) since it's a trusted server, not a browser.
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+    # Shadow-write inserts to Supabase alongside SQLite. Reads stay on
+    # SQLite. Defaults off so the flag has to be flipped per environment;
+    # PR #6 (backfill) flips it to true on EC2 after backfill parity is
+    # confirmed.
+    supabase_dual_write: bool = False
+
     @property
     def origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]

@@ -6,7 +6,7 @@ cached_asks: pre-computed answers keyed by (dataset, question), feeds
 """
 import json
 
-from app.db.client import conn
+from app.db.client import conn, shadow_write
 
 
 # ─────────────────────── ask_log (append-only) ───────────────────────
@@ -18,6 +18,11 @@ def log_ask(question: str, answer: str, citations: list) -> None:
             "INSERT INTO ask_log (question, answer, citations_json) VALUES (?, ?, ?)",
             (question, answer, json.dumps(citations)),
         )
+    shadow_write("ask_log", {
+        "question": question,
+        "answer": answer,
+        "citations": citations,
+    })
 
 
 # ─────────────────────── cached_asks ───────────────────────
@@ -37,13 +42,22 @@ def start_cached_ask(
     dataset: str, question: str, cache_version: int | None = None
 ) -> int:
     """Insert a stub cache row in 'generating' state; return new id."""
+    normalized = _normalize_q(question)
     with conn() as c:
         cur = c.execute(
             "INSERT INTO cached_asks (dataset, question, response_json, status, cache_version) "
             "VALUES (?, ?, '', 'generating', ?)",
-            (dataset, _normalize_q(question), cache_version),
+            (dataset, normalized, cache_version),
         )
-        return cur.lastrowid
+        new_id = cur.lastrowid
+    shadow_write("cached_asks", {
+        "dataset": dataset,
+        "question": normalized,
+        "response": {},
+        "status": "generating",
+        "cache_version": cache_version,
+    })
+    return new_id
 
 
 def complete_cached_ask(cache_id: int, response_json: str) -> None:

@@ -1,7 +1,7 @@
 """Weekly briefs — one is_current row per dataset, history retained."""
 import json
 
-from app.db.client import conn
+from app.db.client import conn, shadow_write
 
 
 def get_current_brief(dataset: str = "asurion") -> dict | None:
@@ -58,7 +58,15 @@ def save_brief(
             "VALUES (?, ?, ?, 1)",
             (dataset, week_label, json.dumps(payload)),
         )
-        return cur.lastrowid
+        new_id = cur.lastrowid
+    # Supabase column is jsonb, named `payload` (not `payload_json`).
+    shadow_write("briefs", {
+        "dataset": dataset,
+        "week_label": week_label,
+        "payload": payload,
+        "is_current": True,
+    })
+    return new_id
 
 
 def invalidate_stale_briefs(current_version: int) -> int:
