@@ -154,6 +154,31 @@ class FalkorBackend(GraphBackend):
     ) -> list[Signal]:
         _not_yet("list_active_signals")
 
+    # Bitemporal point-in-time queries — stubs for now; FalkorDB has
+    # native bitemporal indexing via Graphiti so the implementation will
+    # be much cleaner than the SQLite version. Lands in a follow-up PR.
+    def list_signals_as_of(self, workspace_id: str, as_of: Any) -> list[Signal]:
+        _not_yet("list_signals_as_of")
+    def list_hypotheses_as_of(self, workspace_id: str, as_of: Any) -> list[Hypothesis]:
+        _not_yet("list_hypotheses_as_of")
+    def list_decisions_as_of(self, workspace_id: str, as_of: Any) -> list[Decision]:
+        _not_yet("list_decisions_as_of")
+    def list_outcomes_as_of(self, workspace_id: str, as_of: Any) -> list[Outcome]:
+        _not_yet("list_outcomes_as_of")
+    def list_artifacts_as_of(self, workspace_id: str, as_of: Any) -> list[Artifact]:
+        _not_yet("list_artifacts_as_of")
+    def get_workspace_as_of(
+        self, workspace_id: str, as_of: Any
+    ) -> Optional[Workspace]:
+        _not_yet("get_workspace_as_of")
+
+    def write_artifact_delta(self, delta_row: dict[str, Any]) -> None:
+        _not_yet("write_artifact_delta")
+    def list_artifact_deltas(
+        self, workspace_id: str, artifact_id: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        _not_yet("list_artifact_deltas")
+
     def all_entity_ids(self, workspace_id: str) -> dict[str, list[str]]:
         _not_yet("all_entity_ids")
     def wipe_workspace(self, workspace_id: str) -> None:

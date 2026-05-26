@@ -121,6 +121,22 @@ CREATE TABLE IF NOT EXISTS kg_artifacts (
 CREATE INDEX IF NOT EXISTS idx_kg_art_ws_type
     ON kg_artifacts(workspace_id, artifact_type);
 
+CREATE TABLE IF NOT EXISTS kg_artifact_deltas (
+    delta_id       TEXT PRIMARY KEY,
+    workspace_id   TEXT NOT NULL,
+    artifact_id    TEXT NOT NULL,
+    artifact_type  TEXT NOT NULL,
+    section        TEXT NOT NULL,
+    original_text  TEXT NOT NULL,
+    edited_text    TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    classification TEXT NOT NULL,
+    valid_at       TEXT NOT NULL,
+    transaction_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kg_artdelta_ws_art
+    ON kg_artifact_deltas(workspace_id, artifact_id);
+
 CREATE TABLE IF NOT EXISTS kg_edges (
     edge_id              INTEGER PRIMARY KEY AUTOINCREMENT,
     workspace_id         TEXT NOT NULL,
@@ -474,6 +490,134 @@ class SqliteBackend(GraphBackend):
         with self._conn() as c:
             return [Signal.model_validate_json(r["payload_json"]) for r in c.execute(sql, args)]
 
+    # ──────────── bitemporal point-in-time queries ────────────
+
+    def _bitemporal_filter(
+        self,
+        table: str,
+        workspace_id: str,
+        as_of: datetime,
+    ) -> list[str]:
+        """Shared bitemporal SQL: rows where transaction_at <= as_of AND
+        valid_at <= as_of, scoped to workspace. Returns payload_json strings.
+
+        v1 strategy: return all such rows. Each entity table has its own
+        primary key (workspace_id, entity_id), so duplicates per id only
+        arise if a row was rewritten — for now we return whatever SQLite
+        has, which is the latest write (UPSERT semantics). Multi-version
+        history per entity_id will land when we move to FalkorDB's native
+        bitemporal indexing.
+        """
+        as_of_iso = _iso(as_of)
+        with self._conn() as c:
+            rows = c.execute(
+                f"""SELECT payload_json FROM {table}
+                    WHERE workspace_id = ?
+                      AND transaction_at <= ?
+                      AND valid_at <= ?""",
+                (workspace_id, as_of_iso, as_of_iso),
+            ).fetchall()
+        return [r["payload_json"] for r in rows]
+
+    def list_signals_as_of(self, workspace_id: str, as_of: datetime) -> list[Signal]:
+        return [
+            Signal.model_validate_json(p)
+            for p in self._bitemporal_filter("kg_signals", workspace_id, as_of)
+        ]
+
+    def list_hypotheses_as_of(
+        self, workspace_id: str, as_of: datetime
+    ) -> list[Hypothesis]:
+        return [
+            Hypothesis.model_validate_json(p)
+            for p in self._bitemporal_filter("kg_hypotheses", workspace_id, as_of)
+        ]
+
+    def list_decisions_as_of(
+        self, workspace_id: str, as_of: datetime
+    ) -> list[Decision]:
+        return [
+            Decision.model_validate_json(p)
+            for p in self._bitemporal_filter("kg_decisions", workspace_id, as_of)
+        ]
+
+    def list_outcomes_as_of(
+        self, workspace_id: str, as_of: datetime
+    ) -> list[Outcome]:
+        return [
+            Outcome.model_validate_json(p)
+            for p in self._bitemporal_filter("kg_outcomes", workspace_id, as_of)
+        ]
+
+    def list_artifacts_as_of(
+        self, workspace_id: str, as_of: datetime
+    ) -> list[Artifact]:
+        return [
+            Artifact.model_validate_json(p)
+            for p in self._bitemporal_filter("kg_artifacts", workspace_id, as_of)
+        ]
+
+    def get_workspace_as_of(
+        self, workspace_id: str, as_of: datetime
+    ) -> Optional[Workspace]:
+        as_of_iso = _iso(as_of)
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT payload_json FROM kg_workspaces
+                   WHERE workspace_id = ?
+                     AND transaction_at <= ?
+                     AND valid_at <= ?""",
+                (workspace_id, as_of_iso, as_of_iso),
+            ).fetchone()
+            return Workspace.model_validate_json(row["payload_json"]) if row else None
+
+    # ──────────── delta log ────────────
+
+    def write_artifact_delta(self, delta_row: dict[str, Any]) -> None:
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO kg_artifact_deltas
+                   (delta_id, workspace_id, artifact_id, artifact_type, section,
+                    original_text, edited_text, user_id, classification,
+                    valid_at, transaction_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(delta_id) DO UPDATE SET
+                     artifact_type = excluded.artifact_type,
+                     section = excluded.section,
+                     original_text = excluded.original_text,
+                     edited_text = excluded.edited_text,
+                     user_id = excluded.user_id,
+                     classification = excluded.classification,
+                     valid_at = excluded.valid_at,
+                     transaction_at = excluded.transaction_at
+                """,
+                (
+                    delta_row["delta_id"],
+                    delta_row["workspace_id"],
+                    delta_row["artifact_id"],
+                    delta_row["artifact_type"],
+                    delta_row["section"],
+                    delta_row["original_text"],
+                    delta_row["edited_text"],
+                    delta_row["user_id"],
+                    delta_row["classification"],
+                    delta_row["valid_at"],
+                    delta_row["transaction_at"],
+                ),
+            )
+
+    def list_artifact_deltas(
+        self, workspace_id: str, artifact_id: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM kg_artifact_deltas WHERE workspace_id = ?"
+        args: tuple[Any, ...] = (workspace_id,)
+        if artifact_id is not None:
+            sql += " AND artifact_id = ?"
+            args = (*args, artifact_id)
+        sql += " ORDER BY transaction_at DESC"
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(sql, args).fetchall()]
+
     # ──────────── debug helpers ────────────
 
     def all_entity_ids(self, workspace_id: str) -> dict[str, list[str]]:
@@ -525,5 +669,5 @@ class SqliteBackend(GraphBackend):
 
     def wipe_workspace(self, workspace_id: str) -> None:
         with self._conn() as c:
-            for table in (*_ENTITY_TABLES.values(), "kg_edges"):
+            for table in (*_ENTITY_TABLES.values(), "kg_edges", "kg_artifact_deltas"):
                 c.execute(f"DELETE FROM {table} WHERE workspace_id = ?", (workspace_id,))

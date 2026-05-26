@@ -43,10 +43,27 @@ from app.graph.exceptions import (
     TenantViolationError,
 )
 from app.graph.facade import GraphFacade
+from app.graph.query_types import (
+    ArtifactDelta,
+    BriefContext,
+    PrdContext,
+    ProvenanceChain,
+    SessionContext,
+    SweepReport,
+    WorkspaceSnapshot,
+)
 
 __all__ = [
     # facade
     "GraphFacade",
+    # query types
+    "SessionContext",
+    "BriefContext",
+    "PrdContext",
+    "ProvenanceChain",
+    "WorkspaceSnapshot",
+    "SweepReport",
+    "ArtifactDelta",
     # entities
     "Workspace",
     "Signal",

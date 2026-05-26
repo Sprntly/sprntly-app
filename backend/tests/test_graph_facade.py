@@ -283,8 +283,9 @@ def test_load_session_context_returns_top_n(facade):
         h = _hyp(hypothesis_id=f"hyp-{i}")
         facade.write_hypothesis("ws-1", h)
     ctx = facade.load_session_context("ws-1")
-    assert ctx["workspace"] is not None
-    assert len(ctx["active_hypotheses"]) == 10
+    # P1-11: load_session_context now returns a typed SessionContext model.
+    assert ctx.workspace is not None
+    assert len(ctx.active_hypotheses) == 10
 
 
 # ─────────────────────── edges ───────────────────────

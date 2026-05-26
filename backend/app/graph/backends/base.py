@@ -12,6 +12,7 @@ FalkorDB is running on EC2 and the integration tests pass).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any, Optional
 
 from app.graph.edges import Edge
@@ -141,6 +142,56 @@ class GraphBackend(ABC):
         limit: int = 50,
     ) -> list[Signal]:
         """Non-stale Signals for this workspace, optionally filtered by source_type."""
+
+    # ──────────── bitemporal point-in-time queries (spec §7.5 / §10) ────────────
+
+    @abstractmethod
+    def list_signals_as_of(
+        self, workspace_id: str, as_of: "datetime"
+    ) -> list[Signal]:
+        """Signals where transaction_at <= as_of AND valid_at <= as_of."""
+
+    @abstractmethod
+    def list_hypotheses_as_of(
+        self, workspace_id: str, as_of: "datetime"
+    ) -> list[Hypothesis]:
+        """Hypotheses bitemporally filtered to as_of."""
+
+    @abstractmethod
+    def list_decisions_as_of(
+        self, workspace_id: str, as_of: "datetime"
+    ) -> list[Decision]:
+        """Decisions bitemporally filtered to as_of."""
+
+    @abstractmethod
+    def list_outcomes_as_of(
+        self, workspace_id: str, as_of: "datetime"
+    ) -> list[Outcome]:
+        """Outcomes bitemporally filtered to as_of."""
+
+    @abstractmethod
+    def list_artifacts_as_of(
+        self, workspace_id: str, as_of: "datetime"
+    ) -> list[Artifact]:
+        """Artifacts bitemporally filtered to as_of."""
+
+    @abstractmethod
+    def get_workspace_as_of(
+        self, workspace_id: str, as_of: "datetime"
+    ) -> Optional[Workspace]:
+        """Workspace row at as_of (transaction_at <= as_of AND valid_at <= as_of)."""
+
+    # ──────────── delta log (spec §5.7 — artifact_edit) ────────────
+
+    @abstractmethod
+    def write_artifact_delta(self, delta_row: dict[str, Any]) -> None:
+        """Append a row to the artifact-delta log. Spec §5.7."""
+
+    @abstractmethod
+    def list_artifact_deltas(
+        self, workspace_id: str, artifact_id: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """All deltas for a workspace, optionally scoped to one artifact."""
 
     # ──────────── debug helpers (not in spec; used by facade tests) ────────────
 
