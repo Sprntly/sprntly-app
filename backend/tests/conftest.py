@@ -56,12 +56,16 @@ _RELOAD_ORDER = [
     "app.evidence_runner",
     "app.prd_runner",
     "app.brief_runner",
+    "app.oncall.models",
+    "app.oncall.emergency_brief",
+    "app.oncall",
     "app.routes.health",
     "app.routes.datasets",
     "app.routes.brief",
     "app.routes.ask",
     "app.routes.evidence",
     "app.routes.prd",
+    "app.routes.oncall",
     "app.connectors.tokens",
     "app.connectors.google_oauth",
     "app.connectors.figma_oauth",
@@ -279,6 +283,8 @@ def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
         "app.routes.ask",
         "app.routes.evidence",
         "app.routes.prd",
+        "app.oncall.emergency_brief",
+        "app.routes.oncall",
     ):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "call_json"):
