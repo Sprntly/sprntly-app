@@ -31,6 +31,16 @@ from fastapi.testclient import TestClient
 # consumers, then anything that imports the consumers.
 _RELOAD_ORDER = [
     "app.config",
+    # db is a package; reload submodules so the per-test DB_PATH override
+    # is picked up instead of stale references from a previous test.
+    "app.db.client",
+    "app.db.schema",
+    "app.db.briefs",
+    "app.db.prds",
+    "app.db.evidences",
+    "app.db.asks",
+    "app.db.datasets",
+    "app.db.connections",
     "app.db",
     "app.corpus",
     "app.auth",
@@ -100,6 +110,11 @@ def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("JWT_SECRET", "test-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-used")
     monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:3000")
+    # If a local .env carries production cookie/frontend values, neutralize
+    # them so the TestClient's cookie jar can hold the auth session.
+    monkeypatch.setenv("COOKIE_DOMAIN", "")
+    monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000")
+    monkeypatch.setenv("ENV", "test")
 
     _reload_app_modules()
     import app.db as db_mod
