@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { Brief, Insight } from "../api"
-import { briefToBriefV2State } from "../brief-v2-adapter"
+import { briefToBriefV2State, formatSourceLabel } from "../brief-v2-adapter"
 
 function makeInsight(overrides: Partial<Insight> & { tag: Insight["tag"] }): Insight {
   return {
@@ -169,5 +169,47 @@ describe("briefToBriefV2State", () => {
       makeBrief([makeInsight({ tag: "something_broken", title: "X" })]),
     )
     expect(out.headline).toBe("Three findings this week")
+  })
+})
+
+describe("formatSourceLabel", () => {
+  it("turns ingestion slugs into readable labels", () => {
+    expect(formatSourceLabel("03_qualitative_data_2")).toBe("Qualitative Data")
+    expect(formatSourceLabel("02_quantitative_data_2")).toBe("Quantitative Data")
+    expect(formatSourceLabel("01_company_context_2")).toBe("Company Context")
+    expect(formatSourceLabel("04_insights_monday_brief_2")).toBe(
+      "Insights Monday Brief",
+    )
+  })
+
+  it("strips a file extension if one survives", () => {
+    expect(formatSourceLabel("03_Qualitative_Data-2.docx")).toBe("Qualitative Data")
+  })
+
+  it("passes through already-readable labels untouched", () => {
+    expect(formatSourceLabel("Asurion analytics")).toBe("Asurion analytics")
+    expect(formatSourceLabel("Zendesk")).toBe("Zendesk")
+    expect(formatSourceLabel("S1")).toBe("S1")
+  })
+
+  it("never returns empty for non-empty input", () => {
+    expect(formatSourceLabel("")).toBe("")
+    expect(formatSourceLabel("123")).toBe("123")
+  })
+
+  it("flows through to convergence chips and the sources line", () => {
+    const out = briefToBriefV2State(
+      makeBrief([
+        makeInsight({
+          tag: "something_broken",
+          title: "X",
+          convergence: [
+            { source: "03_qualitative_data_2", signal: "x", strength: "Strong" },
+          ],
+        }),
+      ]),
+    )
+    expect(out.hero?.convergence[0]?.source).toBe("Qualitative Data")
+    expect(out.sourcesLine).toContain("Qualitative Data")
   })
 })

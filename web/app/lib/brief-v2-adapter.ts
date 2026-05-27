@@ -168,12 +168,33 @@ function strengthOf(raw: string): BriefV2Strength {
   return "Moderate"
 }
 
+/**
+ * Convergence sources arrive from the backend as ingestion slugs derived
+ * from the uploaded filename (e.g. "03_Qualitative_Data-2.docx" →
+ * "03_qualitative_data_2"). Those are not fit to show a user, so turn them
+ * into a readable label: drop a leading index ("03_") and trailing version
+ * suffix ("_2"), split on separators, Title-Case. Strings that already look
+ * human-readable (contain a space or camelCase boundary — e.g. "Asurion
+ * analytics", "Zendesk") are passed through untouched.
+ */
+export function formatSourceLabel(raw: string): string {
+  const s = (raw || "").trim()
+  if (!s) return ""
+  if (/\s/.test(s) || /[a-z][A-Z]/.test(s)) return s
+  let t = s.replace(/\.[a-z0-9]+$/i, "") // strip a file extension if present
+  t = t.replace(/^[0-9]+[._-]+/, "") // drop a leading index like "03_"
+  t = t.replace(/[._-]+[0-9]+$/, "") // drop a trailing version like "_2"
+  t = t.replace(/[._-]+/g, " ").trim() // separators → spaces
+  if (!t) return s // never collapse to empty
+  return t.replace(/\b\w/g, (ch) => ch.toUpperCase())
+}
+
 function convergenceRows(insight: Insight): BriefV2Convergence[] {
   const conv = Array.isArray(insight.convergence) ? insight.convergence : []
   return conv
     .filter((c) => c && (c.source || c.signal))
     .map((c) => ({
-      source: c.source || "",
+      source: formatSourceLabel(c.source || ""),
       signal: c.signal || "",
       strength: strengthOf(c.strength || ""),
     }))
@@ -318,7 +339,7 @@ function buildSourcesLine(insights: Insight[]): string {
   const seen = new Set<string>()
   for (const ins of insights) {
     for (const c of ins.convergence || []) {
-      if (c.source) seen.add(c.source)
+      if (c.source) seen.add(formatSourceLabel(c.source))
     }
   }
   return Array.from(seen).slice(0, 8).join(" · ")
