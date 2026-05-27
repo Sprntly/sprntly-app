@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import jwt
-from fastapi import APIRouter, Cookie, HTTPException, Response
+from fastapi import APIRouter, Cookie, Header, HTTPException, Response
 from pydantic import BaseModel
 
 from app.config import settings
@@ -66,16 +66,37 @@ def _decode_token(token: str, expected_audience: Audience) -> dict:
     )
 
 
+def _decode_supabase_token(token: str) -> dict:
+    if not settings.supabase_jwt_secret:
+        raise jwt.PyJWTError("Supabase JWT secret not configured")
+    return jwt.decode(
+        token,
+        settings.supabase_jwt_secret,
+        algorithms=[JWT_ALG],
+        audience="authenticated",
+    )
+
+
 def require_session(
+    authorization: str | None = Header(default=None),
     sprntly_app_session: str | None = Cookie(default=None),
     sprntly_demo_session: str | None = Cookie(default=None),
 ) -> dict:
-    """Generic gate — accepts either audience.
+    """Generic gate — accepts Supabase Bearer JWT or legacy demo cookies.
 
     Use as `Depends(require_session)` on routes shared by app + demo. The
     function returns the decoded JWT payload (with `aud` set) so callers
     can branch on audience if they need to.
     """
+    if authorization and authorization.startswith("Bearer "):
+        bearer = authorization.removeprefix("Bearer ").strip()
+        if bearer:
+            try:
+                payload = _decode_supabase_token(bearer)
+                return {**payload, "aud": "supabase", "scope": "app"}
+            except jwt.PyJWTError:
+                pass
+
     for token, expected_aud in (
         (sprntly_app_session, "app"),
         (sprntly_demo_session, "demo"),

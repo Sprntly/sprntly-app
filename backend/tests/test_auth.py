@@ -54,20 +54,37 @@ def test_decode_token_rejects_tampered_token(isolated_settings):
 
 def test_require_session_raises_when_no_cookies(isolated_settings):
     with pytest.raises(HTTPException) as exc:
-        auth.require_session(None, None)
+        auth.require_session(None, None, None)
     assert exc.value.status_code == 401
 
 
 def test_require_session_accepts_app_cookie(isolated_settings):
     token = auth._make_token("app")
-    payload = auth.require_session(token, None)
+    payload = auth.require_session(None, token, None)
     assert payload["aud"] == "app"
 
 
 def test_require_session_accepts_demo_cookie(isolated_settings):
     token = auth._make_token("demo")
-    payload = auth.require_session(None, token)
+    payload = auth.require_session(None, None, token)
     assert payload["aud"] == "demo"
+
+
+def test_require_session_accepts_supabase_bearer(isolated_settings, monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-supabase-jwt-secret")
+    from importlib import reload
+    from app import config as config_mod
+    reload(config_mod)
+    reload(auth)
+    now = int(time.time())
+    sb_token = jwt.encode(
+        {"sub": "user-uuid", "aud": "authenticated", "exp": now + 3600},
+        "test-supabase-jwt-secret",
+        algorithm=auth.JWT_ALG,
+    )
+    payload = auth.require_session(f"Bearer {sb_token}", None, None)
+    assert payload["aud"] == "supabase"
+    assert payload["sub"] == "user-uuid"
 
 
 def test_require_session_rejects_swapped_cookie(isolated_settings):
@@ -76,9 +93,9 @@ def test_require_session_rejects_swapped_cookie(isolated_settings):
     demo_token = auth._make_token("demo")
     # demo cookie slot holding an app token: audience mismatch
     with pytest.raises(HTTPException):
-        auth.require_session(None, app_token)
+        auth.require_session(None, None, app_token)
     with pytest.raises(HTTPException):
-        auth.require_session(demo_token, None)
+        auth.require_session(None, demo_token, None)
 
 
 def test_require_session_rejects_expired_token(isolated_settings):
@@ -89,7 +106,7 @@ def test_require_session_rejects_expired_token(isolated_settings):
         algorithm=auth.JWT_ALG,
     )
     with pytest.raises(HTTPException) as exc:
-        auth.require_session(expired, None)
+        auth.require_session(None, expired, None)
     assert exc.value.status_code == 401
 
 
@@ -230,6 +247,6 @@ def test_legacy_cookie_is_never_accepted(isolated_settings):
     )
     # Try the legacy token in both new cookie slots — neither validates.
     with pytest.raises(HTTPException):
-        auth.require_session(no_aud, None)
+        auth.require_session(None, no_aud, None)
     with pytest.raises(HTTPException):
-        auth.require_session(None, no_aud)
+        auth.require_session(None, None, no_aud)

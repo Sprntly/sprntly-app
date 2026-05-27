@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # key (bypasses RLS) since it's a trusted server, not a browser.
     supabase_url: str = ""
     supabase_service_role_key: str = ""
+    # JWT secret from Supabase project settings (Settings → API → JWT Secret).
+    # Used to verify access tokens sent as Authorization: Bearer …
+    supabase_jwt_secret: str = ""
     # Shadow-write inserts to Supabase alongside SQLite. Reads stay on
     # SQLite. Defaults off so the flag has to be flipped per environment.
     supabase_dual_write: bool = False

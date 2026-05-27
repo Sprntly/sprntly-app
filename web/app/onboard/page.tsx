@@ -52,7 +52,9 @@ export default function OnboardPage() {
   }, [generating, genStartedAt])
 
   useEffect(() => {
-    if (auth.kind === "anonymous") router.replace("/sign-in")
+    if (auth.kind === "anonymous" || auth.kind === "unconfigured") {
+      router.replace("/sign-in")
+    }
   }, [auth.kind, router])
 
   // Keep slug synced to display name until the user overrides it.
@@ -153,7 +155,13 @@ export default function OnboardPage() {
     router.replace("/")
   }
 
-  if (auth.kind === "loading" || auth.kind === "anonymous") return null
+  if (
+    auth.kind === "loading" ||
+    auth.kind === "anonymous" ||
+    auth.kind === "unconfigured"
+  ) {
+    return null
+  }
 
   return (
     <div className="onboard-shell">

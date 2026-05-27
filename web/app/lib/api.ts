@@ -44,20 +44,34 @@ export function apiErrorMessage(status: number, body: unknown): string {
   return `Request failed (${status})`
 }
 
+let accessTokenProvider: (() => Promise<string | null>) | null = null
+
+/** Registered by AuthProvider — attaches Supabase JWT to backend requests. */
+export function setAccessTokenProvider(fn: () => Promise<string | null>) {
+  accessTokenProvider = fn
+}
+
 async function request<T>(
   method: "GET" | "POST" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
   const isForm = typeof FormData !== "undefined" && body instanceof FormData
+  const headers: Record<string, string> = isForm
+    ? { Accept: "application/json" }
+    : body
+    ? { "Content-Type": "application/json", Accept: "application/json" }
+    : { Accept: "application/json" }
+
+  if (accessTokenProvider) {
+    const token = await accessTokenProvider()
+    if (token) headers.Authorization = `Bearer ${token}`
+  }
+
   const res = await fetch(`${API_URL}${path}`, {
     method,
     credentials: "include",
-    headers: isForm
-      ? { Accept: "application/json" }
-      : body
-      ? { "Content-Type": "application/json", Accept: "application/json" }
-      : { Accept: "application/json" },
+    headers,
     body: isForm
       ? (body as FormData)
       : body
@@ -104,7 +118,8 @@ function inferAudience(): Audience {
   return window.location.hostname.startsWith("app.") ? "app" : "demo"
 }
 
-export const auth = {
+/** Legacy demo-password auth — kept for demo.sprntly.ai compatibility. */
+export const demoAuth = {
   login: (password: string, audience: Audience = inferAudience()) =>
     api.post<{ ok: true; audience: Audience }>("/v1/auth/login", { password, audience }),
   logout: () => api.post<{ ok: true }>("/v1/auth/logout"),

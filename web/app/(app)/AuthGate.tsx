@@ -9,7 +9,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const router = useRouter()
 
   useEffect(() => {
-    if (auth.kind === "anonymous") {
+    if (auth.kind === "anonymous" || auth.kind === "unconfigured") {
       router.replace("/sign-in")
     }
   }, [auth.kind, router])
