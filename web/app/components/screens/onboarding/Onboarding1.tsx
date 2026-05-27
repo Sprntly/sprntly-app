@@ -1,88 +1,193 @@
 "use client"
 
-import { publicPath } from "../../../lib/public-path"
-import { useNavigation } from "../../../context/NavigationContext"
-import { OnboardingLayout } from "./OnboardingLayout"
+import { useEffect, useState } from "react"
+import { useRouter } from "next/navigation"
+import { useAuth } from "../../../lib/auth"
+import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { useOnboarding } from "../../../context/OnboardingContext"
+import {
+  BUSINESS_TYPES,
+  INDUSTRIES,
+  STAGES,
+  TECH_STACK_OPTIONS,
+} from "../../../lib/onboarding/types"
+import { createWorkspace, updateWorkspace } from "../../../lib/onboarding/store"
+import { markSkippedFields } from "../../../lib/onboarding/store"
 
 export function Onboarding1() {
-  const { goTo } = useNavigation()
+  const auth = useAuth()
+  const { workspace, refresh, setWorkspace, loading } = useOnboarding()
+  const router = useRouter()
+  const [companyName, setCompanyName] = useState("")
+  const [productDescription, setProductDescription] = useState("")
+  const [industry, setIndustry] = useState("B2B SaaS")
+  const [industryOther, setIndustryOther] = useState("")
+  const [stage, setStage] = useState("Growth")
+  const [businessType, setBusinessType] = useState("SaaS")
+  const [teamSize, setTeamSize] = useState("")
+  const [techStack, setTechStack] = useState<string[]>([])
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!workspace) return
+    setCompanyName(workspace.display_name)
+    setProductDescription(workspace.product_description ?? "")
+    setIndustry(workspace.industry ?? "B2B SaaS")
+    setStage(workspace.stage ?? "Growth")
+    setBusinessType(workspace.business_type ?? "SaaS")
+    if (workspace.team_size) setTeamSize(String(workspace.team_size))
+    setTechStack(workspace.tech_stack ?? [])
+  }, [workspace])
+
+  const resolvedIndustry = industry === "Other" ? industryOther.trim() : industry
+  const canContinue =
+    companyName.trim().length > 0 &&
+    productDescription.trim().length > 0 &&
+    resolvedIndustry.length > 0
+
+  async function save(andContinue: boolean) {
+    if (auth.kind !== "authed") return
+    setError(null)
+    setSaving(true)
+    try {
+      const payload = {
+        companyName,
+        productDescription,
+        industry: resolvedIndustry,
+        stage,
+        businessType,
+        teamSize: teamSize ? Number(teamSize) : null,
+        techStack,
+      }
+      if (workspace) {
+        const updated = await updateWorkspace(workspace.id, {
+          display_name: payload.companyName.trim(),
+          product_description: payload.productDescription.trim(),
+          industry: payload.industry,
+          stage: payload.stage,
+          business_type: payload.businessType,
+          team_size: payload.teamSize,
+          tech_stack: payload.techStack,
+          onboarding_step: andContinue ? 2 : workspace.onboarding_step,
+        })
+        setWorkspace(updated)
+      } else {
+        const created = await createWorkspace({ ...payload, userId: auth.user.id })
+        setWorkspace(created)
+      }
+      if (andContinue) router.push("/onboarding/2")
+      else await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't save workspace.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function onSkip() {
+    if (auth.kind !== "authed") return
+    await markSkippedFields(auth.user.id, ["team_size", "tech_stack"])
+    if (workspace) {
+      await updateWorkspace(workspace.id, { onboarding_step: 2 })
+      router.push("/onboarding/2")
+    } else if (canContinue) {
+      await save(true)
+    }
+  }
+
+  if (loading) return <div className="ob-shell">Loading…</div>
 
   return (
-    <OnboardingLayout
-      heroTitle={
-        <>
-          Know <span>what to build</span> before your standup.
-        </>
-      }
-      heroSub="Sprntly reads signals from your entire stack — analytics, calls, support, reviews, code — and hands you a weekly brief of the three to five things worth shipping."
-      proof={
-        <div className="ob-proof">
-          <div className="ob-proof-item">
-            <strong>32</strong>sources
-          </div>
-          <div className="ob-proof-item">
-            <strong>3–5</strong>findings/wk
-          </div>
-          <div className="ob-proof-item">
-            <strong>1 click</strong>to code
-          </div>
-        </div>
-      }
+    <InterviewLayout
       step={1}
-      eyebrow="Get started"
-      title="Create your account"
-      desc="One account, one product. Invite your team after setup."
+      eyebrow="Company & product context"
+      title="Tell me about your product"
+      agentMessage="I'll use this to seed your Knowledge Graph workspace — company name, what you build, and where you are in your journey. This is the foundation for your first Brief."
+      rightPane={
+        <PreviewCard
+          title="Workspace preview"
+          lines={[
+            companyName && `Company: ${companyName}`,
+            resolvedIndustry && `Industry: ${resolvedIndustry}`,
+            stage && `Stage: ${stage}`,
+            productDescription && `“${productDescription.slice(0, 120)}${productDescription.length > 120 ? "…" : ""}”`,
+          ].filter(Boolean) as string[]}
+        />
+      }
+      onContinue={() => save(true)}
+      onSkip={onSkip}
+      continueDisabled={!canContinue}
+      loading={saving}
     >
-      <button className="btn btn-block btn-lg" style={{ marginBottom: 10 }}>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-          <path
-            d="M22.5 12.23c0-.85-.08-1.67-.22-2.45H12v4.64h5.92c-.26 1.37-1.03 2.53-2.19 3.31v2.75h3.54c2.07-1.91 3.27-4.72 3.27-8.25z"
-            fill="#4285F4"
-          />
-          <path
-            d="M12 23c2.95 0 5.43-.98 7.24-2.65l-3.54-2.75c-.98.66-2.24 1.05-3.7 1.05-2.84 0-5.25-1.92-6.11-4.5H2.22v2.83A10.99 10.99 0 0 0 12 23z"
-            fill="#34A853"
-          />
-          <path
-            d="M5.89 14.15a6.6 6.6 0 0 1 0-4.3V7.02H2.22a11 11 0 0 0 0 9.96l3.67-2.83z"
-            fill="#FBBC05"
-          />
-          <path
-            d="M12 5.5c1.6 0 3.05.55 4.18 1.64l3.14-3.14C17.42 2.18 14.95 1 12 1 7.7 1 3.99 3.47 2.22 7.02l3.67 2.83C6.75 7.27 9.16 5.5 12 5.5z"
-            fill="#EA4335"
-          />
-        </svg>
-        Continue with Google
-      </button>
-      <div className="divider">or</div>
+      {error && <div className="ob-form-error">{error}</div>}
       <div className="field">
-        <label className="field-label">Work email</label>
-        <input type="email" className="input" placeholder="you@company.com" />
+        <label className="field-label">Company name *</label>
+        <input className="input" value={companyName} onChange={(e) => setCompanyName(e.target.value)} maxLength={100} />
       </div>
-      <button
-        className="btn btn-primary btn-block btn-lg"
-        onClick={() => goTo("ob-2")}
-      >
-        Continue
-      </button>
-      <p
-        style={{
-          textAlign: "center",
-          fontSize: 11.5,
-          color: "var(--muted)",
-          marginTop: 16,
-        }}
-      >
-        By continuing you agree to our{" "}
-        <a href={publicPath("/terms")} style={{ color: "var(--ink-3)" }}>
-          terms
-        </a>{" "}
-        and{" "}
-        <a href={publicPath("/privacy")} style={{ color: "var(--ink-3)" }}>
-          privacy policy
-        </a>
-        .
-      </p>
-    </OnboardingLayout>
+      <div className="field">
+        <label className="field-label">Product description *</label>
+        <textarea className="textarea" value={productDescription} onChange={(e) => setProductDescription(e.target.value)} maxLength={500} rows={4} placeholder="What your product does, who it serves, core value proposition…" />
+      </div>
+      <div className="field">
+        <label className="field-label">Industry *</label>
+        <select className="input" value={industry} onChange={(e) => setIndustry(e.target.value)}>
+          {INDUSTRIES.map((i) => <option key={i}>{i}</option>)}
+        </select>
+        {industry === "Other" && (
+          <input className="input" style={{ marginTop: 8 }} value={industryOther} onChange={(e) => setIndustryOther(e.target.value)} placeholder="Your industry" />
+        )}
+      </div>
+      <div className="field">
+        <label className="field-label">Stage *</label>
+        <div className="ob-radio-row">
+          {STAGES.map((s) => (
+            <label key={s} className={`ob-radio-chip ${stage === s ? "on" : ""}`}>
+              <input type="radio" name="stage" checked={stage === s} onChange={() => setStage(s)} />
+              {s}
+            </label>
+          ))}
+        </div>
+      </div>
+      <div className="field">
+        <label className="field-label">Business type *</label>
+        <select className="input" value={businessType} onChange={(e) => setBusinessType(e.target.value)}>
+          {BUSINESS_TYPES.map((b) => <option key={b}>{b}</option>)}
+        </select>
+      </div>
+      <div className="field">
+        <label className="field-label">Team size (optional)</label>
+        <input type="number" className="input" min={1} value={teamSize} onChange={(e) => setTeamSize(e.target.value)} placeholder="Total headcount" />
+      </div>
+      <div className="field">
+        <label className="field-label">Tech stack (optional)</label>
+        <div className="ob-chip-row">
+          {TECH_STACK_OPTIONS.map((t) => (
+            <button
+              key={t}
+              type="button"
+              className={`metric-chip ${techStack.includes(t) ? "selected" : ""}`}
+              onClick={() => setTechStack((prev) => prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t])}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+    </InterviewLayout>
+  )
+}
+
+function PreviewCard({ title, lines }: { title: string; lines: string[] }) {
+  return (
+    <div>
+      <div className="ob-preview-label">Live preview</div>
+      <h3 className="ob-preview-title">{title}</h3>
+      {lines.length === 0 ? (
+        <p className="ob-preview-empty">Fill in the form to see your workspace take shape.</p>
+      ) : (
+        <ul className="ob-preview-list">{lines.map((l) => <li key={l}>{l}</li>)}</ul>
+      )}
+    </div>
   )
 }

@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
+import { fetchWorkspaceForUser } from "../onboarding/store"
 
 let browserClient: SupabaseClient | null = null
 
@@ -44,16 +45,11 @@ export async function postLoginPath(): Promise<string> {
   } = await supabase.auth.getUser()
   if (!user) return "/sign-in"
 
-  const { data: memberships, error } = await supabase
-    .from("company_members")
-    .select("company_id")
-    .eq("user_id", user.id)
-    .limit(1)
+  if (!user.email_confirmed_at) return "/verify-email"
 
-  if (error) {
-    console.warn("company_members lookup failed:", error.message)
-    return "/"
-  }
-  if (!memberships?.length) return "/onboarding/1"
-  return "/"
+  const workspace = await fetchWorkspaceForUser(user.id)
+  if (!workspace) return "/onboarding/1"
+  if (workspace.onboarding_completed_at) return "/"
+  const step = Math.min(Math.max(workspace.onboarding_step, 1), 8)
+  return `/onboarding/${step}`
 }
