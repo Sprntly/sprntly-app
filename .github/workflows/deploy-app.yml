@@ -70,6 +70,7 @@ jobs:
           NEXT_PUBLIC_API_URL: https://api.sprntly.ai
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST: ${{ secrets.NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST }}
         run: |
           cd web
           npm ci --no-audit --no-fund

@@ -29,7 +29,25 @@ export function emailDomain(email: string): string | null {
   return trimmed.slice(at + 1)
 }
 
+/** Team addresses that predate a company domain — always permitted. */
+const BUILTIN_AUTH_EMAIL_ALLOWLIST = ["sprntly@gmail.com"] as const
+
+/** Comma-separated full addresses (build-time env), merged with builtin list. */
+export function authEmailAllowlist(): Set<string> {
+  const raw = process.env.NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST ?? ""
+  const fromEnv = raw
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+  return new Set([...BUILTIN_AUTH_EMAIL_ALLOWLIST, ...fromEnv])
+}
+
+export function isAllowlistedEmail(email: string): boolean {
+  return authEmailAllowlist().has(email.trim().toLowerCase())
+}
+
 export function isWorkEmail(email: string): boolean {
+  if (isAllowlistedEmail(email)) return true
   const domain = emailDomain(email)
   if (!domain) return false
   return !CONSUMER_DOMAINS.has(domain)
@@ -41,7 +59,7 @@ export function validateWorkEmail(email: string): string | null {
     return "Enter a valid email address."
   }
   if (!isWorkEmail(trimmed)) {
-    return "Please use your work email address."
+    return "Use your work email (e.g. you@company.com). Personal Gmail and similar addresses are not supported."
   }
   return null
 }
