@@ -2,20 +2,65 @@
 
 import { useEffect, useRef, useState } from "react"
 import Link from "next/link"
+import { useWorkspace } from "../../context/WorkspaceContext"
 import { companiesApi, type CompanySummary, ApiError } from "../../lib/api"
+import { isSupabaseConfigured } from "../../lib/supabase/client"
+import { useAuth } from "../../lib/auth"
 
 interface Props {
   activeSlug: string
   onSwitch: (slug: string) => void
 }
 
+/** Production app: show the user's Supabase workspace only (no demo datasets). */
+function WorkspaceCompanyLabel({ displayName }: { displayName: string }) {
+  return (
+    <div className="ds-wrap">
+      <div className="ds-trigger ds-trigger-static" aria-label={`Workspace: ${displayName}`}>
+        <span className="ds-name" title={displayName}>
+          {displayName}
+        </span>
+      </div>
+      <style jsx>{`
+        .ds-wrap { position: relative; padding: 4px 12px 12px; }
+        .ds-trigger {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          width: 100%;
+          padding: 8px 10px;
+          background: #131318;
+          color: #e6e6ea;
+          border: 1px solid #232329;
+          border-radius: 8px;
+          font-size: 13px;
+          text-align: left;
+        }
+        .ds-trigger-static { cursor: default; }
+        .ds-name {
+          flex: 1;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-weight: 500;
+        }
+      `}</style>
+    </div>
+  )
+}
+
 export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
+  const auth = useAuth()
+  const { workspace, loading: workspaceLoading } = useWorkspace()
+  const useWorkspaceMode = isSupabaseConfigured() && auth.kind === "authed"
+
   const [open, setOpen] = useState(false)
   const [companies, setCompanies] = useState<CompanySummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
+    if (useWorkspaceMode) return
     let cancelled = false
     companiesApi
       .list()
@@ -26,7 +71,6 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
       .catch((e) => {
         if (cancelled) return
         if (e instanceof ApiError && e.status === 401) {
-          // Auth gate handles redirect; stay quiet.
           return
         }
         setError(e instanceof Error ? e.message : String(e))
@@ -34,9 +78,8 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [useWorkspaceMode])
 
-  // Close on outside click.
   useEffect(() => {
     function onClick(e: MouseEvent) {
       if (!wrapRef.current) return
@@ -45,6 +88,38 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
     if (open) document.addEventListener("mousedown", onClick)
     return () => document.removeEventListener("mousedown", onClick)
   }, [open])
+
+  if (useWorkspaceMode) {
+    if (workspaceLoading) {
+      return (
+        <div className="ds-wrap" style={{ padding: "4px 12px 12px", fontSize: 13, color: "#7a7a85" }}>
+          Loading workspace…
+        </div>
+      )
+    }
+    if (!workspace) {
+      return (
+        <div className="ds-wrap" style={{ padding: "4px 12px 12px" }}>
+          <Link href="/onboarding/1" className="ds-onboard-link">
+            Finish onboarding →
+          </Link>
+          <style jsx>{`
+            .ds-onboard-link {
+              display: block;
+              padding: 8px 10px;
+              font-size: 13px;
+              color: #a8a8b3;
+              text-decoration: none;
+              border: 1px dashed #232329;
+              border-radius: 8px;
+            }
+          `}</style>
+        </div>
+      )
+    }
+    const label = workspace.product?.name ?? workspace.display_name
+    return <WorkspaceCompanyLabel displayName={label} />
+  }
 
   const active =
     companies?.find((d) => d.slug === activeSlug) ??
@@ -71,9 +146,7 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
         <div className="ds-menu" role="listbox">
           {error && <div className="ds-err">{error}</div>}
           {companies === null && !error && <div className="ds-empty">Loading…</div>}
-          {companies?.length === 0 && (
-            <div className="ds-empty">No companies yet.</div>
-          )}
+          {companies?.length === 0 && <div className="ds-empty">No companies yet.</div>}
           {companies?.map((d) => (
             <button
               key={d.slug}
@@ -120,12 +193,6 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
           transition: border-color 0.15s;
         }
         .ds-trigger:hover { border-color: #4a4a55; }
-        .ds-label {
-          font-size: 10px;
-          letter-spacing: 0.12em;
-          text-transform: uppercase;
-          color: #7a7a85;
-        }
         .ds-name {
           flex: 1;
           overflow: hidden;

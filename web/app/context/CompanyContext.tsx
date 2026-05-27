@@ -1,7 +1,8 @@
 "use client"
 
 import { createContext, useContext, type ReactNode } from "react"
-import { useActiveCompany } from "../lib/useActiveCompany"
+import { useActiveCompany, DEMO_DEFAULT_COMPANY_SLUG } from "../lib/useActiveCompany"
+import { useWorkspace } from "./WorkspaceContext"
 
 type Ctx = {
   activeCompany: string
@@ -11,7 +12,8 @@ type Ctx = {
 const CompanyContext = createContext<Ctx | null>(null)
 
 export function CompanyProvider({ children }: { children: ReactNode }) {
-  const [activeCompany, setActiveCompany] = useActiveCompany()
+  const { workspace } = useWorkspace()
+  const [activeCompany, setActiveCompany] = useActiveCompany(workspace?.slug ?? null)
   return (
     <CompanyContext.Provider value={{ activeCompany, setActiveCompany }}>
       {children}
@@ -24,7 +26,7 @@ export function useCompany(): Ctx {
   if (!ctx) {
     // Default outside provider — keeps screens renderable in storybook / tests.
     return {
-      activeCompany: "asurion",
+      activeCompany: DEMO_DEFAULT_COMPANY_SLUG,
       setActiveCompany: () => {},
     }
   }

@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
+import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
+import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard } from "../../../types/content"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
@@ -45,6 +47,8 @@ export function ChatScreen() {
     setPendingOndemandDraft,
     showToast,
   } = useNavigation()
+  const auth = useAuth()
+  const { profile } = useWorkspace()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
@@ -60,7 +64,12 @@ export function ChatScreen() {
   const conversationsRef = useRef(conversations)
   conversationsRef.current = conversations
 
-  const name = content.userName?.split(/\s+/)[0] ?? "David"
+  const profileName =
+    auth.kind === "authed" ? profileDisplayName(profile, auth.user.email) : null
+  const name =
+    content.userName?.split(/\s+/)[0] ??
+    profileName?.split(/\s+/)[0] ??
+    "there"
   const homeCards = content.homeStarterCards.filter((c) => c.id !== "home-goto-ask")
 
   useEffect(() => {

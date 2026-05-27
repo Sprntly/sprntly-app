@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
+import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import {
   IconBrief,
@@ -24,7 +25,8 @@ interface SidebarProps {
 export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
   const { currentScreen, goTo, sidebarCollapsed, toggleSidebar } = useNavigation()
   const { content } = useContent()
-  const { signOut } = useAuth()
+  const auth = useAuth()
+  const { profile } = useWorkspace()
   const signingOutRef = useRef(false)
   const [signingOut, setSigningOut] = useState(false)
 
@@ -33,12 +35,12 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
     signingOutRef.current = true
     setSigningOut(true)
     try {
-      await signOut()
+      await auth.signOut()
     } finally {
       signingOutRef.current = false
       setSigningOut(false)
     }
-  }, [signOut])
+  }, [auth])
 
   const NavItem = ({
     screen,
@@ -64,7 +66,10 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
     </a>
   )
 
-  const displayName = content.userName ?? "David"
+  const displayName =
+    content.userName ??
+    (auth.kind === "authed" ? profileDisplayName(profile, auth.user.email) : null) ??
+    "Guest"
   const initials =
     content.userInitials ??
     displayName
