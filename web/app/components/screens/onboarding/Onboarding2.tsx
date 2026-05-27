@@ -4,9 +4,10 @@ import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { KpiTreeEditor, normalizeKpiWeights } from "../../onboarding/KpiTreeEditor"
 import { KpiTreePreview } from "../../onboarding/KpiTreePreview"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import type { KpiMetric, KpiTree } from "../../../lib/onboarding/types"
+import type { KpiMetric } from "../../../lib/onboarding/types"
 import { markSkippedFields } from "../../../lib/onboarding/store"
 import { saveKpiTree } from "../../../lib/onboarding/store"
 
@@ -15,16 +16,6 @@ const NORTH_STAR_HINTS: Record<string, string[]> = {
   B2C: ["DAU/MAU ratio", "Day-30 retention", "Conversion rate"],
   Fintech: ["Transaction volume", "Fraud rate", "NRR"],
   default: ["Day-30 retention", "NRR", "Weekly active users"],
-}
-
-function normalizeWeights(metrics: KpiMetric[]): KpiMetric[] {
-  const filled = metrics.filter((m) => m.name.trim())
-  const sum = filled.reduce((a, m) => a + (m.weight || 0), 0)
-  if (sum <= 0) {
-    const even = filled.length ? 1 / filled.length : 0
-    return filled.map((m) => ({ ...m, weight: even }))
-  }
-  return filled.map((m) => ({ ...m, weight: (m.weight || 0) / sum }))
 }
 
 export function Onboarding2() {
@@ -48,25 +39,16 @@ export function Onboarding2() {
 
   const hints =
     NORTH_STAR_HINTS[workspace?.industry ?? ""] ?? NORTH_STAR_HINTS.default
-  const tree: KpiTree = { north_star: northStar, metrics: normalizeWeights(metrics) }
+  const tree = { north_star: northStar, metrics: normalizeKpiWeights(metrics) }
   const namedMetrics = metrics.filter((m) => m.name.trim())
   const canContinue = northStar.trim().length > 0 && namedMetrics.length >= 2
-
-  function updateMetric(i: number, patch: Partial<KpiMetric>) {
-    setMetrics((prev) => prev.map((m, idx) => (idx === i ? { ...m, ...patch } : m)))
-  }
-
-  function addMetric() {
-    if (metrics.length >= 4) return
-    setMetrics((prev) => [...prev, { name: "", current_value: "", target_value: "", weight: 0.25 }])
-  }
 
   async function persist(andContinue: boolean) {
     if (!workspace) return
     setSaving(true)
     setError(null)
     try {
-      const finalTree = { north_star: northStar.trim(), metrics: normalizeWeights(metrics) }
+      const finalTree = { north_star: northStar.trim(), metrics: normalizeKpiWeights(metrics) }
       const updated = await saveKpiTree(workspace.id, finalTree, andContinue ? 3 : workspace.onboarding_step)
       setWorkspace(updated)
       if (andContinue) router.push("/onboarding/3")
@@ -102,27 +84,13 @@ export function Onboarding2() {
       loading={saving}
     >
       {error && <div className="ob-form-error">{error}</div>}
-      <div className="field">
-        <label className="field-label">North star metric *</label>
-        <input className="input" value={northStar} onChange={(e) => setNorthStar(e.target.value)} placeholder="e.g. Day-30 retention" />
-        <div className="ob-hints">Suggestions: {hints.join(" · ")}</div>
-      </div>
-      <div className="field">
-        <label className="field-label">Supporting metrics (2–4) *</label>
-        {metrics.map((m, i) => (
-          <div key={i} className="ob-metric-block">
-            <input className="input" placeholder="Metric name" value={m.name} onChange={(e) => updateMetric(i, { name: e.target.value })} />
-            <div className="ob-metric-row">
-              <input className="input" placeholder="Current (optional)" value={m.current_value ?? ""} onChange={(e) => updateMetric(i, { current_value: e.target.value })} />
-              <input className="input" placeholder="Target (optional)" value={m.target_value ?? ""} onChange={(e) => updateMetric(i, { target_value: e.target.value })} />
-              <input className="input" type="number" min={0} max={1} step={0.05} placeholder="Weight" value={m.weight} onChange={(e) => updateMetric(i, { weight: Number(e.target.value) })} />
-            </div>
-          </div>
-        ))}
-        {metrics.length < 4 && (
-          <button type="button" className="btn btn-ghost btn-sm" onClick={addMetric}>+ Add metric</button>
-        )}
-      </div>
+      <KpiTreeEditor
+        northStar={northStar}
+        metrics={metrics}
+        hints={hints}
+        onNorthStarChange={setNorthStar}
+        onMetricsChange={setMetrics}
+      />
     </InterviewLayout>
   )
 }
