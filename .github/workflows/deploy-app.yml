@@ -28,6 +28,43 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      - name: Validate Supabase build secrets
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          url="$(printf '%s' "$NEXT_PUBLIC_SUPABASE_URL" | tr -d '[:space:]')"
+          key="$(printf '%s' "$NEXT_PUBLIC_SUPABASE_ANON_KEY" | tr -d '[:space:]')"
+          if [ -z "$url" ] || [ -z "$key" ]; then
+            echo "::error::Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY in GitHub Actions secrets."
+            exit 1
+          fi
+          case "$url" in
+            https://*.supabase.co) ;;
+            *)
+              echo "::error::NEXT_PUBLIC_SUPABASE_URL must be https://YOUR_PROJECT_REF.supabase.co (got: ${url:0:40}...)"
+              exit 1
+              ;;
+          esac
+          case "$key" in
+            sb_publishable_*)
+              if [ "${#key}" -lt 30 ]; then
+                echo "::error::NEXT_PUBLIC_SUPABASE_ANON_KEY publishable key looks truncated."
+                exit 1
+              fi
+              ;;
+            eyJ*)
+              if [ "${#key}" -lt 100 ]; then
+                echo "::error::NEXT_PUBLIC_SUPABASE_ANON_KEY JWT anon key looks truncated."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::NEXT_PUBLIC_SUPABASE_ANON_KEY must be the publishable key (sb_publishable_...) or legacy anon JWT (eyJ...) from Supabase Dashboard → Settings → API keys."
+              exit 1
+              ;;
+          esac
+
       - name: Build static export
         env:
           NEXT_PUBLIC_API_URL: https://api.sprntly.ai

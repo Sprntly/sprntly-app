@@ -3,25 +3,52 @@ import { fetchWorkspaceForUser } from "../onboarding/store"
 
 let browserClient: SupabaseClient | null = null
 
+function trimEnv(value: string | undefined): string {
+  return (value ?? "").trim()
+}
+
+/** Must be https://<project-ref>.supabase.co (no trailing slash). */
+export function parseSupabaseUrl(raw: string | undefined): string | null {
+  const value = trimEnv(raw)
+  if (!value) return null
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null
+    if (!parsed.hostname) return null
+    // Supabase project URL is origin-only; reject stray paths/query.
+    if (parsed.pathname !== "/" && parsed.pathname !== "") return null
+    if (parsed.search || parsed.hash) return null
+    return parsed.origin
+  } catch {
+    return null
+  }
+}
+
+export function getSupabasePublicConfig(): {
+  url: string
+  anonKey: string
+} | null {
+  const url = parseSupabaseUrl(process.env.NEXT_PUBLIC_SUPABASE_URL)
+  const anonKey = trimEnv(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
+  if (!url || !anonKey) return null
+  return { url, anonKey }
+}
+
 export function isSupabaseConfigured(): boolean {
-  return !!(
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  )
+  return getSupabasePublicConfig() !== null
 }
 
 export function getSupabase(): SupabaseClient {
   if (browserClient) return browserClient
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  if (!url || !anonKey) {
+  const config = getSupabasePublicConfig()
+  if (!config) {
     throw new Error(
-      "Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY",
+      "Supabase is not configured. Set NEXT_PUBLIC_SUPABASE_URL (https://YOUR_REF.supabase.co) and NEXT_PUBLIC_SUPABASE_ANON_KEY at build time, then redeploy.",
     )
   }
 
-  browserClient = createClient(url, anonKey, {
+  browserClient = createClient(config.url, config.anonKey, {
     auth: {
       persistSession: true,
       autoRefreshToken: true,
