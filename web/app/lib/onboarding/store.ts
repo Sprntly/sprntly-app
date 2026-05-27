@@ -9,14 +9,30 @@ import {
   type KpiTree,
   type UserProfile,
   type WorkspaceCompany,
+  type WorkspaceProduct,
 } from "./types"
 
-function rowToCompany(row: Record<string, unknown>): WorkspaceCompany {
+function rowToProduct(row: Record<string, unknown>): WorkspaceProduct {
+  return {
+    id: String(row.id),
+    company_id: String(row.company_id),
+    name: String(row.name),
+    website: (row.website as string | null) ?? null,
+    description: (row.description as string | null) ?? null,
+    is_primary: Boolean(row.is_primary),
+  }
+}
+
+function rowToCompany(
+  row: Record<string, unknown>,
+  product: WorkspaceProduct | null = null,
+): WorkspaceCompany {
   return {
     id: String(row.id),
     slug: String(row.slug),
     display_name: String(row.display_name),
     product_description: (row.product_description as string | null) ?? null,
+    product,
     industry: (row.industry as string | null) ?? null,
     stage: (row.stage as string | null) ?? null,
     business_type: (row.business_type as string | null) ?? null,
@@ -101,6 +117,59 @@ export async function updateUserProfile(
   return rowToProfile(data as Record<string, unknown>)
 }
 
+export async function fetchPrimaryProduct(
+  companyId: string,
+): Promise<WorkspaceProduct | null> {
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from("products")
+    .select("id, company_id, name, website, description, is_primary")
+    .eq("company_id", companyId)
+    .eq("is_primary", true)
+    .maybeSingle()
+  if (error || !data) return null
+  return rowToProduct(data as Record<string, unknown>)
+}
+
+export async function upsertPrimaryProduct(
+  companyId: string,
+  input: { name: string; website: string | null; description?: string | null },
+): Promise<WorkspaceProduct> {
+  const supabase = getSupabase()
+  const name = input.name.trim()
+  const existing = await fetchPrimaryProduct(companyId)
+
+  if (existing) {
+    const { data, error } = await supabase
+      .from("products")
+      .update({
+        name,
+        website: input.website,
+        description: input.description?.trim() || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", existing.id)
+      .select("id, company_id, name, website, description, is_primary")
+      .single()
+    if (error || !data) throw error ?? new Error("Could not update product")
+    return rowToProduct(data as Record<string, unknown>)
+  }
+
+  const { data, error } = await supabase
+    .from("products")
+    .insert({
+      company_id: companyId,
+      name,
+      website: input.website,
+      description: input.description?.trim() || null,
+      is_primary: true,
+    })
+    .select("id, company_id, name, website, description, is_primary")
+    .single()
+  if (error || !data) throw error ?? new Error("Could not create product")
+  return rowToProduct(data as Record<string, unknown>)
+}
+
 export async function fetchWorkspaceForUser(
   userId: string,
 ): Promise<WorkspaceCompany | null> {
@@ -119,12 +188,15 @@ export async function fetchWorkspaceForUser(
     .eq("id", membership.company_id)
     .maybeSingle()
   if (error || !data) return null
-  return rowToCompany(data as Record<string, unknown>)
+  const companyId = String(data.id)
+  const product = await fetchPrimaryProduct(companyId)
+  return rowToCompany(data as Record<string, unknown>, product)
 }
 
 export async function createWorkspace(input: {
   companyName: string
-  productDescription: string
+  productName: string
+  productWebsite?: string | null
   industry: string
   stage: string
   businessType: string
@@ -144,9 +216,9 @@ export async function createWorkspace(input: {
     const { data: company, error: companyErr } = await supabase
       .from("companies")
       .insert({
+        created_by: input.userId,
         slug: trySlug,
         display_name: input.companyName.trim(),
-        product_description: input.productDescription.trim(),
         industry: input.industry,
         stage: input.stage,
         business_type: input.businessType,
@@ -168,11 +240,15 @@ export async function createWorkspace(input: {
         role: "owner",
       })
       if (memberErr) throw memberErr
+      const product = await upsertPrimaryProduct(String(company.id), {
+        name: input.productName,
+        website: input.productWebsite ?? null,
+      })
       await supabase
         .from("profiles")
         .update({ onboarding_step: 2 })
         .eq("id", input.userId)
-      return rowToCompany(company as Record<string, unknown>)
+      return rowToCompany(company as Record<string, unknown>, product)
     }
     if (companyErr?.code !== "23505") throw companyErr ?? new Error("Could not create workspace")
   }
@@ -191,7 +267,8 @@ export async function updateWorkspace(
     .select("*")
     .single()
   if (error || !data) throw error ?? new Error("Update failed")
-  return rowToCompany(data as Record<string, unknown>)
+  const product = await fetchPrimaryProduct(companyId)
+  return rowToCompany(data as Record<string, unknown>, product)
 }
 
 export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 3) {

@@ -20,11 +20,22 @@ export type FeatureFlags = {
   claude_code_handoff: boolean
 }
 
+export type WorkspaceProduct = {
+  id: string
+  company_id: string
+  name: string
+  website: string | null
+  description: string | null
+  is_primary: boolean
+}
+
 export type WorkspaceCompany = {
   id: string
   slug: string
   display_name: string
+  /** @deprecated Use `product` — kept for rows not yet migrated to products table */
   product_description: string | null
+  product: WorkspaceProduct | null
   industry: string | null
   stage: string | null
   business_type: string | null
