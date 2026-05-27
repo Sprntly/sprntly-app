@@ -12,13 +12,43 @@ import {
 } from "../components/shared"
 import { useCompany } from "../context/CompanyContext"
 import { useContent } from "../context/ContentContext"
+import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
+import { useAuth } from "../lib/auth"
 import { connectorsApi } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const auth = useAuth()
   const { activeCompany } = useCompany()
+  const { profile, workspace } = useWorkspace()
   const { setContent } = useContent()
   useBriefHydration(activeCompany)
+
+  useEffect(() => {
+    if (auth.kind !== "authed") return
+    const name = profileDisplayName(profile, auth.user.email)
+    if (!name) return
+    setContent({
+      userName: name,
+      userEmail: profile?.email ?? auth.user.email ?? null,
+      userInitials: name
+        .split(/\s+/)
+        .map((p) => p[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase(),
+    })
+  }, [auth, profile, setContent])
+
+  useEffect(() => {
+    if (!workspace) return
+    const product = workspace.product?.name
+    setContent({
+      homeHeadline: product
+        ? `Your ${product} workspace`
+        : `${workspace.display_name} workspace`,
+    })
+  }, [workspace, setContent])
 
   useEffect(() => {
     void connectorsApi

@@ -3,21 +3,21 @@
 import { useCallback, useEffect, useState } from "react"
 
 const LS_KEY = "sprntly_active_company"
-const DEFAULT_SLUG = "asurion"
+export const DEMO_DEFAULT_COMPANY_SLUG = "asurion"
 
 /**
- * Active-company state for the demo. Resolution order:
- *   1. ?company=… URL query
- *   2. localStorage["sprntly_active_company"]
- *   3. "asurion" (back-compat with the original single-company demo)
- *
- * Writes back to both localStorage and the URL so reload + share-the-link
- * both work. URL changes via history.replaceState; we never reload.
+ * Active dataset slug for brief/API calls. Resolution order:
+ *   1. Signed-in workspace slug (app / Supabase)
+ *   2. ?company=… URL query
+ *   3. localStorage["sprntly_active_company"]
+ *   4. Demo default ("asurion")
  */
 export function resolveInitialCompany(
   search: string | null,
   storage: Storage | null,
+  workspaceSlug?: string | null,
 ): string {
+  if (workspaceSlug && workspaceSlug.length >= 2) return workspaceSlug
   if (search) {
     try {
       const v = new URLSearchParams(search).get("company")
@@ -30,14 +30,28 @@ export function resolveInitialCompany(
     const v = storage.getItem(LS_KEY)
     if (v && v.length >= 2) return v
   }
-  return DEFAULT_SLUG
+  return DEMO_DEFAULT_COMPANY_SLUG
 }
 
-export function useActiveCompany(): [string, (slug: string) => void] {
+export function useActiveCompany(
+  workspaceSlug?: string | null,
+): [string, (slug: string) => void] {
   const [slug, setSlugState] = useState<string>(() => {
-    if (typeof window === "undefined") return DEFAULT_SLUG
-    return resolveInitialCompany(window.location.search, window.localStorage)
+    if (typeof window === "undefined") {
+      return workspaceSlug ?? DEMO_DEFAULT_COMPANY_SLUG
+    }
+    return resolveInitialCompany(
+      window.location.search,
+      window.localStorage,
+      workspaceSlug,
+    )
   })
+
+  // When Supabase workspace loads, prefer it over a stale demo slug in storage.
+  useEffect(() => {
+    if (!workspaceSlug || workspaceSlug.length < 2) return
+    setSlugState((prev) => (prev === workspaceSlug ? prev : workspaceSlug))
+  }, [workspaceSlug])
 
   // Keep storage + URL in sync whenever slug changes.
   useEffect(() => {

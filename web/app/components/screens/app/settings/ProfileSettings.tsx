@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { AuthApiError } from "@supabase/supabase-js"
+import { useWorkspace } from "../../../../context/WorkspaceContext"
 import { useAuth } from "../../../../lib/auth"
 import { validatePassword } from "../../../../lib/auth-validation"
 import { fetchUserProfile, updateUserProfile } from "../../../../lib/onboarding/store"
@@ -15,6 +16,7 @@ import {
 
 export function ProfileSettings() {
   const auth = useAuth()
+  const { refresh: refreshWorkspace } = useWorkspace()
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [profileSaved, setProfileSaved] = useState(false)
@@ -112,6 +114,7 @@ export function ProfileSettings() {
         role: resolvedRole,
       })
       setProfileSaved(true)
+      await refreshWorkspace()
     } catch (e) {
       setProfileError(e instanceof Error ? e.message : "Could not save profile")
     } finally {
