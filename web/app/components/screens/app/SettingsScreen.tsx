@@ -5,10 +5,48 @@ import { useSearchParams, useRouter } from "next/navigation"
 import Link from "next/link"
 import { AppLayout } from "./AppLayout"
 import { ProfileSettings } from "./settings/ProfileSettings"
+import { WorkspaceSettings } from "./settings/WorkspaceSettings"
+import { KpiSettings } from "./settings/KpiSettings"
+import { StrategicSettings } from "./settings/StrategicSettings"
+import { FeatureFlagsSettings } from "./settings/FeatureFlagsSettings"
+import { NotificationsSettings } from "./settings/NotificationsSettings"
 import {
   SETTINGS_NAV,
   type SettingsSectionId,
 } from "./settings/SettingsLayout"
+
+function SettingsPanel({ section }: { section: SettingsSectionId }) {
+  switch (section) {
+    case "profile":
+      return <ProfileSettings />
+    case "workspace":
+      return <WorkspaceSettings />
+    case "kpi":
+      return <KpiSettings />
+    case "strategic":
+      return <StrategicSettings />
+    case "flags":
+      return <FeatureFlagsSettings />
+    case "notifications":
+      return <NotificationsSettings />
+    default:
+      return (
+        <div className="settings-coming-soon">
+          <h2 className="settings-sec-title">Coming soon</h2>
+          <p className="settings-sec-sub">
+            {section === "connectors" ? (
+              <>
+                Use the full connectors page for now:{" "}
+                <Link href="/connectors">Connectors →</Link>
+              </>
+            ) : (
+              "Team management will sync with workspace invites."
+            )}
+          </p>
+        </div>
+      )
+  }
+}
 
 function SettingsContent() {
   const searchParams = useSearchParams()
@@ -44,29 +82,10 @@ function SettingsContent() {
               {!item.available && <span className="settings-nav-badge">Soon</span>}
             </button>
           ))}
-          <Link href="/connectors" className="settings-nav-link">
-            Connectors →
-          </Link>
         </nav>
 
         <div className="settings-panel">
-          {section === "profile" && <ProfileSettings />}
-          {section !== "profile" && (
-            <div className="settings-coming-soon">
-              <h2 className="settings-sec-title">Coming soon</h2>
-              <p className="settings-sec-sub">
-                This section is defined in the product spec and will load data from
-                your onboarding workspace. Use <strong>Profile</strong> for now.
-              </p>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => setSection("profile")}
-              >
-                Go to Profile
-              </button>
-            </div>
-          )}
+          <SettingsPanel section={section} />
         </div>
       </div>
     </AppLayout>

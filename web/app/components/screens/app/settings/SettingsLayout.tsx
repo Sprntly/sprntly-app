@@ -6,13 +6,13 @@ export type SettingsSectionId = "profile" | "workspace" | "kpi" | "strategic" | 
 
 export const SETTINGS_NAV: { id: SettingsSectionId; label: string; available: boolean }[] = [
   { id: "profile", label: "Profile", available: true },
-  { id: "workspace", label: "Workspace", available: false },
-  { id: "kpi", label: "KPI tree", available: false },
-  { id: "strategic", label: "Strategic context", available: false },
-  { id: "flags", label: "Feature flags", available: false },
+  { id: "workspace", label: "Workspace", available: true },
+  { id: "kpi", label: "KPI tree", available: true },
+  { id: "strategic", label: "Strategic context", available: true },
+  { id: "flags", label: "Feature flags", available: true },
   { id: "connectors", label: "Connectors", available: false },
   { id: "team", label: "Team", available: false },
-  { id: "notifications", label: "Notifications", available: false },
+  { id: "notifications", label: "Notifications", available: true },
 ]
 
 export function SettingsSection({
