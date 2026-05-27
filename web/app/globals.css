@@ -2444,6 +2444,30 @@
   .settings-sec-title { font-family: var(--font-display); font-weight: 600; font-size: 20px; letter-spacing: -0.02em; margin: 0 0 4px; }
   .settings-sec-sub { color: var(--ink-3); font-size: 13px; margin-bottom: 14px; }
   .settings-card { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 18px 22px; }
+  .settings-layout { display: grid; grid-template-columns: 200px 1fr; gap: 32px; align-items: start; }
+  .settings-nav { display: flex; flex-direction: column; gap: 4px; position: sticky; top: 24px; }
+  .settings-nav-item {
+    text-align: left; padding: 10px 12px; border: none; background: transparent; border-radius: 8px;
+    font-size: 14px; font-weight: 500; color: var(--ink-3); cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .settings-nav-item:hover:not(:disabled) { background: var(--surface-2); color: var(--ink); }
+  .settings-nav-item.active { background: var(--surface-2); color: var(--ink); font-weight: 600; }
+  .settings-nav-item.soon { opacity: 0.55; cursor: not-allowed; }
+  .settings-nav-badge { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .settings-nav-link { margin-top: 12px; font-size: 13px; color: var(--accent); text-decoration: none; padding: 8px 12px; display: block; }
+  .settings-coming-soon { padding: 24px; border: 1px dashed var(--line); border-radius: 12px; }
+  .settings-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .settings-readonly { font-size: 14px; color: var(--ink-2); }
+  .settings-loading, .settings-placeholder { font-size: 14px; color: var(--ink-3); }
+  .settings-msg { font-size: 13px; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }
+  .settings-msg-error { background: rgba(180, 50, 50, 0.08); color: var(--danger, #b43232); }
+  .settings-msg-success { background: rgba(15, 111, 78, 0.1); color: var(--accent); }
+  @media (max-width: 768px) {
+    .settings-layout { grid-template-columns: 1fr; }
+    .settings-nav { flex-direction: row; flex-wrap: wrap; position: static; }
+    .settings-field-row { grid-template-columns: 1fr; }
+  }
   .settings-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--line); gap: 16px; }
   .settings-row:last-child { border-bottom: none; }
   .settings-row-label { font-size: 13px; font-weight: 500; }

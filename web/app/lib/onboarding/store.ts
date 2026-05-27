@@ -41,6 +41,19 @@ function rowToCompany(row: Record<string, unknown>): WorkspaceCompany {
   }
 }
 
+function rowToProfile(row: Record<string, unknown>): UserProfile {
+  return {
+    id: String(row.id),
+    email: (row.email as string | null) ?? null,
+    first_name: (row.first_name as string | null) ?? null,
+    last_name: (row.last_name as string | null) ?? null,
+    role: (row.role as string | null) ?? null,
+    onboarding_step: Number(row.onboarding_step) || 0,
+    onboarding_completed_at: (row.onboarding_completed_at as string | null) ?? null,
+    skipped_fields: Array.isArray(row.skipped_fields) ? (row.skipped_fields as string[]) : [],
+  }
+}
+
 export async function fetchUserProfile(userId: string): Promise<UserProfile | null> {
   const supabase = getSupabase()
   const { data, error } = await supabase
@@ -51,16 +64,41 @@ export async function fetchUserProfile(userId: string): Promise<UserProfile | nu
     .eq("id", userId)
     .maybeSingle()
   if (error || !data) return null
-  return {
-    id: data.id,
-    email: data.email,
-    first_name: data.first_name,
-    last_name: data.last_name,
-    role: data.role,
-    onboarding_step: data.onboarding_step ?? 0,
-    onboarding_completed_at: data.onboarding_completed_at,
-    skipped_fields: Array.isArray(data.skipped_fields) ? data.skipped_fields : [],
+  return rowToProfile(data as Record<string, unknown>)
+}
+
+export async function updateUserProfile(
+  userId: string,
+  patch: {
+    first_name: string
+    last_name: string
+    role: string | null
+  },
+): Promise<UserProfile> {
+  const supabase = getSupabase()
+  const first = patch.first_name.trim()
+  const last = patch.last_name.trim()
+  const full_name = [first, last].filter(Boolean).join(" ")
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .update({
+      first_name: first,
+      last_name: last,
+      full_name: full_name || null,
+      role: patch.role?.trim() || null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", userId)
+    .select(
+      "id, email, first_name, last_name, role, onboarding_step, onboarding_completed_at, skipped_fields",
+    )
+    .single()
+
+  if (error || !data) {
+    throw error ?? new Error("Could not update profile")
   }
+  return rowToProfile(data as Record<string, unknown>)
 }
 
 export async function fetchWorkspaceForUser(
