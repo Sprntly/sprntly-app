@@ -33,6 +33,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.design_agent.autofixer import format_errors_for_agent
+from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
 from app.design_agent.tools import (
     ToolContext,
@@ -183,6 +185,26 @@ async def agent_loop(
             results = await asyncio.gather(*[
                 dispatch(tu["name"], tu.get("input") or {}, ctx) for tu in tool_uses
             ])
+
+            # Static AST autofixer (P1-10): after every successful write/
+            # line_replace on a .tsx/.ts file, validate the emitted content.
+            # On failure, mutate the result to is_error so the agent receives
+            # the analysis feedback as a normal tool_result and self-corrects
+            # (per agent-build-research.md §2.4 + §4.1). Runs BEFORE the next
+            # user message is built. Not an LLM call — does not touch `usage`.
+            for i, (tu, result) in enumerate(zip(tool_uses, results)):
+                if tu["name"] not in {"write", "line_replace"} or result.get("is_error"):
+                    continue
+                fpath = (tu.get("input") or {}).get("path", "")
+                if not fpath.endswith((".tsx", ".ts")):
+                    continue
+                af = await autofixer_run(fpath, ctx.virtual_fs.get(fpath, ""), ctx.virtual_fs)
+                if not af.get("ok"):
+                    results[i] = {
+                        "is_error": True,
+                        "content": format_errors_for_agent(af),
+                        "tool_name": tu["name"],
+                    }
 
             # Pathology detection (per §4.3): same (name, input) 3x in window of 5.
             new_warnings: list[str] = []
