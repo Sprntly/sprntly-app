@@ -1,0 +1,542 @@
+"""Unit tests for the Design Agent tool-use loop (P1-04).
+
+The Anthropic client is replaced by a recording fake whose `messages.create`
+is a sync callable (the runner invokes it via `asyncio.to_thread`, matching
+prd_runner.py). The fake records, per call, a DEEP COPY of the `messages`
+kwarg (so per-call snapshots survive the runner's in-place mutation of the
+list) and a REFERENCE to the `system` kwarg (so the cache-identity test can
+assert object identity).
+
+Tests drive `agent_loop` via `asyncio.run(...)`, matching the
+test_design_agent_tools.py convention.
+"""
+from __future__ import annotations
+
+import asyncio
+import copy
+import logging
+import sys
+import time
+import types
+
+import pytest
+
+from app.design_agent import runner
+from app.design_agent.runner import RunResult, agent_loop, generate_prototype
+from app.design_agent.tools import ToolContext
+
+TELEMETRY_LOGGER = "app.llm_telemetry"
+
+
+# ─── Fake Anthropic client ──────────────────────────────────────────────────
+
+
+class _FakeBlock:
+    """Mimics an Anthropic content block exposing `.model_dump()`."""
+
+    def __init__(self, data: dict):
+        self._data = data
+
+    def model_dump(self) -> dict:
+        return copy.deepcopy(self._data)
+
+
+class _FakeMessage:
+    def __init__(self, stop_reason, blocks, usage):
+        self.stop_reason = stop_reason
+        self.content = [_FakeBlock(b) for b in blocks]
+        self.usage = usage
+
+
+class _RecordingClient:
+    """Sync `messages.create` that replays a list of responses.
+
+    Each entry may be a `_FakeMessage` (returned) or an `Exception`
+    instance (raised). When calls outrun the response list, the LAST
+    response is replayed — convenient for "always tool_use" loop tests.
+    """
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+        self.messages = types.SimpleNamespace(create=self._create)
+
+    def _create(self, **kwargs):
+        self.calls.append({
+            "system": kwargs.get("system"),                       # by reference
+            "messages": copy.deepcopy(kwargs.get("messages")),    # per-call snapshot
+            "model": kwargs.get("model"),
+            "max_tokens": kwargs.get("max_tokens"),
+            "tools": kwargs.get("tools"),
+        })
+        i = len(self.calls) - 1
+        resp = self._responses[i] if i < len(self._responses) else self._responses[-1]
+        if isinstance(resp, BaseException):
+            raise resp
+        return resp
+
+
+def _usage(cache_creation=0, cache_read=0, inp=0, out=0):
+    return types.SimpleNamespace(
+        cache_creation_input_tokens=cache_creation,
+        cache_read_input_tokens=cache_read,
+        input_tokens=inp,
+        output_tokens=out,
+    )
+
+
+def _msg(stop_reason, blocks=None, usage=None):
+    return _FakeMessage(stop_reason, blocks or [], usage or _usage())
+
+
+def _text(s: str) -> dict:
+    return {"type": "text", "text": s}
+
+
+def _tool_use(id: str, name: str, inp: dict) -> dict:
+    return {"type": "tool_use", "id": id, "name": name, "input": inp}
+
+
+def _system():
+    return [
+        {"type": "text", "text": "You are the Design Agent. Build prototypes."},
+        {
+            "type": "text",
+            "text": "<design system + tool defs — the stable prefix>",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        },
+    ]
+
+
+def _user(text: str = "Build a landing page."):
+    return {"role": "user", "content": [_text(text)]}
+
+
+def _ctx(**overrides) -> ToolContext:
+    base = dict(prototype_id=1, workspace_id="app", virtual_fs={})
+    base.update(overrides)
+    return ToolContext(**base)
+
+
+def _install_client(monkeypatch, responses) -> _RecordingClient:
+    client = _RecordingClient(responses)
+    monkeypatch.setattr(runner, "get_design_agent_client", lambda: client)
+    return client
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def _all_content_blocks(messages: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            out.extend(content)
+    return out
+
+
+# ─── Creation / basic exits ─────────────────────────────────────────────────
+
+
+def test_agent_loop_end_turn_exits_clean(monkeypatch):
+    _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert isinstance(result, RunResult)
+    assert result.status == "complete"
+    assert result.iters == 1
+    assert result.final_content == [_text("done")]
+
+
+def test_agent_loop_no_tool_calls_zero_iters_exits(monkeypatch):
+    client = _install_client(monkeypatch, [_msg("end_turn", [_text("hi")])])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "complete"
+    assert result.iters == 1
+    assert len(client.calls) == 1
+
+
+def test_agent_loop_unknown_stop_reason_treated_as_complete(monkeypatch):
+    _install_client(monkeypatch, [_msg("surprise_stop", [_text("?")])])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "complete"
+
+
+def test_model_identifier_is_sonnet_4_6(monkeypatch):
+    client = _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
+    _run(agent_loop(_system(), _user(), _ctx()))
+    assert client.calls[0]["model"] == "claude-sonnet-4-6"
+
+
+def test_agent_loop_handles_single_tool_call(monkeypatch):
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "src/App.tsx"})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    ctx = _ctx(virtual_fs={"src/App.tsx": "export default function App() {}"})
+    result = _run(agent_loop(_system(), _user(), ctx))
+    assert result.status == "complete"
+    assert len(client.calls) == 2
+    last_msg = client.calls[1]["messages"][-1]
+    assert last_msg["role"] == "user"
+    assert last_msg["content"][0]["type"] == "tool_result"
+
+
+# ─── Loop bound + stop-reason handling ──────────────────────────────────────
+
+
+def test_agent_loop_bounds_at_max_iters(monkeypatch):
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),  # replayed forever
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "max_iters"
+    assert result.iters == 8
+    assert len(client.calls) == 8
+
+
+def test_agent_loop_emits_wrap_up_nudge_at_n_minus_2(monkeypatch):
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
+    ])
+    _run(agent_loop(_system(), _user(), _ctx()))
+    # Call 7 (index 6) is iters == max_iters - 1; the nudge is appended before it.
+    seventh_call_blocks = _all_content_blocks(client.calls[6]["messages"])
+    assert any(
+        b.get("type") == "text" and "2 iterations remaining" in b.get("text", "")
+        for b in seventh_call_blocks
+    )
+    # And it must NOT be present yet at call 6 (index 5).
+    sixth_call_blocks = _all_content_blocks(client.calls[5]["messages"])
+    assert not any(
+        "2 iterations remaining" in b.get("text", "") for b in sixth_call_blocks
+    )
+
+
+def test_wrap_up_nudge_does_not_create_consecutive_user_turns(monkeypatch):
+    """Regression: the nudge must ride on the trailing user turn, never as a
+    second consecutive user message (the Messages API treats turns as
+    alternating)."""
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
+    ])
+    _run(agent_loop(_system(), _user(), _ctx()))
+    for call in client.calls:
+        roles = [m["role"] for m in call["messages"]]
+        for a, b in zip(roles, roles[1:]):
+            assert a != b, f"consecutive same-role turns: {roles}"
+
+
+def test_agent_loop_max_tokens_doubles_then_exits(monkeypatch):
+    client = _install_client(monkeypatch, [
+        _msg("max_tokens", [_text("...")]),
+        _msg("max_tokens", [_text("...")]),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "max_tokens"
+    assert client.calls[0]["max_tokens"] == 4096
+    assert client.calls[1]["max_tokens"] == 8192  # doubled exactly once
+
+
+def test_agent_loop_refusal_exits(monkeypatch):
+    _install_client(monkeypatch, [_msg("refusal", [_text("I can't help with that.")])])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "refused"
+
+
+# ─── Cache verification ──────────────────────────────────────────────────────
+
+
+def test_cache_control_breakpoint_preserved_across_iters(monkeypatch):
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
+    ])
+    system_blocks = _system()
+    _run(agent_loop(system_blocks, _user(), _ctx()))
+    assert len(client.calls) == 8
+    for call in client.calls:
+        # Same object every iteration — no mutation invalidates the cache prefix.
+        assert call["system"] is system_blocks
+    # The breakpoint stayed at the END of the stable prefix.
+    assert system_blocks[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_cache_read_tokens_counted_on_second_call(monkeypatch):
+    _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "src/A.tsx"})], usage=_usage(inp=500, out=100)),
+        _msg("end_turn", [_text("done")], usage=_usage(cache_read=100, inp=10, out=20)),
+    ])
+    ctx = _ctx(virtual_fs={"src/A.tsx": "x"})
+    result = _run(agent_loop(_system(), _user(), ctx))
+    assert result.usage.cache_read_input_tokens >= 100
+
+
+# ─── Parallel tool use ───────────────────────────────────────────────────────
+
+
+def test_parallel_tool_use_bundled_in_one_user_message(monkeypatch):
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [
+            _tool_use("a", "view", {"path": "src/A.tsx"}),
+            _tool_use("b", "view", {"path": "src/B.tsx"}),
+        ]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    ctx = _ctx(virtual_fs={"src/A.tsx": "a", "src/B.tsx": "b"})
+    _run(agent_loop(_system(), _user(), ctx))
+    last_msg = client.calls[1]["messages"][-1]
+    assert last_msg["role"] == "user"
+    content = last_msg["content"]
+    # Both tool_result blocks present and FIRST in the array.
+    assert content[0]["type"] == "tool_result"
+    assert content[1]["type"] == "tool_result"
+    assert {content[0]["tool_use_id"], content[1]["tool_use_id"]} == {"a", "b"}
+
+
+def test_parallel_tool_dispatch_concurrent(monkeypatch):
+    async def slow_dispatch(name, input, ctx):
+        await asyncio.sleep(0.05)
+        return {"content": "ok"}
+
+    monkeypatch.setattr(runner, "dispatch", slow_dispatch)
+    _install_client(monkeypatch, [
+        _msg("tool_use", [
+            _tool_use("a", "view", {"path": "A"}),
+            _tool_use("b", "view", {"path": "B"}),
+        ]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    start = time.perf_counter()
+    _run(agent_loop(_system(), _user(), _ctx()))
+    elapsed = time.perf_counter() - start
+    # Concurrent gather → ~0.05s for both; serial would be ~0.10s+.
+    assert elapsed < 0.15
+
+
+# ─── Tool result formatting ──────────────────────────────────────────────────
+
+
+def test_tool_result_block_carries_matching_tool_use_id(monkeypatch):
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("abc", "view", {"path": "src/A.tsx"})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    ctx = _ctx(virtual_fs={"src/A.tsx": "x"})
+    _run(agent_loop(_system(), _user(), ctx))
+    tr = client.calls[1]["messages"][-1]["content"][0]
+    assert tr["type"] == "tool_result"
+    assert tr["tool_use_id"] == "abc"
+    assert isinstance(tr["content"], str)  # JSON string
+
+
+def test_tool_result_is_error_propagated(monkeypatch):
+    async def err_dispatch(name, input, ctx):
+        return {"is_error": True, "content": "boom"}
+
+    monkeypatch.setattr(runner, "dispatch", err_dispatch)
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    _run(agent_loop(_system(), _user(), _ctx()))
+    tr = client.calls[1]["messages"][-1]["content"][0]
+    assert tr["type"] == "tool_result"
+    assert tr["is_error"] is True
+
+
+def test_tool_result_content_truncated_at_25k(monkeypatch):
+    async def big_dispatch(name, input, ctx):
+        return {"content": "x" * 30000}
+
+    monkeypatch.setattr(runner, "dispatch", big_dispatch)
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    _run(agent_loop(_system(), _user(), _ctx()))
+    tr = client.calls[1]["messages"][-1]["content"][0]
+    assert len(tr["content"]) == 25000
+
+
+# ─── Pathology detection ─────────────────────────────────────────────────────
+
+
+def test_same_tool_call_3x_in_5_iters_injects_warning(monkeypatch):
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "src/App.tsx"})]),  # identical, replayed
+        _msg("tool_use", [_tool_use("t2", "view", {"path": "src/App.tsx"})]),
+        _msg("tool_use", [_tool_use("t3", "view", {"path": "src/App.tsx"})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    ctx = _ctx(virtual_fs={"src/App.tsx": "x"})  # view succeeds → isolates pathology warning
+    _run(agent_loop(_system(), _user(), ctx))
+    # Warning rides on the user turn built after the 3rd identical call (call index 3).
+    blocks = _all_content_blocks(client.calls[3]["messages"])
+    assert any("identical input" in b.get("text", "") for b in blocks)
+
+
+def test_3_consecutive_tool_errors_inject_step_back_nudge(monkeypatch):
+    async def err_dispatch(name, input, ctx):
+        return {"is_error": True, "content": "kaboom"}
+
+    monkeypatch.setattr(runner, "dispatch", err_dispatch)
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "a"})]),  # distinct inputs:
+        _msg("tool_use", [_tool_use("t2", "view", {"path": "b"})]),  # isolates the consec-error
+        _msg("tool_use", [_tool_use("t3", "view", {"path": "c"})]),  # path from pathology
+        _msg("end_turn", [_text("done")]),
+    ])
+    _run(agent_loop(_system(), _user(), _ctx()))
+    blocks = _all_content_blocks(client.calls[3]["messages"])
+    assert any("Step back" in b.get("text", "") for b in blocks)
+
+
+# ─── Error handling ──────────────────────────────────────────────────────────
+
+
+def test_anthropic_api_exception_returns_error_status(monkeypatch):
+    _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})], usage=_usage(inp=50)),
+        RuntimeError("boom"),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "error"
+    assert result.error_class == "RuntimeError"
+    assert result.error_message == "boom"
+    assert result.usage.input_tokens == 50  # partial usage retained
+
+
+def test_dispatch_exception_returns_is_error_tool_result(monkeypatch):
+    # The real dispatch (P1-03) never raises — it converts an execute exception
+    # into an is_error payload. Drive search with an invalid regex so the real
+    # executor raises re.error and dispatch wraps it.
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("s1", "search", {"pattern": "["})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    _run(agent_loop(_system(), _user(), _ctx()))
+    tr = client.calls[1]["messages"][-1]["content"][0]
+    assert tr["type"] == "tool_result"
+    assert tr["is_error"] is True
+    assert "error" in tr["content"]  # carries the exception class + message
+
+
+# ─── _hash_tool_call ─────────────────────────────────────────────────────────
+
+
+def test_hash_tool_call_is_deterministic():
+    h1 = runner._hash_tool_call("view", {"path": "src/App.tsx"})
+    h2 = runner._hash_tool_call("view", {"path": "src/App.tsx"})
+    assert h1 == h2
+    assert len(h1) == 16
+    # Key order in the input dict must not change the hash.
+    assert runner._hash_tool_call("view", {"a": 1, "b": 2}) == \
+        runner._hash_tool_call("view", {"b": 2, "a": 1})
+
+
+def test_hash_tool_call_differs_on_input():
+    assert runner._hash_tool_call("view", {"path": "a"}) != \
+        runner._hash_tool_call("view", {"path": "b"})
+
+
+# ─── Figma token resolution (carry-forward flag #1) ──────────────────────────
+
+
+def test_resolve_figma_token_none_when_no_file_key():
+    # No file to fetch → no token resolution, no import side effects.
+    assert runner._resolve_figma_access_token(None) is None
+
+
+def test_resolve_figma_token_happy(monkeypatch):
+    fake = types.ModuleType("app.routes.connectors")
+    fake._figma_access_token = lambda: "figd_tok_123"
+    monkeypatch.setitem(sys.modules, "app.routes.connectors", fake)
+    assert runner._resolve_figma_access_token("FILEKEY") == "figd_tok_123"
+
+
+def test_resolve_figma_token_nonfatal_on_connector_error(monkeypatch):
+    fake = types.ModuleType("app.routes.connectors")
+
+    def _raise():
+        raise RuntimeError("Figma is not connected")
+
+    fake._figma_access_token = _raise
+    monkeypatch.setitem(sys.modules, "app.routes.connectors", fake)
+    # Non-fatal: resolver swallows the error and returns None so the run proceeds.
+    assert runner._resolve_figma_access_token("FILEKEY") is None
+
+
+def test_generate_prototype_injects_figma_token_onto_ctx(monkeypatch):
+    captured = {}
+
+    async def fake_loop(*, system_blocks, user_message, ctx, scenario, mode):
+        captured["ctx"] = ctx
+        return RunResult(status="complete", iters=1, usage=runner.RunUsage(),
+                         duration_ms=1, final_content=[])
+
+    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: "tok-xyz")
+    monkeypatch.setattr(runner, "agent_loop", fake_loop)
+    _run(generate_prototype(
+        prototype_id=7, workspace_id="app", system_blocks=_system(),
+        user_message=_user(), figma_file_key="ABC", scenario="A",
+    ))
+    assert captured["ctx"].figma_access_token == "tok-xyz"
+    assert captured["ctx"].figma_file_key == "ABC"
+    assert captured["ctx"].prototype_id == 7
+    assert captured["ctx"].workspace_id == "app"
+
+
+# ─── Cost-summary log line ───────────────────────────────────────────────────
+
+
+def test_generate_prototype_emits_cost_summary_log(monkeypatch, caplog):
+    _install_client(monkeypatch, [
+        _msg("end_turn", [_text("done")], usage=_usage(cache_read=10, inp=100, out=50)),
+    ])
+    with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER):
+        result = _run(generate_prototype(
+            prototype_id=42, workspace_id="app", system_blocks=_system(),
+            user_message=_user(), figma_file_key=None, scenario="A",
+        ))
+    assert result.status == "complete"
+    records = [r for r in caplog.records if r.name == TELEMETRY_LOGGER]
+    assert len(records) == 1
+    msg = records[0].getMessage()
+    assert "design_agent.run.complete" in msg
+    assert "prototype_id=42" in msg
+    assert "scenario=A" in msg
+    assert "mode=scaffold" in msg
+    for field in ("cached_input_tokens=", "input_tokens=", "output_tokens=",
+                  "duration_ms=", "est_cost_usd=", "status=complete", "iters="):
+        assert field in msg, f"missing {field!r}"
+
+
+def test_cost_summary_redacts_pii_and_secrets(monkeypatch, caplog):
+    _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
+    system_blocks = [
+        {"type": "text", "text": "SECRET_SYSTEM_PROMPT_BODY do-not-log"},
+        {"type": "text", "text": "tools", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+    ]
+    user_message = {"role": "user", "content": [_text("USER_PII_jane.doe@example.com")]}
+    with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER):
+        _run(generate_prototype(
+            prototype_id=1, workspace_id="app", system_blocks=system_blocks,
+            user_message=user_message, figma_file_key=None,
+        ))
+    msg = next(r.getMessage() for r in caplog.records if r.name == TELEMETRY_LOGGER)
+    assert "SECRET_SYSTEM_PROMPT_BODY" not in msg
+    assert "jane.doe@example.com" not in msg
+
+
+def test_cost_summary_emitted_even_on_error(monkeypatch, caplog):
+    _install_client(monkeypatch, [RuntimeError("api exploded")])
+    with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER):
+        result = _run(generate_prototype(
+            prototype_id=9, workspace_id="app", system_blocks=_system(),
+            user_message=_user(), figma_file_key=None,
+        ))
+    assert result.status == "error"
+    msg = next(r.getMessage() for r in caplog.records if r.name == TELEMETRY_LOGGER)
+    assert "status=error" in msg
+    assert "error_class=RuntimeError" in msg
