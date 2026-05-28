@@ -11,7 +11,7 @@
 
 create table if not exists prototypes (
     id                     bigint generated always as identity primary key,
-    prd_id                 bigint references prds(id) on delete cascade,
+    prd_id                 bigint not null references prds(id) on delete cascade,
     workspace_id           text not null,                 -- NO default (Rule #20)
     status                 text not null default 'generating',
                            -- 'generating' | 'ready' | 'failed' | 'invalidated'
