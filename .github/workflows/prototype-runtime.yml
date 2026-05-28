@@ -1,0 +1,32 @@
+name: Prototype runtime
+
+on:
+  push:
+    branches: [main, "release/design-agent/**"]
+    paths:
+      - "prototype-runtime/**"
+      - ".github/workflows/prototype-runtime.yml"
+  pull_request:
+    paths:
+      - "prototype-runtime/**"
+      - ".github/workflows/prototype-runtime.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: prototype-runtime/package-lock.json
+      - name: Install deps
+        working-directory: prototype-runtime
+        run: npm ci --no-audit --no-fund
+      - name: Vitest (includes anchor-id stability snapshot)
+        working-directory: prototype-runtime
+        run: npm test
+      - name: Build fixture
+        working-directory: prototype-runtime
+        run: npx vite build --config test/fixture-app/vite.config.ts
