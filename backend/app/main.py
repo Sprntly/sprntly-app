@@ -8,6 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import auth, db, datasets as datasets_service
 from app.brief_runner import auto_generate_all
 from app.config import settings
+from app.db.prototypes import (
+    invalidate_orphan_generating_prototypes,
+    invalidate_stale_prototypes,
+)
+from app.design_agent.prompts import DESIGN_AGENT_TEMPLATE_VERSION
 from app.prompts import (
     ASK_CACHE_VERSION,
     BRIEF_SCHEMA_VERSION,
@@ -19,6 +24,7 @@ from app.routes import (
     brief,
     connectors,
     datasets as datasets_routes,
+    design_agent,
     evidence,
     health,
     prd,
@@ -87,6 +93,18 @@ async def lifespan(app: FastAPI):
             prd_orphans,
             ask_orphans,
         )
+    # Design Agent (P1-07): demote orphaned 'generating' prototypes (the worker
+    # task died with the previous process) + stale 'ready' prototypes (template
+    # bump). Sync helpers, across ALL workspaces — system-wide cleanup, not a
+    # user-driven query (Rule #23) — mirroring the prd/evidence invalidation above.
+    proto_orphans = invalidate_orphan_generating_prototypes()
+    proto_stale = invalidate_stale_prototypes(DESIGN_AGENT_TEMPLATE_VERSION, variant="v1")
+    if proto_orphans or proto_stale:
+        logger.info(
+            "Invalidated %d orphan generating prototype(s), %d stale prototype(s)",
+            proto_orphans,
+            proto_stale,
+        )
     # Kick off brief generation in the background so the service starts fast.
     # auto_generate_all is idempotent: it skips datasets that already have a
     # cached brief in SQLite at the current schema version.
@@ -112,3 +130,4 @@ app.include_router(brief.router)
 app.include_router(ask.router)
 app.include_router(prd.router)
 app.include_router(evidence.router)
+app.include_router(design_agent.router)
