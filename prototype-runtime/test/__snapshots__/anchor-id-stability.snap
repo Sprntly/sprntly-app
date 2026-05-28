@@ -1,0 +1,35 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`anchor-id stability — creation > test_snapshot_matches_baseline 1`] = `
+{
+  "ContactForm.tsx | ContactForm |  | form | 0": "32eb16c2",
+  "ContactForm.tsx | ContactForm | form | button | 0": "cbb60d12",
+  "ContactForm.tsx | ContactForm | form | button | 1": "9309d912",
+  "ContactForm.tsx | ContactForm | form | label | 0": "08133e5f",
+  "ContactForm.tsx | ContactForm | form | label | 1": "a3dc26f8",
+  "ContactForm.tsx | ContactForm | form | label | 2": "26ad3ce7",
+  "ContactForm.tsx | ContactForm | form>label | input | 0": "fb3007b5",
+  "ContactForm.tsx | ContactForm | form>label | input | 0 #1": "fb3007b5",
+  "ContactForm.tsx | ContactForm | form>label | textarea | 0": "e4945d5c",
+  "FixtureApp.tsx | FixtureApp |  | main | 0": "beec7d66",
+  "FixtureApp.tsx | FixtureApp | main | ContactForm | 0": "213a8bc0",
+  "FixtureApp.tsx | FixtureApp | main | NestedCard | 0": "8fbffd7c",
+  "FixtureApp.tsx | FixtureApp | main | TodoList | 0": "322bb96d",
+  "FixtureApp.tsx | FixtureApp | main | h1 | 0": "18bd775d",
+  "NestedCard.tsx | CardBody |  | section | 0": "d5a87bc8",
+  "NestedCard.tsx | CardBody | section | p | 0": "f637e848",
+  "NestedCard.tsx | CardFooter |  | footer | 0": "487a1107",
+  "NestedCard.tsx | CardFooter | footer | button | 0": "2de76986",
+  "NestedCard.tsx | CardHeader |  | header | 0": "2f75c396",
+  "NestedCard.tsx | CardHeader | header | h2 | 0": "52d3aae2",
+  "NestedCard.tsx | NestedCard |  | article | 0": "37bcc743",
+  "NestedCard.tsx | NestedCard | article | CardBody | 0": "ec514cac",
+  "NestedCard.tsx | NestedCard | article | CardFooter | 0": "9847df4e",
+  "NestedCard.tsx | NestedCard | article | CardHeader | 0": "d518fe5c",
+  "TodoList.tsx | TodoList |  | li | 0": "b2fe774c",
+  "TodoList.tsx | TodoList |  | ul | 0": "9c6c54d1",
+  "TodoList.tsx | TodoList | li | span | 0": "08cd72ab",
+  "main.tsx | __module__ |  | StrictMode | 0": "e006b87f",
+  "main.tsx | __module__ | StrictMode | FixtureApp | 0": "54543672",
+}
+`;
