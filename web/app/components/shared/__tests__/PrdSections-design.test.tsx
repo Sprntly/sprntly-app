@@ -1,7 +1,7 @@
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
-import { PrdSections } from "../../shared/PrdSections"
+import { PrdSections } from "../PrdSections"
 import type { PrdSection } from "../../../types/content"
 
 // PrdSections.tsx — like every Sprntly component — has no `import React`; it
