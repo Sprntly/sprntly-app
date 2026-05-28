@@ -381,6 +381,15 @@ export interface PrdMilestonePhase {
   items: string[]
 }
 
+/** F1 Design section. Both hint fields are optional — an empty `:::design`
+ *  block still renders the prototype entry point; the hints feed later
+ *  prototype generation (P1-05), not the P1 renderer. */
+export type PrdDesignBlock = {
+  type: "prd-design"
+  platformHint?: "desktop" | "mobile" | "both"
+  notes?: string
+}
+
 export type PrdSection =
   | { type: "h2"; text: string }
   | { type: "p"; text: string }
@@ -429,6 +438,7 @@ export type PrdSection =
   | { type: "prd-risks"; rows: PrdRiskRow[] }
   | { type: "prd-milestones"; phases: PrdMilestonePhase[] }
   | { type: "prd-dod"; items: string[] }
+  | PrdDesignBlock
 
 export interface PrdState {
   metaLine: string
