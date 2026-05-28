@@ -1,3 +1,7 @@
 export default function App() {
-  return <div>prototype-runtime scaffold</div>;
+  return (
+    <div>
+      <button>Hi</button>
+    </div>
+  );
 }
