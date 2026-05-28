@@ -17,6 +17,7 @@ import type {
   PrdAcceptanceCriterionRow,
   PrdChartDatum,
   PrdChartKind,
+  PrdDesignBlock,
   PrdGuardrail,
   PrdMetricPoint,
   PrdMilestonePhase,
@@ -344,6 +345,31 @@ function fallbackParagraphFromBlock(name: string, body: string): PrdSection {
   }
 }
 
+function parseDesignBlock(body: string): PrdDesignBlock {
+  // The :::design body is plain `key: value` lines (NOT JSON, unlike every
+  // other PRD block). Both keys are optional and unknown keys / invalid
+  // values are dropped leniently, so a malformed or empty body still yields
+  // a minimal prd-design block — the renderer always shows the Design entry
+  // point regardless of the hints.
+  const out: PrdDesignBlock = { type: "prd-design" }
+  for (const raw of body.split("\n")) {
+    const m = raw.match(/^\s*([a-z_]+)\s*:\s*(.*)$/i)
+    if (!m) continue
+    const key = m[1].toLowerCase()
+    const value = m[2].trim()
+    if (!value) continue
+    if (key === "platform_hint") {
+      if (value === "desktop" || value === "mobile" || value === "both") {
+        out.platformHint = value
+      }
+      // Unrecognised platform_hint value → leave undefined (lenient salvage).
+    } else if (key === "notes") {
+      out.notes = value
+    }
+  }
+  return out
+}
+
 function parseSemanticBlock(name: string, _attrs: string, body: string): PrdSection[] {
   switch (name) {
     case "context-chip":
@@ -376,6 +402,10 @@ function parseSemanticBlock(name: string, _attrs: string, body: string): PrdSect
       ]
     case "dod":
       return [parseDodBlock(body) ?? fallbackParagraphFromBlock(name, body)]
+    case "design":
+      // Never falls back — parseDesignBlock is lenient and always returns a
+      // valid prd-design block so the Design entry point still renders.
+      return [parseDesignBlock(body)]
     default:
       return [fallbackParagraphFromBlock(name, body)]
   }

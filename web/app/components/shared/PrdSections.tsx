@@ -129,6 +129,8 @@ function RenderBlock({ block }: { block: PrdSection }) {
       return <MilestonesBlock phases={block.phases} />
     case "prd-dod":
       return <DodChecklist items={block.items} />
+    case "prd-design":
+      return <DesignSection />
     default:
       // Evidence variants and any unknown future blocks render as no-op
       // in the PRD renderer; the dedicated EvidenceSections covers them.
@@ -137,6 +139,26 @@ function RenderBlock({ block }: { block: PrdSection }) {
 }
 
 /* ---------- subcomponents ---------- */
+
+/**
+ * F1 Design section. Renders the header + empty-state entry point only.
+ * The `data-design-agent-slot` div is the mount target P1-09's
+ * DesignAgentDrawer trigger plugs into — no trigger logic lives here.
+ * Parsed `platformHint` / `notes` hints stay on the PrdState block (for
+ * P1-05's scaffold prompt); the P1 renderer intentionally does not surface
+ * them.
+ */
+function DesignSection() {
+  return (
+    <section className="prd-design">
+      <h2 className="prd-h2">Design</h2>
+      <p className="prd-design-empty">
+        No prototype yet — use the Design Agent to generate one
+      </p>
+      <div className="prd-design-slot" data-design-agent-slot />
+    </section>
+  )
+}
 
 function TldrTriptych({
   problem,
