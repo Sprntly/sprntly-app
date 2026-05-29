@@ -28,22 +28,44 @@ import type {
 } from "../../types/content"
 import { renderInline } from "../../lib/inline-md"
 import { InlineChart } from "./InlineChart"
+import { DesignAgentLauncher } from "../design-agent/DesignAgentLauncher"
 
 export function PrdSections({
   sections,
+  prdId,
+  figmaFileKey,
 }: {
   sections: PrdState["sections"]
+  /** PRD DB id, threaded to the prd-design block so the F2 launcher can call
+   *  the Design Agent. Optional so non-PRD callers (and the empty/demo states)
+   *  still render the section without a Generate button. */
+  prdId?: number
+  /** Figma file key for the prd-design launcher; null/undefined → no source. */
+  figmaFileKey?: string | null
 }) {
   return (
     <>
       {sections.map((block, i) => (
-        <RenderBlock key={i} block={block} />
+        <RenderBlock
+          key={i}
+          block={block}
+          prdId={prdId}
+          figmaFileKey={figmaFileKey}
+        />
       ))}
     </>
   )
 }
 
-function RenderBlock({ block }: { block: PrdSection }) {
+function RenderBlock({
+  block,
+  prdId,
+  figmaFileKey,
+}: {
+  block: PrdSection
+  prdId?: number
+  figmaFileKey?: string | null
+}) {
   switch (block.type) {
     case "h2":
       return <h2 className="prd-h2">{renderInline(block.text)}</h2>
@@ -130,7 +152,7 @@ function RenderBlock({ block }: { block: PrdSection }) {
     case "prd-dod":
       return <DodChecklist items={block.items} />
     case "prd-design":
-      return <DesignSection />
+      return <DesignSection prdId={prdId} figmaFileKey={figmaFileKey} />
     default:
       // Evidence variants and any unknown future blocks render as no-op
       // in the PRD renderer; the dedicated EvidenceSections covers them.
@@ -141,20 +163,32 @@ function RenderBlock({ block }: { block: PrdSection }) {
 /* ---------- subcomponents ---------- */
 
 /**
- * F1 Design section. Renders the header + empty-state entry point only.
- * The `data-design-agent-slot` div is the mount target P1-09's
- * DesignAgentDrawer trigger plugs into — no trigger logic lives here.
- * Parsed `platformHint` / `notes` hints stay on the PrdState block (for
- * P1-05's scaffold prompt); the P1 renderer intentionally does not surface
+ * F1/F2 Design section. Renders the header, then — when a `prdId` is in scope
+ * (PrdScreen passes `prd.prd_id`) — the F2 `DesignAgentLauncher` ("Generate
+ * Prototype" button + drawer). Without a `prdId` (non-PRD callers, the
+ * empty/demo states) it falls back to the original empty-state entry point.
+ * The `data-design-agent-slot` div is retained as P1-09's forward-compat mount
+ * target. Parsed `platformHint` / `notes` hints stay on the PrdState block
+ * (for P1-05's scaffold prompt); the P1 renderer intentionally does not surface
  * them.
  */
-function DesignSection() {
+function DesignSection({
+  prdId,
+  figmaFileKey,
+}: {
+  prdId?: number
+  figmaFileKey?: string | null
+}) {
   return (
     <section className="prd-design">
       <h2 className="prd-h2">Design</h2>
-      <p className="prd-design-empty">
-        No prototype yet — use the Design Agent to generate one
-      </p>
+      {prdId !== undefined ? (
+        <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} />
+      ) : (
+        <p className="prd-design-empty">
+          No prototype yet — use the Design Agent to generate one
+        </p>
+      )}
       <div className="prd-design-slot" data-design-agent-slot />
     </section>
   )

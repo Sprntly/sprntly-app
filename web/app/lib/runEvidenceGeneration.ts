@@ -1,9 +1,9 @@
 import { evidenceApi } from "./api"
 import { markdownToEvidenceState } from "./evidence-adapter"
-import type { DetailState, PrdState } from "../types/content"
+import type { DetailState, PrdContent } from "../types/content"
 
 export type EvidenceGenResult =
-  | { ok: true; evidence: PrdState }
+  | { ok: true; evidence: PrdContent }
   | { ok: false; message: string }
 
 /** Polls until the Evidence Page is ready, then parses the markdown with

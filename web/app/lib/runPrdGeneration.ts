@@ -23,5 +23,19 @@ export async function runPrdGeneration(meta: DetailState["meta"]): Promise<PrdGe
   if (prd.status !== "ready") {
     return { ok: false, message: "Timed out waiting for PRD" }
   }
-  return { ok: true, prd: markdownToPrdState(prd.payload_md) }
+  // Carry the PRD's DB id (and the — for now always-undefined — Figma file
+  // key) onto the returned PrdState so the F2 "Generate Prototype" flow can
+  // call designAgentApi.generate({ prd_id }). `prd.id` and `start.prd_id` are
+  // the same value; `prd.id` is read from the freshly-fetched ready record.
+  // figma_file_key stays undefined here — sourcing it from the user's Figma
+  // connector is out of scope for P1-13 (handled by the drawer's
+  // sourceDetectedLabel as "No Figma source connected").
+  return {
+    ok: true,
+    prd: {
+      ...markdownToPrdState(prd.payload_md),
+      prd_id: prd.id,
+      figma_file_key: undefined,
+    },
+  }
 }
