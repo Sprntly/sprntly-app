@@ -29,6 +29,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # @babel/parser powers the design_agent static autofixer's Node companion
+      # (P1-10). Installed to an isolated prefix so the design_agent autofixer
+      # tests exercise the babel-dependent path in CI; DESIGN_AGENT_NODE_PATH
+      # points the wrapper at it. (One-off DBD exception to touch Sprntly CI —
+      # see PR body; load-bearing for P1-11's e2e gate.)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install @babel/parser for autofixer
+        run: npm install --prefix /tmp/babel-deps @babel/parser
+
       - name: Run pytest
         working-directory: backend
+        env:
+          DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules
         run: python -m pytest tests/ -v
