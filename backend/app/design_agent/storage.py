@@ -189,12 +189,19 @@ async def stage_bundle(
     prototype_id: int,
     checkpoint_id: int,
     files: dict[str, str],
+    sub_prefix: str | None = None,
 ) -> str:
     """Write the files dict to storage; return the served bundle_url.
 
     `files` is {bundle_relative_path: content} (e.g. 'index.html',
     'assets/index-abc123.js'). The returned URL points at the entry: `index.html`
     when present, else the first file in the dict.
+
+    When `sub_prefix` is set (e.g. '_source'), the storage path becomes
+    `prototypes/<pid>/<cid>/<sub_prefix>/<rel_path>` and the returned URL points
+    at the sub-prefix entry. Used by `_stage_complete_run` to stage the raw
+    `virtual_fs` source alongside the built `dist/`. With `sub_prefix=None`
+    (default) the layout is unchanged from before — `prototypes/<pid>/<cid>/<rel_path>`.
 
     Raises ValueError on an empty dict (a programming error — an empty bundle has
     nothing to serve; the route's success path guards against reaching here with
@@ -203,7 +210,8 @@ async def stage_bundle(
     if not files:
         raise ValueError("stage_bundle: files dict is empty; nothing to stage")
 
-    prefix = _bundle_prefix(prototype_id, checkpoint_id)
+    base = _bundle_prefix(prototype_id, checkpoint_id)
+    prefix = f"{base}/{sub_prefix}" if sub_prefix else base
     entry = "index.html" if "index.html" in files else next(iter(files))
 
     bucket = _bucket_name()
@@ -215,8 +223,8 @@ async def stage_bundle(
         backend = "filesystem"
     # Identifiers only — no file content / bundle bytes / PII (Rule #24).
     logger.info(
-        "bundle_staged prototype_id=%s checkpoint_id=%s backend=%s entry=%s file_count=%s",
-        prototype_id, checkpoint_id, backend, entry, len(files),
+        "bundle_staged prototype_id=%s checkpoint_id=%s sub_prefix=%s backend=%s entry=%s file_count=%s",
+        prototype_id, checkpoint_id, sub_prefix or "", backend, entry, len(files),
     )
     return url
 
@@ -303,3 +311,61 @@ def _content_type(rel_path: str) -> str:
         if rel_path.endswith(ext):
             return ct
     return "application/octet-stream"
+
+
+# ─── Source readback (P2-04 — read raw virtual_fs staged under _source/) ──────
+
+
+async def read_source_files_for_checkpoint(
+    prototype_id: int,
+    checkpoint_id: int,
+) -> dict[str, str]:
+    """Read every file staged under `prototypes/<pid>/<cid>/_source/` and return
+    {relative_path: content}. Returns {} when the sub-prefix is empty or absent
+    (graceful — historical pre-P2-04 prototypes never staged source).
+
+    Supabase path (primary): list the bucket prefix + download each object.
+    Filesystem path (fallback): walk the directory under settings.storage_dir.
+    """
+    sub_prefix = f"{_bundle_prefix(prototype_id, checkpoint_id)}/_source"
+    bucket = _bucket_name()
+    if bucket:
+        return await asyncio.to_thread(_read_source_supabase_sync, bucket, sub_prefix)
+    return await asyncio.to_thread(_read_source_filesystem_sync, sub_prefix)
+
+
+def _read_source_supabase_sync(bucket: str, prefix: str) -> dict[str, str]:
+    from app.db.client import require_client
+
+    storage = require_client().storage.from_(bucket)
+    try:
+        objects = storage.list(prefix) or []
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for obj in objects:
+        rel = obj.get("name") if isinstance(obj, dict) else getattr(obj, "name", None)
+        if not rel:
+            continue
+        try:
+            data = storage.download(f"{prefix}/{rel}")
+            out[rel] = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
+        except Exception:  # includes UnicodeDecodeError
+            continue
+    return out
+
+
+def _read_source_filesystem_sync(sub_prefix: str) -> dict[str, str]:
+    target = Path(settings.storage_dir).resolve() / sub_prefix
+    if not target.exists():
+        return {}
+    out: dict[str, str] = {}
+    for path in sorted(target.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(target))
+        try:
+            out[rel] = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+    return out

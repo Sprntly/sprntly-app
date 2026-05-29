@@ -387,6 +387,24 @@ async def _stage_complete_run(
         )
         return
 
+    # Step 3.5 — Stage the RAW virtual_fs alongside dist/ under _source/ so the
+    # export serialiser (P2-08) can read raw TSX, not minified bundles.
+    # Best-effort: a source-stage failure logs and proceeds — the prototype is
+    # still ready (the load-bearing artefact is the dist/ bundle). The serialiser
+    # gracefully falls back to its "no source staged" message if this step failed.
+    try:
+        await stage_bundle(
+            prototype_id=prototype_id,
+            checkpoint_id=checkpoint_id,
+            files=virtual_fs,
+            sub_prefix="_source",
+        )
+    except Exception as exc:  # noqa: BLE001 — source-stage is best-effort.
+        logger.warning(
+            "source_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
     # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
     complete_prototype(
         prototype_id=prototype_id,
