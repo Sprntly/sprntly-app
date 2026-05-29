@@ -138,6 +138,7 @@ describe("runGenerateFlow (AC1, AC5)", () => {
       onOpenChange,
       showToast,
       setSubmitting,
+      notifyOnReady: true,
     })
 
     expect(generate).toHaveBeenCalledWith(params)
@@ -171,6 +172,7 @@ describe("runGenerateFlow (AC1, AC5)", () => {
       onOpenChange: vi.fn(),
       showToast,
       setSubmitting: vi.fn(),
+      notifyOnReady: false,
     })
     await genResult
     await Promise.resolve()
@@ -191,12 +193,83 @@ describe("runGenerateFlow (AC1, AC5)", () => {
       onOpenChange,
       showToast,
       setSubmitting,
+      notifyOnReady: false,
     })
 
     expect(showToast).toHaveBeenCalledWith("Generate failed", "server 500")
     expect(onOpenChange).not.toHaveBeenCalled()
     expect(runGeneration).not.toHaveBeenCalled()
     expect(setSubmitting).toHaveBeenLastCalledWith(false)
+  })
+})
+
+describe("F3 opt-in toggle (AC4, AC5, AC6)", () => {
+  const params = {
+    prd_id: 9,
+    target_platform: "desktop" as const,
+    instructions: "",
+    figma_file_key: null,
+  }
+
+  function renderDrawer(
+    props: Partial<Parameters<typeof DesignAgentDrawerView>[0]> = {},
+  ) {
+    return renderToStaticMarkup(
+      React.createElement(DesignAgentDrawerView, {
+        open: true,
+        onOpenChange: noop,
+        prdId: 1,
+        figmaFileKey: null,
+        showToast: noop,
+        ...props,
+      }),
+    )
+  }
+
+  it("renders the 'Notify me when ready' checkbox, unchecked by default (AC4)", () => {
+    const html = renderDrawer()
+    expect(html).toContain("Notify me when ready")
+    expect(html).toMatch(/id="dap-notify"/)
+    // unchecked → no `checked` attribute on the opt-in input specifically
+    expect(html).not.toMatch(/id="dap-notify"[^>]*checked/)
+  })
+
+  it("does NOT fire the ready toast when notifyOnReady is false (AC5)", async () => {
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params,
+      generate: vi.fn().mockResolvedValue({ prototype_id: 7, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+    })
+    await genResult
+    await Promise.resolve()
+
+    expect(showToast).not.toHaveBeenCalledWith("Prototype ready", expect.any(String))
+  })
+
+  it("fires the ready toast when notifyOnReady is true (AC6)", async () => {
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params,
+      generate: vi.fn().mockResolvedValue({ prototype_id: 7, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: true,
+    })
+    await genResult
+    await Promise.resolve()
+
+    expect(showToast).toHaveBeenCalledWith("Prototype ready", expect.any(String))
   })
 })
 
