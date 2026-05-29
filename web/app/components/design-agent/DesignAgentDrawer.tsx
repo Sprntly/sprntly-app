@@ -59,14 +59,18 @@ type GenerateFlowDeps = {
   onOpenChange: (open: boolean) => void
   showToast: (title: string, sub: string) => void
   setSubmitting: (value: boolean) => void
+  /** F3 opt-in: only toast on ready-completion when the user asked to be notified. */
+  notifyOnReady: boolean
 }
 
 /**
  * AC1 + AC5 — Generate submit orchestration. On a successful kickoff: close the
- * drawer, toast "Design Agent generating", then fire-and-forget the poll (which
- * toasts ready/failed on resolution). On a failed kickoff: toast "Generate
- * failed" and leave the drawer open. Extracted as a pure async fn (dependency-
- * injected) so it can be unit-tested without a DOM.
+ * drawer, toast "Design Agent generating", then fire-and-forget the poll. The
+ * ready-completion toast (F3) is gated on `notifyOnReady` — when the user did
+ * not opt in, generation still runs but no "ready" notification fires. Failures
+ * always surface. On a failed kickoff: toast "Generate failed" and leave the
+ * drawer open. Extracted as a pure async fn (dependency-injected) so it can be
+ * unit-tested without a DOM.
  */
 export async function runGenerateFlow({
   params,
@@ -75,6 +79,7 @@ export async function runGenerateFlow({
   onOpenChange,
   showToast,
   setSubmitting,
+  notifyOnReady,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
   try {
@@ -86,10 +91,12 @@ export async function runGenerateFlow({
     )
     void runGeneration({ prototypeId: kickoff.prototype_id }).then((result) => {
       if (result.ok) {
-        showToast(
-          "Prototype ready",
-          "Open the PRD's Design section to view it.",
-        )
+        if (notifyOnReady) {
+          showToast(
+            "Prototype ready",
+            "Open the PRD's Design section to view it.",
+          )
+        }
       } else {
         showToast("Generation failed", result.message)
       }
@@ -154,6 +161,7 @@ export function DesignAgentDrawerView({
 }: ViewProps) {
   const [platform, setPlatform] = useState<TargetPlatform>(DEFAULT_PLATFORM)
   const [instructions, setInstructions] = useState("")
+  const [notifyOnReady, setNotifyOnReady] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   if (!open) return null
@@ -172,6 +180,7 @@ export function DesignAgentDrawerView({
       onOpenChange,
       showToast,
       setSubmitting,
+      notifyOnReady,
     })
   }
 
@@ -243,6 +252,26 @@ export function DesignAgentDrawerView({
               rows={4}
             />
           </div>
+
+          <label
+            htmlFor="dap-notify"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginTop: 14,
+              fontSize: 13,
+              color: "var(--ink-2)",
+            }}
+          >
+            <input
+              type="checkbox"
+              id="dap-notify"
+              checked={notifyOnReady}
+              onChange={(e) => setNotifyOnReady(e.target.checked)}
+            />
+            Notify me when ready
+          </label>
 
           <div
             style={{
