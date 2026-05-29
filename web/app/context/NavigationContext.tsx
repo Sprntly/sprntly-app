@@ -30,8 +30,8 @@ interface NavigationContextType {
   goTo: (screen: ScreenId) => void
 
   // Drawer state
-  activeDrawer: "claude" | "ticket" | null
-  openDrawer: (drawer: "claude" | "ticket") => void
+  activeDrawer: "claude" | "ticket" | "design-agent" | null
+  openDrawer: (drawer: "claude" | "ticket" | "design-agent") => void
   closeDrawers: () => void
 
   // Modal state
@@ -84,7 +84,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname()
   const currentScreen = useMemo(() => screenIdFromPathname(pathname), [pathname])
 
-  const [activeDrawer, setActiveDrawer] = useState<"claude" | "ticket" | null>(null)
+  const [activeDrawer, setActiveDrawer] = useState<"claude" | "ticket" | "design-agent" | null>(null)
   const [activeModal, setActiveModal] = useState<"approve" | "invite" | null>(null)
   const [shareMenuOpen, setShareMenuOpen] = useState(false)
   const [reviewPastOpen, setReviewPastOpen] = useState(false)
@@ -196,7 +196,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     [router],
   )
 
-  const openDrawer = useCallback((drawer: "claude" | "ticket") => {
+  const openDrawer = useCallback((drawer: "claude" | "ticket" | "design-agent") => {
     setActiveDrawer(drawer)
   }, [])
 
