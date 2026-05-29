@@ -287,10 +287,12 @@ async def _run_generation_bg(
             error_parts = [
                 f"agent_loop ended with status={result.status} iters={result.iters}"
             ]
-            if result.error_message:
-                error_parts.append(f"error_message={result.error_message}")
-            if result.error_class:
-                error_parts.append(f"error_class={result.error_class}")
+            error_message = getattr(result, "error_message", None)
+            error_class = getattr(result, "error_class", None)
+            if error_message:
+                error_parts.append(f"error_message={error_message}")
+            if error_class:
+                error_parts.append(f"error_class={error_class}")
             fail_prototype(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
