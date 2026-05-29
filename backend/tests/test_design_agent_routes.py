@@ -116,15 +116,22 @@ def _seed_prd(db_mod, body: str = "# PRD body") -> int:
     return prd_id
 
 
-def _stub_generate(monkeypatch, routes_mod, *, status="complete", iters=1, raises=None):
-    """Patch routes.generate_prototype; return the captured-kwargs list."""
+def _stub_generate(monkeypatch, routes_mod, *, status="complete", iters=1, raises=None, virtual_fs=None):
+    """Patch routes.generate_prototype; return the captured-kwargs list.
+
+    P1-08 changed the runner contract: generate_prototype now returns
+    `(RunResult, virtual_fs)`. The stub returns the matching tuple. `virtual_fs`
+    defaults to `{}` so a "complete" status hits the route's "emitted no files"
+    branch and does NOT trigger a real vite build in these route-level tests
+    (the build/stage path has its own coverage in test_design_agent_storage.py).
+    """
     calls: list[dict] = []
 
     async def _fake(**kwargs):
         calls.append(kwargs)
         if raises is not None:
             raise raises
-        return SimpleNamespace(status=status, iters=iters)
+        return SimpleNamespace(status=status, iters=iters), (virtual_fs or {})
 
     monkeypatch.setattr(routes_mod, "generate_prototype", _fake)
     return calls

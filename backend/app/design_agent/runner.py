@@ -293,10 +293,16 @@ async def generate_prototype(
     user_message: dict[str, Any],
     figma_file_key: str | None,
     scenario: str = "A",
-) -> RunResult:
+) -> tuple[RunResult, dict[str, str]]:
     """Public entrypoint: run agent_loop with a fresh ToolContext, emit the
-    cost-summary log line, and return the result for P1-07 + P1-08 to persist.
-    Bundle staging (writing virtual_fs to storage) is wired by P1-08.
+    cost-summary log line, and return `(result, virtual_fs)` for P1-07 + P1-08
+    to persist + stage.
+
+    P1-08 extends the return type: the `virtual_fs` map (the raw TSX/TS files the
+    agent built up via `write`/`line_replace`) is returned alongside the
+    `RunResult` so the route hook can run `vite_build` over it and stage the
+    bundle. The loop itself never persisted `virtual_fs`; it lives on the
+    `ToolContext`, which is local to this function — hence the threading.
 
     The Figma access token is resolved here (runner-injected onto the
     ToolContext, before any tool dispatch) so `fetch_figma` can reach the
@@ -335,4 +341,4 @@ async def generate_prototype(
         error_class=result.error_class,
         iters=result.iters,
     )
-    return result
+    return result, ctx.virtual_fs

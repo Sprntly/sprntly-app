@@ -495,7 +495,8 @@ def test_generate_prototype_emits_cost_summary_log(monkeypatch, caplog):
         _msg("end_turn", [_text("done")], usage=_usage(cache_read=10, inp=100, out=50)),
     ])
     with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER):
-        result = _run(generate_prototype(
+        # P1-08: generate_prototype now returns (RunResult, virtual_fs).
+        result, _virtual_fs = _run(generate_prototype(
             prototype_id=42, workspace_id="app", system_blocks=_system(),
             user_message=_user(), figma_file_key=None, scenario="A",
         ))
@@ -532,7 +533,8 @@ def test_cost_summary_redacts_pii_and_secrets(monkeypatch, caplog):
 def test_cost_summary_emitted_even_on_error(monkeypatch, caplog):
     _install_client(monkeypatch, [RuntimeError("api exploded")])
     with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER):
-        result = _run(generate_prototype(
+        # P1-08: generate_prototype now returns (RunResult, virtual_fs).
+        result, _virtual_fs = _run(generate_prototype(
             prototype_id=9, workspace_id="app", system_blocks=_system(),
             user_message=_user(), figma_file_key=None,
         ))

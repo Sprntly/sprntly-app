@@ -25,9 +25,9 @@ The only awaited call in this module is `generate_prototype` (P1-04, genuinely
 async), which runs off the request path inside the background task.
 
 SCOPE (what this ticket does NOT do, per the ticket's scope boundaries):
-- Bundle staging to storage + `complete_prototype(bundle_url=...)` — P1-08
-  extends `_run_generation_bg`. For P1-07 alone, the bg task fails the row if
-  the runner did not reach a complete state; P1-08 reverses this on success.
+- Bundle staging to storage + `complete_prototype(bundle_url=...)` — wired by
+  P1-08 (`_run_generation_bg` → `_stage_complete_run`: vite_build → checkpoint →
+  stage_bundle → complete_prototype on the success path).
 - CSRF / Origin check — P5-06 (matches Sprntly's existing routes, which have no
   CSRF defense; design-agent inherits the gap until P5 hardens it).
 - Per-session rate limiter — P5-04.
@@ -47,6 +47,8 @@ from pydantic import BaseModel, Field
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
 from app.db.prds import get_prd
 from app.db.prototypes import (
+    complete_prototype,
+    create_checkpoint,
     fail_prototype,
     find_existing_prototype,
     get_prototype,
@@ -59,6 +61,7 @@ from app.design_agent.prompts import (
     render_scaffold_user,
 )
 from app.design_agent.runner import generate_prototype
+from app.design_agent.storage import ViteBuildError, stage_bundle, vite_build
 
 logger = logging.getLogger(__name__)
 
@@ -212,8 +215,9 @@ async def _run_generation_bg(
     On any exception, sets prototype.status='failed' with the error message in
     the existing Sprntly format (`f"{type(exc).__name__}: {exc}"`, prd_runner.py
     style). The structured cost-summary log line is emitted by
-    `generate_prototype` itself (P1-04). Bundle staging + the success
-    `complete_prototype` call are added by P1-08.
+    `generate_prototype` itself (P1-04). On a complete run with emitted files,
+    `_stage_complete_run` (P1-08) builds + stages the bundle and marks the row
+    ready; every other terminal state fails the row.
     """
     try:
         prd_md = _load_prd_body(prd_id)
@@ -251,7 +255,7 @@ async def _run_generation_bg(
         )
         scenario_label = ",".join(sorted(scenario_set))  # "A" | "A,C" | "0" ...
 
-        result = await generate_prototype(
+        result, virtual_fs = await generate_prototype(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
             system_blocks=system_blocks,
@@ -259,10 +263,22 @@ async def _run_generation_bg(
             figma_file_key=figma_file_key,
             scenario=scenario_label,
         )
-        # P1-07 alone has no bundle-staging step, so a run that did not reach
-        # "complete" is a failure. P1-08 replaces this branch with a
-        # complete_prototype(bundle_url=...) call on the success path.
-        if result.status != "complete":
+        # Success path (P1-08): a complete run that emitted files gets built +
+        # staged + marked ready. A complete run with no files, or any non-complete
+        # terminal state, fails the row.
+        if result.status == "complete" and virtual_fs:
+            await _stage_complete_run(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                virtual_fs=virtual_fs,
+            )
+        elif result.status == "complete" and not virtual_fs:
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error="agent_loop completed but emitted no files",
+            )
+        else:
             fail_prototype(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
@@ -281,6 +297,89 @@ async def _run_generation_bg(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+async def _stage_complete_run(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    virtual_fs: dict[str, str],
+) -> None:
+    """Post-run hook (P1-08): vite_build → checkpoint → stage_bundle → complete.
+
+    Four steps, each gating the next:
+
+    1. **Vite build** runs the P0-02 anchor-id plugin over the agent's raw TSX
+       (per AD4 — load-bearing for F8/F13/F5). A build failure (bad JSX, missing
+       runtime, timeout) marks the row failed and creates NO checkpoint.
+    2. **Checkpoint** row is inserted first so its id seeds the bundle prefix.
+    3. **Stage** the BUILT dist/ (never the raw virtual_fs) to Supabase Storage
+       (primary) / filesystem (fallback). A staging failure leaves the checkpoint
+       row present but `bundle_url` NULL.
+    4. **Complete** marks the prototype ready and threads `current_checkpoint_id`.
+
+    The DB helpers (`create_checkpoint` / `complete_prototype` / `fail_prototype`)
+    are synchronous and called WITHOUT await (supabase-py is sync; mirrors
+    db/prds.py + routes/prd.py). `vite_build` / `stage_bundle` are async and
+    awaited. vite_build / stage_bundle failures are handled here (with their own
+    log lines) rather than propagated, so the error strings match the ticket ACs
+    exactly; a DB-helper failure propagates to the caller's outer except.
+    """
+    # Step 1 — Vite build (anchor-id plugin runs here).
+    try:
+        dist_files = await vite_build(virtual_fs)
+    except (ViteBuildError, FileNotFoundError) as exc:
+        # error_class only in the log (Rule #24 — no stderr/secrets); the full
+        # message (incl. stderr tail) goes to the row's error column.
+        logger.warning(
+            "vite_build_failed prototype_id=%s error_class=%s",
+            prototype_id, type(exc).__name__,
+        )
+        fail_prototype(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return
+    logger.info(
+        "vite_build_succeeded prototype_id=%s checkpoint_id=N/A dist_file_count=%s",
+        prototype_id, len(dist_files),
+    )
+
+    # Step 2 — checkpoint row (id seeds the bundle prefix). prd/figma hashes +
+    # comment_state land in P3; for P1 the checkpoint records the bundle only.
+    checkpoint_id = create_checkpoint(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        bundle_url=None,            # populated on the prototype row after staging
+        prd_revision_hash=None,     # P3-12 wires PRD-hash + figma-hash
+        figma_frame_hash=None,
+        prompt_history=[],
+        comment_state=[],
+    )
+
+    # Step 3 — stage the BUILT dist/ (not raw virtual_fs).
+    try:
+        bundle_url = await stage_bundle(
+            prototype_id=prototype_id,
+            checkpoint_id=checkpoint_id,
+            files=dist_files,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface staging failure on the row.
+        fail_prototype(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return
+
+    # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
+    complete_prototype(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        bundle_url=bundle_url,
+        current_checkpoint_id=checkpoint_id,
+    )
 
 
 def _load_prd_body(prd_id: int) -> str:
