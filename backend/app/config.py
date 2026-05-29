@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     github_oauth_redirect_uri: str = ""
     github_webhook_secret: str = ""
 
+    # Design Agent share-token secret (F6 / AD Rule #14). A DISTINCT secret from
+    # jwt_secret — never reuse JWT_SECRET for Design Agent surfaces. Bound here
+    # for FUTURE HMAC-based share_token rotation (P2-06 stores the column + ships
+    # the helpers; it does not yet consume this secret). No JWT_SECRET fallback.
+    design_agent_token_secret: str = ""
+
     @property
     def github_app_private_key_pem(self) -> str:
         """Normalize the PEM: turn literal `\\n` sequences into real newlines."""
