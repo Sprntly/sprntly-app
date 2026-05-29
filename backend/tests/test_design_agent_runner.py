@@ -190,17 +190,22 @@ def test_agent_loop_bounds_at_max_iters(monkeypatch):
     client = _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),  # replayed forever
     ])
+    # Uses the production default (no explicit max_iters) so this also pins
+    # DEFAULT_MAX_ITERS == 24 per P2-01 — revert the constant and this fails.
     result = _run(agent_loop(_system(), _user(), _ctx()))
     assert result.status == "max_iters"
-    assert result.iters == 8
-    assert len(client.calls) == 8
+    assert result.iters == 24
+    assert len(client.calls) == 24
 
 
 def test_agent_loop_emits_wrap_up_nudge_at_n_minus_2(monkeypatch):
     client = _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
     ])
-    _run(agent_loop(_system(), _user(), _ctx()))
+    # Pin max_iters=8 so the nudge-placement assertions below stay anchored to
+    # fixed call indices regardless of the production DEFAULT_MAX_ITERS (24 per
+    # P2-01) — this test exercises nudge mechanics, not the production cap.
+    _run(agent_loop(_system(), _user(), _ctx(), max_iters=8))
     # Call 7 (index 6) is iters == max_iters - 1; the nudge is appended before it.
     seventh_call_blocks = _all_content_blocks(client.calls[6]["messages"])
     assert any(
@@ -253,7 +258,10 @@ def test_cache_control_breakpoint_preserved_across_iters(monkeypatch):
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
     ])
     system_blocks = _system()
-    _run(agent_loop(system_blocks, _user(), _ctx()))
+    # Pin max_iters=8 — this verifies cache-prefix stability across iterations,
+    # not the production cap (24 per P2-01); a fixed count keeps the assertion
+    # anchored.
+    _run(agent_loop(system_blocks, _user(), _ctx(), max_iters=8))
     assert len(client.calls) == 8
     for call in client.calls:
         # Same object every iteration — no mutation invalidates the cache prefix.

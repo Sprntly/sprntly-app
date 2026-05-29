@@ -13,7 +13,10 @@ The loop is `while stop_reason == "tool_use"`. Stop reasons handled:
 Loop-pathology detection (per agent-build-research.md §4.3):
   - same (tool_name, input_hash) 3x in sliding window of 5 -> warn via tool_result
   - tool returns is_error: true 3x in a row -> wrap-up nudge
-Iteration cap: max_iters (8 for scaffold per BUILD-PHASES.md §Phase 1 #4).
+Iteration cap: max_iters (24 per P2-01; raised from 8 after the P1 smoke
+showed real Scenario A scaffolds exhaust 8 iterations mid-emission). The
+loop-pathology circuit-breakers above remain the real runaway guard; the cap
+is a hard safety rail that should not fire in normal use.
 Per-run cost accounting: aggregate usage.{cache_creation,cache_read,input,
 output}_input_tokens per turn; emit one structured cost-summary log line
 on completion via the shared app.llm_telemetry primitive.
@@ -46,7 +49,7 @@ from app.llm_telemetry import RunUsage, log_llm_run
 logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"  # AD2; NEVER claude-sonnet-4-7
-DEFAULT_MAX_ITERS = 8
+DEFAULT_MAX_ITERS = 24
 DEFAULT_MAX_TOKENS = 4096
 TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
 
