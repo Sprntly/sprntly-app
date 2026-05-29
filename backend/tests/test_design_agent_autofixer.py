@@ -31,15 +31,19 @@ AUTOFIXER_LOGGER = "app.design_agent.autofixer"
 # ─── Environment guards ──────────────────────────────────────────────────────
 
 _NODE_PRESENT = shutil.which(autofixer._NODE_BIN) is not None
-_BABEL_PRESENT = (autofixer._NODE_MODULES / "@babel" / "parser").exists()
+# Detection-based: resolve the same node_modules the wrapper uses (honours
+# DESIGN_AGENT_NODE_PATH, which backend CI sets to an isolated @babel/parser
+# install). When babel is resolvable the fixer tests RUN; they only skip on a
+# bare local checkout with neither prototype-runtime deps nor the CI override.
+_BABEL_PRESENT = (autofixer._node_modules_path() / "@babel" / "parser").exists()
 
 requires_node = pytest.mark.skipif(
     not _NODE_PRESENT, reason="node binary not on PATH"
 )
 requires_babel = pytest.mark.skipif(
     not (_NODE_PRESENT and _BABEL_PRESENT),
-    reason="@babel/parser not installed in prototype-runtime/node_modules "
-    "(backend CI installs Python deps only)",
+    reason="@babel/parser not resolvable (no DESIGN_AGENT_NODE_PATH override "
+    "and no prototype-runtime/node_modules install)",
 )
 
 

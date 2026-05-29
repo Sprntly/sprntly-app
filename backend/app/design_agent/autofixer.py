@@ -42,21 +42,36 @@ logger = logging.getLogger(__name__)
 
 _AUTOFIXER_JS = Path(__file__).with_suffix(".js")
 # design_agent -> app -> backend -> repo root; prototype-runtime is a sibling
-# of backend/ holding the @babel/parser install (P0-02 pin).
+# of backend/ holding the @babel/parser install (P0-02 pin). This is the
+# production default location for the @babel/parser resolution.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_NODE_MODULES = _REPO_ROOT / "prototype-runtime" / "node_modules"
+_PROTOTYPE_RUNTIME_NODE_MODULES = _REPO_ROOT / "prototype-runtime" / "node_modules"
 _NODE_BIN = os.environ.get("NODE_BIN", "node")
 _SUBPROCESS_TIMEOUT_S = 8.0
 
 
+def _node_modules_path() -> Path:
+    """Directory placed on NODE_PATH so `require('@babel/parser')` resolves.
+
+    Defaults to prototype-runtime/node_modules (the P0 Vite install) in
+    production. Overridable via `DESIGN_AGENT_NODE_PATH` — used by backend CI
+    to point at an isolated @babel/parser install (the CI image does not carry
+    the prototype-runtime node_modules). Production behaviour is unchanged when
+    the env var is unset."""
+    override = os.environ.get("DESIGN_AGENT_NODE_PATH")
+    return Path(override) if override else _PROTOTYPE_RUNTIME_NODE_MODULES
+
+
 def _subprocess_env() -> dict[str, str]:
-    """Env for the Node subprocess: NODE_PATH points at prototype-runtime's
-    node_modules so `require('@babel/parser')` resolves without a backend-side
-    install. Prepends to any inherited NODE_PATH rather than clobbering it."""
+    """Env for the Node subprocess: NODE_PATH points at the node_modules that
+    holds @babel/parser so `require('@babel/parser')` resolves without a
+    backend-side install. Prepends to any inherited NODE_PATH rather than
+    clobbering it (but keeps DESIGN_AGENT_NODE_PATH first)."""
     env = dict(os.environ)
+    node_modules = str(_node_modules_path())
     existing = env.get("NODE_PATH")
     env["NODE_PATH"] = (
-        f"{_NODE_MODULES}{os.pathsep}{existing}" if existing else str(_NODE_MODULES)
+        f"{node_modules}{os.pathsep}{existing}" if existing else node_modules
     )
     return env
 
