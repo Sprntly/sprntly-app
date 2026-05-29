@@ -37,11 +37,12 @@ SCOPE (what this ticket does NOT do, per the ticket's scope boundaries):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
@@ -51,9 +52,14 @@ from app.db.prototypes import (
     create_checkpoint,
     fail_prototype,
     find_existing_prototype,
+    find_prototype_by_share_token,
     get_prototype,
     infer_scenario_from_inputs,
+    passcode_rate_limit_check,
+    passcode_rate_limit_clear,
+    passcode_rate_limit_register_failure,
     start_prototype,
+    verify_share_passcode,
 )
 from app.design_agent.prompts import (
     DESIGN_AGENT_SCAFFOLD_SYSTEM,
@@ -448,4 +454,111 @@ def _figma_context_block(figma_file_key: str | None) -> str:
         f"A Figma file is connected to this prototype (file key: {figma_file_key}). "
         "Call the fetch_figma tool (no frame_ids) to list its top-level frames, "
         "then fetch the specific frames you need."
+    )
+
+
+# ─── Public share viewer (P2-05) ──────────────────────────────────────────
+#
+# These two routes back the unauthenticated `/p/<token>` viewer (web/app/p/[token]).
+# They are NO-AUTH BY DESIGN: the share_token IS the access primitive (F6), so
+# they carry NO `require_app_session` dependency and NO workspace filter —
+# `find_prototype_by_share_token` is the one legitimate cross-workspace read
+# (see db/prototypes.py). Both are feature-flag-gated via the shared
+# `_require_feature_enabled()` so a brute-force scan returns 404, matching the
+# auth'd routes' invisibility posture (Rule #15 / F6: 404-not-401).
+#
+# The response is MINIMUM-DISCLOSURE: exactly four fields. No prototype_id,
+# prd_id, workspace_id, instructions, figma_file_key, created_at, or error ever
+# leaves this surface — that reduces the cross-tenant fingerprinting surface to
+# what the viewer strictly needs to render. response_model enforces the exact
+# key set even if the row carries more columns.
+
+
+def _share_token_hash(token: str) -> str:
+    """sha256 prefix of a share token, for log correlation only (Rule #24).
+
+    The full token must NEVER reach log aggregation: it is the access primitive,
+    so logging it verbatim is equivalent to logging the share URL. An 8-char
+    sha256 prefix correlates a resolve/deny pair for one token without being
+    reversible to the token (or to anything PII).
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
+class PublicPrototypeView(BaseModel):
+    share_mode: Literal["public", "passcode"]  # "private" is never returned
+    requires_passcode: bool                    # true iff share_mode == "passcode"
+    bundle_url: str | None                     # null until a passcode is verified
+    is_complete: bool
+
+
+class PasscodeAttempt(BaseModel):
+    passcode: str = Field(..., min_length=1, max_length=128)
+
+
+@router.get("/by-token/{token}", response_model=PublicPrototypeView)
+def get_by_token(token: str) -> PublicPrototypeView:
+    """Resolve a share_token to its viewable prototype. NO auth — the token IS
+    the access. Returns 404 (never 401/403) on a bad token, a `private` row, or a
+    row whose `status` is not `ready` (a generating/failed prototype is not
+    viewable, and we do not disclose that it exists). `bundle_url` is withheld
+    (null) for passcode mode until POST /passcode succeeds.
+    """
+    _require_feature_enabled()
+    th = _share_token_hash(token)
+    row = find_prototype_by_share_token(token)
+    if not row or row.get("share_mode") == "private" or row.get("status") != "ready":
+        # `private` is its own reason; a missing row OR a not-ready row both map
+        # to `not_found` so we never disclose that a hidden prototype exists.
+        reason = "private" if (row and row.get("share_mode") == "private") else "not_found"
+        logger.info("prototype_public_view_denied token_hash=%s reason=%s", th, reason)
+        raise HTTPException(status_code=404, detail="Not found")
+    mode = row["share_mode"]
+    logger.info("prototype_public_view_resolved token_hash=%s share_mode=%s", th, mode)
+    return PublicPrototypeView(
+        share_mode=mode,
+        requires_passcode=(mode == "passcode"),
+        # bundle_url is released for public mode immediately; for passcode mode it
+        # stays null here and is only returned by the verify route on success.
+        bundle_url=row.get("bundle_url") if mode == "public" else None,
+        is_complete=bool(row.get("is_complete")),
+    )
+
+
+@router.post("/by-token/{token}/passcode", response_model=PublicPrototypeView)
+def verify_passcode(
+    token: str, body: PasscodeAttempt, request: Request
+) -> PublicPrototypeView:
+    """Verify a passcode against a passcode-mode share; on success return the
+    bundle_url. Rate-limited 5/min/token (P2-06 primitive). The rate-limit check
+    runs FIRST so counter exhaustion is observable as 429 BEFORE any hash
+    comparison; under the limit, a wrong passcode returns 401 `invalid_passcode`.
+    404 (not 401) for a bad/non-passcode/not-ready token preserves invisibility.
+    """
+    _require_feature_enabled()
+    th = _share_token_hash(token)
+    # Rate-limit FIRST (AC6): a token over the limit gets 429 before we touch the
+    # row or the hash, so a brute-forcer cannot distinguish rate-limited from
+    # wrong-passcode by timing the hash compare.
+    client_ip = request.client.host if request.client else "0.0.0.0"
+    if not passcode_rate_limit_check(token=token, ip=client_ip):
+        logger.info("prototype_public_view_denied token_hash=%s reason=rate_limited", th)
+        raise HTTPException(status_code=429, detail="Too many attempts")
+    row = find_prototype_by_share_token(token)
+    if not row or row.get("share_mode") != "passcode" or row.get("status") != "ready":
+        logger.info("prototype_public_view_denied token_hash=%s reason=not_found", th)
+        raise HTTPException(status_code=404, detail="Not found")
+    if not verify_share_passcode(body.passcode, row.get("share_passcode_hash")):
+        passcode_rate_limit_register_failure(token=token)
+        logger.info("prototype_public_view_denied token_hash=%s reason=passcode_required", th)
+        raise HTTPException(status_code=401, detail="invalid_passcode")
+    # Success: clear the failure history so a later legitimate visitor is not
+    # throttled by this token's earlier wrong attempts.
+    passcode_rate_limit_clear(token=token)
+    logger.info("prototype_public_view_resolved token_hash=%s share_mode=passcode", th)
+    return PublicPrototypeView(
+        share_mode="passcode",
+        requires_passcode=True,
+        bundle_url=row.get("bundle_url"),
+        is_complete=bool(row.get("is_complete")),
     )
