@@ -440,11 +440,31 @@ export type PrdSection =
   | { type: "prd-dod"; items: string[] }
   | PrdDesignBlock
 
-export interface PrdState {
+/**
+ * The shared document-content shape: a title, a meta line and the parsed
+ * semantic sections. Both PRDs (`PrdState`) and Evidence docs reuse it via
+ * the markdown adapters. Extracted from `PrdState` so PRD-only identifiers
+ * (`prd_id`) can be required on PRDs without forcing Evidence docs — which
+ * carry an `evidence_id`, never a `prd_id` — to invent one.
+ */
+export interface PrdContent {
   metaLine: string
   title: string
   /** Plain sections; render as paragraphs / lists / tables / charts client-side */
   sections: PrdSection[]
+}
+
+/**
+ * A loaded PRD document. Extends the shared `PrdContent` shape with the PRD's
+ * DB id. `prd_id` is required: once a `PrdState` exists it represents a real
+ * PRD row, and the F2 "Generate Prototype" flow needs the id to call
+ * `designAgentApi.generate({ prd_id })`.
+ */
+export interface PrdState extends PrdContent {
+  /** DB id of the loaded PRD (`PrdRecord.id`). Always present once a PRD is loaded. */
+  prd_id: number
+  /** Figma file key when the PRD has a connected Figma source; undefined/null when none. */
+  figma_file_key?: string | null
 }
 
 export interface AppContentState {
@@ -472,9 +492,11 @@ export interface AppContentState {
    *  PrdScreen can refetch / regenerate against the same source.
    *  Populated by DetailScreen.handleGeneratePrd alongside `prd`. */
   prdMeta: { briefId: number; insightIndex: number } | null
-  /** Generated Evidence Page doc — same PrdState shape (markdown sections
-   *  with tables and `chart` blocks) so it can reuse the markdown adapter. */
-  evidence: PrdState | null
+  /** Generated Evidence Page doc — shares the `PrdContent` base shape (markdown
+   *  sections with tables and `chart` blocks) so it can reuse the markdown
+   *  adapter. Evidence carries its own `evidence_id` on the wire and never a
+   *  `prd_id`, so it is typed `PrdContent`, not `PrdState`. */
+  evidence: PrdContent | null
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]

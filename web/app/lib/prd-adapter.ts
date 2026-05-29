@@ -25,7 +25,7 @@ import type {
   PrdRequirementRow,
   PrdRiskRow,
   PrdSection,
-  PrdState,
+  PrdContent,
 } from "../types/content"
 
 const HEADING_RULE = /^─+$/
@@ -413,7 +413,7 @@ function parseSemanticBlock(name: string, _attrs: string, body: string): PrdSect
 
 /* ---------- main entry ---------- */
 
-export function markdownToPrdState(markdown: string): PrdState {
+export function markdownToPrdState(markdown: string): PrdContent {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n")
   let title = ""
   const sections: PrdSection[] = []
