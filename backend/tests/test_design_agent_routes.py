@@ -358,6 +358,121 @@ async def test_background_task_marks_failed_when_runner_incomplete(env, monkeypa
     assert "status=max_iters" in row["error"]
 
 
+# ─── Failure-path diagnostics: propagate RunResult.error_message (P2-02) ────
+
+
+def _stub_generate_result(
+    monkeypatch, routes_mod, *, status="error", iters=3,
+    error_message=None, error_class=None,
+):
+    """Patch routes.generate_prototype to return a non-ok RunResult carrying the
+    structured error fields (error_message / error_class), mirroring what the
+    runner sets at runner.py:256-257 when the agent loop catches an exception.
+
+    Distinct from `_stub_generate` (which builds a bare status/iters namespace)
+    because P2-02 specifically needs the error_message / error_class fields
+    populated on the result.
+    """
+
+    async def _fake(**kwargs):
+        return (
+            SimpleNamespace(
+                status=status,
+                iters=iters,
+                error_message=error_message,
+                error_class=error_class,
+            ),
+            {},  # no files -> the route's else-branch fails the row
+        )
+
+    monkeypatch.setattr(routes_mod, "generate_prototype", _fake)
+
+
+@pytest.mark.asyncio
+async def test_run_generation_bg_propagates_error_message_to_db(env, monkeypatch):
+    """P2-02 AC1/AC4: a structured RunResult error reaches the error column.
+
+    The failure path must store error_message AND error_class alongside the
+    base status/iters summary so an Anthropic BadRequestError can be
+    root-caused instead of being dropped on the floor.
+    """
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    _stub_generate_result(
+        monkeypatch, env.routes,
+        status="error", iters=3,
+        error_message="BadRequestError: messages.3: content blocks may not be empty",
+        error_class="BadRequestError",
+    )
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    stored = row["error"]
+    assert "status=error" in stored
+    assert "iters=3" in stored
+    assert "error_message=BadRequestError: messages.3" in stored
+    assert "error_class=BadRequestError" in stored
+
+
+@pytest.mark.asyncio
+async def test_run_generation_bg_falls_through_when_error_message_none(env, monkeypatch):
+    """P2-02 AC2: when error_message/error_class are None the format is unchanged.
+
+    No `error_message=` / `error_class=` segments are appended, preserving
+    today's behaviour for results that carry no structured error.
+    """
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    _stub_generate_result(
+        monkeypatch, env.routes,
+        status="error", iters=2, error_message=None, error_class=None,
+    )
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    assert row["error"] == "agent_loop ended with status=error iters=2"
+    assert "error_message=" not in row["error"]
+    assert "error_class=" not in row["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_generation_bg_error_truncated_to_500_downstream(env, monkeypatch):
+    """P2-02 AC3: the 500-char cap is preserved (applied in fail_prototype).
+
+    The caller passes the full pipe-joined string untruncated; fail_prototype
+    caps it at 500. An 800-char error_message proves truncation still happens
+    downstream rather than in the caller.
+    """
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    long_msg = "X" * 800
+    _stub_generate_result(
+        monkeypatch, env.routes,
+        status="error", iters=1,
+        error_message=long_msg, error_class="BadRequestError",
+    )
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    assert len(row["error"]) == 500
+    assert row["error"].startswith("agent_loop ended with status=error iters=1")
+
+
 # ─── LLM-calling surface: system block + cache_control (AC #8) ─────────────
 
 

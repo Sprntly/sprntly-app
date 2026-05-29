@@ -279,10 +279,24 @@ async def _run_generation_bg(
                 error="agent_loop completed but emitted no files",
             )
         else:
+            # P2-02: include the structured error_message / error_class from
+            # RunResult so the underlying failure (e.g. an Anthropic
+            # BadRequestError) is preserved for triage rather than dropped on
+            # the floor. The 500-char cap is applied downstream in
+            # fail_prototype, so no caller-side truncation is needed here.
+            error_parts = [
+                f"agent_loop ended with status={result.status} iters={result.iters}"
+            ]
+            error_message = getattr(result, "error_message", None)
+            error_class = getattr(result, "error_class", None)
+            if error_message:
+                error_parts.append(f"error_message={error_message}")
+            if error_class:
+                error_parts.append(f"error_class={error_class}")
             fail_prototype(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
-                error=f"agent_loop ended with status={result.status} iters={result.iters}",
+                error=" | ".join(error_parts),
             )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
         # error_class only in the structured log (Rule #24 — no PII / no PRD /
