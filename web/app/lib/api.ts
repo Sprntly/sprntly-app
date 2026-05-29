@@ -465,3 +465,37 @@ export const prdApi = {
   /** Old name retained for compatibility. */
   byId: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
 }
+
+// ---- Design Agent (P1-09) ---------------------------------------------------
+// Append-only block; does not modify any export above. Mirrors prdApi — reuses
+// the shared `api` helper so credentials/JSON/${API_URL} handling stays
+// centralised (no raw fetch, no reinvented client).
+
+/** Full prototype row returned by GET /v1/design-agent/{id}. */
+export type PrototypeRecord = {
+  id: number
+  status: "generating" | "ready" | "failed" | "invalidated"
+  bundle_url: string | null
+  error: string | null
+}
+
+/** 202 kickoff response from POST /v1/design-agent/generate. */
+export type PrototypeStartResponse = {
+  prototype_id: number
+  status: string
+}
+
+export const designAgentApi = {
+  /** Kicks off prototype generation in the background; returns immediately
+   *  with a prototype_id. Client should poll designAgentApi.get(id) (via
+   *  runDesignAgentGeneration) until status === 'ready'. */
+  generate: (body: {
+    prd_id: number
+    target_platform: "desktop" | "mobile" | "both"
+    instructions: string
+    figma_file_key?: string | null
+  }) => api.post<PrototypeStartResponse>("/v1/design-agent/generate", body),
+  /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
+  get: (prototypeId: number) =>
+    api.get<PrototypeRecord>(`/v1/design-agent/${prototypeId}`),
+}
