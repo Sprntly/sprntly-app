@@ -175,6 +175,18 @@ async def agent_loop(
                     return _finish(usage, "max_tokens", iters, start, content)
                 max_tokens *= 2
                 max_tokens_retried = True
+                # The truncated assistant turn was appended above. When the cap
+                # is hit MID-tool_use (the `write` content arg never finishes
+                # serialising, leaving a tool_use block with partial/missing
+                # input) re-sending it 400s the Messages API: "tool_use ids were
+                # found without tool_result blocks immediately after" — the
+                # dangling tool_use has no answering tool_result, and the loop's
+                # retry never produces one. (A pure-text truncation would instead
+                # 400 as two consecutive assistant turns.) Discard the truncated
+                # turn and retry the SAME turn with the doubled budget, exactly as
+                # this function's docstring intends ("retry the same turn"). The
+                # usage from the truncated call is already counted above. (P2-03)
+                messages.pop()
                 continue
 
             if stop == "refusal":
