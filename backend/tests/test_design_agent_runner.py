@@ -250,6 +250,113 @@ def test_agent_loop_refusal_exits(monkeypatch):
     assert result.status == "refused"
 
 
+# ─── max_tokens truncation contract (P2-03 regression) ───────────────────────
+
+
+def _assert_no_orphan_tool_use(messages: list[dict]) -> None:
+    """The exact Messages API contract the production 400 enforced (P2-03):
+    every assistant `tool_use` block must be answered by a `tool_result` block
+    (carrying its id) in the immediately-following user turn. A dangling
+    tool_use — or a tool_use with no next message at all — is a 400.
+    """
+    for i, m in enumerate(messages):
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        tool_use_ids = [b["id"] for b in content if b.get("type") == "tool_use"]
+        if not tool_use_ids:
+            continue
+        assert i + 1 < len(messages), (
+            f"assistant tool_use {tool_use_ids} is the last message — "
+            f"no tool_result turn follows (would 400)"
+        )
+        nxt = messages[i + 1]
+        assert nxt.get("role") == "user", (
+            f"assistant tool_use {tool_use_ids} not followed by a user turn"
+        )
+        result_ids = {
+            b.get("tool_use_id")
+            for b in nxt["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_result"
+        }
+        for tid in tool_use_ids:
+            assert tid in result_ids, f"tool_use {tid} has no matching tool_result"
+
+
+def test_max_tokens_truncation_mid_tool_use_does_not_orphan(monkeypatch):
+    """P2-03 root-cause regression. When the response is truncated by max_tokens
+    WHILE the model is emitting a tool_use (e.g. a `write` whose `content` arg
+    never finished serialising — observed as input keys == ['path'] only), the
+    runner must NOT re-send that dangling tool_use turn. Doing so produced the
+    real failure: BadRequestError 400 'messages.N: `tool_use` ids were found
+    without `tool_result` blocks immediately after'. The fix discards the
+    truncated turn and retries the SAME turn with a doubled budget.
+    """
+    # Truncated mid-tool_use: only `path` made it out, `content` was cut off.
+    partial_write = _tool_use("toolu_partial", "write", {"path": "src/App.tsx"})
+    client = _install_client(monkeypatch, [
+        _msg("max_tokens", [partial_write]),       # truncated mid-emission
+        _msg("end_turn", [_text("recovered")]),    # retry with doubled budget succeeds
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+
+    # The loop recovered instead of 400-ing.
+    assert result.status == "complete"
+    assert result.final_content == [_text("recovered")]
+    # Budget doubled exactly once.
+    assert client.calls[0]["max_tokens"] == 4096
+    assert client.calls[1]["max_tokens"] == 8192
+    # The dangling tool_use turn was discarded — the retry re-sends the SAME
+    # turn (back to the prior user turn), never the partial assistant turn.
+    assert client.calls[1]["messages"] == client.calls[0]["messages"]
+    partial_ids = {
+        b.get("id")
+        for m in client.calls[1]["messages"]
+        for b in (m.get("content") or [])
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+    }
+    assert "toolu_partial" not in partial_ids
+    # Every recorded request honours the tool_use↔tool_result pairing contract.
+    for call in client.calls:
+        _assert_no_orphan_tool_use(call["messages"])
+
+
+def test_max_tokens_truncation_text_no_consecutive_assistant_turns(monkeypatch):
+    """The pure-text truncation case (no tool_use): re-sending the partial
+    assistant turn would create two consecutive assistant turns (also a 400).
+    The discard-and-retry fix keeps roles strictly alternating."""
+    client = _install_client(monkeypatch, [
+        _msg("max_tokens", [_text("partial answer that got cut off ...")]),
+        _msg("end_turn", [_text("the complete answer")]),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "complete"
+    assert result.final_content == [_text("the complete answer")]
+    for call in client.calls:
+        roles = [m["role"] for m in call["messages"]]
+        for a, b in zip(roles, roles[1:]):
+            assert a != b, f"consecutive same-role turns: {roles}"
+
+
+def test_max_tokens_twice_mid_tool_use_exits_clean(monkeypatch):
+    """If BOTH the first attempt and the doubled-budget retry truncate mid-
+    tool_use, the loop exits with status=max_tokens (second hit = exit) and
+    still never emits an orphaned tool_use request."""
+    partial = _tool_use("toolu_p", "write", {"path": "src/App.tsx"})
+    client = _install_client(monkeypatch, [
+        _msg("max_tokens", [partial]),
+        _msg("max_tokens", [partial]),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "max_tokens"
+    assert client.calls[0]["max_tokens"] == 4096
+    assert client.calls[1]["max_tokens"] == 8192
+    for call in client.calls:
+        _assert_no_orphan_tool_use(call["messages"])
+
+
 # ─── Cache verification ──────────────────────────────────────────────────────
 
 
