@@ -352,6 +352,31 @@ async def agent_loop(
                 }
                 return result
 
+            # P3-09 sentinel #2 — propose_prd_patch -> terminal-COMPLETE. Gated on
+            # the tool being in THIS run's allowed set (execute-only): a scaffold/
+            # plan-mode emission is NOT a registered sentinel there, so it falls
+            # through to dispatch's out-of-mode "Unknown tool" rejection and the
+            # loop continues (AD10 "mode is state"; keeps P3-08's
+            # other-sentinel-name test green). Unlike clarifying_question (which
+            # breaks BEFORE dispatch and persists nothing), this sentinel's effect
+            # is a side-effecting INSERT, so we dispatch it explicitly here to run
+            # `_exec_propose_prd_patch` (persists the pending prd_patches row), THEN
+            # end the loop as a NORMAL iterate completion (status='complete'): the
+            # agent's prior-turn write/line_replace edits stay in `virtual_fs` and
+            # the caller's `_stage_iterate_run` stages them as the new checkpoint —
+            # NO `complete_prototype` re-stamp, NO pause. Like clarifying_question,
+            # a terminal sentinel batched with action tools WINS (the batched action
+            # tools in this same turn are NOT dispatched).
+            patch = next(
+                (tu for tu in tool_uses
+                 if tu.get("name") == "propose_prd_patch"
+                 and "propose_prd_patch" in allowed_tool_names),
+                None,
+            )
+            if patch:
+                await dispatch(patch["name"], patch.get("input") or {}, ctx, allowed_tool_names)
+                return _finish(usage, "complete", iters, start, content)
+
             results = await asyncio.gather(*[
                 dispatch(tu["name"], tu.get("input") or {}, ctx, allowed_tool_names)
                 for tu in tool_uses

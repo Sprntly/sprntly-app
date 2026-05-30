@@ -262,7 +262,39 @@ CLARIFYING_QUESTION = ToolDef(
     category="sentinel",
 )
 
-SENTINEL_TOOLS: list[ToolDef] = [CLARIFYING_QUESTION]
+PROPOSE_PRD_PATCH = ToolDef(
+    name="propose_prd_patch",
+    description=(
+        "Propose an edit to the PRD text when — and ONLY when — the change you "
+        "just made (or are about to make) introduces or removes a USER-FACING "
+        "CAPABILITY that the PRD should reflect (e.g. you added a confirmation "
+        "step the PRD doesn't mention, or removed a field the PRD requires). "
+        "Calling this records a PROPOSED patch for the user to accept or reject "
+        "— it does NOT edit the PRD directly and DOES end your turn (it is a "
+        "terminal action: call it LAST, after your write/line_replace edits are "
+        "done). Pass a 1-sentence `rationale` and the `patch_md` (the markdown "
+        "delta to append). Do NOT propose a patch for purely visual tweaks "
+        "(colour, spacing, copy polish) — those have no PRD implication. Do NOT "
+        "propose more than one patch per run; batch all PRD implications into a "
+        "single patch. At most ONE call per run."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "rationale": {"type": "string", "description": "One sentence: why this change affects the PRD."},
+            "patch_md": {"type": "string", "description": "The proposed markdown delta to the PRD."},
+        },
+        "required": ["rationale", "patch_md"],
+    },
+    execute=lambda inp, ctx: _exec_propose_prd_patch(inp, ctx),
+    category="sentinel",
+)
+
+# propose_prd_patch is EXECUTE-ONLY: `tools_for_mode` includes the full
+# SENTINEL_TOOLS list only in execute mode; plan/scaffold keep just
+# clarifying_question (filtered by name there). No PRD-edit step exists at
+# plan/scaffold, so the sentinel is absent from those registries by construction.
+SENTINEL_TOOLS: list[ToolDef] = [CLARIFYING_QUESTION, PROPOSE_PRD_PATCH]
 
 # ─── Registry-level invariants ────────────────────────────────────────────
 
@@ -557,4 +589,37 @@ async def _exec_clarifying_question(inp: dict, ctx: ToolContext) -> dict:
         "question": inp.get("question"),
         "choices": inp.get("choices"),
         "context": inp.get("context"),
+    }
+
+
+async def _exec_propose_prd_patch(inp: dict, ctx: ToolContext) -> dict:
+    """Sentinel #2 executor (P3-09, F11): persist a PROPOSED PRD patch as a sibling
+    `prd_patches` row, then return a `_sentinel` payload. The RUNNER detects the
+    sentinel by tool NAME (`propose_prd_patch`) and ends the loop as a terminal-
+    COMPLETE (distinct from clarifying_question's terminal-PAUSE). The patch is
+    persisted HERE (the side-effecting executor), so the runner's break arm calls
+    `dispatch` for this tool precisely to run this body.
+
+    F11: this NEVER touches `prds` — the proposal lives only in `prd_patches`; the
+    PRD is rendered by applying applied patches on read (db.prd_patches
+    `apply_patches_to_prd_md`). `prd_id` is read via a LAZY `get_prototype`
+    (mirrors `_exec_fetch_figma`'s lazy connector import) so this module stays
+    importable without the DB stack on the import path and no `prd_id` field has to
+    be threaded onto `ToolContext`."""
+    from app.db.prd_patches import insert_patch
+    from app.db.prototypes import get_prototype
+    proto = get_prototype(prototype_id=ctx.prototype_id, workspace_id=ctx.workspace_id)
+    if not proto:
+        return {"is_error": True, "content": "Prototype not found for PRD patch.", "tool_name": "propose_prd_patch"}
+    row = insert_patch(
+        prd_id=proto["prd_id"],
+        prototype_id=ctx.prototype_id,
+        workspace_id=ctx.workspace_id,
+        rationale=inp["rationale"],
+        patch_md=inp["patch_md"],
+    )
+    return {
+        "_sentinel": "propose_prd_patch",
+        "patch_id": row["id"],
+        "content": "PRD patch proposed (pending user review). This ends your turn.",
     }
