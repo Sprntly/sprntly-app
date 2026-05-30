@@ -52,7 +52,7 @@ export function setAccessTokenProvider(fn: () => Promise<string | null>) {
 }
 
 async function request<T>(
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "DELETE" | "PATCH",
   path: string,
   body?: unknown,
 ): Promise<T> {
@@ -96,6 +96,7 @@ async function request<T>(
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
+  patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   delete: <T>(path: string) => request<T>("DELETE", path),
 }
 
@@ -493,6 +494,21 @@ export type PrototypeStartResponse = {
   status: string
 }
 
+/** F8 (P3-02/P3-03) — an anchored comment. Wire shape mirrors the backend
+ *  `CommentOut` (id/anchor_id/body/author/status/created_at/resolved_at).
+ *  `status` is the AD12 lifecycle: `open` (active), `resolved` (internally
+ *  closed), `orphaned` (the anchor no longer exists in the current bundle —
+ *  set by P3-04, rendered with no pin by the panel). */
+export type CommentRecord = {
+  id: number
+  anchor_id: string
+  body: string
+  author: string
+  status: "open" | "resolved" | "orphaned"
+  created_at: string
+  resolved_at: string | null
+}
+
 export const designAgentApi = {
   /** Kicks off prototype generation in the background; returns immediately
    *  with a prototype_id. Client should poll designAgentApi.get(id) (via
@@ -549,4 +565,26 @@ export const designAgentApi = {
     }
     return await res.text()
   },
+  // ── F8 anchored comments (P3-03) ──────────────────────────────────────────
+  /** Public-route comment write (external viewer on `/p/<token>`): the token
+   *  is the access primitive (F6), so no auth is required. Hits the P3-02
+   *  public route; the backend attributes the comment to the `external` author. */
+  createCommentByToken: (token: string, body: { anchor_id: string; body: string }) =>
+    api.post<CommentRecord>(
+      `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
+      body,
+    ),
+  /** Public-route comment read: lists every comment for the token's prototype
+   *  (all statuses). Same 404 posture as the resolver for missing/private. */
+  listCommentsByToken: (token: string) =>
+    api.get<CommentRecord[]>(
+      `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
+    ),
+  /** Internal (authed) resolve — external viewers cannot resolve (spec §4
+   *  Stage 2). Addressed by prototype id; renders only on the signed-in mount
+   *  where a `prototypeId` is supplied. */
+  resolveComment: (prototypeId: number, commentId: number) =>
+    api.patch<CommentRecord>(
+      `/v1/design-agent/${prototypeId}/comments/${commentId}/resolve`,
+    ),
 }

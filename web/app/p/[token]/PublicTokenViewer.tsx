@@ -15,6 +15,7 @@ import { notFound, useParams } from "next/navigation"
 import { API_URL } from "../../lib/api"
 import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
 import { CompletionBar } from "../../components/design-agent/CompletionBar"
+import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
 import { PasscodeGate } from "./PasscodeGate"
 
 export type ResolvedView = {
@@ -103,11 +104,17 @@ export function PublicTokenViewer() {
     <PrototypeViewer
       bundleUrl={state.bundleUrl}
       isComplete={state.isComplete}
-      // Read-only public-viewer chrome (P2-10): a status badge only — no
-      // prototypeId (the public resolver is minimum-disclosure) and no
-      // mutating affordances. The editable chrome lives on the signed-in
-      // surface (follow-up; see P2-10 Open Question).
-      chrome={<CompletionBar isComplete={state.isComplete} editable={false} />}
+      // Public-viewer chrome: a read-only CompletionBar status badge (P2-10) +
+      // the F8 CommentsPanel (P3-03). Neither passes a prototypeId — the public
+      // resolver is minimum-disclosure, so the CompletionBar stays read-only and
+      // the panel offers create + read only (no internal resolve affordance).
+      // Editable/internal chrome lives on the signed-in surface (follow-up).
+      chrome={
+        <>
+          <CompletionBar isComplete={state.isComplete} editable={false} />
+          <CommentsPanel token={token as string} />
+        </>
+      }
     />
   )
 }
