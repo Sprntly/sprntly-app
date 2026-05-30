@@ -210,10 +210,14 @@ def test_complete_is_idempotent_preserving_first_checkpoint(env, client):
 
 
 def test_complete_invokes_record_export_at_complete_once(env, client, monkeypatch):
-    # AC #12 — the stub integration point is called exactly once with the right args.
+    # AC #12 — the export hook is called exactly once with the right args.
+    # P2-09 made record_export_at_complete async and the /complete handler now
+    # `await`s it, so the spy MUST be an async function (a sync spy returns None
+    # and `await None` raises TypeError). This is the required AsyncMock-style
+    # adjustment called out in P2-09's Implementation Notes, not an AC15 break.
     calls: list[dict] = []
 
-    def _spy(*, prototype_id, workspace_id):
+    async def _spy(*, prototype_id, workspace_id):
         calls.append({"prototype_id": prototype_id, "workspace_id": workspace_id})
 
     monkeypatch.setattr(env.routes, "record_export_at_complete", _spy)
@@ -492,9 +496,13 @@ def test_flag_stale_handoff_respects_workspace(env):
     assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id="app") == 0
 
 
-def test_record_export_at_complete_is_noop(env):
-    # Stub: does not raise, returns None, touches nothing.
-    assert env.proto.record_export_at_complete(prototype_id=1, workspace_id="app") is None
+async def test_record_export_at_complete_is_noop_when_prototype_missing(env):
+    # P2-09 made this async + real. With no prototype row (id=1 unseeded here)
+    # it no-ops gracefully: returns None, raises nothing, inserts no export row.
+    assert (
+        await env.proto.record_export_at_complete(prototype_id=1, workspace_id="app")
+        is None
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
