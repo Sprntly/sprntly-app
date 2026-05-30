@@ -208,7 +208,7 @@ function AuthShell({ children }: { children: React.ReactNode }) {
       </div>
       <style jsx>{`
         .auth-card { width: 100%; max-width: 480px; }
-        .ob-brand-mark { font-family: var(--font-display); font-weight: 400; font-size: 22px; letter-spacing: -0.02em; margin-bottom: 48px; text-align: center; color: var(--ink); }
+        .ob-brand-mark { font-family: var(--font-body); font-weight: 500; font-size: 22px; letter-spacing: -0.015em; margin-bottom: 48px; text-align: center; color: var(--ink); }
         .ob-brand-mark :global(span) { color: var(--accent); }
       `}</style>
     </div>
