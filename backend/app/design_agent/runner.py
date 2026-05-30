@@ -13,10 +13,13 @@ The loop is `while stop_reason == "tool_use"`. Stop reasons handled:
 Loop-pathology detection (per agent-build-research.md §4.3):
   - same (tool_name, input_hash) 3x in sliding window of 5 -> warn via tool_result
   - tool returns is_error: true 3x in a row -> wrap-up nudge
-Iteration cap: max_iters (24 per P2-01; raised from 8 after the P1 smoke
-showed real Scenario A scaffolds exhaust 8 iterations mid-emission). The
-loop-pathology circuit-breakers above remain the real runaway guard; the cap
-is a hard safety rail that should not fire in normal use.
+Iteration cap: max_iters (40; raised from 24 after the convergence fix —
+real non-trivial PRDs were running to the old cap without converging). The
+loop-pathology circuit-breakers above plus the graduated wrap-up nudges
+(_wrap_up_nudge, fired at ~half / ~quarter / last turn) are the real
+convergence drivers; the cap is a hard safety rail. On a max_iters exit the
+last assistant turn is salvaged as final_content so a near-complete build is
+not discarded.
 Per-run cost accounting: aggregate usage.{cache_creation,cache_read,input,
 output}_input_tokens per turn; emit one structured cost-summary log line
 on completion via the shared app.llm_telemetry primitive.
@@ -49,7 +52,7 @@ from app.llm_telemetry import RunUsage, log_llm_run
 logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"  # AD2; NEVER claude-sonnet-4-7
-DEFAULT_MAX_ITERS = 24
+DEFAULT_MAX_ITERS = 40
 DEFAULT_MAX_TOKENS = 4096
 TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
 
@@ -75,9 +78,17 @@ def _hash_tool_call(name: str, input: dict[str, Any]) -> str:
 
 
 def _wrap_up_nudge(iters_remaining: int) -> str:
+    if iters_remaining <= 2:
+        return (
+            f"You have {iters_remaining} tool-call turn(s) left. STOP now: finish "
+            f"the current file, do NOT start new ones, then end your turn with a "
+            f"1-2 sentence summary. A cut-off build is lost."
+        )
     return (
-        f"You have {iters_remaining} iterations remaining. Wrap up: finish any "
-        f"in-progress files, do not start new ones."
+        f"You have ~{iters_remaining} tool-call turns left. Start converging: make "
+        f"the core flow navigable, batch any remaining writes, prefer finishing the "
+        f"primary flow over adding screens. End your turn (no tool calls) as soon as "
+        f"the core flow works."
     )
 
 
@@ -139,19 +150,26 @@ async def agent_loop(
     start = time.perf_counter()
     iters = 0
     max_tokens_retried = False
+    # Last assistant turn's content, salvaged on a max_iters exit so a near-
+    # complete build (the agent ran out of turns mid-flow) is not discarded.
+    last_assistant_content: list[dict[str, Any]] = []
 
     try:
         while iters < max_iters:
             iters += 1
 
-            # Wrap-up nudge at N-1 per agent-build-research.md §4.2. The trailing
-            # message here is always a user turn (the prior iteration's
-            # tool_results, or the initial user message when max_iters == 1), so
+            # Graduated wrap-up pressure (per agent-build-research.md §4.2) with
+            # the REAL remaining count — was a single hardcoded "2 remaining"
+            # nudge at N-1, too late to change a build's trajectory. Gentle
+            # heads-up at ~half budget, firmer at ~quarter, hard stop in the last
+            # turn. The trailing message here is always a user turn (the prior
+            # iteration's tool_results, or the initial user message on iter 1), so
             # we append the nudge as a text block to that turn rather than a
             # second consecutive user message — the Messages API treats turns as
             # alternating, and a standalone consecutive user turn is unsafe.
-            if iters == max_iters - 1:
-                _append_text_block(messages[-1], _wrap_up_nudge(2))
+            remaining = max_iters - iters
+            if remaining in {max_iters // 2, max(2, max_iters // 4), 1}:
+                _append_text_block(messages[-1], _wrap_up_nudge(remaining))
 
             resp = await asyncio.to_thread(
                 client.messages.create,
@@ -166,6 +184,7 @@ async def agent_loop(
             stop = resp.stop_reason
             content = [b.model_dump() for b in resp.content]
             messages.append({"role": "assistant", "content": content})
+            last_assistant_content = content
 
             if stop == "end_turn":
                 return _finish(usage, "complete", iters, start, content)
@@ -260,8 +279,10 @@ async def agent_loop(
 
             messages.append({"role": "user", "content": next_content})
 
-        # Exited because iters == max_iters.
-        return _finish(usage, "max_iters", iters, start, [])
+        # Exited because iters == max_iters. Salvage the last assistant turn as
+        # final_content (was discarded as []) — a build that ran out of turns
+        # mid-flow is usually near-complete and worth staging, not throwing away.
+        return _finish(usage, "max_iters", iters, start, last_assistant_content)
 
     except Exception as exc:
         result = _finish(usage, "error", iters, start, [])
