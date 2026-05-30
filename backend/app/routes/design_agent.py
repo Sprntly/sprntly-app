@@ -777,3 +777,178 @@ def _export_filename(proto: dict[str, Any]) -> str:
     import re
     base = f"prototype-{proto['id']}"
     return re.sub(r"[^A-Za-z0-9_-]", "-", base) + "-design-brief.md"
+
+
+# ─── Anchored comments (P3-02) ─────────────────────────────────────────────
+#
+# F8: anyone with the share URL can comment; spec §4 Stage 2 splits write access
+# by surface, not by capability gate — internal users act through the authed app
+# routes, external viewers through the public `/p/<token>` variant. This block
+# mounts the HTTP surface over P3-01's `db.prototype_comments` helpers:
+#
+#   POST  /{prototype_id}/comments              (authed — create)
+#   GET   /{prototype_id}/comments              (authed — list, all statuses)
+#   PATCH /{prototype_id}/comments/{cid}/resolve (authed — resolve)
+#   POST  /by-token/{token}/comments            (public, NO auth — create)
+#   GET   /by-token/{token}/comments            (public, NO auth — list)
+#
+# The internal routes reuse the authed-route gates verbatim (feature flag +
+# require_app_session + workspace filter via get_prototype). The public routes
+# mirror get_by_token's posture exactly: the token IS the access primitive (F6),
+# so NO auth dependency and NO session workspace claim — workspace_id is taken
+# from the RESOLVED prototype row. Per spec §4 Stage 2 ("only internal users with
+# credentials can act"), external viewers create + read only; there is NO public
+# resolve route. Public-write rate limiting is OUT of scope here — it lands in
+# P5-07 (per TICKET_LIST shared-resources).
+from app.db.prototype_comments import insert_comment, list_comments, resolve_comment
+
+
+class CommentCreate(BaseModel):
+    anchor_id: str = Field(..., min_length=1, max_length=64)
+    body: str = Field(..., min_length=1, max_length=4000)
+
+
+class CommentOut(BaseModel):
+    id: int
+    anchor_id: str
+    body: str
+    author: str
+    status: str           # 'open' | 'resolved' | 'orphaned'
+    created_at: str
+    resolved_at: str | None = None
+
+
+def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
+    """Project a DB row to the CommentOut shape (ISO-string timestamps).
+
+    Timestamps are stringified defensively: Postgres returns timestamptz objects
+    via supabase, the SQLite fake returns TEXT — `str()` normalises both to the
+    ISO string CommentOut expects without leaking driver-specific types."""
+    return {
+        "id": row["id"],
+        "anchor_id": row["anchor_id"],
+        "body": row["body"],
+        "author": row["author"],
+        "status": row["status"],
+        "created_at": str(row["created_at"]),
+        "resolved_at": str(row["resolved_at"]) if row.get("resolved_at") else None,
+    }
+
+
+# ─── Internal (authed) comment routes ─────────────────────────────────────
+
+
+@router.post("/{prototype_id}/comments", response_model=CommentOut)
+def post_comment(
+    prototype_id: int,
+    body: CommentCreate,
+    session: dict = Depends(require_app_session),
+) -> CommentOut:
+    """Create a comment as an internal user. Workspace-filtered: 404 if the
+    prototype is not in the caller's workspace (cross-tenant existence is not
+    disclosed — Rule #22). Attributed to the internal author label."""
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    row = insert_comment(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        anchor_id=body.anchor_id,
+        body=body.body,
+        author="demo",
+    )
+    return CommentOut(**_comment_to_out(row))
+
+
+@router.get("/{prototype_id}/comments", response_model=list[CommentOut])
+def get_comments(
+    prototype_id: int,
+    session: dict = Depends(require_app_session),
+) -> list[CommentOut]:
+    """List every comment for a prototype (all statuses, created_at-ascending).
+    Workspace-filtered: 404 if the prototype is not in the caller's workspace."""
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    return [
+        CommentOut(**_comment_to_out(r))
+        for r in list_comments(prototype_id=prototype_id, workspace_id=workspace_id)
+    ]
+
+
+@router.patch("/{prototype_id}/comments/{cid}/resolve", response_model=CommentOut)
+def patch_resolve_comment(
+    prototype_id: int,
+    cid: int,
+    session: dict = Depends(require_app_session),
+) -> CommentOut:
+    """Resolve a comment (internal only — external viewers cannot resolve, per
+    spec §4 Stage 2 'only internal users with credentials can act'). Returns 404
+    when the comment is not in the caller's workspace OR belongs to a different
+    prototype than the one in the path (no cross-prototype resolve)."""
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    row = resolve_comment(comment_id=cid, workspace_id=workspace_id)
+    if not row or row["prototype_id"] != prototype_id:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return CommentOut(**_comment_to_out(row))
+
+
+# ─── Public (token-resolved, NO auth) comment routes ──────────────────────
+#
+# F8: "anyone with the URL can comment." The token IS the access primitive.
+# Workspace is taken from the RESOLVED prototype row (not a session claim).
+# External viewers may CREATE + READ comments but NOT resolve them. The
+# resolution posture matches get_by_token exactly (404 for missing / private /
+# not-ready) so brute-force scanning discloses nothing (Rule #15 / F6).
+
+
+@router.post("/by-token/{token}/comments", response_model=CommentOut)
+def post_comment_public(token: str, body: CommentCreate, request: Request) -> CommentOut:
+    """Public comment write. Resolves token → prototype; rejects when the
+    prototype is private or not ready (404, matching get_by_token's posture).
+    The comment is attributed to the anonymous external author label, and the
+    workspace_id is taken from the resolved row — never a session claim."""
+    _require_feature_enabled()
+    proto = find_prototype_by_share_token(token)
+    if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
+        raise HTTPException(status_code=404, detail="Not found")
+    row = insert_comment(
+        prototype_id=proto["id"],
+        workspace_id=proto["workspace_id"],   # from the resolved row, not a session
+        anchor_id=body.anchor_id,
+        body=body.body,
+        author="external",
+    )
+    # Token hashed, never raw (Rule #24 — the token is the access primitive); no
+    # comment body in the log line (PII). insert_comment emits its own
+    # `comment_created` line; this adds the public-surface correlation marker.
+    logger.info(
+        "comment_created_public token_hash=%s prototype_id=%s comment_id=%s",
+        _share_token_hash(token), proto["id"], row["id"],
+    )
+    return CommentOut(**_comment_to_out(row))
+
+
+@router.get("/by-token/{token}/comments", response_model=list[CommentOut])
+def get_comments_public(token: str) -> list[CommentOut]:
+    """Public comment read. All viewers can read existing comments (spec §4).
+    Same 404 posture as the public write for missing / private / not-ready."""
+    _require_feature_enabled()
+    proto = find_prototype_by_share_token(token)
+    if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
+        raise HTTPException(status_code=404, detail="Not found")
+    return [
+        CommentOut(**_comment_to_out(r))
+        for r in list_comments(prototype_id=proto["id"], workspace_id=proto["workspace_id"])
+    ]
