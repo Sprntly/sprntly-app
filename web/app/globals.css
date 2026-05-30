@@ -82,7 +82,8 @@
     --radius-lg: 16px;
     --radius-xl: 20px;
 
-    --font-display: 'Instrument Serif', Georgia, serif;
+    --font-display: 'Geist', -apple-system, sans-serif;
+    --font-serif: 'Instrument Serif', Georgia, serif;
     --font-body: 'Geist', -apple-system, sans-serif;
     --font-mono: 'Geist Mono', 'JetBrains Mono', monospace;
 
@@ -94,11 +95,11 @@
   * { box-sizing: border-box; }
   html, body {
     margin:0; padding:0; background: var(--surface); color: var(--ink);
-    font-family: var(--font-body); font-size: 14px; line-height: 1.5;
+    font-family: var(--font-body); font-size: 14px; line-height: 1.55;
+    letter-spacing: -0.003em;
     -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
-    font-feature-settings: "ss01", "cv11";
   }
-  h1, h2, h3, h4, h5, h6 { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.02em; }
+  h1, h2, h3, h4, h5, h6 { font-family: var(--font-serif); font-weight: 400; letter-spacing: -0.02em; }
   .mono { font-family: var(--font-mono); }
   button, input, select, textarea { font-family: inherit; }
 
@@ -188,14 +189,14 @@
 
   .ob-panel { padding: 0; display: flex; flex-direction: column; justify-content: center; background: transparent; width: 100%; max-width: 480px; }
   .ob-panel-inner { max-width: 480px; margin: 0 auto; width: 100%; }
-  .ob-brand-mark { font-family: var(--font-display); font-weight: 400; font-size: 22px; letter-spacing: -0.02em; margin-bottom: 48px; text-align: center; color: var(--ink); }
+  .ob-brand-mark { font-family: var(--font-body); font-weight: 500; font-size: 22px; letter-spacing: -0.015em; margin-bottom: 48px; text-align: center; color: var(--ink); }
   .ob-brand-mark span { color: var(--accent); }
   .ob-step-indicator { display: flex; gap: 5px; margin-bottom: 22px; justify-content: center; }
   .ob-dot { width: 22px; height: 3px; background: var(--line); border-radius: 2px; transition: background 0.2s; }
   .ob-dot.done { background: var(--accent); }
   .ob-dot.active { background: var(--ink); }
   .ob-eyebrow { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); margin-bottom: 10px; font-weight: 600; text-align: center; }
-  .ob-title { font-family: var(--font-display); font-weight: 400; font-size: 32px; line-height: 1.08; letter-spacing: -0.025em; margin: 0 0 10px; text-align: center; }
+  .ob-title { font-family: var(--font-serif); font-weight: 400; font-size: 32px; line-height: 1.08; letter-spacing: -0.02em; margin: 0 0 10px; text-align: center; }
   .ob-desc { color: var(--ink-3); margin-bottom: 26px; font-size: 14px; text-align: center; }
 
   /* Onboarding interview + previews */
@@ -569,7 +570,7 @@
     color: var(--nav-text-hover);
   }
   .sb-brand {
-    font-family: var(--font-display); font-weight: 400; font-size: 20px; letter-spacing: -0.02em;
+    font-family: var(--font-body); font-weight: 500; font-size: 20px; letter-spacing: -0.015em;
     padding: 0;
     margin: 0;
     display: flex;
@@ -793,8 +794,8 @@
   }
   .chat-greeting { text-align: center; margin-bottom: 0; }
   .chat-greeting-title {
-    font-family: var(--font-display); font-weight: 400; font-size: 40px;
-    letter-spacing: -0.03em; line-height: 1.08; margin: 0 0 12px;
+    font-family: var(--font-serif); font-weight: 400; font-size: 40px;
+    letter-spacing: -0.022em; line-height: 1.1; margin: 0 0 12px;
   }
   .chat-greeting-title span { color: var(--accent); }
   .chat-greeting-sub { color: var(--ink-3); font-size: 15px; max-width: 520px; margin: 12px auto 0; line-height: 1.55; }
@@ -888,7 +889,7 @@
   .brief-impact-inner { position: relative; z-index: 1; }
   .brief-impact-eyebrow { font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--on-dark-alpha-55); margin-bottom: 10px; font-weight: 600; }
   .brief-impact-headline {
-    font-family: var(--font-display); font-weight: 600; font-size: 28px;
+    font-family: var(--font-serif); font-weight: 400; font-size: 28px;
     line-height: 1.18; letter-spacing: -0.02em; margin: 0;
   }
   .brief-impact-headline span { color: var(--accent-2); }
@@ -2406,8 +2407,8 @@
     text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 14px;
   }
   .shipped-celebrate-headline {
-    font-family: var(--font-display); font-weight: 600; font-size: 30px;
-    line-height: 1.18; letter-spacing: -0.025em; margin: 0 0 20px; max-width: 680px;
+    font-family: var(--font-serif); font-weight: 400; font-size: 30px;
+    line-height: 1.18; letter-spacing: -0.02em; margin: 0 0 20px; max-width: 680px;
   }
   .shipped-celebrate-headline span { color: var(--accent-2); }
   .shipped-range-tabs {

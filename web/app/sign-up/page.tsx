@@ -135,7 +135,7 @@ function SignUpForm() {
 
       <style jsx>{`
         .auth-card { width: 100%; max-width: 480px; }
-        .ob-brand-mark { font-family: var(--font-display); font-weight: 400; font-size: 22px; text-align: center; margin-bottom: 48px; }
+        .ob-brand-mark { font-family: var(--font-body); font-weight: 500; font-size: 22px; text-align: center; margin-bottom: 48px; }
         .ob-brand-mark :global(span) { color: var(--accent); }
         .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
         .pw-row { display: flex; gap: 8px; align-items: center; }
