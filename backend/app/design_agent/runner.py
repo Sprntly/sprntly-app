@@ -52,7 +52,7 @@ from app.design_agent.client import get_design_agent_client
 from app.design_agent.tools import (
     ToolContext,
     dispatch,
-    tool_definitions_for_api,
+    tool_definitions_for_mode,
 )
 from app.llm_telemetry import RunUsage, log_llm_run
 
@@ -226,7 +226,17 @@ async def agent_loop(
     single-inference-site decision (routing lives in the route layer).
     """
     client = get_design_agent_client()
-    tools_payload = tool_definitions_for_api()
+    # AD17 + AD10: the registry is partitioned PER MODE and computed ONCE here,
+    # before the loop — never reassigned inside it (a mid-run tool change would
+    # invalidate the prompt cache, agent-build-research.md §3.4). PLAN mode gets
+    # the explore-only subset (no write/line_replace); execute/scaffold get all 6
+    # action tools. Sentinels (P3-08/P3-09) are filtered per mode by tools_for_mode.
+    tools_payload = tool_definitions_for_mode(mode)
+    # The set of tool names the model is allowed to call THIS run — frozen here
+    # alongside tools_payload. Passed to dispatch so a hallucinated out-of-mode
+    # call (e.g. `write` in PLAN mode) is rejected as "Unknown tool" without ever
+    # touching the virtual_fs (AD10 "mode is state"). Never recomputed mid-loop.
+    allowed_tool_names = {t["name"] for t in tools_payload}
     messages: list[dict[str, Any]] = [user_message]
 
     usage = RunUsage()
@@ -302,7 +312,8 @@ async def agent_loop(
             # Collect tool_use blocks; dispatch concurrently per parallel-tool-use rule.
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
             results = await asyncio.gather(*[
-                dispatch(tu["name"], tu.get("input") or {}, ctx) for tu in tool_uses
+                dispatch(tu["name"], tu.get("input") or {}, ctx, allowed_tool_names)
+                for tu in tool_uses
             ])
 
             # Static AST autofixer (P1-10): after every successful write/
@@ -465,6 +476,29 @@ async def generate_prototype(
     return result, ctx.virtual_fs
 
 
+def prepend_plan_addendum(
+    system_blocks: list[dict[str, Any]], plan_text: str
+) -> list[dict[str, Any]]:
+    """Plan->Execute transition (P3-07, AD10): return a NEW system-block list with
+    the approved plan prepended as a leading addendum block.
+
+    The addendum goes BEFORE the iterate system prompt, so the AD2 cache breakpoint
+    (which lives on the LAST block — system + tool defs) is untouched: the existing
+    blocks keep their position and their `cache_control`. The plan is constant for
+    the whole execute run (it never changes across the run's turns), so it belongs
+    in the cached stable prefix. The input list is not mutated (a fresh list is
+    returned) so the caller's blocks are reusable."""
+    addendum = {
+        "type": "text",
+        "text": (
+            "APPROVED PLAN (the team reviewed and approved this in Plan mode — "
+            "execute it with the smallest possible diff):\n"
+            f"{plan_text.strip()}"
+        ),
+    }
+    return [addendum, *system_blocks]
+
+
 async def iterate_prototype(
     *,
     prototype_id: int,
@@ -475,6 +509,7 @@ async def iterate_prototype(
     figma_file_key: str | None,
     scenario: str = "A",
     mode: str = "execute",
+    approved_plan: str | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
     """Iterate entrypoint (P3-05): mirror of `generate_prototype` for the EDIT
     path (AD8). The difference from scaffold is the seed: the ToolContext's
@@ -483,12 +518,17 @@ async def iterate_prototype(
     `view` of an existing file returns its content instead of a not-found error.
     The loop, cache discipline, and Figma-token injection are identical.
 
-    `mode` is the tool-partition value threaded into `agent_loop` (and, once
-    P3-07 lands, into `tools_for_mode`). The canonical iterate value is
-    `'execute'`, NEVER `'iterate'` — P3-07 partitions on `scaffold`/`plan`/
-    `execute`. The `mode="iterate"` string below is a DIFFERENT thing: the
-    cost-log identifier (telemetry), distinguishing iterate runs from scaffold
-    runs in the structured log, independent of the tool-partition mode.
+    `mode` is the tool-partition value threaded into `agent_loop` (and through to
+    `tools_for_mode`, P3-07). The canonical values are `'execute'` (default) and
+    `'plan'` (the AD10 explore-only run). NEVER `'iterate'` — P3-07 partitions on
+    `scaffold`/`plan`/`execute`. The `mode="iterate"` string below is a DIFFERENT
+    thing: the cost-log identifier (telemetry), distinguishing iterate runs from
+    scaffold runs in the structured log, independent of the tool-partition mode.
+
+    `approved_plan` (P3-07 Plan->Execute transition): when set (the confirm-plan
+    path passes the approved plan text), it is prepended to `system_blocks` as a
+    leading addendum so the EXECUTE run is told exactly what the team approved. It
+    is None for a plain re-prompt iterate and for plan-mode runs.
 
     Returns `(result, virtual_fs)` — the post-run virtual_fs (seed + the agent's
     edits) for the caller's iterate-staging path (`_stage_iterate_run`).
@@ -502,8 +542,13 @@ async def iterate_prototype(
         figma_file_key=figma_file_key,
         figma_access_token=_resolve_figma_access_token(figma_file_key),
     )
+    effective_system_blocks = (
+        prepend_plan_addendum(system_blocks, approved_plan)
+        if approved_plan and approved_plan.strip()
+        else system_blocks
+    )
     result = await agent_loop(
-        system_blocks=system_blocks,
+        system_blocks=effective_system_blocks,
         user_message=user_message,
         ctx=ctx,
         scenario=scenario,

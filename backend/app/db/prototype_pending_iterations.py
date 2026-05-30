@@ -110,12 +110,20 @@ def enqueue_iteration(
     prompt: str,
     applied_comment_id: int | None = None,
     mode: str = "execute",
+    plan: str | None = None,
 ) -> dict[str, Any]:
     """Insert a 'pending' iteration row and return it WITH a derived
     `queue_position`. Raises `QueueFullError` when `_QUEUE_CAP` active
     (pending + running) iterations already exist for this prototype (AD11 cap).
 
     The cap is checked BEFORE insert, so the 6th enqueue never lands a row.
+
+    `plan` (P3-07): the APPROVED plan text for a confirm-plan execute row — it is
+    prepended to the EXECUTE run's system blocks as an addendum. Left None for a
+    plain re-prompt iterate and for plan-mode rows (whose plan is written AFTER the
+    run by `set_iteration_plan`). The `plan` key is only included in the insert
+    when non-None, so callers running against a schema without the `plan` column
+    (e.g. pre-migration test DDLs) are unaffected.
     """
     c = require_client()
     active = _active_rows(c, prototype_id=prototype_id, workspace_id=workspace_id)
@@ -123,14 +131,17 @@ def enqueue_iteration(
         raise QueueFullError(
             f"queue full: {len(active)} active iterations for prototype {prototype_id}"
         )
-    resp = c.table(_TABLE).insert({
+    payload: dict[str, Any] = {
         "prototype_id": prototype_id,
         "workspace_id": workspace_id,
         "prompt": prompt,
         "applied_comment_id": applied_comment_id,
         "mode": mode,
         "status": "pending",
-    }).execute()
+    }
+    if plan is not None:
+        payload["plan"] = plan
+    resp = c.table(_TABLE).insert(payload).execute()
     row = resp.data[0]
     # Re-read the active set (now includes the new row) and derive position over it.
     rows = _active_rows(c, prototype_id=prototype_id, workspace_id=workspace_id)
@@ -212,6 +223,27 @@ def mark_iteration_failed(*, iteration_id: int, workspace_id: str, error: str) -
     logger.info(
         "iteration_failed iteration_id=%s error_class=%s",
         iteration_id, (error or "").split(":", 1)[0][:80],
+    )
+
+
+def set_iteration_plan(*, iteration_id: int, workspace_id: str, plan: str) -> None:
+    """Persist the textual plan a PLAN-mode run emitted onto its queue row (P3-07).
+
+    Written AFTER a plan run completes (the plan is the run's output). Workspace-
+    filtered. Stores the plan only — never a checkpoint, never a bundle (a plan run
+    builds nothing). The plan body can echo PRD/source content, so it is NOT logged
+    (Rule #24); only the identifier + length go to the log line."""
+    c = require_client()
+    (
+        c.table(_TABLE)
+        .update({"plan": plan})
+        .eq("id", iteration_id)
+        .eq("workspace_id", workspace_id)
+        .execute()
+    )
+    logger.info(
+        "iteration_plan_saved iteration_id=%s plan_chars=%s",
+        iteration_id, len(plan or ""),
     )
 
 

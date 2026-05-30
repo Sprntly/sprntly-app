@@ -990,17 +990,22 @@ def get_comments_public(token: str) -> list[CommentOut]:
 # `advance_current_checkpoint` helper — not merged yet, so this leaves that
 # advance as the documented seam (`_advance_current_checkpoint_seam`).
 #
-# Scope (P3-05): EXECUTE mode only. `mode='plan'` is ACCEPTED but treated as
-# execute here — the real plan/execute tool split is P3-07. Concurrency / queueing
-# is P3-06 (this fires a single bg task). Tools are append-only: this block is at
-# the EOF of the route file; no existing handler is modified.
-from app.design_agent.prompts import DESIGN_AGENT_ITERATE_SYSTEM, render_iterate_user
+# Mode (P3-05 → P3-07): EXECUTE is the default; `mode='plan'` is now FULLY wired
+# (P3-07) — the plan/execute tool split + the distinct plan system prompt + the
+# Plan→Execute transition (`POST /{id}/iterate/confirm-plan`) all land here.
+# Concurrency / queueing is P3-06 (the queue serialises plan + execute runs alike).
+from app.design_agent.prompts import (
+    DESIGN_AGENT_ITERATE_SYSTEM,
+    DESIGN_AGENT_PLAN_SYSTEM,
+    render_iterate_user,
+)
 from app.design_agent.runner import drain_iteration_queue, iterate_prototype
 from app.design_agent.storage import read_source_files_for_checkpoint
 from app.db.prototype_pending_iterations import (
     QueueFullError,
     enqueue_iteration,
     queue_position,
+    set_iteration_plan,
 )
 
 
@@ -1074,11 +1079,73 @@ async def post_iterate(
     )
 
 
+class ConfirmPlanRequest(BaseModel):
+    """Plan->Execute transition body (P3-07, AD10). The team reviewed the plan a
+    `mode='plan'` run emitted and approved (or refined) it; `plan` carries the
+    approved text back, `prompt` is the iterate request the plan was for."""
+    prompt: str = Field(..., min_length=1, max_length=8000)
+    plan: str = Field(..., min_length=1, max_length=8000)
+    applied_comment_id: int | None = None
+
+
+@router.post("/{prototype_id}/iterate/confirm-plan", response_model=IterateResponse)
+async def post_confirm_plan(
+    prototype_id: int,
+    body: ConfirmPlanRequest,
+    session: dict = Depends(require_app_session),
+) -> IterateResponse:
+    """Plan->Execute transition (P3-07, AD10): run the approved plan in EXECUTE mode.
+
+    Same gates/posture as POST /iterate (feature-flag 404, require_app_session 401,
+    workspace 404, locked/not-ready 409, full-queue 429). Enqueues an EXECUTE
+    iteration carrying the approved plan on the queue row's `plan` column; the drain
+    prepends it to the run's system blocks as an addendum (`approved_plan`). Returns
+    in <200ms — no Anthropic call in the request path.
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    if proto.get("is_complete"):
+        raise HTTPException(status_code=409, detail="Prototype is locked; Resume Iteration first")
+    if proto.get("status") != "ready":
+        raise HTTPException(status_code=409, detail="Prototype not ready to iterate")
+
+    try:
+        row = enqueue_iteration(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            prompt=body.prompt,
+            applied_comment_id=body.applied_comment_id,
+            mode="execute",          # the confirm always runs in EXECUTE mode
+            plan=body.plan,          # approved plan -> prepended as a system addendum
+        )
+    except QueueFullError:
+        raise HTTPException(status_code=429, detail={"error": "queue_full", "max": 5})
+
+    logger.info("prototype_plan_confirmed prototype_id=%s iteration_id=%s", prototype_id, row["id"])
+    task = asyncio.create_task(
+        drain_iteration_queue(prototype_id=prototype_id, workspace_id=workspace_id)
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return IterateResponse(
+        prototype_id=prototype_id,
+        status="generating",
+        queue_position=row["queue_position"],
+    )
+
+
 async def _run_iterate_bg(
     *,
     prototype_id: int,
     workspace_id: str,
     body: IterateRequest,
+    approved_plan: str | None = None,
+    iteration_id: int | None = None,
 ) -> None:
     """Background iterate run: load the current bundle + open comments, render the
     iterate prompts (cache-disciplined), run the agent loop, then stage the result
@@ -1089,6 +1156,16 @@ async def _run_iterate_bg(
     (P2-04 — positional args, async, storage-path read, NOT workspace-filtered) to
     pre-fill the agent's virtual_fs. On any exception the row is marked failed in
     the existing Sprntly error format; the prior bundle_url is preserved.
+
+    PLAN vs EXECUTE (P3-07, AD10), keyed on `body.mode`:
+      - 'plan'    : uses DESIGN_AGENT_PLAN_SYSTEM + the plan tool registry (no
+                    write/line_replace). On completion the emitted textual plan is
+                    persisted to the queue row (`set_iteration_plan`, needs
+                    `iteration_id`) and the run stages NOTHING — a plan builds no
+                    bundle and advances no checkpoint (AC6). A plan run NEVER fails
+                    the prototype row: the bundle is untouched.
+      - 'execute' : the existing path. `approved_plan` (set by the confirm-plan
+                    transition) is prepended to the system blocks as an addendum.
     """
     try:
         proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
@@ -1132,9 +1209,14 @@ async def _run_iterate_bg(
         # System block(s) cached at the END of the stable prefix (AD2), mirroring
         # _run_generation_bg. The bundle+comments user prefix is cached too (its
         # last block carries cache_control); the volatile prompt block does not.
+        # PLAN mode swaps in the distinct plan/discuss system prompt (AD10); the
+        # explore-only tool registry is selected downstream by mode in agent_loop.
+        system_text = (
+            DESIGN_AGENT_PLAN_SYSTEM if body.mode == "plan" else DESIGN_AGENT_ITERATE_SYSTEM
+        )
         system_blocks = [{
             "type": "text",
-            "text": DESIGN_AGENT_ITERATE_SYSTEM,
+            "text": system_text,
             "cache_control": {"type": "ephemeral", "ttl": "1h"},
         }]
         user_message = {"role": "user", "content": [*cacheable_blocks, volatile_block]}
@@ -1156,11 +1238,36 @@ async def _run_iterate_bg(
             current_source=current_source,
             figma_file_key=figma_file_key,
             scenario=scenario_label,
-            # EXECUTE mode for tool partitioning (P3-05 is execute-only; 'plan' is
-            # accepted on the request but runs as execute until P3-07 wires the
-            # real split). Canonical 'execute', never 'iterate' (AD17 / P3-07).
-            mode="execute",
+            # Tool-partition mode (AD17 / P3-07): canonical 'plan' or 'execute',
+            # never 'iterate'. agent_loop -> tools_for_mode selects the registry.
+            mode=body.mode,
+            # Plan->Execute transition: the approved plan (if any) is prepended to
+            # the system blocks as an addendum inside iterate_prototype.
+            approved_plan=approved_plan,
         )
+
+        # PLAN mode (AD10): persist the emitted plan, stage NOTHING (no checkpoint,
+        # no bundle — a plan builds nothing, AC6). A plan run never fails the
+        # prototype row; the bundle is untouched regardless of run status.
+        if body.mode == "plan":
+            if result.status == "complete":
+                plan_text = _extract_plan_text(result.final_content)
+                if iteration_id is not None and plan_text:
+                    set_iteration_plan(
+                        iteration_id=iteration_id,
+                        workspace_id=workspace_id,
+                        plan=plan_text,
+                    )
+                logger.info(
+                    "prototype_plan_run_complete prototype_id=%s iteration_id=%s plan_chars=%s",
+                    prototype_id, iteration_id, len(plan_text),
+                )
+            else:
+                logger.warning(
+                    "prototype_plan_run_incomplete prototype_id=%s iteration_id=%s status=%s",
+                    prototype_id, iteration_id, result.status,
+                )
+            return
 
         if result.status == "complete" and virtual_fs:
             await _stage_iterate_run(
@@ -1228,7 +1335,28 @@ async def _run_one_iteration(row: dict[str, Any]) -> None:
         prototype_id=row["prototype_id"],
         workspace_id=row["workspace_id"],
         body=body,
+        # P3-07: the queue row's `plan` column is the APPROVED plan for a confirm
+        # row (prepended as a system addendum in execute mode) AND the write target
+        # for a plan-mode run's emitted plan. `iteration_id` lets the plan branch
+        # persist back to this row. `.get` tolerates pre-migration schemas (None).
+        approved_plan=row.get("plan"),
+        iteration_id=row.get("id"),
     )
+
+
+def _extract_plan_text(final_content: list[dict[str, Any]]) -> str:
+    """Concatenate the text blocks of a plan run's final assistant turn (P3-07).
+
+    The plan IS the final assistant message's text (plan mode ends its turn with
+    the plan and no tool calls). Non-text blocks (there should be none on a clean
+    plan turn) are ignored. Returns a stripped string; empty when the turn had no
+    text (an abnormal plan run — the caller logs and skips persistence)."""
+    parts = [
+        b.get("text", "")
+        for b in (final_content or [])
+        if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    return "\n".join(p for p in parts if p).strip()
 
 
 async def _stage_iterate_run(
