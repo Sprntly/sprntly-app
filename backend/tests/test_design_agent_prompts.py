@@ -42,10 +42,11 @@ def _section(n: int) -> str:
 
 # ---- creation ---------------------------------------------------------------
 
-def test_template_version_is_3():
-    # P3-05 bumped the template version to 3 (HEAD was 1 on the release branch;
-    # the iterate-aware template family invalidates cached prototypes). See
-    # test_design_agent_iterate.py::test_template_version_is_3 (AC2).
+def test_template_version_is_current():
+    # v2 = scaffold-completeness chore #65 (inventory synced to the real vendored
+    # prototype-runtime/src/components/ui/* set); v3 = P3-05 iterate spine (the
+    # iterate-aware template family lands). Both invalidate cached prototypes so
+    # they regenerate. See test_design_agent_iterate.py::test_template_version_is_3 (AC2).
     assert p.DESIGN_AGENT_TEMPLATE_VERSION == 3
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
 
