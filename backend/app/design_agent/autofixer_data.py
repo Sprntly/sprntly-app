@@ -17,6 +17,16 @@ from __future__ import annotations
 # shadcn/ui registry — component names importable as `@/components/ui/<name>`.
 # An import of `@/components/ui/<name>` where <name> is NOT here is flagged as a
 # hallucinated component (the agent invented a component that was never installed).
+#
+# CANONICAL SOURCE = the scaffold's on-disk inventory
+# (`prototype-runtime/src/components/ui/*.tsx`). This list MUST equal the set of
+# files vendored there, or the autofixer passes an import that then fails
+# `vite build` — exactly the bug fixed in the scaffold-completeness chore
+# (2026-05-30): the registry advertised components the scaffold never shipped
+# (incl. `sidebar`), so a converged generation that imported them built red.
+# `tests/test_design_agent_scaffold_sync.py` enforces `SHADCN_REGISTRY ==
+# on-disk` so this class of drift can't recur: add a component to the scaffold
+# AND here in the same change, or neither.
 SHADCN_REGISTRY: frozenset[str] = frozenset({
     "accordion", "alert", "alert-dialog", "aspect-ratio", "avatar", "badge",
     "breadcrumb", "button", "calendar", "card", "carousel", "checkbox",
@@ -24,7 +34,7 @@ SHADCN_REGISTRY: frozenset[str] = frozenset({
     "dropdown-menu", "form", "hover-card", "input", "input-otp", "label",
     "menubar", "navigation-menu", "pagination", "popover", "progress",
     "radio-group", "resizable", "scroll-area", "select", "separator", "sheet",
-    "sidebar", "skeleton", "slider", "sonner", "switch", "table", "tabs",
+    "skeleton", "slider", "sonner", "switch", "table", "tabs",
     "textarea", "toast", "toaster", "toggle", "toggle-group", "tooltip",
 })
 
@@ -38,6 +48,12 @@ KNOWN_PACKAGES: frozenset[str] = frozenset({
     "react", "react-dom", "react-router-dom",
     "clsx", "tailwind-merge", "class-variance-authority",
     "lucide-react", "date-fns", "zod",
+    # The shadcn `form` component is a thin wrapper over react-hook-form: a
+    # prototype that uses it imports `useForm` from "react-hook-form" (and
+    # often `zodResolver` from "@hookform/resolvers/zod") DIRECTLY in addition
+    # to the `@/components/ui/form` re-exports. Both are vendored into the
+    # scaffold's package.json, so allow them.
+    "react-hook-form", "@hookform/resolvers",
     "@radix-ui/react-slot",
 })
 
