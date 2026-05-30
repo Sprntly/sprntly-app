@@ -35,10 +35,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.db.prototype_comments import mark_comments_orphaned
 from app.design_agent.autofixer import format_errors_for_agent
 from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
@@ -55,6 +57,84 @@ MODEL = "claude-sonnet-4-6"  # AD2; NEVER claude-sonnet-4-7
 DEFAULT_MAX_ITERS = 40
 DEFAULT_MAX_TOKENS = 4096
 TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
+
+# ── AD12 orphan / re-attach: anchor-id extraction from the BUILT bundle ──────
+#
+# N2 — cross-language width coupling. This MUST equal `HASH_HEX_LENGTH` in
+# `prototype-runtime/vite-plugin-anchor-id.ts` (P0-02), which emits
+# `data-anchor-id` via `.slice(0, HASH_HEX_LENGTH)` at BUILD time. The agent
+# NEVER emits `data-anchor-id` itself (AD4) — only the Vite plugin does, so the
+# raw virtual_fs has no anchors and extraction MUST run over `vite_build`'s
+# output. If the plugin's width ever changes, update this constant in lockstep:
+# a stale width makes `_ANCHOR_ID_RE` silently match nothing, which would orphan
+# EVERY open comment on the next build. A single named site (here) makes that a
+# loud one-line change instead of a silent regex break.
+_ANCHOR_HEX_WIDTH = 8
+
+# Built from the width constant (N2) rather than a bare `{8}` literal. Matches
+# both the plain attribute form (`data-anchor-id="abc12345"`) and the
+# JS-string-escaped form (`data-anchor-id=\"abc12345\"`) Vite may emit when the
+# attribute lands inside a bundled JS string literal.
+_ANCHOR_ID_RE = re.compile(
+    rf'data-anchor-id=(?:"|\\")([0-9a-f]{{{_ANCHOR_HEX_WIDTH}}})(?:"|\\")'
+)
+
+
+def extract_anchor_ids(dist_files: dict[str, str]) -> set[str]:
+    """Return the distinct set of `data-anchor-id` values present across all
+    built dist files. Pure; deterministic; no LLM, no network.
+
+    The regex matches both the plain (`data-anchor-id="abc12345"`) and the
+    escaped-in-JS-string (`data-anchor-id=\\"abc12345\\"`) forms, since Vite may
+    emit the attribute inside a bundled JS string literal. Width is the
+    `_ANCHOR_HEX_WIDTH` constant (coupled to P0-02's `HASH_HEX_LENGTH`).
+
+    AD4-collision ([[ad4-collision-by-design]]): when the same anchor id appears
+    on multiple elements (structurally-identical subtrees hash-collide), it is
+    returned ONCE — set membership, not per-element. A comment on a collided id
+    survives iff that id appears anywhere in the new bundle.
+    """
+    found: set[str] = set()
+    for content in dist_files.values():
+        found.update(_ANCHOR_ID_RE.findall(content))
+    return found
+
+
+def reconcile_comments_on_checkpoint(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    dist_files: dict[str, str],
+) -> int:
+    """AD12: after a new checkpoint's bundle is built, orphan every OPEN comment
+    whose anchor_id is absent from the new bundle's surviving anchor IDs. Returns
+    the count orphaned. Workspace-filtered (the prototype being regenerated is
+    known — NOT a cross-workspace sweep).
+
+    A comment whose anchor SURVIVES is left 'open' (re-attached implicitly — the
+    anchor_id is unchanged, so P3-03's pin re-renders against the same id). AD4
+    guarantees an unmodified element's anchor id is byte-identical across builds,
+    so survival is exact-string membership, not fuzzy matching. There is no
+    explicit un-orphan step: orphaning is one-way in P3 (a later build that
+    re-introduces a deleted element does NOT auto-revive its comment).
+
+    Called on EVERY new checkpoint build — the GENERATE staging path
+    (`_stage_complete_run`) and the ITERATE staging path (`_stage_iterate_run`).
+    It keys on `prototype_id` (not `checkpoint_id`), so it is build-path-agnostic.
+    Callers wrap this best-effort: a reconcile failure must NOT fail the build.
+    """
+    surviving = extract_anchor_ids(dist_files)
+    orphaned = mark_comments_orphaned(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        surviving_anchor_ids=surviving,
+    )
+    # Identifiers + counts only (Rule #24) — never anchor values or comment body.
+    logger.info(
+        "comments_reconciled prototype_id=%s surviving_anchors=%s orphaned=%s",
+        prototype_id, len(surviving), orphaned,
+    )
+    return orphaned
 
 # Pricing constants + RunUsage live in app.llm_telemetry — shared across
 # every LLM call site in the repo. design_agent/runner.py only consumes
