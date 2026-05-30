@@ -245,24 +245,113 @@ def all_tools() -> list[ToolDef]:
 
 
 def tool_definitions_for_api() -> list[dict[str, Any]]:
-    """Serialised shape for the Anthropic Messages API `tools=` field."""
+    """Serialised shape for the Anthropic Messages API `tools=` field.
+
+    Back-compat alias (P3-07): equivalent to the EXECUTE-mode registry. P1's
+    callers imported this unconditional serialiser before mode partitioning
+    existed; it stays as `tool_definitions_for_mode("execute")` so they keep
+    working while they migrate to the explicit mode-aware call. New call sites
+    MUST use `tool_definitions_for_mode(mode)` — never this alias."""
+    return tool_definitions_for_mode("execute")
+
+
+# ─── AD17 mode-partitioned registry assembly (P3-07) ──────────────────────────
+#
+# AD17's rule is "6 action tools (fixed) + ≤4 exit-sentinel tools" — a split,
+# NOT a flat ≤7. The cap is enforced PER MODE: action-count ≤6 AND sentinel-count
+# ≤4. PLAN mode runs an explore-only subset of the action tools (no write /
+# line_replace — Plan mode CANNOT mutate by construction, AD10 "mode is state,
+# not a request"); EXECUTE / SCAFFOLD run all 6. Sentinels (clarifying_question
+# from P3-08, propose_prd_patch from P3-09) are appended to SENTINEL_TOOLS by
+# those tickets and filtered per mode here.
+
+PLAN_ACTION_TOOLS: list[ToolDef] = [VIEW, SEARCH, FETCH_FIGMA, READ_CONSOLE]  # no write/line_replace
+EXECUTE_ACTION_TOOLS: list[ToolDef] = ACTION_TOOLS                            # all 6
+
+# The canonical tool-partition mode strings. NOTE: 'iterate' is NOT one of them —
+# it is P3-05's cost-log telemetry label, not a tool-partition mode. A caller that
+# passes any non-canonical value (incl. the legacy 'iterate' label) is treated as
+# 'execute' by `tools_for_mode`'s else branch, but callers MUST pass one of these.
+_PARTITION_MODES = ("scaffold", "plan", "execute")
+
+
+def tools_for_mode(mode: str) -> list[ToolDef]:
+    """Return the tool registry for a run mode. AD17's split is enforced PER MODE:
+      - 'plan'    : explore-only action tools (view/search/fetch_figma/read_console)
+                    + plan-safe sentinels (clarifying_question). No write/line_replace.
+      - 'execute' : all 6 action tools + all sentinels.
+      - 'scaffold': all 6 action tools + scaffold-safe sentinels (clarifying_question;
+                    NOT propose_prd_patch — there is no PRD-edit step at scaffold).
+    Any other mode value (incl. the legacy 'iterate' telemetry label) is treated
+    as 'execute'.
+
+    The returned registry is FROZEN for the duration of a run (the runner computes
+    it ONCE before the tool-use loop and never mutates it mid-loop): a mid-run tool
+    change would invalidate the prompt cache (agent-build-research.md §3.4). The
+    per-mode invariant (action ≤6, sentinel ≤4) is asserted on every call so a bad
+    future append fails loud rather than silently shipping an over-budget registry."""
+    if mode == "plan":
+        action = PLAN_ACTION_TOOLS
+        sentinels = [t for t in SENTINEL_TOOLS if t.name == "clarifying_question"]
+    elif mode == "scaffold":
+        action = EXECUTE_ACTION_TOOLS
+        sentinels = [t for t in SENTINEL_TOOLS if t.name == "clarifying_question"]
+    else:  # 'execute' (and any non-canonical value, defensively)
+        action = EXECUTE_ACTION_TOOLS
+        sentinels = list(SENTINEL_TOOLS)
+    registry = [*action, *sentinels]
+    # AD17 per-mode invariant — action ≤6 AND sentinel ≤4 (NOT a flat ≤7).
+    assert sum(1 for t in registry if t.category == "action") <= 6, "AD17: ≤6 action tools per mode"
+    assert sum(1 for t in registry if t.category == "sentinel") <= 4, "AD17: ≤4 sentinel tools per mode"
+    return registry
+
+
+def tool_definitions_for_mode(mode: str) -> list[dict[str, Any]]:
+    """Serialised (Anthropic `tools=` shape) registry for a run mode. The
+    mode-aware counterpart to `tool_definitions_for_api`; the runner calls this
+    once at run start with the run's mode."""
     return [
         {"name": t.name, "description": t.description, "input_schema": t.input_schema}
-        for t in all_tools()
+        for t in tools_for_mode(mode)
     ]
 
 
 # ─── Dispatch ─────────────────────────────────────────────────────────────
 
 
-async def dispatch(name: str, input: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+def _unknown_tool_error(name: str, registered: list[str]) -> dict[str, Any]:
+    return {
+        "is_error": True,
+        "content": f"Unknown tool: {name!r}. Registered tools: {registered}",
+        "tool_name": name,
+    }
+
+
+async def dispatch(
+    name: str,
+    input: dict[str, Any],
+    ctx: ToolContext,
+    allowed_names: set[str] | None = None,
+) -> dict[str, Any]:
     """Look up a tool by name and execute it. Returns the tool_result content.
+
+    `allowed_names` (P3-07, AD10): when provided — the runner passes the
+    mode-partitioned registry's tool names, FROZEN at run start — a tool_use whose
+    name is NOT in that set is rejected with an "Unknown tool" `is_error` WITHOUT
+    executing. This is the "plan mode is state, not a request" guarantee
+    (agent-build-research.md §4.5): even if the model hallucinates a `write` in
+    PLAN mode (where the registry omits it), dispatch never runs the executor, so
+    the virtual_fs is untouched. When `allowed_names` is None (the default — direct
+    unit-test calls), no mode gate is applied and the global `all_tools()` registry
+    governs.
 
     On any execute exception, returns an `is_error: true` payload with the
     failure class + message (NOT the traceback) so the agent can recover
     per agent-build-research.md §4.1. The runner is responsible for
     formatting this into the Anthropic `tool_result` block shape.
     """
+    if allowed_names is not None and name not in allowed_names:
+        return _unknown_tool_error(name, sorted(allowed_names))
     for t in all_tools():
         if t.name == name:
             try:
@@ -273,14 +362,7 @@ async def dispatch(name: str, input: dict[str, Any], ctx: ToolContext) -> dict[s
                     "content": f"{type(exc).__name__}: {exc}",
                     "tool_name": name,
                 }
-    return {
-        "is_error": True,
-        "content": (
-            f"Unknown tool: {name!r}. Registered tools: "
-            f"{[t.name for t in all_tools()]}"
-        ),
-        "tool_name": name,
-    }
+    return _unknown_tool_error(name, [t.name for t in all_tools()])
 
 
 # ─── Execute implementations (short by design; descriptions carry the weight) ─

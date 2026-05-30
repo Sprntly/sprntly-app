@@ -344,7 +344,7 @@ def _install_client(monkeypatch, responses):
 
 
 def test_runner_invokes_autofixer_after_write_tsx(monkeypatch):
-    async def fake_dispatch(name, inp, ctx):
+    async def fake_dispatch(name, inp, ctx, allowed_names=None):
         ctx.virtual_fs[inp["path"]] = inp.get("content", "")
         return {"content": "wrote", "path": inp["path"]}
 
@@ -372,7 +372,7 @@ def test_runner_invokes_autofixer_after_write_tsx(monkeypatch):
 def test_runner_skips_autofixer_for_write_ts_failure(monkeypatch):
     calls = []
 
-    async def fail_dispatch(name, inp, ctx):
+    async def fail_dispatch(name, inp, ctx, allowed_names=None):
         return {"is_error": True, "content": "write failed"}
 
     async def spy_autofixer(file_path, content, vfs):
@@ -393,7 +393,7 @@ def test_runner_skips_autofixer_for_write_ts_failure(monkeypatch):
 def test_runner_skips_autofixer_for_non_tsx_files(monkeypatch):
     calls = []
 
-    async def fake_dispatch(name, inp, ctx):
+    async def fake_dispatch(name, inp, ctx, allowed_names=None):
         ctx.virtual_fs[inp["path"]] = inp.get("content", "")
         return {"content": "wrote", "path": inp["path"]}
 
