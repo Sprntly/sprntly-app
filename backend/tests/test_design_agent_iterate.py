@@ -369,6 +369,23 @@ CREATE TABLE prototype_comments (
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
 );
+-- P3-06: POST /iterate now enqueues into the message queue, so the route tests
+-- below need this table in the fake schema (the handler no longer fires a raw
+-- bg task). The _run_iterate_bg unit tests call the body directly and don't.
+CREATE TABLE prototype_pending_iterations (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id       INTEGER NOT NULL,
+    workspace_id       TEXT NOT NULL,
+    prompt             TEXT NOT NULL,
+    applied_comment_id INTEGER,
+    mode               TEXT NOT NULL DEFAULT 'execute',
+    status             TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'running', 'done', 'failed')),
+    error              TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at         TEXT,
+    finished_at        TEXT
+);
 """
 
 

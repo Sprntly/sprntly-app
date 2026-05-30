@@ -12,6 +12,7 @@ from app.db.prototypes import (
     invalidate_orphan_generating_prototypes,
     invalidate_stale_prototypes,
 )
+from app.db.prototype_pending_iterations import invalidate_orphan_running_iterations
 from app.design_agent.prompts import DESIGN_AGENT_TEMPLATE_VERSION
 from app.prompts import (
     ASK_CACHE_VERSION,
@@ -105,6 +106,13 @@ async def lifespan(app: FastAPI):
             proto_orphans,
             proto_stale,
         )
+    # Design Agent (P3-06, AD11): demote orphaned 'running' iterations (the worker
+    # task died with the previous process) so a restart recovers the iterate queue.
+    # Sync helper, across ALL workspaces — system-wide cleanup, not user-driven
+    # (Rule #23) — mirroring the prototype orphan-clear above.
+    iter_orphans = invalidate_orphan_running_iterations()
+    if iter_orphans:
+        logger.info("Invalidated %d orphan running iteration(s)", iter_orphans)
     # Kick off brief generation in the background so the service starts fast.
     # auto_generate_all is idempotent: it skips datasets that already have a
     # cached brief in SQLite at the current schema version.

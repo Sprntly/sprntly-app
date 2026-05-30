@@ -41,6 +41,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.db.prototype_comments import mark_comments_orphaned
+from app.db.prototype_pending_iterations import (
+    dequeue_next,
+    mark_iteration_done,
+    mark_iteration_failed,
+)
 from app.design_agent.autofixer import format_errors_for_agent
 from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
@@ -523,3 +528,53 @@ async def iterate_prototype(
         iters=result.iters,
     )
     return result, ctx.virtual_fs
+
+
+async def drain_iteration_queue(*, prototype_id: int, workspace_id: str) -> None:
+    """Serially drain the pending-iteration queue for a prototype (AD11, P3-06).
+
+    Pops the OLDEST pending row, marks it 'running' (`dequeue_next`), runs it
+    through the P3-05 iterate body, marks it 'done' (or 'failed'), then chains the
+    next pending row via `asyncio.create_task` until the queue is empty. At most
+    ONE iteration runs at a time per prototype — each `_run_one_iteration` is
+    awaited to completion BEFORE the next is dequeued, so there is never more than
+    one 'running' row. A failed iteration marks its row 'failed' and the drain
+    CONTINUES to the next pending row (one bad prompt does not stall the queue).
+
+    Idempotent kick: if there is no pending row (e.g. the queue is already being
+    drained, or it is empty), this no-ops — so the route can fire it on every
+    enqueue without spawning a second concurrent drain.
+
+    Deferred import (`_run_one_iteration`, `_inflight_tasks`): the routes module
+    imports this function at load time, so a top-level `import app.routes...` here
+    would be a cycle. The function-local import is the established break in this
+    codebase (mirrors `_resolve_figma_access_token` and
+    `db.prototypes.record_export_at_complete`). `_run_one_iteration` owns the real
+    iterate body; `_inflight_tasks` is the route's strong-ref set (AC9).
+    """
+    row = dequeue_next(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        return
+    from app.routes.design_agent import _inflight_tasks, _run_one_iteration
+    try:
+        await _run_one_iteration(row)
+        mark_iteration_done(iteration_id=row["id"], workspace_id=workspace_id)
+    except Exception as exc:  # noqa: BLE001 — one bad iteration must not stall the queue.
+        mark_iteration_failed(
+            iteration_id=row["id"],
+            workspace_id=workspace_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        logger.warning(
+            "iteration_failed prototype_id=%s iteration_id=%s error_class=%s",
+            prototype_id, row["id"], type(exc).__name__,
+        )
+    # Chain the next pending iteration. Strong-ref discipline (AC9): hold the task
+    # in the route's _inflight_tasks set + discard on done, so it is never GC'd
+    # mid-run. The chained drain no-ops if the queue is now empty (the `if not row`
+    # guard above), so chaining terminates.
+    nxt = asyncio.create_task(
+        drain_iteration_queue(prototype_id=prototype_id, workspace_id=workspace_id)
+    )
+    _inflight_tasks.add(nxt)
+    nxt.add_done_callback(_inflight_tasks.discard)
