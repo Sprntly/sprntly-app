@@ -477,6 +477,14 @@ export type PrototypeRecord = {
   status: "generating" | "ready" | "failed" | "invalidated"
   bundle_url: string | null
   error: string | null
+  // ── P2-12 (append-only): F14/F15 + F6 columns added by the P2-06 sharing
+  //    migration. GET /v1/design-agent/{id} does `select("*")`, so the row
+  //    carries these. Typed OPTIONAL so existing `PrototypeRecord` literals
+  //    (e.g. the runDesignAgentGeneration test's `proto()` base) keep
+  //    typechecking; consumers default with `?? …` for older/partial rows.
+  is_complete?: boolean
+  share_mode?: "private" | "public" | "passcode"
+  share_token?: string | null
 }
 
 /** 202 kickoff response from POST /v1/design-agent/generate. */

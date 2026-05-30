@@ -21,6 +21,9 @@
 
 import { useState, type ReactNode } from "react"
 import { DesignAgentDrawer } from "./DesignAgentDrawer"
+import { PostGenerationResult } from "./PostGenerationResult"
+import type { PrototypeRecord } from "../../lib/api"
+import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 
 export type DesignAgentLauncherProps = {
   prdId: number
@@ -34,6 +37,18 @@ export type LauncherDrawerProps = {
   onOpenChange: (open: boolean) => void
   prdId: number
   figmaFileKey?: string | null
+  /** P2-12: drawer reports the terminal generation outcome here so the
+   *  container can mount the post-generation result view. */
+  onGenerated?: (result: DesignAgentGenResult) => void
+}
+
+/** P2-12: maps a generation outcome to launcher result state — the prototype
+ *  on success, null on failure (the drawer's existing toast surfaces the error;
+ *  AC5: no result view on failure). Pure → unit-testable without a DOM. */
+export function resultFromGeneration(
+  result: DesignAgentGenResult,
+): PrototypeRecord | null {
+  return result.ok ? result.prototype : null
 }
 
 /** Default drawer renderer: the real, NavigationContext-wired DesignAgentDrawer. */
@@ -44,19 +59,30 @@ export const defaultRenderDrawer = (props: LauncherDrawerProps): ReactNode => (
 type LauncherViewProps = DesignAgentLauncherProps & {
   open: boolean
   setOpen: (open: boolean) => void
+  /** P2-12: the generated prototype to show post-generation. Null → no result
+   *  view yet (the Generate button is the only chrome). Optional/defaulted so
+   *  existing direct-view test calls keep typechecking. */
+  result?: PrototypeRecord | null
+  /** P2-12: handed to the drawer so a successful generation populates `result`. */
+  onGenerated?: (result: DesignAgentGenResult) => void
   /** Injected in tests so the view renders without NavigationContext. */
   renderDrawer?: (props: LauncherDrawerProps) => ReactNode
 }
 
 /**
  * Pure, SSR-renderable view: the `contentEditable={false}` wrapper, the
- * "Generate Prototype" button, and the (closed-by-default) drawer.
+ * "Generate Prototype" button, the (closed-by-default) drawer, and — once a
+ * generation has succeeded — the editable `PostGenerationResult` chrome. The
+ * result mounts INSIDE the same `contentEditable={false}` boundary so it never
+ * interferes with the PRD body's `contentEditable` (PrdScreen antipattern guard).
  */
 export function DesignAgentLauncherView({
   prdId,
   figmaFileKey,
   open,
   setOpen,
+  result = null,
+  onGenerated,
   renderDrawer = defaultRenderDrawer,
 }: LauncherViewProps) {
   return (
@@ -68,11 +94,13 @@ export function DesignAgentLauncherView({
       >
         Generate Prototype
       </button>
+      {result && <PostGenerationResult prototype={result} />}
       {renderDrawer({
         open,
         onOpenChange: setOpen,
         prdId,
         figmaFileKey,
+        onGenerated,
       })}
     </div>
   )
@@ -91,12 +119,24 @@ export function DesignAgentLauncher({
   renderDrawer?: (props: LauncherDrawerProps) => ReactNode
 }) {
   const [open, setOpen] = useState(false)
+  const [result, setResult] = useState<PrototypeRecord | null>(null)
+
+  // On a successful generation, mount the result view. On failure, leave the
+  // current state intact — the drawer's existing toast surfaces the error and
+  // no result view renders (AC5).
+  const handleGenerated = (outcome: DesignAgentGenResult) => {
+    const next = resultFromGeneration(outcome)
+    if (next) setResult(next)
+  }
+
   return (
     <DesignAgentLauncherView
       prdId={prdId}
       figmaFileKey={figmaFileKey}
       open={open}
       setOpen={setOpen}
+      result={result}
+      onGenerated={handleGenerated}
       renderDrawer={renderDrawer}
     />
   )

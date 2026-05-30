@@ -19,7 +19,10 @@
 import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { designAgentApi } from "../../lib/api"
-import { runDesignAgentGeneration } from "../../lib/runDesignAgentGeneration"
+import {
+  runDesignAgentGeneration,
+  type DesignAgentGenResult,
+} from "../../lib/runDesignAgentGeneration"
 import { IconClose, IconSparkle } from "../shared/app-icons"
 
 export type TargetPlatform = "desktop" | "mobile" | "both"
@@ -29,6 +32,10 @@ export type DesignAgentDrawerProps = {
   onOpenChange: (open: boolean) => void
   prdId: number
   figmaFileKey?: string | null
+  /** P2-12: fired with the terminal generation outcome (ok or failure) so the
+   *  host launcher can mount the post-generation result view. Optional — the
+   *  existing toast flow is unchanged when absent. */
+  onGenerated?: (result: DesignAgentGenResult) => void
 }
 
 /** Initial target-platform selection (AC2). */
@@ -61,6 +68,9 @@ type GenerateFlowDeps = {
   setSubmitting: (value: boolean) => void
   /** F3 opt-in: only toast on ready-completion when the user asked to be notified. */
   notifyOnReady: boolean
+  /** P2-12: receives the terminal poll outcome so the host can render the
+   *  post-generation result view. Optional — absent in the pre-P2-12 flow. */
+  onGenerated?: (result: DesignAgentGenResult) => void
 }
 
 /**
@@ -80,6 +90,7 @@ export async function runGenerateFlow({
   showToast,
   setSubmitting,
   notifyOnReady,
+  onGenerated,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
   try {
@@ -100,6 +111,9 @@ export async function runGenerateFlow({
       } else {
         showToast("Generation failed", result.message)
       }
+      // P2-12: hand the terminal outcome to the host launcher so it can mount
+      // the post-generation result view (success) — failures stay toast-only.
+      onGenerated?.(result)
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error"
@@ -158,6 +172,7 @@ export function DesignAgentDrawerView({
   prdId,
   figmaFileKey,
   showToast,
+  onGenerated,
 }: ViewProps) {
   const [platform, setPlatform] = useState<TargetPlatform>(DEFAULT_PLATFORM)
   const [instructions, setInstructions] = useState("")
@@ -181,6 +196,7 @@ export function DesignAgentDrawerView({
       showToast,
       setSubmitting,
       notifyOnReady,
+      onGenerated,
     })
   }
 

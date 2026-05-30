@@ -4,8 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   DesignAgentLauncher,
   DesignAgentLauncherView,
+  resultFromGeneration,
   type LauncherDrawerProps,
 } from "../DesignAgentLauncher"
+import type { PrototypeRecord } from "../../../lib/api"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
 // esbuild transform defaults to the classic runtime, so expose React globally
@@ -145,5 +147,76 @@ describe("DesignAgentLauncher — open interaction (DI)", () => {
     expect(calls[0].onOpenChange).toBe(setOpen)
     calls[0].onOpenChange(false)
     expect(setOpen).toHaveBeenCalledWith(false)
+  })
+})
+
+describe("DesignAgentLauncher — post-generation result (P2-12)", () => {
+  const samplePrototype: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/bundle/index.html",
+    error: null,
+    is_complete: false,
+    share_mode: "private",
+    share_token: null,
+  }
+
+  it("renders PostGenerationResult once a generation has succeeded (test_launcher_renders_result_on_generation_success)", () => {
+    const { renderDrawer } = makeDrawerSpy()
+    const html = renderToStaticMarkup(
+      React.createElement(DesignAgentLauncherView, {
+        prdId: 1,
+        figmaFileKey: null,
+        open: false,
+        setOpen: noop,
+        result: samplePrototype,
+        renderDrawer,
+      }),
+    )
+    expect(html).toContain('data-testid="post-generation-result"')
+    // The editable chrome (not the public read-only badge) is mounted.
+    expect(html).toContain('data-testid="mark-complete-btn"')
+    expect(html).not.toContain('data-testid="completion-bar-readonly"')
+  })
+
+  it("renders no result view when generation has not succeeded (test_launcher_renders_error_on_generation_failure)", () => {
+    const { renderDrawer } = makeDrawerSpy()
+    const html = renderToStaticMarkup(
+      React.createElement(DesignAgentLauncherView, {
+        prdId: 1,
+        figmaFileKey: null,
+        open: false,
+        setOpen: noop,
+        result: null,
+        renderDrawer,
+      }),
+    )
+    expect(html).not.toContain('data-testid="post-generation-result"')
+    // The Generate affordance remains; the error surfaces via the drawer toast.
+    expect(html).toContain("Generate Prototype")
+  })
+
+  it("forwards onGenerated to the drawer so a success can populate the result", () => {
+    const { calls, renderDrawer } = makeDrawerSpy()
+    const onGenerated = vi.fn()
+    DesignAgentLauncherView({
+      prdId: 1,
+      figmaFileKey: null,
+      open: false,
+      setOpen: noop,
+      onGenerated,
+      renderDrawer,
+    })
+    expect(calls[0].onGenerated).toBe(onGenerated)
+  })
+
+  it("maps a successful outcome to the prototype (resultFromGeneration)", () => {
+    expect(resultFromGeneration({ ok: true, prototype: samplePrototype })).toBe(
+      samplePrototype,
+    )
+  })
+
+  it("maps a failed outcome to null — no result view (AC5)", () => {
+    expect(resultFromGeneration({ ok: false, message: "timed out" })).toBeNull()
   })
 })
