@@ -42,8 +42,11 @@ def _section(n: int) -> str:
 
 # ---- creation ---------------------------------------------------------------
 
-def test_template_version_is_1():
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 1
+def test_template_version_is_current():
+    # Bumped to 2 by the scaffold-completeness chore (2026-05-30) — the inventory
+    # was synced to the real vendored prototype-runtime/src/components/ui/* set,
+    # which invalidates cached prototypes so they regenerate under the real set.
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 2
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 

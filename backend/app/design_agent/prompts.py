@@ -17,7 +17,11 @@ from __future__ import annotations
 
 # ─── Template version (bumped when prompt semantics change) ───────────────
 # AD8: scaffold and iterate (P3-05) have INDEPENDENT version ints.
-DESIGN_AGENT_TEMPLATE_VERSION = 1
+# v2 (2026-05-30, scaffold-completeness chore): inventory synced to the actual
+# vendored prototype-runtime/src/components/ui/* set (added Drawer, InputOTP,
+# Pagination, Resizable, Sonner, Toaster). Bumping invalidates cached prototypes
+# so they regenerate under the real inventory.
+DESIGN_AGENT_TEMPLATE_VERSION = 2
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the
@@ -25,21 +29,22 @@ DESIGN_AGENT_TEMPLATE_VERSION = 1
 # set instead of inventing components that don't exist.
 #
 # Source: shadcn/ui registry (https://ui.shadcn.com/docs/components) — the
-# components that ship with the standard `npx shadcn@latest add` install.
-# This list mirrors what P0-01 wires into prototype-runtime's package.json
-# (or what a fresh prototype install would pull). When prototype-runtime
-# adds/removes a shadcn component, update this list AND bump
-# DESIGN_AGENT_TEMPLATE_VERSION so cached prototypes regenerate under the
-# new inventory.
+# components actually vendored into prototype-runtime/src/components/ui/* by the
+# scaffold-completeness chore. This inventory MUST stay ⊆ that on-disk set AND ⊆
+# autofixer_data.SHADCN_REGISTRY — advertising a component the scaffold does not
+# ship is exactly the drift that broke `vite build`. When prototype-runtime
+# adds/removes a shadcn component, update this list, the registry, AND bump
+# DESIGN_AGENT_TEMPLATE_VERSION. `tests/test_design_agent_scaffold_sync.py`
+# enforces all three stay aligned.
 SHADCN_COMPONENT_INVENTORY = """
 Available shadcn/ui components (import from "@/components/ui/<name>"):
 
 Accordion, Alert, AlertDialog, AspectRatio, Avatar, Badge, Breadcrumb,
 Button, Calendar, Card, Carousel, Checkbox, Collapsible, Command,
-ContextMenu, Dialog, DropdownMenu, Form, HoverCard, Input, Label, Menubar,
-NavigationMenu, Popover, Progress, RadioGroup, ScrollArea, Select,
-Separator, Sheet, Skeleton, Slider, Switch, Table, Tabs, Textarea, Toast,
-Toggle, ToggleGroup, Tooltip.
+ContextMenu, Dialog, Drawer, DropdownMenu, Form, HoverCard, Input, InputOTP,
+Label, Menubar, NavigationMenu, Pagination, Popover, Progress, RadioGroup,
+Resizable, ScrollArea, Select, Separator, Sheet, Skeleton, Slider, Sonner,
+Switch, Table, Tabs, Textarea, Toast, Toaster, Toggle, ToggleGroup, Tooltip.
 
 Icons: lucide-react (any icon from https://lucide.dev — common: ChevronRight,
 X, Plus, Search, Check, AlertCircle, Loader2, User, Settings, Calendar,
