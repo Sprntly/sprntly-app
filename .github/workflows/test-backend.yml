@@ -51,7 +51,11 @@ jobs:
       # tests don't depend on prototype-runtime, so this is purely additive.)
       - name: Install prototype-runtime node_modules (for storage symlink + autofixer + P1-11 smoke)
         working-directory: prototype-runtime
-        run: npm install --no-audit --no-fund
+        # `npm ci` (not `install`) so the real-build @integration tests run against
+        # the exact pinned dep set in package-lock.json — the build the agent runs
+        # in prod must match what CI proves. The scaffold now carries real shadcn/
+        # tailwind deps, so lockfile fidelity is load-bearing.
+        run: npm ci --no-audit --no-fund
 
       - name: Run pytest
         working-directory: backend
