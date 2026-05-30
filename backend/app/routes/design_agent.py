@@ -43,10 +43,12 @@ import os
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
 from app.db.prds import get_prd
+from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
     complete_prototype,
     create_checkpoint,
@@ -593,7 +595,7 @@ class CompleteResponse(BaseModel):
 
 
 @router.post("/{prototype_id}/complete", response_model=CompleteResponse)
-def post_complete(
+async def post_complete(
     prototype_id: int,
     session: dict = Depends(require_app_session),
 ) -> CompleteResponse:
@@ -603,6 +605,11 @@ def post_complete(
     Returns 404 if the prototype is not in the caller's workspace.
     Returns 409 if `status != 'ready'` (cannot mark a generating/failed/invalidated
     prototype complete).
+
+    `async def` because the export-write hook (`record_export_at_complete`,
+    filled in by P2-09) is now async — it awaits the markdown serialiser. The
+    sync DB helpers (`get_prototype`, `mark_complete`) are still called WITHOUT
+    `await` per the CALL-STYLE NOTE; only the export hook is awaited.
     """
     _require_feature_enabled()
     workspace_id = (session.get("aud") or "").strip()
@@ -614,10 +621,11 @@ def post_complete(
     if row["status"] != "ready":
         raise HTTPException(status_code=409, detail=f"Cannot complete: status={row['status']}")
     updated = mark_complete(prototype_id=prototype_id, workspace_id=workspace_id)
-    # P2-09 fills in the export-write hook; P2-07 ships the no-op stub so the
-    # /complete handler has a single integration point (cleaner than P2-09
-    # re-touching the handler later).
-    record_export_at_complete(prototype_id=prototype_id, workspace_id=workspace_id)
+    # P2-09 fills in the export-write hook (async): it generates the markdown
+    # brief and persists it to prototype_exports. Awaited inline so the export
+    # row is committed before the /complete response returns (no fire-and-forget
+    # coroutine — an un-awaited call would silently never insert the row).
+    await record_export_at_complete(prototype_id=prototype_id, workspace_id=workspace_id)
     return CompleteResponse(
         prototype_id=updated["id"],
         is_complete=updated["is_complete"],
@@ -705,3 +713,67 @@ def post_share(
         share_mode=updated["share_mode"],
         share_token=updated.get("share_token"),
     )
+
+
+# ─── Export read (P2-09) ──────────────────────────────────────────────────────
+#
+# F16/F17: return the markdown brief of the locked checkpoint. The /complete
+# handler snapshots the markdown into prototype_exports (record_export_at_complete);
+# this route reads that snapshot, falling back to a fresh serialiser render if the
+# snapshot row is missing (defensive against a partial-failure during /complete).
+# Same gates as the authed routes above: feature-flag (404 when off) +
+# require_app_session (401 without a session) + workspace filter (404 cross-tenant).
+
+
+@router.get("/{prototype_id}/export")
+async def get_export(
+    prototype_id: int,
+    session: dict = Depends(require_app_session),
+) -> Response:
+    """F16/F17: return the markdown export of the locked checkpoint.
+
+    Returns 409 when the prototype is not complete (is_complete=false) per F17.
+    Returns 404 when not in the caller's workspace.
+    Returns 200 with Content-Type: text/markdown; charset=utf-8 and
+    Content-Disposition: attachment; filename="<slug>-design-brief.md".
+    The frontend uses this for both Download .md and Copy to clipboard (it
+    reads the text body and copies via navigator.clipboard.writeText).
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    if not proto.get("is_complete"):
+        # F17: WIP prototypes viewable but not exportable.
+        raise HTTPException(status_code=409, detail="Mark prototype complete first")
+    export_row = find_prototype_export(
+        prototype_id=prototype_id, workspace_id=workspace_id,
+    )
+    if not export_row:
+        # Fallback: regenerate on the fly if the snapshot row is missing
+        # (shouldn't happen under normal flow — /complete writes it — but
+        # defensive against partial-failure during the /complete handler).
+        from app.design_agent.export import render_export_markdown
+        markdown = await render_export_markdown(
+            prototype_id, proto["complete_checkpoint_id"],
+            workspace_id=workspace_id,
+        )
+    else:
+        markdown = export_row["markdown_content"]
+    filename = _export_filename(proto)
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _export_filename(proto: dict[str, Any]) -> str:
+    """Build a safe download filename. Strips non-ascii + replaces spaces.
+    Falls back to prototype-<id> when no slug source available."""
+    import re
+    base = f"prototype-{proto['id']}"
+    return re.sub(r"[^A-Za-z0-9_-]", "-", base) + "-design-brief.md"

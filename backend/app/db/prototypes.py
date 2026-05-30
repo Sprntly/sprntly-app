@@ -606,12 +606,56 @@ def flag_stale_handoff(*, prototype_id: int, workspace_id: str) -> int:
     return 1
 
 
-def record_export_at_complete(*, prototype_id: int, workspace_id: str) -> None:
-    """P2-07 STUB: invoked by POST /complete on success. P2-09 fills it in with
-    the actual serialiser call + prototype_exports row insert. Single integration
-    point — P2-09 does NOT modify the /complete handler.
+async def record_export_at_complete(*, prototype_id: int, workspace_id: str) -> None:
+    """P2-09: fills in P2-07's stub. Generates the markdown via the serialiser
+    and persists to prototype_exports. Idempotent on (prototype_id, checkpoint_id):
+    a re-call after the first Mark Complete on the same checkpoint no-ops.
+
+    Async (P2-07's stub was sync): `render_export_markdown` is async, so the
+    POST /complete handler awaits this. The local imports avoid an import cycle
+    at module load (export.py imports get_prototype from this module).
     """
-    # No-op stub. P2-09 replaces this body with:
-    #   markdown = render_export_markdown(prototype_id, complete_checkpoint_id)
-    #   insert_prototype_export(prototype_id, complete_checkpoint_id, markdown, workspace_id)
-    return
+    from app.design_agent.export import render_export_markdown
+    from app.db.prototype_exports import insert_prototype_export
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        # Race / orphan — log and continue. The /complete handler succeeded;
+        # absence of the row here means the row was deleted between the
+        # handler's get_prototype check and now. Don't raise; the /complete
+        # response is already committed.
+        logger.warning(
+            "record_export_at_complete_skipped prototype_id=%s reason=missing_row",
+            prototype_id,
+        )
+        return
+    checkpoint_id = proto.get("complete_checkpoint_id")
+    if not checkpoint_id:
+        # Should never happen — mark_complete sets complete_checkpoint_id —
+        # but defensive against a future change to mark_complete semantics.
+        logger.warning(
+            "record_export_at_complete_skipped prototype_id=%s reason=no_checkpoint",
+            prototype_id,
+        )
+        return
+    try:
+        markdown = await render_export_markdown(
+            prototype_id=prototype_id,
+            checkpoint_id=checkpoint_id,
+            workspace_id=workspace_id,
+        )
+    except ValueError as exc:
+        # Serialiser failure (missing PRD, mismatched checkpoint, etc.) —
+        # log and return; the /complete response is already committed, so
+        # the prototype is locked but the export will need regeneration via
+        # the GET-export fallback path.
+        logger.warning(
+            "record_export_at_complete_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            prototype_id, checkpoint_id, type(exc).__name__,
+        )
+        return
+    insert_prototype_export(
+        prototype_id=prototype_id,
+        checkpoint_id=checkpoint_id,
+        workspace_id=workspace_id,
+        markdown_content=markdown,
+    )
