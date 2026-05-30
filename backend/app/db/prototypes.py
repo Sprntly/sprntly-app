@@ -510,3 +510,108 @@ def passcode_rate_limit_clear(*, token: str) -> None:
     legitimate viewer is never rate-limited by their own earlier typos."""
     with _passcode_failures_lock:
         _passcode_failures.pop(token, None)
+
+
+# ─── Lifecycle: Mark Complete / Resume / stale-handoff flag (P2-07) ───────────
+#
+# Structural cousins of `complete_prototype` (different patch semantics): all
+# user-driven, all workspace-filtered (Rule #22). `flag_stale_handoff` operates
+# on `prototype_exports` — the most-recent export row IS the handoff record (per
+# the 2026-05-29 decision: no separate handoff_records table). That table is
+# created by P2-09's migration; this helper is exercised against the in-memory
+# fake until the trio merges (see the ticket's "THE KNOT" note).
+
+
+def mark_complete(*, prototype_id: int, workspace_id: str) -> dict[str, Any]:
+    """F14: set is_complete=true, promote current_checkpoint_id → complete_checkpoint_id.
+    Idempotent: a re-call when already complete is a no-op (returns the row unchanged).
+    """
+    c = require_client()
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise ValueError(f"mark_complete: prototype {prototype_id} not found")
+    patch: dict[str, Any] = {"is_complete": True}
+    # Promote current_checkpoint_id → complete_checkpoint_id only on the first
+    # complete. A second complete (idempotent path) preserves the original
+    # complete_checkpoint_id (the canonical lock point).
+    if not row.get("is_complete"):
+        patch["complete_checkpoint_id"] = row.get("current_checkpoint_id")
+    (
+        c.table(_TABLE)
+        .update(patch)
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .execute()
+    )
+    logger.info(
+        "prototype_completed prototype_id=%s complete_checkpoint_id=%s",
+        prototype_id,
+        patch.get("complete_checkpoint_id", row.get("complete_checkpoint_id")),
+    )
+    return get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+
+
+def resume_iteration(*, prototype_id: int, workspace_id: str) -> dict[str, Any]:
+    """F15: set is_complete=false. Does NOT clear complete_checkpoint_id —
+    that's the historical lock point and stays. Idempotent.
+    """
+    c = require_client()
+    (
+        c.table(_TABLE)
+        .update({"is_complete": False})
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .execute()
+    )
+    logger.info("prototype_resumed prototype_id=%s", prototype_id)
+    return get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+
+
+def flag_stale_handoff(*, prototype_id: int, workspace_id: str) -> int:
+    """F15: mark the most recent export row for this prototype as stale.
+
+    The most-recent `prototype_exports` row IS the handoff record (per the
+    2026-05-29 decision: no separate handoff_records table). Sets `is_stale=true`
+    on the most recent export row for this prototype + workspace. Returns the
+    count of rows updated (0 if no non-stale export exists yet; 1 otherwise).
+
+    Idempotent: re-calling when the most-recent export is already stale returns 0
+    because the `is_stale = false` filter excludes it from the candidate set.
+    """
+    c = require_client()
+    rows = (
+        c.table("prototype_exports")
+        .select("id")
+        .eq("prototype_id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .eq("is_stale", False)
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not rows:
+        return 0
+    export_id = rows[0]["id"]
+    (
+        c.table("prototype_exports")
+        .update({"is_stale": True})
+        .eq("id", export_id)
+        .execute()
+    )
+    logger.info(
+        "prototype_export_marked_stale prototype_id=%s export_id=%s",
+        prototype_id, export_id,
+    )
+    return 1
+
+
+def record_export_at_complete(*, prototype_id: int, workspace_id: str) -> None:
+    """P2-07 STUB: invoked by POST /complete on success. P2-09 fills it in with
+    the actual serialiser call + prototype_exports row insert. Single integration
+    point — P2-09 does NOT modify the /complete handler.
+    """
+    # No-op stub. P2-09 replaces this body with:
+    #   markdown = render_export_markdown(prototype_id, complete_checkpoint_id)
+    #   insert_prototype_export(prototype_id, complete_checkpoint_id, markdown, workspace_id)
+    return

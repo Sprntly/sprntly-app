@@ -53,11 +53,16 @@ from app.db.prototypes import (
     fail_prototype,
     find_existing_prototype,
     find_prototype_by_share_token,
+    flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
+    mark_complete,
     passcode_rate_limit_check,
     passcode_rate_limit_clear,
     passcode_rate_limit_register_failure,
+    record_export_at_complete,
+    resume_iteration,
+    set_share_config,
     start_prototype,
     verify_share_passcode,
 )
@@ -561,4 +566,142 @@ def verify_passcode(
         requires_passcode=True,
         bundle_url=row.get("bundle_url"),
         is_complete=bool(row.get("is_complete")),
+    )
+
+
+# ─── Lifecycle: Mark Complete / Resume Iteration / Set Share (P2-07) ──────────
+#
+# F14 (complete) locks a prototype; F15 (resume) unlocks it AND flags any open
+# downstream handoff (the most-recent export row) as stale per spec §8; F6
+# (share) sets share_mode/token/passcode. All three reuse `require_app_session`
+# (app-audience auth) and `_require_feature_enabled` so they are invisible (404)
+# while the flag is off and 401 without an app session — identical gates to
+# /generate above. The handlers are sync (mirrors get_one): FastAPI runs them in
+# the threadpool, so the blocking supabase calls don't stall the event loop.
+
+
+class CompleteRequest(BaseModel):
+    """Empty body — POST /complete takes no payload. The current checkpoint
+    (from `prototypes.current_checkpoint_id`) is what's locked."""
+    pass
+
+
+class CompleteResponse(BaseModel):
+    prototype_id: int
+    is_complete: bool
+    complete_checkpoint_id: int | None
+
+
+@router.post("/{prototype_id}/complete", response_model=CompleteResponse)
+def post_complete(
+    prototype_id: int,
+    session: dict = Depends(require_app_session),
+) -> CompleteResponse:
+    """F14: lock the prototype. Sets is_complete=true and promotes
+    current_checkpoint_id → complete_checkpoint_id. Idempotent: a second
+    /complete on an already-complete prototype is a no-op (200; no row change).
+    Returns 404 if the prototype is not in the caller's workspace.
+    Returns 409 if `status != 'ready'` (cannot mark a generating/failed/invalidated
+    prototype complete).
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    if row["status"] != "ready":
+        raise HTTPException(status_code=409, detail=f"Cannot complete: status={row['status']}")
+    updated = mark_complete(prototype_id=prototype_id, workspace_id=workspace_id)
+    # P2-09 fills in the export-write hook; P2-07 ships the no-op stub so the
+    # /complete handler has a single integration point (cleaner than P2-09
+    # re-touching the handler later).
+    record_export_at_complete(prototype_id=prototype_id, workspace_id=workspace_id)
+    return CompleteResponse(
+        prototype_id=updated["id"],
+        is_complete=updated["is_complete"],
+        complete_checkpoint_id=updated["complete_checkpoint_id"],
+    )
+
+
+class ResumeResponse(BaseModel):
+    prototype_id: int
+    is_complete: bool
+    handoffs_flagged_stale: int   # count for log/UX; the export row IS the handoff
+
+
+@router.post("/{prototype_id}/resume", response_model=ResumeResponse)
+def post_resume(
+    prototype_id: int,
+    session: dict = Depends(require_app_session),
+) -> ResumeResponse:
+    """F15: unlock the prototype + flag any open handoff record as stale.
+
+    Sets is_complete=false. Calls flag_stale_handoff(prototype_id) which marks the
+    most-recent `prototype_exports` row stale (that row IS the handoff record per
+    the 2026-05-29 decision). Returns 0 when no export exists yet, so resume on a
+    never-completed prototype is a clean no-op on the handoff surface.
+    Idempotent: resume-on-WIP is a 200 no-op.
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    updated = resume_iteration(prototype_id=prototype_id, workspace_id=workspace_id)
+    stale_count = flag_stale_handoff(prototype_id=prototype_id, workspace_id=workspace_id)
+    return ResumeResponse(
+        prototype_id=updated["id"],
+        is_complete=updated["is_complete"],
+        handoffs_flagged_stale=stale_count,
+    )
+
+
+class ShareRequest(BaseModel):
+    mode: Literal["private", "public", "passcode"]
+    passcode: str | None = Field(default=None, max_length=128)
+
+
+class ShareResponse(BaseModel):
+    prototype_id: int
+    share_mode: str
+    share_token: str | None     # null for private, populated for public/passcode
+
+
+@router.post("/{prototype_id}/share", response_model=ShareResponse)
+def post_share(
+    prototype_id: int,
+    body: ShareRequest,
+    session: dict = Depends(require_app_session),
+) -> ShareResponse:
+    """F6: set / update share configuration. Wraps set_share_config (P2-06).
+
+    On passcode mode without a passcode, returns 400. On unknown mode → 422
+    (caught by pydantic). On row-not-found in this workspace → 404.
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    if body.mode == "passcode" and not body.passcode:
+        raise HTTPException(status_code=400, detail="passcode-mode requires a passcode")
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    try:
+        updated = set_share_config(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            share_mode=body.mode,
+            passcode=body.passcode,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return ShareResponse(
+        prototype_id=updated["id"],
+        share_mode=updated["share_mode"],
+        share_token=updated.get("share_token"),
     )
