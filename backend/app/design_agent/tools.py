@@ -221,15 +221,48 @@ READ_CONSOLE = ToolDef(
 
 ACTION_TOOLS: list[ToolDef] = [VIEW, WRITE, LINE_REPLACE, SEARCH, FETCH_FIGMA, READ_CONSOLE]
 
-# ─── EXIT-SENTINEL TOOLS (cap=4, currently empty in P1) ───────────────────
+# ─── EXIT-SENTINEL TOOLS (cap=4) ──────────────────────────────────────────
 # Sentinels land in P3:
-#   - clarifying_question (P3-08): pauses the loop awaiting user reply
+#   - clarifying_question (P3-08): pauses the loop awaiting user reply (THIS file)
 #   - propose_prd_patch  (P3-09): persists a PRD patch proposal, ends the loop
 # Each sentinel must satisfy "ends or pauses the loop with a structured
 # payload" per AD17. New sentinels are appended below; do not change the
-# list shape.
+# list shape. The RUNNER (agent_loop) keys the loop-break + resulting state on
+# the tool NAME, not on `category == "sentinel"` uniformly — clarifying_question
+# is a terminal-PAUSE; propose_prd_patch (P3-09) is a terminal-COMPLETE.
 
-SENTINEL_TOOLS: list[ToolDef] = []
+CLARIFYING_QUESTION = ToolDef(
+    name="clarifying_question",
+    description=(
+        "Pause and ask the user ONE specific question when the request is "
+        "genuinely ambiguous and proceeding would require guessing about "
+        "product intent. Calling this ENDS your turn and returns control to "
+        "the user — it is a terminal action, not a mid-work query. Use it only "
+        "for genuine PRODUCT ambiguity (e.g. 'should this CTA submit the form "
+        "or open a confirmation modal?'). Do NOT call it for choices the design "
+        "system, the PRD, or the Figma frames already answer (colour, font, "
+        "spacing, which shadcn component) — pick the reasonable default and "
+        "proceed. Do NOT call it as a courtesy or to confirm you understood; "
+        "the user trusts you to execute. At most ONE call per run."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "description": "The single specific question. One sentence."},
+            "choices": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional 2-4 options rendered as buttons; omit for free-text.",
+            },
+            "context": {"type": "string", "description": "Optional 1-2 sentence reason it's ambiguous."},
+        },
+        "required": ["question"],
+    },
+    execute=lambda inp, ctx: _exec_clarifying_question(inp, ctx),
+    category="sentinel",
+)
+
+SENTINEL_TOOLS: list[ToolDef] = [CLARIFYING_QUESTION]
 
 # ─── Registry-level invariants ────────────────────────────────────────────
 
@@ -508,3 +541,20 @@ async def _exec_read_console(inp: dict, ctx: ToolContext) -> dict:
     # AD20: no per-prototype runtime exists. Stub returns empty array.
     # Real implementation requires runtime instrumentation (deferred to v2).
     return {"entries": [], "note": "No prototype runtime configured (AD20 stub)."}
+
+
+async def _exec_clarifying_question(inp: dict, ctx: ToolContext) -> dict:
+    """Sentinel executor: returns the question payload as the tool_result. The
+    RUNNER detects the sentinel by tool NAME (`clarifying_question`) and breaks
+    the loop — the executor itself does NOT pause; the loop does. In practice the
+    runner's sentinel-distinction branch fires BEFORE dispatch, so this executor
+    is rarely reached on the loop path; it exists so a direct `dispatch(...)` call
+    (and the AD17 dispatch-routes-to-executor non-breakage AC) still resolves to a
+    structured payload. The `_sentinel` marker is for traceability only — the
+    loop-break decision keys on the name, not on this return value."""
+    return {
+        "_sentinel": "clarifying_question",
+        "question": inp.get("question"),
+        "choices": inp.get("choices"),
+        "context": inp.get("context"),
+    }
