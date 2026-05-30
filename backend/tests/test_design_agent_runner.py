@@ -191,32 +191,79 @@ def test_agent_loop_bounds_at_max_iters(monkeypatch):
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),  # replayed forever
     ])
     # Uses the production default (no explicit max_iters) so this also pins
-    # DEFAULT_MAX_ITERS == 24 per P2-01 — revert the constant and this fails.
+    # DEFAULT_MAX_ITERS == 40 (raised from 24 by the convergence fix) — revert
+    # the constant and this fails.
     result = _run(agent_loop(_system(), _user(), _ctx()))
     assert result.status == "max_iters"
-    assert result.iters == 24
-    assert len(client.calls) == 24
+    assert result.iters == 40
+    assert len(client.calls) == 40
 
 
-def test_agent_loop_emits_wrap_up_nudge_at_n_minus_2(monkeypatch):
+def test_wrap_up_nudge_escalates_by_remaining_count():
+    """The nudge text escalates as the budget shrinks: a 'start converging'
+    heads-up while there's room, a hard 'STOP now' in the last 1-2 turns."""
+    soft = runner._wrap_up_nudge(10)
+    assert "Start converging" in soft
+    assert "10 tool-call turns left" in soft
+    assert "STOP now" not in soft
+    # Boundary: 2 remaining is already the hard stop.
+    for n in (2, 1):
+        hard = runner._wrap_up_nudge(n)
+        assert "STOP now" in hard
+        assert f"{n} tool-call turn(s) left" in hard
+        assert "Start converging" not in hard
+
+
+def test_graduated_wrap_up_nudge_fires_at_scheduled_remaining(monkeypatch):
     client = _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
     ])
-    # Pin max_iters=8 so the nudge-placement assertions below stay anchored to
-    # fixed call indices regardless of the production DEFAULT_MAX_ITERS (24 per
-    # P2-01) — this test exercises nudge mechanics, not the production cap.
+    # Pin max_iters=8 → nudge schedule remaining ∈ {8//2, max(2, 8//4), 1} = {4, 2, 1}.
+    # Fixed call indices regardless of the production DEFAULT_MAX_ITERS — this
+    # test exercises the graduated firing schedule, not the production cap.
     _run(agent_loop(_system(), _user(), _ctx(), max_iters=8))
-    # Call 7 (index 6) is iters == max_iters - 1; the nudge is appended before it.
-    seventh_call_blocks = _all_content_blocks(client.calls[6]["messages"])
+    # remaining=4 at iters=4 → the soft 'converging' nudge is appended before
+    # call index 3, and is NOT present yet at call index 2.
     assert any(
-        b.get("type") == "text" and "2 iterations remaining" in b.get("text", "")
-        for b in seventh_call_blocks
+        "Start converging" in b.get("text", "")
+        for b in _all_content_blocks(client.calls[3]["messages"])
     )
-    # And it must NOT be present yet at call 6 (index 5).
-    sixth_call_blocks = _all_content_blocks(client.calls[5]["messages"])
     assert not any(
-        "2 iterations remaining" in b.get("text", "") for b in sixth_call_blocks
+        "Start converging" in b.get("text", "")
+        for b in _all_content_blocks(client.calls[2]["messages"])
     )
+    # remaining=2 at iters=6 → the hard 'STOP now' nudge appears at call index 5,
+    # and is NOT present at call index 4 (iters=5, remaining=3 → no nudge fires).
+    assert any(
+        "STOP now" in b.get("text", "")
+        for b in _all_content_blocks(client.calls[5]["messages"])
+    )
+    assert not any(
+        "STOP now" in b.get("text", "")
+        for b in _all_content_blocks(client.calls[4]["messages"])
+    )
+
+
+def test_max_iters_exit_salvages_last_assistant_content(monkeypatch):
+    """On a max_iters exit the runner returns the LAST assistant turn's content
+    (was discarded as []), so a build that ran out of turns mid-flow is staged
+    rather than thrown away."""
+    last_turn = [
+        _text("Built the dashboard shell; wiring the detail view."),
+        _tool_use("t9", "view", {"path": "src/App.tsx"}),
+    ]
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", last_turn),  # replayed forever → final iteration's content
+    ])
+    ctx = _ctx(virtual_fs={"src/App.tsx": "export default function App() {}"})
+    result = _run(agent_loop(_system(), _user(), ctx, max_iters=3))
+    assert result.status == "max_iters"
+    assert result.iters == 3
+    # Salvage is non-empty and equals the last assistant turn (by value).
+    assert result.final_content != []
+    assert result.final_content == last_turn
+    # Sanity: it is genuinely the last turn the model produced, the 3rd call.
+    assert len(client.calls) == 3
 
 
 def test_wrap_up_nudge_does_not_create_consecutive_user_turns(monkeypatch):

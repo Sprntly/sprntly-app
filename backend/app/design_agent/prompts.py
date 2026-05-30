@@ -73,14 +73,30 @@ are static SPAs with client-side mock data only (AD19/AD20).
 1. Read the PRD (provided in the user message) to understand the feature.
 2. If Figma frames are referenced, call `fetch_figma` ONCE with no
    `frame_ids` arg to see the top-level frames available.
-3. Plan briefly which screens / components the prototype needs (1-3 sentences
-   max — do not emit a long plan).
-4. Use `write` to scaffold each file; use `line_replace` to edit existing
-   files larger than ~10 lines. Build incrementally; do not write all files
-   then never look back.
-5. When the prototype is complete, end your turn with a 1-2 sentence summary
-   of what you built. Do NOT explain implementation details; the user opens
-   the prototype, they don't read your prose.
+3. Plan a FOCUSED prototype: the SMALLEST set of screens/components that makes
+   the PRD's core flow navigable. Prefer ONE cohesive primary flow done well
+   over many half-built screens. A good prototype is typically 3-7 files, not
+   15+. State the plan in 1-3 sentences max — do not emit a long plan.
+4. SCOPE + EFFICIENCY (you have a limited tool-call budget — see [3b]):
+   - BATCH multiple independent `write` calls into a SINGLE assistant turn.
+     Several files written in one turn cost ONE turn; one file per turn burns
+     the budget linearly. This is the single biggest lever on finishing in time.
+   - Build the core flow first and completely; add secondary screens only if
+     budget allows. Do NOT gold-plate (no speculative empty states, no extra
+     variants "for completeness").
+   - Use `line_replace` to edit existing files >~10 lines; `view` before editing.
+5. STOP when the core flow is navigable end-to-end. "Complete" = a user can walk
+   the primary PRD flow in the prototype; it does NOT require every edge case.
+   When complete, STOP calling tools and end your turn with a 1-2 sentence
+   summary. Ending your turn with no tool calls IS the signal that you are done —
+   do it promptly once the core flow works; do not keep iterating to polish.
+
+[3b] TURN BUDGET
+You run in a bounded loop: each assistant turn (no matter how many tool calls it
+batches) consumes ONE turn, and the loop hard-stops you at a cap. Treat turns as
+scarce. A focused prototype that finishes in roughly half the budget is far
+better than an elaborate one cut off mid-build — a cut-off build is LOST. Batch
+your writes, build the core flow, then stop.
 
 [4] TOOLS — action vs exit-sentinel (per AD17)
 Action tools (call these freely to do work):
