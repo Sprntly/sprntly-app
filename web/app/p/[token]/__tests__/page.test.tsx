@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { resolveToken, nextViewerState } from "../PublicTokenViewer"
 import { PrototypeViewer } from "../../../components/design-agent/PrototypeViewer"
+import { CompletionBar } from "../../../components/design-agent/CompletionBar"
 import { PasscodeGateView, submitPasscode } from "../PasscodeGate"
 
 function mockFetch(res: { status: number; ok?: boolean; body?: unknown }) {
@@ -207,5 +208,43 @@ describe("PrototypeViewer chrome slot (AC9)", () => {
       }),
     )
     expect(html).toContain('data-testid="prototype-chrome"')
+  })
+})
+
+// P2-10: the public viewer mounts a read-only CompletionBar as the chrome —
+// a status badge only, no prototypeId, no mutation affordances (AC19, AC3).
+describe("P2-10 read-only CompletionBar chrome mount (AC19)", () => {
+  it("renders the read-only complete badge inside the chrome slot", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeViewer, {
+        bundleUrl: "https://cdn.example/p/abc/index.html",
+        isComplete: true,
+        chrome: React.createElement(CompletionBar, {
+          isComplete: true,
+          editable: false,
+        }),
+      }),
+    )
+    expect(html).toContain('data-testid="prototype-chrome"')
+    expect(html).toContain('data-testid="completion-bar-readonly"')
+    expect(html).toContain("Marked Complete")
+    // No mutating affordances leak into the public viewer.
+    expect(html).not.toContain('data-testid="mark-complete-btn"')
+    expect(html).not.toContain('data-testid="resume-btn"')
+  })
+
+  it("renders the read-only WIP badge for an incomplete prototype", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeViewer, {
+        bundleUrl: "https://cdn.example/p/abc/index.html",
+        isComplete: false,
+        chrome: React.createElement(CompletionBar, {
+          isComplete: false,
+          editable: false,
+        }),
+      }),
+    )
+    expect(html).toContain('data-testid="completion-bar-readonly"')
+    expect(html).toContain("Work in progress")
   })
 })

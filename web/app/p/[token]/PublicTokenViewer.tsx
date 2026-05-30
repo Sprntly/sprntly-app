@@ -14,6 +14,7 @@ import { useEffect, useState } from "react"
 import { notFound, useParams } from "next/navigation"
 import { API_URL } from "../../lib/api"
 import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
+import { CompletionBar } from "../../components/design-agent/CompletionBar"
 import { PasscodeGate } from "./PasscodeGate"
 
 export type ResolvedView = {
@@ -98,5 +99,15 @@ export function PublicTokenViewer() {
     )
   }
   if (state.kind === "passcode") return <PasscodeGate token={token as string} />
-  return <PrototypeViewer bundleUrl={state.bundleUrl} isComplete={state.isComplete} />
+  return (
+    <PrototypeViewer
+      bundleUrl={state.bundleUrl}
+      isComplete={state.isComplete}
+      // Read-only public-viewer chrome (P2-10): a status badge only — no
+      // prototypeId (the public resolver is minimum-disclosure) and no
+      // mutating affordances. The editable chrome lives on the signed-in
+      // surface (follow-up; see P2-10 Open Question).
+      chrome={<CompletionBar isComplete={state.isComplete} editable={false} />}
+    />
+  )
 }

@@ -498,4 +498,47 @@ export const designAgentApi = {
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
     api.get<PrototypeRecord>(`/v1/design-agent/${prototypeId}`),
+  /** F14 — mark a prototype complete. Empty body. */
+  complete: (prototypeId: number) =>
+    api.post<{
+      prototype_id: number
+      is_complete: boolean
+      complete_checkpoint_id: number | null
+    }>(`/v1/design-agent/${prototypeId}/complete`, {}),
+  /** F15 — resume iteration on a completed prototype. Empty body. */
+  resume: (prototypeId: number) =>
+    api.post<{
+      prototype_id: number
+      is_complete: boolean
+      handoffs_flagged_stale: number
+    }>(`/v1/design-agent/${prototypeId}/resume`, {}),
+  /** F6 — set the share mode (and, for passcode mode, the passcode). */
+  share: (
+    prototypeId: number,
+    body: { mode: "private" | "public" | "passcode"; passcode?: string },
+  ) =>
+    api.post<{
+      prototype_id: number
+      share_mode: string
+      share_token: string | null
+    }>(`/v1/design-agent/${prototypeId}/share`, body),
+  /**
+   * F16 — `GET /v1/design-agent/{id}/export` returns `text/markdown`, NOT JSON,
+   * so it bypasses the shared JSON-parsing `request<T>` helper and uses `fetch`
+   * directly. Same auth path (Bearer via `accessTokenProvider`) + cookie.
+   */
+  exportMarkdown: async (prototypeId: number): Promise<string> => {
+    const token = accessTokenProvider ? await accessTokenProvider() : null
+    const headers: Record<string, string> = { Accept: "text/markdown" }
+    if (token) headers["Authorization"] = `Bearer ${token}`
+    const res = await fetch(
+      `${API_URL}/v1/design-agent/${prototypeId}/export`,
+      { method: "GET", headers, credentials: "include" },
+    )
+    if (!res.ok) {
+      // 409 = WIP (F17). 404 = wrong workspace / missing. 401 = no auth.
+      throw new ApiError(res.status, await res.text())
+    }
+    return await res.text()
+  },
 }
