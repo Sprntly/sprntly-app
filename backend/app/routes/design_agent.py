@@ -995,8 +995,13 @@ def get_comments_public(token: str) -> list[CommentOut]:
 # is P3-06 (this fires a single bg task). Tools are append-only: this block is at
 # the EOF of the route file; no existing handler is modified.
 from app.design_agent.prompts import DESIGN_AGENT_ITERATE_SYSTEM, render_iterate_user
-from app.design_agent.runner import iterate_prototype
+from app.design_agent.runner import drain_iteration_queue, iterate_prototype
 from app.design_agent.storage import read_source_files_for_checkpoint
+from app.db.prototype_pending_iterations import (
+    QueueFullError,
+    enqueue_iteration,
+    queue_position,
+)
 
 
 class IterateRequest(BaseModel):
@@ -1008,6 +1013,7 @@ class IterateRequest(BaseModel):
 class IterateResponse(BaseModel):
     prototype_id: int
     status: str                                   # 'generating' (kicked off in the bg)
+    queue_position: int                           # P3-06: derived slot in the iterate queue
 
 
 @router.post("/{prototype_id}/iterate", response_model=IterateResponse)
@@ -1023,8 +1029,9 @@ async def post_iterate(
     specific 409s:
       - `is_complete` (locked, F14): cannot iterate until Resume Iteration (P2-07).
       - `status != 'ready'`: cannot iterate a generating/failed/invalidated row.
-    On success fires a single background task (P3-06 wraps this in a queue later)
-    and returns status='generating'. No Anthropic call in the request path.
+    On success enqueues the iterate (AD11 5-slot queue), kicks the serial drain in
+    the background, and returns status='generating' + the derived queue_position.
+    A full queue returns 429. No Anthropic call in the request path.
     """
     _require_feature_enabled()
     workspace_id = (session.get("aud") or "").strip()
@@ -1038,13 +1045,33 @@ async def post_iterate(
     if proto.get("status") != "ready":
         raise HTTPException(status_code=409, detail="Prototype not ready to iterate")
 
+    # P3-06 (AD11): enqueue instead of firing a raw bg task. The queue caps at 5
+    # active (pending + running) iterations per prototype; a 6th enqueue raises
+    # QueueFullError → 429. The drain kick is idempotent (it no-ops if a row is
+    # already running), so firing it on every enqueue never spawns a second
+    # concurrent drain.
+    try:
+        row = enqueue_iteration(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            prompt=body.prompt,
+            applied_comment_id=body.applied_comment_id,
+            mode=body.mode,
+        )
+    except QueueFullError:
+        raise HTTPException(status_code=429, detail={"error": "queue_full", "max": 5})
+
     logger.info("prototype_iterate_started prototype_id=%s", prototype_id)
     task = asyncio.create_task(
-        _run_iterate_bg(prototype_id=prototype_id, workspace_id=workspace_id, body=body)
+        drain_iteration_queue(prototype_id=prototype_id, workspace_id=workspace_id)
     )
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
-    return IterateResponse(prototype_id=prototype_id, status="generating")
+    return IterateResponse(
+        prototype_id=prototype_id,
+        status="generating",
+        queue_position=row["queue_position"],
+    )
 
 
 async def _run_iterate_bg(
@@ -1178,6 +1205,30 @@ async def _run_iterate_bg(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+async def _run_one_iteration(row: dict[str, Any]) -> None:
+    """Run a single dequeued queue row through the P3-05 iterate body (P3-06).
+
+    Adapter for `runner.drain_iteration_queue`: reconstructs the `IterateRequest`
+    from the persisted queue row and delegates to `_run_iterate_bg` (UNCHANGED) so
+    the drain reuses the exact source-load → prompt-render → agent-loop → stage
+    path. `_run_iterate_bg` handles prototype-level failure internally (it marks
+    the PROTOTYPE failed and never raises on a runner error), so on the normal
+    path the drain marks the queue ROW 'done'. This adapter only re-raises on an
+    UNEXPECTED exception (a row missing required keys, etc.), which the drain
+    catches to mark the queue row 'failed' without stalling the rest of the queue.
+    """
+    body = IterateRequest(
+        prompt=row["prompt"],
+        applied_comment_id=row.get("applied_comment_id"),
+        mode=row.get("mode") or "execute",
+    )
+    await _run_iterate_bg(
+        prototype_id=row["prototype_id"],
+        workspace_id=row["workspace_id"],
+        body=body,
+    )
 
 
 async def _stage_iterate_run(
