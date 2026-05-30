@@ -952,3 +952,328 @@ def get_comments_public(token: str) -> list[CommentOut]:
         CommentOut(**_comment_to_out(r))
         for r in list_comments(prototype_id=proto["id"], workspace_id=proto["workspace_id"])
     ]
+
+
+# ─── Iterate: re-prompt + Apply-driven edits (P3-05) ───────────────────────────
+#
+# AD8 mandates a SEPARATE iterate prompt distinct from scaffold; this block lands
+# the iterate spine the rest of P3 hangs on. F9 (re-prompt) and F10 (Apply-on-
+# comment pre-fills the prompt) both route through `POST /{id}/iterate`:
+#
+#   POST /v1/design-agent/{prototype_id}/iterate  {prompt, applied_comment_id?, mode?}
+#
+# Cache discipline (AD2): the iterate system blocks + the current bundle source +
+# the open comment threads form the STABLE cacheable prefix; the user's iterate
+# prompt is the per-call volatile suffix (render_iterate_user owns the breakpoint).
+#
+# Staging (B2 — AC6a): a complete iterate run stages via `_stage_iterate_run`, NOT
+# `_stage_complete_run`. An iterate is a checkpoint ADVANCE, not a first
+# completion, so it MUST NOT call `complete_prototype` (which re-stamps
+# completed_at + emits prototype_completed). Advancing `current_checkpoint_id` +
+# threading the new bundle_url onto the prototype row is P3-12's
+# `advance_current_checkpoint` helper — not merged yet, so this leaves that
+# advance as the documented seam (`_advance_current_checkpoint_seam`).
+#
+# Scope (P3-05): EXECUTE mode only. `mode='plan'` is ACCEPTED but treated as
+# execute here — the real plan/execute tool split is P3-07. Concurrency / queueing
+# is P3-06 (this fires a single bg task). Tools are append-only: this block is at
+# the EOF of the route file; no existing handler is modified.
+from app.design_agent.prompts import DESIGN_AGENT_ITERATE_SYSTEM, render_iterate_user
+from app.design_agent.runner import iterate_prototype
+from app.design_agent.storage import read_source_files_for_checkpoint
+
+
+class IterateRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=8000)
+    applied_comment_id: int | None = None        # F10: set when Apply pre-filled the prompt
+    mode: Literal["plan", "execute"] = "execute"  # P3-07 implements 'plan'; P3-05 runs 'execute'
+
+
+class IterateResponse(BaseModel):
+    prototype_id: int
+    status: str                                   # 'generating' (kicked off in the bg)
+
+
+@router.post("/{prototype_id}/iterate", response_model=IterateResponse)
+async def post_iterate(
+    prototype_id: int,
+    body: IterateRequest,
+    session: dict = Depends(require_app_session),
+) -> IterateResponse:
+    """F9/F10: kick off an iterate of an existing prototype; return in <200ms.
+
+    Gates (identical posture to /generate): feature-flag (404 when off) +
+    require_app_session (401) + workspace filter (404 cross-tenant). Two iterate-
+    specific 409s:
+      - `is_complete` (locked, F14): cannot iterate until Resume Iteration (P2-07).
+      - `status != 'ready'`: cannot iterate a generating/failed/invalidated row.
+    On success fires a single background task (P3-06 wraps this in a queue later)
+    and returns status='generating'. No Anthropic call in the request path.
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    if proto.get("is_complete"):
+        raise HTTPException(status_code=409, detail="Prototype is locked; Resume Iteration first")
+    if proto.get("status") != "ready":
+        raise HTTPException(status_code=409, detail="Prototype not ready to iterate")
+
+    logger.info("prototype_iterate_started prototype_id=%s", prototype_id)
+    task = asyncio.create_task(
+        _run_iterate_bg(prototype_id=prototype_id, workspace_id=workspace_id, body=body)
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return IterateResponse(prototype_id=prototype_id, status="generating")
+
+
+async def _run_iterate_bg(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    body: IterateRequest,
+) -> None:
+    """Background iterate run: load the current bundle + open comments, render the
+    iterate prompts (cache-disciplined), run the agent loop, then stage the result
+    via the iterate path (NOT the first-completion path).
+
+    Source load (S2): `get_prototype` FIRST to obtain `current_checkpoint_id`, then
+    `read_source_files_for_checkpoint(prototype_id, current_checkpoint_id)`
+    (P2-04 — positional args, async, storage-path read, NOT workspace-filtered) to
+    pre-fill the agent's virtual_fs. On any exception the row is marked failed in
+    the existing Sprntly error format; the prior bundle_url is preserved.
+    """
+    try:
+        proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+        if not proto:
+            return  # row vanished under us; nothing to iterate.
+
+        checkpoint_id = proto.get("current_checkpoint_id")
+        current_source = (
+            await read_source_files_for_checkpoint(prototype_id, checkpoint_id)
+            if checkpoint_id else {}
+        )
+
+        # Open comment threads — the stable cacheable signal (P3-01 list_comments,
+        # filtered to open). Project to the {anchor_id, body, author} shape the
+        # prompt renderer expects.
+        all_comments = list_comments(prototype_id=prototype_id, workspace_id=workspace_id)
+        open_comments = [
+            {"anchor_id": c["anchor_id"], "body": c["body"], "author": c["author"]}
+            for c in all_comments if c.get("status") == "open"
+        ]
+
+        # F10 applied-comment: workspace-filtered (it came from the same
+        # list_comments read, which filters by workspace) lookup by id, projected
+        # to {anchor_id, body}. None when no applied_comment_id or no match.
+        applied_comment = None
+        if body.applied_comment_id is not None:
+            applied_comment = next(
+                (
+                    {"anchor_id": c["anchor_id"], "body": c["body"]}
+                    for c in all_comments if c["id"] == body.applied_comment_id
+                ),
+                None,
+            )
+
+        cacheable_blocks, volatile_block = render_iterate_user(
+            current_source=current_source,
+            open_comments=open_comments,
+            iterate_prompt=body.prompt,
+            applied_comment=applied_comment,
+        )
+        # System block(s) cached at the END of the stable prefix (AD2), mirroring
+        # _run_generation_bg. The bundle+comments user prefix is cached too (its
+        # last block carries cache_control); the volatile prompt block does not.
+        system_blocks = [{
+            "type": "text",
+            "text": DESIGN_AGENT_ITERATE_SYSTEM,
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }]
+        user_message = {"role": "user", "content": [*cacheable_blocks, volatile_block]}
+
+        figma_file_key = proto.get("figma_file_key")
+        scenario_set = infer_scenario_from_inputs(
+            figma_file_key=figma_file_key,
+            website_url=proto.get("website_url"),
+            github_installation_id=proto.get("github_installation_id"),
+            prd_references_codebase=False,  # P4-05 implements the codebase detector
+        )
+        scenario_label = ",".join(sorted(scenario_set))
+
+        result, virtual_fs = await iterate_prototype(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            system_blocks=system_blocks,
+            user_message=user_message,
+            current_source=current_source,
+            figma_file_key=figma_file_key,
+            scenario=scenario_label,
+            # EXECUTE mode for tool partitioning (P3-05 is execute-only; 'plan' is
+            # accepted on the request but runs as execute until P3-07 wires the
+            # real split). Canonical 'execute', never 'iterate' (AD17 / P3-07).
+            mode="execute",
+        )
+
+        if result.status == "complete" and virtual_fs:
+            await _stage_iterate_run(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                virtual_fs=virtual_fs,
+                iterate_prompt=body.prompt,
+            )
+        elif result.status == "complete" and not virtual_fs:
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error="iterate agent_loop completed but emitted no files",
+            )
+        else:
+            # Mirror _run_generation_bg's structured failure (P2-02): surface the
+            # RunResult error_message / error_class so an Anthropic failure is
+            # triageable rather than dropped. fail_prototype caps at 500 chars.
+            error_parts = [
+                f"iterate agent_loop ended with status={result.status} iters={result.iters}"
+            ]
+            error_message = getattr(result, "error_message", None)
+            error_class = getattr(result, "error_class", None)
+            if error_message:
+                error_parts.append(f"error_message={error_message}")
+            if error_class:
+                error_parts.append(f"error_class={error_class}")
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=" | ".join(error_parts),
+            )
+    except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
+        # error_class only in the structured log (Rule #24 — no PRD / comment /
+        # Figma content); the full message goes to the row's error column.
+        logger.warning(
+            "design_agent.iterate_failed prototype_id=%s error_class=%s",
+            prototype_id, type(exc).__name__,
+        )
+        fail_prototype(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+async def _stage_iterate_run(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    virtual_fs: dict[str, str],
+    iterate_prompt: str,
+) -> None:
+    """Iterate-completion staging path (B2). DELIBERATELY SEPARATE from
+    `_stage_complete_run`: it does NOT call `complete_prototype` (AC6a). An iterate
+    is a checkpoint ADVANCE on an already-completed prototype, so re-stamping
+    `completed_at` and emitting `prototype_completed` would be wrong — that whole
+    separation is the point of this helper. Do NOT fold it back into the scaffold
+    staging path.
+
+    Steps: vite_build (anchor-id plugin runs here) → create_checkpoint (threading
+    the iterate prompt into prompt_history) → stage_bundle (dist + raw _source so
+    the NEXT iterate can read it back). Then the P3-12 seam advances
+    `current_checkpoint_id` + bundle_url WITHOUT a completed_at re-stamp.
+    """
+    # Step 1 — Vite build (anchor-id plugin runs here, AD4).
+    try:
+        dist_files = await vite_build(virtual_fs)
+    except (ViteBuildError, FileNotFoundError) as exc:
+        logger.warning(
+            "iterate_vite_build_failed prototype_id=%s error_class=%s",
+            prototype_id, type(exc).__name__,
+        )
+        fail_prototype(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return
+    logger.info(
+        "iterate_vite_build_succeeded prototype_id=%s dist_file_count=%s",
+        prototype_id, len(dist_files),
+    )
+
+    # Step 2 — new checkpoint; thread the iterate prompt into prompt_history (AC6a).
+    checkpoint_id = create_checkpoint(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        bundle_url=None,
+        prd_revision_hash=None,    # P3-12 wires PRD-hash + figma-hash on this path
+        figma_frame_hash=None,
+        prompt_history=[{"kind": "iterate", "prompt": iterate_prompt}],
+        comment_state=[],
+    )
+
+    # Step 3 — stage the BUILT dist/ (never raw virtual_fs).
+    try:
+        bundle_url = await stage_bundle(
+            prototype_id=prototype_id,
+            checkpoint_id=checkpoint_id,
+            files=dist_files,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface staging failure on the row.
+        fail_prototype(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return
+
+    # Step 3.5 — stage the RAW virtual_fs under _source/ so the NEXT iterate's
+    # read_source_files_for_checkpoint returns real TSX. Best-effort (mirrors
+    # _stage_complete_run): a source-stage failure logs and proceeds.
+    try:
+        await stage_bundle(
+            prototype_id=prototype_id,
+            checkpoint_id=checkpoint_id,
+            files=virtual_fs,
+            sub_prefix="_source",
+        )
+    except Exception as exc:  # noqa: BLE001 — source-stage is best-effort.
+        logger.warning(
+            "iterate_source_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
+    # Step 4 — P3-12 SEAM. Advance current_checkpoint_id + bundle_url WITHOUT a
+    # completed_at re-stamp (NOT complete_prototype — AC6a).
+    _advance_current_checkpoint_seam(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        checkpoint_id=checkpoint_id,
+        bundle_url=bundle_url,
+    )
+
+
+def _advance_current_checkpoint_seam(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    checkpoint_id: int,
+    bundle_url: str | None,
+) -> None:
+    """P3-12 SEAM (documented, intentional — see the ticket's Iterate staging path
+    + the P3-05/P3-12 ordering decision).
+
+    P3-12 lands `db.prototypes.advance_current_checkpoint`, which advances
+    `prototypes.current_checkpoint_id` → `checkpoint_id` and threads `bundle_url`
+    onto the prototype row WITHOUT re-stamping `completed_at` (the iterate-correct
+    counterpart to `complete_prototype` — AC6a). Until it merges, the new
+    checkpoint is fully built + staged and this records the pending advance as an
+    INFO marker (identifiers only, Rule #24). When P3-12 lands, it fills the call
+    here — that edit lives in this builder-owned block, not a hot file.
+    """
+    logger.info(
+        "prototype_iterate_checkpoint_staged prototype_id=%s workspace_id=%s "
+        "checkpoint_id=%s bundle_staged=%s advance_pending=P3-12",
+        prototype_id, workspace_id, checkpoint_id, bool(bundle_url),
+    )

@@ -378,3 +378,68 @@ async def generate_prototype(
         iters=result.iters,
     )
     return result, ctx.virtual_fs
+
+
+async def iterate_prototype(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    system_blocks: list[dict[str, Any]],
+    user_message: dict[str, Any],
+    current_source: dict[str, str],
+    figma_file_key: str | None,
+    scenario: str = "A",
+    mode: str = "execute",
+) -> tuple[RunResult, dict[str, str]]:
+    """Iterate entrypoint (P3-05): mirror of `generate_prototype` for the EDIT
+    path (AD8). The difference from scaffold is the seed: the ToolContext's
+    `virtual_fs` is PRE-POPULATED with the current checkpoint's source files
+    (loaded by the caller via `read_source_files_for_checkpoint`, P2-04) so a
+    `view` of an existing file returns its content instead of a not-found error.
+    The loop, cache discipline, and Figma-token injection are identical.
+
+    `mode` is the tool-partition value threaded into `agent_loop` (and, once
+    P3-07 lands, into `tools_for_mode`). The canonical iterate value is
+    `'execute'`, NEVER `'iterate'` — P3-07 partitions on `scaffold`/`plan`/
+    `execute`. The `mode="iterate"` string below is a DIFFERENT thing: the
+    cost-log identifier (telemetry), distinguishing iterate runs from scaffold
+    runs in the structured log, independent of the tool-partition mode.
+
+    Returns `(result, virtual_fs)` — the post-run virtual_fs (seed + the agent's
+    edits) for the caller's iterate-staging path (`_stage_iterate_run`).
+    """
+    ctx = ToolContext(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        # Copy so the agent's in-loop mutations never write back into the caller's
+        # source dict; `view` returns real content because the seed is present.
+        virtual_fs=dict(current_source),
+        figma_file_key=figma_file_key,
+        figma_access_token=_resolve_figma_access_token(figma_file_key),
+    )
+    result = await agent_loop(
+        system_blocks=system_blocks,
+        user_message=user_message,
+        ctx=ctx,
+        scenario=scenario,
+        mode=mode,
+    )
+    # Cost-summary log line — same shared primitive as generate_prototype. The
+    # operation + mode identifier mark this as an ITERATE run for telemetry; the
+    # log carries identifiers + token counts only (Rule #24), never PRD/comment/
+    # Figma content.
+    log_llm_run(
+        operation="design_agent.run.iterate",
+        identifier={
+            "prototype_id": prototype_id,
+            "scenario": scenario,
+            "mode": "iterate",
+        },
+        usage=result.usage,
+        duration_ms=result.duration_ms,
+        status=result.status,
+        model=MODEL,
+        error_class=result.error_class,
+        iters=result.iters,
+    )
+    return result, ctx.virtual_fs
