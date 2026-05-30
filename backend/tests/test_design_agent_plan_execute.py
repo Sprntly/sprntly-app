@@ -187,12 +187,16 @@ def test_tool_definitions_for_api_equals_execute_mode():
 
 
 def test_module_level_asserts_still_pass():
-    # AC10: the frozen module-level caps still hold; all_tools resolves.
+    # AC10: the frozen module-level caps still hold; all_tools resolves. P3-08
+    # landed sentinel #1 (clarifying_question), so all_tools() is now the 6 actions
+    # FIRST (stable order) then the sentinel(s) — the ACTION cap stays at 6.
     assert len(ACTION_TOOLS) == 6
     assert len(SENTINEL_TOOLS) <= 4
-    assert [t.name for t in all_tools()] == [
+    assert [t.name for t in all_tools()][:6] == [
         "view", "write", "line_replace", "search", "fetch_figma", "read_console",
     ]
+    assert sum(1 for t in all_tools() if t.category == "action") == 6
+    assert "clarifying_question" in {t.name for t in all_tools()}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -306,7 +310,8 @@ def test_agent_loop_uses_mode_registry_plan(monkeypatch):
     ctx = _ctx(virtual_fs={"src/App.tsx": "x"})
     _run(runner.agent_loop(_system(), _user(), ctx, mode="plan"))
     names = {t["name"] for t in client.calls[0]["tools"]}
-    assert names == PLAN_NAMES
+    # P3-08: plan mode now also carries the clarifying_question sentinel (plan-safe).
+    assert names == PLAN_NAMES | {"clarifying_question"}
     assert "write" not in names and "line_replace" not in names
     # Frozen: same tools object content on every create call.
     assert client.calls[0]["tools"] == client.calls[1]["tools"]

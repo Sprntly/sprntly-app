@@ -45,9 +45,13 @@ def test_sentinel_tools_count_at_most_4():
     assert len(SENTINEL_TOOLS) <= 4
 
 
-def test_sentinel_tools_empty_in_p1():
-    # P3-08 removes this expectation when clarifying_question lands.
-    assert SENTINEL_TOOLS == []
+def test_sentinel_tools_holds_clarifying_question():
+    # P3-08: the FIRST exit-sentinel landed. SENTINEL_TOOLS is no longer empty
+    # (it was [] through P1/P2) — it holds exactly clarifying_question, and the
+    # AD17 cap (≤4) still holds. propose_prd_patch (sentinel #2) lands in P3-09.
+    assert [t.name for t in SENTINEL_TOOLS] == ["clarifying_question"]
+    assert len(SENTINEL_TOOLS) <= 4
+    assert SENTINEL_TOOLS[0].category == "sentinel"
 
 
 def test_all_action_tools_have_action_category():
@@ -63,8 +67,14 @@ def test_tool_names_match_ad17():
 
 
 def test_no_seventh_action_tool():
-    # AD17: action cap is inviolable. all_tools() in P1 is exactly the 6 actions.
-    assert [t.name for t in all_tools()] == [
+    # AD17: the ACTION cap is inviolable — exactly 6 action tools, never a 7th,
+    # regardless of how many sentinels are appended. all_tools() is the 6 actions
+    # FIRST (stable order) then the sentinels (clarifying_question from P3-08).
+    assert [t.name for t in ACTION_TOOLS] == [
+        "view", "write", "line_replace", "search", "fetch_figma", "read_console",
+    ]
+    assert sum(1 for t in all_tools() if t.category == "action") == 6
+    assert [t.name for t in all_tools()][:6] == [
         "view", "write", "line_replace", "search", "fetch_figma", "read_console",
     ]
 
