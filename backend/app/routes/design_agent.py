@@ -73,7 +73,7 @@ from app.design_agent.prompts import (
     DESIGN_AGENT_TEMPLATE_VERSION,
     render_scaffold_user,
 )
-from app.design_agent.runner import generate_prototype
+from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
 from app.design_agent.storage import ViteBuildError, stage_bundle, vite_build
 
 logger = logging.getLogger(__name__)
@@ -416,6 +416,22 @@ async def _stage_complete_run(
         logger.warning(
             "source_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
             prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
+    # Step 3.6 — AD12 orphan/re-attach. Orphan every OPEN comment whose anchor
+    # vanished from THIS build's bundle. Best-effort: the bundle is already
+    # staged, so a reconcile failure must NOT fail the build — it logs and the
+    # prototype still completes ready (orphaning is housekeeping, not a gate).
+    try:
+        reconcile_comments_on_checkpoint(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            dist_files=dist_files,
+        )
+    except Exception as exc:  # noqa: BLE001 — reconcile is best-effort housekeeping.
+        logger.warning(
+            "comments_reconcile_failed prototype_id=%s error_class=%s",
+            prototype_id, type(exc).__name__,
         )
 
     # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
@@ -1242,6 +1258,24 @@ async def _stage_iterate_run(
         logger.warning(
             "iterate_source_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
             prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
+    # Step 3.6 — AD12 orphan/re-attach on the ITERATE path. An iterate is a new
+    # checkpoint build, so per AD12 it MUST reconcile comments too (P3-05 shipped
+    # before this helper existed; wired here so generate AND iterate both orphan
+    # vanished anchors). Same path-agnostic helper as _stage_complete_run — it
+    # keys on prototype_id, not checkpoint_id. Best-effort: a reconcile failure
+    # must NOT fail the iterate (the bundle is already staged).
+    try:
+        reconcile_comments_on_checkpoint(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            dist_files=dist_files,
+        )
+    except Exception as exc:  # noqa: BLE001 — reconcile is best-effort housekeeping.
+        logger.warning(
+            "comments_reconcile_failed prototype_id=%s error_class=%s",
+            prototype_id, type(exc).__name__,
         )
 
     # Step 4 — P3-12 SEAM. Advance current_checkpoint_id + bundle_url WITHOUT a
