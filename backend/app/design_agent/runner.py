@@ -46,6 +46,7 @@ from app.db.prototype_pending_iterations import (
     mark_iteration_done,
     mark_iteration_failed,
 )
+from app.db.prototypes import set_pending_question
 from app.design_agent.autofixer import format_errors_for_agent
 from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
@@ -148,13 +149,19 @@ def reconcile_comments_on_checkpoint(
 
 @dataclass
 class RunResult:
-    status: str  # "complete" | "max_iters" | "refused" | "max_tokens" | "error"
+    status: str  # "complete" | "max_iters" | "refused" | "max_tokens" | "error" | "awaiting_clarification"
     iters: int
     usage: RunUsage
     duration_ms: int
     final_content: list[dict[str, Any]]  # raw assistant content blocks
     error_class: str | None = None
     error_message: str | None = None
+    # F12 (P3-08): set ONLY when the clarifying_question sentinel ends the loop as
+    # a terminal-PAUSE (status='awaiting_clarification'). Shape: {question, choices,
+    # context}. None on every other exit. Persisted by the entrypoints
+    # (iterate_prototype / generate_prototype) onto the prototype's pending_question
+    # sidecar column; no checkpoint is staged for a pause (no bundle was built).
+    pending_question: dict[str, Any] | None = None
 
 
 def _hash_tool_call(name: str, input: dict[str, Any]) -> str:
@@ -311,6 +318,40 @@ async def agent_loop(
 
             # Collect tool_use blocks; dispatch concurrently per parallel-tool-use rule.
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
+
+            # ── Exit-sentinel detection (AD17). A sentinel tool_use ENDS the loop;
+            # the RESULTING state is per-sentinel, keyed on the tool NAME (NOT
+            # "any sentinel" uniformly). The branch fires BEFORE dispatch, so a
+            # terminal sentinel batched with action tools WINS: the action tools
+            # in the same turn are NOT dispatched and the virtual_fs is untouched
+            # (AC5 terminal precedence). The detection runs here rather than in
+            # dispatch because the loop-break is a control-flow decision, not a
+            # tool execution (agent-build-research.md §4.4: "tool name ==
+            # clarifying_question -> break").
+            #
+            #   clarifying_question -> terminal-PAUSE: status='awaiting_clarification',
+            #       carry pending_question, stage NO completion checkpoint (the run
+            #       is incomplete; the answer arrives as a NEW iterate, P3-16).
+            #
+            # P3-09 adds the second arm WITHOUT redesigning this block — an
+            # `elif (patch := next(... "propose_prd_patch" ...)):` that ends the
+            # loop as terminal-COMPLETE (normal iterate completion + a prd_patches
+            # row). Do NOT collapse the two into a `category == "sentinel"` check:
+            # the two sentinels end the loop with DIFFERENT downstream effects.
+            clar = next(
+                (tu for tu in tool_uses if tu.get("name") == "clarifying_question"),
+                None,
+            )
+            if clar:
+                payload = clar.get("input") or {}
+                result = _finish(usage, "awaiting_clarification", iters, start, content)
+                result.pending_question = {
+                    "question": payload.get("question"),
+                    "choices": payload.get("choices"),
+                    "context": payload.get("context"),
+                }
+                return result
+
             results = await asyncio.gather(*[
                 dispatch(tu["name"], tu.get("input") or {}, ctx, allowed_tool_names)
                 for tu in tool_uses
@@ -407,6 +448,26 @@ def _serialise_tool_result(result: dict[str, Any]) -> str:
     return json.dumps(safe, default=str)[:TOOL_RESULT_MAX_CHARS]  # truncate per §5.1
 
 
+def _persist_pending_question_if_paused(
+    result: RunResult, prototype_id: int, workspace_id: str
+) -> None:
+    """F12 (P3-08): if the run ended as a clarifying_question terminal-PAUSE,
+    write the question payload to the prototype's `pending_question` sidecar.
+
+    No-op for every other status. Workspace-filtered (the helper applies the
+    filter). Shared by `generate_prototype` (scaffold) and `iterate_prototype`
+    (execute/plan) so the persistence is a single site. Does NOT touch the
+    prototype `status` (the sidecar IS the awaiting-answer signal) and stages no
+    checkpoint — the answer arrives as a NEW iterate (P3-16)."""
+    if result.status != "awaiting_clarification":
+        return
+    set_pending_question(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        question=result.pending_question,
+    )
+
+
 def _finish(usage: RunUsage, status: str, iters: int, start: float, final_content: list) -> RunResult:
     duration_ms = int((time.perf_counter() - start) * 1000)
     return RunResult(
@@ -455,6 +516,13 @@ async def generate_prototype(
         scenario=scenario,
         mode="scaffold",
     )
+    # F12 (P3-08): the clarifying_question sentinel can fire in scaffold mode too
+    # (it is registered in all modes). On a pause, persist the question on the
+    # prototype's pending_question sidecar — the prototype status is left untouched
+    # (the `pending_question IS NOT NULL` signal is the "awaiting answer" marker,
+    # NOT a new status enum value) and NO checkpoint is staged here (no bundle was
+    # built). The answer arrives as a NEW iterate (P3-16), which clears it.
+    _persist_pending_question_if_paused(result, prototype_id, workspace_id)
     # Cost-summary log line per TICKET_STANDARD §2 LLM-calling AC —
     # emitted via the shared llm_telemetry.log_llm_run primitive so the
     # log shape stays identical across every LLM call site in the repo
@@ -554,6 +622,13 @@ async def iterate_prototype(
         scenario=scenario,
         mode=mode,
     )
+    # F12 (P3-08): on an awaiting_clarification pause, persist the question on the
+    # prototype's pending_question sidecar and stage NO checkpoint (no bundle was
+    # built). iterate_prototype itself never stages checkpoints (the route's
+    # _stage_iterate_run does, and only on status=='complete'), so the "no
+    # checkpoint on a pause" guarantee holds end-to-end. The prototype status is
+    # left untouched; pending_question IS NOT NULL is the awaiting-answer signal.
+    _persist_pending_question_if_paused(result, prototype_id, workspace_id)
     # Cost-summary log line — same shared primitive as generate_prototype. The
     # operation + mode identifier mark this as an ITERATE run for telemetry; the
     # log carries identifiers + token counts only (Rule #24), never PRD/comment/

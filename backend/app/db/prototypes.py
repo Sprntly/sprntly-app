@@ -659,3 +659,55 @@ async def record_export_at_complete(*, prototype_id: int, workspace_id: str) -> 
         workspace_id=workspace_id,
         markdown_content=markdown,
     )
+
+
+# ─── F12 clarifying-question pause (P3-08) ────────────────────────────────────
+#
+# The clarifying_question exit-sentinel persists its question as a SIDECAR on the
+# prototype row (`pending_question` jsonb). It is NOT a new status value — a
+# paused prototype stays 'ready' and `pending_question IS NOT NULL` is the
+# "awaiting answer" signal. Both helpers are workspace-filtered (Rule #22) and
+# additive (they touch only the new column; existing helpers are unchanged).
+
+
+def set_pending_question(
+    *,
+    prototype_id: int,
+    workspace_id: str,                 # explicit workspace filter (Rule #22)
+    question: dict[str, Any] | None,
+) -> None:
+    """F12: write the clarifying-question payload to `prototypes.pending_question`.
+
+    `question` is the {question, choices?, context?} dict from the sentinel (or
+    None to clear). Workspace-filtered: a 'demo' call never touches an 'app' row.
+    Does NOT change `status` — the sidecar IS the awaiting-answer signal.
+
+    Logs identifiers ONLY (Rule #24) — the question TEXT is never logged: it can
+    embed PRD / product detail. `set` vs `cleared` is derivable from whether
+    `question` is None, so the log line records only the id + the action.
+    """
+    c = require_client()
+    (
+        c.table(_TABLE)
+        .update({"pending_question": question})
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .execute()
+    )
+    logger.info(
+        "prototype_question_%s prototype_id=%s",
+        "set" if question is not None else "cleared",
+        prototype_id,
+    )
+
+
+def clear_pending_question(*, prototype_id: int, workspace_id: str) -> None:
+    """F12: null out `prototypes.pending_question` (the answer arrived, P3-16).
+
+    Thin wrapper over `set_pending_question(question=None)` so the call site that
+    resumes a paused run reads as an explicit clear. Workspace-filtered."""
+    set_pending_question(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        question=None,
+    )
