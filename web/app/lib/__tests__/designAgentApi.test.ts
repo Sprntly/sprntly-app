@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { API_URL, designAgentApi, setAccessTokenProvider } from "../api"
+import { api, API_URL, designAgentApi, setAccessTokenProvider } from "../api"
 
 type MockResponse = {
   ok: boolean
@@ -236,6 +236,89 @@ describe("designAgentApi", () => {
         // Reset so the provider does not leak into other tests in this file.
         setAccessTokenProvider(async () => null)
       }
+    })
+  })
+
+  // ── F8 anchored comments (P3-03) ──────────────────────────────────────────
+  describe("comments", () => {
+    it("createCommentByToken POSTs to the public by-token route (AC8)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          id: 11,
+          anchor_id: "fb3007b5",
+          body: "make it bigger",
+          author: "external",
+          status: "open",
+          created_at: "2026-05-30T12:00:00Z",
+          resolved_at: null,
+        }),
+      )
+      const r = await designAgentApi.createCommentByToken("tok-xyz", {
+        anchor_id: "fb3007b5",
+        body: "make it bigger",
+      })
+      expect(r.id).toBe(11)
+      expect(r.status).toBe("open")
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/by-token/tok-xyz/comments`)
+      expect(init.method).toBe("POST")
+      expect(init.credentials).toBe("include")
+      expect(JSON.parse(init.body as string)).toEqual({
+        anchor_id: "fb3007b5",
+        body: "make it bigger",
+      })
+    })
+
+    it("listCommentsByToken GETs the public by-token route (AC8)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, [
+          {
+            id: 11,
+            anchor_id: "fb3007b5",
+            body: "hi",
+            author: "external",
+            status: "open",
+            created_at: "2026-05-30T12:00:00Z",
+            resolved_at: null,
+          },
+        ]),
+      )
+      const r = await designAgentApi.listCommentsByToken("tok-xyz")
+      expect(r).toHaveLength(1)
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/by-token/tok-xyz/comments`)
+      expect(init.method).toBe("GET")
+      expect(init.credentials).toBe("include")
+    })
+
+    it("resolveComment PATCHes the internal resolve route (AC8)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          id: 7,
+          anchor_id: "fb3007b5",
+          body: "hi",
+          author: "demo",
+          status: "resolved",
+          created_at: "2026-05-30T12:00:00Z",
+          resolved_at: "2026-05-30T13:00:00Z",
+        }),
+      )
+      const r = await designAgentApi.resolveComment(5, 7)
+      expect(r.status).toBe("resolved")
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/5/comments/7/resolve`)
+      expect(init.method).toBe("PATCH")
+      expect(init.credentials).toBe("include")
+    })
+
+    it("api.patch issues a PATCH request via the shared helper (AC9)", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }))
+      await api.patch("/v1/some/patch/route", { a: 1 })
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/some/patch/route`)
+      expect(init.method).toBe("PATCH")
+      expect(init.credentials).toBe("include")
+      expect(JSON.parse(init.body as string)).toEqual({ a: 1 })
     })
   })
 })
