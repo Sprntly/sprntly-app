@@ -167,7 +167,7 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
           <Link
             href="/onboard"
             className="ds-row ds-onboard"
-            style={{ color: "#e6e6ea", textDecoration: "none" }}
+            style={{ color: "var(--nav-text-hover)", textDecoration: "none" }}
             onClick={() => setOpen(false)}
           >
             + Onboard a company
@@ -183,16 +183,16 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
           gap: 6px;
           width: 100%;
           padding: 8px 10px;
-          background: #131318;
-          color: #e6e6ea;
-          border: 1px solid #232329;
+          background: var(--nav-2);
+          color: var(--nav-text-hover);
+          border: 1px solid rgba(143, 179, 166, 0.2);
           border-radius: 8px;
           cursor: pointer;
           font-size: 13px;
           text-align: left;
-          transition: border-color 0.15s;
+          transition: border-color 0.15s, background 0.15s;
         }
-        .ds-trigger:hover { border-color: #4a4a55; }
+        .ds-trigger:hover { border-color: rgba(143, 179, 166, 0.35); background: rgba(28, 78, 63, 0.85); }
         .ds-name {
           flex: 1;
           overflow: hidden;
@@ -205,10 +205,10 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
           left: 12px;
           right: 12px;
           top: calc(100% - 6px);
-          background: #131318;
-          border: 1px solid #2a2a32;
+          background: var(--nav);
+          border: 1px solid var(--nav-2);
           border-radius: 10px;
-          box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+          box-shadow: var(--shadow-lg);
           padding: 4px;
           z-index: 50;
         }
@@ -220,20 +220,20 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
           padding: 8px 10px;
           background: transparent;
           border: none;
-          color: #e6e6ea;
+          color: var(--nav-text-hover);
           text-align: left;
           cursor: pointer;
           font-size: 13px;
           border-radius: 6px;
           text-decoration: none;
         }
-        .ds-row:hover { background: #1a1a20; }
-        .ds-row.active { background: #1a1a20; }
-        .ds-row .row-meta { font-size: 11px; color: #7a7a85; }
-        .ds-onboard { color: #a8a8b3; }
-        .ds-sep { height: 1px; background: #232329; margin: 4px 0; }
-        .ds-empty, .ds-err { padding: 8px 10px; font-size: 12px; color: #7a7a85; }
-        .ds-err { color: #ff6b6b; }
+        .ds-row:hover { background: var(--nav-2); }
+        .ds-row.active { background: var(--nav-2); }
+        .ds-row .row-meta { font-size: 11px; color: var(--nav-text); }
+        .ds-onboard { color: var(--nav-text); }
+        .ds-sep { height: 1px; background: var(--nav-2); margin: 4px 0; }
+        .ds-empty, .ds-err { padding: 8px 10px; font-size: 12px; color: var(--nav-text); }
+        .ds-err { color: var(--danger); }
       `}</style>
     </div>
   )
