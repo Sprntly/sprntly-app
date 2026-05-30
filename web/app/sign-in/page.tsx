@@ -190,7 +190,8 @@ export default function SignInPage() {
         .pw-toggle { flex-shrink: 0; }
         .auth-error { color: #c0392b; font-size: 13px; padding: 8px 12px; background: rgba(192,57,43,0.08); border-radius: 8px; margin-bottom: 12px; }
         .auth-switch { text-align: center; font-size: 13px; color: var(--ink-3); margin-top: 18px; }
-        .auth-switch :global(a), .link-btn { color: var(--ink); font-weight: 600; background: none; border: none; cursor: pointer; font: inherit; text-decoration: underline; padding: 0; }
+        .auth-switch :global(a), .link-btn { color: var(--accent-hover); font-weight: 600; background: none; border: none; cursor: pointer; font: inherit; text-decoration: none; padding: 0; }
+        .auth-switch :global(a:hover), .link-btn:hover { text-decoration: underline; }
         .auth-legal { text-align: center; font-size: 11.5px; color: var(--muted); margin-top: 16px; }
         .auth-legal :global(a) { color: var(--ink-3); }
       `}</style>
@@ -207,7 +208,7 @@ function AuthShell({ children }: { children: React.ReactNode }) {
       </div>
       <style jsx>{`
         .auth-card { width: 100%; max-width: 480px; }
-        .ob-brand-mark { font-family: var(--font-display); font-weight: 600; font-size: 22px; letter-spacing: -0.02em; margin-bottom: 48px; text-align: center; color: var(--ink); }
+        .ob-brand-mark { font-family: var(--font-display); font-weight: 400; font-size: 22px; letter-spacing: -0.02em; margin-bottom: 48px; text-align: center; color: var(--ink); }
         .ob-brand-mark :global(span) { color: var(--accent); }
       `}</style>
     </div>
