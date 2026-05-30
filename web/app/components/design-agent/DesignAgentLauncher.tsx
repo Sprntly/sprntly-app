@@ -94,7 +94,11 @@ export function DesignAgentLauncherView({
       >
         Generate Prototype
       </button>
-      {result && <PostGenerationResult prototype={result} />}
+      {/* `key` forces a clean remount per prototype id: PostGenerationResult
+          (and the CompletionBar it mounts) seed state from props at mount only,
+          so regenerating a second prototype in the same launcher instance must
+          remount to avoid carrying the prior prototype's is_complete. */}
+      {result && <PostGenerationResult key={result.id} prototype={result} />}
       {renderDrawer({
         open,
         onOpenChange: setOpen,

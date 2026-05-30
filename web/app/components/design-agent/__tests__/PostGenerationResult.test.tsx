@@ -144,6 +144,20 @@ describe("PostGenerationResult container — defaults from the prototype record 
     expect(html).toMatch(/<input[^>]*checked[^>]*value="public"[^>]*>/)
   })
 
+  it("seeds the Complete view from a record with is_complete=true", () => {
+    // Guards the staleness class the launcher `key={result.id}` fix targets:
+    // the container seeds is_complete from the prop at mount, so a complete
+    // record must render the complete-state controls (not the WIP button).
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ is_complete: true, share_mode: "private" }),
+      }),
+    )
+    expect(html).toContain('data-testid="resume-btn"')
+    expect(html).toContain('data-testid="download-md-btn"')
+    expect(html).not.toContain('data-testid="mark-complete-btn"')
+  })
+
   it("defaults share_mode→private / is_complete→false when the columns are absent", () => {
     // Older / partial rows that don't surface the P2-06 columns.
     const html = renderToStaticMarkup(
