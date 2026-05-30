@@ -38,7 +38,12 @@ as a column. See the migration header for the rationale.
 from __future__ import annotations
 
 import logging
+import time
+import uuid
+from threading import Lock
 from typing import Any
+
+from argon2 import PasswordHasher
 
 from app.db.client import require_client, utc_now
 
@@ -341,3 +346,316 @@ def invalidate_stale_prototypes(current_version: int, variant: str = "v1") -> in
             len(stale_ids), current_version, variant,
         )
     return len(stale_ids)
+
+
+# ─── Sharing config + passcode + public-route lookup (P2-06) ──────────────
+#
+# F6: share_token is an OPAQUE uuid4 — NOT a JWT, NOT derived from prototype_id,
+# NOT signed. A brute-force scan of /p/<random-uuid> has no DB row, so the
+# public resolver returns 404 (not 401). DESIGN_AGENT_TOKEN_SECRET (config.py)
+# is bound for FUTURE HMAC-based token rotation and is intentionally NOT
+# consumed here. The app session secret is NEVER reused for any Design Agent
+# surface (skill-config Architecture Rule #14) — this module deliberately holds
+# no reference to that secret.
+
+_SHARE_MODES = {"private", "public", "passcode"}
+
+# OWASP-default params (time_cost=3, memory_cost=64 MB, parallelism=4) — argon2id.
+_PW_HASHER = PasswordHasher()
+
+
+def hash_share_passcode(passcode: str) -> str:
+    """Return the argon2id hash of a passcode for storage.
+
+    Raises ValueError on empty input — a passcode-mode share with no passcode is
+    a programming bug, not a runtime condition to swallow. The plaintext passcode
+    is NEVER logged or persisted; only the hash is stored.
+    """
+    if not passcode:
+        raise ValueError("hash_share_passcode: passcode is empty")
+    return _PW_HASHER.hash(passcode)
+
+
+def verify_share_passcode(plaintext: str, hashed: str | None) -> bool:
+    """Return True iff `plaintext` matches the stored argon2id `hashed` value.
+
+    Never raises: returns False on a missing hash, a malformed/garbage hash, or a
+    wrong passcode. The caller (P2-05 passcode route) treats every False the same
+    way, so collapsing all failure modes to False keeps the call-site simple and
+    avoids leaking which failure occurred.
+    """
+    if not hashed or not plaintext:
+        return False
+    try:
+        return _PW_HASHER.verify(hashed, plaintext)
+    except Exception:
+        # VerifyMismatchError / InvalidHashError / VerificationError all mean the
+        # same thing to the caller: this passcode did not verify. Defensive
+        # catch-all keeps the "never raises" contract.
+        return False
+
+
+def set_share_config(
+    *,
+    prototype_id: int,
+    workspace_id: str,                          # explicit workspace filter (Rule #22)
+    share_mode: str,                            # 'private' | 'public' | 'passcode'
+    passcode: str | None = None,                # required iff share_mode == 'passcode'
+) -> dict[str, Any]:
+    """Update share_mode + share_token + share_passcode_hash for a prototype.
+
+    Returns the updated row (including the generated share_token when the mode is
+    not 'private'). Workspace-filtered: a prototype that is not in `workspace_id`
+    raises ValueError (the standard isolation guard; this is NOT the public-route
+    path — see find_prototype_by_share_token for that).
+
+    Behaviour by mode:
+      - 'private'  → share_mode=private; share_token=NULL; share_passcode_hash=NULL
+      - 'public'   → share_mode=public;  share_token=uuid4() if NULL else preserved; hash=NULL
+      - 'passcode' → share_mode=passcode; share_token=uuid4() if NULL else preserved; hash=argon2(passcode)
+    Re-setting public→public (or passcode→passcode) does NOT rotate share_token
+    (F7: the public URL is reused across regenerations).
+    """
+    if share_mode not in _SHARE_MODES:
+        raise ValueError(f"set_share_config: unknown share_mode={share_mode!r}")
+    if share_mode == "passcode" and not passcode:
+        raise ValueError("set_share_config: passcode-mode requires a passcode")
+
+    c = require_client()
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise ValueError(f"set_share_config: prototype {prototype_id} not found in workspace")
+
+    patch: dict[str, Any] = {"share_mode": share_mode}
+    if share_mode == "private":
+        patch["share_token"] = None
+        patch["share_passcode_hash"] = None
+    else:
+        # Preserve an existing token (F7) — only mint one when none exists yet.
+        patch["share_token"] = row.get("share_token") or str(uuid.uuid4())
+        patch["share_passcode_hash"] = (
+            hash_share_passcode(passcode) if share_mode == "passcode" else None
+        )
+
+    (
+        c.table(_TABLE)
+        .update(patch)
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .execute()
+    )
+    # Rule #24 / #26: state-transition INFO line. Log the mode + id ONLY — never
+    # the passcode plaintext and never the share_token (the token is the access
+    # primitive, so it must not leak into log aggregation).
+    logger.info("prototype_share_configured prototype_id=%s mode=%s", prototype_id, share_mode)
+    return get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+
+
+def find_prototype_by_share_token(token: str) -> dict[str, Any] | None:
+    """Public-route lookup — deliberately does NOT filter by workspace_id.
+
+    This is the ONE legitimate cross-workspace user-facing query in the codebase,
+    justified by F6's design: the share_token IS the access primitive, so anyone
+    holding the URL holds the access regardless of which workspace owns the row.
+    Do NOT "fix" this to add a workspace filter — that would break public sharing.
+    (Contrast get_prototype, which is workspace-filtered for the authenticated
+    app surface.) Returns the full row, or None when the token has no row — which
+    is what makes a /p/<random-uuid> scan return 404, not 401.
+    """
+    c = require_client()
+    resp = c.table(_TABLE).select("*").eq("share_token", token).limit(1).execute()
+    return resp.data[0] if resp.data else None
+
+
+# ─── Passcode rate-limit primitive (in-memory token bucket) ──────────────
+#
+# 5 failures per minute per token. In-memory: a list of failure timestamps per
+# token, pruned on each check. Process-local — matches Sprntly's single-uvicorn-
+# worker pattern (backend/app/main.py). If/when Sprntly horizontal-scales this
+# moves to Redis; for the 2-week build, in-memory is sufficient. Guarded by a
+# Lock because the FastAPI TestClient (and uvicorn under threads) can call these
+# from multiple threads.
+
+_RATE_LIMIT_WINDOW_SEC = 60
+_RATE_LIMIT_MAX_FAILURES = 5
+_passcode_failures: dict[str, list[float]] = {}
+_passcode_failures_lock = Lock()
+
+
+def passcode_rate_limit_check(*, token: str, ip: str) -> bool:
+    """Return True iff `token` has < 5 failures in the last 60s.
+
+    The `ip` arg is accepted for FUTURE per-IP throttling (P5 hardening) and for
+    log enrichment, but is intentionally NOT used in the limit decision here —
+    the spec is "5/min/token" (BUILD-PHASES §Phase 2 deliverable #3). Prunes
+    expired failure timestamps as a side effect of each check.
+    """
+    now = time.monotonic()
+    with _passcode_failures_lock:
+        history = _passcode_failures.get(token, [])
+        fresh = [t for t in history if now - t < _RATE_LIMIT_WINDOW_SEC]
+        _passcode_failures[token] = fresh
+        return len(fresh) < _RATE_LIMIT_MAX_FAILURES
+
+
+def passcode_rate_limit_register_failure(*, token: str) -> None:
+    """Record one failed passcode attempt for `token` (monotonic timestamp)."""
+    now = time.monotonic()
+    with _passcode_failures_lock:
+        _passcode_failures.setdefault(token, []).append(now)
+
+
+def passcode_rate_limit_clear(*, token: str) -> None:
+    """Clear the failure history for `token` — called on a SUCCESSFUL verify so a
+    legitimate viewer is never rate-limited by their own earlier typos."""
+    with _passcode_failures_lock:
+        _passcode_failures.pop(token, None)
+
+
+# ─── Lifecycle: Mark Complete / Resume / stale-handoff flag (P2-07) ───────────
+#
+# Structural cousins of `complete_prototype` (different patch semantics): all
+# user-driven, all workspace-filtered (Rule #22). `flag_stale_handoff` operates
+# on `prototype_exports` — the most-recent export row IS the handoff record (per
+# the 2026-05-29 decision: no separate handoff_records table). That table is
+# created by P2-09's migration; this helper is exercised against the in-memory
+# fake until the trio merges (see the ticket's "THE KNOT" note).
+
+
+def mark_complete(*, prototype_id: int, workspace_id: str) -> dict[str, Any]:
+    """F14: set is_complete=true, promote current_checkpoint_id → complete_checkpoint_id.
+    Idempotent: a re-call when already complete is a no-op (returns the row unchanged).
+    """
+    c = require_client()
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise ValueError(f"mark_complete: prototype {prototype_id} not found")
+    patch: dict[str, Any] = {"is_complete": True}
+    # Promote current_checkpoint_id → complete_checkpoint_id only on the first
+    # complete. A second complete (idempotent path) preserves the original
+    # complete_checkpoint_id (the canonical lock point).
+    if not row.get("is_complete"):
+        patch["complete_checkpoint_id"] = row.get("current_checkpoint_id")
+    (
+        c.table(_TABLE)
+        .update(patch)
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .execute()
+    )
+    logger.info(
+        "prototype_completed prototype_id=%s complete_checkpoint_id=%s",
+        prototype_id,
+        patch.get("complete_checkpoint_id", row.get("complete_checkpoint_id")),
+    )
+    return get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+
+
+def resume_iteration(*, prototype_id: int, workspace_id: str) -> dict[str, Any]:
+    """F15: set is_complete=false. Does NOT clear complete_checkpoint_id —
+    that's the historical lock point and stays. Idempotent.
+    """
+    c = require_client()
+    (
+        c.table(_TABLE)
+        .update({"is_complete": False})
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .execute()
+    )
+    logger.info("prototype_resumed prototype_id=%s", prototype_id)
+    return get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+
+
+def flag_stale_handoff(*, prototype_id: int, workspace_id: str) -> int:
+    """F15: mark the most recent export row for this prototype as stale.
+
+    The most-recent `prototype_exports` row IS the handoff record (per the
+    2026-05-29 decision: no separate handoff_records table). Sets `is_stale=true`
+    on the most recent export row for this prototype + workspace. Returns the
+    count of rows updated (0 if no non-stale export exists yet; 1 otherwise).
+
+    Idempotent: re-calling when the most-recent export is already stale returns 0
+    because the `is_stale = false` filter excludes it from the candidate set.
+    """
+    c = require_client()
+    rows = (
+        c.table("prototype_exports")
+        .select("id")
+        .eq("prototype_id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .eq("is_stale", False)
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not rows:
+        return 0
+    export_id = rows[0]["id"]
+    (
+        c.table("prototype_exports")
+        .update({"is_stale": True})
+        .eq("id", export_id)
+        .execute()
+    )
+    logger.info(
+        "prototype_export_marked_stale prototype_id=%s export_id=%s",
+        prototype_id, export_id,
+    )
+    return 1
+
+
+async def record_export_at_complete(*, prototype_id: int, workspace_id: str) -> None:
+    """P2-09: fills in P2-07's stub. Generates the markdown via the serialiser
+    and persists to prototype_exports. Idempotent on (prototype_id, checkpoint_id):
+    a re-call after the first Mark Complete on the same checkpoint no-ops.
+
+    Async (P2-07's stub was sync): `render_export_markdown` is async, so the
+    POST /complete handler awaits this. The local imports avoid an import cycle
+    at module load (export.py imports get_prototype from this module).
+    """
+    from app.design_agent.export import render_export_markdown
+    from app.db.prototype_exports import insert_prototype_export
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        # Race / orphan — log and continue. The /complete handler succeeded;
+        # absence of the row here means the row was deleted between the
+        # handler's get_prototype check and now. Don't raise; the /complete
+        # response is already committed.
+        logger.warning(
+            "record_export_at_complete_skipped prototype_id=%s reason=missing_row",
+            prototype_id,
+        )
+        return
+    checkpoint_id = proto.get("complete_checkpoint_id")
+    if not checkpoint_id:
+        # Should never happen — mark_complete sets complete_checkpoint_id —
+        # but defensive against a future change to mark_complete semantics.
+        logger.warning(
+            "record_export_at_complete_skipped prototype_id=%s reason=no_checkpoint",
+            prototype_id,
+        )
+        return
+    try:
+        markdown = await render_export_markdown(
+            prototype_id=prototype_id,
+            checkpoint_id=checkpoint_id,
+            workspace_id=workspace_id,
+        )
+    except ValueError as exc:
+        # Serialiser failure (missing PRD, mismatched checkpoint, etc.) —
+        # log and return; the /complete response is already committed, so
+        # the prototype is locked but the export will need regeneration via
+        # the GET-export fallback path.
+        logger.warning(
+            "record_export_at_complete_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            prototype_id, checkpoint_id, type(exc).__name__,
+        )
+        return
+    insert_prototype_export(
+        prototype_id=prototype_id,
+        checkpoint_id=checkpoint_id,
+        workspace_id=workspace_id,
+        markdown_content=markdown,
+    )

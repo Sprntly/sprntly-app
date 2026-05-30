@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { API_URL, designAgentApi } from "../api"
+import { API_URL, designAgentApi, setAccessTokenProvider } from "../api"
 
 type MockResponse = {
   ok: boolean
@@ -12,6 +12,15 @@ function jsonResponse(status: number, body: unknown): MockResponse {
     ok: status >= 200 && status < 300,
     status,
     text: async () => JSON.stringify(body),
+  }
+}
+
+/** Raw text/markdown response for the export endpoint (NOT JSON-encoded). */
+function textResponse(status: number, body: string): MockResponse {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => body,
   }
 }
 
@@ -87,6 +96,146 @@ describe("designAgentApi", () => {
       expect(url).toBe(`${API_URL}/v1/design-agent/5`)
       expect(init.method).toBe("GET")
       expect(init.credentials).toBe("include")
+    })
+  })
+
+  describe("complete", () => {
+    it("POSTs /v1/design-agent/{id}/complete with an empty body (AC13)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          prototype_id: 5,
+          is_complete: true,
+          complete_checkpoint_id: 9,
+        }),
+      )
+      await designAgentApi.complete(5)
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/5/complete`)
+      expect(init.method).toBe("POST")
+      expect(init.credentials).toBe("include")
+      expect(JSON.parse(init.body as string)).toEqual({})
+    })
+
+    it("parses the response (AC13)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          prototype_id: 5,
+          is_complete: true,
+          complete_checkpoint_id: 9,
+        }),
+      )
+      const r = await designAgentApi.complete(5)
+      expect(r.is_complete).toBe(true)
+      expect(r.complete_checkpoint_id).toBe(9)
+    })
+  })
+
+  describe("resume", () => {
+    it("POSTs /v1/design-agent/{id}/resume (AC14)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          prototype_id: 5,
+          is_complete: false,
+          handoffs_flagged_stale: 2,
+        }),
+      )
+      await designAgentApi.resume(5)
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/5/resume`)
+      expect(init.method).toBe("POST")
+    })
+
+    it("parses the response (AC14)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          prototype_id: 5,
+          is_complete: false,
+          handoffs_flagged_stale: 2,
+        }),
+      )
+      const r = await designAgentApi.resume(5)
+      expect(r.is_complete).toBe(false)
+      expect(r.handoffs_flagged_stale).toBe(2)
+    })
+  })
+
+  describe("share", () => {
+    it("POSTs /v1/design-agent/{id}/share, passing the body through (AC15)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          prototype_id: 5,
+          share_mode: "passcode",
+          share_token: "tok-xyz",
+        }),
+      )
+      await designAgentApi.share(5, { mode: "passcode", passcode: "hunter2" })
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/5/share`)
+      expect(init.method).toBe("POST")
+      expect(JSON.parse(init.body as string)).toEqual({
+        mode: "passcode",
+        passcode: "hunter2",
+      })
+    })
+
+    it("parses the response (AC15)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          prototype_id: 5,
+          share_mode: "public",
+          share_token: "tok-abc",
+        }),
+      )
+      const r = await designAgentApi.share(5, { mode: "public" })
+      expect(r.share_mode).toBe("public")
+      expect(r.share_token).toBe("tok-abc")
+    })
+  })
+
+  describe("exportMarkdown", () => {
+    it("GETs /v1/design-agent/{id}/export (AC16)", async () => {
+      fetchMock.mockResolvedValueOnce(textResponse(200, "# Design brief\n"))
+      await designAgentApi.exportMarkdown(5)
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/5/export`)
+      expect(init.method).toBe("GET")
+      expect(init.credentials).toBe("include")
+    })
+
+    it("returns the response text as a string (AC16)", async () => {
+      fetchMock.mockResolvedValueOnce(textResponse(200, "# Design brief\n## Section"))
+      const md = await designAgentApi.exportMarkdown(5)
+      expect(md).toBe("# Design brief\n## Section")
+    })
+
+    it("sets the Accept header to text/markdown (AC16)", async () => {
+      fetchMock.mockResolvedValueOnce(textResponse(200, "# md"))
+      await designAgentApi.exportMarkdown(5)
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect((init.headers as Record<string, string>)["Accept"]).toBe("text/markdown")
+    })
+
+    it("throws an ApiError on a non-ok response (AC16)", async () => {
+      fetchMock.mockResolvedValueOnce(textResponse(409, "prototype is still WIP"))
+      await expect(designAgentApi.exportMarkdown(5)).rejects.toMatchObject({
+        status: 409,
+      })
+    })
+
+    it("includes the Bearer token when an access-token provider is set (AC17)", async () => {
+      setAccessTokenProvider(async () => "jwt-123")
+      try {
+        fetchMock.mockResolvedValueOnce(textResponse(200, "# md"))
+        await designAgentApi.exportMarkdown(5)
+        const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+        expect((init.headers as Record<string, string>)["Authorization"]).toBe(
+          "Bearer jwt-123",
+        )
+        expect(init.credentials).toBe("include")
+      } finally {
+        // Reset so the provider does not leak into other tests in this file.
+        setAccessTokenProvider(async () => null)
+      }
     })
   })
 })

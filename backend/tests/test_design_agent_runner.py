@@ -190,28 +190,80 @@ def test_agent_loop_bounds_at_max_iters(monkeypatch):
     client = _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),  # replayed forever
     ])
+    # Uses the production default (no explicit max_iters) so this also pins
+    # DEFAULT_MAX_ITERS == 40 (raised from 24 by the convergence fix) — revert
+    # the constant and this fails.
     result = _run(agent_loop(_system(), _user(), _ctx()))
     assert result.status == "max_iters"
-    assert result.iters == 8
-    assert len(client.calls) == 8
+    assert result.iters == 40
+    assert len(client.calls) == 40
 
 
-def test_agent_loop_emits_wrap_up_nudge_at_n_minus_2(monkeypatch):
+def test_wrap_up_nudge_escalates_by_remaining_count():
+    """The nudge text escalates as the budget shrinks: a 'start converging'
+    heads-up while there's room, a hard 'STOP now' in the last 1-2 turns."""
+    soft = runner._wrap_up_nudge(10)
+    assert "Start converging" in soft
+    assert "10 tool-call turns left" in soft
+    assert "STOP now" not in soft
+    # Boundary: 2 remaining is already the hard stop.
+    for n in (2, 1):
+        hard = runner._wrap_up_nudge(n)
+        assert "STOP now" in hard
+        assert f"{n} tool-call turn(s) left" in hard
+        assert "Start converging" not in hard
+
+
+def test_graduated_wrap_up_nudge_fires_at_scheduled_remaining(monkeypatch):
     client = _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
     ])
-    _run(agent_loop(_system(), _user(), _ctx()))
-    # Call 7 (index 6) is iters == max_iters - 1; the nudge is appended before it.
-    seventh_call_blocks = _all_content_blocks(client.calls[6]["messages"])
+    # Pin max_iters=8 → nudge schedule remaining ∈ {8//2, max(2, 8//4), 1} = {4, 2, 1}.
+    # Fixed call indices regardless of the production DEFAULT_MAX_ITERS — this
+    # test exercises the graduated firing schedule, not the production cap.
+    _run(agent_loop(_system(), _user(), _ctx(), max_iters=8))
+    # remaining=4 at iters=4 → the soft 'converging' nudge is appended before
+    # call index 3, and is NOT present yet at call index 2.
     assert any(
-        b.get("type") == "text" and "2 iterations remaining" in b.get("text", "")
-        for b in seventh_call_blocks
+        "Start converging" in b.get("text", "")
+        for b in _all_content_blocks(client.calls[3]["messages"])
     )
-    # And it must NOT be present yet at call 6 (index 5).
-    sixth_call_blocks = _all_content_blocks(client.calls[5]["messages"])
     assert not any(
-        "2 iterations remaining" in b.get("text", "") for b in sixth_call_blocks
+        "Start converging" in b.get("text", "")
+        for b in _all_content_blocks(client.calls[2]["messages"])
     )
+    # remaining=2 at iters=6 → the hard 'STOP now' nudge appears at call index 5,
+    # and is NOT present at call index 4 (iters=5, remaining=3 → no nudge fires).
+    assert any(
+        "STOP now" in b.get("text", "")
+        for b in _all_content_blocks(client.calls[5]["messages"])
+    )
+    assert not any(
+        "STOP now" in b.get("text", "")
+        for b in _all_content_blocks(client.calls[4]["messages"])
+    )
+
+
+def test_max_iters_exit_salvages_last_assistant_content(monkeypatch):
+    """On a max_iters exit the runner returns the LAST assistant turn's content
+    (was discarded as []), so a build that ran out of turns mid-flow is staged
+    rather than thrown away."""
+    last_turn = [
+        _text("Built the dashboard shell; wiring the detail view."),
+        _tool_use("t9", "view", {"path": "src/App.tsx"}),
+    ]
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", last_turn),  # replayed forever → final iteration's content
+    ])
+    ctx = _ctx(virtual_fs={"src/App.tsx": "export default function App() {}"})
+    result = _run(agent_loop(_system(), _user(), ctx, max_iters=3))
+    assert result.status == "max_iters"
+    assert result.iters == 3
+    # Salvage is non-empty and equals the last assistant turn (by value).
+    assert result.final_content != []
+    assert result.final_content == last_turn
+    # Sanity: it is genuinely the last turn the model produced, the 3rd call.
+    assert len(client.calls) == 3
 
 
 def test_wrap_up_nudge_does_not_create_consecutive_user_turns(monkeypatch):
@@ -245,6 +297,113 @@ def test_agent_loop_refusal_exits(monkeypatch):
     assert result.status == "refused"
 
 
+# ─── max_tokens truncation contract (P2-03 regression) ───────────────────────
+
+
+def _assert_no_orphan_tool_use(messages: list[dict]) -> None:
+    """The exact Messages API contract the production 400 enforced (P2-03):
+    every assistant `tool_use` block must be answered by a `tool_result` block
+    (carrying its id) in the immediately-following user turn. A dangling
+    tool_use — or a tool_use with no next message at all — is a 400.
+    """
+    for i, m in enumerate(messages):
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        tool_use_ids = [b["id"] for b in content if b.get("type") == "tool_use"]
+        if not tool_use_ids:
+            continue
+        assert i + 1 < len(messages), (
+            f"assistant tool_use {tool_use_ids} is the last message — "
+            f"no tool_result turn follows (would 400)"
+        )
+        nxt = messages[i + 1]
+        assert nxt.get("role") == "user", (
+            f"assistant tool_use {tool_use_ids} not followed by a user turn"
+        )
+        result_ids = {
+            b.get("tool_use_id")
+            for b in nxt["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_result"
+        }
+        for tid in tool_use_ids:
+            assert tid in result_ids, f"tool_use {tid} has no matching tool_result"
+
+
+def test_max_tokens_truncation_mid_tool_use_does_not_orphan(monkeypatch):
+    """P2-03 root-cause regression. When the response is truncated by max_tokens
+    WHILE the model is emitting a tool_use (e.g. a `write` whose `content` arg
+    never finished serialising — observed as input keys == ['path'] only), the
+    runner must NOT re-send that dangling tool_use turn. Doing so produced the
+    real failure: BadRequestError 400 'messages.N: `tool_use` ids were found
+    without `tool_result` blocks immediately after'. The fix discards the
+    truncated turn and retries the SAME turn with a doubled budget.
+    """
+    # Truncated mid-tool_use: only `path` made it out, `content` was cut off.
+    partial_write = _tool_use("toolu_partial", "write", {"path": "src/App.tsx"})
+    client = _install_client(monkeypatch, [
+        _msg("max_tokens", [partial_write]),       # truncated mid-emission
+        _msg("end_turn", [_text("recovered")]),    # retry with doubled budget succeeds
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+
+    # The loop recovered instead of 400-ing.
+    assert result.status == "complete"
+    assert result.final_content == [_text("recovered")]
+    # Budget doubled exactly once.
+    assert client.calls[0]["max_tokens"] == 4096
+    assert client.calls[1]["max_tokens"] == 8192
+    # The dangling tool_use turn was discarded — the retry re-sends the SAME
+    # turn (back to the prior user turn), never the partial assistant turn.
+    assert client.calls[1]["messages"] == client.calls[0]["messages"]
+    partial_ids = {
+        b.get("id")
+        for m in client.calls[1]["messages"]
+        for b in (m.get("content") or [])
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+    }
+    assert "toolu_partial" not in partial_ids
+    # Every recorded request honours the tool_use↔tool_result pairing contract.
+    for call in client.calls:
+        _assert_no_orphan_tool_use(call["messages"])
+
+
+def test_max_tokens_truncation_text_no_consecutive_assistant_turns(monkeypatch):
+    """The pure-text truncation case (no tool_use): re-sending the partial
+    assistant turn would create two consecutive assistant turns (also a 400).
+    The discard-and-retry fix keeps roles strictly alternating."""
+    client = _install_client(monkeypatch, [
+        _msg("max_tokens", [_text("partial answer that got cut off ...")]),
+        _msg("end_turn", [_text("the complete answer")]),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "complete"
+    assert result.final_content == [_text("the complete answer")]
+    for call in client.calls:
+        roles = [m["role"] for m in call["messages"]]
+        for a, b in zip(roles, roles[1:]):
+            assert a != b, f"consecutive same-role turns: {roles}"
+
+
+def test_max_tokens_twice_mid_tool_use_exits_clean(monkeypatch):
+    """If BOTH the first attempt and the doubled-budget retry truncate mid-
+    tool_use, the loop exits with status=max_tokens (second hit = exit) and
+    still never emits an orphaned tool_use request."""
+    partial = _tool_use("toolu_p", "write", {"path": "src/App.tsx"})
+    client = _install_client(monkeypatch, [
+        _msg("max_tokens", [partial]),
+        _msg("max_tokens", [partial]),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "max_tokens"
+    assert client.calls[0]["max_tokens"] == 4096
+    assert client.calls[1]["max_tokens"] == 8192
+    for call in client.calls:
+        _assert_no_orphan_tool_use(call["messages"])
+
+
 # ─── Cache verification ──────────────────────────────────────────────────────
 
 
@@ -253,7 +412,10 @@ def test_cache_control_breakpoint_preserved_across_iters(monkeypatch):
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
     ])
     system_blocks = _system()
-    _run(agent_loop(system_blocks, _user(), _ctx()))
+    # Pin max_iters=8 — this verifies cache-prefix stability across iterations,
+    # not the production cap (24 per P2-01); a fixed count keeps the assertion
+    # anchored.
+    _run(agent_loop(system_blocks, _user(), _ctx(), max_iters=8))
     assert len(client.calls) == 8
     for call in client.calls:
         # Same object every iteration — no mutation invalidates the cache prefix.

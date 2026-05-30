@@ -37,23 +37,36 @@ SCOPE (what this ticket does NOT do, per the ticket's scope boundaries):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
 from app.db.prds import get_prd
+from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
     complete_prototype,
     create_checkpoint,
     fail_prototype,
     find_existing_prototype,
+    find_prototype_by_share_token,
+    flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
+    mark_complete,
+    passcode_rate_limit_check,
+    passcode_rate_limit_clear,
+    passcode_rate_limit_register_failure,
+    record_export_at_complete,
+    resume_iteration,
+    set_share_config,
     start_prototype,
+    verify_share_passcode,
 )
 from app.design_agent.prompts import (
     DESIGN_AGENT_SCAFFOLD_SYSTEM,
@@ -279,10 +292,24 @@ async def _run_generation_bg(
                 error="agent_loop completed but emitted no files",
             )
         else:
+            # P2-02: include the structured error_message / error_class from
+            # RunResult so the underlying failure (e.g. an Anthropic
+            # BadRequestError) is preserved for triage rather than dropped on
+            # the floor. The 500-char cap is applied downstream in
+            # fail_prototype, so no caller-side truncation is needed here.
+            error_parts = [
+                f"agent_loop ended with status={result.status} iters={result.iters}"
+            ]
+            error_message = getattr(result, "error_message", None)
+            error_class = getattr(result, "error_class", None)
+            if error_message:
+                error_parts.append(f"error_message={error_message}")
+            if error_class:
+                error_parts.append(f"error_class={error_class}")
             fail_prototype(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
-                error=f"agent_loop ended with status={result.status} iters={result.iters}",
+                error=" | ".join(error_parts),
             )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
         # error_class only in the structured log (Rule #24 — no PII / no PRD /
@@ -373,6 +400,24 @@ async def _stage_complete_run(
         )
         return
 
+    # Step 3.5 — Stage the RAW virtual_fs alongside dist/ under _source/ so the
+    # export serialiser (P2-08) can read raw TSX, not minified bundles.
+    # Best-effort: a source-stage failure logs and proceeds — the prototype is
+    # still ready (the load-bearing artefact is the dist/ bundle). The serialiser
+    # gracefully falls back to its "no source staged" message if this step failed.
+    try:
+        await stage_bundle(
+            prototype_id=prototype_id,
+            checkpoint_id=checkpoint_id,
+            files=virtual_fs,
+            sub_prefix="_source",
+        )
+    except Exception as exc:  # noqa: BLE001 — source-stage is best-effort.
+        logger.warning(
+            "source_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
     # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
     complete_prototype(
         prototype_id=prototype_id,
@@ -417,3 +462,318 @@ def _figma_context_block(figma_file_key: str | None) -> str:
         "Call the fetch_figma tool (no frame_ids) to list its top-level frames, "
         "then fetch the specific frames you need."
     )
+
+
+# ─── Public share viewer (P2-05) ──────────────────────────────────────────
+#
+# These two routes back the unauthenticated `/p/<token>` viewer (web/app/p/[token]).
+# They are NO-AUTH BY DESIGN: the share_token IS the access primitive (F6), so
+# they carry NO `require_app_session` dependency and NO workspace filter —
+# `find_prototype_by_share_token` is the one legitimate cross-workspace read
+# (see db/prototypes.py). Both are feature-flag-gated via the shared
+# `_require_feature_enabled()` so a brute-force scan returns 404, matching the
+# auth'd routes' invisibility posture (Rule #15 / F6: 404-not-401).
+#
+# The response is MINIMUM-DISCLOSURE: exactly four fields. No prototype_id,
+# prd_id, workspace_id, instructions, figma_file_key, created_at, or error ever
+# leaves this surface — that reduces the cross-tenant fingerprinting surface to
+# what the viewer strictly needs to render. response_model enforces the exact
+# key set even if the row carries more columns.
+
+
+def _share_token_hash(token: str) -> str:
+    """sha256 prefix of a share token, for log correlation only (Rule #24).
+
+    The full token must NEVER reach log aggregation: it is the access primitive,
+    so logging it verbatim is equivalent to logging the share URL. An 8-char
+    sha256 prefix correlates a resolve/deny pair for one token without being
+    reversible to the token (or to anything PII).
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
+class PublicPrototypeView(BaseModel):
+    share_mode: Literal["public", "passcode"]  # "private" is never returned
+    requires_passcode: bool                    # true iff share_mode == "passcode"
+    bundle_url: str | None                     # null until a passcode is verified
+    is_complete: bool
+
+
+class PasscodeAttempt(BaseModel):
+    passcode: str = Field(..., min_length=1, max_length=128)
+
+
+@router.get("/by-token/{token}", response_model=PublicPrototypeView)
+def get_by_token(token: str) -> PublicPrototypeView:
+    """Resolve a share_token to its viewable prototype. NO auth — the token IS
+    the access. Returns 404 (never 401/403) on a bad token, a `private` row, or a
+    row whose `status` is not `ready` (a generating/failed prototype is not
+    viewable, and we do not disclose that it exists). `bundle_url` is withheld
+    (null) for passcode mode until POST /passcode succeeds.
+    """
+    _require_feature_enabled()
+    th = _share_token_hash(token)
+    row = find_prototype_by_share_token(token)
+    if not row or row.get("share_mode") == "private" or row.get("status") != "ready":
+        # `private` is its own reason; a missing row OR a not-ready row both map
+        # to `not_found` so we never disclose that a hidden prototype exists.
+        reason = "private" if (row and row.get("share_mode") == "private") else "not_found"
+        logger.info("prototype_public_view_denied token_hash=%s reason=%s", th, reason)
+        raise HTTPException(status_code=404, detail="Not found")
+    mode = row["share_mode"]
+    logger.info("prototype_public_view_resolved token_hash=%s share_mode=%s", th, mode)
+    return PublicPrototypeView(
+        share_mode=mode,
+        requires_passcode=(mode == "passcode"),
+        # bundle_url is released for public mode immediately; for passcode mode it
+        # stays null here and is only returned by the verify route on success.
+        bundle_url=row.get("bundle_url") if mode == "public" else None,
+        is_complete=bool(row.get("is_complete")),
+    )
+
+
+@router.post("/by-token/{token}/passcode", response_model=PublicPrototypeView)
+def verify_passcode(
+    token: str, body: PasscodeAttempt, request: Request
+) -> PublicPrototypeView:
+    """Verify a passcode against a passcode-mode share; on success return the
+    bundle_url. Rate-limited 5/min/token (P2-06 primitive). The rate-limit check
+    runs FIRST so counter exhaustion is observable as 429 BEFORE any hash
+    comparison; under the limit, a wrong passcode returns 401 `invalid_passcode`.
+    404 (not 401) for a bad/non-passcode/not-ready token preserves invisibility.
+    """
+    _require_feature_enabled()
+    th = _share_token_hash(token)
+    # Rate-limit FIRST (AC6): a token over the limit gets 429 before we touch the
+    # row or the hash, so a brute-forcer cannot distinguish rate-limited from
+    # wrong-passcode by timing the hash compare.
+    client_ip = request.client.host if request.client else "0.0.0.0"
+    if not passcode_rate_limit_check(token=token, ip=client_ip):
+        logger.info("prototype_public_view_denied token_hash=%s reason=rate_limited", th)
+        raise HTTPException(status_code=429, detail="Too many attempts")
+    row = find_prototype_by_share_token(token)
+    if not row or row.get("share_mode") != "passcode" or row.get("status") != "ready":
+        logger.info("prototype_public_view_denied token_hash=%s reason=not_found", th)
+        raise HTTPException(status_code=404, detail="Not found")
+    if not verify_share_passcode(body.passcode, row.get("share_passcode_hash")):
+        passcode_rate_limit_register_failure(token=token)
+        logger.info("prototype_public_view_denied token_hash=%s reason=passcode_required", th)
+        raise HTTPException(status_code=401, detail="invalid_passcode")
+    # Success: clear the failure history so a later legitimate visitor is not
+    # throttled by this token's earlier wrong attempts.
+    passcode_rate_limit_clear(token=token)
+    logger.info("prototype_public_view_resolved token_hash=%s share_mode=passcode", th)
+    return PublicPrototypeView(
+        share_mode="passcode",
+        requires_passcode=True,
+        bundle_url=row.get("bundle_url"),
+        is_complete=bool(row.get("is_complete")),
+    )
+
+
+# ─── Lifecycle: Mark Complete / Resume Iteration / Set Share (P2-07) ──────────
+#
+# F14 (complete) locks a prototype; F15 (resume) unlocks it AND flags any open
+# downstream handoff (the most-recent export row) as stale per spec §8; F6
+# (share) sets share_mode/token/passcode. All three reuse `require_app_session`
+# (app-audience auth) and `_require_feature_enabled` so they are invisible (404)
+# while the flag is off and 401 without an app session — identical gates to
+# /generate above. The handlers are sync (mirrors get_one): FastAPI runs them in
+# the threadpool, so the blocking supabase calls don't stall the event loop.
+
+
+class CompleteRequest(BaseModel):
+    """Empty body — POST /complete takes no payload. The current checkpoint
+    (from `prototypes.current_checkpoint_id`) is what's locked."""
+    pass
+
+
+class CompleteResponse(BaseModel):
+    prototype_id: int
+    is_complete: bool
+    complete_checkpoint_id: int | None
+
+
+@router.post("/{prototype_id}/complete", response_model=CompleteResponse)
+async def post_complete(
+    prototype_id: int,
+    session: dict = Depends(require_app_session),
+) -> CompleteResponse:
+    """F14: lock the prototype. Sets is_complete=true and promotes
+    current_checkpoint_id → complete_checkpoint_id. Idempotent: a second
+    /complete on an already-complete prototype is a no-op (200; no row change).
+    Returns 404 if the prototype is not in the caller's workspace.
+    Returns 409 if `status != 'ready'` (cannot mark a generating/failed/invalidated
+    prototype complete).
+
+    `async def` because the export-write hook (`record_export_at_complete`,
+    filled in by P2-09) is now async — it awaits the markdown serialiser. The
+    sync DB helpers (`get_prototype`, `mark_complete`) are still called WITHOUT
+    `await` per the CALL-STYLE NOTE; only the export hook is awaited.
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    if row["status"] != "ready":
+        raise HTTPException(status_code=409, detail=f"Cannot complete: status={row['status']}")
+    updated = mark_complete(prototype_id=prototype_id, workspace_id=workspace_id)
+    # P2-09 fills in the export-write hook (async): it generates the markdown
+    # brief and persists it to prototype_exports. Awaited inline so the export
+    # row is committed before the /complete response returns (no fire-and-forget
+    # coroutine — an un-awaited call would silently never insert the row).
+    await record_export_at_complete(prototype_id=prototype_id, workspace_id=workspace_id)
+    return CompleteResponse(
+        prototype_id=updated["id"],
+        is_complete=updated["is_complete"],
+        complete_checkpoint_id=updated["complete_checkpoint_id"],
+    )
+
+
+class ResumeResponse(BaseModel):
+    prototype_id: int
+    is_complete: bool
+    handoffs_flagged_stale: int   # count for log/UX; the export row IS the handoff
+
+
+@router.post("/{prototype_id}/resume", response_model=ResumeResponse)
+def post_resume(
+    prototype_id: int,
+    session: dict = Depends(require_app_session),
+) -> ResumeResponse:
+    """F15: unlock the prototype + flag any open handoff record as stale.
+
+    Sets is_complete=false. Calls flag_stale_handoff(prototype_id) which marks the
+    most-recent `prototype_exports` row stale (that row IS the handoff record per
+    the 2026-05-29 decision). Returns 0 when no export exists yet, so resume on a
+    never-completed prototype is a clean no-op on the handoff surface.
+    Idempotent: resume-on-WIP is a 200 no-op.
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    updated = resume_iteration(prototype_id=prototype_id, workspace_id=workspace_id)
+    stale_count = flag_stale_handoff(prototype_id=prototype_id, workspace_id=workspace_id)
+    return ResumeResponse(
+        prototype_id=updated["id"],
+        is_complete=updated["is_complete"],
+        handoffs_flagged_stale=stale_count,
+    )
+
+
+class ShareRequest(BaseModel):
+    mode: Literal["private", "public", "passcode"]
+    passcode: str | None = Field(default=None, max_length=128)
+
+
+class ShareResponse(BaseModel):
+    prototype_id: int
+    share_mode: str
+    share_token: str | None     # null for private, populated for public/passcode
+
+
+@router.post("/{prototype_id}/share", response_model=ShareResponse)
+def post_share(
+    prototype_id: int,
+    body: ShareRequest,
+    session: dict = Depends(require_app_session),
+) -> ShareResponse:
+    """F6: set / update share configuration. Wraps set_share_config (P2-06).
+
+    On passcode mode without a passcode, returns 400. On unknown mode → 422
+    (caught by pydantic). On row-not-found in this workspace → 404.
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    if body.mode == "passcode" and not body.passcode:
+        raise HTTPException(status_code=400, detail="passcode-mode requires a passcode")
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    try:
+        updated = set_share_config(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            share_mode=body.mode,
+            passcode=body.passcode,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return ShareResponse(
+        prototype_id=updated["id"],
+        share_mode=updated["share_mode"],
+        share_token=updated.get("share_token"),
+    )
+
+
+# ─── Export read (P2-09) ──────────────────────────────────────────────────────
+#
+# F16/F17: return the markdown brief of the locked checkpoint. The /complete
+# handler snapshots the markdown into prototype_exports (record_export_at_complete);
+# this route reads that snapshot, falling back to a fresh serialiser render if the
+# snapshot row is missing (defensive against a partial-failure during /complete).
+# Same gates as the authed routes above: feature-flag (404 when off) +
+# require_app_session (401 without a session) + workspace filter (404 cross-tenant).
+
+
+@router.get("/{prototype_id}/export")
+async def get_export(
+    prototype_id: int,
+    session: dict = Depends(require_app_session),
+) -> Response:
+    """F16/F17: return the markdown export of the locked checkpoint.
+
+    Returns 409 when the prototype is not complete (is_complete=false) per F17.
+    Returns 404 when not in the caller's workspace.
+    Returns 200 with Content-Type: text/markdown; charset=utf-8 and
+    Content-Disposition: attachment; filename="<slug>-design-brief.md".
+    The frontend uses this for both Download .md and Copy to clipboard (it
+    reads the text body and copies via navigator.clipboard.writeText).
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    if not proto.get("is_complete"):
+        # F17: WIP prototypes viewable but not exportable.
+        raise HTTPException(status_code=409, detail="Mark prototype complete first")
+    export_row = find_prototype_export(
+        prototype_id=prototype_id, workspace_id=workspace_id,
+    )
+    if not export_row:
+        # Fallback: regenerate on the fly if the snapshot row is missing
+        # (shouldn't happen under normal flow — /complete writes it — but
+        # defensive against partial-failure during the /complete handler).
+        from app.design_agent.export import render_export_markdown
+        markdown = await render_export_markdown(
+            prototype_id, proto["complete_checkpoint_id"],
+            workspace_id=workspace_id,
+        )
+    else:
+        markdown = export_row["markdown_content"]
+    filename = _export_filename(proto)
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _export_filename(proto: dict[str, Any]) -> str:
+    """Build a safe download filename. Strips non-ascii + replaces spaces.
+    Falls back to prototype-<id> when no slug source available."""
+    import re
+    base = f"prototype-{proto['id']}"
+    return re.sub(r"[^A-Za-z0-9_-]", "-", base) + "-design-brief.md"
