@@ -169,8 +169,11 @@ def test_clarifying_question_in_all_modes():
         registry = tools_for_mode(mode)
         assert sum(1 for t in registry if t.category == "action") <= 6
         assert sum(1 for t in registry if t.category == "sentinel") <= 4
-    # propose_prd_patch (sentinel #2) is NOT yet present — it lands in P3-09.
-    assert "propose_prd_patch" not in {t.name for t in tools_for_mode("execute")}
+    # propose_prd_patch (sentinel #2) landed in P3-09 as EXECUTE-ONLY — present in
+    # execute mode, absent from plan/scaffold (no PRD-edit step there).
+    assert "propose_prd_patch" in {t.name for t in tools_for_mode("execute")}
+    assert "propose_prd_patch" not in {t.name for t in tools_for_mode("plan")}
+    assert "propose_prd_patch" not in {t.name for t in tools_for_mode("scaffold")}
 
 
 def test_description_has_negative_space():

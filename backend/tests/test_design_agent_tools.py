@@ -46,12 +46,12 @@ def test_sentinel_tools_count_at_most_4():
 
 
 def test_sentinel_tools_holds_clarifying_question():
-    # P3-08: the FIRST exit-sentinel landed. SENTINEL_TOOLS is no longer empty
-    # (it was [] through P1/P2) — it holds exactly clarifying_question, and the
-    # AD17 cap (≤4) still holds. propose_prd_patch (sentinel #2) lands in P3-09.
-    assert [t.name for t in SENTINEL_TOOLS] == ["clarifying_question"]
+    # P3-08 landed sentinel #1 (clarifying_question); P3-09 landed sentinel #2
+    # (propose_prd_patch). SENTINEL_TOOLS now holds exactly those two, in
+    # declaration order, and the AD17 cap (≤4) still holds.
+    assert [t.name for t in SENTINEL_TOOLS] == ["clarifying_question", "propose_prd_patch"]
     assert len(SENTINEL_TOOLS) <= 4
-    assert SENTINEL_TOOLS[0].category == "sentinel"
+    assert all(t.category == "sentinel" for t in SENTINEL_TOOLS)
 
 
 def test_all_action_tools_have_action_category():
