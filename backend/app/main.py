@@ -94,25 +94,44 @@ async def lifespan(app: FastAPI):
             prd_orphans,
             ask_orphans,
         )
-    # Design Agent (P1-07): demote orphaned 'generating' prototypes (the worker
-    # task died with the previous process) + stale 'ready' prototypes (template
-    # bump). Sync helpers, across ALL workspaces — system-wide cleanup, not a
-    # user-driven query (Rule #23) — mirroring the prd/evidence invalidation above.
-    proto_orphans = invalidate_orphan_generating_prototypes()
-    proto_stale = invalidate_stale_prototypes(DESIGN_AGENT_TEMPLATE_VERSION, variant="v1")
-    if proto_orphans or proto_stale:
-        logger.info(
-            "Invalidated %d orphan generating prototype(s), %d stale prototype(s)",
-            proto_orphans,
-            proto_stale,
+    # Design Agent startup invalidation (P1-07 prototypes + P3-06 iterations).
+    #
+    # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
+    # out-of-band via Supabase migrations (db.init_db is a no-op) that may not yet
+    # be applied in a given environment — e.g. prod before the feature flag-flip.
+    # A missing design-agent table must NOT crash API startup; the Design Agent
+    # surface stays dark behind NEXT_PUBLIC_DESIGN_AGENT_ENABLED regardless. Without
+    # this guard an unapplied migration takes the entire API down (prod was 502 from
+    # the P1 rollup until this landed). Both unguarded calls — the P1-07 prototypes
+    # block AND the P3-06 iterations call — live inside this ONE try/except so a
+    # regression that un-guards either one is caught by the lifespan-guard test.
+    try:
+        # Design Agent (P1-07): demote orphaned 'generating' prototypes (the worker
+        # task died with the previous process) + stale 'ready' prototypes (template
+        # bump). Sync helpers, across ALL workspaces — system-wide cleanup, not a
+        # user-driven query (Rule #23) — mirroring the prd/evidence invalidation above.
+        proto_orphans = invalidate_orphan_generating_prototypes()
+        proto_stale = invalidate_stale_prototypes(DESIGN_AGENT_TEMPLATE_VERSION, variant="v1")
+        if proto_orphans or proto_stale:
+            logger.info(
+                "Invalidated %d orphan generating prototype(s), %d stale prototype(s)",
+                proto_orphans,
+                proto_stale,
+            )
+        # Design Agent (P3-06, AD11): demote orphaned 'running' iterations (the worker
+        # task died with the previous process) so a restart recovers the iterate queue.
+        # Sync helper, across ALL workspaces — system-wide cleanup, not user-driven
+        # (Rule #23) — mirroring the prototype orphan-clear above.
+        iter_orphans = invalidate_orphan_running_iterations()
+        if iter_orphans:
+            logger.info("Invalidated %d orphan running iteration(s)", iter_orphans)
+    except Exception:
+        logger.warning(
+            "Design Agent startup invalidation skipped — table(s) unavailable "
+            "(migrations not yet applied in this environment); API startup continues, "
+            "feature stays dark behind flag",
+            exc_info=True,
         )
-    # Design Agent (P3-06, AD11): demote orphaned 'running' iterations (the worker
-    # task died with the previous process) so a restart recovers the iterate queue.
-    # Sync helper, across ALL workspaces — system-wide cleanup, not user-driven
-    # (Rule #23) — mirroring the prototype orphan-clear above.
-    iter_orphans = invalidate_orphan_running_iterations()
-    if iter_orphans:
-        logger.info("Invalidated %d orphan running iteration(s)", iter_orphans)
     # Kick off brief generation in the background so the service starts fast.
     # auto_generate_all is idempotent: it skips datasets that already have a
     # cached brief in SQLite at the current schema version.
