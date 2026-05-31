@@ -47,7 +47,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
-from app.db.prds import get_prd
+from app.db.prds import get_prd_rendered
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
     advance_current_checkpoint,
@@ -526,15 +526,17 @@ async def _stage_complete_run(
 def _load_prd_body(prd_id: int) -> str:
     """Fetch the PRD's `payload_md` for the agent's user message.
 
-    `get_prd` is the existing helper (db/prds.py) and is NOT workspace-scoped —
-    PRDs predate the workspace_id primitive, and `routes/prd.py` reads them the
-    same way under its own auth dependency. Per AC #10 this is the documented
-    fallback: the route's `require_app_session` gate is the access boundary; a
-    workspace filter is added if/when `get_prd` grows a `workspace_id` param.
-    Raises 404 (surfaced into the row's error via the caller's except) when the
-    PRD does not exist.
+    Uses `get_prd_rendered` (db/prds.py, P3-17) so the body the agent sees in its
+    iterate user-message reflects accepted (status='applied') prd_patches folded
+    in at read time (F11 render-on-read). Like the underlying `get_prd`, this is
+    NOT workspace-scoped — PRDs predate the workspace_id primitive, and
+    `routes/prd.py` reads them the same way under its own auth dependency. Per AC
+    #10 this is the documented fallback: the route's `require_app_session` gate is
+    the access boundary; a workspace filter is added if/when `get_prd` grows a
+    `workspace_id` param. Raises 404 (surfaced into the row's error via the
+    caller's except) when the PRD does not exist.
     """
-    prd = get_prd(prd_id)
+    prd = get_prd_rendered(prd_id)
     if not prd:
         raise HTTPException(status_code=404, detail="PRD not found")
     return prd.get("payload_md") or ""
