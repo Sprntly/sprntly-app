@@ -1,21 +1,27 @@
 // P3-14 — IterateComposer tests. Node-env vitest (no DOM, no testing-library),
-// so — following the CostEstimateModal / CommentsPanel / DesignAgentLauncher
-// convention — we SSR-render the pure views via renderToStaticMarkup and
-// unit-test the extracted dependency-injected helpers (initialComposerState /
-// runEstimate / runIterate / queueIndicator) with spies. The AD14 gate (Submit→
-// estimate, Continue→iterate, Cancel→neither) and the B4 Apply→prefill→estimate→
-// Continue→iterate handoff are asserted against spies + element-tree extraction
-// (the same node-env-faithful "mounted" technique the Launcher test uses), since
-// renderToStaticMarkup does not fire DOM events or effects.
+// so — following the repo's renderToStaticMarkup convention — pure views are
+// SSR-rendered for markup assertions. For the load-bearing AD14 cost-gate
+// invariant (AC3) and the B4 handoff we DRIVE THE REAL CONTAINER HANDLERS (not
+// the extracted free helpers) against spies on the REAL designAgentApi methods,
+// so the gate is genuinely locked: a future edit that moved an `iterate` call
+// into Submit would make `onSubmit` call iterate and fail these tests.
+//
+// Driving the container in node-env: the components read the classic JSX factory
+// from `globalThis.React`, so `driveContainer` wraps that `createElement` to
+// capture the props the container passes to its View (including the live
+// `onSubmit`/`onContinue`/`onCancel` = the container's handleSubmit/handleContinue/
+// handleCancel closures), renders the container with renderToStaticMarkup, then
+// restores. useState setters fired by those handlers post-render are no-ops in the
+// server renderer (verified), so the handlers' API calls run while their setState
+// calls harmlessly no-op — exactly what we assert against.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-// Sprntly components carry no `import React`; vitest's esbuild transform uses the
-// classic runtime, so expose React globally (repo-wide test convention) rather
-// than touch the shared vitest config.
+// Sprntly components carry no `import React`; the classic JSX runtime reads
+// `globalThis.React`, so expose it (repo-wide test convention).
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import {
@@ -27,9 +33,9 @@ import {
   queueIndicator,
   LOCKED_AFFORDANCE,
 } from "../IterateComposer"
-import { CostEstimateModalView } from "../CostEstimateModal"
 import { CommentsPanel } from "../CommentsPanel"
 import { DesignAgentLauncherView } from "../DesignAgentLauncher"
+import { designAgentApi } from "../../../lib/api"
 import type {
   CommentRecord,
   IterateCostEstimate,
@@ -96,6 +102,38 @@ function findChild(tree: React.ReactElement, type: unknown): React.ReactElement 
   return kids.find((k) => k.type === type)
 }
 
+/**
+ * Render the REAL IterateComposer container and return the props it passes to
+ * its View — including the live handler closures (`onSubmit` = handleSubmit,
+ * `onContinue` = handleContinue, `onCancel` = handleCancel). Wraps the classic
+ * JSX factory on `globalThis.React` (the factory the component reads) so we can
+ * capture the View props without mocking the same-module View or redefining the
+ * non-configurable `React.createElement` export.
+ */
+function driveContainer(
+  props: React.ComponentProps<typeof IterateComposer>,
+): React.ComponentProps<typeof IterateComposerView> {
+  const realReact = (globalThis as { React?: typeof React }).React!
+  const realCreate = realReact.createElement
+  const calls: Array<[unknown, Record<string, unknown> | null]> = []
+  ;(globalThis as { React?: unknown }).React = {
+    ...realReact,
+    createElement: (type: unknown, p: Record<string, unknown> | null, ...kids: unknown[]) => {
+      calls.push([type, p])
+      return (realCreate as (...a: unknown[]) => unknown)(type, p, ...kids)
+    },
+  }
+  try {
+    renderToStaticMarkup(
+      (realCreate as (...a: unknown[]) => React.ReactElement)(IterateComposer, props),
+    )
+  } finally {
+    ;(globalThis as { React?: unknown }).React = realReact
+  }
+  const call = calls.find((c) => c[0] === IterateComposerView)
+  return (call?.[1] ?? {}) as React.ComponentProps<typeof IterateComposerView>
+}
+
 // ---- initial state (F9 / F10) -----------------------------------------------
 
 describe("initialComposerState — re-prompt vs Apply", () => {
@@ -117,40 +155,47 @@ describe("initialComposerState — re-prompt vs Apply", () => {
       prompt: "tighten the spacing",
       appliedCommentId: 5,
     })
-    // Mounted: the container seeds the input from the Apply target (AC2).
-    const html = renderToStaticMarkup(
-      React.createElement(IterateComposer, {
-        prototypeId: 7,
-        applyTarget: comment({ id: 5, body: "tighten the spacing" }),
-      }),
-    )
-    expect(html).toContain('data-mode="apply"')
-    expect(html).toContain("tighten the spacing")
-    // Apply mode labels the submit button "Apply".
-    expect(html).toContain("Apply")
+    // Mounted: the container seeds the input from the Apply target (AC2). Asserted
+    // against the real container's View props, not just SSR markup.
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "tighten the spacing" }),
+    })
+    expect(viewProps.mode).toBe("apply")
+    expect(viewProps.prompt).toBe("tighten the spacing")
   })
 })
 
-// ---- AD14 gate (AC3 / AC4) --------------------------------------------------
+// ---- AD14 gate (AC3) — driven through the REAL container handlers ------------
 
-describe("AD14 estimate gate — Submit→estimate, Continue→iterate, Cancel→neither", () => {
-  it("Submit fetches the estimate and does NOT call iterate (test_submit_opens_cost_estimate_modal_and_does_not_call_iterate)", async () => {
-    const estimateIterate = vi.fn().mockResolvedValue(UNDER_CAP)
-    const iterate = vi.fn()
-    const est = await runEstimate(estimateIterate, {
+describe("AD14 estimate gate (AC3) — Submit→estimate, Continue→iterate, Cancel→neither", () => {
+  it("Submit (container handleSubmit) calls estimateIterate and NOT iterate (test_submit_opens_cost_estimate_modal_and_does_not_call_iterate)", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+
+    const viewProps = driveContainer({ prototypeId: 7, applyTarget: null })
+    // re-prompt: nothing to submit on an empty body — type something first by
+    // driving with an Apply target so prompt is non-empty (Submit is gated on a
+    // non-empty body).
+    const filled = driveContainer({
       prototypeId: 7,
-      prompt: "make it blue",
-      appliedCommentId: null,
+      applyTarget: comment({ id: 5, body: "make it blue" }),
     })
-    expect(estimateIterate).toHaveBeenCalledTimes(1)
-    expect(estimateIterate).toHaveBeenCalledWith(7, {
-      prompt: "make it blue",
-      applied_comment_id: null,
-    })
-    expect(iterate).not.toHaveBeenCalled()
-    expect(est).toBe(UNDER_CAP)
-    // When open, the view renders the reused CostEstimateModal markup with the
-    // Continue/Cancel affordances (the AD14 gate is on screen).
+    expect(typeof filled.onSubmit).toBe("function")
+
+    await filled.onSubmit!()
+    expect(est).toHaveBeenCalledTimes(1)
+    expect(est).toHaveBeenCalledWith(7, { prompt: "make it blue", applied_comment_id: 5 })
+    // The load-bearing invariant: Submit reaches estimate but NEVER iterate.
+    expect(iter).not.toHaveBeenCalled()
+
+    // An empty re-prompt body cannot Submit (the button is disabled): driving
+    // handleSubmit with an empty body is a no-op (no estimate call).
+    est.mockClear()
+    await viewProps.onSubmit!()
+    expect(est).not.toHaveBeenCalled()
+
+    // The modal markup (Continue/Cancel) is the on-screen AD14 gate.
     const html = renderView({
       prompt: "make it blue",
       isComplete: false,
@@ -163,44 +208,65 @@ describe("AD14 estimate gate — Submit→estimate, Continue→iterate, Cancel�
     expect(html).toContain('data-testid="cost-estimate-cancel"')
   })
 
-  it("Continue calls iterate with the merged body + mode:'execute' (test_continue_calls_iterate_with_body)", async () => {
-    const iterate = vi.fn().mockResolvedValue(GEN_RESP)
-    const resp = await runIterate(iterate, {
+  it("Continue (container handleContinue) calls iterate with the merged body + mode:'execute' (test_continue_calls_iterate_with_body)", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+
+    const viewProps = driveContainer({
       prototypeId: 7,
-      prompt: "make it blue",
-      appliedCommentId: 5,
+      applyTarget: comment({ id: 5, body: "make it blue" }),
     })
-    expect(iterate).toHaveBeenCalledTimes(1)
-    expect(iterate).toHaveBeenCalledWith(7, {
+    expect(typeof viewProps.onContinue).toBe("function")
+
+    await viewProps.onContinue!()
+    expect(iter).toHaveBeenCalledTimes(1)
+    expect(iter).toHaveBeenCalledWith(7, {
       prompt: "make it blue",
       applied_comment_id: 5,
       mode: "execute",
     })
-    expect(resp).toBe(GEN_RESP)
+    // Continue is the ONLY iterate caller — it does not also re-estimate.
+    expect(est).not.toHaveBeenCalled()
   })
 
-  it("Cancel routes to onCancel and calls neither estimate nor iterate (test_cancel_calls_neither_estimate_nor_iterate_again)", () => {
-    const estimateIterate = vi.fn()
-    const iterate = vi.fn()
-    const onCancel = vi.fn()
-    const onContinue = vi.fn()
-    const tree = IterateComposerView({
-      prompt: "make it blue",
-      isComplete: false,
-      mode: "reprompt",
-      showModal: true,
-      estimate: UNDER_CAP,
-      onCancel,
-      onContinue,
-    }) as React.ReactElement
-    const modal = findChild(tree, CostEstimateModalView)
-    expect(modal).toBeTruthy()
-    // Invoke the modal's Cancel wiring — it must reach onCancel, not onContinue.
-    ;(modal!.props as { onCancel: () => void }).onCancel()
-    expect(onCancel).toHaveBeenCalledTimes(1)
-    expect(onContinue).not.toHaveBeenCalled()
-    expect(estimateIterate).not.toHaveBeenCalled()
-    expect(iterate).not.toHaveBeenCalled()
+  it("Cancel (container handleCancel) calls neither estimate (again) nor iterate (test_cancel_calls_neither_estimate_nor_iterate_again)", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "make it blue" }),
+    })
+    // Submit once → one estimate.
+    await viewProps.onSubmit!()
+    expect(est).toHaveBeenCalledTimes(1)
+    // Cancel → no API call at all (no second estimate, no iterate).
+    expect(typeof viewProps.onCancel).toBe("function")
+    viewProps.onCancel!()
+    expect(est).toHaveBeenCalledTimes(1)
+    expect(iter).not.toHaveBeenCalled()
+  })
+})
+
+// ---- iterate is reached ONLY via Continue — regression guard -----------------
+
+describe("AD14 gate is genuinely locked", () => {
+  it("driving Submit then Continue calls estimate strictly before iterate, each exactly once", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "make it blue" }),
+    })
+    await viewProps.onSubmit!()
+    expect(iter).not.toHaveBeenCalled() // gate holds: no iterate until Continue
+    await viewProps.onContinue!()
+
+    expect(est).toHaveBeenCalledTimes(1)
+    expect(iter).toHaveBeenCalledTimes(1)
+    // estimate fired before iterate.
+    expect(est.mock.invocationCallOrder[0]).toBeLessThan(iter.mock.invocationCallOrder[0])
   })
 })
 
@@ -218,15 +284,10 @@ describe("locked-state gating (F14)", () => {
     expect(html).not.toContain('data-testid="iterate-composer-submit"')
   })
 
-  it("the view renders the locked affordance directly when isComplete", () => {
-    const html = renderView({
-      prompt: "ignored",
-      isComplete: true,
-      mode: "reprompt",
-      showModal: false,
-    })
-    expect(html).toContain('data-testid="iterate-composer-locked"')
-    expect(html).not.toContain('data-testid="iterate-composer-submit"')
+  it("the locked container exposes NO onSubmit handler (Submit cannot fire)", () => {
+    const viewProps = driveContainer({ prototypeId: 7, isComplete: true })
+    expect(viewProps.isComplete).toBe(true)
+    expect(viewProps.onSubmit).toBeUndefined()
   })
 })
 
@@ -319,51 +380,53 @@ describe("B4 — Apply → prefill → estimate → Continue → iterate (mounte
     expect(setApplyTarget).toHaveBeenCalledWith(c)
   })
 
-  it("end-to-end call order: Apply→prefill→estimate→Continue→iterate (test_apply_to_iterate_mounted_handoff_end_to_end)", async () => {
-    const order: string[] = []
-    const estimateIterate = vi.fn(async () => {
-      order.push("estimate")
-      return UNDER_CAP
-    })
-    const iterate = vi.fn(async () => {
-      order.push("iterate")
-      return GEN_RESP
-    })
+  it("end-to-end via the REAL container: Apply prefill → Submit→estimate → Continue→iterate (test_apply_to_iterate_mounted_handoff_end_to_end)", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
 
-    // 1. Apply on a comment → derive the pre-fill (F10).
+    // 1. Apply on a comment → the container pre-fills from the Apply target (F10).
     const c = comment({ id: 5, body: "make the header bigger" })
-    order.push("apply-prefill")
-    const seed = initialComposerState(c)
-    expect(seed.prompt).toBe("make the header bigger")
-    expect(seed.appliedCommentId).toBe(5)
+    const viewProps = driveContainer({ prototypeId: 7, applyTarget: c })
+    expect(viewProps.mode).toBe("apply")
+    expect(viewProps.prompt).toBe("make the header bigger")
 
-    // 2. Submit → estimate (AD14 gate). iterate NOT called yet.
-    const est = await runEstimate(estimateIterate, {
-      prototypeId: 7,
-      prompt: seed.prompt,
-      appliedCommentId: seed.appliedCommentId,
-    })
-    expect(est).toBe(UNDER_CAP)
-    expect(estimateIterate).toHaveBeenCalledWith(7, {
+    // 2. Submit → estimate (AD14 gate); iterate NOT called yet.
+    await viewProps.onSubmit!()
+    expect(est).toHaveBeenCalledWith(7, {
       prompt: "make the header bigger",
       applied_comment_id: 5,
     })
-    expect(iterate).not.toHaveBeenCalled()
+    expect(iter).not.toHaveBeenCalled()
 
     // 3. Continue → iterate with the merged body + mode:'execute'.
-    const resp = await runIterate(iterate, {
-      prototypeId: 7,
-      prompt: seed.prompt,
-      appliedCommentId: seed.appliedCommentId,
-    })
-    expect(resp).toBe(GEN_RESP)
-    expect(iterate).toHaveBeenCalledWith(7, {
+    await viewProps.onContinue!()
+    expect(iter).toHaveBeenCalledWith(7, {
       prompt: "make the header bigger",
       applied_comment_id: 5,
       mode: "execute",
     })
 
     // The whole handoff happened in the AD14-mandated order.
-    expect(order).toEqual(["apply-prefill", "estimate", "iterate"])
+    expect(est.mock.invocationCallOrder[0]).toBeLessThan(iter.mock.invocationCallOrder[0])
+  })
+})
+
+// ---- helper-level contract (kept as cheap unit coverage) --------------------
+
+describe("helpers — runEstimate / runIterate body shaping", () => {
+  it("runEstimate posts prompt + applied_comment_id, never mode", async () => {
+    const estimateIterate = vi.fn().mockResolvedValue(UNDER_CAP)
+    await runEstimate(estimateIterate, { prototypeId: 7, prompt: "x", appliedCommentId: 9 })
+    expect(estimateIterate).toHaveBeenCalledWith(7, { prompt: "x", applied_comment_id: 9 })
+  })
+
+  it("runIterate pins mode:'execute' and forwards applied_comment_id", async () => {
+    const iterate = vi.fn().mockResolvedValue(GEN_RESP)
+    await runIterate(iterate, { prototypeId: 7, prompt: "x", appliedCommentId: null })
+    expect(iterate).toHaveBeenCalledWith(7, {
+      prompt: "x",
+      applied_comment_id: null,
+      mode: "execute",
+    })
   })
 })
