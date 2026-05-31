@@ -39,7 +39,7 @@ from fastapi.testclient import TestClient
 # the sibling test DDLs do; the status CHECK is inlined so the fake rejects illegal
 # values like Postgres. The routes never touch `prototypes`, so it is not seeded.
 _DDL = """
-CREATE TABLE prd_patches (
+CREATE TABLE IF NOT EXISTS prd_patches (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id        INTEGER NOT NULL,
     prototype_id  INTEGER NOT NULL,
