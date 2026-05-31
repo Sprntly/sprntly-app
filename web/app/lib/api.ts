@@ -636,6 +636,26 @@ export const designAgentApi = {
       `/v1/design-agent/${prototypeId}/iterate/estimate`,
       body,
     ),
+  // ── F9/F10 iterate (P3-14) ────────────────────────────────────────────────
+  /** Kick off an iterate of an existing prototype (F9 re-prompt / F10 Apply).
+   *  Owned HERE, not P3-11 (which ships `estimateIterate` only). The IterateComposer
+   *  routes Submit through the AD14 `CostEstimateModal` gate and calls this ONLY
+   *  from the modal's Continue handler — never directly from a Submit. Defaults
+   *  `mode:'execute'` (`'plan'` is P3-07). Returns the background-run handle +
+   *  `queue_position` (P3-06's iterate queue). 409 when the prototype is locked
+   *  (`is_complete`) or not `ready`; 429 when the queue is full. */
+  iterate: (
+    prototypeId: number,
+    body: {
+      prompt: string
+      applied_comment_id?: number | null
+      mode?: "plan" | "execute"
+    },
+  ) =>
+    api.post<IterateResponse>(`/v1/design-agent/${prototypeId}/iterate`, {
+      ...body,
+      mode: body.mode ?? "execute",
+    }),
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
@@ -647,4 +667,11 @@ export type IterateCostEstimate = {
   soft_cap_usd: number
   exceeds_soft_cap: boolean
   model: string
+}
+
+/** Shape returned by POST /v1/design-agent/{id}/iterate (P3-05 route + P3-06 queue). */
+export type IterateResponse = {
+  prototype_id: number
+  status: string
+  queue_position: number
 }

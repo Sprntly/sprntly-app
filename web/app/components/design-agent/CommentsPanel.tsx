@@ -163,6 +163,9 @@ export type CommentsPanelViewProps = {
   onSubmit?: () => void
   onCancelComposer?: () => void
   onResolve?: (commentId: number) => void
+  /** P3-14 (F10): Apply hands a comment to the IterateComposer. Supplied only on
+   *  the signed-in mount; absent on the public viewer → no Apply button (AC9). */
+  onApply?: (comment: CommentRecord) => void
 }
 
 function CommentThread({
@@ -171,12 +174,17 @@ function CommentThread({
   canResolve,
   pinExtra,
   onResolve,
+  onApply,
 }: {
   comment: CommentRecord
   withPin: boolean
   canResolve?: boolean
   pinExtra?: string | null
   onResolve?: (commentId: number) => void
+  /** P3-14 (F10): when supplied (signed-in mount only), an Apply action hands
+   *  the comment to the IterateComposer to pre-fill an iterate prompt. Absent on
+   *  the public mount → no Apply button renders (AC9 — behaves as before). */
+  onApply?: (comment: CommentRecord) => void
 }) {
   const resolved = comment.status === "resolved"
   return (
@@ -212,6 +220,16 @@ function CommentThread({
           Resolve
         </button>
       )}
+      {onApply && !resolved && (
+        <button
+          type="button"
+          className="btn comment-apply-btn"
+          data-testid={`comment-apply-${comment.id}`}
+          onClick={() => onApply(comment)}
+        >
+          Apply
+        </button>
+      )}
     </li>
   )
 }
@@ -229,6 +247,7 @@ export function CommentsPanelView({
   onSubmit,
   onCancelComposer,
   onResolve,
+  onApply,
 }: CommentsPanelViewProps) {
   const open = comments.filter((c) => c.status === "open")
   const resolved = comments.filter((c) => c.status === "resolved")
@@ -295,6 +314,7 @@ export function CommentsPanelView({
                 canResolve={canResolve}
                 pinExtra={pinExtra?.[c.anchor_id] ?? null}
                 onResolve={onResolve}
+                onApply={onApply}
               />
             ))}
           </ul>
@@ -355,6 +375,11 @@ export type CommentsPanelProps = {
   /** Supplied only on the internal/authed mount — enables the resolve
    *  affordance. The public viewer omits it (create + read only). */
   prototypeId?: number
+  /** P3-14 (F10): supplied only on the signed-in mount (DesignAgentLauncher) —
+   *  an Apply action on an open comment hands it to the IterateComposer to
+   *  pre-fill an iterate prompt. Absent on the public viewer → no Apply button
+   *  (AC9 — the public mount behaves exactly as before P3-14). */
+  onApply?: (comment: CommentRecord) => void
 }
 
 function toMessage(err: unknown, fallback: string): string {
@@ -364,7 +389,7 @@ function toMessage(err: unknown, fallback: string): string {
 /** Public component. Loads comments on mount, listens for right-clicks to open
  *  an anchored composer, and wires submit/resolve to the orchestration helpers
  *  and the canonical `designAgentApi`. Delegates rendering to the pure view. */
-export function CommentsPanel({ token, prototypeId }: CommentsPanelProps) {
+export function CommentsPanel({ token, prototypeId, onApply }: CommentsPanelProps) {
   const [comments, setComments] = useState<CommentRecord[]>([])
   const [composer, setComposer] = useState<{ anchorId: string; body: string } | null>(
     null,
@@ -457,6 +482,7 @@ export function CommentsPanel({ token, prototypeId }: CommentsPanelProps) {
         onSubmit={handleSubmit}
         onCancelComposer={() => setComposer(null)}
         onResolve={handleResolve}
+        onApply={onApply}
       />
     </div>
   )
