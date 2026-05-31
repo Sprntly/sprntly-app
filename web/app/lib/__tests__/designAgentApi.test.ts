@@ -395,4 +395,49 @@ describe("designAgentApi", () => {
       expect(JSON.parse(init.body as string)).toEqual({ prompt: "make it blue" })
     })
   })
+
+  // ── F9/F10 iterate (P3-14) ─────────────────────────────────────────────────
+  describe("iterate", () => {
+    it("POSTs to the iterate route with the body + default mode:'execute' (P3-14 AC4)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(202, { prototype_id: 7, status: "generating", queue_position: 0 }),
+      )
+      const out = await designAgentApi.iterate(7, {
+        prompt: "make it blue",
+        applied_comment_id: 5,
+      })
+      expect(out.prototype_id).toBe(7)
+      expect(out.status).toBe("generating")
+      expect(out.queue_position).toBe(0)
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/7/iterate`)
+      expect(init.method).toBe("POST")
+      expect(init.credentials).toBe("include")
+      expect(JSON.parse(init.body as string)).toEqual({
+        prompt: "make it blue",
+        applied_comment_id: 5,
+        mode: "execute",
+      })
+    })
+
+    it("defaults mode to 'execute' and works without applied_comment_id", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(202, { prototype_id: 9, status: "generating", queue_position: 2 }),
+      )
+      const out = await designAgentApi.iterate(9, { prompt: "tweak" })
+      expect(out.queue_position).toBe(2)
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/9/iterate`)
+      expect(JSON.parse(init.body as string)).toEqual({ prompt: "tweak", mode: "execute" })
+    })
+
+    it("honours an explicit mode:'plan' (P3-07 path)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(202, { prototype_id: 3, status: "generating", queue_position: 0 }),
+      )
+      await designAgentApi.iterate(3, { prompt: "plan it", mode: "plan" })
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(JSON.parse(init.body as string)).toEqual({ prompt: "plan it", mode: "plan" })
+    })
+  })
 })
