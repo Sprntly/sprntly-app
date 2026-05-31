@@ -321,4 +321,53 @@ describe("designAgentApi", () => {
       expect(JSON.parse(init.body as string)).toEqual({ a: 1 })
     })
   })
+
+  // ── F11 PRD patches (P3-10) ────────────────────────────────────────────────
+  describe("prd patches", () => {
+    function patchRow(over: Record<string, unknown> = {}) {
+      return {
+        id: 1,
+        prd_id: 7,
+        prototype_id: 3,
+        rationale: "tighten the metric",
+        patch_md: "## Metric\n7-day activation",
+        status: "pending",
+        created_at: "2026-05-30T12:00:00Z",
+        ...over,
+      }
+    }
+
+    it("listPendingPatches GETs the prd-patches route with the prd_id query (AC5)", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, [patchRow()]))
+      const r = await designAgentApi.listPendingPatches(7)
+      expect(r).toHaveLength(1)
+      expect(r[0].status).toBe("pending")
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/prd-patches?prd_id=7`)
+      expect(init.method).toBe("GET")
+      expect(init.credentials).toBe("include")
+    })
+
+    it("acceptPatch POSTs the accept route with an empty body (AC5)", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, patchRow({ status: "applied" })))
+      const r = await designAgentApi.acceptPatch(1)
+      expect(r.status).toBe("applied")
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/prd-patches/1/accept`)
+      expect(init.method).toBe("POST")
+      expect(init.credentials).toBe("include")
+      expect(JSON.parse(init.body as string)).toEqual({})
+    })
+
+    it("rejectPatch POSTs the reject route with an empty body (AC5)", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, patchRow({ status: "rejected" })))
+      const r = await designAgentApi.rejectPatch(1)
+      expect(r.status).toBe("rejected")
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/prd-patches/1/reject`)
+      expect(init.method).toBe("POST")
+      expect(init.credentials).toBe("include")
+      expect(JSON.parse(init.body as string)).toEqual({})
+    })
+  })
 })

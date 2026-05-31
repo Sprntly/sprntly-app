@@ -189,6 +189,81 @@ async def generate(
     return GenerateResponse(prototype_id=prototype_id, status="generating")
 
 
+# ─── PRD patches: list pending (P3-10, F11) ─────────────────────────────────────
+#
+# F11's user-facing half. P3-09 persists agent-proposed PRD edits as `pending` rows
+# in `prd_patches` (NEVER touching `prds.payload_md`); the `PrdPatchBanner` surfaces
+# them and the POST accept/reject routes (at EOF) resolve them. Accept flips a row
+# to `applied`; the RENDERED PRD reflects it on the next load via
+# `apply_patches_to_prd_md` — the banner never mutates the PrdScreen contentEditable.
+#
+# ROUTE ORDER IS LOAD-BEARING — do NOT "tidy" this block down to EOF with its POST
+# siblings. The list path `/prd-patches` is a SINGLE segment, so Starlette would
+# match it against the earlier `GET /{prototype_id}` catch-all below (the int
+# validation on `prototype_id` happens in the handler, not the path regex) and
+# return 422 before this handler is ever reached. Declaring it ABOVE the catch-all
+# is the FastAPI static-before-dynamic fix. `PrdPatchOut` + `_patch_to_out` + the
+# `prd_patches` import live here (not at EOF) because the list decorator's
+# `response_model` needs `PrdPatchOut` defined at module-load time; the EOF POSTs
+# reference these same module-level symbols. Same gate posture as the authed routes:
+# feature-flag 404 when off + require_app_session 401 + workspace filter.
+from app.db.prd_patches import (
+    list_pending_patches,
+    mark_patch_applied,
+    mark_patch_rejected,
+)
+
+
+class PrdPatchOut(BaseModel):
+    id: int
+    prd_id: int
+    prototype_id: int
+    rationale: str
+    patch_md: str
+    status: str           # 'pending' | 'applied' | 'rejected'
+    created_at: str
+
+
+def _patch_to_out(row: dict[str, Any]) -> dict[str, Any]:
+    """Project a `prd_patches` row to the PrdPatchOut shape (ISO-string timestamp).
+
+    `created_at` is stringified defensively (same reasoning as `_comment_to_out`):
+    Postgres returns a timestamptz object via supabase, the SQLite fake returns
+    TEXT — `str()` normalises both to the ISO string PrdPatchOut expects. The
+    internal `workspace_id` / `resolved_at` columns are deliberately NOT projected
+    (the banner needs neither)."""
+    return {
+        "id": row["id"],
+        "prd_id": row["prd_id"],
+        "prototype_id": row["prototype_id"],
+        "rationale": row["rationale"],
+        "patch_md": row["patch_md"],
+        "status": row["status"],
+        "created_at": str(row["created_at"]),
+    }
+
+
+@router.get("/prd-patches", response_model=list[PrdPatchOut])
+def get_pending_patches(
+    prd_id: int,
+    session: dict = Depends(require_app_session),
+) -> list[PrdPatchOut]:
+    """List the PENDING patches for a PRD (created_at-ascending), workspace-filtered.
+
+    Only `pending` rows surface — `applied`/`rejected` are resolved and excluded by
+    `list_pending_patches`. A PRD with no pending patches returns `[]` (the banner
+    renders nothing). 401 without a session; 404-invisibility is moot here (a
+    foreign-workspace PRD simply yields no rows under this workspace filter)."""
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    return [
+        PrdPatchOut(**_patch_to_out(p))
+        for p in list_pending_patches(prd_id=prd_id, workspace_id=workspace_id)
+    ]
+
+
 @router.get("/{prototype_id}")
 def get_one(
     prototype_id: int,
@@ -1490,3 +1565,65 @@ def _advance_current_checkpoint_seam(
         "checkpoint_id=%s bundle_staged=%s advance_pending=P3-12",
         prototype_id, workspace_id, checkpoint_id, bool(bundle_url),
     )
+
+
+# ─── PRD patches: accept / reject (P3-10, F11) ──────────────────────────────────
+#
+# Accept/reject resolve a PENDING `prd_patches` proposal (P3-09). The companion
+# LIST route (`GET /prd-patches`) + the `PrdPatchOut` model + `_patch_to_out` + the
+# `prd_patches` import are declared ABOVE the `GET /{prototype_id}` catch-all (see
+# the "PRD patches: list pending" block there) — the list path is a SINGLE segment
+# and would otherwise be swallowed by the catch-all (FastAPI static-before-dynamic).
+# These two POSTs are 3-segment (`/prd-patches/{id}/accept|reject`), unambiguous
+# against the single-segment catch-all, so they stay at EOF and reuse the
+# module-level `PrdPatchOut` / `_patch_to_out` / `mark_patch_*` symbols defined in
+# that block. Same gate posture as the authed routes above: feature-flag 404 when
+# off + require_app_session 401 + workspace 404 (cross-tenant invisibility, Rule
+# #22). Sync handlers (mirrors get_one): FastAPI runs them in the threadpool.
+
+
+@router.post("/prd-patches/{patch_id}/accept", response_model=PrdPatchOut)
+def post_accept_patch(
+    patch_id: int,
+    session: dict = Depends(require_app_session),
+) -> PrdPatchOut:
+    """Accept a proposed PRD patch: flip its status to `applied` (P3-09
+    `mark_patch_applied`) and return the updated row. The rendered PRD reflects the
+    applied patch on its NEXT load (read path folds it in via
+    `apply_patches_to_prd_md`); this route does NOT mutate `prds.payload_md` or the
+    PrdScreen `contentEditable`. 404 when the patch is not in the caller's
+    workspace (cross-tenant invisibility, Rule #22). Idempotent: re-accepting an
+    already-applied patch is a no-op flip that returns the row."""
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    row = mark_patch_applied(patch_id=patch_id, workspace_id=workspace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Patch not found")
+    # Route-level state-transition log (Rule #24 / AC12): identifiers only — never
+    # patch_md / rationale (they can embed PRD body). Logged on the route's own
+    # logger so the observability AC is satisfied at this surface.
+    logger.info("prd_patch_applied patch_id=%s", patch_id)
+    return PrdPatchOut(**_patch_to_out(row))
+
+
+@router.post("/prd-patches/{patch_id}/reject", response_model=PrdPatchOut)
+def post_reject_patch(
+    patch_id: int,
+    session: dict = Depends(require_app_session),
+) -> PrdPatchOut:
+    """Reject a proposed PRD patch: flip its status to `rejected` (P3-09
+    `mark_patch_rejected`) and return the updated row. The PRD is unaffected
+    (rejected patches are excluded by `apply_patches_to_prd_md`). 404 when not in
+    the caller's workspace. Idempotent (mirrors accept)."""
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    row = mark_patch_rejected(patch_id=patch_id, workspace_id=workspace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Patch not found")
+    # Identifiers only — never patch_md / rationale (Rule #24 / AC12).
+    logger.info("prd_patch_rejected patch_id=%s", patch_id)
+    return PrdPatchOut(**_patch_to_out(row))
