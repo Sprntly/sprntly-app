@@ -24,6 +24,7 @@ import { DesignAgentDrawer } from "./DesignAgentDrawer"
 import { PostGenerationResult } from "./PostGenerationResult"
 import { CommentsPanel } from "./CommentsPanel"
 import { IterateComposer } from "./IterateComposer"
+import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
 import type { CommentRecord, PrototypeRecord } from "../../lib/api"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 
@@ -134,6 +135,19 @@ export function DesignAgentLauncherView({
           onClearApply={() => setApplyTarget?.(null)}
         />
       )}
+      {/* P3-16 (F12): the clarifying-question answer surface — rendered ONLY when
+          the agent has paused with a pending question and the prototype is not
+          locked. The answer routes through the reused P3-14 iterate (no new
+          method). Mounted ONLY here (authed surface), never in the public route
+          (external viewers cannot answer/iterate). */}
+      {result &&
+        result.pending_question != null &&
+        !(result.is_complete ?? false) && (
+          <ClarifyingQuestionSurface
+            key={`clarify-${result.id}`}
+            prototype={result}
+          />
+        )}
       {renderDrawer({
         open,
         onOpenChange: setOpen,
