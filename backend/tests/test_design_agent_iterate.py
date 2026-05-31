@@ -658,9 +658,10 @@ async def test_stage_iterate_run_does_not_call_complete_prototype(env, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_stage_iterate_run_logs_p3_12_seam(env, monkeypatch, caplog):
-    # The P3-12 advance is left as a documented seam (INFO marker), NOT a real
-    # row mutation, until P3-12 merges.
+async def test_stage_iterate_run_advances_current_checkpoint(env, monkeypatch, caplog):
+    # P3-12 filled the seam: _stage_iterate_run now calls advance_current_checkpoint
+    # at the tail, so current_checkpoint_id + bundle_url move to the new checkpoint
+    # and the `prototype_checkpoint_advanced` INFO line is emitted (AC5).
     async def fake_vite(vfs):
         return {"index.html": "<html></html>"}
 
@@ -678,8 +679,11 @@ async def test_stage_iterate_run_logs_p3_12_seam(env, monkeypatch, caplog):
             virtual_fs={"a.tsx": "x"}, iterate_prompt="p",
         )
     blob = "\n".join(r.getMessage() for r in caplog.records)
-    assert "prototype_iterate_checkpoint_staged" in blob
-    assert "advance_pending=P3-12" in blob
+    assert "prototype_checkpoint_advanced" in blob
+    # The advance actually moved the row to the new checkpoint + staged bundle.
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["current_checkpoint_id"] == 555
+    assert row["bundle_url"] == "https://bundle/iterated"
 
 
 @pytest.mark.asyncio

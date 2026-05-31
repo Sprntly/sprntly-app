@@ -50,6 +50,7 @@ from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
 from app.db.prds import get_prd
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
+    advance_current_checkpoint,
     complete_prototype,
     create_checkpoint,
     fail_prototype,
@@ -1062,8 +1063,8 @@ def get_comments_public(token: str) -> list[CommentOut]:
 # completion, so it MUST NOT call `complete_prototype` (which re-stamps
 # completed_at + emits prototype_completed). Advancing `current_checkpoint_id` +
 # threading the new bundle_url onto the prototype row is P3-12's
-# `advance_current_checkpoint` helper — not merged yet, so this leaves that
-# advance as the documented seam (`_advance_current_checkpoint_seam`).
+# `advance_current_checkpoint` helper (F7: stable URL, no share_token rotation),
+# called at the tail of `_stage_iterate_run`.
 #
 # Mode (P3-05 → P3-07): EXECUTE is the default; `mode='plan'` is now FULLY wired
 # (P3-07) — the plan/execute tool split + the distinct plan system prompt + the
@@ -1587,38 +1588,15 @@ async def _stage_iterate_run(
             prototype_id, type(exc).__name__,
         )
 
-    # Step 4 — P3-12 SEAM. Advance current_checkpoint_id + bundle_url WITHOUT a
-    # completed_at re-stamp (NOT complete_prototype — AC6a).
-    _advance_current_checkpoint_seam(
+    # Step 4 — P3-12. Advance current_checkpoint_id + bundle_url WITHOUT a
+    # completed_at re-stamp (NOT complete_prototype — AC6a). F7: this does not
+    # rotate share_token / share_mode, so the public /p/<token> URL is unchanged
+    # and now resolves to the new checkpoint's bundle_url.
+    advance_current_checkpoint(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
         checkpoint_id=checkpoint_id,
         bundle_url=bundle_url,
-    )
-
-
-def _advance_current_checkpoint_seam(
-    *,
-    prototype_id: int,
-    workspace_id: str,
-    checkpoint_id: int,
-    bundle_url: str | None,
-) -> None:
-    """P3-12 SEAM (documented, intentional — see the ticket's Iterate staging path
-    + the P3-05/P3-12 ordering decision).
-
-    P3-12 lands `db.prototypes.advance_current_checkpoint`, which advances
-    `prototypes.current_checkpoint_id` → `checkpoint_id` and threads `bundle_url`
-    onto the prototype row WITHOUT re-stamping `completed_at` (the iterate-correct
-    counterpart to `complete_prototype` — AC6a). Until it merges, the new
-    checkpoint is fully built + staged and this records the pending advance as an
-    INFO marker (identifiers only, Rule #24). When P3-12 lands, it fills the call
-    here — that edit lives in this builder-owned block, not a hot file.
-    """
-    logger.info(
-        "prototype_iterate_checkpoint_staged prototype_id=%s workspace_id=%s "
-        "checkpoint_id=%s bundle_staged=%s advance_pending=P3-12",
-        prototype_id, workspace_id, checkpoint_id, bool(bundle_url),
     )
 
 

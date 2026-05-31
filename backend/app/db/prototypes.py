@@ -711,3 +711,54 @@ def clear_pending_question(*, prototype_id: int, workspace_id: str) -> None:
         workspace_id=workspace_id,
         question=None,
     )
+
+
+# ─── Checkpoint chain: advance current_checkpoint_id on iterate (P3-12, F7) ───
+#
+# The iterate staging path (`_stage_iterate_run`, P3-05) deliberately does NOT
+# call `complete_prototype` — re-stamping `completed_at` + emitting
+# `prototype_completed` is wrong semantics for an iterate (B2 decision,
+# 2026-05-30). So the checkpoint advance that `complete_prototype` performs "for
+# free" on the GENERATE path does NOT happen for free on the iterate path; this
+# helper is the iterate-correct counterpart that advances `current_checkpoint_id`
+# + `bundle_url` WITHOUT touching `completed_at` / `status`.
+#
+# F7 (stable URL, no version history in MVP): the chain is forward-only —
+# `current_checkpoint_id` always points at the newest checkpoint, older
+# `prototype_checkpoints` rows are retained (AD6 atomic snapshots) but never
+# served. This helper MUST NOT rotate `share_token` or change `share_mode`: an
+# external viewer on `/p/<token>` keeps the same URL and now sees the new
+# checkpoint's bundle because the public resolver reads `bundle_url`.
+
+
+def advance_current_checkpoint(
+    *,
+    prototype_id: int,
+    workspace_id: str,                 # explicit workspace filter (Rule #22)
+    checkpoint_id: int,
+    bundle_url: str | None,
+) -> dict[str, Any] | None:
+    """Point the prototype at the LATEST checkpoint (F7: stable URL, latest
+    content). Updates `current_checkpoint_id` + `bundle_url`, workspace-filtered.
+
+    Does NOT touch `share_token` / `share_mode` (F7: the URL is reused across
+    regenerations — the token is unchanged) and does NOT re-stamp `completed_at`
+    / `status` (the iterate-correct counterpart to `complete_prototype` —
+    B2/AC6a). Returns the updated row, or None when no row matched the
+    (prototype_id, workspace_id) pair (a cross-workspace call is a no-op).
+    """
+    c = require_client()
+    (
+        c.table(_TABLE)
+        .update({"current_checkpoint_id": checkpoint_id, "bundle_url": bundle_url})
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .execute()
+    )
+    # State-transition INFO line, identifiers only (Rule #24): never the
+    # bundle_url (it is the storage path) and never the share_token.
+    logger.info(
+        "prototype_checkpoint_advanced prototype_id=%s checkpoint_id=%s",
+        prototype_id, checkpoint_id,
+    )
+    return get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
