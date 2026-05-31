@@ -472,6 +472,17 @@ export const prdApi = {
 // the shared `api` helper so credentials/JSON/${API_URL} handling stays
 // centralised (no raw fetch, no reinvented client).
 
+/** F12 (P3-08) — the agent's clarifying question, persisted on the prototype
+ *  row as a sidecar. Shape `{question, choices?, context?}`. When non-null the
+ *  prototype is in `awaiting_clarification` (`status` stays `ready` — the
+ *  question is a sidecar, NOT a status enum value). `choices` present → answer
+ *  by picking a button; absent → free-text answer. */
+export type PendingQuestion = {
+  question: string
+  choices?: string[]
+  context?: string
+}
+
 /** Full prototype row returned by GET /v1/design-agent/{id}. */
 export type PrototypeRecord = {
   id: number
@@ -486,6 +497,12 @@ export type PrototypeRecord = {
   is_complete?: boolean
   share_mode?: "private" | "public" | "passcode"
   share_token?: string | null
+  // ── P3-16 (append-only): F12 `awaiting_clarification` sidecar — the
+  //    `pending_question` column added by P3-08. GET /{id} `select("*")` carries
+  //    it; typed OPTIONAL/nullable to match the posture above (no api method
+  //    added — the existing GET poll surfaces it; the answer routes through the
+  //    existing P3-14 `iterate`). Null/absent ⇒ no question pending.
+  pending_question?: PendingQuestion | null
 }
 
 /** 202 kickoff response from POST /v1/design-agent/generate. */
