@@ -370,4 +370,29 @@ describe("designAgentApi", () => {
       expect(JSON.parse(init.body as string)).toEqual({})
     })
   })
+
+  // ── AD14 pre-flight cost estimate (P3-11) ──────────────────────────────────
+  describe("estimateIterate", () => {
+    it("POSTs to the iterate/estimate route with the prompt body (AC7)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(200, {
+          cached_input_tokens: 100,
+          new_input_tokens: 5,
+          expected_output_tokens: 2000,
+          est_cost_usd: 0.03,
+          soft_cap_usd: 0.5,
+          exceeds_soft_cap: false,
+          model: "claude-sonnet-4-6",
+        }),
+      )
+      const out = await designAgentApi.estimateIterate(7, { prompt: "make it blue" })
+      expect(out.est_cost_usd).toBe(0.03)
+      expect(out.model).toBe("claude-sonnet-4-6")
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/7/iterate/estimate`)
+      expect(init.method).toBe("POST")
+      expect(init.credentials).toBe("include")
+      expect(JSON.parse(init.body as string)).toEqual({ prompt: "make it blue" })
+    })
+  })
 })

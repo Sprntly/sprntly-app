@@ -623,4 +623,28 @@ export const designAgentApi = {
       `/v1/design-agent/prd-patches/${patchId}/reject`,
       {},
     ),
+  // ── AD14 pre-flight cost estimate (P3-11) ─────────────────────────────────
+  /** Pre-flight cost estimate for an iterate run (AD14). Deterministic, makes no
+   *  Anthropic call server-side — drives the CostEstimateModal's
+   *  "~$0.X · Continue / Cancel" gate. The iterate composer itself (`iterate`) is
+   *  P3-14; this only estimates. */
+  estimateIterate: (
+    prototypeId: number,
+    body: { prompt: string; applied_comment_id?: number | null },
+  ) =>
+    api.post<IterateCostEstimate>(
+      `/v1/design-agent/${prototypeId}/iterate/estimate`,
+      body,
+    ),
+}
+
+/** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
+export type IterateCostEstimate = {
+  cached_input_tokens: number
+  new_input_tokens: number
+  expected_output_tokens: number
+  est_cost_usd: number
+  soft_cap_usd: number
+  exceeds_soft_cap: boolean
+  model: string
 }
