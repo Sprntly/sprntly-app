@@ -196,8 +196,17 @@ CREATE TABLE prototype_comments (
 @pytest.fixture
 def env(isolated_settings, monkeypatch):
     """isolated_settings + the prototypes/comments tables + feature flag ON, with the
-    design-agent module stack reloaded in dependency order so the route binds to the
-    fake-wired helpers (runner imports get_prototype/list_comments at module load)."""
+    design-agent route stack reloaded in dependency order so the route binds to the
+    fake-wired helpers.
+
+    NOTE: we deliberately do NOT `importlib.reload(app.design_agent.runner)` here.
+    Reloading runner mints a fresh `RunResult` class, which pollutes
+    test_design_agent_runner.py's `isinstance(result, RunResult)` checks under a full
+    suite run. The route reaches `estimate_iterate_cost` via the reloaded routes module
+    (which re-imports the CURRENT runner's functions); those call the db helpers, which
+    hit the fake client through the global supabase_client monkeypatch — so reloading
+    runner is unnecessary as well as harmful. Mirrors the sibling route tests
+    (test_design_agent_prd_patch_routes.py), which reload routes + main only."""
     from tests import _fake_supabase
 
     _fake_supabase.get_fake_db().executescript(_DDL)
@@ -207,16 +216,13 @@ def env(isolated_settings, monkeypatch):
     importlib.reload(proto_mod)
     import app.db.prototype_comments as comments_mod
     importlib.reload(comments_mod)
-    import app.design_agent.runner as runner_mod
-    importlib.reload(runner_mod)
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)
     import app.main as main_mod
     importlib.reload(main_mod)
 
     return SimpleNamespace(
-        proto=proto_mod, comments=comments_mod, runner=runner_mod,
-        routes=routes_mod, main=main_mod,
+        proto=proto_mod, comments=comments_mod, routes=routes_mod, main=main_mod,
     )
 
 
