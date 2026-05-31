@@ -75,7 +75,7 @@ from app.design_agent.prompts import (
     render_scaffold_user,
 )
 from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
-from app.design_agent.storage import ViteBuildError, stage_bundle, vite_build
+from app.design_agent.storage import TypeCheckError, ViteBuildError, stage_bundle, vite_build
 
 logger = logging.getLogger(__name__)
 
@@ -431,9 +431,13 @@ async def _stage_complete_run(
     # Step 1 — Vite build (anchor-id plugin runs here).
     try:
         dist_files = await vite_build(virtual_fs)
-    except (ViteBuildError, FileNotFoundError) as exc:
-        # error_class only in the log (Rule #24 — no stderr/secrets); the full
-        # message (incl. stderr tail) goes to the row's error column.
+    except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
+        # P3-15 (B3): TypeCheckError joins the precise build-failure tuple so a
+        # runtime-break diagnostic routes to fail_prototype with the diagnostic in
+        # `prototypes.error` (NOT the generic outer except — which would lose this
+        # precise handling). error_class only in the log (Rule #24 — no
+        # stderr/secrets); the full message (incl. fatal codes) goes to the row's
+        # error column.
         logger.warning(
             "vite_build_failed prototype_id=%s error_class=%s",
             prototype_id, type(exc).__name__,
@@ -1512,7 +1516,11 @@ async def _stage_iterate_run(
     # Step 1 — Vite build (anchor-id plugin runs here, AD4).
     try:
         dist_files = await vite_build(virtual_fs)
-    except (ViteBuildError, FileNotFoundError) as exc:
+    except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
+        # P3-15 cross-ticket seam: the type-check runs inside the shared
+        # _vite_build_sync, so it fires on the ITERATE build too. A runtime-broken
+        # iterate must fail the iterate (route to fail_prototype), not silently
+        # stage — mirror _stage_complete_run's widened tuple.
         logger.warning(
             "iterate_vite_build_failed prototype_id=%s error_class=%s",
             prototype_id, type(exc).__name__,

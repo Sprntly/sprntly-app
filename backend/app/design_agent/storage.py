@@ -52,6 +52,9 @@ logger = logging.getLogger(__name__)
 _SIGNED_URL_TTL_SECONDS = 60 * 60 * 24  # 24h — long enough for a demo session,
 #                                         short enough a leaked URL expires soon.
 _VITE_BUILD_TIMEOUT_SECONDS = 60        # build budget — Vite scaffold ~5-15s typical.
+_TSC_TIMEOUT_SECONDS = 60               # P3-15 — runtime-break type-check budget;
+#                                         mirrors the vite budget (tsc --noEmit on the
+#                                         small scaffold is a few seconds; no second knob).
 
 # prototype-runtime/ sits at the repo root. This file is at
 # backend/app/design_agent/storage.py → parents are [design_agent, app, backend,
@@ -66,6 +69,31 @@ _SCAFFOLD_EXCLUDE = {"node_modules", "dist", "dist-fixture", ".vite", "test", "_
 
 class ViteBuildError(RuntimeError):
     """Raised when `vite build` fails (non-zero exit, timeout, or no dist/)."""
+
+
+# Runtime-BREAKING TS diagnostics: an emitted `ready` bundle with any of these
+# blank-screens at runtime (undefined reference / missing module / missing export).
+# Everything NOT in this set (implicit any, prop-type mismatch, unused var) is a
+# COSMETIC error that still renders — per prototype-runtime/tsconfig.json:10-11 it
+# must NOT gate generation. (The scaffold's own shadcn-ui files emit cosmetic
+# TS2339/TS2353 noise on every build; a blanket `tsc` gate would fail every
+# generation — which is exactly why this set is curated, not blanket.) Expand this
+# set ONLY when a new runtime-break class is observed in production; document the
+# observation when you do.
+_FATAL_TS_CODES = frozenset({
+    "TS2304",  # Cannot find name 'X'        (e.g. useState used, not imported) — the #20 bug
+    "TS2307",  # Cannot find module 'X'       (bad import path)
+    "TS2305",  # Module '"X"' has no exported member 'Y'  (named import → undefined at runtime)
+    "TS2552",  # Cannot find name 'X'. Did you mean 'Y'?  (TS2304 variant)
+})
+
+
+class TypeCheckError(RuntimeError):
+    """Raised when the built bundle contains a runtime-breaking type diagnostic
+    (a code in _FATAL_TS_CODES). Cosmetic type errors do NOT raise. Subclass of
+    RuntimeError, so callers that only catch the generic outer except would still
+    catch it — the route widens its precise (ViteBuildError, FileNotFoundError)
+    tuple to include this (P3-15 B3) so it gets the same fail_prototype handling."""
 
 
 # ─── Vite build (where the anchor-id plugin runs — AD4) ─────────────────────
@@ -129,7 +157,57 @@ def _vite_build_sync(runtime_root: Path, virtual_fs: dict[str, str]) -> dict[str
         dist_dir = build_path / "dist"
         if not dist_dir.exists():
             raise ViteBuildError("vite build succeeded but dist/ was not produced")
+        # P3-15 — scoped runtime-break backstop to the P1-10 autofixer. esbuild
+        # transpiled cleanly above, but it does no name resolution, so a bundle
+        # that references an unimported symbol (#20) staged `ready` and
+        # blank-screened. Re-check here, scoped to _FATAL_TS_CODES only, before
+        # the dist is read back for staging. Raises TypeCheckError on a fatal code.
+        _typecheck_runtime_break(build_path)
         return _read_dist(dist_dir)
+
+
+def _typecheck_runtime_break(build_path: Path) -> None:
+    """Run `tsc --noEmit` in the assembled build tempdir and raise TypeCheckError
+    iff any diagnostic line carries a code in _FATAL_TS_CODES.
+
+    Pure backstop to the P1-10 static autofixer; leaves the `vite build` script
+    untouched (prototype-runtime/tsconfig.json:10-11 intent — cosmetic type errors
+    still render). The gate keys off diagnostic CODES, not message text, so a
+    localized/reworded tsc message still triggers on the code.
+
+    Fail-open on a tsc TOOLING failure (binary missing / timeout / any failure to
+    RUN): log at WARNING and return WITHOUT raising — we never block a working
+    bundle because tsc itself broke. Only an actual fatal-code diagnostic blocks.
+    A non-zero exit with no fatal-code line (e.g. the scaffold's cosmetic
+    TS2339/TS2353 noise) is therefore NOT fatal — only the curated codes are.
+    """
+    try:
+        result = subprocess.run(
+            ["npx", "tsc", "--noEmit", "-p", "tsconfig.json", "--pretty", "false"],
+            cwd=str(build_path),
+            capture_output=True,
+            text=True,
+            timeout=_TSC_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        # Fail-open: a tsc tooling problem must not nuke an otherwise-working
+        # bundle. Identifier-free, error_class only (Rule #24).
+        logger.warning(
+            "typecheck_tool_failed error_class=%s (fail-open; bundle not blocked)",
+            type(exc).__name__,
+        )
+        return
+    # tsc prints diagnostics as `file(line,col): error TSXXXX: message` (plain,
+    # --pretty false). Scan stdout + stderr; key strictly on the diagnostic code.
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    hits = [
+        ln for ln in output.splitlines()
+        if any(code in ln for code in _FATAL_TS_CODES)
+    ]
+    if hits:
+        # Codes + truncated diagnostic only — no full source dump (Rule #24).
+        raise TypeCheckError("runtime-breaking type errors: " + " | ".join(hits[:5]))
 
 
 def _copy_scaffold(runtime_root: Path, build_path: Path) -> None:
