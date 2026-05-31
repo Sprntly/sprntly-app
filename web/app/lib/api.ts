@@ -509,6 +509,21 @@ export type CommentRecord = {
   resolved_at: string | null
 }
 
+/** F11 (P3-09/P3-10) — a proposed PRD patch. Wire shape mirrors the backend
+ *  `PrdPatchOut` (id/prd_id/prototype_id/rationale/patch_md/status/created_at).
+ *  `status` is `pending` (awaiting accept/reject), `applied` (folded into the
+ *  rendered PRD on read via apply_patches_to_prd_md), or `rejected`. The banner
+ *  only ever lists `pending` rows. */
+export type PrdPatchRecord = {
+  id: number
+  prd_id: number
+  prototype_id: number
+  rationale: string
+  patch_md: string
+  status: "pending" | "applied" | "rejected"
+  created_at: string
+}
+
 export const designAgentApi = {
   /** Kicks off prototype generation in the background; returns immediately
    *  with a prototype_id. Client should poll designAgentApi.get(id) (via
@@ -586,5 +601,26 @@ export const designAgentApi = {
   resolveComment: (prototypeId: number, commentId: number) =>
     api.patch<CommentRecord>(
       `/v1/design-agent/${prototypeId}/comments/${commentId}/resolve`,
+    ),
+  // ── F11 PRD patches (P3-10) ───────────────────────────────────────────────
+  /** List the PENDING PRD patches for a PRD (workspace-filtered server-side).
+   *  The PrdPatchBanner calls this on mount to decide whether to surface. */
+  listPendingPatches: (prdId: number) =>
+    api.get<PrdPatchRecord[]>(
+      `/v1/design-agent/prd-patches?prd_id=${encodeURIComponent(prdId)}`,
+    ),
+  /** Accept a proposed PRD patch → flips it to `applied`. The rendered PRD
+   *  reflects it on the next load (read path folds applied patches in); this does
+   *  NOT mutate the PrdScreen contentEditable. */
+  acceptPatch: (patchId: number) =>
+    api.post<PrdPatchRecord>(
+      `/v1/design-agent/prd-patches/${patchId}/accept`,
+      {},
+    ),
+  /** Reject a proposed PRD patch → flips it to `rejected`. */
+  rejectPatch: (patchId: number) =>
+    api.post<PrdPatchRecord>(
+      `/v1/design-agent/prd-patches/${patchId}/reject`,
+      {},
     ),
 }

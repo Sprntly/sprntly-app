@@ -16,6 +16,7 @@ import {
   IconRedo,
   IconUndo,
 } from "../../shared/app-icons"
+import { PrdPatchBanner } from "../../design-agent/PrdPatchBanner"
 
 export function PrdScreen() {
   const { goTo, openModal, shareMenuOpen, setShareMenuOpen, showToast } =
@@ -45,6 +46,7 @@ export function PrdScreen() {
 
   return (
     <AppLayout mainClassName="main--reading">
+      {prd && <PrdPatchBanner prdId={prd.prd_id} />}
       <div className="prd-header-row">
         <a className="detail-back" onClick={() => goTo("detail")}>
           ← Back to evidence
