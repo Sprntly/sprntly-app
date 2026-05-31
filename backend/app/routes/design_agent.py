@@ -1074,7 +1074,11 @@ from app.design_agent.prompts import (
     DESIGN_AGENT_PLAN_SYSTEM,
     render_iterate_user,
 )
-from app.design_agent.runner import drain_iteration_queue, iterate_prototype
+from app.design_agent.runner import (
+    drain_iteration_queue,
+    estimate_iterate_cost,
+    iterate_prototype,
+)
 from app.design_agent.storage import read_source_files_for_checkpoint
 from app.db.prototype_pending_iterations import (
     QueueFullError,
@@ -1152,6 +1156,57 @@ async def post_iterate(
         status="generating",
         queue_position=row["queue_position"],
     )
+
+
+class EstimateRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=8000)
+    applied_comment_id: int | None = None
+
+
+@router.post("/{prototype_id}/iterate/estimate")
+async def post_iterate_estimate(
+    prototype_id: int,
+    body: EstimateRequest,
+    session: dict = Depends(require_app_session),
+) -> dict:
+    """Pre-flight cost estimate (AD14): return the token + dollar estimate + soft-cap
+    warning the CostEstimateModal renders BEFORE an iterate run. Deterministic, no
+    Anthropic call in the request path — cancelling the modal costs nothing.
+
+    Gates mirror POST /iterate exactly: feature-flag (404 when off) + require_app_session
+    (401) + workspace filter (404 cross-tenant). Empty prompt → 422 (min_length=1).
+
+    Route placement: this is a POST on a 3-segment path (`/{id}/iterate/estimate`); the
+    `GET /{prototype_id}` catch-all cannot shadow it (different method AND more segments),
+    matching the existing `POST /{id}/iterate` + `/iterate/confirm-plan` siblings.
+
+    Observability (Rule #24): logs identifiers + token counts only — never the prompt or
+    bundle content.
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    # estimate_iterate_cost is async (it awaits read_source_files_for_checkpoint, S2).
+    estimate = await estimate_iterate_cost(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        prompt=body.prompt,
+        applied_comment_id=body.applied_comment_id,
+    )
+    logger.info(
+        "prototype_iterate_estimate prototype_id=%s cached_input_tokens=%s "
+        "new_input_tokens=%s est_cost_usd=%s exceeds_soft_cap=%s",
+        prototype_id,
+        estimate["cached_input_tokens"],
+        estimate["new_input_tokens"],
+        estimate["est_cost_usd"],
+        estimate["exceeds_soft_cap"],
+    )
+    return estimate
 
 
 class ConfirmPlanRequest(BaseModel):

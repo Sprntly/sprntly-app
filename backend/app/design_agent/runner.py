@@ -40,22 +40,24 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from app.db.prototype_comments import mark_comments_orphaned
+from app.db.prototype_comments import list_comments, mark_comments_orphaned
 from app.db.prototype_pending_iterations import (
     dequeue_next,
     mark_iteration_done,
     mark_iteration_failed,
 )
-from app.db.prototypes import set_pending_question
+from app.db.prototypes import get_prototype, set_pending_question
 from app.design_agent.autofixer import format_errors_for_agent
 from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
+from app.design_agent.prompts import DESIGN_AGENT_ITERATE_SYSTEM
+from app.design_agent.storage import read_source_files_for_checkpoint
 from app.design_agent.tools import (
     ToolContext,
     dispatch,
     tool_definitions_for_mode,
 )
-from app.llm_telemetry import RunUsage, log_llm_run
+from app.llm_telemetry import MODEL_PRICING, RunUsage, log_llm_run
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,16 @@ MODEL = "claude-sonnet-4-6"  # AD2; NEVER claude-sonnet-4-7
 DEFAULT_MAX_ITERS = 40
 DEFAULT_MAX_TOKENS = 4096
 TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
+
+# ── Pre-flight cost estimate (AD14 / AD15, P3-11) ────────────────────────────
+SOFT_CAP_USD = 0.50  # AD15 per-generation soft cap (trust primitive, not a hard gate)
+# Deterministic token heuristic: chars/4 (agent-build-research.md §3.3). No network,
+# no SDK token-counter dependency, ±20% accuracy band — the estimate is a "~$" guide,
+# not a billing figure (the REAL cost is the post-flight cost-log emitted by P3-05).
+_CHARS_PER_TOKEN = 4
+# Median iterate output (agent-build-research.md §3.2). A fixed heuristic keeps the
+# estimate deterministic (AC4); actual output is whatever the run produces.
+_EXPECTED_OUTPUT_TOKENS = 2000
 
 # ── AD12 orphan / re-attach: anchor-id extraction from the BUILT bundle ──────
 #
@@ -673,6 +685,90 @@ async def iterate_prototype(
         iters=result.iters,
     )
     return result, ctx.virtual_fs
+
+
+def _chars(source: dict[str, str]) -> int:
+    """Total character count of a source bundle (paths + contents). The path is
+    counted because it appears in the rendered prefix (`--- <path> ---` headers in
+    render_iterate_user, P3-05). Deterministic over the same dict."""
+    return sum(len(path) + len(content) for path, content in source.items())
+
+
+def _chars_comments(open_comments: list[dict]) -> int:
+    """Total character count of the open comment threads as they enter the cacheable
+    prefix (anchor + body). Deterministic over the same list."""
+    return sum(
+        len(c.get("anchor_id") or "") + len((c.get("body") or ""))
+        for c in open_comments
+    )
+
+
+async def estimate_iterate_cost(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    prompt: str,
+    applied_comment_id: int | None = None,
+) -> dict:
+    """Pre-flight cost estimate for an iterate run (AD14). Deterministic; makes NO
+    Anthropic call — a token-count + price calc only, so cancelling provably costs
+    nothing (the iterate route is only hit on Continue).
+
+    Counts the CACHEABLE prefix (iterate system prompt + the current bundle source +
+    the open comment threads) and the VOLATILE suffix (the user's iterate prompt),
+    converts chars→tokens via the chars/4 heuristic (`_CHARS_PER_TOKEN`), then prices
+    via `llm_telemetry.MODEL_PRICING[MODEL]` — the SAME constants `RunUsage.est_cost_usd`
+    uses (no second pricing table, AC1). The estimate prices the cache-READ path for
+    the cacheable prefix (the common iterate case re-uses recent context within the 1h
+    window) plus fresh input for the volatile prompt plus the expected output.
+
+    Cost framing per AD14: returns the cached-vs-fresh token split so the UI can render
+    "reusing context from your last run". `exceeds_soft_cap` flags projected spend over
+    the $0.50 AD15 guide.
+
+    S2: `read_source_files_for_checkpoint(prototype_id, checkpoint_id)` is positional,
+    async, and storage-path (NOT workspace-filtered) — `get_prototype` FIRST (workspace-
+    filtered) to obtain `current_checkpoint_id`, then read. A missing/None checkpoint
+    yields an empty bundle (mirrors `_run_iterate_bg`'s defensive read).
+
+    `applied_comment_id` is accepted for parity with the iterate request shape; the F10
+    applied comment is already part of the open-comment set counted above, so it does
+    not change the estimate (kept in the signature so the route can forward the body
+    verbatim).
+    """
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    checkpoint_id = proto.get("current_checkpoint_id") if proto else None
+    source = (
+        await read_source_files_for_checkpoint(prototype_id, checkpoint_id)
+        if checkpoint_id
+        else {}
+    )
+    open_comments = [
+        c
+        for c in list_comments(prototype_id=prototype_id, workspace_id=workspace_id)
+        if c.get("status") == "open"
+    ]
+
+    cacheable_chars = len(DESIGN_AGENT_ITERATE_SYSTEM) + _chars(source) + _chars_comments(open_comments)
+    volatile_chars = len(prompt)
+    cached_input_tokens = cacheable_chars // _CHARS_PER_TOKEN
+    new_input_tokens = volatile_chars // _CHARS_PER_TOKEN
+
+    p = MODEL_PRICING[MODEL]
+    est = (
+        cached_input_tokens * p["cache_read"]
+        + new_input_tokens * p["input"]
+        + _EXPECTED_OUTPUT_TOKENS * p["output"]
+    )
+    return {
+        "cached_input_tokens": cached_input_tokens,
+        "new_input_tokens": new_input_tokens,
+        "expected_output_tokens": _EXPECTED_OUTPUT_TOKENS,
+        "est_cost_usd": round(est, 4),
+        "soft_cap_usd": SOFT_CAP_USD,
+        "exceeds_soft_cap": est > SOFT_CAP_USD,
+        "model": MODEL,
+    }
 
 
 async def drain_iteration_queue(*, prototype_id: int, workspace_id: str) -> None:
