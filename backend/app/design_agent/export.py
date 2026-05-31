@@ -19,7 +19,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from app.db.prds import get_prd
+from app.db.prds import get_prd_rendered
 from app.db.prototypes import get_prototype
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ async def render_export_markdown(
         raise ValueError(
             f"render_export_markdown: checkpoint {checkpoint_id} does not belong to prototype {prototype_id}"
         )
-    prd = get_prd(prototype["prd_id"])
+    prd = get_prd_rendered(prototype["prd_id"])
     if not prd:
         raise ValueError(f"render_export_markdown: PRD {prototype['prd_id']} not found")
 

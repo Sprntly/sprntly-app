@@ -126,6 +126,24 @@ CREATE TABLE evidences (
     variant          TEXT NOT NULL DEFAULT 'v1'
 );
 
+-- Test-harness only (NOT a migration): the real prd_patches migration ships
+-- from P3-09. Seeded in the base schema so get_prd_rendered (P3-17) can resolve
+-- list_applied_patches to [] under the base harness — keeps existing PRD route
+-- tests green when GET /v1/prd/{id} now folds applied patches on read. Mirrors
+-- test_design_agent_prd_patches._PRD_PATCHES_DDL exactly.
+CREATE TABLE prd_patches (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prd_id        INTEGER NOT NULL,
+    prototype_id  INTEGER NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    rationale     TEXT NOT NULL,
+    patch_md      TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending', 'applied', 'rejected')),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT
+);
+
 CREATE TABLE ask_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     asked_at    TEXT NOT NULL DEFAULT (datetime('now')),

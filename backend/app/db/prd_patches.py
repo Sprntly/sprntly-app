@@ -100,6 +100,25 @@ def list_pending_patches(
     return resp.data or []
 
 
+def list_applied_patches(*, prd_id: int) -> list[dict[str, Any]]:
+    """Return status='applied' patches for a PRD, created_at-ascending.
+
+    The read-side companion to list_pending_patches. Feeds get_prd_rendered's
+    render-on-read fold (F11). NOT workspace-filtered (planner-resolved Open
+    Question): get_prd itself is not workspace-scoped, and the accept route is
+    the write-time workspace gate that produced these 'applied' rows — so the
+    render read folds whatever was accepted under that PRD. Threading a
+    workspace claim here would require one get_prd / routes/prd.py does not
+    currently take. Mirrors list_pending_patches's ordering otherwise.
+    """
+    c = require_client()
+    resp = (c.table(_TABLE).select("*")
+            .eq("prd_id", prd_id)
+            .eq("status", "applied")
+            .order("created_at", desc=False).execute())
+    return resp.data or []
+
+
 def mark_patch_applied(
     *,
     patch_id: int,

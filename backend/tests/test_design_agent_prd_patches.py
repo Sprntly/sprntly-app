@@ -146,7 +146,7 @@ def _run(coro):
 # ALTER ... ADD CONSTRAINT) are translated/omitted exactly as the sibling test DDLs
 # do. The status CHECK is inlined so the fake rejects illegal values like Postgres.
 _PRD_PATCHES_DDL = """
-CREATE TABLE prd_patches (
+CREATE TABLE IF NOT EXISTS prd_patches (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id        INTEGER NOT NULL,
     prototype_id  INTEGER NOT NULL,
