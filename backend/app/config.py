@@ -29,6 +29,9 @@ class Settings(BaseSettings):
 
     db_path: str = str(REPO_ROOT / "data" / "sprintly.db")
 
+    # Internal service-to-service API (DS Agent → Backend)
+    internal_api_key: str = ""
+
     # Google Drive connector (OAuth)
     google_client_id: str = ""
     google_client_secret: str = ""

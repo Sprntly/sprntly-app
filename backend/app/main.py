@@ -21,6 +21,7 @@ from app.routes import (
     datasets as datasets_routes,
     evidence,
     health,
+    internal,
     prd,
 )
 
@@ -112,3 +113,4 @@ app.include_router(brief.router)
 app.include_router(ask.router)
 app.include_router(prd.router)
 app.include_router(evidence.router)
+app.include_router(internal.router)

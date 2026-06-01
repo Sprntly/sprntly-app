@@ -48,6 +48,8 @@ from pydantic import BaseModel
 
 from . import agents as _agents
 from . import auth as _auth
+from . import backend_client as _backend
+from . import pipeline as _pipeline
 from . import tools as _files
 from .agents import AgentConfig
 from .chat import ChatRunner
@@ -73,6 +75,14 @@ class ChatBody(BaseModel):
 
 class LoadSampleBody(BaseModel):
     sample_id: str
+
+
+class AttachDatasetBody(BaseModel):
+    dataset_slug: str
+
+
+class PipelineBody(BaseModel):
+    dataset_slug: str
 
 
 def create_app() -> FastAPI:
@@ -256,6 +266,33 @@ def create_app() -> FastAPI:
             "files": [{"label": f.label, "size_bytes": f.size_bytes} for f in s.files],
         }
 
+    # ───── per-agent: attach backend dataset ─────
+
+    @app.post("/api/agents/{agent_id}/attach-dataset")
+    def attach_dataset(
+        agent_id: str, body: AttachDatasetBody, sid: str = Depends(require)
+    ) -> dict[str, Any]:
+        """Attach a backend dataset to this agent session.
+
+        Fetches the corpus from the backend internal API and stores it
+        on the session so the agent has company knowledge as context.
+        """
+        agent = _resolve_agent(agent_id)
+        s = sessions.get_or_create(sid, agent.id)
+        try:
+            corpus_data = _backend.fetch_corpus(body.dataset_slug)
+        except _backend.BackendError as exc:
+            raise HTTPException(exc.status, f"backend_error: {exc.detail}") from exc
+
+        s.dataset_slug = body.dataset_slug
+        s.corpus_context = corpus_data.get("joined", "")
+        return {
+            "ok": True,
+            "dataset_slug": body.dataset_slug,
+            "total_chars": corpus_data.get("total_chars", 0),
+            "doc_count": len(corpus_data.get("docs", [])),
+        }
+
     @app.get("/api/agents/{agent_id}/state")
     def state(agent_id: str, sid: str = Depends(require)) -> dict[str, Any]:
         agent = _resolve_agent(agent_id)
@@ -270,6 +307,7 @@ def create_app() -> FastAPI:
                 "kickoff_message": agent.kickoff_message,
             },
             "has_dataset": s.has_files,
+            "dataset_slug": s.dataset_slug,
             "dataset_label": s.dataset_label,
             "files": [{"label": f.label, "size_bytes": f.size_bytes} for f in s.files],
             "messages": _visible_transcript(s.messages),
@@ -294,7 +332,7 @@ def create_app() -> FastAPI:
     ) -> StreamingResponse:
         agent = _resolve_agent(agent_id)
         s = sessions.get_or_create(sid, agent.id)
-        if agent.accepts_files and not s.has_files:
+        if agent.accepts_files and not s.has_files and not s.corpus_context:
             raise HTTPException(400, "no_dataset_loaded")
         msg = body.message.strip()
         if not msg:
@@ -319,6 +357,19 @@ def create_app() -> FastAPI:
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
+
+    # ───── pipeline validation (debug) ─────
+
+    @app.post("/api/pipeline/validate")
+    def validate_pipeline(
+        body: PipelineBody, sid: str = Depends(require)
+    ) -> dict[str, Any]:
+        """Run the DS → Design → Engineer pipeline for a dataset.
+
+        Debug/validation endpoint — proves the multi-agent pipeline
+        works end-to-end.  Not user-facing.
+        """
+        return _pipeline.run_pipeline(body.dataset_slug)
 
     # ───── shared: sandbox-artifact proxy ─────
 

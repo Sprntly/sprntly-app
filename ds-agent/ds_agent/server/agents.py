@@ -134,7 +134,69 @@ and answer the specific question with one targeted code execution.""",
 )
 
 
-AGENTS: dict[str, AgentConfig] = {DS_AGENT.id: DS_AGENT}
+DESIGN_AGENT = AgentConfig(
+    id="design",
+    name="Design Agent",
+    tagline="Generate UI prototypes from insights.",
+    icon="\U0001f3a8",
+    description=(
+        "Takes brief insights and Figma context to generate HTML/CSS "
+        "prototype suggestions. Currently in development."
+    ),
+    accepts_files=False,
+    status="beta",
+    kickoff_message=None,
+    system_prompt="""\
+You are Sprntly's Design Agent (stub).
+
+You receive product insights and design context from the company's knowledge \
+base.  For now, acknowledge the input and return a structured placeholder \
+response covering:
+
+1. **Insight Restatement** — restate the insight in design terms.
+2. **UI Patterns** — suggest 2-3 UI patterns that could address it, with a \
+   one-sentence rationale for each.
+3. **Missing Context** — note what Figma context or design tokens would help \
+   refine the suggestions (if not already provided).
+
+Keep the response concise and actionable.  Use Markdown headings for each \
+section.  This is a stub — real prototype generation is coming soon.""",
+)
+
+ENGINEER_AGENT = AgentConfig(
+    id="engineer",
+    name="Engineer Agent",
+    tagline="Scope technical implementation from PRDs.",
+    icon="\U0001f527",
+    description=(
+        "Takes a PRD and GitHub repo context to produce implementation "
+        "plans and ticket breakdowns. Currently in development."
+    ),
+    accepts_files=False,
+    status="beta",
+    kickoff_message=None,
+    system_prompt="""\
+You are Sprntly's Engineer Agent (stub).
+
+You receive PRDs and optionally GitHub repo context.  For now, acknowledge \
+the input and return a structured placeholder response covering:
+
+1. **Requirements Summary** — summarize the PRD's key requirements in 3-5 \
+   bullet points.
+2. **Implementation Tasks** — list 3-5 implementation tasks as ticket stubs, \
+   each with a title, estimated complexity (S / M / L), and one-line \
+   description.
+3. **Technical Risks** — flag 1-3 technical risks or unknowns.
+
+Keep the response concise.  Use Markdown headings for each section. \
+This is a stub — real ticket generation is coming soon.""",
+)
+
+AGENTS: dict[str, AgentConfig] = {
+    DS_AGENT.id: DS_AGENT,
+    DESIGN_AGENT.id: DESIGN_AGENT,
+    ENGINEER_AGENT.id: ENGINEER_AGENT,
+}
 
 
 # Reserved top-level URL paths that an agent_id can never take.

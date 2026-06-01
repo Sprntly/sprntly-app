@@ -88,6 +88,13 @@ from app.db.connections import (
     upsert_connection,
 )
 
+# Enterprise input sources
+from app.db.input_sources import (
+    delete_input_source,
+    list_input_sources,
+    upsert_input_source,
+)
+
 # GitHub App (webhook-driven)
 from app.db.github import (
     delete_github_installation,
@@ -143,6 +150,10 @@ __all__ = [
     "insert_dataset",
     "list_dataset_slugs",
     "list_datasets",
+    # input sources
+    "delete_input_source",
+    "list_input_sources",
+    "upsert_input_source",
     # connections
     "delete_connection",
     "get_connection",

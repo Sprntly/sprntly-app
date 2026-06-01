@@ -20,7 +20,9 @@ Architecture:
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
@@ -28,6 +30,8 @@ from anthropic import Anthropic
 
 from .agents import AgentConfig
 from .state import SessionState
+
+logger = logging.getLogger(__name__)
 
 
 _MODEL = os.environ.get("AGENT_MODEL", "claude-opus-4-7")
@@ -187,6 +191,14 @@ class ChatRunner:
 
         pause_resumes = 0
 
+        # Build system prompt — optionally enriched with corpus context.
+        system_text = self.agent.system_prompt
+        if session.corpus_context:
+            system_text += (
+                "\n\nBACKGROUND KNOWLEDGE (company corpus):\n"
+                + session.corpus_context
+            )
+
         while True:
             kwargs = {
                 "model": self.model,
@@ -194,7 +206,7 @@ class ChatRunner:
                 "system": [
                     {
                         "type": "text",
-                        "text": self.agent.system_prompt,
+                        "text": system_text,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
@@ -303,6 +315,51 @@ class ChatRunner:
                 break
 
         yield {"type": "done"}
+
+        # Best-effort: push analysis results back to the backend corpus
+        # so they inform the next brief-generation run.
+        if session.dataset_slug:
+            self._push_analysis(session)
+
+    def _push_analysis(self, session: SessionState) -> None:
+        """Extract the latest assistant text and push it to the backend."""
+        # Find the last assistant message text.
+        for msg in reversed(session.messages):
+            if msg.get("role") != "assistant":
+                continue
+            text_parts: list[str] = []
+            for block in msg.get("content", []):
+                btype = getattr(block, "type", None) or (
+                    block.get("type") if isinstance(block, dict) else None
+                )
+                if btype == "text":
+                    text = getattr(block, "text", None) or (
+                        block.get("text", "") if isinstance(block, dict) else ""
+                    )
+                    if text:
+                        text_parts.append(text)
+            if text_parts:
+                markdown = "\n".join(text_parts).strip()
+                if len(markdown) < 50:
+                    return  # too short to be useful
+                filename = f"ds_analysis_{session.sid}_{int(time.time())}.md"
+                try:
+                    from . import backend_client as _backend
+                    _backend.push_analysis(
+                        dataset_slug=session.dataset_slug,
+                        filename=filename,
+                        markdown=markdown,
+                    )
+                    logger.info(
+                        "Pushed analysis to %s/%s (%d chars)",
+                        session.dataset_slug, filename, len(markdown),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to push analysis to backend (best-effort)",
+                        exc_info=True,
+                    )
+                return
 
     # ─────────────────────── non-streaming wrapper (tests) ───────────────────────
 
