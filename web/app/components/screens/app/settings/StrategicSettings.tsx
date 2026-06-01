@@ -1,3 +1,9 @@
+// DORMANT (commit B, 2026-06-01): This pane is no longer linked from
+// SETTINGS_NAV per the sprntly_Design-3 reset. The component still
+// renders if reached via /settings?section=strategic but the URL falls
+// back to Profile through the default branch in SettingsScreen.tsx —
+// no shim. Backend persistence still works; bring back the SETTINGS_NAV
+// entry to restore the visible pane.
 "use client"
 
 import { useEffect, useState } from "react"

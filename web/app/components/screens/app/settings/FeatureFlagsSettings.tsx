@@ -1,3 +1,7 @@
+// DORMANT (commit B, 2026-06-01): This pane is no longer linked from
+// SETTINGS_NAV per the sprntly_Design-3 reset. Backend persistence still
+// works (saveFeatureFlags + the feature_flags column on onboarding_workspace).
+// Bring back the SETTINGS_NAV entry to restore the visible pane.
 "use client"
 
 import { useEffect, useState } from "react"
