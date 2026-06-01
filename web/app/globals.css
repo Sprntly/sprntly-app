@@ -4445,3 +4445,58 @@
   color: #828d87;
   padding: 6px 8px 4px;
 }
+
+/* ─── Settings → Connectors: Configure drawer body chrome (commit E) ─── */
+
+.conn-config-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.conn-config-meta-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 12.5px;
+}
+.conn-config-meta-k {
+  color: #828d87;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.conn-config-meta-v {
+  color: #15201b;
+  font-weight: 500;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.conn-config-slot { margin-bottom: 18px; }
+.conn-config-placeholder {
+  margin: 0 0 18px;
+  padding: 14px;
+  background: #f6f7f6;
+  border: 1px dashed rgba(18, 32, 26, 0.18);
+  border-radius: 8px;
+  color: #828d87;
+  font-size: 12px;
+}
+
+.conn-mgmt-disconnect {
+  background: transparent;
+  color: var(--danger, #C13838);
+  border: 1px solid rgba(193, 56, 56, 0.3);
+}
+.conn-mgmt-disconnect:hover:not(:disabled) {
+  background: rgba(193, 56, 56, 0.06);
+  border-color: var(--danger, #C13838);
+}
+.conn-mgmt-disconnect:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

@@ -29,6 +29,7 @@ import {
   getConnectorRowState,
 } from "../../../../lib/connectorRowState"
 import type { ConnectorCategoryRow } from "../../../../types/content"
+import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 
 // ─────────────────────────── Pure View ───────────────────────────
 
@@ -161,6 +162,9 @@ export function ConnectorsSettings() {
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [configuringProviderId, setConfiguringProviderId] = useState<
+    string | null
+  >(null)
 
   const reload = useCallback(async () => {
     setLoadError(null)
@@ -206,11 +210,7 @@ export function ConnectorsSettings() {
   )
 
   const onConfigure = useCallback((providerId: string) => {
-    // Commit E mounts the real drawer. For now: a console marker so the
-    // click is observably wired without changing layout.
-    if (typeof window !== "undefined") {
-      window.console.info("[connectors] Configure clicked for", providerId)
-    }
+    setConfiguringProviderId(providerId)
   }, [])
 
   const onUpload = useCallback(
@@ -233,15 +233,29 @@ export function ConnectorsSettings() {
     [activeCompany],
   )
 
+  const configuringConnection =
+    configuringProviderId != null
+      ? (connectionByProvider.get(configuringProviderId) ?? null)
+      : null
+
   return (
-    <ConnectorsSettingsView
-      categories={CONNECTOR_CATALOG}
-      connectionByProvider={connectionByProvider}
-      loading={loading}
-      loadError={loadError}
-      onConnect={onConnect}
-      onConfigure={onConfigure}
-      onUpload={onUpload}
-    />
+    <>
+      <ConnectorsSettingsView
+        categories={CONNECTOR_CATALOG}
+        connectionByProvider={connectionByProvider}
+        loading={loading}
+        loadError={loadError}
+        onConnect={onConnect}
+        onConfigure={onConfigure}
+        onUpload={onUpload}
+      />
+      <ConfigureConnectorDrawer
+        providerId={configuringProviderId}
+        connection={configuringConnection}
+        activeCompany={activeCompany}
+        onClose={() => setConfiguringProviderId(null)}
+        onDisconnected={() => void reload()}
+      />
+    </>
   )
 }
