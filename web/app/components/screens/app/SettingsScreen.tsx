@@ -11,6 +11,7 @@ import { FeatureFlagsSettings } from "./settings/FeatureFlagsSettings"
 import { NotificationsSettings } from "./settings/NotificationsSettings"
 import { BillingSettings } from "./settings/BillingSettings"
 import { SecuritySettings } from "./settings/SecuritySettings"
+import { ConnectorsSettings } from "./settings/ConnectorsSettings"
 import {
   SETTINGS_NAV,
   type SettingsSectionId,
@@ -53,14 +54,7 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
         </div>
       )
     case "connectors":
-      return (
-        <div className="settings-coming-soon">
-          <h2 className="settings-sec-title">Coming soon</h2>
-          <p className="settings-sec-sub">
-            The Connectors pane lands in commit D.
-          </p>
-        </div>
-      )
+      return <ConnectorsSettings />
     default:
       return <ProfileSettings />
   }

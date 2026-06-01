@@ -4251,3 +4251,197 @@
   .legal-footer a { color: var(--ink-3); text-decoration: underline; }
   .legal-footer a:hover { color: var(--ink); }
   .legal-footer-sep { color: var(--line-strong); }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Settings → Connectors pane (commit D, ported from
+   sprntly_Design-3/sprntly.css lines 1283-1643). Design tokens are
+   inlined to hex literals so the port doesn't depend on a separate
+   token system. Some sub-token names from the design were renamed
+   here for clarity (e.g. .set-block-s-inline) — see the original for
+   the source-of-truth visual.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.set-pane {
+  display: flex;
+  flex-direction: column;
+  padding: 28px 32px 60px;
+  max-width: 840px;
+  width: 100%;
+}
+
+.set-h {
+  font-family: var(--ff-serif, "Instrument Serif", Georgia, serif);
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: -0.018em;
+  line-height: 1.1;
+  margin-bottom: 8px;
+  color: #15201b;
+}
+
+.set-sub {
+  font-size: 13.5px;
+  color: #4a564f;
+  margin-bottom: 26px;
+  line-height: 1.55;
+  max-width: 580px;
+}
+
+.set-block {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-sm);
+}
+
+.set-block-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.set-block-t {
+  font-family: var(--ff-serif, "Instrument Serif", Georgia, serif);
+  font-size: 18px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  color: #15201b;
+}
+
+.set-block-s-inline {
+  font-size: 12px;
+  color: #828d87;
+  font-weight: 400;
+  font-family: var(--ff-sans, "Geist", system-ui, sans-serif);
+}
+
+/* ─── Connector rows ─── */
+
+.set-conn-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+.set-conn-row:last-of-type {
+  border-bottom: none;
+}
+
+.set-conn-row .logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.set-conn-row .nm {
+  flex: 1;
+  min-width: 0;
+}
+.set-conn-row .nm .t {
+  font-size: 13px;
+  font-weight: 500;
+  color: #15201b;
+}
+.set-conn-row .nm .s {
+  font-size: 11px;
+  color: #828d87;
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-conn-row .st {
+  font-size: 10.5px;
+  border-radius: 30px;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+}
+.set-conn-row .st.on {
+  background: #dff5e9;
+  color: #0c6e4a;
+  border-color: #9dd5b4;
+}
+.set-conn-row .st.off {
+  background: #e9edea;
+  color: #828d87;
+}
+
+.set-conn-row .ac {
+  font-size: 11.5px;
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 500;
+  padding: 5px 10px;
+  border-radius: 6px;
+  background: transparent;
+  border: 0;
+  font-family: inherit;
+}
+.set-conn-row .ac:hover:not(:disabled) {
+  background: #eaf6f0;
+}
+.set-conn-row .ac:disabled {
+  color: #aab2ac;
+  cursor: not-allowed;
+}
+
+/* ─── Per-category upload strip ─── */
+
+.set-conn-upload {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(18, 32, 26, 0.18);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #4a564f;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.set-conn-upload:hover {
+  border-color: #b8e0cc;
+  background: #eaf6f0;
+  color: #0c6e4a;
+}
+.set-conn-upload i {
+  font-size: 15px;
+  color: var(--accent);
+}
+.set-conn-upload .muted {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: #aab2ac;
+}
+
+/* ─── Settings sidebar group header (commit B chrome) ─── */
+
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+}
+.settings-nav-group + .settings-nav-group {
+  margin-top: 14px;
+}
+.settings-nav-group-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #828d87;
+  padding: 6px 8px 4px;
+}

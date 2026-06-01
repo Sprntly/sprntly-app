@@ -61,7 +61,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
   {
     groupLabel: "Data & Integrations",
     items: [
-      { id: "connectors", label: "Connectors", available: false },
+      { id: "connectors", label: "Connectors", available: true },
     ],
   },
   {
