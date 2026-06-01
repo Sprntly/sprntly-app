@@ -2,7 +2,6 @@
 
 import { Suspense } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
-import Link from "next/link"
 import { AppLayout } from "./AppLayout"
 import { ProfileSettings } from "./settings/ProfileSettings"
 import { WorkspaceSettings } from "./settings/WorkspaceSettings"
@@ -34,14 +33,9 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
         <div className="settings-coming-soon">
           <h2 className="settings-sec-title">Coming soon</h2>
           <p className="settings-sec-sub">
-            {section === "connectors" ? (
-              <>
-                Use the full connectors page for now:{" "}
-                <Link href="/connectors">Connectors →</Link>
-              </>
-            ) : (
-              "Team management will sync with workspace invites."
-            )}
+            {section === "connectors"
+              ? "The Connectors pane lands in the next commit."
+              : "Team management will sync with workspace invites."}
           </p>
         </div>
       )
