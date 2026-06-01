@@ -457,7 +457,7 @@ def test_parallel_tool_use_bundled_in_one_user_message(monkeypatch):
 
 
 def test_parallel_tool_dispatch_concurrent(monkeypatch):
-    async def slow_dispatch(name, input, ctx):
+    async def slow_dispatch(name, input, ctx, allowed_names=None):
         await asyncio.sleep(0.05)
         return {"content": "ok"}
 
@@ -493,7 +493,7 @@ def test_tool_result_block_carries_matching_tool_use_id(monkeypatch):
 
 
 def test_tool_result_is_error_propagated(monkeypatch):
-    async def err_dispatch(name, input, ctx):
+    async def err_dispatch(name, input, ctx, allowed_names=None):
         return {"is_error": True, "content": "boom"}
 
     monkeypatch.setattr(runner, "dispatch", err_dispatch)
@@ -508,7 +508,7 @@ def test_tool_result_is_error_propagated(monkeypatch):
 
 
 def test_tool_result_content_truncated_at_25k(monkeypatch):
-    async def big_dispatch(name, input, ctx):
+    async def big_dispatch(name, input, ctx, allowed_names=None):
         return {"content": "x" * 30000}
 
     monkeypatch.setattr(runner, "dispatch", big_dispatch)
@@ -539,7 +539,7 @@ def test_same_tool_call_3x_in_5_iters_injects_warning(monkeypatch):
 
 
 def test_3_consecutive_tool_errors_inject_step_back_nudge(monkeypatch):
-    async def err_dispatch(name, input, ctx):
+    async def err_dispatch(name, input, ctx, allowed_names=None):
         return {"is_error": True, "content": "kaboom"}
 
     monkeypatch.setattr(runner, "dispatch", err_dispatch)

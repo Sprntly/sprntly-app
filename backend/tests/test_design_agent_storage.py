@@ -35,7 +35,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import app.design_agent.storage as storage
-from app.design_agent.storage import ViteBuildError
+from app.design_agent.storage import TypeCheckError, ViteBuildError
 
 # ─── shared helpers ──────────────────────────────────────────────────────────
 
@@ -240,8 +240,18 @@ async def test_bundle_staged_log_emitted_with_identifiers_only(monkeypatch, tmp_
 
 
 def _fake_vite_run(*, dist_files=None, returncode=0, stderr="", capture=None):
-    """Build a subprocess.run replacement that fabricates a dist/ dir in cwd."""
+    """Build a subprocess.run replacement that fabricates a dist/ dir in cwd.
+
+    P3-15: `_vite_build_sync` now runs a SECOND subprocess (`tsc --noEmit`) after a
+    successful vite build (the scoped runtime-break gate). This fake answers that
+    `tsc` invocation with a clean, no-diagnostic result so the vite-build
+    orchestration tests below stay focused on the build step — the type-check gate
+    has its own dedicated tests further down. (Without this branch the fake would
+    fabricate a second `dist/` and overwrite `capture` with the tsc argv.)
+    """
     def _run(cmd, cwd=None, **kwargs):
+        if "tsc" in cmd:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if capture is not None:
             capture["cmd"] = cmd
             capture["cwd"] = cwd
@@ -274,7 +284,9 @@ async def test_vite_build_symlinks_node_modules_not_install(monkeypatch):
     await storage.vite_build({"src/App.tsx": "export default () => null;"})
     # node_modules is symlinked from the scaffold (installed) — never npm install.
     assert capture["node_modules_is_symlink"] is True
-    # The only subprocess invoked is the build itself (no `npm install`).
+    # The build subprocess is `npx vite build` (no `npm install`). P3-15 adds a
+    # second `tsc` subprocess after build; the fake answers it cleanly without
+    # capturing, so `capture` still reflects the vite invocation here.
     assert capture["cmd"][:3] == ["npx", "vite", "build"]
 
 
@@ -355,6 +367,265 @@ async def test_vite_build_raises_on_syntax_error_integration():
     with pytest.raises(ViteBuildError) as ei:
         await storage.vite_build({"src/App.tsx": "export default function App(){return <button>unclosed;}"})
     assert "exit=" in str(ei.value)
+
+
+# ─── Scoped runtime-break type-check gate — subprocess MOCKED (P3-15) ────────
+#
+# These prove the parse/raise/fail-open LOGIC and run in toolchain-less CI (the
+# real-tsc cases below skip there). Per the ticket's Unit Tests note: mock
+# subprocess.run to return crafted diagnostic stdout where a real tsc is too slow.
+
+
+def _fake_tsc(*, stdout="", stderr="", returncode=0, raises=None):
+    """subprocess.run replacement for the `tsc --noEmit` invocation."""
+    def _run(cmd, cwd=None, **kwargs):
+        if raises is not None:
+            raise raises
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+    return _run
+
+
+def test_typecheck_blocks_missing_hook_import(monkeypatch, tmp_path):
+    """AC #1 (parse/raise): TS2304 (useState used, not imported — the #20 bug)."""
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_tsc(stdout="src/App.tsx(1,47): error TS2304: Cannot find name 'useState'.\n",
+                  returncode=2),
+    )
+    with pytest.raises(TypeCheckError) as ei:
+        storage._typecheck_runtime_break(tmp_path)
+    assert "TS2304" in str(ei.value)
+
+
+def test_typecheck_blocks_bad_module_import(monkeypatch, tmp_path):
+    """AC #2 (parse/raise): TS2307 (bad import path)."""
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_tsc(stdout="src/App.tsx(1,23): error TS2307: Cannot find module './does-not-exist'.\n",
+                  returncode=2),
+    )
+    with pytest.raises(TypeCheckError) as ei:
+        storage._typecheck_runtime_break(tmp_path)
+    assert "TS2307" in str(ei.value)
+
+
+def test_typecheck_allows_cosmetic_type_error(monkeypatch, tmp_path):
+    """AC #3: implicit-any (TS7006) + scaffold TS2339/TS2353 noise → NO raise.
+
+    Non-zero exit with no fatal-code line is not fatal — the gate is scoped, not
+    blanket; cosmetic type errors still render (tsconfig.json:10-11 intent)."""
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_tsc(
+            stdout=(
+                "src/App.tsx(1,17): error TS7006: Parameter 'x' implicitly has an 'any' type.\n"
+                "src/components/ui/resizable.tsx(9,51): error TS2339: Property 'PanelGroup' does not exist.\n"
+                "src/components/ui/calendar.tsx(87,9): error TS2353: Object literal may only specify known properties.\n"
+            ),
+            returncode=2,
+        ),
+    )
+    storage._typecheck_runtime_break(tmp_path)  # no raise
+
+
+def test_typecheck_clean_bundle_unaffected(monkeypatch, tmp_path):
+    """AC #4 (parse): a clean build (rc=0, no diagnostics) → no raise."""
+    monkeypatch.setattr(storage.subprocess, "run", _fake_tsc(stdout="", returncode=0))
+    storage._typecheck_runtime_break(tmp_path)  # no raise
+
+
+def test_typecheck_fail_open_when_tsc_binary_missing(monkeypatch, tmp_path, caplog):
+    """AC #5 / #8: tsc binary missing (FileNotFoundError) → fail-open, WARNING, no raise."""
+    monkeypatch.setattr(
+        storage.subprocess, "run", _fake_tsc(raises=FileNotFoundError("npx: command not found")),
+    )
+    with caplog.at_level(logging.WARNING):
+        storage._typecheck_runtime_break(tmp_path)  # no raise
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("typecheck_tool_failed" in m and "FileNotFoundError" in m for m in msgs)
+
+
+def test_typecheck_fail_open_on_timeout(monkeypatch, tmp_path):
+    """AC #5: tsc timeout → fail-open, no raise (a tooling hang must not block staging)."""
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_tsc(raises=subprocess.TimeoutExpired(cmd=["npx", "tsc"], timeout=60)),
+    )
+    storage._typecheck_runtime_break(tmp_path)  # no raise
+
+
+def test_typecheck_fail_open_nonzero_no_fatal_codes(monkeypatch, tmp_path):
+    """AC #5: non-zero exit carrying only a config/tooling diagnostic (TS5057, not in
+    the fatal set) → no raise. Only a curated fatal code blocks."""
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_tsc(stdout="error TS5057: Cannot find a tsconfig.json file at the specified directory.\n",
+                  returncode=1),
+    )
+    storage._typecheck_runtime_break(tmp_path)  # no raise
+
+
+def test_fatal_codes_keyed_on_code_not_message(monkeypatch, tmp_path):
+    """AC #6: a reworded/localized TS2304 message still triggers — keyed on the code."""
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_tsc(stdout="src/App.tsx(1,5): error TS2304: <<localized message text>>\n",
+                  returncode=2),
+    )
+    with pytest.raises(TypeCheckError):
+        storage._typecheck_runtime_break(tmp_path)
+
+
+def test_typecheck_scans_stderr_for_fatal_code(monkeypatch, tmp_path):
+    """Defensive: a fatal code surfacing on stderr is still caught (TS2552 variant)."""
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_tsc(
+            stdout="",
+            stderr="src/App.tsx(1,1): error TS2552: Cannot find name 'usestate'. Did you mean 'useState'?\n",
+            returncode=2,
+        ),
+    )
+    with pytest.raises(TypeCheckError):
+        storage._typecheck_runtime_break(tmp_path)
+
+
+def test_fatal_codes_is_curated_frozenset():
+    """AC #6: _FATAL_TS_CODES is a frozenset containing at least TS2304 and TS2307."""
+    assert isinstance(storage._FATAL_TS_CODES, frozenset)
+    assert {"TS2304", "TS2307"} <= storage._FATAL_TS_CODES
+
+
+def test_typecheck_blocked_generation_logs_codes_only(monkeypatch, tmp_path):
+    """AC #8: the raised diagnostic carries codes + truncated message (≤5 lines),
+    not a full source dump (Rule #24)."""
+    lines = "".join(f"src/F{i}.tsx(1,1): error TS2304: Cannot find name 'x{i}'.\n" for i in range(8))
+    monkeypatch.setattr(storage.subprocess, "run", _fake_tsc(stdout=lines, returncode=2))
+    with pytest.raises(TypeCheckError) as ei:
+        storage._typecheck_runtime_break(tmp_path)
+    msg = str(ei.value)
+    assert "TS2304" in msg
+    assert msg.count("error TS2304") <= 5  # truncated to first 5 hits
+
+
+async def test_vite_build_sync_propagates_typecheck_error(monkeypatch):
+    """The shared build path runs vite build (success) THEN tsc; a fatal tsc code
+    propagates out of vite_build() as TypeCheckError (so the route's widened except
+    catches it). #20 end-to-end at the unit layer."""
+    def _run(cmd, cwd=None, **kwargs):
+        if "tsc" in cmd:
+            return SimpleNamespace(
+                returncode=2,
+                stdout="src/App.tsx(1,47): error TS2304: Cannot find name 'useState'.\n",
+                stderr="",
+            )
+        dist = Path(cwd) / "dist"
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "index.html").write_text("<html>built</html>")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(storage.subprocess, "run", _run)
+    with pytest.raises(TypeCheckError):
+        await storage.vite_build({"src/App.tsx": "useState"})
+
+
+async def test_vite_build_sync_returns_dist_when_only_cosmetic(monkeypatch):
+    """Non-regression: vite build success + tsc reporting only cosmetic codes →
+    vite_build returns the dist normally (no raise)."""
+    def _run(cmd, cwd=None, **kwargs):
+        if "tsc" in cmd:
+            return SimpleNamespace(
+                returncode=2,
+                stdout="src/components/ui/resizable.tsx(9,51): error TS2339: Property 'PanelGroup' does not exist.\n",
+                stderr="",
+            )
+        dist = Path(cwd) / "dist"
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "index.html").write_text("<html>built</html>")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(storage.subprocess, "run", _run)
+    out = await storage.vite_build({"src/App.tsx": "export default () => null;"})
+    assert out["index.html"] == "<html>built</html>"
+
+
+# ─── Type-check gate — REAL tsc integration (AC #1, #2, #3, #4) ──────────────
+#
+# Run real `tsc --noEmit` in an assembled build dir (skipped when the toolchain is
+# absent — same gate as the real-vite-build integration tests above). The
+# bad-import (TS2307) case must hit tsc DIRECTLY: a real `vite build` would fail to
+# resolve the missing module before tsc ever runs, so these assemble the dir and
+# call _typecheck_runtime_break, bypassing vite.
+
+
+def _assemble_build_dir(build_path: Path, virtual_fs: dict[str, str]) -> None:
+    """Mirror _vite_build_sync's tempdir assembly: scaffold copy + node_modules
+    symlink + virtual_fs overlay. Lets the real-tsc tests run the gate in isolation."""
+    storage._copy_scaffold(storage._RUNTIME_ROOT, build_path)
+    storage._symlink_node_modules(storage._RUNTIME_ROOT, build_path)
+    for rel, content in virtual_fs.items():
+        target = build_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
+@pytest.mark.integration
+@_skip_no_toolchain
+def test_typecheck_real_tsc_blocks_missing_hook_import(tmp_path):
+    """AC #1 (real tsc): the #20 repro — useState without import → TS2304."""
+    _assemble_build_dir(tmp_path, {
+        "src/App.tsx": "export default function App(){const[n,setN]=useState(0);"
+                       "return <div onClick={()=>setN(n+1)}>{n}</div>;}",
+    })
+    with pytest.raises(TypeCheckError) as ei:
+        storage._typecheck_runtime_break(tmp_path)
+    assert "TS2304" in str(ei.value)
+
+
+@pytest.mark.integration
+@_skip_no_toolchain
+def test_typecheck_real_tsc_blocks_bad_module_import(tmp_path):
+    """AC #2 (real tsc): a bad import path → TS2307."""
+    _assemble_build_dir(tmp_path, {
+        "src/App.tsx": 'import { Thing } from "./does-not-exist";'
+                       "export default function App(){return <div><Thing/></div>;}",
+    })
+    with pytest.raises(TypeCheckError) as ei:
+        storage._typecheck_runtime_break(tmp_path)
+    assert "TS2307" in str(ei.value)
+
+
+@pytest.mark.integration
+@_skip_no_toolchain
+def test_typecheck_real_tsc_allows_cosmetic_error(tmp_path):
+    """AC #3 (real tsc): implicit-any param + scaffold's own non-fatal noise → no raise."""
+    _assemble_build_dir(tmp_path, {
+        "src/App.tsx": "export default function App(){const f=(x)=>x+1;return <div>{f(2)}</div>;}",
+    })
+    storage._typecheck_runtime_break(tmp_path)  # no raise — cosmetic still renders
+
+
+@pytest.mark.integration
+@_skip_no_toolchain
+def test_typecheck_real_tsc_clean_bundle_passes(tmp_path):
+    """AC #4 (real tsc): a clean bundle → no raise (non-regression)."""
+    _assemble_build_dir(tmp_path, {
+        "src/App.tsx": "export default function App(){return <div><button>Submit</button></div>;}",
+    })
+    storage._typecheck_runtime_break(tmp_path)  # no raise
+
+
+@pytest.mark.integration
+@_skip_no_toolchain
+async def test_vite_build_full_path_blocks_runtime_break_integration():
+    """AC #1 end-to-end: the #20 bundle transpiles under real vite (esbuild does no
+    name resolution) but the scoped gate inside _vite_build_sync raises before staging."""
+    with pytest.raises(TypeCheckError) as ei:
+        await storage.vite_build({
+            "src/App.tsx": "export default function App(){const[n,setN]=useState(0);"
+                           "return <div onClick={()=>setN(n+1)}>{n}</div>;}",
+        })
+    assert "TS2304" in str(ei.value)
 
 
 # ─── Route hook — fake Supabase DB (AC #9-#13, #16) ──────────────────────────
@@ -585,3 +856,85 @@ async def test_stage_complete_run_emits_observability_logs(env, monkeypatch, cap
     failed = [r.getMessage() for r in caplog.records if r.getMessage().startswith("vite_build_failed")]
     assert failed and "error_class=ViteBuildError" in failed[0]
     assert "secret-stderr-blob" not in failed[0]  # stderr never in the log line
+
+
+# ─── Type-check gate routing — B3 + iterate seam (P3-15 AC #1a) ──────────────
+
+
+def test_routes_imports_typecheck_error(env):
+    """AC #1a: TypeCheckError is imported into routes/design_agent.py (so its
+    except tuple can name it). Asserted against the reloaded route module."""
+    assert hasattr(env.routes, "TypeCheckError")
+    assert issubclass(env.routes.TypeCheckError, RuntimeError)
+
+
+async def test_complete_path_routes_typecheck_error_to_precise_fail(env, monkeypatch):
+    """AC #1a (B3): a TypeCheckError from the build routes to fail_prototype via the
+    PRECISE widened except — status='failed' with the fatal codes in `error`, NOT
+    the generic outer except. No checkpoint; stage_bundle never called."""
+    stage_mock = MagicMock()
+    _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
+    monkeypatch.setattr(
+        env.routes, "vite_build",
+        _async_raise(env.routes.TypeCheckError(
+            "runtime-breaking type errors: src/App.tsx(1,47): error TS2304: Cannot find name 'useState'."
+        )),
+    )
+    monkeypatch.setattr(env.routes, "stage_bundle", stage_mock)
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    assert "TypeCheckError" in row["error"]
+    assert "TS2304" in row["error"]            # the fatal diagnostic lands in error
+    assert _checkpoints_for(pid) == []         # no checkpoint created
+    assert stage_mock.call_count == 0          # staging never attempted
+
+
+async def test_complete_path_typecheck_uses_precise_log(env, monkeypatch, caplog):
+    """AC #1a: the precise `vite_build_failed` log fires (not the generic outer
+    `design_agent.generation_failed`) when a TypeCheckError is raised."""
+    _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
+    monkeypatch.setattr(
+        env.routes, "vite_build",
+        _async_raise(env.routes.TypeCheckError("runtime-breaking type errors: error TS2307: ...")),
+    )
+    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    with caplog.at_level(logging.WARNING):
+        await env.routes._stage_complete_run(prototype_id=pid, workspace_id="app", virtual_fs={"a": "b"})
+    failed = [r.getMessage() for r in caplog.records if r.getMessage().startswith("vite_build_failed")]
+    assert failed and "error_class=TypeCheckError" in failed[0]
+
+
+async def test_iterate_path_routes_typecheck_error_to_precise_fail(env, monkeypatch, caplog):
+    """Cross-ticket seam: a runtime-break on the ITERATE build is caught by
+    _stage_iterate_run's widened except (precise `iterate_vite_build_failed` path),
+    routes to fail_prototype, and does NOT propagate (un-widened code would let the
+    TypeCheckError escape this helper)."""
+    stage_mock = MagicMock()
+    monkeypatch.setattr(
+        env.routes, "vite_build",
+        _async_raise(env.routes.TypeCheckError(
+            "runtime-breaking type errors: src/App.tsx(1,23): error TS2307: Cannot find module './x'."
+        )),
+    )
+    monkeypatch.setattr(env.routes, "stage_bundle", stage_mock)
+    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    with caplog.at_level(logging.WARNING):
+        # No pytest.raises: the widened except swallows it and fails the row.
+        await env.routes._stage_iterate_run(
+            prototype_id=pid, workspace_id="app",
+            virtual_fs={"src/App.tsx": "x"}, iterate_prompt="make the header blue",
+        )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    assert "TypeCheckError" in row["error"]
+    assert "TS2307" in row["error"]
+    failed = [r.getMessage() for r in caplog.records
+              if r.getMessage().startswith("iterate_vite_build_failed")]
+    assert failed and "error_class=TypeCheckError" in failed[0]
+    assert stage_mock.call_count == 0          # iterate never staged a runtime-broken bundle

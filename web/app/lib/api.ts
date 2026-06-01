@@ -52,7 +52,7 @@ export function setAccessTokenProvider(fn: () => Promise<string | null>) {
 }
 
 async function request<T>(
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "DELETE" | "PATCH",
   path: string,
   body?: unknown,
 ): Promise<T> {
@@ -96,6 +96,7 @@ async function request<T>(
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
+  patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   delete: <T>(path: string) => request<T>("DELETE", path),
 }
 
@@ -471,6 +472,17 @@ export const prdApi = {
 // the shared `api` helper so credentials/JSON/${API_URL} handling stays
 // centralised (no raw fetch, no reinvented client).
 
+/** F12 (P3-08) — the agent's clarifying question, persisted on the prototype
+ *  row as a sidecar. Shape `{question, choices?, context?}`. When non-null the
+ *  prototype is in `awaiting_clarification` (`status` stays `ready` — the
+ *  question is a sidecar, NOT a status enum value). `choices` present → answer
+ *  by picking a button; absent → free-text answer. */
+export type PendingQuestion = {
+  question: string
+  choices?: string[]
+  context?: string
+}
+
 /** Full prototype row returned by GET /v1/design-agent/{id}. */
 export type PrototypeRecord = {
   id: number
@@ -485,12 +497,48 @@ export type PrototypeRecord = {
   is_complete?: boolean
   share_mode?: "private" | "public" | "passcode"
   share_token?: string | null
+  // ── P3-16 (append-only): F12 `awaiting_clarification` sidecar — the
+  //    `pending_question` column added by P3-08. GET /{id} `select("*")` carries
+  //    it; typed OPTIONAL/nullable to match the posture above (no api method
+  //    added — the existing GET poll surfaces it; the answer routes through the
+  //    existing P3-14 `iterate`). Null/absent ⇒ no question pending.
+  pending_question?: PendingQuestion | null
 }
 
 /** 202 kickoff response from POST /v1/design-agent/generate. */
 export type PrototypeStartResponse = {
   prototype_id: number
   status: string
+}
+
+/** F8 (P3-02/P3-03) — an anchored comment. Wire shape mirrors the backend
+ *  `CommentOut` (id/anchor_id/body/author/status/created_at/resolved_at).
+ *  `status` is the AD12 lifecycle: `open` (active), `resolved` (internally
+ *  closed), `orphaned` (the anchor no longer exists in the current bundle —
+ *  set by P3-04, rendered with no pin by the panel). */
+export type CommentRecord = {
+  id: number
+  anchor_id: string
+  body: string
+  author: string
+  status: "open" | "resolved" | "orphaned"
+  created_at: string
+  resolved_at: string | null
+}
+
+/** F11 (P3-09/P3-10) — a proposed PRD patch. Wire shape mirrors the backend
+ *  `PrdPatchOut` (id/prd_id/prototype_id/rationale/patch_md/status/created_at).
+ *  `status` is `pending` (awaiting accept/reject), `applied` (folded into the
+ *  rendered PRD on read via apply_patches_to_prd_md), or `rejected`. The banner
+ *  only ever lists `pending` rows. */
+export type PrdPatchRecord = {
+  id: number
+  prd_id: number
+  prototype_id: number
+  rationale: string
+  patch_md: string
+  status: "pending" | "applied" | "rejected"
+  created_at: string
 }
 
 export const designAgentApi = {
@@ -549,4 +597,98 @@ export const designAgentApi = {
     }
     return await res.text()
   },
+  // ── F8 anchored comments (P3-03) ──────────────────────────────────────────
+  /** Public-route comment write (external viewer on `/p/<token>`): the token
+   *  is the access primitive (F6), so no auth is required. Hits the P3-02
+   *  public route; the backend attributes the comment to the `external` author. */
+  createCommentByToken: (token: string, body: { anchor_id: string; body: string }) =>
+    api.post<CommentRecord>(
+      `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
+      body,
+    ),
+  /** Public-route comment read: lists every comment for the token's prototype
+   *  (all statuses). Same 404 posture as the resolver for missing/private. */
+  listCommentsByToken: (token: string) =>
+    api.get<CommentRecord[]>(
+      `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
+    ),
+  /** Internal (authed) resolve — external viewers cannot resolve (spec §4
+   *  Stage 2). Addressed by prototype id; renders only on the signed-in mount
+   *  where a `prototypeId` is supplied. */
+  resolveComment: (prototypeId: number, commentId: number) =>
+    api.patch<CommentRecord>(
+      `/v1/design-agent/${prototypeId}/comments/${commentId}/resolve`,
+    ),
+  // ── F11 PRD patches (P3-10) ───────────────────────────────────────────────
+  /** List the PENDING PRD patches for a PRD (workspace-filtered server-side).
+   *  The PrdPatchBanner calls this on mount to decide whether to surface. */
+  listPendingPatches: (prdId: number) =>
+    api.get<PrdPatchRecord[]>(
+      `/v1/design-agent/prd-patches?prd_id=${encodeURIComponent(prdId)}`,
+    ),
+  /** Accept a proposed PRD patch → flips it to `applied`. The rendered PRD
+   *  reflects it on the next load (read path folds applied patches in); this does
+   *  NOT mutate the PrdScreen contentEditable. */
+  acceptPatch: (patchId: number) =>
+    api.post<PrdPatchRecord>(
+      `/v1/design-agent/prd-patches/${patchId}/accept`,
+      {},
+    ),
+  /** Reject a proposed PRD patch → flips it to `rejected`. */
+  rejectPatch: (patchId: number) =>
+    api.post<PrdPatchRecord>(
+      `/v1/design-agent/prd-patches/${patchId}/reject`,
+      {},
+    ),
+  // ── AD14 pre-flight cost estimate (P3-11) ─────────────────────────────────
+  /** Pre-flight cost estimate for an iterate run (AD14). Deterministic, makes no
+   *  Anthropic call server-side — drives the CostEstimateModal's
+   *  "~$0.X · Continue / Cancel" gate. The iterate composer itself (`iterate`) is
+   *  P3-14; this only estimates. */
+  estimateIterate: (
+    prototypeId: number,
+    body: { prompt: string; applied_comment_id?: number | null },
+  ) =>
+    api.post<IterateCostEstimate>(
+      `/v1/design-agent/${prototypeId}/iterate/estimate`,
+      body,
+    ),
+  // ── F9/F10 iterate (P3-14) ────────────────────────────────────────────────
+  /** Kick off an iterate of an existing prototype (F9 re-prompt / F10 Apply).
+   *  Owned HERE, not P3-11 (which ships `estimateIterate` only). The IterateComposer
+   *  routes Submit through the AD14 `CostEstimateModal` gate and calls this ONLY
+   *  from the modal's Continue handler — never directly from a Submit. Defaults
+   *  `mode:'execute'` (`'plan'` is P3-07). Returns the background-run handle +
+   *  `queue_position` (P3-06's iterate queue). 409 when the prototype is locked
+   *  (`is_complete`) or not `ready`; 429 when the queue is full. */
+  iterate: (
+    prototypeId: number,
+    body: {
+      prompt: string
+      applied_comment_id?: number | null
+      mode?: "plan" | "execute"
+    },
+  ) =>
+    api.post<IterateResponse>(`/v1/design-agent/${prototypeId}/iterate`, {
+      ...body,
+      mode: body.mode ?? "execute",
+    }),
+}
+
+/** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
+export type IterateCostEstimate = {
+  cached_input_tokens: number
+  new_input_tokens: number
+  expected_output_tokens: number
+  est_cost_usd: number
+  soft_cap_usd: number
+  exceeds_soft_cap: boolean
+  model: string
+}
+
+/** Shape returned by POST /v1/design-agent/{id}/iterate (P3-05 route + P3-06 queue). */
+export type IterateResponse = {
+  prototype_id: number
+  status: string
+  queue_position: number
 }

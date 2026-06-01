@@ -22,7 +22,10 @@
 import { useState, type ReactNode } from "react"
 import { DesignAgentDrawer } from "./DesignAgentDrawer"
 import { PostGenerationResult } from "./PostGenerationResult"
-import type { PrototypeRecord } from "../../lib/api"
+import { CommentsPanel } from "./CommentsPanel"
+import { IterateComposer } from "./IterateComposer"
+import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
+import type { CommentRecord, PrototypeRecord } from "../../lib/api"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 
 export type DesignAgentLauncherProps = {
@@ -65,6 +68,13 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   result?: PrototypeRecord | null
   /** P2-12: handed to the drawer so a successful generation populates `result`. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** P3-14 (F10): the comment selected for Apply, lifted to the container so
+   *  CommentsPanel's Apply action sets it and IterateComposer reads it. Optional
+   *  so existing direct-view test calls keep typechecking. */
+  applyTarget?: CommentRecord | null
+  /** P3-14 (F10): setter for `applyTarget` (CommentsPanel onApply → set;
+   *  IterateComposer onClearApply → clear). */
+  setApplyTarget?: (comment: CommentRecord | null) => void
   /** Injected in tests so the view renders without NavigationContext. */
   renderDrawer?: (props: LauncherDrawerProps) => ReactNode
 }
@@ -83,6 +93,8 @@ export function DesignAgentLauncherView({
   setOpen,
   result = null,
   onGenerated,
+  applyTarget = null,
+  setApplyTarget,
   renderDrawer = defaultRenderDrawer,
 }: LauncherViewProps) {
   return (
@@ -99,6 +111,43 @@ export function DesignAgentLauncherView({
           so regenerating a second prototype in the same launcher instance must
           remount to avoid carrying the prior prototype's is_complete. */}
       {result && <PostGenerationResult key={result.id} prototype={result} />}
+      {/* P3-14 (F10): signed-in CommentsPanel mount — the public mount lives in
+          PublicTokenViewer (P3-03). Comments are addressed by the share token,
+          so this mounts only once the prototype is shared. `onApply` enables the
+          Apply→IterateComposer handoff (absent on the public mount → no Apply). */}
+      {result && result.share_token && (
+        <CommentsPanel
+          key={`comments-${result.id}`}
+          token={result.share_token}
+          prototypeId={result.id}
+          onApply={(comment) => setApplyTarget?.(comment)}
+        />
+      )}
+      {/* P3-14 (F9/F10): the iterate trigger surface — re-prompt always available
+          (when unlocked); Apply pre-fills from `applyTarget`. Mounted ONLY here
+          (authed surface), never in the public route. */}
+      {result && (
+        <IterateComposer
+          key={`iterate-${result.id}`}
+          prototypeId={result.id}
+          isComplete={result.is_complete ?? false}
+          applyTarget={applyTarget}
+          onClearApply={() => setApplyTarget?.(null)}
+        />
+      )}
+      {/* P3-16 (F12): the clarifying-question answer surface — rendered ONLY when
+          the agent has paused with a pending question and the prototype is not
+          locked. The answer routes through the reused P3-14 iterate (no new
+          method). Mounted ONLY here (authed surface), never in the public route
+          (external viewers cannot answer/iterate). */}
+      {result &&
+        result.pending_question != null &&
+        !(result.is_complete ?? false) && (
+          <ClarifyingQuestionSurface
+            key={`clarify-${result.id}`}
+            prototype={result}
+          />
+        )}
       {renderDrawer({
         open,
         onOpenChange: setOpen,
@@ -124,6 +173,9 @@ export function DesignAgentLauncher({
 }) {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState<PrototypeRecord | null>(null)
+  // P3-14 (F10): lifted so CommentsPanel's Apply sets it and IterateComposer
+  // reads it as its pre-fill.
+  const [applyTarget, setApplyTarget] = useState<CommentRecord | null>(null)
 
   // On a successful generation, mount the result view. On failure, leave the
   // current state intact — the drawer's existing toast surfaces the error and
@@ -141,6 +193,8 @@ export function DesignAgentLauncher({
       setOpen={setOpen}
       result={result}
       onGenerated={handleGenerated}
+      applyTarget={applyTarget}
+      setApplyTarget={setApplyTarget}
       renderDrawer={renderDrawer}
     />
   )
