@@ -437,6 +437,10 @@ export const connectorsApi = {
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
     api.delete<{ deleted: true; provider: string }>("/v1/connectors/clickup"),
+
+  // ---- HubSpot -------------------------------------------------------------
+  disconnectHubspot: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/hubspot"),
   listGithubRepos: (perPage = 50) =>
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,

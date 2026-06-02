@@ -186,6 +186,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectGithub()
   } else if (providerId === "clickup") {
     await connectorsApi.disconnectClickup()
+  } else if (providerId === "hubspot") {
+    await connectorsApi.disconnectHubspot()
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }

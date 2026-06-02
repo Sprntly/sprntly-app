@@ -64,7 +64,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     items: [
       { id: "stripe",     name: "Stripe",     logo: "S", logoText: "S", logoColor: "#635BFF", oauth: false },
       { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false },
-      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", oauth: false },
+      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", oauth: true },
     ],
   },
   {

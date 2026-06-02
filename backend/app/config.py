@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     clickup_client_secret: str = ""
     clickup_oauth_redirect_uri: str = ""
 
+    # HubSpot connector (OAuth 2.0 with refresh tokens)
+    hubspot_client_id: str = ""
+    hubspot_client_secret: str = ""
+    hubspot_oauth_redirect_uri: str = ""
+    # Space-separated scopes. Minimum is just `oauth`. Add more (e.g.
+    # `crm.objects.contacts.read`) when sync features actually need them.
+    hubspot_scopes: str = "oauth crm.objects.contacts.read"
+
     # GitHub connector (GitHub App with user-to-server OAuth)
     github_app_id: str = ""
     github_app_client_id: str = ""

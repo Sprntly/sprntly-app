@@ -38,7 +38,7 @@ from pydantic import BaseModel
 from app import db
 from app.auth import require_session
 from app.config import settings
-from app.connectors import clickup_oauth, figma_oauth, github_app, google_oauth
+from app.connectors import clickup_oauth, figma_oauth, github_app, google_oauth, hubspot_oauth
 from app.connectors.google_drive_sync import (
     SyncConfigError,
     browse_folders,
@@ -140,6 +140,12 @@ def start_oauth(
         if not clickup_oauth.clickup_configured():
             raise HTTPException(500, "ClickUp OAuth is not configured on the server")
         url = clickup_oauth.authorize_url(state=clickup_oauth.sign_oauth_state())
+        return {"authorize_url": url}
+
+    if provider == hubspot_oauth.HUBSPOT_PROVIDER:
+        if not hubspot_oauth.hubspot_configured():
+            raise HTTPException(500, "HubSpot OAuth is not configured on the server")
+        url = hubspot_oauth.authorize_url(state=hubspot_oauth.sign_oauth_state())
         return {"authorize_url": url}
 
     raise HTTPException(
@@ -493,6 +499,52 @@ def clickup_disconnect(_session: dict = Depends(require_session)):
         raise HTTPException(404, "ClickUp is not connected")
     db.delete_connection(clickup_oauth.CLICKUP_PROVIDER)
     return {"deleted": True, "provider": clickup_oauth.CLICKUP_PROVIDER}
+
+
+# ─────────────────────── HubSpot ───────────────────────
+#
+# Commit I. OAuth-only — no corpus sync yet.
+
+
+@router.get("/hubspot/callback")
+def hubspot_callback(code: str, state: str):
+    hubspot_oauth.verify_oauth_state(state)
+    token_json = hubspot_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "HubSpot did not return an access_token")
+
+    info = hubspot_oauth.fetch_token_info(access_token)
+    # `user` is the authenticated user's email per the token-info endpoint
+    # (https://api.hubapi.com/oauth/v1/access-tokens/{token}).
+    label = info.get("user") or info.get("hub_domain") or str(info.get("hub_id") or "")
+
+    try:
+        token_encrypted = encrypt_token_json(
+            hubspot_oauth.token_payload_to_store(token_json)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        provider=hubspot_oauth.HUBSPOT_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=" ".join(info.get("scopes") or []) if isinstance(info.get("scopes"), list) else "",
+        account_label=label or None,
+        config_json=json.dumps({"info": info}) if info else "{}",
+    )
+
+    q = urlencode({"section": "connectors", "connected": hubspot_oauth.HUBSPOT_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+
+
+@router.delete("/hubspot")
+def hubspot_disconnect(_session: dict = Depends(require_session)):
+    row = db.get_connection(hubspot_oauth.HUBSPOT_PROVIDER)
+    if not row:
+        raise HTTPException(404, "HubSpot is not connected")
+    db.delete_connection(hubspot_oauth.HUBSPOT_PROVIDER)
+    return {"deleted": True, "provider": hubspot_oauth.HUBSPOT_PROVIDER}
 
 
 # ─────────────────────── GitHub webhook ───────────────────────

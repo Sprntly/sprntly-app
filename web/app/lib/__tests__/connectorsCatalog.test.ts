@@ -119,9 +119,9 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
 })
 
 describe("CONNECTOR_IDS_WITH_OAUTH", () => {
-  it("contains the connectors with live OAuth backends (Drive/Figma/GitHub + ClickUp from commit H)", () => {
+  it("contains the connectors with live OAuth backends (Drive/Figma/GitHub + ClickUp + HubSpot)", () => {
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
-      ["clickup", "figma", "github", "google_drive"].sort(),
+      ["clickup", "figma", "github", "google_drive", "hubspot"].sort(),
     )
   })
 
