@@ -12,16 +12,18 @@ Four test layers, matching the ticket's Unit Tests section:
                directive) + the cache-breakpoint discipline of render_manual_edit_user.
 - TOOL BUDGET— tools_for_mode("manual") = 6 action, 0 sentinel; AD17 budget unchanged.
 - RUNNER     — manual_edit_prototype against the recording fake Anthropic client
-               (reused shape from test_design_agent_iterate.py): the 2-iter cap, the
-               cost-log (mode=manual, est_cost_usd≤$0.05), cache-read accounting,
-               client routing.
+               (reused shape from test_design_agent_iterate.py): the 4-iter cap
+               (P4-11: raised 2→4 so a realistic search→view→batched-edit→self-correct
+               multi-anchor edit can commit), the cost-log (mode=manual), cache-read
+               accounting, client routing.
 - ROUTE      — the HTTP surface + the background task + the iterate-staging reuse +
                the stale-anchor fail-closed path. Auth is INJECTED via
                app.dependency_overrides (NOT the live auth.py path — P4-02 mitigation).
 
 Load-bearing assertions: AC1 (200ms generating, no Anthropic in request path),
-AC5 (max_iters=2 hard cap), AC7 (6 action / 0 sentinel), AC8 (Tailwind-class-swap
-prompt), AC9 (stages via _stage_iterate_run, never complete_prototype), AC10
+AC5 (max_iters=4 hard cap — P4-11), AC7 (6 action / 0 sentinel), AC8 (Tailwind-class-swap
+prompt + the §3b turn-sequence/batching contract — P4-11), AC9 (stages via
+_stage_iterate_run, never complete_prototype), AC10
 (stale-anchor → fail_prototype, no advance), AC11 (cache_control at end of stable
 prefix only), AC13 (route reachable, not catch-all-shadowed).
 """
@@ -91,6 +93,36 @@ def test_manual_edit_system_prompt_never_asks():
     assert "Never." in p or "never" in p.lower()
     # multi-match (AD4 collision) directive present.
     assert "ALL of them" in p
+
+
+def test_manual_edit_system_prompt_names_turn_sequence_and_keeps_batching():
+    # AC3 (P4-11): §3b must reconcile the (now 4-turn) budget with the prompt's own
+    # workflow — it must NAME the expected turn shape (Turn 1 locate via search/view,
+    # Turn 2 batched edits), KEEP the batching directive, advertise the 4-turn safety
+    # rail, and bias toward finishing in 2–3. This is a contract/property test guarding
+    # prompt drift: if a future edit drops the batching directive or the turn sequence,
+    # this fails loudly rather than silently regressing the cost/turn behaviour.
+    p = DESIGN_AGENT_MANUAL_EDIT_SYSTEM
+
+    # 1. Batching directive is still present (the writes go in ONE turn).
+    assert "ONE batched turn" in p
+    assert "single assistant turn" in p
+
+    # 2. The explicit search/view-then-edit turn sequence is named.
+    assert "Turn 1" in p
+    assert "Turn 2" in p
+    assert "LOCATE" in p or "locate" in p
+    # the locate pass uses search/view; the edit pass uses line_replace.
+    assert "search" in p
+    assert "line_replace" in p
+
+    # 3. The 4-turn safety rail is advertised AND the model is biased toward 2–3.
+    assert "AT MOST 4 turns" in p
+    assert "GOAL" in p.upper()
+    assert ("2–3" in p) or ("2-3" in p)  # en-dash or hyphen — "finishing in 2–3 is the goal"
+
+    # 4. The old hard "AT MOST 2 turns" framing is gone (it was the bug — zero slack).
+    assert "AT MOST 2 turns" not in p
 
 
 def test_render_manual_edit_user_cache_breakpoint_on_prefix():
@@ -243,9 +275,10 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_manual_edit_prototype_threads_manual_mode_and_two_iter_cap(monkeypatch):
-    # AC5: manual_edit_prototype calls agent_loop with mode='manual' AND an explicit
-    # max_iters=2 (NOT the inherited DEFAULT_MAX_ITERS of 40).
+def test_manual_edit_prototype_threads_manual_mode_and_iter_cap(monkeypatch):
+    # AC5 (P4-11): manual_edit_prototype calls agent_loop with mode='manual' AND an
+    # explicit max_iters=MANUAL_EDIT_MAX_ITERS (now 4, NOT the inherited
+    # DEFAULT_MAX_ITERS of 40). The cap is threaded explicitly, never inherited.
     captured: dict = {}
 
     async def fake_loop(*, system_blocks, user_message, ctx, max_iters, scenario, mode):
@@ -262,14 +295,18 @@ def test_manual_edit_prototype_threads_manual_mode_and_two_iter_cap(monkeypatch)
         current_source={"src/App.tsx": "x"}, figma_file_key=None,
     ))
     assert captured["mode"] == "manual"
-    assert captured["max_iters"] == 2
+    assert captured["max_iters"] == runner.MANUAL_EDIT_MAX_ITERS
+    assert captured["max_iters"] == 4
     assert captured["max_iters"] != runner.DEFAULT_MAX_ITERS
     assert captured["ctx"].virtual_fs == {"src/App.tsx": "x"}
 
 
-def test_manual_edit_runs_two_iter_max(monkeypatch):
-    # AC5: a forced-runaway model (always tool_use) exits at EXACTLY 2 iters with
-    # status='max_iters' and does not exceed the cap — no exception.
+def test_manual_edit_runs_four_iter_max(monkeypatch):
+    # AC2/AC5 (P4-11): a forced-runaway model (always tool_use) exits at EXACTLY
+    # MANUAL_EDIT_MAX_ITERS=4 iters with status='max_iters' and does not exceed the
+    # cap — no exception. The cap was raised 2→4 so the prompt's own
+    # search→view→batched-edit→self-correct workflow can actually complete; this test
+    # guards that the rail still bounds a genuine runaway at 4 (not 40).
     _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),  # replayed forever
     ])
@@ -278,14 +315,16 @@ def test_manual_edit_runs_two_iter_max(monkeypatch):
         current_source={}, figma_file_key=None,
     ))
     assert result.status == "max_iters"
-    assert result.iters == 2
+    assert result.iters == 4
     assert result.iters == runner.MANUAL_EDIT_MAX_ITERS
 
 
 def test_manual_edit_emits_cost_summary_mode_manual_under_5c(monkeypatch, caplog):
     # AC4/AC6: cost-summary via log_llm_run with operation manual_edit + mode=manual,
-    # iters<=2, est_cost_usd<=0.05 on a representative stubbed usage (independent of
-    # the live DEFAULT_MAX_TOKENS value — the cost asserts on the STUBBED usage).
+    # iters<=MANUAL_EDIT_MAX_ITERS (P4-11: now 4), est_cost_usd<=0.05 on a representative
+    # stubbed usage (independent of the live DEFAULT_MAX_TOKENS value — the cost asserts
+    # on the STUBBED usage; the real-LLM cold-cache cost is reconciled by AC1/AC4 at the
+    # live gate, not here).
     _install_client(monkeypatch, [
         _msg("end_turn", [_text("committed")], usage=_usage(cache_read=200, inp=300, out=120)),
     ])
@@ -295,7 +334,7 @@ def test_manual_edit_emits_cost_summary_mode_manual_under_5c(monkeypatch, caplog
             current_source={"src/App.tsx": "x"}, figma_file_key=None, scenario="A",
         ))
     assert result.status == "complete"
-    assert result.iters <= 2
+    assert result.iters <= runner.MANUAL_EDIT_MAX_ITERS
     records = [r for r in caplog.records if r.name == TELEMETRY_LOGGER]
     assert len(records) == 1
     msg = records[0].getMessage()
@@ -342,7 +381,7 @@ def test_manual_edit_cache_read_nonzero_on_second_call(monkeypatch):
         current_source={"src/A.tsx": "x"}, figma_file_key=None,
     ))
     assert result.usage.cache_read_input_tokens >= 120
-    assert result.iters <= 2
+    assert result.iters <= runner.MANUAL_EDIT_MAX_ITERS
 
 
 def test_manual_edit_uses_design_agent_client(monkeypatch):
@@ -686,7 +725,7 @@ async def test_manual_edit_stale_anchor_fails_not_silent(env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_manual_edit_run_status_failure_marks_failed(env, monkeypatch):
-    # A non-complete RunResult (e.g. the 2-iter max_iters cap, or an Anthropic error)
+    # A non-complete RunResult (e.g. the 4-iter max_iters cap, or an Anthropic error)
     # → structured fail_prototype, no staging.
     monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
     fail_calls: list[dict] = []
