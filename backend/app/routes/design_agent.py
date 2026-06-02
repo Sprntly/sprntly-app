@@ -41,6 +41,7 @@ import hashlib
 import logging
 import os
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
@@ -115,12 +116,24 @@ def _require_feature_enabled() -> None:
 # ─── Schemas ────────────────────────────────────────────────────────────────
 
 
+class ManualDesignInput(BaseModel):
+    """P5-02: the absolute Scenario-B floor — a user-supplied brand color + font
+    that styles the prototype even when there is no Figma and no extractable
+    website design system (the noon-Day-11 manual cut). Both fields required when
+    the object is present; the whole object is optional on the request."""
+
+    primary_color: str = Field(..., min_length=1)   # e.g. "#3b82f6"
+    font_family: str = Field(..., min_length=1)      # e.g. "Inter"
+
+
 class GenerateRequest(BaseModel):
     prd_id: int = Field(..., gt=0)
     target_platform: str = Field("both")  # "desktop" | "mobile" | "both"
     instructions: str = Field("")
     figma_file_key: str | None = None     # explicit; auto-detection via the
     #                                       connector lookup lands in a later phase.
+    website_url: str | None = None        # P5-02: Scenario B fallback source
+    manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
@@ -171,7 +184,7 @@ async def generate(
         instructions=body.instructions,
         target_platform=body.normalised_platform(),
         figma_file_key=body.figma_file_key,
-        website_url=None,             # populated in P5-02 (Scenario B)
+        website_url=body.website_url,  # P5-02: Scenario B source snapshot
         github_installation_id=None,  # populated in P4-05 (Scenario C)
     )
 
@@ -183,6 +196,8 @@ async def generate(
             target_platform=body.normalised_platform(),
             instructions=body.instructions,
             figma_file_key=body.figma_file_key,
+            website_url=body.website_url,
+            manual_design=body.manual_design,
         )
     )
     _inflight_tasks.add(task)
@@ -299,6 +314,8 @@ async def _run_generation_bg(
     target_platform: str,
     instructions: str,
     figma_file_key: str | None,
+    website_url: str | None = None,
+    manual_design: ManualDesignInput | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -311,7 +328,17 @@ async def _run_generation_bg(
     """
     try:
         prd_md = _load_prd_body(prd_id)
-        figma_block = _figma_context_block(figma_file_key)
+        # Single "design source" slot. Figma always wins when present (AC3) — the
+        # website block is not even built in that case. When there is no Figma,
+        # Scenario B (extracted/manual website design system) takes the slot;
+        # `_website_context_block` returns None when there is neither a website
+        # URL nor manual hints, so we fall back to the generic Figma string
+        # ("(no Figma source detected)").
+        website_block = (
+            None if figma_file_key
+            else await _website_context_block(website_url, manual_design)
+        )
+        source_block = website_block or _figma_context_block(figma_file_key)
 
         # Exactly one system block; cache_control at the END of the stable
         # prefix (AD2 / TICKET_STANDARD §2 LLM-calling AC). The agent loop reads
@@ -325,7 +352,7 @@ async def _run_generation_bg(
             prd_md=prd_md,
             target_platform=target_platform,
             instructions=instructions,
-            figma_frames=figma_block,
+            figma_frames=source_block,
         )
         user_message = {
             "role": "user",
@@ -339,7 +366,7 @@ async def _run_generation_bg(
         # always False, so C never fires here regardless of inputs.
         scenario_set = infer_scenario_from_inputs(
             figma_file_key=figma_file_key,
-            website_url=None,               # P5-02 populates
+            website_url=website_url,        # P5-02: derives 'B' (url, no figma) / '0'
             github_installation_id=None,    # P4-05 populates
             prd_references_codebase=False,  # P4-05 implements the detector
         )
@@ -561,6 +588,163 @@ def _figma_context_block(figma_file_key: str | None) -> str:
         "Call the fetch_figma tool (no frame_ids) to list its top-level frames, "
         "then fetch the specific frames you need."
     )
+
+
+def _is_usable_color(value: str | None) -> bool:
+    """True iff `value` is a real, non-transparent color worth feeding the scaffold.
+
+    Rejects ``None``, empty/whitespace, the literal ``transparent``, and any
+    zero-alpha ``rgba(...)`` / ``hsla(...)`` (alpha component == 0). Everything
+    else (hex, ``rgb()``, named colors, non-zero-alpha ``rgba()``) is usable.
+
+    Why this is load-bearing (P5-01 verifier finding, 2026-06-02): the extractor's
+    own ``_below_confidence`` guard only checks for an EMPTY color string, so a
+    NON-empty transparent value like ``rgba(0,0,0,0)`` — which P5-01's live runs
+    returned as the "primary color" on Stripe/Linear (modern CSS-layered sites) —
+    passes that guard and would otherwise flow straight into the scaffold prose.
+    This is the second gate that catches it. Do NOT call this on font/logo fields.
+    """
+    if value is None:
+        return False
+    v = value.strip().lower()
+    if not v or v == "transparent":
+        return False
+    if v.startswith(("rgba(", "hsla(")) and ")" in v:
+        inner = v[v.index("(") + 1 : v.rindex(")")]
+        parts = [p.strip() for p in inner.split(",")]
+        if len(parts) == 4:
+            try:
+                if float(parts[3]) == 0.0:
+                    return False
+            except ValueError:
+                pass  # non-numeric alpha → treat as usable (don't over-reject)
+    return True
+
+
+def _manual_design_block(primary_color: str, font_family: str, *, host: str | None) -> str:
+    """Scaffold prose for user-supplied brand hints (the manual floor)."""
+    prefix = (
+        f"No design system could be extracted from {host}; "
+        if host else ""
+    )
+    return (
+        f"{prefix}Use these user-supplied brand hints as the design system. "
+        f"Primary color: {primary_color}. Heading and body font: {font_family}. "
+        "Build a clean, modern interface around this color and typography."
+    )
+
+
+def _url_only_neutral_block(host: str) -> str:
+    """Scaffold prose when a URL was given but nothing usable was extracted and
+    no manual hints are available — instruct a clean neutral palette."""
+    return (
+        f"The brand site at {host} was provided but no usable design system could "
+        "be extracted — produce a clean, neutral, modern design (no specific brand "
+        "color or font available)."
+    )
+
+
+def _extracted_design_block(
+    ds: dict[str, Any],
+    *,
+    host: str,
+    manual_design: "ManualDesignInput | None",
+) -> str:
+    """Render an extracted website design system as scaffold prose.
+
+    The COLOR fields are gated through `_is_usable_color`: a transparent /
+    zero-alpha extracted color is treated as below-confidence FOR THAT FIELD
+    ONLY — the color is then sourced from `manual_design` (if present) or a
+    neutral-palette instruction, while the good extracted font/logo/spacing
+    signal is KEPT. A transparent value NEVER reaches the prose.
+    """
+    parts: list[str] = [
+        f"Design system extracted from the brand website ({host}). "
+        "Match this visual identity in the prototype."
+    ]
+
+    primary = ds.get("primary_color")
+    if _is_usable_color(primary):
+        parts.append(f"Primary color: {primary}.")
+    elif manual_design is not None:
+        parts.append(
+            f"Primary color: {manual_design.primary_color} (user-supplied; no "
+            "usable brand color could be extracted from the site)."
+        )
+    else:
+        parts.append(
+            "No usable brand color extracted from the site — produce a clean "
+            "neutral palette."
+        )
+
+    background = ds.get("background_color")
+    if _is_usable_color(background):
+        parts.append(f"Background color: {background}.")
+
+    if ds.get("heading_font_family"):
+        parts.append(f"Heading font: {ds['heading_font_family']}.")
+    if ds.get("heading_size_scale"):
+        parts.append(f"Heading size: {ds['heading_size_scale']}.")
+    if ds.get("body_font_family"):
+        parts.append(f"Body font: {ds['body_font_family']}.")
+    if ds.get("border_radius_convention"):
+        parts.append(f"Border radius: {ds['border_radius_convention']}.")
+    spacing = ds.get("spacing_scale_samples") or []
+    if spacing:
+        parts.append(f"Spacing samples: {', '.join(spacing)}.")
+    if ds.get("logo_url"):
+        parts.append(f"Logo: {ds['logo_url']}.")
+
+    return " ".join(parts)
+
+
+async def _website_context_block(
+    website_url: str | None,
+    manual_design: "ManualDesignInput | None",
+) -> str | None:
+    """Scaffold context for Scenario B (analog of `_figma_context_block`).
+
+    Returns a prose design-system block, or ``None`` when there is no website
+    source at all (the caller then uses the Figma block / the generic
+    "(no source)" string). Precedence: extracted > manual > url-only.
+
+      1. ``website_url`` set → ``extract_website_design_system`` (P5-01). On a
+         non-``None`` dict, render it (with the transparent-color gate).
+      2. extractor ``None`` + ``manual_design`` present → manual prose.
+      3. extractor ``None`` + no manual + a URL was given → url-only neutral block.
+      4. no ``website_url`` but ``manual_design`` present → manual prose
+         (Scenario-0-with-manual-hints; the run is labelled '0' because
+         `infer_scenario_from_inputs` keys 'B' off `website_url`, but the hints
+         MUST still reach the scaffold — decision 2026-06-02, AC10).
+      5. neither → ``None``.
+
+    The P5-01 import is lazy + ImportError-guarded so the manual-floor half ships
+    independently of the extractor (the noon-Day-11 cut, AC5).
+    """
+    if website_url:
+        host = urlsplit(website_url).hostname or website_url
+        ds: dict[str, Any] | None = None
+        try:
+            from app.design_agent.scenarios.website import (
+                extract_website_design_system,
+            )
+            ds = await extract_website_design_system(website_url)
+        except ImportError:
+            ds = None  # P5-01 not merged → fall through to manual / url-only.
+        if ds is not None:
+            return _extracted_design_block(ds, host=host, manual_design=manual_design)
+        if manual_design is not None:
+            return _manual_design_block(
+                manual_design.primary_color, manual_design.font_family, host=host
+            )
+        return _url_only_neutral_block(host)
+
+    # No website_url: only the manual hints can supply a design system.
+    if manual_design is not None:
+        return _manual_design_block(
+            manual_design.primary_color, manual_design.font_family, host=None
+        )
+    return None
 
 
 # ─── Public share viewer (P2-05) ──────────────────────────────────────────
