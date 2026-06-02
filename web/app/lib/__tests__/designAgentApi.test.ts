@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { api, API_URL, designAgentApi, setAccessTokenProvider } from "../api"
+import {
+  api,
+  API_URL,
+  designAgentApi,
+  setAccessTokenProvider,
+  type ManualEditTriple,
+} from "../api"
 
 type MockResponse = {
   ok: boolean
@@ -438,6 +444,43 @@ describe("designAgentApi", () => {
       await designAgentApi.iterate(3, { prompt: "plan it", mode: "plan" })
       const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
       expect(JSON.parse(init.body as string)).toEqual({ prompt: "plan it", mode: "plan" })
+    })
+  })
+
+  // ── F13 manual edit (P4-01) ────────────────────────────────────────────────
+  describe("manualEdit", () => {
+    it("test_manual_edit_posts_to_manual_edit_route — POSTs {edits} (AC6/AC11)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(202, { prototype_id: 7, status: "generating", queue_position: 0 }),
+      )
+      const edits: ManualEditTriple[] = [
+        {
+          anchor_id: "fb3007b5",
+          property: "color",
+          old_value: "rgb(0, 0, 0)",
+          new_value: "rgb(255, 0, 0)",
+        },
+      ]
+      const out = await designAgentApi.manualEdit(7, { edits })
+      expect(out.prototype_id).toBe(7)
+      expect(out.status).toBe("generating")
+      expect(out.queue_position).toBe(0)
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe(`${API_URL}/v1/design-agent/7/manual-edit`)
+      expect(init.method).toBe("POST")
+      expect(init.credentials).toBe("include")
+      expect(JSON.parse(init.body as string)).toEqual({ edits })
+    })
+
+    it("propagates a stale-anchor error as ApiError (overlay maps it, AC8)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(400, { detail: "anchor fb3007b5 no longer exists in the current bundle" }),
+      )
+      await expect(
+        designAgentApi.manualEdit(7, {
+          edits: [{ anchor_id: "fb3007b5", property: "text", old_value: "a", new_value: "b" }],
+        }),
+      ).rejects.toMatchObject({ status: 400 })
     })
   })
 })
