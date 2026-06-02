@@ -196,8 +196,8 @@ def google_drive_callback(code: str, state: str):
         config_json=json.dumps(config),
     )
 
-    q = urlencode({"connected": google_oauth.GOOGLE_DRIVE_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    q = urlencode({"section": "connectors", "connected": google_oauth.GOOGLE_DRIVE_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
 
 
 class GoogleDriveConfigIn(BaseModel):
@@ -315,8 +315,8 @@ def figma_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
-    q = urlencode({"connected": figma_oauth.FIGMA_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    q = urlencode({"section": "connectors", "connected": figma_oauth.FIGMA_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
 
 
 @router.delete("/figma")
@@ -400,8 +400,8 @@ def github_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
-    q = urlencode({"connected": github_app.GITHUB_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    q = urlencode({"section": "connectors", "connected": github_app.GITHUB_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
 
 
 @router.delete("/github")
@@ -482,8 +482,8 @@ def clickup_callback(code: str, state: str):
         config_json=json.dumps({"user": user}) if user else "{}",
     )
 
-    q = urlencode({"connected": clickup_oauth.CLICKUP_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    q = urlencode({"section": "connectors", "connected": clickup_oauth.CLICKUP_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
 
 
 @router.delete("/clickup")

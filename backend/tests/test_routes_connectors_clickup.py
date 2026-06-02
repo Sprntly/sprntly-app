@@ -75,7 +75,8 @@ def test_clickup_configured_reflects_env(clickup_env, monkeypatch):
     from app.connectors import clickup_oauth
     assert clickup_oauth.clickup_configured() is True
 
-    monkeypatch.delenv("CLICKUP_CLIENT_ID", raising=False)
+    # Empty-set overrides .env-file value (pydantic-settings reads both).
+    monkeypatch.setenv("CLICKUP_CLIENT_ID", "")
     _reload_app_modules()
     from app.connectors import clickup_oauth as reloaded
     assert reloaded.clickup_configured() is False
@@ -173,8 +174,11 @@ def test_start_oauth_clickup_returns_clickup_url(clickup_env):
 
 
 def test_start_oauth_clickup_500_when_not_configured(isolated_settings, monkeypatch):
-    monkeypatch.delenv("CLICKUP_CLIENT_ID", raising=False)
-    monkeypatch.delenv("CLICKUP_CLIENT_SECRET", raising=False)
+    # Empty-set rather than delenv — pydantic-settings reads from the real
+    # backend/.env file in addition to os.environ.
+    monkeypatch.setenv("CLICKUP_CLIENT_ID", "")
+    monkeypatch.setenv("CLICKUP_CLIENT_SECRET", "")
+    monkeypatch.setenv("CLICKUP_OAUTH_REDIRECT_URI", "")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     _reload_app_modules()
     import app.main as main_mod
