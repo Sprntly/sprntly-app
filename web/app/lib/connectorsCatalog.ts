@@ -51,6 +51,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     items: [
       { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", oauth: false },
       { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", oauth: false },
+      { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey" },
       { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false },
       { id: "dovetail",   name: "Dovetail",   logo: "D", logoText: "D", logoColor: "#9B59B6", oauth: false },
       { id: "salesforce", name: "Salesforce", logo: "S", logoText: "S", logoColor: "#00A1E0", oauth: false },
@@ -117,9 +118,23 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
  * Convenience set of connector IDs that have a real OAuth backend.
  * Derived from the `oauth` flag on each catalog row so the two stay in
  * sync automatically — never hand-edit this directly.
+ *
+ * Note: This is "has OAuth specifically." For "is connectable by any
+ * auth mechanism" (OAuth or API key), use CONNECTOR_IDS_CONNECTABLE.
  */
 export const CONNECTOR_IDS_WITH_OAUTH = new Set<string>(
   CONNECTOR_CATALOG.flatMap((c) => c.items)
     .filter((i) => i.oauth)
+    .map((i) => i.id),
+)
+
+/**
+ * All connectors the UI should expose as clickable Connect (whether the
+ * underlying auth is OAuth or API key). Derived — keep in sync via the
+ * `oauth` flag or `authType: "apikey"` per row, not by hand-editing.
+ */
+export const CONNECTOR_IDS_CONNECTABLE = new Set<string>(
+  CONNECTOR_CATALOG.flatMap((c) => c.items)
+    .filter((i) => i.oauth || i.authType === "apikey")
     .map((i) => i.id),
 )

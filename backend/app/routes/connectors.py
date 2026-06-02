@@ -38,7 +38,14 @@ from pydantic import BaseModel
 from app import db
 from app.auth import require_session
 from app.config import settings
-from app.connectors import clickup_oauth, figma_oauth, github_app, google_oauth, hubspot_oauth
+from app.connectors import (
+    clickup_oauth,
+    figma_oauth,
+    fireflies_apikey,
+    github_app,
+    google_oauth,
+    hubspot_oauth,
+)
 from app.connectors.google_drive_sync import (
     SyncConfigError,
     browse_folders,
@@ -545,6 +552,69 @@ def hubspot_disconnect(_session: dict = Depends(require_session)):
         raise HTTPException(404, "HubSpot is not connected")
     db.delete_connection(hubspot_oauth.HUBSPOT_PROVIDER)
     return {"deleted": True, "provider": hubspot_oauth.HUBSPOT_PROVIDER}
+
+
+# ─────────────────────── Fireflies (API key) ───────────────────────
+#
+# Commit J. Fireflies doesn't expose self-serve OAuth — auth is a user-
+# issued API key (fireflies.ai → Settings → Integrations → Fireflies API).
+# Per the Onboarding Spec line 150, "API key flow" is explicitly allowed
+# alongside OAuth. The frontend collects the key in a modal and POSTs it
+# here for validation + storage.
+
+
+class FirefliesApiKeyIn(BaseModel):
+    api_key: str
+
+    def model_post_init(self, _context) -> None:
+        if not self.api_key or not self.api_key.strip():
+            raise ValueError("api_key cannot be empty")
+
+
+@router.post("/fireflies/apikey")
+def fireflies_connect_apikey(
+    body: FirefliesApiKeyIn,
+    _session: dict = Depends(require_session),
+):
+    api_key = body.api_key.strip()
+    user = fireflies_apikey.fetch_authenticated_user(api_key)
+    if not user:
+        raise HTTPException(
+            400,
+            "Fireflies rejected this API key — double-check the value at "
+            "fireflies.ai → Settings → Integrations → Fireflies API.",
+        )
+
+    label = user.get("email") or user.get("name") or "Fireflies user"
+
+    try:
+        token_encrypted = encrypt_token_json(
+            fireflies_apikey.token_payload_to_store(api_key)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        provider=fireflies_apikey.FIREFLIES_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes="",
+        account_label=label,
+        config_json=json.dumps({"user": user}) if user else "{}",
+    )
+    return {
+        "ok": True,
+        "provider": fireflies_apikey.FIREFLIES_PROVIDER,
+        "account_label": label,
+    }
+
+
+@router.delete("/fireflies")
+def fireflies_disconnect(_session: dict = Depends(require_session)):
+    row = db.get_connection(fireflies_apikey.FIREFLIES_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Fireflies is not connected")
+    db.delete_connection(fireflies_apikey.FIREFLIES_PROVIDER)
+    return {"deleted": True, "provider": fireflies_apikey.FIREFLIES_PROVIDER}
 
 
 # ─────────────────────── GitHub webhook ───────────────────────

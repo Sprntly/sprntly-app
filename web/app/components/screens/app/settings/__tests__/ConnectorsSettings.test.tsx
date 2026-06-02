@@ -93,10 +93,10 @@ describe("ConnectorsSettingsView — categories + sub-labels", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders 30 connector rows total (29 design + ClickUp added in commit H)", () => {
+  it("renders 31 connector rows total (29 design + ClickUp + Fireflies)", () => {
     const html = render()
     const matches = html.match(/class="set-conn-row"/g) ?? []
-    expect(matches.length).toBe(30)
+    expect(matches.length).toBe(31)
   })
 
   it("shows 'Off' pill + 'Connect' action for OAuth-supported connector with no connection", () => {

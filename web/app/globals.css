@@ -4500,3 +4500,14 @@
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+/* ─── API key modal (commit J — Fireflies-style apikey connectors) ─── */
+.modal-sm { width: 480px; max-width: 92vw; }
+.modal-body { padding: 4px 28px 14px; }
+.modal-close {
+  background: transparent; border: none; color: var(--muted);
+  cursor: pointer; padding: 6px 10px; border-radius: 6px;
+  font-size: 16px; line-height: 1;
+}
+.modal-close:hover { background: var(--surface-2); color: var(--ink); }
+.modal-foot .btn + .btn { margin-left: 8px; }

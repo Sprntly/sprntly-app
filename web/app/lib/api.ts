@@ -441,6 +441,15 @@ export const connectorsApi = {
   // ---- HubSpot -------------------------------------------------------------
   disconnectHubspot: () =>
     api.delete<{ deleted: true; provider: string }>("/v1/connectors/hubspot"),
+
+  // ---- Fireflies (API key, not OAuth) --------------------------------------
+  connectFirefliesWithApiKey: (apiKey: string) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      "/v1/connectors/fireflies/apikey",
+      { api_key: apiKey },
+    ),
+  disconnectFireflies: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/fireflies"),
   listGithubRepos: (perPage = 50) =>
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,

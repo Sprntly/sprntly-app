@@ -28,8 +28,22 @@ import {
 import {
   getConnectorRowState,
 } from "../../../../lib/connectorRowState"
-import type { ConnectorCategoryRow } from "../../../../types/content"
+import type {
+  ConnectorCategoryRow,
+  ConnectorItemRow,
+} from "../../../../types/content"
+import { ApiKeyPromptModal } from "../../../connectors/ApiKeyPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
+
+/**
+ * Per-connector help text shown in the API-key modal. Keep it short and
+ * point at the provider's own docs page where the key lives. Falls back
+ * to a generic "look in your account settings" if not listed.
+ */
+const APIKEY_HELP: Record<string, string> = {
+  fireflies:
+    "Get your key from fireflies.ai → Settings → Integrations → Fireflies API.",
+}
 
 // ─────────────────────────── Pure View ───────────────────────────
 
@@ -165,6 +179,8 @@ export function ConnectorsSettings() {
   const [configuringProviderId, setConfiguringProviderId] = useState<
     string | null
   >(null)
+  const [apiKeyConnectingItem, setApiKeyConnectingItem] =
+    useState<ConnectorItemRow | null>(null)
 
   const reload = useCallback(async () => {
     setLoadError(null)
@@ -197,6 +213,17 @@ export function ConnectorsSettings() {
 
   const onConnect = useCallback(
     async (providerId: string) => {
+      // Find the catalog row so we know which auth flow to take.
+      const item = CONNECTOR_CATALOG
+        .flatMap((c) => c.items)
+        .find((i) => i.id === providerId)
+
+      if (item?.authType === "apikey") {
+        // Open the API-key paste modal instead of an OAuth redirect.
+        setApiKeyConnectingItem(item)
+        return
+      }
+
       if (!CONNECTOR_IDS_WITH_OAUTH.has(providerId)) return
       // Go through the fetch-then-navigate path (commit F) so the auth
       // check runs with the Supabase Bearer header before we hand
@@ -217,6 +244,21 @@ export function ConnectorsSettings() {
       }
     },
     [activeCompany],
+  )
+
+  const handleApiKeyConnect = useCallback(
+    async (apiKey: string) => {
+      if (!apiKeyConnectingItem) return
+      if (apiKeyConnectingItem.id === "fireflies") {
+        await connectorsApi.connectFirefliesWithApiKey(apiKey)
+        await reload()
+      } else {
+        throw new Error(
+          `API-key connect not wired for provider: ${apiKeyConnectingItem.id}`,
+        )
+      }
+    },
+    [apiKeyConnectingItem, reload],
   )
 
   const onConfigure = useCallback((providerId: string) => {
@@ -265,6 +307,17 @@ export function ConnectorsSettings() {
         activeCompany={activeCompany}
         onClose={() => setConfiguringProviderId(null)}
         onDisconnected={() => void reload()}
+      />
+      <ApiKeyPromptModal
+        open={apiKeyConnectingItem != null}
+        connectorName={apiKeyConnectingItem?.name ?? ""}
+        helpText={
+          apiKeyConnectingItem
+            ? APIKEY_HELP[apiKeyConnectingItem.id] ?? null
+            : null
+        }
+        onConnect={handleApiKeyConnect}
+        onClose={() => setApiKeyConnectingItem(null)}
       />
     </>
   )

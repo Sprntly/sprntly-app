@@ -246,6 +246,13 @@ export interface ConnectorItemRow {
   logoColor?: string
   /** True if a working OAuth backend exists for this connector. */
   oauth?: boolean
+  /**
+   * Connector auth model. Defaults to "oauth" when unset so the existing
+   * catalog rows (which use `oauth: true|false`) don't need a churn.
+   * Use "apikey" for providers (e.g. Fireflies) whose primary auth path
+   * is a user-issued API key pasted into a modal — no OAuth redirect.
+   */
+  authType?: "oauth" | "apikey"
 }
 
 export interface ConnectorCategoryRow {

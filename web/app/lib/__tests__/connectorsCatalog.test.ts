@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest"
 import {
   CONNECTOR_CATALOG,
+  CONNECTOR_IDS_CONNECTABLE,
   CONNECTOR_IDS_WITH_OAUTH,
 } from "../connectorsCatalog"
 
@@ -24,9 +25,9 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 30 connector rows across all categories (29 design + 1 ClickUp)", () => {
+  it("totals 31 connector rows across all categories (29 design + ClickUp + Fireflies)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(30)
+    expect(total).toBe(31)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -89,9 +90,9 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Customer Voice & Support: Intercom, Zendesk, Gong, Dovetail, Salesforce", () => {
+  it("Customer Voice & Support: Intercom, Zendesk, Fireflies, Gong, Dovetail, Salesforce", () => {
     expect(items("Customer Voice & Support")).toEqual([
-      "Intercom", "Zendesk", "Gong", "Dovetail", "Salesforce",
+      "Intercom", "Zendesk", "Fireflies", "Gong", "Dovetail", "Salesforce",
     ])
   })
 
@@ -130,6 +131,18 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
       .filter((i) => i.oauth)
       .map((i) => i.id)
     expect(flaggedOauth.sort()).toEqual([...CONNECTOR_IDS_WITH_OAUTH].sort())
+  })
+
+  it("excludes Fireflies (it's API-key based, not OAuth)", () => {
+    expect(CONNECTOR_IDS_WITH_OAUTH.has("fireflies")).toBe(false)
+  })
+})
+
+describe("CONNECTOR_IDS_CONNECTABLE", () => {
+  it("contains all OAuth providers PLUS API-key ones (Fireflies)", () => {
+    expect([...CONNECTOR_IDS_CONNECTABLE].sort()).toEqual(
+      ["clickup", "figma", "fireflies", "github", "google_drive", "hubspot"].sort(),
+    )
   })
 })
 
