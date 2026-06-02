@@ -27,6 +27,8 @@
 import { useState } from "react"
 import { CompletionBar } from "./CompletionBar"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
+import { PrototypeViewer } from "./PrototypeViewer"
+import { ManualEditOverlay } from "./ManualEditOverlay"
 import type { PrototypeRecord } from "../../lib/api"
 
 export type PostGenerationResultProps = {
@@ -81,6 +83,24 @@ export function PostGenerationResultView({
         initialMode={shareMode}
         initialToken={shareToken}
       />
+      {/* P4-10 — embed the EDITABLE viewer when a built bundle exists. This
+          surface only renders inside (app)/AuthGate, so it is internal by
+          construction; passing the real numeric `prototypeId` into the overlay
+          IS the internal mount that makes F13 manual-edit reachable (AD13). The
+          overlay reaches the same-origin iframe (`da-prototype-iframe`) for
+          click→select. The public `/p/<token>` mount keeps passing no
+          `prototypeId` → the overlay renders nothing (AC10 preserved, untouched
+          here). The link-out below is kept as a full-screen "open in new tab"
+          affordance. */}
+      {bundleUrl && (
+        <PrototypeViewer
+          bundleUrl={bundleUrl}
+          isComplete={isComplete}
+          chrome={
+            <ManualEditOverlay prototypeId={prototypeId} isComplete={isComplete} />
+          }
+        />
+      )}
       {viewHref && (
         <a
           className="btn"
