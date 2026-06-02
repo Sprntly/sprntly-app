@@ -16,6 +16,7 @@ import { API_URL } from "../../lib/api"
 import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
 import { CompletionBar } from "../../components/design-agent/CompletionBar"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
+import { ManualEditOverlay } from "../../components/design-agent/ManualEditOverlay"
 import { PasscodeGate } from "./PasscodeGate"
 
 export type ResolvedView = {
@@ -113,6 +114,13 @@ export function PublicTokenViewer() {
         <>
           <CompletionBar isComplete={state.isComplete} editable={false} />
           <CommentsPanel token={token as string} />
+          {/* F13 manual edit (P4-01) is INTERNAL-ONLY: it renders its toggle only
+              when a prototypeId is supplied. The public resolver is minimum-
+              disclosure and exposes no prototypeId / signed-in primitive on this
+              surface, so the overlay mounts with prototypeId undefined → renders
+              nothing (AC10, non-breaking). The signed-in surface mounts it with a
+              real prototypeId + isComplete to enable edit mode. */}
+          <ManualEditOverlay isComplete={state.isComplete} />
         </>
       }
     />

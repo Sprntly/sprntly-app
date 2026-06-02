@@ -291,6 +291,9 @@ def test_export_embeds_rendered_prd(rendered_env, monkeypatch):
     async def _no_sources(prototype_id, checkpoint_id):  # noqa: ARG001
         return {}
     monkeypatch.setattr(export_mod, "_read_source_files", _no_sources)
+    # P4-07: render_export_markdown now reads resolved comments (F16). Stub it out
+    # here — this test asserts the PRD fold, not the new Resolved Feedback section.
+    monkeypatch.setattr(export_mod, "list_resolved_comments", lambda **kw: [])
 
     md = asyncio.run(
         export_mod.render_export_markdown(1, 1, workspace_id="app")

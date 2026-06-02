@@ -687,6 +687,85 @@ async def iterate_prototype(
     return result, ctx.virtual_fs
 
 
+MANUAL_EDIT_MAX_ITERS = 4  # AD23 / P4-02 / P4-11: a manual commit is tiny, but the
+# manual-edit prompt's own workflow is search (locate) → view (confirm) → line_replace
+# (batched edits) → +1 self-correction turn for an autofixer-rejected edit ≈ 3–4 turns.
+# The old 2-cap could not hold that for a realistic multi-anchor edit (it exited
+# `max_iters` → checkpoint never advanced — P4-10 live failure). 4 is the smallest cap
+# that holds search→view→batched-edit + ONE recovery turn. Still a TIGHT runaway rail,
+# NOT DEFAULT_MAX_ITERS (40); the expected count is 2–3, the 4th turn is margin only.
+
+
+async def manual_edit_prototype(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    system_blocks: list[dict[str, Any]],
+    user_message: dict[str, Any],
+    current_source: dict[str, str],
+    figma_file_key: str | None,
+    scenario: str = "A",
+) -> tuple[RunResult, dict[str, str]]:
+    """Manual-edit commit entrypoint (P4-02, AD23): a THIN sibling of
+    `iterate_prototype` for the F13 commit-back path. The user already applied the
+    visual change in the live preview (no LLM computed it); this run's ONLY job is
+    to make the SOURCE match — translating the `{anchor_id, property, old_value,
+    new_value}` triples into the smallest `line_replace` edits.
+
+    The difference from `iterate_prototype` is the cap: this passes an EXPLICIT
+    `max_iters=MANUAL_EDIT_MAX_ITERS` (4) into `agent_loop` — it does NOT inherit
+    `DEFAULT_MAX_ITERS` (40). The prompt's own faithful workflow is search (locate the
+    target lines — the source carries no `data-anchor-id`) → view (confirm before a
+    blind write) → batched `line_replace` → one optional self-correction turn when the
+    autofixer rejects an edit ≈ 3–4 turns; 4 is the smallest cap that holds it plus one
+    recovery turn (P4-11). It is still a TIGHT runaway rail (expected count 2–3, the 4th
+    turn is margin only), not the 40-turn generate budget. The tool-partition `mode` is
+    `"manual"` (all 6 action tools, NO sentinels — a commit never pauses or
+    proposes a PRD patch, per tools_for_mode's manual branch). Cache discipline,
+    Figma-token injection, and the cost-log shape are identical to iterate.
+
+    Returns `(result, virtual_fs)` — the post-run virtual_fs (seed + the agent's
+    committed edits) for the caller's iterate-staging path (`_stage_iterate_run`).
+    """
+    ctx = ToolContext(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        # Copy so the agent's in-loop mutations never write back into the caller's
+        # source dict; `view` returns real content because the seed is present.
+        virtual_fs=dict(current_source),
+        figma_file_key=figma_file_key,
+        figma_access_token=_resolve_figma_access_token(figma_file_key),
+    )
+    result = await agent_loop(
+        system_blocks=system_blocks,
+        user_message=user_message,
+        ctx=ctx,
+        # AD23 hard cap — pass EXPLICITLY; never inherit DEFAULT_MAX_ITERS (40).
+        max_iters=MANUAL_EDIT_MAX_ITERS,
+        scenario=scenario,
+        mode="manual",
+    )
+    # Cost-summary log line — same shared primitive as iterate/generate. The
+    # operation + mode identifier mark this as a MANUAL-EDIT run for telemetry; the
+    # log carries identifiers + token counts only (Rule #24), never source/edit
+    # content. AC4/AC6: the line carries mode="manual" + iters (≤2).
+    log_llm_run(
+        operation="design_agent.run.manual_edit",
+        identifier={
+            "prototype_id": prototype_id,
+            "scenario": scenario,
+            "mode": "manual",
+        },
+        usage=result.usage,
+        duration_ms=result.duration_ms,
+        status=result.status,
+        model=MODEL,
+        error_class=result.error_class,
+        iters=result.iters,
+    )
+    return result, ctx.virtual_fs
+
+
 def _chars(source: dict[str, str]) -> int:
     """Total character count of a source bundle (paths + contents). The path is
     counted because it appears in the rendered prefix (`--- <path> ---` headers in
