@@ -84,6 +84,38 @@ class RunUsage:
         )
 
 
+def project_next_iter_cost(usage: RunUsage, model: str) -> float:
+    """Projected cumulative cost (USD) IF one more average iteration runs.
+
+    Heuristic (AD15 soft cap — a trust signal, not a billing figure): current
+    spend + one more iteration's worth at the run's own average rate so far ≈
+    ``2 × current spend`` once at least one iteration has billed. The simplest
+    defensible projection; a marginal-delta model isn't worth the complexity for
+    a SOFT cap. Returns ``0.0`` on empty usage (nothing has billed yet, so there
+    is nothing to project from).
+
+    Pure and deterministic — no network, no SDK token-counter. Reuses
+    ``MODEL_PRICING`` via ``RunUsage.est_cost_usd``; raises ``UnknownModelError``
+    on an unpriced model (fails closed). The soft cap is the caller's to pass —
+    this helper is cap-agnostic so any future agent can supply its own.
+    """
+    current = usage.est_cost_usd(model)  # raises UnknownModelError — fails closed
+    return current * 2 if current > 0 else 0.0
+
+
+def should_wrap_up(usage: RunUsage, model: str, soft_cap: float) -> bool:
+    """True iff the projected next-iteration cost would reach/exceed the soft cap.
+
+    Pure decision primitive — the CALLER (e.g. ``agent_loop``) decides what to do
+    when it returns True (inject a wrap-up nudge, degrade gracefully). Boundary is
+    inclusive: a projection exactly equal to ``soft_cap`` returns True. Opt-in by
+    import for any future Sprntly agent (PRD/Evidence runner) — one import, one
+    call. Raises ``UnknownModelError`` on an unpriced model (via
+    ``project_next_iter_cost``).
+    """
+    return project_next_iter_cost(usage, model) >= soft_cap
+
+
 def log_llm_run(
     *,
     operation: str,
