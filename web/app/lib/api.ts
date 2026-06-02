@@ -433,6 +433,10 @@ export const connectorsApi = {
   githubAuthorizeUrl: () => `${API_URL}/v1/connectors/github/authorize`,
   disconnectGithub: () =>
     api.delete<{ deleted: true; provider: string }>("/v1/connectors/github"),
+
+  // ---- ClickUp -------------------------------------------------------------
+  disconnectClickup: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/clickup"),
   listGithubRepos: (perPage = 50) =>
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,

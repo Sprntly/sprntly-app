@@ -184,6 +184,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectFigma()
   } else if (providerId === "github") {
     await connectorsApi.disconnectGithub()
+  } else if (providerId === "clickup") {
+    await connectorsApi.disconnectClickup()
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }
