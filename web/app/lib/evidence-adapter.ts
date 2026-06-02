@@ -20,7 +20,7 @@ import type {
   PrdChartDatum,
   PrdChartKind,
   PrdSection,
-  PrdState,
+  PrdContent,
 } from "../types/content"
 
 const HEADING_RULE = /^─+$/
@@ -297,7 +297,7 @@ function parseSemanticBlock(
 
 /* ---------- main entry ---------- */
 
-export function markdownToEvidenceState(markdown: string): PrdState {
+export function markdownToEvidenceState(markdown: string): PrdContent {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n")
   let title = ""
   const sections: PrdSection[] = []

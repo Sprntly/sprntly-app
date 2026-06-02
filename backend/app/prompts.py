@@ -61,7 +61,10 @@ EVIDENCE_TEMPLATE_VERSION = 2
 #      a first-class frontend component.
 #  2 — Promoted to canonical: same content shape, version bump forces a
 #      regen of any cached doc so it lands on the post-promotion code path.
-PRD_TEMPLATE_VERSION = 2
+#  3 — Added the :::design block (Design section + prototype entry point)
+#      for the Design Agent. Bump re-renders every cached PRD so it gains
+#      the Design section on next view.
+PRD_TEMPLATE_VERSION = 3
 
 
 # Bumped whenever the predefined Ask prompts list changes or the underlying
@@ -355,7 +358,18 @@ one shared truth.
 The output is markdown — section headings exactly as in the template, with \
 each section filled in concretely. Numbers beat adjectives: words like \
 'significantly', 'substantially', 'meaningful', and 'considerable' are \
-banned from `:::tldr` and `:::hypothesis`."""
+banned from `:::tldr` and `:::hypothesis`.
+
+Every PRD ends with a `:::design` block — the Design section that holds \
+the interactive-prototype entry point. It takes two fields and BOTH ARE \
+OPTIONAL: `platform_hint` (one of `desktop`, `mobile`, or `both`) and \
+`notes` (a one-to-three-line designer-facing hint). Unlike the other \
+blocks, the `:::design` body is NOT JSON — it is plain `key: value` \
+lines, one field per line (e.g. a `platform_hint: both` line followed by \
+a `notes: keep the dashboard above the fold` line). Emit exactly one \
+`:::design` block in every PRD, after the `:::dod` block; when you have \
+neither a platform hint nor notes, still emit it with an empty body (the \
+`:::design` opener immediately followed by the closing `:::`)."""
 
 
 PRD_USER_TEMPLATE = """\

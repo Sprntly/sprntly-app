@@ -69,7 +69,7 @@ function VerifyEmailContent() {
       </div>
       <style jsx>{`
         .auth-card { width: 100%; max-width: 480px; }
-        .ob-brand-mark { font-family: var(--font-display); font-weight: 600; font-size: 22px; text-align: center; margin-bottom: 48px; }
+        .ob-brand-mark { font-family: var(--font-body); font-weight: 500; font-size: 22px; text-align: center; margin-bottom: 48px; }
         .ob-brand-mark :global(span) { color: var(--accent); }
         .hint { font-size: 13px; color: var(--muted); margin: 0 0 20px; }
         .msg { font-size: 13px; color: var(--accent); margin-bottom: 12px; }

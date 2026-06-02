@@ -24,7 +24,7 @@ from app.auth import require_session
 from app.db import (
     find_existing_prd,
     get_brief_by_id,
-    get_prd,
+    get_prd_rendered,
     start_prd,
 )
 from app.prd_runner import generate_prd
@@ -104,7 +104,7 @@ def get(
     bookmarks don't 409. The `variant` field on the response identifies
     which format the row was generated under.
     """
-    row = get_prd(prd_id)
+    row = get_prd_rendered(prd_id)
     if not row:
         raise HTTPException(404, "PRD not found")
     return row

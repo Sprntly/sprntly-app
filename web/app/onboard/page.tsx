@@ -317,7 +317,7 @@ export default function OnboardPage() {
           box-shadow: 0 30px 80px rgba(0, 0, 0, 0.4);
         }
         .brand {
-          font-family: "General Sans", "Geist", sans-serif;
+          font-family: "Instrument Serif", "Geist", serif;
           font-weight: 700;
           font-size: 22px;
           letter-spacing: -0.02em;

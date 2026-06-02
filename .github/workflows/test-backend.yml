@@ -29,6 +29,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # @babel/parser powers the design_agent static autofixer's Node companion
+      # (P1-10). Installed to an isolated prefix so the design_agent autofixer
+      # tests exercise the babel-dependent path in CI; DESIGN_AGENT_NODE_PATH
+      # points the wrapper at it. (One-off DBD exception to touch Sprntly CI —
+      # see PR body; load-bearing for P1-11's e2e gate.)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install @babel/parser for autofixer
+        run: npm install --prefix /tmp/babel-deps @babel/parser
+
+      # prototype-runtime/node_modules is required for the design_agent storage
+      # layer's real vite-build path (P1-08): vite_build symlinks this directory
+      # into its temp build dir instead of npm-installing per build. Installing
+      # it here lets test_design_agent_storage.py's symlink unit test pass and
+      # un-skips the @integration real-build tests (incl. the AD4 anchor-id
+      # assertion) in CI. Also load-bearing for P1-11's e2e smoke (same install).
+      # (Second one-off DBD exception to touch Sprntly CI — see PR body; backend
+      # tests don't depend on prototype-runtime, so this is purely additive.)
+      - name: Install prototype-runtime node_modules (for storage symlink + autofixer + P1-11 smoke)
+        working-directory: prototype-runtime
+        # `npm ci` (not `install`) so the real-build @integration tests run against
+        # the exact pinned dep set in package-lock.json — the build the agent runs
+        # in prod must match what CI proves. The scaffold now carries real shadcn/
+        # tailwind deps, so lockfile fidelity is load-bearing.
+        run: npm ci --no-audit --no-fund
+
       - name: Run pytest
         working-directory: backend
+        env:
+          DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules
         run: python -m pytest tests/ -v

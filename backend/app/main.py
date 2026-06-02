@@ -8,6 +8,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import auth, db, datasets as datasets_service
 from app.brief_runner import auto_generate_all
 from app.config import settings
+from app.db.prototypes import (
+    invalidate_orphan_generating_prototypes,
+    invalidate_stale_prototypes,
+)
+from app.db.prototype_pending_iterations import invalidate_orphan_running_iterations
+from app.design_agent.prompts import DESIGN_AGENT_TEMPLATE_VERSION
 from app.prompts import (
     ASK_CACHE_VERSION,
     BRIEF_SCHEMA_VERSION,
@@ -19,13 +25,15 @@ from app.routes import (
     brief,
     connectors,
     datasets as datasets_routes,
+    design_agent,
     evidence,
     health,
     internal,
     prd,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -36,13 +44,15 @@ async def lifespan(app: FastAPI):
     # pre-existing `asurion` corpus and any sibling dirs added manually.
     seeded = datasets_service.seed_filesystem_datasets()
     if seeded:
-        logger.info("Seeded %d on-disk dataset(s) into the datasets table", seeded)
+        logger.info(
+            "Seeded %d on-disk dataset(s) into the datasets table", seeded)
     # Demote any cached brief whose payload schema doesn't match the current
     # code. auto_generate_all will then treat affected datasets as empty and
     # regenerate them under the new schema on the next tick.
     invalidated = db.invalidate_stale_briefs(BRIEF_SCHEMA_VERSION)
     if invalidated:
-        logger.info("Invalidated %d stale brief(s) (schema bump → v%d)", invalidated, BRIEF_SCHEMA_VERSION)
+        logger.info("Invalidated %d stale brief(s) (schema bump → v%d)",
+                    invalidated, BRIEF_SCHEMA_VERSION)
     # Same for cached evidence docs — mismatched template_version → status
     # 'invalidated' so the next view regenerates under the current prompt.
     # Variant-scoped to v2 (the only variant we generate now); historical
@@ -88,6 +98,46 @@ async def lifespan(app: FastAPI):
             prd_orphans,
             ask_orphans,
         )
+    # Design Agent startup invalidation (P1-07 prototypes + P3-06 iterations).
+    #
+    # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
+    # out-of-band via Supabase migrations (db.init_db is a no-op) that may not yet
+    # be applied in a given environment — e.g. prod before the feature flag-flip.
+    # A missing design-agent table must NOT crash API startup; the Design Agent
+    # surface stays dark behind NEXT_PUBLIC_DESIGN_AGENT_ENABLED regardless. Without
+    # this guard an unapplied migration takes the entire API down (prod was 502 from
+    # the P1 rollup until this landed). Both unguarded calls — the P1-07 prototypes
+    # block AND the P3-06 iterations call — live inside this ONE try/except so a
+    # regression that un-guards either one is caught by the lifespan-guard test.
+    try:
+        # Design Agent (P1-07): demote orphaned 'generating' prototypes (the worker
+        # task died with the previous process) + stale 'ready' prototypes (template
+        # bump). Sync helpers, across ALL workspaces — system-wide cleanup, not a
+        # user-driven query (Rule #23) — mirroring the prd/evidence invalidation above.
+        proto_orphans = invalidate_orphan_generating_prototypes()
+        proto_stale = invalidate_stale_prototypes(
+            DESIGN_AGENT_TEMPLATE_VERSION, variant="v1")
+        if proto_orphans or proto_stale:
+            logger.info(
+                "Invalidated %d orphan generating prototype(s), %d stale prototype(s)",
+                proto_orphans,
+                proto_stale,
+            )
+        # Design Agent (P3-06, AD11): demote orphaned 'running' iterations (the worker
+        # task died with the previous process) so a restart recovers the iterate queue.
+        # Sync helper, across ALL workspaces — system-wide cleanup, not user-driven
+        # (Rule #23) — mirroring the prototype orphan-clear above.
+        iter_orphans = invalidate_orphan_running_iterations()
+        if iter_orphans:
+            logger.info(
+                "Invalidated %d orphan running iteration(s)", iter_orphans)
+    except Exception:
+        logger.warning(
+            "Design Agent startup invalidation skipped — table(s) unavailable "
+            "(migrations not yet applied in this environment); API startup continues, "
+            "feature stays dark behind flag",
+            exc_info=True,
+        )
     # Kick off brief generation in the background so the service starts fast.
     # auto_generate_all is idempotent: it skips datasets that already have a
     # cached brief in SQLite at the current schema version.
@@ -114,3 +164,4 @@ app.include_router(ask.router)
 app.include_router(prd.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
+app.include_router(design_agent.router)

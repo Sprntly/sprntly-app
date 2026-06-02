@@ -103,6 +103,30 @@ def get_prd(prd_id: int) -> dict | None:
     return resp.data[0] if resp.data else None
 
 
+def get_prd_rendered(prd_id: int) -> dict | None:
+    """Canonical PRD read: the raw row with status='applied' prd_patches folded
+    into payload_md at read time (F11 render-on-read). prds.payload_md is NEVER
+    altered in the DB — the fold produces a derived copy.
+
+    Returns None when the PRD does not exist (same contract as get_prd). When
+    there are zero applied patches, payload_md is byte-identical to the raw row
+    (apply_patches_to_prd_md returns its input unchanged) — zero blast radius.
+    """
+    row = get_prd(prd_id)
+    if row is None:
+        return None
+    # Lazy import: keeps db/prds.py importable without the prd_patches module on
+    # every import path, and mirrors the lazy-import discipline used elsewhere in
+    # the Design Agent DB layer.
+    from app.db.prd_patches import apply_patches_to_prd_md, list_applied_patches
+    patches = list_applied_patches(prd_id=prd_id)
+    if not patches:
+        return row                      # fast path: no fold, raw row returned as-is
+    rendered = dict(row)                # copy — never mutate the row object in place
+    rendered["payload_md"] = apply_patches_to_prd_md(row.get("payload_md") or "", patches)
+    return rendered
+
+
 def find_existing_prd(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:

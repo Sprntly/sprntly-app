@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     anthropic_api_key: str = ""
+    # Design Agent uses a dedicated key (AD16) for cost attribution + per-key
+    # rotation at handoff; falls back to anthropic_api_key with a startup
+    # warning (see app/design_agent/client.py).
+    design_agent_anthropic_api_key: str = ""
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 
@@ -31,6 +35,16 @@ class Settings(BaseSettings):
 
     # Internal service-to-service API (DS Agent → Backend)
     internal_api_key: str = ""
+    # Design Agent bundle staging (P1-08). Supabase Storage is the PRIMARY
+    # destination (bucket named by the SUPABASE_STORAGE_BUCKET env var, read
+    # directly in design_agent/storage.py). These two settings drive the
+    # dev/test FALLBACK used when that env var is unset:
+    #   storage_dir        — filesystem root the dist/ bundle is written under
+    #   storage_public_url — public base URL the bundle is served from (nginx in
+    #                        local dev). Empty → stage_bundle returns a file://
+    #                        URL (test-only fallback).
+    storage_dir: str = str(REPO_ROOT / "data" / "prototypes")
+    storage_public_url: str = ""
 
     # Google Drive connector (OAuth)
     google_client_id: str = ""
@@ -64,6 +78,12 @@ class Settings(BaseSettings):
     github_app_private_key: str = ""
     github_oauth_redirect_uri: str = ""
     github_webhook_secret: str = ""
+
+    # Design Agent share-token secret (F6 / AD Rule #14). A DISTINCT secret from
+    # jwt_secret — never reuse JWT_SECRET for Design Agent surfaces. Bound here
+    # for FUTURE HMAC-based share_token rotation (P2-06 stores the column + ships
+    # the helpers; it does not yet consume this secret). No JWT_SECRET fallback.
+    design_agent_token_secret: str = ""
 
     @property
     def github_app_private_key_pem(self) -> str:
