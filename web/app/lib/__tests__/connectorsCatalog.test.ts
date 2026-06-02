@@ -24,9 +24,9 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 29 connector rows across all categories", () => {
+  it("totals 30 connector rows across all categories (29 design + 1 ClickUp)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(29)
+    expect(total).toBe(30)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -83,9 +83,9 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Project Management: Linear, Jira, Notion, Google Docs, Asana", () => {
+  it("Project Management: Linear, Jira, ClickUp, Notion, Google Docs, Asana", () => {
     expect(items("Project Management")).toEqual([
-      "Linear", "Jira", "Notion", "Google Docs", "Asana",
+      "Linear", "Jira", "ClickUp", "Notion", "Google Docs", "Asana",
     ])
   })
 
@@ -119,9 +119,9 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
 })
 
 describe("CONNECTOR_IDS_WITH_OAUTH", () => {
-  it("contains exactly the three connectors with live OAuth backends", () => {
+  it("contains the connectors with live OAuth backends (Drive/Figma/GitHub + ClickUp from commit H)", () => {
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
-      ["figma", "github", "google_drive"].sort(),
+      ["clickup", "figma", "github", "google_drive"].sort(),
     )
   })
 

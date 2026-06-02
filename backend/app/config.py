@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     figma_client_secret: str = ""
     figma_oauth_redirect_uri: str = ""
 
+    # ClickUp connector (OAuth 2.0)
+    clickup_client_id: str = ""
+    clickup_client_secret: str = ""
+    clickup_oauth_redirect_uri: str = ""
+
     # GitHub connector (GitHub App with user-to-server OAuth)
     github_app_id: str = ""
     github_app_client_id: str = ""

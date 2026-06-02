@@ -149,5 +149,6 @@ def test_start_oauth_github_returns_github_url(signed_in):
 
 
 def test_start_oauth_unknown_provider_404(signed_in):
-    r = signed_in.post("/v1/connectors/clickup/start-oauth")
+    # Use an obviously-unsupported name (ClickUp is wired as of commit H).
+    r = signed_in.post("/v1/connectors/notaprovider/start-oauth")
     assert r.status_code == 404

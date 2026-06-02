@@ -38,7 +38,7 @@ from pydantic import BaseModel
 from app import db
 from app.auth import require_session
 from app.config import settings
-from app.connectors import figma_oauth, github_app, google_oauth
+from app.connectors import clickup_oauth, figma_oauth, github_app, google_oauth
 from app.connectors.google_drive_sync import (
     SyncConfigError,
     browse_folders,
@@ -134,6 +134,12 @@ def start_oauth(
         if not github_app.github_oauth_configured():
             raise HTTPException(500, "GitHub OAuth is not configured on the server")
         url = github_app.authorize_url(state=github_app.sign_oauth_state())
+        return {"authorize_url": url}
+
+    if provider == clickup_oauth.CLICKUP_PROVIDER:
+        if not clickup_oauth.clickup_configured():
+            raise HTTPException(500, "ClickUp OAuth is not configured on the server")
+        url = clickup_oauth.authorize_url(state=clickup_oauth.sign_oauth_state())
         return {"authorize_url": url}
 
     raise HTTPException(
@@ -442,6 +448,51 @@ def github_list_repos(per_page: int = 50, _session: dict = Depends(require_sessi
     will be used later for read-write operations."""
     token = _github_access_token()
     return {"repositories": github_app.fetch_user_repos(token, per_page=per_page)}
+
+
+# ─────────────────────── ClickUp ───────────────────────
+#
+# Commit H. OAuth-only — no data sync into the corpus yet. Follow-on
+# slice will add task → markdown sync similar to Drive's pattern.
+
+
+@router.get("/clickup/callback")
+def clickup_callback(code: str, state: str):
+    clickup_oauth.verify_oauth_state(state)
+    token_json = clickup_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "ClickUp did not return an access_token")
+
+    user = clickup_oauth.fetch_authenticated_user(access_token)
+    label = user.get("email") or user.get("username") or str(user.get("id") or "")
+
+    try:
+        token_encrypted = encrypt_token_json(
+            clickup_oauth.token_payload_to_store(token_json)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        provider=clickup_oauth.CLICKUP_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes="",
+        account_label=label or None,
+        config_json=json.dumps({"user": user}) if user else "{}",
+    )
+
+    q = urlencode({"connected": clickup_oauth.CLICKUP_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+
+
+@router.delete("/clickup")
+def clickup_disconnect(_session: dict = Depends(require_session)):
+    row = db.get_connection(clickup_oauth.CLICKUP_PROVIDER)
+    if not row:
+        raise HTTPException(404, "ClickUp is not connected")
+    db.delete_connection(clickup_oauth.CLICKUP_PROVIDER)
+    return {"deleted": True, "provider": clickup_oauth.CLICKUP_PROVIDER}
 
 
 # ─────────────────────── GitHub webhook ───────────────────────
