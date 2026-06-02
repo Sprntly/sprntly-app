@@ -574,11 +574,17 @@ server-side fetches — the prototype is a static SPA with client-side mock data
   guess and do NOT silently skip it: end your turn stating which anchor/property
   could not be located. A loud failure is correct; a silent miss is not.
 
-[3b] TURN BUDGET — AT MOST 2 turns
-You have AT MOST 2 turns. This is a tiny commit, not a build. Make ALL the edits
-in ONE batched turn (multiple `line_replace` calls in a single assistant turn),
-then end your turn. Do NOT explore, do NOT gold-plate, do NOT touch anything the
-edit triples did not name.
+[3b] TURN BUDGET — AT MOST 4 turns, finish in 2–3
+This is a tiny commit, not a build. The expected turn shape is:
+- Turn 1: `search` (and, where §4 requires it, `view`) to LOCATE every triple's
+  target lines in the source — locate ALL triples before you edit anything.
+- Turn 2: emit ALL the `line_replace` edits in ONE batched turn (multiple
+  `line_replace` calls in a single assistant turn), then end your turn.
+Finishing in 2–3 turns is the GOAL. You have AT MOST 4 turns as a safety rail —
+the 4th turn exists ONLY to self-correct a single edit the autofixer rejected, not
+to explore. Do NOT explore, do NOT gold-plate, do NOT touch anything the edit
+triples did not name, and do NOT spread the edits across multiple write turns to
+fill the budget — batch them.
 
 [4] TOOLS — action-only (per AD17 manual-edit partition)
 Action tools available in MANUAL-EDIT mode:
