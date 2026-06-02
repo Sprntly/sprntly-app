@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+  buildGenerateParams,
   DEFAULT_PLATFORM,
   DesignAgentDrawerView,
   DrawerFooter,
@@ -280,5 +281,105 @@ describe("NavigationContext drawer union (AC10)", () => {
       "utf8",
     )
     expect(navSrc).toContain('"design-agent"')
+  })
+})
+
+// ─── P5-02: Scenario B floor — conditional inputs + request-body shape ───────
+
+describe("Scenario B fallback inputs (P5-02 AC6)", () => {
+  function render(props: Partial<Parameters<typeof DesignAgentDrawerView>[0]> = {}) {
+    return renderToStaticMarkup(
+      React.createElement(DesignAgentDrawerView, {
+        open: true,
+        onOpenChange: noop,
+        prdId: 1,
+        figmaFileKey: null,
+        showToast: noop,
+        ...props,
+      }),
+    )
+  }
+
+  it("renders the website-URL + manual color + font inputs when no Figma (AC6)", () => {
+    const html = render({ figmaFileKey: null })
+    expect(html).toContain('id="dap-website-url"')
+    expect(html).toContain('id="dap-manual-color"')
+    expect(html).toContain('id="dap-manual-font"')
+    // The color picker is a native <input type="color"> (attribute order is
+    // JSX-source order: type precedes id).
+    expect(html).toMatch(/type="color"[^>]*id="dap-manual-color"/)
+  })
+
+  it("hides all three inputs when a Figma file key is present (AC6)", () => {
+    const html = render({ figmaFileKey: "fk" })
+    expect(html).not.toContain('id="dap-website-url"')
+    expect(html).not.toContain('id="dap-manual-color"')
+    expect(html).not.toContain('id="dap-manual-font"')
+  })
+})
+
+describe("buildGenerateParams request-body shape (P5-02 AC7)", () => {
+  const base = {
+    prdId: 9,
+    platform: "both" as const,
+    instructions: "",
+    figmaFileKey: null,
+  }
+
+  it("includes website_url + manual_design when a URL, color and font are set (AC7)", () => {
+    const params = buildGenerateParams({
+      ...base,
+      websiteUrl: "https://acme.com",
+      manualColor: "#3b82f6",
+      manualFont: "Inter",
+    })
+    expect(params.website_url).toBe("https://acme.com")
+    expect(params.manual_design).toEqual({
+      primary_color: "#3b82f6",
+      font_family: "Inter",
+    })
+  })
+
+  it("nulls website_url + manual_design when nothing is supplied (AC7)", () => {
+    const params = buildGenerateParams({
+      ...base,
+      websiteUrl: "",
+      manualColor: "#3b82f6", // default color, but no font name → not enough
+      manualFont: "",
+    })
+    expect(params.website_url).toBeNull()
+    expect(params.manual_design).toBeNull()
+  })
+
+  it("still threads figma_file_key and platform unchanged (AC7/AC3)", () => {
+    const params = buildGenerateParams({
+      prdId: 5,
+      platform: "mobile",
+      instructions: "dark theme",
+      figmaFileKey: "FK",
+      websiteUrl: "https://ignored.example", // present but Figma wins server-side
+      manualColor: "#000000",
+      manualFont: "Roboto",
+    })
+    expect(params.prd_id).toBe(5)
+    expect(params.target_platform).toBe("mobile")
+    expect(params.figma_file_key).toBe("FK")
+    expect(params.instructions).toBe("dark theme")
+  })
+})
+
+describe("DesignAgentDrawer prop signature unchanged (P5-02 AC9)", () => {
+  it("renders with the existing prop set (no required new props)", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DesignAgentDrawerView, {
+        open: true,
+        onOpenChange: noop,
+        prdId: 42,
+        figmaFileKey: null,
+        showToast: noop,
+        // onGenerated is optional and omitted — proves the signature is unchanged
+      }),
+    )
+    expect(html).toContain("Generate Prototype")
   })
 })
