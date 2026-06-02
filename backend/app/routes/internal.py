@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from app import db
+from app import datasets as datasets_service
 from app.config import settings
 from app.corpus import load_corpus
 
@@ -76,6 +77,68 @@ def get_input_sources(slug: str) -> dict[str, Any]:
     """Return configured input sources for a dataset/company."""
     sources = db.list_input_sources(slug)
     return {"dataset": slug, "input_sources": sources}
+
+
+class UpsertInputSourceBody(BaseModel):
+    source_type: str
+    enabled: bool = True
+    config: dict[str, Any] | None = None
+
+
+@router.post(
+    "/datasets/{slug}/input-sources",
+    dependencies=[Depends(_require_internal_key)],
+)
+def upsert_input_source(slug: str, body: UpsertInputSourceBody) -> dict[str, Any]:
+    """Create or update an input source for a dataset."""
+    row = db.upsert_input_source(
+        dataset=slug,
+        source_type=body.source_type,
+        enabled=body.enabled,
+        config=body.config,
+    )
+    return {"ok": True, "input_source": row}
+
+
+@router.delete(
+    "/datasets/{slug}/input-sources/{source_type}",
+    dependencies=[Depends(_require_internal_key)],
+)
+def delete_input_source(slug: str, source_type: str) -> dict[str, Any]:
+    """Remove an input source configuration."""
+    deleted = db.delete_input_source(slug, source_type)
+    return {"ok": True, "deleted": deleted}
+
+
+# ───── seed onboarding context ─────
+
+
+class SeedContextBody(BaseModel):
+    company_name: str = ""
+    product_name: str = ""
+    industry: str = ""
+    kpi_tree: dict[str, Any] | None = None
+    strategic_context: str = ""
+
+
+@router.post(
+    "/datasets/{slug}/seed-context",
+    dependencies=[Depends(_require_internal_key)],
+)
+def seed_context(slug: str, body: SeedContextBody) -> dict[str, Any]:
+    """Write onboarding metadata into the corpus as a markdown file."""
+    try:
+        path = datasets_service.seed_onboarding_context(
+            slug,
+            company_name=body.company_name,
+            product_name=body.product_name,
+            industry=body.industry,
+            kpi_tree=body.kpi_tree,
+            strategic_context=body.strategic_context,
+        )
+    except datasets_service.DatasetNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"ok": True, "path": path}
 
 
 # ───── ingest analysis ─────

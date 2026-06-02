@@ -284,13 +284,37 @@ def create_app() -> FastAPI:
         except _backend.BackendError as exc:
             raise HTTPException(exc.status, f"backend_error: {exc.detail}") from exc
 
+        # Also fetch enabled input sources for this enterprise
+        input_sources: list[dict[str, Any]] = []
+        try:
+            input_sources = _backend.fetch_input_sources(body.dataset_slug)
+        except _backend.BackendError:
+            pass  # best-effort; don't fail attach if input sources unavailable
+
         s.dataset_slug = body.dataset_slug
         s.corpus_context = corpus_data.get("joined", "")
+
+        # Append input source awareness to corpus context
+        if input_sources:
+            enabled = [src for src in input_sources if src.get("enabled")]
+            if enabled:
+                source_lines = "\n\nAVAILABLE DATA SOURCES:\n"
+                for src in enabled:
+                    stype = src.get("source_type", "unknown")
+                    cfg = src.get("config") or {}
+                    last_sync = cfg.get("last_sync_at", "never")
+                    source_lines += f"- {stype} (last sync: {last_sync})\n"
+                s.corpus_context += source_lines
+
         return {
             "ok": True,
             "dataset_slug": body.dataset_slug,
             "total_chars": corpus_data.get("total_chars", 0),
             "doc_count": len(corpus_data.get("docs", [])),
+            "input_sources": [
+                {"source_type": s.get("source_type"), "enabled": s.get("enabled")}
+                for s in input_sources
+            ],
         }
 
     @app.get("/api/agents/{agent_id}/state")
@@ -320,6 +344,8 @@ def create_app() -> FastAPI:
         _wipe_session_files(s)
         s.files = []
         s.dataset_label = None
+        s.dataset_slug = None
+        s.corpus_context = None
         s.container_id = None
         s.messages = []
         return {"ok": True}
@@ -400,6 +426,8 @@ def _reset_dataset(s: SessionState) -> None:
     _wipe_session_files(s)
     s.files = []
     s.dataset_label = None
+    s.dataset_slug = None
+    s.corpus_context = None
     s.container_id = None
     s.messages = []
 

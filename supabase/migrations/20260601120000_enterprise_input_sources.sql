@@ -16,3 +16,7 @@ create table if not exists enterprise_input_sources (
 
 comment on column enterprise_input_sources.source_type is
     'One of: csv_upload, google_drive, figma, github, amplitude, mixpanel, ga4, posthog';
+
+-- RLS: backend uses service-role key (bypasses RLS). Enable RLS for
+-- consistency with other tables so direct anon/authenticated access is denied.
+alter table enterprise_input_sources enable row level security;
