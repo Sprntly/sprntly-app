@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     # Space-separated scopes. Minimum is just `oauth`. Add more (e.g.
     # `crm.objects.contacts.read`) when sync features actually need them.
     hubspot_scopes: str = "oauth crm.objects.contacts.read"
+    # Which HubSpot OAuth API generation to use. v3 (modern, RFC 7662
+    # introspection, 30-minute access tokens, body-only credentials) is
+    # the default since legacy v1 endpoints are sunset-pending and new
+    # HubSpot accounts can't create legacy public apps. Set to "v1" for
+    # backward-compat with older legacy apps still active in production.
+    hubspot_oauth_version: str = "v3"
 
     # GitHub connector (GitHub App with user-to-server OAuth)
     github_app_id: str = ""
