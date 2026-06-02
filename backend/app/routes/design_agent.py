@@ -1087,6 +1087,7 @@ from app.design_agent.runner import (
     estimate_iterate_cost,
     iterate_prototype,
 )
+from app.design_agent.rate_limit import ITERATE_LIMITER
 from app.design_agent.storage import read_source_files_for_checkpoint
 from app.db.prototype_pending_iterations import (
     QueueFullError,
@@ -1136,6 +1137,26 @@ async def post_iterate(
         raise HTTPException(status_code=409, detail="Prototype is locked; Resume Iteration first")
     if proto.get("status") != "ready":
         raise HTTPException(status_code=409, detail="Prototype not ready to iterate")
+
+    # P5-04 (AD15 spend control): per-prototype iterate rate limit — 6 calls/hr.
+    # Mounted AFTER the feature/session/workspace/lock/ready gates (so a feature-off
+    # or cross-tenant request gets its 404/401 first and the limiter never leaks
+    # existence) and BEFORE enqueue_iteration (enqueue is the spend-meaningful action;
+    # a rate-limited call must not consume a queue slot). Distinct from the queue_full
+    # 429 below — that one fires when a slot can't be granted; this one fires before a
+    # slot is even requested. Estimate/confirm-plan are intentionally NOT limited here.
+    key = str(prototype_id)
+    if not ITERATE_LIMITER.check(key):
+        retry_after = ITERATE_LIMITER.retry_after(key)
+        logger.info(
+            "iterate_rate_limited prototype_id=%s retry_after_seconds=%s",
+            prototype_id, retry_after,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limit", "retry_after_seconds": retry_after},
+        )
+    ITERATE_LIMITER.register(key)
 
     # P3-06 (AD11): enqueue instead of firing a raw bg task. The queue caps at 5
     # active (pending + running) iterations per prototype; a 6th enqueue raises

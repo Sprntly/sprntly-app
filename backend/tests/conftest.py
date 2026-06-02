@@ -274,6 +274,26 @@ def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.Mo
     }
 
 
+@pytest.fixture(autouse=True)
+def _reset_iterate_limiter():
+    """Per-test isolation for the P5-04 iterate rate limiter.
+
+    `app.design_agent.rate_limit.ITERATE_LIMITER` is a process-level singleton
+    keyed by `prototype_id`. Tests use a fresh per-test DB whose autoincrement
+    restarts at 1, so nearly every test reuses key "1"; without this reset the
+    limiter's 1-hour window accumulates across the whole session and unrelated
+    iterate tests would spuriously 429 after the 6th cumulative call. Clearing the
+    window (rather than reloading the module) keeps the singleton's class identity
+    stable, so isinstance checks against it still hold under full-suite ordering."""
+    try:
+        from app.design_agent.rate_limit import ITERATE_LIMITER
+
+        ITERATE_LIMITER._events.clear()
+    except Exception:
+        pass
+    yield
+
+
 @pytest.fixture
 def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
     """Patch every imported reference to `call_json` so no test ever hits Anthropic."""
