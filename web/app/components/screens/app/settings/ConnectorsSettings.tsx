@@ -196,14 +196,24 @@ export function ConnectorsSettings() {
   }
 
   const onConnect = useCallback(
-    (providerId: string) => {
+    async (providerId: string) => {
       if (!CONNECTOR_IDS_WITH_OAUTH.has(providerId)) return
-      if (providerId === "google_drive") {
-        window.location.href = connectorsApi.googleDriveAuthorizeUrl(activeCompany)
-      } else if (providerId === "figma") {
-        window.location.href = connectorsApi.figmaAuthorizeUrl()
-      } else if (providerId === "github") {
-        window.location.href = connectorsApi.githubAuthorizeUrl()
+      // Go through the fetch-then-navigate path (commit F) so the auth
+      // check runs with the Supabase Bearer header before we hand
+      // control to the browser's URL bar. Direct navigation to the
+      // legacy GET /authorize routes fails with "Not signed in" in the
+      // Supabase-only auth world.
+      try {
+        const dataset =
+          providerId === "google_drive" ? activeCompany : undefined
+        const r = await connectorsApi.startOauth(providerId, dataset)
+        if (r.authorize_url) {
+          window.location.href = r.authorize_url
+        }
+      } catch (e) {
+        // Surface the auth/connect error in-place; no toast system yet.
+        const msg = e instanceof Error ? e.message : String(e)
+        setLoadError(`Could not start ${providerId} connect: ${msg}`)
       }
     },
     [activeCompany],

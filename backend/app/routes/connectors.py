@@ -89,6 +89,59 @@ def list_connections(_session: dict = Depends(require_session)):
     return {"connections": [_public_connection(r) for r in rows]}
 
 
+# ─────────────────────── Start-OAuth (fetch-friendly) ───────────────────────
+#
+# POST /v1/connectors/{provider}/start-oauth — returns the OAuth
+# authorize URL as JSON so the frontend can call it with a Bearer
+# token (fetch) and then navigate the browser to the returned URL.
+#
+# The legacy GET .../authorize routes (300+ redirect) only work when
+# the request carries a session cookie — browser URL-bar navigation
+# can't set an Authorization header, so the Connect button needs this
+# variant for Supabase-only sessions. Both routes remain available.
+
+
+class StartOauthIn(BaseModel):
+    dataset: str | None = None
+
+
+@router.post("/{provider}/start-oauth")
+def start_oauth(
+    provider: str,
+    body: StartOauthIn | None = None,
+    _session: dict = Depends(require_session),
+):
+    payload = body or StartOauthIn()
+
+    if provider == google_oauth.GOOGLE_DRIVE_PROVIDER:
+        state = google_oauth.sign_oauth_state(dataset=payload.dataset)
+        flow = google_oauth.build_flow()
+        url, _ = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes="true",
+            prompt="consent",
+            state=state,
+        )
+        return {"authorize_url": url}
+
+    if provider == figma_oauth.FIGMA_PROVIDER:
+        if not figma_oauth.figma_configured():
+            raise HTTPException(500, "Figma OAuth is not configured on the server")
+        url = figma_oauth.authorize_url(state=figma_oauth.sign_oauth_state())
+        return {"authorize_url": url}
+
+    if provider == github_app.GITHUB_PROVIDER:
+        if not github_app.github_oauth_configured():
+            raise HTTPException(500, "GitHub OAuth is not configured on the server")
+        url = github_app.authorize_url(state=github_app.sign_oauth_state())
+        return {"authorize_url": url}
+
+    raise HTTPException(
+        404,
+        f"OAuth start is not available for provider {provider!r}",
+    )
+
+
 @router.get("/google-drive/authorize")
 def google_drive_authorize(
     dataset: str | None = None,
