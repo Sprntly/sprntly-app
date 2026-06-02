@@ -89,6 +89,19 @@ CREATE TABLE prototype_exports (
     is_stale         INTEGER NOT NULL DEFAULT 0,
     UNIQUE (prototype_id, checkpoint_id)
 );
+-- P4-07: render_export_markdown now reads resolved comments (F16 Resolved Feedback
+-- section), so the export-path fake DB needs this table even when no comment is seeded.
+CREATE TABLE prototype_comments (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id INTEGER NOT NULL,
+    workspace_id TEXT NOT NULL,
+    anchor_id    TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    author       TEXT NOT NULL DEFAULT 'demo',
+    status       TEXT NOT NULL DEFAULT 'open',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at  TEXT
+);
 """
 
 _PRD_MD = (

@@ -169,3 +169,32 @@ def mark_comments_orphaned(
             "comments_orphaned prototype_id=%s count=%s", prototype_id, len(orphan_ids),
         )
     return len(orphan_ids)
+
+
+def list_resolved_comments(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+) -> list[dict[str, Any]]:
+    """Return the prototype's status='resolved' comments, ordered deterministically
+    by (anchor_id, id). Workspace-filtered (Rule #22). Used by the export serialiser
+    to render the Resolved Feedback section (F16).
+
+    Resolved ONLY: open comments are unresolved feedback (not part of the locked-state
+    handoff); orphaned comments point at anchors that no longer exist (P3-04). Ordered
+    by (anchor_id, id) rather than created_at for byte-determinism (created_at can
+    collide at same-second resolution; id is the monotonic tiebreak), and so a thread's
+    comments group visually under one anchor in the export.
+    """
+    c = require_client()
+    resp = (c.table(_TABLE).select("*")
+            .eq("prototype_id", prototype_id)
+            .eq("workspace_id", workspace_id)
+            .eq("status", "resolved")
+            .order("anchor_id", desc=False).order("id", desc=False).execute())
+    rows = resp.data or []
+    # Final ordering authority is this stable Python sort, NOT the DB layer: it keeps
+    # the (anchor_id, id) contract byte-deterministic regardless of the backend's
+    # multi-column-order or collation semantics. The `.order()` calls above let real
+    # Postgres pre-sort; this guarantees the invariant the export serialiser relies on.
+    return sorted(rows, key=lambda r: (r["anchor_id"], r["id"]))
