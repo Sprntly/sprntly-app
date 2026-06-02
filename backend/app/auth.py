@@ -66,15 +66,75 @@ def _decode_token(token: str, expected_audience: Audience) -> dict:
     )
 
 
+# Supabase signs user-session JWTs with one of:
+#   - HS256 (legacy, shared secret) → verified with settings.supabase_jwt_secret
+#   - ES256 / RS256 (modern, asymmetric) → public key fetched from the
+#     project's JWKS endpoint at /auth/v1/.well-known/jwks.json
+#
+# `_decode_supabase_token` dispatches on the JWT `alg` header so both
+# signing models are accepted; new asymmetric tokens work without
+# changes to env config beyond SUPABASE_URL already being present.
+_SUPPORTED_ASYMMETRIC_ALGS = frozenset({"ES256", "RS256", "ES384", "RS384"})
+
+# Memoised so we don't re-instantiate PyJWKClient (and re-fetch the JWK
+# set) on every incoming request. Reset on module reload via `del`.
+_jwks_client_cache: object | None = None
+
+
+def _get_jwks_client():
+    """Memoised PyJWKClient pointed at this project's JWKS endpoint.
+
+    Returns None if SUPABASE_URL isn't configured. PyJWKClient itself
+    caches the JWK set for 5 minutes; clients re-fetch on key rotation.
+    """
+    global _jwks_client_cache
+    if _jwks_client_cache is not None:
+        return _jwks_client_cache
+    base = (settings.supabase_url or "").rstrip("/")
+    if not base:
+        return None
+    from jwt import PyJWKClient
+
+    jwks_url = f"{base}/auth/v1/.well-known/jwks.json"
+    _jwks_client_cache = PyJWKClient(jwks_url, cache_keys=True, lifespan=300)
+    return _jwks_client_cache
+
+
 def _decode_supabase_token(token: str) -> dict:
-    if not settings.supabase_jwt_secret:
-        raise jwt.PyJWTError("Supabase JWT secret not configured")
-    return jwt.decode(
-        token,
-        settings.supabase_jwt_secret,
-        algorithms=[JWT_ALG],
-        audience="authenticated",
-    )
+    """Verify a Supabase-issued JWT and return its payload.
+
+    Dispatches on the JWT's `alg` header so projects on either signing
+    model (HS256 shared-secret or ES256/RS256 asymmetric via JWKS) work
+    without further configuration beyond what's already in `.env`.
+    """
+    header = jwt.get_unverified_header(token)
+    alg = header.get("alg", "")
+
+    if alg == "HS256":
+        if not settings.supabase_jwt_secret:
+            raise jwt.PyJWTError("Supabase JWT secret not configured")
+        return jwt.decode(
+            token,
+            settings.supabase_jwt_secret,
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+
+    if alg in _SUPPORTED_ASYMMETRIC_ALGS:
+        client = _get_jwks_client()
+        if client is None:
+            raise jwt.PyJWTError(
+                "Supabase URL not configured — cannot verify asymmetric JWT"
+            )
+        signing_key = client.get_signing_key_from_jwt(token)
+        return jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=[alg],
+            audience="authenticated",
+        )
+
+    raise jwt.PyJWTError(f"Unsupported JWT algorithm: {alg or 'none'}")
 
 
 def require_session(
