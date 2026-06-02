@@ -59,6 +59,7 @@ from app.db.prototypes import (
     flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
+    mark_awaiting_clarification,
     mark_complete,
     passcode_rate_limit_check,
     passcode_rate_limit_clear,
@@ -1418,6 +1419,23 @@ async def _run_iterate_bg(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
                 error="iterate agent_loop completed but emitted no files",
+            )
+        elif result.status == "awaiting_clarification":
+            # F12 (P4-08): a clarifying_question terminal-PAUSE is NOT a failure.
+            # The runner already persisted the question on `pending_question`
+            # (P3-08); leave the row in a clean PAUSED state (status='ready',
+            # pending_question set, no completed_at, no error) so the P3-16
+            # answer-resume iterate is NOT 409-blocked by `post_iterate`'s
+            # `status != 'ready'` guard. Do NOT fail_prototype — that flip is
+            # exactly the bug this ticket fixes. (Iterate path only; the
+            # generate-time pause is scoped out — see P4-08 Open question.)
+            mark_awaiting_clarification(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+            )
+            logger.info(
+                "prototype_iterate_paused_awaiting_clarification prototype_id=%s",
+                prototype_id,
             )
         else:
             # Mirror _run_generation_bg's structured failure (P2-02): surface the

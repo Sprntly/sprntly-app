@@ -762,3 +762,49 @@ def advance_current_checkpoint(
         prototype_id, checkpoint_id,
     )
     return get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+
+
+# ─── F12 clarifying-question PAUSE-correction for the route bg layer (P4-08) ───
+#
+# When the agent calls `clarifying_question` mid-iterate, the runner returns
+# `status='awaiting_clarification'` and persists the question on `pending_question`
+# (P3-08). A pause is NOT a failure: by P3-08's design a paused prototype stays
+# `status='ready'` and `pending_question IS NOT NULL` is the awaiting-answer
+# signal. But the route bg layer (`_run_iterate_bg`) would otherwise route every
+# non-complete status — including a pause — to `fail_prototype`, flipping the row
+# to `status='failed'`. That flip then trips `post_iterate`'s `status != 'ready'`
+# 409 guard, so the P3-16 answer-as-new-iterate is rejected and the
+# clarify→answer→resume loop is dead. This helper is the status correction the bg
+# layer must apply on a pause.
+#
+# Why a new helper rather than reusing one: the only helper that sets
+# `status='ready'` is `complete_prototype`, but it also requires a `bundle_url`,
+# re-stamps `completed_at`, and emits `prototype_completed` — wrong semantics for a
+# pause. `advance_current_checkpoint` mutates `current_checkpoint_id` + `bundle_url`
+# — also wrong. So no existing helper expresses "return the row to PAUSED-ready
+# without touching the completion fields." This is the named, fail-closed
+# counterpart.
+
+
+def mark_awaiting_clarification(*, prototype_id: int, workspace_id: str) -> None:
+    """F12 (P4-08): return a paused prototype to the clean PAUSED state after a
+    clarifying_question terminal-PAUSE in the route bg layer.
+
+    A pause is NOT a failure and NOT a completion. The runner already persisted
+    the question on `pending_question` (P3-08); this helper only corrects the
+    status the bg layer would otherwise have set to 'failed'. Sets status='ready'
+    and clears `error`. Does NOT touch `bundle_url` / `completed_at` /
+    `current_checkpoint_id` / `share_token` — on the ITERATE path the prior
+    'ready' bundle and checkpoint are preserved untouched, so the existing share
+    URL keeps serving the last good prototype while the question is open. Does NOT
+    write `pending_question` — the runner already did (P3-08). Workspace-filtered
+    (Rule #22)."""
+    c = require_client()
+    (
+        c.table(_TABLE)
+        .update({"status": "ready", "error": None})
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
+        .execute()
+    )
+    logger.info("prototype_awaiting_clarification prototype_id=%s", prototype_id)
