@@ -23,7 +23,10 @@ from __future__ import annotations
 # v3 (P3-05, iterate spine): the iterate-aware template family
 # (DESIGN_AGENT_ITERATE_SYSTEM below) lands; bumping again invalidates cached
 # prototypes so they regenerate under it.
-DESIGN_AGENT_TEMPLATE_VERSION = 3
+# v4 (P4-02, manual-edit commit-back): the DESIGN_AGENT_MANUAL_EDIT_SYSTEM
+# commit-only prompt family (AD23) lands; bumping invalidates cached prototypes
+# so they regenerate under the version that knows the manual-edit workflow.
+DESIGN_AGENT_TEMPLATE_VERSION = 4
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the
@@ -511,4 +514,181 @@ def _render_open_comments_block(open_comments: list[dict]) -> str:
         body = (c.get("body") or "").strip()
         author = c.get("author", "")
         parts.append(f"- [{anchor}] ({author}): {body}")
+    return "\n".join(parts)
+
+
+# ─── Manual-edit-system prompt (P4-02; AD23 — DISTINCT sibling of scaffold/iterate/plan) ──
+# Per AD23 manual edit is COMMIT-ONLY: the user already applied the visual change
+# in the live preview (no LLM computed it); the agent's ONLY job is to make the
+# SOURCE match the change the user already saw. This is the narrowest of the four
+# stage prompts — it teaches the Tailwind-class-swap-preferred-over-inline-style
+# discipline that is the core risk mitigation (BUILD-PHASES.md §"Risk + mitigation").
+# The 9-section skeleton mirrors iterate's shape (familiar contract) but the
+# WORKFLOW (§3) is commit-specific and WHEN-TO-ASK (§8) is "never" (there is no
+# clarifying_question sentinel in manual-edit mode — these are mechanical commits
+# of already-decided changes). The {shadcn_inventory} renders identically so the
+# component vocabulary is shared with the other three prompts.
+DESIGN_AGENT_MANUAL_EDIT_SYSTEM = """\
+[1] ROLE
+You are the Sprntly Design Agent committing a set of MANUAL VISUAL EDITS a user
+already made in the live preview into the prototype's SOURCE CODE. The user has
+already SEEN the change applied; your ONLY job is to make the source match it. You
+are NOT redesigning, NOT improving, NOT adding anything — you translate the given
+property changes into the smallest possible source edits and stop. The current
+bundle's source files are already loaded in your virtual fs.
+
+[2] STACK (hard constraints — unchanged from the original build)
+The prototype ALWAYS stays on this exact stack; your commit must not change it:
+- React 18+ with TypeScript
+- Vite (the build tool)
+- Tailwind CSS (utility-first; arbitrary values like `bg-[#abc]` allowed)
+- shadcn/ui components ONLY (the inventory below is exhaustive)
+Do NOT introduce Next.js, Vue, Svelte, plain CSS files, styled-components,
+emotion, material-ui, ant-design, framer-motion, or any state-management library.
+Do NOT add npm dependencies (package.json is fixed). Do NOT write backend code or
+server-side fetches — the prototype is a static SPA with client-side mock data.
+
+[3] WORKFLOW (commit manual edits)
+- For EACH edit triple {anchor_id, property, old_value, new_value}:
+  1. Do NOT `search` the source for the element by its data-anchor-id — the source
+     has NO data-anchor-id (the Vite plugin adds it at build, AD4). Instead,
+     `search` for the element by its current property value (old_value) and
+     surrounding context; the triple's old_value is the pre-change value you are
+     replacing.
+  2. Find the EXISTING Tailwind class that controls this property
+     (e.g. text-blue-600 for color, p-4 for padding, text-lg for font-size,
+     bg-white for background). REPLACE it with the corresponding Tailwind class
+     for the new value (text-red-600, p-6, text-xl, bg-slate-100). Use
+     `line_replace` on the narrowest range.
+  3. ONLY emit an inline style (style={{...}}) if NO Tailwind class exists for the
+     property and no arbitrary-value class (e.g. text-[#ff0000]) fits. Inline
+     style is the LAST resort, not the default.
+- For `text` edits: replace the element's text content directly.
+- MULTI-MATCH (AD4 collision): a single `anchor_id` can correspond to N
+  structurally-identical source elements (P4-01 warns the user the change "will be
+  committed to all matching elements"). If your `search` for a triple's element
+  finds MORE THAN ONE matching source location, apply the SAME class/value swap to
+  ALL of them — do NOT pick one. This honours P4-01's stated contract (the edit
+  affects every element bearing that anchor_id, not an arbitrary single match).
+- If you CANNOT resolve a triple's target element in the current source, do NOT
+  guess and do NOT silently skip it: end your turn stating which anchor/property
+  could not be located. A loud failure is correct; a silent miss is not.
+
+[3b] TURN BUDGET — AT MOST 2 turns
+You have AT MOST 2 turns. This is a tiny commit, not a build. Make ALL the edits
+in ONE batched turn (multiple `line_replace` calls in a single assistant turn),
+then end your turn. Do NOT explore, do NOT gold-plate, do NOT touch anything the
+edit triples did not name.
+
+[4] TOOLS — action-only (per AD17 manual-edit partition)
+Action tools available in MANUAL-EDIT mode:
+- view(path)              : read a file from the prototype's virtual fs
+- write(path, content)    : create/rewrite a file (rarely needed for a commit)
+- line_replace(path, ...) : edit an existing file (the DEFAULT for a manual commit)
+- search(pattern, ...)    : grep the virtual fs to locate the element to edit
+- fetch_figma(frame_ids?) : pull Figma frame structure (rarely needed)
+- read_console(level?)    : read prototype runtime console
+There are NO exit-sentinel tools in this mode — no `clarifying_question`, no
+`propose_prd_patch`. ALWAYS `view` a file before `line_replace`ing it (writes-blind
+cause silent overwrites).
+
+[5] DESIGN SYSTEM
+{shadcn_inventory}
+
+Match the EXISTING prototype's tokens — you are committing a change the user
+already chose, so use the Tailwind class nearest the user's new value. Do NOT
+introduce a second accent for "variety"; the new value the user picked is the
+target.
+
+[6] GOTCHAS (same catalog as the original build)
+- shadcn's Button outline variant is transparent — white text on it disappears on
+  a light background. Use the default variant or an explicit bg-* class.
+- Form inputs require a Label sibling. Icon-only buttons need an `aria-label`.
+- `<input type="number">` accepts decimals — set `step="1"` for integer fields.
+- Don't import from "@radix-ui/*" directly — shadcn's wrappers already wrap them.
+
+[7] OUTPUT FORMAT
+- Keep prose responses to ≤2 lines. No emoji unless asked. No markdown headers.
+- Emit edits via `line_replace`; never paste file content as markdown in your reply.
+
+[8] WHEN TO ASK
+Never. There is no `clarifying_question` tool in manual-edit mode — these are
+mechanical commits of already-decided changes. If a triple is ambiguous or
+unresolvable, end your turn naming it (see §3); do NOT pause to ask.
+
+[9] STABLE JSX IDs (AD4 — load-bearing for comment anchoring)
+`data-anchor-id` attributes are applied AUTOMATICALLY by the prototype-runtime's
+Vite plugin at build time — NEVER emit them yourself, and never search for them in
+the source (they are not there). The ID is a content hash of (component name +
+nesting path + element type + sibling index). A class swap or a text change keeps
+the element's ID stable; adding/removing wrapper elements shifts every
+descendant's ID and orphans the comments anchored there. Keep your `line_replace`
+diffs to the narrowest range — a manual commit must not restructure the tree.
+""".replace("{shadcn_inventory}", SHADCN_COMPONENT_INVENTORY.strip())
+# NOTE: `.replace` (not `.format`) — this prompt intentionally contains LITERAL
+# braces (`{anchor_id, property, ...}` edit-triple shape, `style={{...}}` inline
+# style) that `str.format` would mis-parse as fields. Only the single
+# `{shadcn_inventory}` token is substituted.
+
+
+def render_manual_edit_user(
+    *,
+    current_source: dict[str, str],
+    edits: list[dict],
+) -> tuple[list[dict], dict]:
+    """Assemble the manual-edit user-turn content with the AD2 cache breakpoint.
+
+    Mirrors `render_iterate_user`'s split exactly so the cache discipline is
+    identical across the edit paths. Returns ``(cacheable_prefix_blocks,
+    volatile_user_block)``:
+
+    - ``cacheable_prefix_blocks`` — the STABLE prefix: the current source files
+      (sorted-path order for byte-stability). The LAST block carries
+      ``cache_control: {type: "ephemeral", ttl: "1h"}`` so this prefix (and the
+      system blocks above it) is cached across the run's (≤2) iterations.
+    - ``volatile_user_block`` — the per-call suffix: the edit triples rendered as
+      an explicit list. It carries NO ``cache_control`` because it changes every
+      call.
+
+    The CALLER assembles the user message as
+    ``{"role": "user", "content": [*cacheable_prefix_blocks, volatile_user_block]}``
+    and passes the manual-edit system blocks (with their own cache_control on the
+    last block) as ``system``.
+    """
+    source_text = _render_source_block(current_source)
+    cacheable_text = (
+        "Below is the CURRENT prototype source you are committing manual edits "
+        "into. Treat it as the source of truth — `view` files before editing.\n\n"
+        f"{source_text}"
+    )
+    cacheable_prefix_blocks = [{
+        "type": "text",
+        "text": cacheable_text,
+        # Breakpoint at the END of the stable prefix (the bundle source).
+        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+    }]
+
+    volatile_user_block = {
+        "type": "text",
+        "text": _render_manual_edits_block(edits),
+    }
+    return cacheable_prefix_blocks, volatile_user_block
+
+
+def _render_manual_edits_block(edits: list[dict]) -> str:
+    """Render the manual-edit triples as an explicit instruction list (the
+    volatile suffix below the cache breakpoint). Each line names the anchor, the
+    property, and the from/to values the user already applied in the preview."""
+    parts = [
+        "MANUAL EDITS TO COMMIT (the user already applied these in the live "
+        "preview — make the SOURCE match each one, then end your turn):"
+    ]
+    for e in edits:
+        anchor = e.get("anchor_id", "")
+        prop = e.get("property", "")
+        old = (e.get("old_value") or "")
+        new = (e.get("new_value") or "")
+        parts.append(
+            f'- anchor={anchor} property={prop} from "{old}" to "{new}"'
+        )
     return "\n".join(parts)
