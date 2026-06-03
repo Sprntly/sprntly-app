@@ -240,8 +240,16 @@ class _Query:
                 placeholders = ",".join("?" for _ in cols)
                 col_sql = ",".join(cols)
                 if self._on_conflict:
+                    # supabase-py accepts a comma-separated list for composite
+                    # uniques (e.g. "workspace_id,provider"). Treat each piece
+                    # as a conflict-key column so it's excluded from the
+                    # DO UPDATE SET clause (setting the conflict key to its
+                    # existing value is wasteful and PG rejects it).
+                    conflict_keys = {
+                        k.strip() for k in self._on_conflict.split(",") if k.strip()
+                    }
                     update_assignments = ",".join(
-                        f"{c} = excluded.{c}" for c in cols if c != self._on_conflict
+                        f"{c} = excluded.{c}" for c in cols if c not in conflict_keys
                     )
                     conflict_sql = (
                         f" ON CONFLICT({self._on_conflict}) DO UPDATE SET {update_assignments}"
@@ -255,17 +263,24 @@ class _Query:
                     [row[c] for c in cols],
                 )
             db.commit()
-            # Return upserted rows looked up by on_conflict key, or all of self._values.
+            # Return upserted rows looked up by on_conflict key(s), or all
+            # of self._values. Composite keys arrive comma-separated.
             if self._on_conflict:
-                key = self._on_conflict
-                vals_to_fetch = [v[key] for v in self._values if key in v]
-                if vals_to_fetch:
-                    placeholders = ",".join("?" for _ in vals_to_fetch)
-                    rows = db.execute(
-                        f"SELECT * FROM {self.table} WHERE {key} IN ({placeholders})",
-                        vals_to_fetch,
+                conflict_keys = [
+                    k.strip() for k in self._on_conflict.split(",") if k.strip()
+                ]
+                fetched_rows: list = []
+                for v in self._values:
+                    if not all(k in v for k in conflict_keys):
+                        continue
+                    where_sql = " AND ".join(f"{k} = ?" for k in conflict_keys)
+                    args = [v[k] for k in conflict_keys]
+                    found = db.execute(
+                        f"SELECT * FROM {self.table} WHERE {where_sql}", args
                     ).fetchall()
-                    inserted = [_decode_row(self.table, r) for r in rows]
+                    fetched_rows.extend(found)
+                if fetched_rows:
+                    inserted = [_decode_row(self.table, r) for r in fetched_rows]
             return SimpleNamespace(data=inserted, count=None)
 
         if self._kind == "update":
