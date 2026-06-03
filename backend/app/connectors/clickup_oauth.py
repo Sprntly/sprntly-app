@@ -61,10 +61,14 @@ def authorize_url(state: str) -> str:
     return f"{CLICKUP_AUTH_URL}?{urlencode(params)}"
 
 
-def sign_oauth_state() -> str:
+def sign_oauth_state(*, workspace_id: str) -> str:
+    """Mint a signed state JWT that binds the OAuth round-trip to a
+    specific workspace. The callback (which has no user session) trusts
+    only this signature to know which workspace gets the new token."""
     now = int(time.time())
     payload = {
         "provider": CLICKUP_PROVIDER,
+        "workspace_id": workspace_id,
         "nonce": uuid.uuid4().hex,
         "iat": now,
         "exp": now + STATE_TTL_SECONDS,
@@ -79,6 +83,8 @@ def verify_oauth_state(state: str) -> dict:
         raise HTTPException(400, "Invalid or expired OAuth state") from e
     if payload.get("provider") != CLICKUP_PROVIDER:
         raise HTTPException(400, "OAuth state provider mismatch")
+    if not payload.get("workspace_id"):
+        raise HTTPException(400, "OAuth state missing workspace_id")
     return payload
 
 

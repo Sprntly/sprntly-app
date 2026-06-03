@@ -89,6 +89,9 @@ from app.db.connections import (
     upsert_connection,
 )
 
+# Workspace membership (used by connector route deps)
+from app.db.workspace_membership import is_member
+
 # GitHub App (webhook-driven)
 from app.db.github import (
     delete_github_installation,
@@ -153,6 +156,8 @@ __all__ = [
     "update_connection_sync",
     "update_connection_tokens",
     "upsert_connection",
+    # workspace membership
+    "is_member",
     # github (webhook-driven)
     "delete_github_installation",
     "get_github_installation",

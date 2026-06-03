@@ -208,16 +208,28 @@ CREATE TABLE datasets (
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Companies table is in the real Supabase migrations but the backend
--- doesn't query it directly yet — only required here so connections.workspace_id
--- has a valid FK target. Membership table comes when commit 3 adds the
--- route-level membership dep.
+-- Companies / company_members mirror the Supabase migrations. The
+-- backend doesn't query companies directly yet, but connections.workspace_id
+-- FKs into it and the workspace-membership check (commit 3) reads
+-- company_members.
 CREATE TABLE companies (
     id           TEXT PRIMARY KEY,
     slug         TEXT NOT NULL UNIQUE,
     display_name TEXT NOT NULL,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE company_members (
+    id         TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member'
+                CHECK (role IN ('owner', 'admin', 'member')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, user_id)
+);
+CREATE INDEX company_members_user_id_idx    ON company_members (user_id);
+CREATE INDEX company_members_company_id_idx ON company_members (company_id);
 
 CREATE TABLE connections (
     id                   TEXT PRIMARY KEY,

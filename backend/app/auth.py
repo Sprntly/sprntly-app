@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import jwt
-from fastapi import APIRouter, Cookie, Header, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from app.config import settings
@@ -181,6 +181,44 @@ def require_app_session(
         return _decode_token(sprntly_app_session, "app")
     except jwt.PyJWTError as e:
         raise HTTPException(401, "Invalid or expired session") from e
+
+
+def require_workspace_membership(
+    workspace_id: str = Query(
+        ...,
+        description=(
+            "UUID of the company/workspace this connector operation belongs to."
+        ),
+    ),
+    session: dict = Depends(require_session),
+) -> str:
+    """Verify the caller is a member of the requested workspace, return id.
+
+    The connector slice's primary tenant-isolation guard. Pulls the user
+    id from the validated Supabase JWT (legacy demo cookies have no
+    user, so they're rejected here even though they validate as a
+    session — connectors are an app-surface feature).
+
+    Returns the verified workspace_id so routes can capture it via:
+        workspace_id: str = Depends(require_workspace_membership)
+    instead of declaring workspace_id a second time as a query param.
+    """
+    from app.db.workspace_membership import is_member  # lazy: avoid import cycle
+
+    user_id = session.get("sub")
+    if not user_id or session.get("aud") != "supabase":
+        # Legacy demo cookies don't carry a user identity, so they have
+        # no way to claim workspace membership.
+        raise HTTPException(
+            403,
+            "Workspace membership requires a Supabase session.",
+        )
+    if not is_member(user_id=user_id, workspace_id=workspace_id):
+        raise HTTPException(
+            403,
+            "You are not a member of this workspace.",
+        )
+    return workspace_id
 
 
 def require_demo_session(
