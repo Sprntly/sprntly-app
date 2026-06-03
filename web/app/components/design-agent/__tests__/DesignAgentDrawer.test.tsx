@@ -9,9 +9,11 @@ import {
   DEFAULT_PLATFORM,
   DesignAgentDrawerView,
   DrawerFooter,
+  replayCompletedNotifications,
   runGenerateFlow,
   sourceDetectedLabel,
 } from "../DesignAgentDrawer"
+import { markCompleted, markPending, pendingCompleted } from "../notificationStore"
 import { designAgentApi } from "../../../lib/api"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
@@ -378,6 +380,134 @@ describe("DesignAgentDrawer prop signature unchanged (P5-02 AC9)", () => {
         figmaFileKey: null,
         showToast: noop,
         // onGenerated is optional and omitted — proves the signature is unchanged
+      }),
+    )
+    expect(html).toContain("Generate Prototype")
+  })
+})
+
+// ─── P5-09: notification persistence delta (re-show on reload + acknowledge) ──
+
+describe("notification persistence (P5-09)", () => {
+  function makeSessionStorage(): Storage {
+    let store: Record<string, string> = {}
+    return {
+      get length(): number {
+        return Object.keys(store).length
+      },
+      getItem: (k: string): string | null => (k in store ? store[k] : null),
+      setItem: (k: string, v: string): void => {
+        store[k] = String(v)
+      },
+      removeItem: (k: string): void => {
+        delete store[k]
+      },
+      clear: (): void => {
+        store = {}
+      },
+      key: (i: number): string | null => Object.keys(store)[i] ?? null,
+    }
+  }
+
+  // `unknown as` breaks the lib.dom `Window` typing so a node-env stub can be
+  // installed and then set back to undefined (the SSR / no-storage case).
+  const testGlobal = globalThis as unknown as {
+    window?: { sessionStorage: Storage }
+  }
+
+  function installStorage() {
+    testGlobal.window = { sessionStorage: makeSessionStorage() }
+  }
+
+  function removeWindow() {
+    testGlobal.window = undefined
+  }
+
+  afterEach(() => {
+    removeWindow()
+  })
+
+  it("mount re-shows a completed entry once, then acknowledges it (AC2)", () => {
+    installStorage()
+    markCompleted(7, "Open the PRD's Design section to view it.")
+
+    const showToast = vi.fn()
+    replayCompletedNotifications(showToast) // simulates the mount effect
+    expect(showToast).toHaveBeenCalledTimes(1)
+    expect(showToast).toHaveBeenCalledWith(
+      "Prototype ready",
+      "Open the PRD's Design section to view it.",
+    )
+
+    // A second mount (still same session) must NOT re-show — it was acknowledged.
+    const showToast2 = vi.fn()
+    replayCompletedNotifications(showToast2)
+    expect(showToast2).not.toHaveBeenCalled()
+  })
+
+  it("does NOT re-show a pending (not-yet-complete) entry on mount (AC3)", () => {
+    installStorage()
+    markPending(9)
+
+    const showToast = vi.fn()
+    replayCompletedNotifications(showToast)
+    expect(showToast).not.toHaveBeenCalled()
+  })
+
+  it("records completion in sessionStorage while the live toast still fires (AC5)", async () => {
+    installStorage()
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 9,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 7, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: true,
+    })
+    await genResult
+    await Promise.resolve()
+
+    // Live toast unchanged (still fires this page life)…
+    expect(showToast).toHaveBeenCalledWith("Prototype ready", expect.any(String))
+    // …AND the completion is persisted so a reload can re-show it.
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 7, sub: "Open the PRD's Design section to view it." },
+    ])
+  })
+
+  it("SSR-renders the drawer without throwing when storage is unavailable (AC6)", () => {
+    removeWindow()
+    expect(() =>
+      renderToStaticMarkup(
+        React.createElement(DesignAgentDrawerView, {
+          open: true,
+          onOpenChange: noop,
+          prdId: 1,
+          figmaFileKey: null,
+          showToast: noop,
+        }),
+      ),
+    ).not.toThrow()
+  })
+
+  it("keeps the view's required prop set unchanged after the persistence delta (AC8)", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DesignAgentDrawerView, {
+        open: true,
+        onOpenChange: noop,
+        prdId: 3,
+        figmaFileKey: null,
+        showToast: noop,
+        // no persistence-related prop added — the store is internal
       }),
     )
     expect(html).toContain("Generate Prototype")
