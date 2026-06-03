@@ -88,6 +88,15 @@ class Settings(BaseSettings):
     # backward-compat with older legacy apps still active in production.
     hubspot_oauth_version: str = "v3"
 
+    # Slack connector (OAuth 2.0 — bot token for message delivery + sync)
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_oauth_redirect_uri: str = ""
+    slack_scopes: str = (
+        "chat:write,channels:read,channels:history,"
+        "groups:read,groups:history,users:read"
+    )
+
     # GitHub connector (GitHub App with user-to-server OAuth)
     github_app_id: str = ""
     github_app_client_id: str = ""

@@ -15,6 +15,10 @@
   GET    /v1/connectors/figma/files/{key}       -> file structure (Design Agent input)
   GET    /v1/connectors/figma/files/{key}/styles -> design tokens (Design Agent input)
 
+  GET    /v1/connectors/slack/callback           -> OAuth callback
+  DELETE /v1/connectors/slack                   -> disconnect
+  POST   /v1/connectors/slack/sync-to-corpus    -> sync messages into corpus
+
   GET    /v1/connectors/github/authorize        -> redirect to GitHub
   GET    /v1/connectors/github/callback         -> OAuth callback
   DELETE /v1/connectors/github                  -> disconnect
@@ -46,6 +50,7 @@ from app.connectors import (
     github_app,
     google_oauth,
     hubspot_oauth,
+    slack_oauth,
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
@@ -156,6 +161,12 @@ def start_oauth(
         url = hubspot_oauth.authorize_url(state=hubspot_oauth.sign_oauth_state())
         return {"authorize_url": url}
 
+    if provider == slack_oauth.SLACK_PROVIDER:
+        if not slack_oauth.slack_configured():
+            raise HTTPException(500, "Slack OAuth is not configured on the server")
+        url = slack_oauth.authorize_url(state=slack_oauth.sign_oauth_state())
+        return {"authorize_url": url}
+
     raise HTTPException(
         404,
         f"OAuth start is not available for provider {provider!r}",
@@ -221,6 +232,9 @@ def test_connection(
     elif provider == hubspot_oauth.HUBSPOT_PROVIDER:
         access_token = token_json.get("access_token") or ""
         user_obj = hubspot_oauth.fetch_token_info(access_token) or {}
+    elif provider == slack_oauth.SLACK_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = slack_oauth.fetch_auth_test(access_token) or {}
     elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
         api_key = token_json.get("api_key") or ""
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
@@ -832,6 +846,182 @@ def hubspot_disconnect(_session: dict = Depends(require_session)):
         raise HTTPException(404, "HubSpot is not connected")
     db.delete_connection(hubspot_oauth.HUBSPOT_PROVIDER)
     return {"deleted": True, "provider": hubspot_oauth.HUBSPOT_PROVIDER}
+
+
+class HubSpotSyncCorpusIn(BaseModel):
+    dataset: str
+
+
+@router.post("/hubspot/sync")
+def hubspot_sync(
+    body: HubSpotSyncCorpusIn,
+    _session: dict = Depends(require_session),
+):
+    """Sync HubSpot CRM data (contacts, companies, deals) into the corpus.
+
+    Fetches data from HubSpot API, converts to markdown, and writes
+    into DATA_DIR/{dataset}/ so it enters the knowledge base.
+    """
+    from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
+
+    try:
+        result = sync_hubspot(body.dataset)
+    except HubSpotSyncError as e:
+        raise HTTPException(400, str(e)) from e
+    return result.to_dict()
+
+
+@router.post("/hubspot/sync-to-corpus")
+def hubspot_sync_to_corpus(
+    body: HubSpotSyncCorpusIn,
+    _session: dict = Depends(require_session),
+):
+    """Alias for /hubspot/sync — matches Figma/GitHub sync-to-corpus pattern."""
+    from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
+
+    try:
+        result = sync_hubspot(body.dataset)
+    except HubSpotSyncError as e:
+        raise HTTPException(400, str(e)) from e
+    return result.to_dict()
+
+
+# ─────────────────────── Slack ───────────────────────
+#
+# OAuth callback + disconnect. start-oauth is handled by the generic
+# POST /{provider}/start-oauth above; helpers live in slack_oauth.py.
+
+
+@router.get("/slack/callback")
+def slack_callback(code: str, state: str):
+    slack_oauth.verify_oauth_state(state)
+    token_json = slack_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Slack did not return an access_token")
+
+    auth_info = slack_oauth.fetch_auth_test(access_token)
+    label = (
+        auth_info.get("user")
+        or (token_json.get("team") or {}).get("name")
+        or str(token_json.get("bot_user_id") or "")
+    )
+
+    try:
+        token_encrypted = encrypt_token_json(
+            slack_oauth.token_payload_to_store(token_json)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        provider=slack_oauth.SLACK_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=token_json.get("scope", ""),
+        account_label=label or None,
+        config_json=json.dumps({
+            "team": token_json.get("team"),
+            "bot_user_id": token_json.get("bot_user_id"),
+        }),
+    )
+
+    q = urlencode({"section": "connectors", "connected": slack_oauth.SLACK_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+
+
+@router.delete("/slack")
+def slack_disconnect(_session: dict = Depends(require_session)):
+    row = db.get_connection(slack_oauth.SLACK_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Slack is not connected")
+    db.delete_connection(slack_oauth.SLACK_PROVIDER)
+    return {"deleted": True, "provider": slack_oauth.SLACK_PROVIDER}
+
+
+class SlackBotTokenIn(BaseModel):
+    api_key: str
+
+    def model_post_init(self, _context) -> None:
+        if not self.api_key or not self.api_key.strip():
+            raise ValueError("api_key cannot be empty")
+
+
+@router.post("/slack/apikey")
+def slack_connect_bot_token(
+    body: SlackBotTokenIn,
+    _session: dict = Depends(require_session),
+):
+    """Connect Slack using a Bot User OAuth Token (xoxb-...).
+
+    Alternative to the full OAuth flow — useful when the Slack app is not
+    distributed. The user copies the token from api.slack.com/apps →
+    Install App → Bot User OAuth Token.
+    """
+    token = body.api_key.strip()
+    auth_info = slack_oauth.fetch_auth_test(token)
+    if not auth_info:
+        raise HTTPException(
+            400,
+            "Slack rejected this token — verify the Bot User OAuth Token "
+            "at api.slack.com/apps → Install App.",
+        )
+
+    label = (
+        auth_info.get("user")
+        or auth_info.get("team")
+        or "Slack workspace"
+    )
+
+    payload = json.dumps({
+        "access_token": token,
+        "token_type": "bot",
+        "team_id": auth_info.get("team_id"),
+        "team_name": auth_info.get("team"),
+        "bot_user_id": auth_info.get("user_id"),
+        "obtained_at": int(__import__("time").time()),
+    })
+
+    try:
+        token_encrypted = encrypt_token_json(payload)
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        provider=slack_oauth.SLACK_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=settings.slack_scopes.replace(",", " "),
+        account_label=label,
+        config_json=json.dumps({"auth_info": auth_info}) if auth_info else "{}",
+    )
+    return {
+        "ok": True,
+        "provider": slack_oauth.SLACK_PROVIDER,
+        "account_label": label,
+    }
+
+
+class SlackSyncCorpusIn(BaseModel):
+    dataset: str
+    history_days: int = 90
+
+
+@router.post("/slack/sync-to-corpus")
+def slack_sync_to_corpus(
+    body: SlackSyncCorpusIn,
+    _session: dict = Depends(require_session),
+):
+    """Sync Slack channels, messages, and threads into the corpus.
+
+    Fetches data from the Slack API, converts to markdown, and writes
+    into DATA_DIR/{dataset}/ so it enters the knowledge base.
+    """
+    from app.connectors.slack_sync import SlackSyncError, sync_slack
+
+    try:
+        result = sync_slack(body.dataset, history_days=body.history_days)
+    except SlackSyncError as e:
+        raise HTTPException(400, str(e)) from e
+    return result.to_dict()
 
 
 # ─────────────────────── Fireflies (API key) ───────────────────────

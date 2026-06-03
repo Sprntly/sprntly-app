@@ -441,6 +441,36 @@ export const connectorsApi = {
   // ---- HubSpot -------------------------------------------------------------
   disconnectHubspot: () =>
     api.delete<{ deleted: true; provider: string }>("/v1/connectors/hubspot"),
+  syncHubspot: (dataset: string) =>
+    api.post<{
+      dataset: string;
+      contacts_count: number;
+      companies_count: number;
+      deals_count: number;
+      total_synced: number;
+      errors: string[];
+    }>("/v1/connectors/hubspot/sync-to-corpus", { dataset }),
+
+  // ---- Slack ---------------------------------------------------------------
+  connectSlackWithBotToken: (apiKey: string) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      "/v1/connectors/slack/apikey",
+      { api_key: apiKey },
+    ),
+  disconnectSlack: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/slack"),
+  syncSlack: (dataset: string, historyDays = 90) =>
+    api.post<{
+      dataset: string
+      channels_count: number
+      messages_count: number
+      threads_count: number
+      total_synced: number
+      errors: string[]
+    }>("/v1/connectors/slack/sync-to-corpus", {
+      dataset,
+      history_days: historyDays,
+    }),
 
   // ---- Fireflies (API key, not OAuth) --------------------------------------
   connectFirefliesWithApiKey: (apiKey: string) =>

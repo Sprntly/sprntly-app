@@ -43,6 +43,8 @@ import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnector
 const APIKEY_HELP: Record<string, string> = {
   fireflies:
     "Get your key from fireflies.ai → Settings → Integrations → Fireflies API.",
+  slack:
+    "Get your Bot User OAuth Token from api.slack.com/apps → your app → Install App → Bot User OAuth Token (starts with xoxb-).",
 }
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -251,6 +253,9 @@ export function ConnectorsSettings() {
       if (!apiKeyConnectingItem) return
       if (apiKeyConnectingItem.id === "fireflies") {
         await connectorsApi.connectFirefliesWithApiKey(apiKey)
+        await reload()
+      } else if (apiKeyConnectingItem.id === "slack") {
+        await connectorsApi.connectSlackWithBotToken(apiKey)
         await reload()
       } else {
         throw new Error(

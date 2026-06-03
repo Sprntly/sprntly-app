@@ -30,6 +30,156 @@ import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
 
+// ─────────────────────── Slack Sync Button ─────────────────────
+
+function SlackSyncButton({
+  dataset,
+  onSynced,
+}: {
+  dataset: string
+  onSynced: () => void
+}) {
+  const [syncing, setSyncing] = useState(false)
+  const [result, setResult] = useState<{
+    total_synced: number
+    channels_count: number
+    messages_count: number
+    threads_count: number
+    errors: string[]
+  } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSync = useCallback(async () => {
+    setSyncing(true)
+    setError(null)
+    setResult(null)
+    try {
+      const res = await connectorsApi.syncSlack(dataset)
+      setResult(res)
+      onSynced()
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? apiErrorMessage(e.status, e.body)
+          : e instanceof Error
+            ? e.message
+            : String(e)
+      setError(msg)
+    } finally {
+      setSyncing(false)
+    }
+  }, [dataset, onSynced])
+
+  return (
+    <div style={{ padding: "12px 0" }}>
+      <p style={{ fontSize: 13, color: "#888", marginBottom: 8 }}>
+        Sync channels, messages, and threads from Slack into the knowledge base.
+      </p>
+      <button
+        onClick={() => void handleSync()}
+        disabled={syncing}
+        style={{
+          padding: "8px 16px",
+          borderRadius: 6,
+          border: "1px solid #ccc",
+          background: syncing ? "#eee" : "#fff",
+          cursor: syncing ? "not-allowed" : "pointer",
+          fontSize: 13,
+        }}
+      >
+        {syncing ? "Syncing…" : "Sync Slack Data"}
+      </button>
+      {result && (
+        <p style={{ fontSize: 12, color: "#2a7", marginTop: 8 }}>
+          Synced {result.total_synced} items ({result.channels_count} channels,{" "}
+          {result.messages_count} messages, {result.threads_count} thread replies)
+          {result.errors.length > 0 && (
+            <span style={{ color: "#c33" }}> — {result.errors.join("; ")}</span>
+          )}
+        </p>
+      )}
+      {error && (
+        <p style={{ fontSize: 12, color: "#c33", marginTop: 8 }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────── HubSpot Sync Button ────────────────────
+
+function HubSpotSyncButton({
+  dataset,
+  onSynced,
+}: {
+  dataset: string
+  onSynced: () => void
+}) {
+  const [syncing, setSyncing] = useState(false)
+  const [result, setResult] = useState<{
+    total_synced: number
+    contacts_count: number
+    companies_count: number
+    deals_count: number
+    errors: string[]
+  } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSync = useCallback(async () => {
+    setSyncing(true)
+    setError(null)
+    setResult(null)
+    try {
+      const res = await connectorsApi.syncHubspot(dataset)
+      setResult(res)
+      onSynced()
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? apiErrorMessage(e.status, e.body)
+          : e instanceof Error
+            ? e.message
+            : String(e)
+      setError(msg)
+    } finally {
+      setSyncing(false)
+    }
+  }, [dataset, onSynced])
+
+  return (
+    <div style={{ padding: "12px 0" }}>
+      <p style={{ fontSize: 13, color: "#888", marginBottom: 8 }}>
+        Sync contacts, companies, and deals from HubSpot into the knowledge base.
+      </p>
+      <button
+        onClick={() => void handleSync()}
+        disabled={syncing}
+        style={{
+          padding: "8px 16px",
+          borderRadius: 6,
+          border: "1px solid #ccc",
+          background: syncing ? "#eee" : "#fff",
+          cursor: syncing ? "not-allowed" : "pointer",
+          fontSize: 13,
+        }}
+      >
+        {syncing ? "Syncing…" : "Sync CRM Data"}
+      </button>
+      {result && (
+        <p style={{ fontSize: 12, color: "#2a7", marginTop: 8 }}>
+          Synced {result.total_synced} records ({result.contacts_count} contacts,{" "}
+          {result.companies_count} companies, {result.deals_count} deals)
+          {result.errors.length > 0 && (
+            <span style={{ color: "#c33" }}> — {result.errors.join("; ")}</span>
+          )}
+        </p>
+      )}
+      {error && (
+        <p style={{ fontSize: 12, color: "#c33", marginTop: 8 }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
 // ─────────────────────────── Pure View ───────────────────────────
 
 export type TestConnectionResult =
@@ -233,6 +383,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectClickup()
   } else if (providerId === "hubspot") {
     await connectorsApi.disconnectHubspot()
+  } else if (providerId === "slack") {
+    await connectorsApi.disconnectSlack()
   } else if (providerId === "fireflies") {
     await connectorsApi.disconnectFireflies()
   } else {
@@ -315,6 +467,20 @@ export function ConfigureConnectorDrawer({
         selectedFolderId={connection?.config?.folder_id}
         selectedFolderName={connection?.config?.folder_name}
         onSelected={onDisconnected /* reuse the reload callback */}
+      />
+    )
+  } else if (providerId === "hubspot") {
+    slot = (
+      <HubSpotSyncButton
+        dataset={activeCompany}
+        onSynced={onDisconnected /* reuse the reload callback */}
+      />
+    )
+  } else if (providerId === "slack") {
+    slot = (
+      <SlackSyncButton
+        dataset={activeCompany}
+        onSynced={onDisconnected /* reuse the reload callback */}
       />
     )
   }
