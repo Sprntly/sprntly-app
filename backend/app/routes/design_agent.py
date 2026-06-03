@@ -49,6 +49,10 @@ from pydantic import BaseModel, Field
 
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
 from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
+from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
+    PUBLIC_COMMENT_LIMITER,
+    PUBLIC_TOKEN_LIMITER,
+)
 from app.db.prds import get_prd_rendered
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
@@ -792,15 +796,34 @@ class PasscodeAttempt(BaseModel):
 
 
 @router.get("/by-token/{token}", response_model=PublicPrototypeView)
-def get_by_token(token: str) -> PublicPrototypeView:
+def get_by_token(token: str, request: Request) -> PublicPrototypeView:
     """Resolve a share_token to its viewable prototype. NO auth — the token IS
     the access. Returns 404 (never 401/403) on a bad token, a `private` row, or a
     row whose `status` is not `ready` (a generating/failed prototype is not
     viewable, and we do not disclose that it exists). `bundle_url` is withheld
     (null) for passcode mode until POST /passcode succeeds.
+
+    `request: Request` is injected by FastAPI only to source nothing user-visible —
+    the path/response_model are unchanged, so the web client contract is intact.
     """
     _require_feature_enabled()
     th = _share_token_hash(token)
+    # P5-07: per-token view rate limit (60/min/token). Mounted AFTER the feature
+    # gate (feature-off still 404s first) and BEFORE token resolution: the 429 fires
+    # on scan velocity for a VALID-FORMAT token regardless of whether it resolves, so
+    # it reveals only "you are scanning fast," never whether a token exists. A
+    # non-existent token under the limit still returns 404.
+    if not PUBLIC_TOKEN_LIMITER.check(token):
+        retry_after = PUBLIC_TOKEN_LIMITER.retry_after(token)
+        logger.info(
+            "public_token_rate_limited token_hash=%s retry_after_seconds=%s",
+            th, retry_after,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limit", "retry_after_seconds": retry_after},
+        )
+    PUBLIC_TOKEN_LIMITER.register(token)
     row = find_prototype_by_share_token(token)
     if not row or row.get("share_mode") == "private" or row.get("status") != "ready":
         # `private` is its own reason; a missing row OR a not-ready row both map
@@ -1231,6 +1254,24 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
         raise HTTPException(status_code=404, detail="Not found")
+    # P5-07: per-IP public-comment rate limit (10/hour/IP). Mounted AFTER the 404
+    # resolution (a private/missing/not-ready prototype 404s first, so the limiter
+    # never discloses a hidden prototype's existence) and BEFORE insert_comment (the
+    # spend-meaningful write). Keyed by client IP — the same machine can spam across
+    # many tokens, so per-IP, not per-token, is the spam boundary. Null-guard mirrors
+    # the passcode route's `request.client.host if request.client else "0.0.0.0"`.
+    client_ip = request.client.host if request.client else "0.0.0.0"
+    if not PUBLIC_COMMENT_LIMITER.check(client_ip):
+        retry_after = PUBLIC_COMMENT_LIMITER.retry_after(client_ip)
+        logger.info(
+            "public_comment_rate_limited ip_present=%s retry_after_seconds=%s",
+            request.client is not None, retry_after,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limit", "retry_after_seconds": retry_after},
+        )
+    PUBLIC_COMMENT_LIMITER.register(client_ip)
     row = insert_comment(
         prototype_id=proto["id"],
         workspace_id=proto["workspace_id"],   # from the resolved row, not a session
