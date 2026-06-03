@@ -60,7 +60,7 @@ def authorize_url(state: str, scopes: str | None = None) -> str:
     return f"{FIGMA_AUTH_URL}?{urlencode(params)}"
 
 
-def sign_oauth_state() -> str:
+def sign_oauth_state(return_to: str | None = None) -> str:
     now = int(time.time())
     payload = {
         "provider": FIGMA_PROVIDER,
@@ -68,6 +68,10 @@ def sign_oauth_state() -> str:
         "iat": now,
         "exp": now + STATE_TTL_SECONDS,
     }
+    # Base URL of the surface (app vs demo) that started the flow, echoed back
+    # so the callback redirects there instead of a single global FRONTEND_URL.
+    if return_to:
+        payload["return_to"] = return_to
     return jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALG)
 
 

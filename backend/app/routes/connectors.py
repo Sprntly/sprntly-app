@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Annotated
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -55,6 +55,36 @@ from app.connectors.tokens import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
+
+
+def _frontend_redirect(provider: str, return_to: str | None) -> RedirectResponse:
+    """Send the user back to the surface that started the OAuth flow.
+
+    The app and demo surfaces share one backend, so a single FRONTEND_URL
+    can't serve both — anyone connecting from app.sprntly.ai would still be
+    bounced to the demo surface. Instead the initiating frontend passes its
+    own base URL (origin + any `/demo` base path) as `return_to`, which we
+    carry through the signed OAuth `state` and honor here.
+
+    `return_to` is validated against the CORS allowlist (the set of origins
+    already trusted to call this API) so the callback can't be turned into an
+    open redirect. We fall back to FRONTEND_URL when it's missing or unknown.
+    """
+    base = settings.frontend_url.rstrip("/")
+    if return_to:
+        parts = urlsplit(return_to)
+        if parts.scheme in ("http", "https") and parts.netloc:
+            origin = f"{parts.scheme}://{parts.netloc}"
+            allowed = set(settings.origins_list)
+            fallback = urlsplit(base)
+            if fallback.scheme and fallback.netloc:
+                allowed.add(f"{fallback.scheme}://{fallback.netloc}")
+            if origin in allowed:
+                # Keep origin + path (carries the /demo base path); drop any
+                # query/fragment the caller tacked on.
+                base = f"{origin}{parts.path}".rstrip("/")
+    q = urlencode({"connected": provider})
+    return RedirectResponse(f"{base}/connectors?{q}")
 
 
 def _public_connection(row: dict) -> dict:
@@ -92,9 +122,10 @@ def list_connections(_session: dict = Depends(require_session)):
 @router.get("/google-drive/authorize")
 def google_drive_authorize(
     dataset: str | None = None,
+    return_to: str | None = None,
     _session: dict = Depends(require_session),
 ):
-    state = google_oauth.sign_oauth_state(dataset=dataset)
+    state = google_oauth.sign_oauth_state(dataset=dataset, return_to=return_to)
     flow = google_oauth.build_flow()
     url, _ = flow.authorization_url(
         access_type="offline",
@@ -137,8 +168,9 @@ def google_drive_callback(code: str, state: str):
         config_json=json.dumps(config),
     )
 
-    q = urlencode({"connected": google_oauth.GOOGLE_DRIVE_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    return _frontend_redirect(
+        google_oauth.GOOGLE_DRIVE_PROVIDER, payload.get("return_to")
+    )
 
 
 class GoogleDriveConfigIn(BaseModel):
@@ -225,16 +257,21 @@ def google_drive_disconnect(_session: dict = Depends(require_session)):
 
 
 @router.get("/figma/authorize")
-def figma_authorize(_session: dict = Depends(require_session)):
+def figma_authorize(
+    return_to: str | None = None,
+    _session: dict = Depends(require_session),
+):
     if not figma_oauth.figma_configured():
         raise HTTPException(500, "Figma OAuth is not configured on the server")
-    url = figma_oauth.authorize_url(state=figma_oauth.sign_oauth_state())
+    url = figma_oauth.authorize_url(
+        state=figma_oauth.sign_oauth_state(return_to=return_to)
+    )
     return RedirectResponse(url)
 
 
 @router.get("/figma/callback")
 def figma_callback(code: str, state: str):
-    figma_oauth.verify_oauth_state(state)
+    payload = figma_oauth.verify_oauth_state(state)
     token_json = figma_oauth.exchange_code_for_token(code)
     access_token = token_json.get("access_token")
     if not access_token:
@@ -256,8 +293,7 @@ def figma_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
-    q = urlencode({"connected": figma_oauth.FIGMA_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    return _frontend_redirect(figma_oauth.FIGMA_PROVIDER, payload.get("return_to"))
 
 
 @router.delete("/figma")
@@ -307,16 +343,19 @@ def figma_get_file_styles(key: str, _session: dict = Depends(require_session)):
 
 
 @router.get("/github/authorize")
-def github_authorize(_session: dict = Depends(require_session)):
+def github_authorize(
+    return_to: str | None = None,
+    _session: dict = Depends(require_session),
+):
     if not github_app.github_oauth_configured():
         raise HTTPException(500, "GitHub OAuth is not configured on the server")
-    url = github_app.authorize_url(state=github_app.sign_oauth_state())
+    url = github_app.authorize_url(state=github_app.sign_oauth_state(return_to=return_to))
     return RedirectResponse(url)
 
 
 @router.get("/github/callback")
 def github_callback(code: str, state: str):
-    github_app.verify_oauth_state(state)
+    payload = github_app.verify_oauth_state(state)
     token_json = github_app.exchange_code_for_token(code)
     access_token = token_json.get("access_token")
     if not access_token:
@@ -341,8 +380,7 @@ def github_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
-    q = urlencode({"connected": github_app.GITHUB_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    return _frontend_redirect(github_app.GITHUB_PROVIDER, payload.get("return_to"))
 
 
 @router.delete("/github")

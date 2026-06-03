@@ -134,6 +134,48 @@ def test_figma_callback_stores_token(figma_client):
     assert "files:read" in figma["scopes"]
 
 
+def test_figma_callback_honors_return_to(figma_client):
+    """A return_to from a trusted origin redirects back to that surface
+    (carrying its /demo base path) instead of the global FRONTEND_URL."""
+    from app.connectors import figma_oauth
+    # http://localhost:3000 is the test FRONTEND_URL, so its origin is trusted.
+    state = figma_oauth.sign_oauth_state(return_to="http://localhost:3000/demo")
+
+    with patch("app.routes.connectors.figma_oauth.exchange_code_for_token",
+               return_value={"access_token": "fig-access", "user_id": "u"}), \
+         patch("app.routes.connectors.figma_oauth.fetch_me", return_value={}):
+        r = figma_client.get(
+            "/v1/connectors/figma/callback",
+            params={"code": "abc", "state": state},
+            follow_redirects=False,
+        )
+
+    assert r.status_code == 307
+    assert r.headers["location"].startswith("http://localhost:3000/demo/connectors")
+    assert "connected=figma" in r.headers["location"]
+
+
+def test_figma_callback_rejects_foreign_return_to(figma_client):
+    """An untrusted return_to is ignored — no open redirect. Falls back to
+    FRONTEND_URL."""
+    from app.connectors import figma_oauth
+    state = figma_oauth.sign_oauth_state(return_to="https://evil.example.com/phish")
+
+    with patch("app.routes.connectors.figma_oauth.exchange_code_for_token",
+               return_value={"access_token": "fig-access", "user_id": "u"}), \
+         patch("app.routes.connectors.figma_oauth.fetch_me", return_value={}):
+        r = figma_client.get(
+            "/v1/connectors/figma/callback",
+            params={"code": "abc", "state": state},
+            follow_redirects=False,
+        )
+
+    assert r.status_code == 307
+    loc = r.headers["location"]
+    assert loc.startswith("http://localhost:3000/connectors")
+    assert "evil.example.com" not in loc
+
+
 def test_figma_callback_rejects_bad_state(figma_client):
     r = figma_client.get(
         "/v1/connectors/figma/callback",

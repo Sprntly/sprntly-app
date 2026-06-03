@@ -6,12 +6,30 @@
  * wrappers expose `company` to the rest of the app and translate at the
  * request/response boundary.
  */
+import { getBasePath } from "./public-path"
 
 // Default to the deployed backend so `npm run dev` works out of the box
 // without a local FastAPI. To run against a local backend, set
 // `NEXT_PUBLIC_API_URL=http://localhost:8000` in `web/.env.local`.
 export const API_URL =
   process.env.NEXT_PUBLIC_API_URL || "https://api.sprntly.ai"
+
+// Base URL of the current surface (origin + any `/demo` base path). Passed to
+// connector OAuth as `return_to` so the backend callback redirects back to the
+// surface that started the flow (app vs demo) rather than a single global
+// FRONTEND_URL. Empty during SSR (no window); the backend then falls back.
+function surfaceReturnTo(): string {
+  if (typeof window === "undefined") return ""
+  return `${window.location.origin}${getBasePath()}`
+}
+
+/** Append `return_to=<current surface>` to a connector authorize URL. */
+function withReturnTo(url: string): string {
+  const rt = surfaceReturnTo()
+  if (!rt) return url
+  const sep = url.includes("?") ? "&" : "?"
+  return `${url}${sep}return_to=${encodeURIComponent(rt)}`
+}
 
 export class ApiError extends Error {
   status: number
@@ -414,10 +432,13 @@ export const connectorsApi = {
     }),
   /** Full-page navigation — OAuth must not use fetch. */
   googleDriveAuthorizeUrl: (dataset: string) =>
-    `${API_URL}/v1/connectors/google-drive/authorize?dataset=${encodeURIComponent(dataset)}`,
+    withReturnTo(
+      `${API_URL}/v1/connectors/google-drive/authorize?dataset=${encodeURIComponent(dataset)}`,
+    ),
 
   // ---- Figma ---------------------------------------------------------------
-  figmaAuthorizeUrl: () => `${API_URL}/v1/connectors/figma/authorize`,
+  figmaAuthorizeUrl: () =>
+    withReturnTo(`${API_URL}/v1/connectors/figma/authorize`),
   disconnectFigma: () =>
     api.delete<{ deleted: true; provider: string }>("/v1/connectors/figma"),
   getFigmaFile: (key: string, depth = 2) =>
@@ -430,7 +451,8 @@ export const connectorsApi = {
     ),
 
   // ---- GitHub --------------------------------------------------------------
-  githubAuthorizeUrl: () => `${API_URL}/v1/connectors/github/authorize`,
+  githubAuthorizeUrl: () =>
+    withReturnTo(`${API_URL}/v1/connectors/github/authorize`),
   disconnectGithub: () =>
     api.delete<{ deleted: true; provider: string }>("/v1/connectors/github"),
   listGithubRepos: (perPage = 50) =>
