@@ -16,14 +16,25 @@
  * behaviour is covered by SSR render + direct calls to these exported units.
  */
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { designAgentApi } from "../../lib/api"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
 } from "../../lib/runDesignAgentGeneration"
+import {
+  acknowledge,
+  markCompleted,
+  markPending,
+  pendingCompleted,
+} from "./notificationStore"
 import { IconClose, IconSparkle } from "../shared/app-icons"
+
+/** P1-12 ready-completion toast copy. Reused for the live toast, the persisted
+ *  entry's sub, and the post-reload re-show so all three are byte-identical. */
+const READY_TOAST_TITLE = "Prototype ready"
+const READY_TOAST_SUB = "Open the PRD's Design section to view it."
 
 export type TargetPlatform = "desktop" | "mobile" | "both"
 
@@ -60,6 +71,10 @@ type GenerateFlowDeps = {
     target_platform: TargetPlatform
     instructions: string
     figma_file_key?: string | null
+    /** P5-02: Scenario B fallback source (shown only when no Figma). */
+    website_url?: string | null
+    /** P5-02: manual color/font floor (shown only when no Figma). */
+    manual_design?: { primary_color: string; font_family: string } | null
   }
   generate: typeof designAgentApi.generate
   runGeneration: typeof runDesignAgentGeneration
@@ -71,6 +86,46 @@ type GenerateFlowDeps = {
   /** P2-12: receives the terminal poll outcome so the host can render the
    *  post-generation result view. Optional — absent in the pre-P2-12 flow. */
   onGenerated?: (result: DesignAgentGenResult) => void
+}
+
+/**
+ * P5-02 — pure request-param builder. Maps the drawer's form state to the
+ * generate request body, including the Scenario B floor:
+ *   - `website_url`: the typed URL, or null when blank.
+ *   - `manual_design`: the color + font when BOTH are set, else null (a color
+ *     with no font name, or vice-versa, is not enough to style output).
+ * Extracted (and exported) so the mapping is unit-testable without a DOM — the
+ * repo's vitest env is `node` with no @testing-library, so we cannot click the
+ * Generate button; we assert the produced params instead.
+ */
+export function buildGenerateParams({
+  prdId,
+  platform,
+  instructions,
+  figmaFileKey,
+  websiteUrl,
+  manualColor,
+  manualFont,
+}: {
+  prdId: number
+  platform: TargetPlatform
+  instructions: string
+  figmaFileKey?: string | null
+  websiteUrl: string
+  manualColor: string
+  manualFont: string
+}): GenerateFlowDeps["params"] {
+  return {
+    prd_id: prdId,
+    target_platform: platform,
+    instructions,
+    figma_file_key: figmaFileKey ?? null,
+    website_url: websiteUrl || null,
+    manual_design:
+      manualColor && manualFont
+        ? { primary_color: manualColor, font_family: manualFont }
+        : null,
+  }
 }
 
 /**
@@ -95,6 +150,9 @@ export async function runGenerateFlow({
   setSubmitting(true)
   try {
     const kickoff = await generate(params)
+    // P5-09: persist a `pending` entry so a reload mid-generation that then
+    // completes still captures the ready notification.
+    markPending(kickoff.prototype_id)
     onOpenChange(false)
     showToast(
       "Design Agent generating",
@@ -102,11 +160,13 @@ export async function runGenerateFlow({
     )
     void runGeneration({ prototypeId: kickoff.prototype_id }).then((result) => {
       if (result.ok) {
+        // P5-09: record completion BEFORE the live toast so a subsequent
+        // same-session reload can re-show it. The persistence delta is
+        // independent of the F3 opt-in — the entry is always recorded; only the
+        // *live* toast stays gated on `notifyOnReady` (unchanged from P1-12).
+        markCompleted(kickoff.prototype_id, READY_TOAST_SUB)
         if (notifyOnReady) {
-          showToast(
-            "Prototype ready",
-            "Open the PRD's Design section to view it.",
-          )
+          showToast(READY_TOAST_TITLE, READY_TOAST_SUB)
         }
       } else {
         showToast("Generation failed", result.message)
@@ -161,6 +221,24 @@ export function DrawerFooter({
   )
 }
 
+/**
+ * P5-09 — re-show any completed-but-unacknowledged ready notification that was
+ * persisted before a same-session reload, then acknowledge each so it shows
+ * exactly once per reload. `pending` entries are never re-shown (the store's
+ * `pendingCompleted` excludes them). Pure (sessionStorage via notificationStore
+ * + injected `showToast`) so the mount effect is a one-line wrapper and the
+ * behaviour is unit-testable without a DOM (the repo's vitest env is `node`,
+ * where effects do not fire under SSR render).
+ */
+export function replayCompletedNotifications(
+  showToast: (title: string, sub: string) => void,
+): void {
+  for (const n of pendingCompleted()) {
+    showToast(READY_TOAST_TITLE, n.sub)
+    acknowledge(n.prototypeId)
+  }
+}
+
 type ViewProps = DesignAgentDrawerProps & {
   showToast: (title: string, sub: string) => void
 }
@@ -178,18 +256,36 @@ export function DesignAgentDrawerView({
   const [instructions, setInstructions] = useState("")
   const [notifyOnReady, setNotifyOnReady] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // P5-02 Scenario B floor — only used (and only rendered) when no Figma source.
+  const [websiteUrl, setWebsiteUrl] = useState("")
+  const [manualColor, setManualColor] = useState("#3b82f6")
+  const [manualFont, setManualFont] = useState("")
+
+  // P5-09: on mount, re-show any completed-but-unacknowledged notification that
+  // survived a same-session reload, then acknowledge so it shows once. Runs once
+  // regardless of open state (this effect precedes the `!open` early return, so
+  // the hook order stays stable). Effect — not render — keeps it client-only and
+  // SSR-safe; `showToast`/the store reads are stable, so `[]` is correct.
+  useEffect(() => {
+    replayCompletedNotifications(showToast)
+  }, [])
 
   if (!open) return null
 
   const handleGenerate = () => {
     if (submitting) return
     void runGenerateFlow({
-      params: {
-        prd_id: prdId,
-        target_platform: platform,
+      // P5-02: website_url / manual_design are only meaningful when no Figma;
+      // they resolve to harmless nulls when their inputs are blank.
+      params: buildGenerateParams({
+        prdId,
+        platform,
         instructions,
-        figma_file_key: figmaFileKey ?? null,
-      },
+        figmaFileKey,
+        websiteUrl,
+        manualColor,
+        manualFont,
+      }),
       generate: designAgentApi.generate,
       runGeneration: runDesignAgentGeneration,
       onOpenChange,
@@ -268,6 +364,77 @@ export function DesignAgentDrawerView({
               rows={4}
             />
           </div>
+
+          {/* P5-02 Scenario B floor — only when no Figma source is connected.
+              A brand URL (matched automatically) plus a manual color + font that
+              guarantee styled output even with no extractor (the absolute floor). */}
+          {!figmaFileKey && (
+            <div style={{ marginTop: 16 }}>
+              <label className="field-label" htmlFor="dap-website-url">
+                Brand website URL (optional)
+              </label>
+              <input
+                type="url"
+                id="dap-website-url"
+                className="input"
+                value={websiteUrl}
+                onChange={(e) => setWebsiteUrl(e.target.value)}
+                placeholder="https://yourbrand.com"
+              />
+              <p
+                style={{
+                  fontSize: 11.5,
+                  color: "var(--muted)",
+                  margin: "6px 0 0",
+                }}
+              >
+                We&apos;ll match the site&apos;s colors and fonts. No site? Set a
+                brand color and font below.
+              </p>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  marginTop: 12,
+                  alignItems: "flex-end",
+                }}
+              >
+                <div>
+                  <label className="field-label" htmlFor="dap-manual-color">
+                    Brand color
+                  </label>
+                  <input
+                    type="color"
+                    id="dap-manual-color"
+                    value={manualColor}
+                    onChange={(e) => setManualColor(e.target.value)}
+                    style={{
+                      display: "block",
+                      width: 48,
+                      height: 34,
+                      padding: 2,
+                      border: "1px solid var(--border)",
+                      borderRadius: 6,
+                      background: "var(--surface)",
+                    }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label className="field-label" htmlFor="dap-manual-font">
+                    Brand font
+                  </label>
+                  <input
+                    type="text"
+                    id="dap-manual-font"
+                    className="input"
+                    value={manualFont}
+                    onChange={(e) => setManualFont(e.target.value)}
+                    placeholder="e.g. Inter"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
 
           <label
             htmlFor="dap-notify"

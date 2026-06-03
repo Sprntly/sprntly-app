@@ -5,12 +5,15 @@ import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+  buildGenerateParams,
   DEFAULT_PLATFORM,
   DesignAgentDrawerView,
   DrawerFooter,
+  replayCompletedNotifications,
   runGenerateFlow,
   sourceDetectedLabel,
 } from "../DesignAgentDrawer"
+import { markCompleted, markPending, pendingCompleted } from "../notificationStore"
 import { designAgentApi } from "../../../lib/api"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
@@ -280,5 +283,233 @@ describe("NavigationContext drawer union (AC10)", () => {
       "utf8",
     )
     expect(navSrc).toContain('"design-agent"')
+  })
+})
+
+// ─── P5-02: Scenario B floor — conditional inputs + request-body shape ───────
+
+describe("Scenario B fallback inputs (P5-02 AC6)", () => {
+  function render(props: Partial<Parameters<typeof DesignAgentDrawerView>[0]> = {}) {
+    return renderToStaticMarkup(
+      React.createElement(DesignAgentDrawerView, {
+        open: true,
+        onOpenChange: noop,
+        prdId: 1,
+        figmaFileKey: null,
+        showToast: noop,
+        ...props,
+      }),
+    )
+  }
+
+  it("renders the website-URL + manual color + font inputs when no Figma (AC6)", () => {
+    const html = render({ figmaFileKey: null })
+    expect(html).toContain('id="dap-website-url"')
+    expect(html).toContain('id="dap-manual-color"')
+    expect(html).toContain('id="dap-manual-font"')
+    // The color picker is a native <input type="color"> (attribute order is
+    // JSX-source order: type precedes id).
+    expect(html).toMatch(/type="color"[^>]*id="dap-manual-color"/)
+  })
+
+  it("hides all three inputs when a Figma file key is present (AC6)", () => {
+    const html = render({ figmaFileKey: "fk" })
+    expect(html).not.toContain('id="dap-website-url"')
+    expect(html).not.toContain('id="dap-manual-color"')
+    expect(html).not.toContain('id="dap-manual-font"')
+  })
+})
+
+describe("buildGenerateParams request-body shape (P5-02 AC7)", () => {
+  const base = {
+    prdId: 9,
+    platform: "both" as const,
+    instructions: "",
+    figmaFileKey: null,
+  }
+
+  it("includes website_url + manual_design when a URL, color and font are set (AC7)", () => {
+    const params = buildGenerateParams({
+      ...base,
+      websiteUrl: "https://acme.com",
+      manualColor: "#3b82f6",
+      manualFont: "Inter",
+    })
+    expect(params.website_url).toBe("https://acme.com")
+    expect(params.manual_design).toEqual({
+      primary_color: "#3b82f6",
+      font_family: "Inter",
+    })
+  })
+
+  it("nulls website_url + manual_design when nothing is supplied (AC7)", () => {
+    const params = buildGenerateParams({
+      ...base,
+      websiteUrl: "",
+      manualColor: "#3b82f6", // default color, but no font name → not enough
+      manualFont: "",
+    })
+    expect(params.website_url).toBeNull()
+    expect(params.manual_design).toBeNull()
+  })
+
+  it("still threads figma_file_key and platform unchanged (AC7/AC3)", () => {
+    const params = buildGenerateParams({
+      prdId: 5,
+      platform: "mobile",
+      instructions: "dark theme",
+      figmaFileKey: "FK",
+      websiteUrl: "https://ignored.example", // present but Figma wins server-side
+      manualColor: "#000000",
+      manualFont: "Roboto",
+    })
+    expect(params.prd_id).toBe(5)
+    expect(params.target_platform).toBe("mobile")
+    expect(params.figma_file_key).toBe("FK")
+    expect(params.instructions).toBe("dark theme")
+  })
+})
+
+describe("DesignAgentDrawer prop signature unchanged (P5-02 AC9)", () => {
+  it("renders with the existing prop set (no required new props)", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DesignAgentDrawerView, {
+        open: true,
+        onOpenChange: noop,
+        prdId: 42,
+        figmaFileKey: null,
+        showToast: noop,
+        // onGenerated is optional and omitted — proves the signature is unchanged
+      }),
+    )
+    expect(html).toContain("Generate Prototype")
+  })
+})
+
+// ─── P5-09: notification persistence delta (re-show on reload + acknowledge) ──
+
+describe("notification persistence (P5-09)", () => {
+  function makeSessionStorage(): Storage {
+    let store: Record<string, string> = {}
+    return {
+      get length(): number {
+        return Object.keys(store).length
+      },
+      getItem: (k: string): string | null => (k in store ? store[k] : null),
+      setItem: (k: string, v: string): void => {
+        store[k] = String(v)
+      },
+      removeItem: (k: string): void => {
+        delete store[k]
+      },
+      clear: (): void => {
+        store = {}
+      },
+      key: (i: number): string | null => Object.keys(store)[i] ?? null,
+    }
+  }
+
+  // `unknown as` breaks the lib.dom `Window` typing so a node-env stub can be
+  // installed and then set back to undefined (the SSR / no-storage case).
+  const testGlobal = globalThis as unknown as {
+    window?: { sessionStorage: Storage }
+  }
+
+  function installStorage() {
+    testGlobal.window = { sessionStorage: makeSessionStorage() }
+  }
+
+  function removeWindow() {
+    testGlobal.window = undefined
+  }
+
+  afterEach(() => {
+    removeWindow()
+  })
+
+  it("mount re-shows a completed entry once, then acknowledges it (AC2)", () => {
+    installStorage()
+    markCompleted(7, "Open the PRD's Design section to view it.")
+
+    const showToast = vi.fn()
+    replayCompletedNotifications(showToast) // simulates the mount effect
+    expect(showToast).toHaveBeenCalledTimes(1)
+    expect(showToast).toHaveBeenCalledWith(
+      "Prototype ready",
+      "Open the PRD's Design section to view it.",
+    )
+
+    // A second mount (still same session) must NOT re-show — it was acknowledged.
+    const showToast2 = vi.fn()
+    replayCompletedNotifications(showToast2)
+    expect(showToast2).not.toHaveBeenCalled()
+  })
+
+  it("does NOT re-show a pending (not-yet-complete) entry on mount (AC3)", () => {
+    installStorage()
+    markPending(9)
+
+    const showToast = vi.fn()
+    replayCompletedNotifications(showToast)
+    expect(showToast).not.toHaveBeenCalled()
+  })
+
+  it("records completion in sessionStorage while the live toast still fires (AC5)", async () => {
+    installStorage()
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 9,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 7, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: true,
+    })
+    await genResult
+    await Promise.resolve()
+
+    // Live toast unchanged (still fires this page life)…
+    expect(showToast).toHaveBeenCalledWith("Prototype ready", expect.any(String))
+    // …AND the completion is persisted so a reload can re-show it.
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 7, sub: "Open the PRD's Design section to view it." },
+    ])
+  })
+
+  it("SSR-renders the drawer without throwing when storage is unavailable (AC6)", () => {
+    removeWindow()
+    expect(() =>
+      renderToStaticMarkup(
+        React.createElement(DesignAgentDrawerView, {
+          open: true,
+          onOpenChange: noop,
+          prdId: 1,
+          figmaFileKey: null,
+          showToast: noop,
+        }),
+      ),
+    ).not.toThrow()
+  })
+
+  it("keeps the view's required prop set unchanged after the persistence delta (AC8)", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DesignAgentDrawerView, {
+        open: true,
+        onOpenChange: noop,
+        prdId: 3,
+        figmaFileKey: null,
+        showToast: noop,
+        // no persistence-related prop added — the store is internal
+      }),
+    )
+    expect(html).toContain("Generate Prototype")
   })
 })

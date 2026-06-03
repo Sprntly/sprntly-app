@@ -331,6 +331,9 @@ async def test_smoke_emits_cost_summary_log(env, monkeypatch, caplog):
     line = cost_lines[0]
     for token in ("prototype_id=4242", "scenario=A", "status=complete", "est_cost_usd=", "iters="):
         assert token in line, f"missing {token!r} in {line!r}"
+    # P5-08 AC1/AC5: the scaffold line carries the FULL 11-field set + mode=scaffold.
+    _assert_full_field_set(line)
+    assert "mode=scaffold" in line.split(), f"expected mode=scaffold token in {line!r}"
     # No PII / no prompt body / no API key in the cost line (Rule #24).
     assert secret_user not in line
     assert "sk-" not in line
@@ -363,6 +366,249 @@ async def test_smoke_runner_failure_marks_failed(env, monkeypatch):
     assert row["status"] == "failed"
     assert "status=error" in (row.get("error") or "")
     assert not row.get("bundle_url"), "no bundle should be staged on the failure path"
+
+
+# ─── P5-08: per-mode cost-summary contract (telemetry verify + lock) ────────
+#
+# The structured cost-summary line already exists (P1-04 `log_llm_run`) and is
+# wired at all three runner sites — scaffold (`design_agent.run.complete`,
+# mode=scaffold), iterate (`design_agent.run.iterate`, mode=iterate), and
+# manual-edit (`design_agent.run.manual_edit`, mode=manual). These tests LOCK the
+# per-mode contract: every mode emits its line with the correct mode/scenario
+# labels and the full 11-field set, carrying identifiers + token counts only.
+#
+# Each test drives the runner entrypoint DIRECTLY with the mocked client (the
+# always-on pattern of test_smoke_emits_cost_summary_log) — the cost line is
+# emitted regardless of the toolchain-dependent build/stage step, so no Node/Vite
+# guard is needed and the LLM is never actually called.
+
+# The 11-field cost-summary contract (BUILD-PHASES §Phase 5 deliverable 8).
+# Asserted as space-delimited tokens so `input_tokens=` is never satisfied by the
+# `cached_input_tokens=` substring.
+_COST_OP = {
+    "scaffold": "design_agent.run.complete",
+    "iterate": "design_agent.run.iterate",
+    "manual": "design_agent.run.manual_edit",
+}
+_FULL_FIELD_KEYS = (
+    "prototype_id=",
+    "scenario=",
+    "mode=",
+    "iters=",
+    "cached_input_tokens=",
+    "input_tokens=",
+    "output_tokens=",
+    "duration_ms=",
+    "est_cost_usd=",
+    "status=",
+    "error_class=",
+)
+_SYS_BLOCK = {
+    "type": "text",
+    "text": "system prompt",
+    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+}
+
+
+def _user_msg(text: str) -> dict:
+    return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+
+def _install_mock(monkeypatch) -> None:
+    """Patch where it's USED (runner-local name) + stub the Figma token lookup so
+    the run is hermetic. A fresh 2-iter mock per get_design_agent_client() call —
+    each runner entrypoint calls it once, so each run consumes its own side_effect
+    pair from position 0 (no cross-run replay leakage)."""
+    monkeypatch.setattr(
+        "app.design_agent.runner.get_design_agent_client",
+        lambda: _mock_design_agent_client(),
+    )
+    monkeypatch.setattr(
+        "app.design_agent.runner._resolve_figma_access_token", lambda k: None
+    )
+
+
+def _cost_line(caplog, op_prefix: str) -> str:
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith(op_prefix)
+    ]
+    assert len(lines) == 1, f"expected exactly one {op_prefix!r} line, got {lines}"
+    return lines[0]
+
+
+def _assert_full_field_set(line: str) -> None:
+    """Every one of the 11 contract fields is present as its own space-delimited
+    token — a missing field fails. Token-level (not substring) so the
+    `cached_input_tokens=` / `input_tokens=` overlap can't mask an absent field."""
+    tokens = line.split()
+    for key in _FULL_FIELD_KEYS:
+        assert any(t.startswith(key) for t in tokens), f"missing {key!r} in {line!r}"
+
+
+async def _run_scaffold(monkeypatch, caplog, *, scenario="A", user_text="build a screen"):
+    _install_mock(monkeypatch)
+    from app.design_agent.runner import generate_prototype
+
+    with caplog.at_level(logging.INFO):
+        result, _vfs = await generate_prototype(
+            prototype_id=4242,
+            workspace_id="app",
+            system_blocks=[dict(_SYS_BLOCK)],
+            user_message=_user_msg(user_text),
+            figma_file_key=None,
+            scenario=scenario,
+        )
+    assert result.status == "complete", f"scaffold run not complete: {result.status}"
+    return result
+
+
+async def _run_iterate(monkeypatch, caplog, *, scenario="A", user_text="tweak the header", source=None):
+    _install_mock(monkeypatch)
+    from app.design_agent.runner import iterate_prototype
+
+    with caplog.at_level(logging.INFO):
+        result, _vfs = await iterate_prototype(
+            prototype_id=4343,
+            workspace_id="app",
+            system_blocks=[dict(_SYS_BLOCK)],
+            user_message=_user_msg(user_text),
+            current_source=source or {"src/App.tsx": "export default function App(){return null}"},
+            figma_file_key=None,
+            scenario=scenario,
+        )
+    assert result.status == "complete", f"iterate run not complete: {result.status}"
+    return result
+
+
+async def _run_manual(monkeypatch, caplog, *, scenario="A", user_text="commit the change", source=None):
+    _install_mock(monkeypatch)
+    from app.design_agent.runner import manual_edit_prototype
+
+    with caplog.at_level(logging.INFO):
+        result, _vfs = await manual_edit_prototype(
+            prototype_id=4444,
+            workspace_id="app",
+            system_blocks=[dict(_SYS_BLOCK)],
+            user_message=_user_msg(user_text),
+            current_source=source or {"src/App.tsx": "export default function App(){return null}"},
+            figma_file_key=None,
+            scenario=scenario,
+        )
+    assert result.status == "complete", f"manual-edit run not complete: {result.status}"
+    return result
+
+
+async def test_iterate_emits_cost_summary_mode_iterate(env, monkeypatch, caplog):
+    """AC2: an iterate run emits one design_agent.run.iterate line with
+    mode=iterate, the run's scenario label, and the full 11-field set."""
+    await _run_iterate(monkeypatch, caplog, scenario="A")
+    line = _cost_line(caplog, _COST_OP["iterate"])
+    assert "mode=iterate" in line.split(), f"expected mode=iterate token in {line!r}"
+    assert "scenario=A" in line.split(), f"expected scenario=A token in {line!r}"
+    assert "status=complete" in line.split(), f"expected status=complete in {line!r}"
+    _assert_full_field_set(line)
+
+
+async def test_manual_edit_emits_cost_summary_mode_manual(env, monkeypatch, caplog):
+    """AC3: a manual-edit run emits one design_agent.run.manual_edit line with
+    mode=manual (the runner literal — NOT 'manual-edit') and the full field set."""
+    await _run_manual(monkeypatch, caplog, scenario="A")
+    line = _cost_line(caplog, _COST_OP["manual"])
+    assert "mode=manual" in line.split(), f"expected mode=manual token in {line!r}"
+    assert "mode=manual-edit" not in line, "mode label must be the runner literal 'manual'"
+    assert "status=complete" in line.split(), f"expected status=complete in {line!r}"
+    _assert_full_field_set(line)
+
+
+async def test_cost_lines_have_correct_mode_labels(env, monkeypatch, caplog):
+    """AC4: the three modes carry mode=scaffold / mode=iterate / mode=manual
+    respectively — not swapped. Each line's mode token matches its operation."""
+    await _run_scaffold(monkeypatch, caplog)
+    await _run_iterate(monkeypatch, caplog)
+    await _run_manual(monkeypatch, caplog)
+
+    expected_mode = {"scaffold": "scaffold", "iterate": "iterate", "manual": "manual"}
+    for key, op in _COST_OP.items():
+        line = _cost_line(caplog, op)
+        tokens = line.split()
+        assert f"mode={expected_mode[key]}" in tokens, (
+            f"{op} line missing mode={expected_mode[key]}: {line!r}"
+        )
+        # Not swapped: no OTHER mode label appears on this line.
+        for other_key, other_mode in expected_mode.items():
+            if other_key != key:
+                assert f"mode={other_mode}" not in tokens, (
+                    f"{op} line carries wrong mode={other_mode}: {line!r}"
+                )
+
+
+async def test_cost_lines_carry_full_field_set(env, monkeypatch, caplog):
+    """AC5: every mode's line contains all 11 named fields; a missing field
+    fails the test."""
+    await _run_scaffold(monkeypatch, caplog)
+    await _run_iterate(monkeypatch, caplog)
+    await _run_manual(monkeypatch, caplog)
+    for op in _COST_OP.values():
+        _assert_full_field_set(_cost_line(caplog, op))
+
+
+async def test_cost_lines_no_content_leak(env, monkeypatch, caplog):
+    """AC8 (Rule #24): no PRD / source / prompt content leaks into any
+    cost-summary line — identifiers + token counts only."""
+    secret_user = "ZZZ_SECRET_USER_PROMPT_ZZZ"
+    secret_src = "QQQ_SECRET_SOURCE_BODY_QQQ"
+    seeded = {"src/App.tsx": f"// {secret_src}\nexport default function App(){{return null}}"}
+
+    await _run_scaffold(monkeypatch, caplog, user_text=secret_user)
+    await _run_iterate(monkeypatch, caplog, user_text=secret_user, source=dict(seeded))
+    await _run_manual(monkeypatch, caplog, user_text=secret_user, source=dict(seeded))
+
+    for op in _COST_OP.values():
+        line = _cost_line(caplog, op)
+        assert secret_user not in line, f"user-prompt content leaked into {op} line: {line!r}"
+        assert secret_src not in line, f"source content leaked into {op} line: {line!r}"
+        assert "sk-" not in line, f"api-key-shaped token in {op} line: {line!r}"
+
+
+def test_runner_has_three_cost_call_sites():
+    """AC6: runner.py calls log_llm_run at exactly three sites (scaffold,
+    iterate, manual-edit), each with its operation + mode literal. A new run mode
+    added without the cost line drops the count and fails this guard."""
+    import app.design_agent.runner as runner_mod
+
+    src = Path(runner_mod.__file__).read_text(encoding="utf-8")
+    call_sites = re.findall(r"\blog_llm_run\(", src)
+    assert len(call_sites) == 3, (
+        f"expected 3 log_llm_run call sites in runner.py, found {len(call_sites)}"
+    )
+    for op in _COST_OP.values():
+        assert f'operation="{op}"' in src, f"missing operation={op!r} call in runner.py"
+    for mode in ("scaffold", "iterate", "manual"):
+        assert f'"mode": "{mode}"' in src, f"missing mode={mode!r} identifier in runner.py"
+
+
+def test_llm_telemetry_unchanged():
+    """AC7: the shared log_llm_run primitive's signature is the locked P1-04
+    contract — keyword-only operation/identifier/usage/duration_ms/status/model,
+    optional error_class defaulting None, and **extra. P5-08 verifies adoption; it
+    never edits the primitive."""
+    import inspect
+
+    from app.llm_telemetry import log_llm_run
+
+    params = inspect.signature(log_llm_run).parameters
+    for name in ("operation", "identifier", "usage", "duration_ms", "status", "model"):
+        assert name in params, f"log_llm_run lost required param {name!r}"
+        assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, (
+            f"{name} must stay keyword-only"
+        )
+    assert params["error_class"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["error_class"].default is None
+    assert any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    ), "log_llm_run must keep **extra"
 
 
 # ─── Full end-to-end happy path (real Vite build — toolchain-guarded) ───────
@@ -438,3 +684,178 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
         f"prototype_id={prototype_id}" in ln and "status=complete" in ln
         for ln in cost_lines
     ), f"no design_agent.run.complete cost line for prototype {prototype_id}: {cost_lines}"
+
+
+# ─── F4 scenario matrix: B + 0 happy-path smokes (P5-10) ────────────────────
+#
+# Clone of test_scenario_a_smoke's shape — same FakeSupabaseClient + mocked-LLM +
+# tmp-storage + real-`vite build` harness, toolchain-guarded identically. These
+# drive the REAL generate route, so `infer_scenario_from_inputs` runs for real
+# (website_url + no Figma → 'B'; nothing → '0'); the scenario label is not stubbed.
+# Scenario C is intentionally absent (dropped 2026-06-02, markdown-export-only).
+
+
+@_skip_no_toolchain
+async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
+    """Scenario B (P5-10 AC2): a website URL + NO Figma. The P5-01 extractor is
+    mocked (no live browser in CI), but the run still flows through the real
+    generate route → `infer_scenario_from_inputs` → real `vite build`, proving
+    scenario=B derivation, `prototypes.website_url` persistence (P5-02), and the
+    anchor-id bundle end-to-end (AD4)."""
+    monkeypatch.setattr(
+        "app.design_agent.runner.get_design_agent_client",
+        lambda: _mock_design_agent_client(),
+    )
+    # No Figma in Scenario B; the figma-token resolver is stubbed only for parity
+    # with test_scenario_a_smoke (the mocked agent never calls fetch_figma anyway).
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    # Mock the P5-01 extractor at its SOURCE module — `_website_context_block`
+    # does a lazy `from app.design_agent.scenarios.website import
+    # extract_website_design_system`, so the patch must land on that module for the
+    # `from ... import` to bind the fake. Returns a fixed WebsiteDesignSystem dict
+    # so no browser runs; the run reaches the extracted-design-system branch.
+    async def _fake_extract(url: str):
+        return {
+            "primary_color": "#2563eb",
+            "background_color": "#ffffff",
+            "heading_font_family": "Inter",
+            "heading_size_scale": "48px",
+            "body_font_family": "Inter",
+            "border_radius_convention": "8px",
+            "spacing_scale_samples": ["16px", "24px"],
+            "logo_url": None,
+        }
+
+    monkeypatch.setattr(
+        "app.design_agent.scenarios.website.extract_website_design_system",
+        _fake_extract,
+    )
+    _point_storage_to_tmp(monkeypatch, tmp_path)
+    prd_id = _seed_prd(env.db)
+
+    with caplog.at_level(logging.INFO):
+        async with _login(env) as client:
+            resp = await client.post(
+                "/v1/design-agent/generate",
+                json={
+                    "prd_id": prd_id,
+                    "target_platform": "both",
+                    "instructions": "",
+                    "website_url": "https://example.com",
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["status"] == "generating"
+            prototype_id = body["prototype_id"]
+
+            row = await _poll_until(
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+            )
+
+    assert row is not None, "generation did not reach a terminal status within 60s"
+    assert row["status"] == "ready", f"generation failed: {row.get('error')!r}"
+    assert row["bundle_url"], "bundle_url is empty on a ready prototype"
+
+    # AC2: prototypes.website_url is persisted from the request; no Figma key.
+    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id="app")
+    assert persisted is not None
+    assert persisted["website_url"] == "https://example.com", (
+        f"website_url not persisted: {persisted.get('website_url')!r}"
+    )
+    assert not persisted["figma_file_key"], "Scenario B must carry no Figma key"
+
+    # AC2: served bundle exists and carries data-anchor-id (AD4 closure).
+    index_path = Path(unquote(urlparse(row["bundle_url"]).path))
+    assert index_path.exists(), f"bundle entry not on disk at {index_path}"
+    bundle_dir = index_path.parent
+    files = [p for p in sorted(bundle_dir.rglob("*")) if p.is_file()]
+    blob = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in files)
+    assert blob, "served bundle is empty"
+    assert ANCHOR_ID_RE.search(blob), (
+        f"no data-anchor-id=<8-hex> in the served Scenario B bundle under {bundle_dir}. "
+        f"Files: {[p.name for p in files]}"
+    )
+
+    # AC2: the cost-summary line carries scenario=B (derived at the route by
+    # infer_scenario_from_inputs: website_url present + no Figma → 'B').
+    cost_lines = [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith("design_agent.run.complete")
+    ]
+    assert any(
+        f"prototype_id={prototype_id}" in ln and "scenario=B" in ln.split()
+        for ln in cost_lines
+    ), f"no scenario=B cost line for prototype {prototype_id}: {cost_lines}"
+
+
+@_skip_no_toolchain
+async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
+    """Scenario 0 (P5-10 AC3): no Figma, no website URL, no manual design — the
+    generic path. `infer_scenario_from_inputs` returns {'0'}; the run still
+    reaches ready with an anchor-id bundle and all three source columns NULL."""
+    monkeypatch.setattr(
+        "app.design_agent.runner.get_design_agent_client",
+        lambda: _mock_design_agent_client(),
+    )
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    _point_storage_to_tmp(monkeypatch, tmp_path)
+    prd_id = _seed_prd(env.db)
+
+    with caplog.at_level(logging.INFO):
+        async with _login(env) as client:
+            resp = await client.post(
+                "/v1/design-agent/generate",
+                json={
+                    "prd_id": prd_id,
+                    "target_platform": "both",
+                    "instructions": "",
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["status"] == "generating"
+            prototype_id = body["prototype_id"]
+
+            row = await _poll_until(
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+            )
+
+    assert row is not None, "generation did not reach a terminal status within 60s"
+    assert row["status"] == "ready", f"generation failed: {row.get('error')!r}"
+    assert row["bundle_url"], "bundle_url is empty on a ready prototype"
+
+    # AC3: all three source columns are NULL (no Figma / website / GitHub).
+    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id="app")
+    assert persisted is not None
+    assert not persisted["figma_file_key"], (
+        f"figma_file_key not NULL: {persisted.get('figma_file_key')!r}"
+    )
+    assert not persisted["website_url"], (
+        f"website_url not NULL: {persisted.get('website_url')!r}"
+    )
+    assert not persisted["github_installation_id"], (
+        f"github_installation_id not NULL: {persisted.get('github_installation_id')!r}"
+    )
+
+    # AC3: served bundle exists and carries data-anchor-id.
+    index_path = Path(unquote(urlparse(row["bundle_url"]).path))
+    assert index_path.exists(), f"bundle entry not on disk at {index_path}"
+    bundle_dir = index_path.parent
+    files = [p for p in sorted(bundle_dir.rglob("*")) if p.is_file()]
+    blob = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in files)
+    assert blob, "served bundle is empty"
+    assert ANCHOR_ID_RE.search(blob), (
+        f"no data-anchor-id=<8-hex> in the served Scenario 0 bundle under {bundle_dir}. "
+        f"Files: {[p.name for p in files]}"
+    )
+
+    # AC3: the cost-summary line carries scenario=0 (no source inputs → generic).
+    cost_lines = [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith("design_agent.run.complete")
+    ]
+    assert any(
+        f"prototype_id={prototype_id}" in ln and "scenario=0" in ln.split()
+        for ln in cost_lines
+    ), f"no scenario=0 cost line for prototype {prototype_id}: {cost_lines}"

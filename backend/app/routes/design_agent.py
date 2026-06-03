@@ -41,12 +41,18 @@ import hashlib
 import logging
 import os
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
+from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
+from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
+    PUBLIC_COMMENT_LIMITER,
+    PUBLIC_TOKEN_LIMITER,
+)
 from app.db.prds import get_prd_rendered
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
@@ -115,12 +121,24 @@ def _require_feature_enabled() -> None:
 # ─── Schemas ────────────────────────────────────────────────────────────────
 
 
+class ManualDesignInput(BaseModel):
+    """P5-02: the absolute Scenario-B floor — a user-supplied brand color + font
+    that styles the prototype even when there is no Figma and no extractable
+    website design system (the noon-Day-11 manual cut). Both fields required when
+    the object is present; the whole object is optional on the request."""
+
+    primary_color: str = Field(..., min_length=1)   # e.g. "#3b82f6"
+    font_family: str = Field(..., min_length=1)      # e.g. "Inter"
+
+
 class GenerateRequest(BaseModel):
     prd_id: int = Field(..., gt=0)
     target_platform: str = Field("both")  # "desktop" | "mobile" | "both"
     instructions: str = Field("")
     figma_file_key: str | None = None     # explicit; auto-detection via the
     #                                       connector lookup lands in a later phase.
+    website_url: str | None = None        # P5-02: Scenario B fallback source
+    manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
@@ -134,7 +152,11 @@ class GenerateResponse(BaseModel):
 # ─── Routes ───────────────────────────────────────────────────────────────
 
 
-@router.post("/generate", response_model=GenerateResponse)
+@router.post(
+    "/generate",
+    response_model=GenerateResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def generate(
     body: GenerateRequest,
     session: dict = Depends(require_app_session),
@@ -171,7 +193,7 @@ async def generate(
         instructions=body.instructions,
         target_platform=body.normalised_platform(),
         figma_file_key=body.figma_file_key,
-        website_url=None,             # populated in P5-02 (Scenario B)
+        website_url=body.website_url,  # P5-02: Scenario B source snapshot
         github_installation_id=None,  # populated in P4-05 (Scenario C)
     )
 
@@ -183,6 +205,8 @@ async def generate(
             target_platform=body.normalised_platform(),
             instructions=body.instructions,
             figma_file_key=body.figma_file_key,
+            website_url=body.website_url,
+            manual_design=body.manual_design,
         )
     )
     _inflight_tasks.add(task)
@@ -299,6 +323,8 @@ async def _run_generation_bg(
     target_platform: str,
     instructions: str,
     figma_file_key: str | None,
+    website_url: str | None = None,
+    manual_design: ManualDesignInput | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -311,7 +337,17 @@ async def _run_generation_bg(
     """
     try:
         prd_md = _load_prd_body(prd_id)
-        figma_block = _figma_context_block(figma_file_key)
+        # Single "design source" slot. Figma always wins when present (AC3) — the
+        # website block is not even built in that case. When there is no Figma,
+        # Scenario B (extracted/manual website design system) takes the slot;
+        # `_website_context_block` returns None when there is neither a website
+        # URL nor manual hints, so we fall back to the generic Figma string
+        # ("(no Figma source detected)").
+        website_block = (
+            None if figma_file_key
+            else await _website_context_block(website_url, manual_design)
+        )
+        source_block = website_block or _figma_context_block(figma_file_key)
 
         # Exactly one system block; cache_control at the END of the stable
         # prefix (AD2 / TICKET_STANDARD §2 LLM-calling AC). The agent loop reads
@@ -325,7 +361,7 @@ async def _run_generation_bg(
             prd_md=prd_md,
             target_platform=target_platform,
             instructions=instructions,
-            figma_frames=figma_block,
+            figma_frames=source_block,
         )
         user_message = {
             "role": "user",
@@ -339,7 +375,7 @@ async def _run_generation_bg(
         # always False, so C never fires here regardless of inputs.
         scenario_set = infer_scenario_from_inputs(
             figma_file_key=figma_file_key,
-            website_url=None,               # P5-02 populates
+            website_url=website_url,        # P5-02: derives 'B' (url, no figma) / '0'
             github_installation_id=None,    # P4-05 populates
             prd_references_codebase=False,  # P4-05 implements the detector
         )
@@ -563,6 +599,163 @@ def _figma_context_block(figma_file_key: str | None) -> str:
     )
 
 
+def _is_usable_color(value: str | None) -> bool:
+    """True iff `value` is a real, non-transparent color worth feeding the scaffold.
+
+    Rejects ``None``, empty/whitespace, the literal ``transparent``, and any
+    zero-alpha ``rgba(...)`` / ``hsla(...)`` (alpha component == 0). Everything
+    else (hex, ``rgb()``, named colors, non-zero-alpha ``rgba()``) is usable.
+
+    Why this is load-bearing (P5-01 verifier finding, 2026-06-02): the extractor's
+    own ``_below_confidence`` guard only checks for an EMPTY color string, so a
+    NON-empty transparent value like ``rgba(0,0,0,0)`` — which P5-01's live runs
+    returned as the "primary color" on Stripe/Linear (modern CSS-layered sites) —
+    passes that guard and would otherwise flow straight into the scaffold prose.
+    This is the second gate that catches it. Do NOT call this on font/logo fields.
+    """
+    if value is None:
+        return False
+    v = value.strip().lower()
+    if not v or v == "transparent":
+        return False
+    if v.startswith(("rgba(", "hsla(")) and ")" in v:
+        inner = v[v.index("(") + 1 : v.rindex(")")]
+        parts = [p.strip() for p in inner.split(",")]
+        if len(parts) == 4:
+            try:
+                if float(parts[3]) == 0.0:
+                    return False
+            except ValueError:
+                pass  # non-numeric alpha → treat as usable (don't over-reject)
+    return True
+
+
+def _manual_design_block(primary_color: str, font_family: str, *, host: str | None) -> str:
+    """Scaffold prose for user-supplied brand hints (the manual floor)."""
+    prefix = (
+        f"No design system could be extracted from {host}; "
+        if host else ""
+    )
+    return (
+        f"{prefix}Use these user-supplied brand hints as the design system. "
+        f"Primary color: {primary_color}. Heading and body font: {font_family}. "
+        "Build a clean, modern interface around this color and typography."
+    )
+
+
+def _url_only_neutral_block(host: str) -> str:
+    """Scaffold prose when a URL was given but nothing usable was extracted and
+    no manual hints are available — instruct a clean neutral palette."""
+    return (
+        f"The brand site at {host} was provided but no usable design system could "
+        "be extracted — produce a clean, neutral, modern design (no specific brand "
+        "color or font available)."
+    )
+
+
+def _extracted_design_block(
+    ds: dict[str, Any],
+    *,
+    host: str,
+    manual_design: "ManualDesignInput | None",
+) -> str:
+    """Render an extracted website design system as scaffold prose.
+
+    The COLOR fields are gated through `_is_usable_color`: a transparent /
+    zero-alpha extracted color is treated as below-confidence FOR THAT FIELD
+    ONLY — the color is then sourced from `manual_design` (if present) or a
+    neutral-palette instruction, while the good extracted font/logo/spacing
+    signal is KEPT. A transparent value NEVER reaches the prose.
+    """
+    parts: list[str] = [
+        f"Design system extracted from the brand website ({host}). "
+        "Match this visual identity in the prototype."
+    ]
+
+    primary = ds.get("primary_color")
+    if _is_usable_color(primary):
+        parts.append(f"Primary color: {primary}.")
+    elif manual_design is not None:
+        parts.append(
+            f"Primary color: {manual_design.primary_color} (user-supplied; no "
+            "usable brand color could be extracted from the site)."
+        )
+    else:
+        parts.append(
+            "No usable brand color extracted from the site — produce a clean "
+            "neutral palette."
+        )
+
+    background = ds.get("background_color")
+    if _is_usable_color(background):
+        parts.append(f"Background color: {background}.")
+
+    if ds.get("heading_font_family"):
+        parts.append(f"Heading font: {ds['heading_font_family']}.")
+    if ds.get("heading_size_scale"):
+        parts.append(f"Heading size: {ds['heading_size_scale']}.")
+    if ds.get("body_font_family"):
+        parts.append(f"Body font: {ds['body_font_family']}.")
+    if ds.get("border_radius_convention"):
+        parts.append(f"Border radius: {ds['border_radius_convention']}.")
+    spacing = ds.get("spacing_scale_samples") or []
+    if spacing:
+        parts.append(f"Spacing samples: {', '.join(spacing)}.")
+    if ds.get("logo_url"):
+        parts.append(f"Logo: {ds['logo_url']}.")
+
+    return " ".join(parts)
+
+
+async def _website_context_block(
+    website_url: str | None,
+    manual_design: "ManualDesignInput | None",
+) -> str | None:
+    """Scaffold context for Scenario B (analog of `_figma_context_block`).
+
+    Returns a prose design-system block, or ``None`` when there is no website
+    source at all (the caller then uses the Figma block / the generic
+    "(no source)" string). Precedence: extracted > manual > url-only.
+
+      1. ``website_url`` set → ``extract_website_design_system`` (P5-01). On a
+         non-``None`` dict, render it (with the transparent-color gate).
+      2. extractor ``None`` + ``manual_design`` present → manual prose.
+      3. extractor ``None`` + no manual + a URL was given → url-only neutral block.
+      4. no ``website_url`` but ``manual_design`` present → manual prose
+         (Scenario-0-with-manual-hints; the run is labelled '0' because
+         `infer_scenario_from_inputs` keys 'B' off `website_url`, but the hints
+         MUST still reach the scaffold — decision 2026-06-02, AC10).
+      5. neither → ``None``.
+
+    The P5-01 import is lazy + ImportError-guarded so the manual-floor half ships
+    independently of the extractor (the noon-Day-11 cut, AC5).
+    """
+    if website_url:
+        host = urlsplit(website_url).hostname or website_url
+        ds: dict[str, Any] | None = None
+        try:
+            from app.design_agent.scenarios.website import (
+                extract_website_design_system,
+            )
+            ds = await extract_website_design_system(website_url)
+        except ImportError:
+            ds = None  # P5-01 not merged → fall through to manual / url-only.
+        if ds is not None:
+            return _extracted_design_block(ds, host=host, manual_design=manual_design)
+        if manual_design is not None:
+            return _manual_design_block(
+                manual_design.primary_color, manual_design.font_family, host=host
+            )
+        return _url_only_neutral_block(host)
+
+    # No website_url: only the manual hints can supply a design system.
+    if manual_design is not None:
+        return _manual_design_block(
+            manual_design.primary_color, manual_design.font_family, host=None
+        )
+    return None
+
+
 # ─── Public share viewer (P2-05) ──────────────────────────────────────────
 #
 # These two routes back the unauthenticated `/p/<token>` viewer (web/app/p/[token]).
@@ -603,15 +796,34 @@ class PasscodeAttempt(BaseModel):
 
 
 @router.get("/by-token/{token}", response_model=PublicPrototypeView)
-def get_by_token(token: str) -> PublicPrototypeView:
+def get_by_token(token: str, request: Request) -> PublicPrototypeView:
     """Resolve a share_token to its viewable prototype. NO auth — the token IS
     the access. Returns 404 (never 401/403) on a bad token, a `private` row, or a
     row whose `status` is not `ready` (a generating/failed prototype is not
     viewable, and we do not disclose that it exists). `bundle_url` is withheld
     (null) for passcode mode until POST /passcode succeeds.
+
+    `request: Request` is injected by FastAPI only to source nothing user-visible —
+    the path/response_model are unchanged, so the web client contract is intact.
     """
     _require_feature_enabled()
     th = _share_token_hash(token)
+    # P5-07: per-token view rate limit (60/min/token). Mounted AFTER the feature
+    # gate (feature-off still 404s first) and BEFORE token resolution: the 429 fires
+    # on scan velocity for a VALID-FORMAT token regardless of whether it resolves, so
+    # it reveals only "you are scanning fast," never whether a token exists. A
+    # non-existent token under the limit still returns 404.
+    if not PUBLIC_TOKEN_LIMITER.check(token):
+        retry_after = PUBLIC_TOKEN_LIMITER.retry_after(token)
+        logger.info(
+            "public_token_rate_limited token_hash=%s retry_after_seconds=%s",
+            th, retry_after,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limit", "retry_after_seconds": retry_after},
+        )
+    PUBLIC_TOKEN_LIMITER.register(token)
     row = find_prototype_by_share_token(token)
     if not row or row.get("share_mode") == "private" or row.get("status") != "ready":
         # `private` is its own reason; a missing row OR a not-ready row both map
@@ -693,7 +905,11 @@ class CompleteResponse(BaseModel):
     complete_checkpoint_id: int | None
 
 
-@router.post("/{prototype_id}/complete", response_model=CompleteResponse)
+@router.post(
+    "/{prototype_id}/complete",
+    response_model=CompleteResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def post_complete(
     prototype_id: int,
     session: dict = Depends(require_app_session),
@@ -738,7 +954,11 @@ class ResumeResponse(BaseModel):
     handoffs_flagged_stale: int   # count for log/UX; the export row IS the handoff
 
 
-@router.post("/{prototype_id}/resume", response_model=ResumeResponse)
+@router.post(
+    "/{prototype_id}/resume",
+    response_model=ResumeResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_resume(
     prototype_id: int,
     session: dict = Depends(require_app_session),
@@ -778,7 +998,11 @@ class ShareResponse(BaseModel):
     share_token: str | None     # null for private, populated for public/passcode
 
 
-@router.post("/{prototype_id}/share", response_model=ShareResponse)
+@router.post(
+    "/{prototype_id}/share",
+    response_model=ShareResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_share(
     prototype_id: int,
     body: ShareRequest,
@@ -937,7 +1161,11 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
 # ─── Internal (authed) comment routes ─────────────────────────────────────
 
 
-@router.post("/{prototype_id}/comments", response_model=CommentOut)
+@router.post(
+    "/{prototype_id}/comments",
+    response_model=CommentOut,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_comment(
     prototype_id: int,
     body: CommentCreate,
@@ -983,7 +1211,11 @@ def get_comments(
     ]
 
 
-@router.patch("/{prototype_id}/comments/{cid}/resolve", response_model=CommentOut)
+@router.patch(
+    "/{prototype_id}/comments/{cid}/resolve",
+    response_model=CommentOut,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def patch_resolve_comment(
     prototype_id: int,
     cid: int,
@@ -1022,6 +1254,24 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
         raise HTTPException(status_code=404, detail="Not found")
+    # P5-07: per-IP public-comment rate limit (10/hour/IP). Mounted AFTER the 404
+    # resolution (a private/missing/not-ready prototype 404s first, so the limiter
+    # never discloses a hidden prototype's existence) and BEFORE insert_comment (the
+    # spend-meaningful write). Keyed by client IP — the same machine can spam across
+    # many tokens, so per-IP, not per-token, is the spam boundary. Null-guard mirrors
+    # the passcode route's `request.client.host if request.client else "0.0.0.0"`.
+    client_ip = request.client.host if request.client else "0.0.0.0"
+    if not PUBLIC_COMMENT_LIMITER.check(client_ip):
+        retry_after = PUBLIC_COMMENT_LIMITER.retry_after(client_ip)
+        logger.info(
+            "public_comment_rate_limited ip_present=%s retry_after_seconds=%s",
+            request.client is not None, retry_after,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limit", "retry_after_seconds": retry_after},
+        )
+    PUBLIC_COMMENT_LIMITER.register(client_ip)
     row = insert_comment(
         prototype_id=proto["id"],
         workspace_id=proto["workspace_id"],   # from the resolved row, not a session
@@ -1087,6 +1337,7 @@ from app.design_agent.runner import (
     estimate_iterate_cost,
     iterate_prototype,
 )
+from app.design_agent.rate_limit import ITERATE_LIMITER
 from app.design_agent.storage import read_source_files_for_checkpoint
 from app.db.prototype_pending_iterations import (
     QueueFullError,
@@ -1108,7 +1359,11 @@ class IterateResponse(BaseModel):
     queue_position: int                           # P3-06: derived slot in the iterate queue
 
 
-@router.post("/{prototype_id}/iterate", response_model=IterateResponse)
+@router.post(
+    "/{prototype_id}/iterate",
+    response_model=IterateResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def post_iterate(
     prototype_id: int,
     body: IterateRequest,
@@ -1136,6 +1391,26 @@ async def post_iterate(
         raise HTTPException(status_code=409, detail="Prototype is locked; Resume Iteration first")
     if proto.get("status") != "ready":
         raise HTTPException(status_code=409, detail="Prototype not ready to iterate")
+
+    # P5-04 (AD15 spend control): per-prototype iterate rate limit — 6 calls/hr.
+    # Mounted AFTER the feature/session/workspace/lock/ready gates (so a feature-off
+    # or cross-tenant request gets its 404/401 first and the limiter never leaks
+    # existence) and BEFORE enqueue_iteration (enqueue is the spend-meaningful action;
+    # a rate-limited call must not consume a queue slot). Distinct from the queue_full
+    # 429 below — that one fires when a slot can't be granted; this one fires before a
+    # slot is even requested. Estimate/confirm-plan are intentionally NOT limited here.
+    key = str(prototype_id)
+    if not ITERATE_LIMITER.check(key):
+        retry_after = ITERATE_LIMITER.retry_after(key)
+        logger.info(
+            "iterate_rate_limited prototype_id=%s retry_after_seconds=%s",
+            prototype_id, retry_after,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limit", "retry_after_seconds": retry_after},
+        )
+    ITERATE_LIMITER.register(key)
 
     # P3-06 (AD11): enqueue instead of firing a raw bg task. The queue caps at 5
     # active (pending + running) iterations per prototype; a 6th enqueue raises
@@ -1171,7 +1446,10 @@ class EstimateRequest(BaseModel):
     applied_comment_id: int | None = None
 
 
-@router.post("/{prototype_id}/iterate/estimate")
+@router.post(
+    "/{prototype_id}/iterate/estimate",
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed POST)
+)
 async def post_iterate_estimate(
     prototype_id: int,
     body: EstimateRequest,
@@ -1226,7 +1504,11 @@ class ConfirmPlanRequest(BaseModel):
     applied_comment_id: int | None = None
 
 
-@router.post("/{prototype_id}/iterate/confirm-plan", response_model=IterateResponse)
+@router.post(
+    "/{prototype_id}/iterate/confirm-plan",
+    response_model=IterateResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def post_confirm_plan(
     prototype_id: int,
     body: ConfirmPlanRequest,
@@ -1643,7 +1925,11 @@ async def _stage_iterate_run(
 # #22). Sync handlers (mirrors get_one): FastAPI runs them in the threadpool.
 
 
-@router.post("/prd-patches/{patch_id}/accept", response_model=PrdPatchOut)
+@router.post(
+    "/prd-patches/{patch_id}/accept",
+    response_model=PrdPatchOut,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_accept_patch(
     patch_id: int,
     session: dict = Depends(require_app_session),
@@ -1669,7 +1955,11 @@ def post_accept_patch(
     return PrdPatchOut(**_patch_to_out(row))
 
 
-@router.post("/prd-patches/{patch_id}/reject", response_model=PrdPatchOut)
+@router.post(
+    "/prd-patches/{patch_id}/reject",
+    response_model=PrdPatchOut,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_reject_patch(
     patch_id: int,
     session: dict = Depends(require_app_session),
@@ -1748,7 +2038,11 @@ class ManualEditResponse(BaseModel):
     queue_position: int    # always 0 — manual edit does not use the iterate queue
 
 
-@router.post("/{prototype_id}/manual-edit", response_model=ManualEditResponse)
+@router.post(
+    "/{prototype_id}/manual-edit",
+    response_model=ManualEditResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def post_manual_edit(
     prototype_id: int,
     body: ManualEditRequest,
