@@ -386,3 +386,73 @@ def test_public_routes_contract_unchanged(env):
         and "GET" in getattr(r, "methods", set())
     )
     assert get_route.response_model is env.routes.PublicPrototypeView
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# request.client None safety + 429 existence-neutrality (reviewer hardening)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_public_comment_request_client_none_no_crash(unauth, env):
+    # `request.client` can be None in some ASGI/test contexts. The per-IP comment
+    # guard must degrade to the "0.0.0.0" sentinel (per the ticket's null-guard,
+    # mirroring the passcode route) and NOT raise AttributeError on None.host.
+    # TestClient always sets a client tuple, so the None branch is unreachable over
+    # HTTP — exercise it by calling the handler with a hand-built scope whose
+    # `client` is None. (Note: the route trusts `request.client.host` only; it does
+    # NOT read X-Forwarded-For, so behind a proxy the key is the proxy IP — an
+    # accepted limitation for this in-memory, single-worker build.)
+    from starlette.requests import Request as StarletteRequest
+
+    token = _seed(share_mode="public")
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/v1/design-agent/by-token/{token}/comments",
+        "headers": [],
+        "query_string": b"",
+        "client": None,                       # <-- the case under test
+    }
+    req = StarletteRequest(scope)
+    body = env.routes.CommentCreate(anchor_id="deadbeef", body="from a clientless request")
+
+    # Must NOT raise (no NPE on None.host); the comment is written normally.
+    out = env.routes.post_comment_public(token=token, body=body, request=req)
+    assert out.author == "external"
+    assert out.status == "open"
+    # The guard fell back to the "0.0.0.0" sentinel key, so exactly one event landed
+    # there (proving the None path keyed the sentinel rather than crashing).
+    assert len(env.routes.PUBLIC_COMMENT_LIMITER._events.get("0.0.0.0", [])) == 1
+
+
+def test_token_view_429_existence_neutral_bogus_vs_real(unauth):
+    # The 429 is existence-NEUTRAL: a bogus (never-seeded) token hammered over the
+    # limit returns 429 IDENTICALLY to a real token over the limit, so the 429 signal
+    # never reveals whether a token exists. Because the limiter runs BEFORE resolution
+    # (the locked §Invisibility ordering), the bogus token's first 60 are 404 (unknown)
+    # yet the 61st still 429s — same contract as the real token's 61st. This is the
+    # security property the reviewer most wants codified.
+    real = _seed(share_mode="public")
+    bogus = str(uuid.uuid4())                 # never inserted → resolves to 404
+
+    real_url = f"/v1/design-agent/by-token/{real}"
+    for _ in range(60):
+        assert unauth.get(real_url).status_code == 200      # real + under limit
+    real_429 = unauth.get(real_url)
+
+    bogus_url = f"/v1/design-agent/by-token/{bogus}"
+    for _ in range(60):
+        assert unauth.get(bogus_url).status_code == 404      # unknown + under limit
+    bogus_429 = unauth.get(bogus_url)
+
+    # Both 61st calls 429 — existence-neutral.
+    assert real_429.status_code == 429
+    assert bogus_429.status_code == 429
+    real_detail = real_429.json()["detail"]
+    bogus_detail = bogus_429.json()["detail"]
+    assert real_detail["error"] == "rate_limit"
+    assert bogus_detail["error"] == "rate_limit"
+    assert isinstance(bogus_detail["retry_after_seconds"], int)
+    assert bogus_detail["retry_after_seconds"] >= 1
+    # Identical 429 body key set for real and bogus — no extra field leaks existence.
+    assert real_detail.keys() == bogus_detail.keys()
