@@ -39,7 +39,14 @@ from app import db
 from app import datasets as datasets_service
 from app.auth import require_session
 from app.config import settings
-from app.connectors import figma_oauth, github_app, google_oauth
+from app.connectors import (
+    clickup_oauth,
+    figma_oauth,
+    fireflies_apikey,
+    github_app,
+    google_oauth,
+    hubspot_oauth,
+)
 from app.connectors.google_drive_sync import (
     SyncConfigError,
     browse_folders,
@@ -90,6 +97,157 @@ def list_connections(_session: dict = Depends(require_session)):
     return {"connections": [_public_connection(r) for r in rows]}
 
 
+# ─────────────────────── Start-OAuth (fetch-friendly) ───────────────────────
+#
+# POST /v1/connectors/{provider}/start-oauth — returns the OAuth
+# authorize URL as JSON so the frontend can call it with a Bearer
+# token (fetch) and then navigate the browser to the returned URL.
+#
+# The legacy GET .../authorize routes (300+ redirect) only work when
+# the request carries a session cookie — browser URL-bar navigation
+# can't set an Authorization header, so the Connect button needs this
+# variant for Supabase-only sessions. Both routes remain available.
+
+
+class StartOauthIn(BaseModel):
+    dataset: str | None = None
+
+
+@router.post("/{provider}/start-oauth")
+def start_oauth(
+    provider: str,
+    body: StartOauthIn | None = None,
+    _session: dict = Depends(require_session),
+):
+    payload = body or StartOauthIn()
+
+    if provider == google_oauth.GOOGLE_DRIVE_PROVIDER:
+        state = google_oauth.sign_oauth_state(dataset=payload.dataset)
+        flow = google_oauth.build_flow()
+        url, _ = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes="true",
+            prompt="consent",
+            state=state,
+        )
+        return {"authorize_url": url}
+
+    if provider == figma_oauth.FIGMA_PROVIDER:
+        if not figma_oauth.figma_configured():
+            raise HTTPException(500, "Figma OAuth is not configured on the server")
+        url = figma_oauth.authorize_url(state=figma_oauth.sign_oauth_state())
+        return {"authorize_url": url}
+
+    if provider == github_app.GITHUB_PROVIDER:
+        if not github_app.github_oauth_configured():
+            raise HTTPException(500, "GitHub OAuth is not configured on the server")
+        url = github_app.authorize_url(state=github_app.sign_oauth_state())
+        return {"authorize_url": url}
+
+    if provider == clickup_oauth.CLICKUP_PROVIDER:
+        if not clickup_oauth.clickup_configured():
+            raise HTTPException(500, "ClickUp OAuth is not configured on the server")
+        url = clickup_oauth.authorize_url(state=clickup_oauth.sign_oauth_state())
+        return {"authorize_url": url}
+
+    if provider == hubspot_oauth.HUBSPOT_PROVIDER:
+        if not hubspot_oauth.hubspot_configured():
+            raise HTTPException(500, "HubSpot OAuth is not configured on the server")
+        url = hubspot_oauth.authorize_url(state=hubspot_oauth.sign_oauth_state())
+        return {"authorize_url": url}
+
+    raise HTTPException(
+        404,
+        f"OAuth start is not available for provider {provider!r}",
+    )
+
+
+# ─────────────────────── Test connection ───────────────────────
+#
+# POST /v1/connectors/{provider}/test — re-runs the provider's identity
+# lookup using the stored (decrypted) token. Backs the "Test connection"
+# button in the Configure drawer (commit K).
+
+
+@router.post("/{provider}/test")
+def test_connection(
+    provider: str,
+    _session: dict = Depends(require_session),
+):
+    """Re-validate a stored connection by re-running the provider's
+    identity lookup with the decrypted token.
+
+    Returns:
+        200 {ok: true, account_label, tested_at}  — token still valid
+        400 {detail}                              — provider rejected token
+        404                                       — provider not connected
+                                                    or unknown
+    """
+    from datetime import datetime, timezone
+
+    row = db.get_connection(provider)
+    if not row:
+        raise HTTPException(404, f"{provider!r} is not connected")
+
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except (TokenEncryptionError, json.JSONDecodeError) as e:
+        raise HTTPException(500, "Stored token unreadable") from e
+
+    user_obj: dict = {}
+
+    if provider == google_oauth.GOOGLE_DRIVE_PROVIDER:
+        # Drive: prove the token chain is healthy by attempting refresh.
+        try:
+            creds = google_oauth.credentials_from_token_json(
+                json.dumps(token_json)
+            )
+            if creds.expired and creds.refresh_token:
+                creds.refresh(GoogleAuthRequest())
+            user_obj = {
+                "email": row.get("google_email") or row.get("account_label") or "",
+            }
+        except Exception as e:
+            raise HTTPException(400, f"Google Drive token rejected: {e}") from e
+    elif provider == figma_oauth.FIGMA_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = figma_oauth.fetch_me(access_token) or {}
+    elif provider == github_app.GITHUB_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = github_app.fetch_authenticated_user(access_token) or {}
+    elif provider == clickup_oauth.CLICKUP_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = clickup_oauth.fetch_authenticated_user(access_token) or {}
+    elif provider == hubspot_oauth.HUBSPOT_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = hubspot_oauth.fetch_token_info(access_token) or {}
+    elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
+        api_key = token_json.get("api_key") or ""
+        user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
+    else:
+        raise HTTPException(
+            404, f"Test connection not supported for provider {provider!r}"
+        )
+
+    if not user_obj:
+        raise HTTPException(
+            400,
+            f"{provider} rejected the stored credential — disconnect and reconnect.",
+        )
+
+    label = (
+        user_obj.get("email")
+        or user_obj.get("user")
+        or user_obj.get("username")
+        or user_obj.get("login")
+        or user_obj.get("handle")
+        or user_obj.get("name")
+        or ""
+    )
+    tested_at = datetime.now(timezone.utc).isoformat()
+    return {"ok": True, "account_label": str(label), "tested_at": tested_at}
+
+
 @router.get("/google-drive/authorize")
 def google_drive_authorize(
     dataset: str | None = None,
@@ -138,8 +296,8 @@ def google_drive_callback(code: str, state: str):
         config_json=json.dumps(config),
     )
 
-    q = urlencode({"connected": google_oauth.GOOGLE_DRIVE_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    q = urlencode({"section": "connectors", "connected": google_oauth.GOOGLE_DRIVE_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
 
 
 class GoogleDriveConfigIn(BaseModel):
@@ -277,8 +435,8 @@ def figma_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
-    q = urlencode({"connected": figma_oauth.FIGMA_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    q = urlencode({"section": "connectors", "connected": figma_oauth.FIGMA_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
 
 
 @router.delete("/figma")
@@ -428,8 +586,8 @@ def github_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
-    q = urlencode({"connected": github_app.GITHUB_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/connectors?{q}")
+    q = urlencode({"section": "connectors", "connected": github_app.GITHUB_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
 
 
 @router.delete("/github")
@@ -585,6 +743,158 @@ def connector_sync_status(_session: dict = Depends(require_session)):
         })
 
     return {"connectors": connectors_out, "datasets": datasets_out}
+# ─────────────────────── ClickUp ───────────────────────
+#
+# Commit H. OAuth-only — no data sync into the corpus yet. Follow-on
+# slice will add task → markdown sync similar to Drive's pattern.
+
+
+@router.get("/clickup/callback")
+def clickup_callback(code: str, state: str):
+    clickup_oauth.verify_oauth_state(state)
+    token_json = clickup_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "ClickUp did not return an access_token")
+
+    user = clickup_oauth.fetch_authenticated_user(access_token)
+    label = user.get("email") or user.get("username") or str(user.get("id") or "")
+
+    try:
+        token_encrypted = encrypt_token_json(
+            clickup_oauth.token_payload_to_store(token_json)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        provider=clickup_oauth.CLICKUP_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes="",
+        account_label=label or None,
+        config_json=json.dumps({"user": user}) if user else "{}",
+    )
+
+    q = urlencode({"section": "connectors", "connected": clickup_oauth.CLICKUP_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+
+
+@router.delete("/clickup")
+def clickup_disconnect(_session: dict = Depends(require_session)):
+    row = db.get_connection(clickup_oauth.CLICKUP_PROVIDER)
+    if not row:
+        raise HTTPException(404, "ClickUp is not connected")
+    db.delete_connection(clickup_oauth.CLICKUP_PROVIDER)
+    return {"deleted": True, "provider": clickup_oauth.CLICKUP_PROVIDER}
+
+
+# ─────────────────────── HubSpot ───────────────────────
+#
+# Commit I. OAuth-only — no corpus sync yet.
+
+
+@router.get("/hubspot/callback")
+def hubspot_callback(code: str, state: str):
+    hubspot_oauth.verify_oauth_state(state)
+    token_json = hubspot_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "HubSpot did not return an access_token")
+
+    info = hubspot_oauth.fetch_token_info(access_token)
+    # `user` is the authenticated user's email per the token-info endpoint
+    # (https://api.hubapi.com/oauth/v1/access-tokens/{token}).
+    label = info.get("user") or info.get("hub_domain") or str(info.get("hub_id") or "")
+
+    try:
+        token_encrypted = encrypt_token_json(
+            hubspot_oauth.token_payload_to_store(token_json)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        provider=hubspot_oauth.HUBSPOT_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=" ".join(info.get("scopes") or []) if isinstance(info.get("scopes"), list) else "",
+        account_label=label or None,
+        config_json=json.dumps({"info": info}) if info else "{}",
+    )
+
+    q = urlencode({"section": "connectors", "connected": hubspot_oauth.HUBSPOT_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+
+
+@router.delete("/hubspot")
+def hubspot_disconnect(_session: dict = Depends(require_session)):
+    row = db.get_connection(hubspot_oauth.HUBSPOT_PROVIDER)
+    if not row:
+        raise HTTPException(404, "HubSpot is not connected")
+    db.delete_connection(hubspot_oauth.HUBSPOT_PROVIDER)
+    return {"deleted": True, "provider": hubspot_oauth.HUBSPOT_PROVIDER}
+
+
+# ─────────────────────── Fireflies (API key) ───────────────────────
+#
+# Commit J. Fireflies doesn't expose self-serve OAuth — auth is a user-
+# issued API key (fireflies.ai → Settings → Integrations → Fireflies API).
+# Per the Onboarding Spec line 150, "API key flow" is explicitly allowed
+# alongside OAuth. The frontend collects the key in a modal and POSTs it
+# here for validation + storage.
+
+
+class FirefliesApiKeyIn(BaseModel):
+    api_key: str
+
+    def model_post_init(self, _context) -> None:
+        if not self.api_key or not self.api_key.strip():
+            raise ValueError("api_key cannot be empty")
+
+
+@router.post("/fireflies/apikey")
+def fireflies_connect_apikey(
+    body: FirefliesApiKeyIn,
+    _session: dict = Depends(require_session),
+):
+    api_key = body.api_key.strip()
+    user = fireflies_apikey.fetch_authenticated_user(api_key)
+    if not user:
+        raise HTTPException(
+            400,
+            "Fireflies rejected this API key — double-check the value at "
+            "fireflies.ai → Settings → Integrations → Fireflies API.",
+        )
+
+    label = user.get("email") or user.get("name") or "Fireflies user"
+
+    try:
+        token_encrypted = encrypt_token_json(
+            fireflies_apikey.token_payload_to_store(api_key)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        provider=fireflies_apikey.FIREFLIES_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes="",
+        account_label=label,
+        config_json=json.dumps({"user": user}) if user else "{}",
+    )
+    return {
+        "ok": True,
+        "provider": fireflies_apikey.FIREFLIES_PROVIDER,
+        "account_label": label,
+    }
+
+
+@router.delete("/fireflies")
+def fireflies_disconnect(_session: dict = Depends(require_session)):
+    row = db.get_connection(fireflies_apikey.FIREFLIES_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Fireflies is not connected")
+    db.delete_connection(fireflies_apikey.FIREFLIES_PROVIDER)
+    return {"deleted": True, "provider": fireflies_apikey.FIREFLIES_PROVIDER}
 
 
 # ─────────────────────── GitHub webhook ───────────────────────

@@ -59,6 +59,7 @@ from app.db.prototypes import (
     flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
+    mark_awaiting_clarification,
     mark_complete,
     passcode_rate_limit_check,
     passcode_rate_limit_clear,
@@ -1419,6 +1420,23 @@ async def _run_iterate_bg(
                 workspace_id=workspace_id,
                 error="iterate agent_loop completed but emitted no files",
             )
+        elif result.status == "awaiting_clarification":
+            # F12 (P4-08): a clarifying_question terminal-PAUSE is NOT a failure.
+            # The runner already persisted the question on `pending_question`
+            # (P3-08); leave the row in a clean PAUSED state (status='ready',
+            # pending_question set, no completed_at, no error) so the P3-16
+            # answer-resume iterate is NOT 409-blocked by `post_iterate`'s
+            # `status != 'ready'` guard. Do NOT fail_prototype — that flip is
+            # exactly the bug this ticket fixes. (Iterate path only; the
+            # generate-time pause is scoped out — see P4-08 Open question.)
+            mark_awaiting_clarification(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+            )
+            logger.info(
+                "prototype_iterate_paused_awaiting_clarification prototype_id=%s",
+                prototype_id,
+            )
         else:
             # Mirror _run_generation_bg's structured failure (P2-02): surface the
             # RunResult error_message / error_class so an Anthropic failure is
@@ -1670,3 +1688,228 @@ def post_reject_patch(
     # Identifiers only — never patch_md / rationale (Rule #24 / AC12).
     logger.info("prd_patch_rejected patch_id=%s", patch_id)
     return PrdPatchOut(**_patch_to_out(row))
+
+
+# ─── F13 manual edit: commit-back (P4-02, AD23) ─────────────────────────────────
+#
+# The commit-back half of F13: when the user clicks "Save edits" in the
+# ManualEditOverlay (P4-01), the accumulated `{anchor_id, property, old_value,
+# new_value}` triples are POSTed here. Per AD23 the visual change was ALREADY
+# applied client-side (no LLM); the LLM is invoked ONLY to COMMIT the change into
+# the prototype's SOURCE (not to compute it) — exactly once per Save.
+#
+# ROUTE PLACEMENT (route-ordering catch-all): `POST /{id}/manual-edit` is a POST on
+# a 2-segment path. The `GET /{prototype_id}` catch-all (line ~268) is a GET on a
+# 1-segment path — it CANNOT shadow this (different METHOD and more segments),
+# exactly like the existing `POST /{id}/complete`, `/{id}/iterate`, `/{id}/share`
+# siblings declared after the catch-all. So this stays at EOF with the other
+# non-shadowable POSTs (mirrors the `/prd-patches/{id}/accept|reject` rationale
+# above) rather than being hoisted above the catch-all (which is reserved for NEW
+# single-segment routes like `GET /prd-patches`). Reachability is VERIFIED by a
+# real request in test_design_agent_manual_edit.py (asserts the route is hit, not
+# 422-shadowed by the int-coerced catch-all).
+#
+# QUEUE DECISION (AD23): manual edit does NOT go through the P3-06 iterate queue —
+# it is a distinct, small, 2-iter operation. It runs as a single fire-and-forget bg
+# task (held in `_inflight_tasks`, strong-ref discipline mirroring post_iterate).
+# `queue_position` is always 0 in the response (kept in the shape for client parity
+# with iterate). A manual edit that collides with an in-flight iterate is
+# last-write-wins on `current_checkpoint_id` via advance_current_checkpoint
+# (acceptable for MVP).
+#
+# Localized imports (mirror the P3-05 block near _run_iterate_bg): the manual-edit
+# runner entrypoint + prompt symbols. _stage_iterate_run / read_source_files_for_checkpoint
+# / fail_prototype / get_prototype / infer_scenario_from_inputs are already in module scope.
+from app.design_agent.prompts import (
+    DESIGN_AGENT_MANUAL_EDIT_SYSTEM,
+    render_manual_edit_user,
+)
+from app.design_agent.runner import manual_edit_prototype
+
+
+class ManualEditTriple(BaseModel):
+    """One fixed-property visual edit (P4-01 ManualEditTriple wire-shape). `old_value`
+    is the pristine value at first selection; `new_value` is the value at Save. The
+    closed `property` set matches P4-01's EditableProperty exactly."""
+    anchor_id: str = Field(..., min_length=1)
+    property: Literal["text", "font-size", "padding", "color", "background"]
+    old_value: str
+    new_value: str
+
+
+class ManualEditRequest(BaseModel):
+    # min_length=1 → 422 on empty edits; max_length=50 → a manual session is small.
+    edits: list[ManualEditTriple] = Field(..., min_length=1, max_length=50)
+
+
+class ManualEditResponse(BaseModel):
+    prototype_id: int
+    status: str            # 'generating' (kicked off in the bg)
+    queue_position: int    # always 0 — manual edit does not use the iterate queue
+
+
+@router.post("/{prototype_id}/manual-edit", response_model=ManualEditResponse)
+async def post_manual_edit(
+    prototype_id: int,
+    body: ManualEditRequest,
+    session: dict = Depends(require_app_session),
+) -> ManualEditResponse:
+    """F13/AD23: commit a batch of manual visual edits into the prototype source.
+
+    Gates (identical posture to POST /iterate): feature-flag (404 when off) +
+    require_app_session (401) + workspace filter (404 cross-tenant). Two 409s:
+      - `is_complete` (locked, F14): cannot edit until Resume Iteration.
+      - `status != 'ready'`: cannot edit a generating/failed/invalidated row.
+    On success fires `_run_manual_edit_bg` as a single bg task (NOT the iterate
+    queue) and returns status='generating', queue_position=0 in <200ms. No
+    Anthropic call in the request path (AC1/AC4 — the LLM runs once, in the bg).
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not proto:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    if proto.get("is_complete"):
+        raise HTTPException(status_code=409, detail="Prototype is locked; Resume Iteration first")
+    if proto.get("status") != "ready":
+        raise HTTPException(status_code=409, detail="Prototype not ready to edit")
+
+    # Observability (Rule #24 / AC14): identifiers only — never the edit triples
+    # (old/new values can embed user-facing copy).
+    logger.info("prototype_manual_edit_started prototype_id=%s", prototype_id)
+    task = asyncio.create_task(
+        _run_manual_edit_bg(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            body=body,
+        )
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return ManualEditResponse(
+        prototype_id=prototype_id,
+        status="generating",
+        queue_position=0,
+    )
+
+
+async def _run_manual_edit_bg(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    body: ManualEditRequest,
+) -> None:
+    """Background manual-edit run (AD23): load the current bundle source, render the
+    commit-only prompts (cache-disciplined), run the thin 2-iter agent loop, then
+    stage the result via the iterate path (a manual edit is a checkpoint ADVANCE,
+    not a first completion — reuses `_stage_iterate_run` verbatim).
+
+    STALE-ANCHOR (fail-closed, AC10): the run is NOT pre-validated for anchor
+    presence (the anchors live in the BUILT dist, not the staged `_source/` TSX).
+    The DESIGN_AGENT_MANUAL_EDIT_SYSTEM prompt instructs the agent to `search` the
+    source for each triple's element and, when it cannot resolve one, to end its
+    turn WITHOUT editing. We detect that no-target outcome as "the run ended but the
+    source is byte-identical to the seed" → `fail_prototype` with a loud
+    `manual_edit: anchor … not found` error and NO checkpoint advance. P4-01
+    surfaces the error toast from `status='failed'` + the error on the next poll.
+    Do NOT silently succeed on a missing anchor.
+    """
+    try:
+        proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+        if not proto:
+            return  # row vanished under us; nothing to edit.
+
+        checkpoint_id = proto.get("current_checkpoint_id")
+        current_source = (
+            await read_source_files_for_checkpoint(prototype_id, checkpoint_id)
+            if checkpoint_id else {}
+        )
+
+        cacheable_blocks, volatile_block = render_manual_edit_user(
+            current_source=current_source,
+            edits=[e.model_dump() for e in body.edits],
+        )
+        # System block cached at the END of the stable prefix (AD2), mirroring
+        # _run_iterate_bg. The source user prefix is cached too (its last block
+        # carries cache_control); the volatile edit-triple block does not.
+        system_blocks = [{
+            "type": "text",
+            "text": DESIGN_AGENT_MANUAL_EDIT_SYSTEM,
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }]
+        user_message = {"role": "user", "content": [*cacheable_blocks, volatile_block]}
+
+        figma_file_key = proto.get("figma_file_key")
+        scenario_set = infer_scenario_from_inputs(
+            figma_file_key=figma_file_key,
+            website_url=proto.get("website_url"),
+            github_installation_id=proto.get("github_installation_id"),
+            prd_references_codebase=False,
+        )
+        scenario_label = ",".join(sorted(scenario_set))
+
+        result, virtual_fs = await manual_edit_prototype(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            system_blocks=system_blocks,
+            user_message=user_message,
+            current_source=current_source,
+            figma_file_key=figma_file_key,
+            scenario=scenario_label,
+        )
+
+        source_changed = virtual_fs != current_source
+        if result.status == "complete" and virtual_fs and source_changed:
+            # Reuse the iterate staging path verbatim — a manual edit is a checkpoint
+            # ADVANCE (no complete_prototype, no completed_at re-stamp; F7 stable URL).
+            await _stage_iterate_run(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                virtual_fs=virtual_fs,
+                iterate_prompt="<manual edit>",
+            )
+        elif result.status == "complete":
+            # AD23 stale-anchor fail-closed: the run ended but committed NO source
+            # change → the agent could not resolve a triple's target element. Record
+            # a loud error and do NOT advance the checkpoint.
+            anchors = ", ".join(e.anchor_id for e in body.edits)
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=(
+                    f"manual_edit: anchor(s) {anchors} not found in current bundle; "
+                    f"no source change committed"
+                ),
+            )
+        else:
+            # Mirror _run_iterate_bg's structured failure: surface the RunResult
+            # error_message / error_class so an Anthropic failure (or the 2-iter
+            # max_iters cap with no committed change) is triageable.
+            error_parts = [
+                f"manual_edit agent_loop ended with status={result.status} iters={result.iters}"
+            ]
+            error_message = getattr(result, "error_message", None)
+            error_class = getattr(result, "error_class", None)
+            if error_message:
+                error_parts.append(f"error_message={error_message}")
+            if error_class:
+                error_parts.append(f"error_class={error_class}")
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=" | ".join(error_parts),
+            )
+    except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
+        # error_class only in the structured log (Rule #24 — no source / edit
+        # content); the full message goes to the row's error column.
+        logger.warning(
+            "design_agent.manual_edit_failed prototype_id=%s error_class=%s",
+            prototype_id, type(exc).__name__,
+        )
+        fail_prototype(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )

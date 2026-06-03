@@ -4,6 +4,10 @@ import { fileURLToPath, URL } from "node:url";
 import anchorId from "./vite-plugin-anchor-id";
 
 export default defineConfig({
+  // prod-portable: relative asset paths resolve under path-prefixed signed-URL
+  // serving (Supabase Storage). Absolute "/assets/..." would 404 against the
+  // storage origin root. Build-time-only; no template-version bump (P4-09).
+  base: "./",
   plugins: [
     anchorId(),
     react(),

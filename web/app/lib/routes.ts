@@ -19,7 +19,10 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   shipped: "/shipped",
   settings: "/settings",
   team: "/team",
-  connectors: "/connectors",
+  // connectors: route deleted in commit A — Settings → Connectors is the
+  // sole surface. The "connectors" ScreenId is kept in the type union for
+  // the dormant ConnectorsScreen.tsx (see commit A note in that file).
+  connectors: "/settings?section=connectors",
   sources: "/sources",
 }
 
@@ -32,7 +35,6 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/shipped": "shipped",
   "/settings": "settings",
   "/team": "team",
-  "/connectors": "connectors",
   "/sources": "sources",
 }
 

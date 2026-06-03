@@ -433,9 +433,58 @@ export const connectorsApi = {
   githubAuthorizeUrl: () => `${API_URL}/v1/connectors/github/authorize`,
   disconnectGithub: () =>
     api.delete<{ deleted: true; provider: string }>("/v1/connectors/github"),
+
+  // ---- ClickUp -------------------------------------------------------------
+  disconnectClickup: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/clickup"),
+
+  // ---- HubSpot -------------------------------------------------------------
+  disconnectHubspot: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/hubspot"),
+
+  // ---- Fireflies (API key, not OAuth) --------------------------------------
+  connectFirefliesWithApiKey: (apiKey: string) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      "/v1/connectors/fireflies/apikey",
+      { api_key: apiKey },
+    ),
+  disconnectFireflies: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/fireflies"),
   listGithubRepos: (perPage = 50) =>
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
+    ),
+
+  // ---- Generic test-connection (commit K) ---------------------------------
+  /**
+   * Re-validate a stored connection by re-running the provider's
+   * identity lookup with the decrypted token. Backs the "Test
+   * connection" button in the Configure drawer.
+   *
+   * Returns {ok, account_label, tested_at} on success; throws ApiError
+   * on 400 (token rejected) / 404 (not connected).
+   */
+  testConnection: (provider: string) =>
+    api.post<{ ok: true; account_label: string; tested_at: string }>(
+      `/v1/connectors/${encodeURIComponent(provider)}/test`,
+      {},
+    ),
+
+  // ---- Generic start-OAuth (commit F) -------------------------------------
+  /**
+   * Returns the provider's OAuth authorize URL as JSON. The caller is
+   * expected to navigate the browser to it (`window.location.href = url`).
+   *
+   * Why this exists: the legacy GET /authorize routes 307-redirect to
+   * Google/Figma/GitHub, but they require auth — and a browser URL-bar
+   * navigation can't attach the Supabase Bearer token. This endpoint
+   * runs the auth check via fetch + Bearer, then hands back the URL the
+   * browser should navigate to next.
+   */
+  startOauth: (provider: string, dataset?: string) =>
+    api.post<{ authorize_url: string }>(
+      `/v1/connectors/${encodeURIComponent(provider)}/start-oauth`,
+      dataset ? { dataset } : {},
     ),
 }
 
@@ -673,6 +722,20 @@ export const designAgentApi = {
       ...body,
       mode: body.mode ?? "execute",
     }),
+  // ── F13 manual edit (P4-01 caller / P4-02 route) ──────────────────────────
+  /** F13 (AD13/AD23) — commit a batch of light visual property edits collected
+   *  by the ManualEditOverlay. Mirrors `iterate`'s response shape (background-run
+   *  handle + queue_position). `body.edits` are de-duplicated
+   *  `{anchor_id, property, old_value, new_value}` triples; P4-02's backend route
+   *  translates them into source edits via one LLM run. 409 when the prototype is
+   *  locked (`is_complete`) or not `ready`; the route returns a clear error when
+   *  an anchor_id no longer exists in the current bundle (the overlay surfaces it
+   *  as a stale-anchor reload affordance). */
+  manualEdit: (prototypeId: number, body: { edits: ManualEditTriple[] }) =>
+    api.post<ManualEditResponse>(
+      `/v1/design-agent/${prototypeId}/manual-edit`,
+      body,
+    ),
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
@@ -688,6 +751,31 @@ export type IterateCostEstimate = {
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate (P3-05 route + P3-06 queue). */
 export type IterateResponse = {
+  prototype_id: number
+  status: string
+  queue_position: number
+}
+
+/** F13 (P4-01) — the closed set of properties the ManualEditOverlay exposes.
+ *  Border, animation, gap, margin, etc. are OUT of scope (deferred to v2 per
+ *  BUILD-PHASES.md). The wire keeps this typed so the overlay and P4-02 share
+ *  one shape end-to-end. */
+export type EditableProperty = "text" | "font-size" | "padding" | "color" | "background"
+
+/** F13 (P4-01/P4-02) — one fixed-property visual edit. The SAVED triple keys on
+ *  `anchor_id` (AD4 — one id may match N structurally-identical elements; P4-02
+ *  applies the edit to ALL N). `old_value` is the pristine value at first
+ *  selection; `new_value` is the final value at Save. */
+export type ManualEditTriple = {
+  anchor_id: string
+  property: EditableProperty
+  old_value: string
+  new_value: string
+}
+
+/** Shape returned by POST /v1/design-agent/{id}/manual-edit (P4-02). Mirrors
+ *  IterateResponse — a manual edit kicks off the same background-run + queue. */
+export type ManualEditResponse = {
   prototype_id: number
   status: string
   queue_position: number

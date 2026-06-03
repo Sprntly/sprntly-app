@@ -337,7 +337,7 @@ EXECUTE_ACTION_TOOLS: list[ToolDef] = ACTION_TOOLS                            # 
 # it is P3-05's cost-log telemetry label, not a tool-partition mode. A caller that
 # passes any non-canonical value (incl. the legacy 'iterate' label) is treated as
 # 'execute' by `tools_for_mode`'s else branch, but callers MUST pass one of these.
-_PARTITION_MODES = ("scaffold", "plan", "execute")
+_PARTITION_MODES = ("scaffold", "plan", "execute", "manual")
 
 
 def tools_for_mode(mode: str) -> list[ToolDef]:
@@ -347,6 +347,8 @@ def tools_for_mode(mode: str) -> list[ToolDef]:
       - 'execute' : all 6 action tools + all sentinels.
       - 'scaffold': all 6 action tools + scaffold-safe sentinels (clarifying_question;
                     NOT propose_prd_patch — there is no PRD-edit step at scaffold).
+      - 'manual'  : all 6 action tools + NO sentinels (P4-02, AD23 — a commit-only
+                    run never pauses or proposes a PRD patch).
     Any other mode value (incl. the legacy 'iterate' telemetry label) is treated
     as 'execute'.
 
@@ -361,6 +363,16 @@ def tools_for_mode(mode: str) -> list[ToolDef]:
     elif mode == "scaffold":
         action = EXECUTE_ACTION_TOOLS
         sentinels = [t for t in SENTINEL_TOOLS if t.name == "clarifying_question"]
+    elif mode == "manual":
+        # P4-02 (AD23): manual edit is a COMMIT-ONLY run — all 6 action tools
+        # (line_replace is the workhorse) but NO sentinels. A manual commit never
+        # pauses to ask (clarifying_question) and never proposes a PRD patch
+        # (propose_prd_patch); it mechanically commits already-decided changes and
+        # stops. This is a tool-PARTITION addition, NOT a new tool — AD17 budget
+        # unchanged (6 action, 0 sentinel here). Do NOT fall through to 'execute',
+        # which would register BOTH sentinels and break the manual-edit AC.
+        action = EXECUTE_ACTION_TOOLS
+        sentinels = []
     else:  # 'execute' (and any non-canonical value, defensively)
         action = EXECUTE_ACTION_TOOLS
         sentinels = list(SENTINEL_TOOLS)

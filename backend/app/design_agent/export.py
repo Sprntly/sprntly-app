@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db.prds import get_prd_rendered
+from app.db.prototype_comments import list_resolved_comments
 from app.db.prototypes import get_prototype
 
 logger = logging.getLogger(__name__)
@@ -60,11 +61,17 @@ async def render_export_markdown(
         raise ValueError(f"render_export_markdown: PRD {prototype['prd_id']} not found")
 
     source_files = await _read_source_files(prototype_id, checkpoint_id)
+    # SYNC read (supabase-py is sync, matching the other prototype_comments helpers) —
+    # call directly, no await, and hand the list to the pure sync `_assemble`. F16.
+    resolved_comments = list_resolved_comments(
+        prototype_id=prototype_id, workspace_id=workspace_id
+    )
     return _assemble(
         prototype=prototype,
         checkpoint=checkpoint,
         prd=prd,
         source_files=source_files,
+        resolved_comments=resolved_comments,
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -76,11 +83,18 @@ def _assemble(
     prd: dict[str, Any],
     source_files: dict[str, str],
     generated_at: str,
+    resolved_comments: list[dict[str, Any]] | None = None,
 ) -> str:
     """Pure assembly of the markdown body. Separated for testability —
     pass synthesised dicts (including a pre-loaded `source_files`) to lock
     down the output shape. Stays SYNC: the source-file read is awaited by
     `render_export_markdown` and the result handed in here.
+
+    `resolved_comments` (F16, P4-07) is pre-loaded + pre-ordered by
+    `list_resolved_comments` (by anchor_id, id); defaults to None → no Resolved
+    Feedback section. Both enrichment sections (Design Source, Resolved Feedback)
+    are conditional and append AFTER the five core sections, so the P2-08/P3-17
+    contract output is byte-identical when their data is absent.
     """
     title = prd.get("title") or f"Prototype {prototype['id']}"
     prd_md = prd.get("payload_md") or ""
@@ -140,7 +154,74 @@ def _assemble(
             parts.append("")
     else:
         parts.append("_No iteration history recorded for this checkpoint._")
+
+    # ── Enrichment sections (F16, P4-07) — appended AFTER the five core sections,
+    # in the order Design Source → Resolved Feedback. Each is conditional: when its
+    # data is absent the helper returns "" and NOTHING is emitted (no header, no
+    # placeholder), so the five-section contract output stays byte-identical for the
+    # common no-Figma + no-resolved-comments case.
+    for section in (
+        _render_design_source(prototype),
+        _render_resolved_feedback(resolved_comments or []),
+    ):
+        if section:
+            parts.append("")
+            parts.append(section)
+
     return "\n".join(parts).rstrip() + "\n"
+
+
+def _render_design_source(prototype: dict[str, Any]) -> str:
+    """Render the Design Source section (F16) — names the Figma file the prototype
+    was generated from. Returns "" (omit the section entirely) when the prototype
+    carries no `figma_file_key` (Scenario B website / Scenario 0 no-input).
+
+    Emits the BARE file key in a code span, NOT a constructed figma.com URL: the
+    codebase builds no `figma.com/file/<key>` URL anywhere, so inventing a path /
+    node-id format would be a guess. The reader pastes the key into Figma's opener.
+    """
+    figma_file_key = prototype.get("figma_file_key")
+    if not figma_file_key:
+        return ""
+    return f"## Design Source\n\nGenerated from Figma file `{figma_file_key}`."
+
+
+def _render_resolved_feedback(resolved_comments: list[dict[str, Any]]) -> str:
+    """Render the Resolved Feedback section (F16) — the prototype's resolved comment
+    threads, grouped by anchor. Returns "" (omit the section) when there are no
+    resolved comments.
+
+    `resolved_comments` arrives pre-ordered by (anchor_id, id) from
+    `list_resolved_comments`, so iteration here is deterministic — no sorting, no set
+    iteration. One `### Anchor` sub-header per distinct anchor_id; multiple comments
+    on the same anchor group under it in id order (consecutive same-anchor rows).
+
+    Each line carries the author (bold), the `resolved_at` ISO timestamp in parens
+    (falls back to "—" when null — defensive; P3-02 stamps it), then the body inline
+    after a colon (bodies are short prose, not code — not fenced). The body IS the
+    point of this section (the customer asked for "comments" in the handoff); this
+    does NOT contradict Rule #24, which governs LOG lines, not the export artifact —
+    so the body is never logged in this path.
+    """
+    if not resolved_comments:
+        return ""
+    lines: list[str] = [
+        "## Resolved Feedback",
+        "",
+        "Feedback left on the prototype and resolved before this checkpoint was locked.",
+    ]
+    current_anchor: object = object()  # sentinel: never equals a real anchor_id
+    for comment in resolved_comments:
+        anchor_id = comment.get("anchor_id") or ""
+        if anchor_id != current_anchor:
+            current_anchor = anchor_id
+            lines.append("")
+            lines.append(f"### Anchor `{anchor_id}`")
+        author = comment.get("author") or "unknown"
+        resolved_at = comment.get("resolved_at") or "—"
+        body = comment.get("body") or ""
+        lines.append(f"- **{author}** (resolved {resolved_at}): {body}")
+    return "\n".join(lines)
 
 
 def _extract_design_block(prd_md: str) -> str:

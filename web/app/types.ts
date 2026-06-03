@@ -40,7 +40,9 @@ export const APP_SCREENS: ScreenId[] = [
   "shipped",
   "settings",
   "team",
-  "connectors",
+  // "connectors" removed in commit A — standalone route deleted, Settings →
+  // Connectors is the sole surface. ScreenId kept in the type union for
+  // the dormant ConnectorsScreen.tsx (salvaged in commit D).
   "sources",
 ]
 
@@ -143,13 +145,9 @@ export const AI_CONTEXTS: Record<
     path: "/team",
     suggest: ["Who opens the brief most often?", "Suggest who to invite from Slack"],
   },
-  connectors: {
-    path: "/connectors",
-    suggest: [
-      "Which unconnected source would help most?",
-      "What would Mixpanel add?",
-    ],
-  },
+  // connectors AI_CONTEXTS entry removed in commit A (no standalone route).
+  // When the Settings → Connectors pane lands in commit D, decide whether to
+  // surface AI suggestions inside the settings shell or drop them entirely.
   sources: {
     path: "/sources",
     suggest: [
