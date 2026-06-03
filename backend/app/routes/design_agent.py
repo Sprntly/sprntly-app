@@ -48,6 +48,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
+from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
 from app.db.prds import get_prd_rendered
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
@@ -147,7 +148,11 @@ class GenerateResponse(BaseModel):
 # ─── Routes ───────────────────────────────────────────────────────────────
 
 
-@router.post("/generate", response_model=GenerateResponse)
+@router.post(
+    "/generate",
+    response_model=GenerateResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def generate(
     body: GenerateRequest,
     session: dict = Depends(require_app_session),
@@ -877,7 +882,11 @@ class CompleteResponse(BaseModel):
     complete_checkpoint_id: int | None
 
 
-@router.post("/{prototype_id}/complete", response_model=CompleteResponse)
+@router.post(
+    "/{prototype_id}/complete",
+    response_model=CompleteResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def post_complete(
     prototype_id: int,
     session: dict = Depends(require_app_session),
@@ -922,7 +931,11 @@ class ResumeResponse(BaseModel):
     handoffs_flagged_stale: int   # count for log/UX; the export row IS the handoff
 
 
-@router.post("/{prototype_id}/resume", response_model=ResumeResponse)
+@router.post(
+    "/{prototype_id}/resume",
+    response_model=ResumeResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_resume(
     prototype_id: int,
     session: dict = Depends(require_app_session),
@@ -962,7 +975,11 @@ class ShareResponse(BaseModel):
     share_token: str | None     # null for private, populated for public/passcode
 
 
-@router.post("/{prototype_id}/share", response_model=ShareResponse)
+@router.post(
+    "/{prototype_id}/share",
+    response_model=ShareResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_share(
     prototype_id: int,
     body: ShareRequest,
@@ -1121,7 +1138,11 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
 # ─── Internal (authed) comment routes ─────────────────────────────────────
 
 
-@router.post("/{prototype_id}/comments", response_model=CommentOut)
+@router.post(
+    "/{prototype_id}/comments",
+    response_model=CommentOut,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_comment(
     prototype_id: int,
     body: CommentCreate,
@@ -1167,7 +1188,11 @@ def get_comments(
     ]
 
 
-@router.patch("/{prototype_id}/comments/{cid}/resolve", response_model=CommentOut)
+@router.patch(
+    "/{prototype_id}/comments/{cid}/resolve",
+    response_model=CommentOut,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def patch_resolve_comment(
     prototype_id: int,
     cid: int,
@@ -1293,7 +1318,11 @@ class IterateResponse(BaseModel):
     queue_position: int                           # P3-06: derived slot in the iterate queue
 
 
-@router.post("/{prototype_id}/iterate", response_model=IterateResponse)
+@router.post(
+    "/{prototype_id}/iterate",
+    response_model=IterateResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def post_iterate(
     prototype_id: int,
     body: IterateRequest,
@@ -1376,7 +1405,10 @@ class EstimateRequest(BaseModel):
     applied_comment_id: int | None = None
 
 
-@router.post("/{prototype_id}/iterate/estimate")
+@router.post(
+    "/{prototype_id}/iterate/estimate",
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed POST)
+)
 async def post_iterate_estimate(
     prototype_id: int,
     body: EstimateRequest,
@@ -1431,7 +1463,11 @@ class ConfirmPlanRequest(BaseModel):
     applied_comment_id: int | None = None
 
 
-@router.post("/{prototype_id}/iterate/confirm-plan", response_model=IterateResponse)
+@router.post(
+    "/{prototype_id}/iterate/confirm-plan",
+    response_model=IterateResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def post_confirm_plan(
     prototype_id: int,
     body: ConfirmPlanRequest,
@@ -1848,7 +1884,11 @@ async def _stage_iterate_run(
 # #22). Sync handlers (mirrors get_one): FastAPI runs them in the threadpool.
 
 
-@router.post("/prd-patches/{patch_id}/accept", response_model=PrdPatchOut)
+@router.post(
+    "/prd-patches/{patch_id}/accept",
+    response_model=PrdPatchOut,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_accept_patch(
     patch_id: int,
     session: dict = Depends(require_app_session),
@@ -1874,7 +1914,11 @@ def post_accept_patch(
     return PrdPatchOut(**_patch_to_out(row))
 
 
-@router.post("/prd-patches/{patch_id}/reject", response_model=PrdPatchOut)
+@router.post(
+    "/prd-patches/{patch_id}/reject",
+    response_model=PrdPatchOut,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 def post_reject_patch(
     patch_id: int,
     session: dict = Depends(require_app_session),
@@ -1953,7 +1997,11 @@ class ManualEditResponse(BaseModel):
     queue_position: int    # always 0 — manual edit does not use the iterate queue
 
 
-@router.post("/{prototype_id}/manual-edit", response_model=ManualEditResponse)
+@router.post(
+    "/{prototype_id}/manual-edit",
+    response_model=ManualEditResponse,
+    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+)
 async def post_manual_edit(
     prototype_id: int,
     body: ManualEditRequest,
