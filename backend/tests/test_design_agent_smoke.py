@@ -684,3 +684,178 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
         f"prototype_id={prototype_id}" in ln and "status=complete" in ln
         for ln in cost_lines
     ), f"no design_agent.run.complete cost line for prototype {prototype_id}: {cost_lines}"
+
+
+# ─── F4 scenario matrix: B + 0 happy-path smokes (P5-10) ────────────────────
+#
+# Clone of test_scenario_a_smoke's shape — same FakeSupabaseClient + mocked-LLM +
+# tmp-storage + real-`vite build` harness, toolchain-guarded identically. These
+# drive the REAL generate route, so `infer_scenario_from_inputs` runs for real
+# (website_url + no Figma → 'B'; nothing → '0'); the scenario label is not stubbed.
+# Scenario C is intentionally absent (dropped 2026-06-02, markdown-export-only).
+
+
+@_skip_no_toolchain
+async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
+    """Scenario B (P5-10 AC2): a website URL + NO Figma. The P5-01 extractor is
+    mocked (no live browser in CI), but the run still flows through the real
+    generate route → `infer_scenario_from_inputs` → real `vite build`, proving
+    scenario=B derivation, `prototypes.website_url` persistence (P5-02), and the
+    anchor-id bundle end-to-end (AD4)."""
+    monkeypatch.setattr(
+        "app.design_agent.runner.get_design_agent_client",
+        lambda: _mock_design_agent_client(),
+    )
+    # No Figma in Scenario B; the figma-token resolver is stubbed only for parity
+    # with test_scenario_a_smoke (the mocked agent never calls fetch_figma anyway).
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    # Mock the P5-01 extractor at its SOURCE module — `_website_context_block`
+    # does a lazy `from app.design_agent.scenarios.website import
+    # extract_website_design_system`, so the patch must land on that module for the
+    # `from ... import` to bind the fake. Returns a fixed WebsiteDesignSystem dict
+    # so no browser runs; the run reaches the extracted-design-system branch.
+    async def _fake_extract(url: str):
+        return {
+            "primary_color": "#2563eb",
+            "background_color": "#ffffff",
+            "heading_font_family": "Inter",
+            "heading_size_scale": "48px",
+            "body_font_family": "Inter",
+            "border_radius_convention": "8px",
+            "spacing_scale_samples": ["16px", "24px"],
+            "logo_url": None,
+        }
+
+    monkeypatch.setattr(
+        "app.design_agent.scenarios.website.extract_website_design_system",
+        _fake_extract,
+    )
+    _point_storage_to_tmp(monkeypatch, tmp_path)
+    prd_id = _seed_prd(env.db)
+
+    with caplog.at_level(logging.INFO):
+        async with _login(env) as client:
+            resp = await client.post(
+                "/v1/design-agent/generate",
+                json={
+                    "prd_id": prd_id,
+                    "target_platform": "both",
+                    "instructions": "",
+                    "website_url": "https://example.com",
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["status"] == "generating"
+            prototype_id = body["prototype_id"]
+
+            row = await _poll_until(
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+            )
+
+    assert row is not None, "generation did not reach a terminal status within 60s"
+    assert row["status"] == "ready", f"generation failed: {row.get('error')!r}"
+    assert row["bundle_url"], "bundle_url is empty on a ready prototype"
+
+    # AC2: prototypes.website_url is persisted from the request; no Figma key.
+    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id="app")
+    assert persisted is not None
+    assert persisted["website_url"] == "https://example.com", (
+        f"website_url not persisted: {persisted.get('website_url')!r}"
+    )
+    assert not persisted["figma_file_key"], "Scenario B must carry no Figma key"
+
+    # AC2: served bundle exists and carries data-anchor-id (AD4 closure).
+    index_path = Path(unquote(urlparse(row["bundle_url"]).path))
+    assert index_path.exists(), f"bundle entry not on disk at {index_path}"
+    bundle_dir = index_path.parent
+    files = [p for p in sorted(bundle_dir.rglob("*")) if p.is_file()]
+    blob = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in files)
+    assert blob, "served bundle is empty"
+    assert ANCHOR_ID_RE.search(blob), (
+        f"no data-anchor-id=<8-hex> in the served Scenario B bundle under {bundle_dir}. "
+        f"Files: {[p.name for p in files]}"
+    )
+
+    # AC2: the cost-summary line carries scenario=B (derived at the route by
+    # infer_scenario_from_inputs: website_url present + no Figma → 'B').
+    cost_lines = [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith("design_agent.run.complete")
+    ]
+    assert any(
+        f"prototype_id={prototype_id}" in ln and "scenario=B" in ln.split()
+        for ln in cost_lines
+    ), f"no scenario=B cost line for prototype {prototype_id}: {cost_lines}"
+
+
+@_skip_no_toolchain
+async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
+    """Scenario 0 (P5-10 AC3): no Figma, no website URL, no manual design — the
+    generic path. `infer_scenario_from_inputs` returns {'0'}; the run still
+    reaches ready with an anchor-id bundle and all three source columns NULL."""
+    monkeypatch.setattr(
+        "app.design_agent.runner.get_design_agent_client",
+        lambda: _mock_design_agent_client(),
+    )
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    _point_storage_to_tmp(monkeypatch, tmp_path)
+    prd_id = _seed_prd(env.db)
+
+    with caplog.at_level(logging.INFO):
+        async with _login(env) as client:
+            resp = await client.post(
+                "/v1/design-agent/generate",
+                json={
+                    "prd_id": prd_id,
+                    "target_platform": "both",
+                    "instructions": "",
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["status"] == "generating"
+            prototype_id = body["prototype_id"]
+
+            row = await _poll_until(
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+            )
+
+    assert row is not None, "generation did not reach a terminal status within 60s"
+    assert row["status"] == "ready", f"generation failed: {row.get('error')!r}"
+    assert row["bundle_url"], "bundle_url is empty on a ready prototype"
+
+    # AC3: all three source columns are NULL (no Figma / website / GitHub).
+    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id="app")
+    assert persisted is not None
+    assert not persisted["figma_file_key"], (
+        f"figma_file_key not NULL: {persisted.get('figma_file_key')!r}"
+    )
+    assert not persisted["website_url"], (
+        f"website_url not NULL: {persisted.get('website_url')!r}"
+    )
+    assert not persisted["github_installation_id"], (
+        f"github_installation_id not NULL: {persisted.get('github_installation_id')!r}"
+    )
+
+    # AC3: served bundle exists and carries data-anchor-id.
+    index_path = Path(unquote(urlparse(row["bundle_url"]).path))
+    assert index_path.exists(), f"bundle entry not on disk at {index_path}"
+    bundle_dir = index_path.parent
+    files = [p for p in sorted(bundle_dir.rglob("*")) if p.is_file()]
+    blob = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in files)
+    assert blob, "served bundle is empty"
+    assert ANCHOR_ID_RE.search(blob), (
+        f"no data-anchor-id=<8-hex> in the served Scenario 0 bundle under {bundle_dir}. "
+        f"Files: {[p.name for p in files]}"
+    )
+
+    # AC3: the cost-summary line carries scenario=0 (no source inputs → generic).
+    cost_lines = [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith("design_agent.run.complete")
+    ]
+    assert any(
+        f"prototype_id={prototype_id}" in ln and "scenario=0" in ln.split()
+        for ln in cost_lines
+    ), f"no scenario=0 cost line for prototype {prototype_id}: {cost_lines}"
