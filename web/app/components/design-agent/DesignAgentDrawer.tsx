@@ -16,14 +16,25 @@
  * behaviour is covered by SSR render + direct calls to these exported units.
  */
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { designAgentApi } from "../../lib/api"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
 } from "../../lib/runDesignAgentGeneration"
+import {
+  acknowledge,
+  markCompleted,
+  markPending,
+  pendingCompleted,
+} from "./notificationStore"
 import { IconClose, IconSparkle } from "../shared/app-icons"
+
+/** P1-12 ready-completion toast copy. Reused for the live toast, the persisted
+ *  entry's sub, and the post-reload re-show so all three are byte-identical. */
+const READY_TOAST_TITLE = "Prototype ready"
+const READY_TOAST_SUB = "Open the PRD's Design section to view it."
 
 export type TargetPlatform = "desktop" | "mobile" | "both"
 
@@ -139,6 +150,9 @@ export async function runGenerateFlow({
   setSubmitting(true)
   try {
     const kickoff = await generate(params)
+    // P5-09: persist a `pending` entry so a reload mid-generation that then
+    // completes still captures the ready notification.
+    markPending(kickoff.prototype_id)
     onOpenChange(false)
     showToast(
       "Design Agent generating",
@@ -146,11 +160,13 @@ export async function runGenerateFlow({
     )
     void runGeneration({ prototypeId: kickoff.prototype_id }).then((result) => {
       if (result.ok) {
+        // P5-09: record completion BEFORE the live toast so a subsequent
+        // same-session reload can re-show it. The persistence delta is
+        // independent of the F3 opt-in — the entry is always recorded; only the
+        // *live* toast stays gated on `notifyOnReady` (unchanged from P1-12).
+        markCompleted(kickoff.prototype_id, READY_TOAST_SUB)
         if (notifyOnReady) {
-          showToast(
-            "Prototype ready",
-            "Open the PRD's Design section to view it.",
-          )
+          showToast(READY_TOAST_TITLE, READY_TOAST_SUB)
         }
       } else {
         showToast("Generation failed", result.message)
@@ -205,6 +221,24 @@ export function DrawerFooter({
   )
 }
 
+/**
+ * P5-09 — re-show any completed-but-unacknowledged ready notification that was
+ * persisted before a same-session reload, then acknowledge each so it shows
+ * exactly once per reload. `pending` entries are never re-shown (the store's
+ * `pendingCompleted` excludes them). Pure (sessionStorage via notificationStore
+ * + injected `showToast`) so the mount effect is a one-line wrapper and the
+ * behaviour is unit-testable without a DOM (the repo's vitest env is `node`,
+ * where effects do not fire under SSR render).
+ */
+export function replayCompletedNotifications(
+  showToast: (title: string, sub: string) => void,
+): void {
+  for (const n of pendingCompleted()) {
+    showToast(READY_TOAST_TITLE, n.sub)
+    acknowledge(n.prototypeId)
+  }
+}
+
 type ViewProps = DesignAgentDrawerProps & {
   showToast: (title: string, sub: string) => void
 }
@@ -226,6 +260,15 @@ export function DesignAgentDrawerView({
   const [websiteUrl, setWebsiteUrl] = useState("")
   const [manualColor, setManualColor] = useState("#3b82f6")
   const [manualFont, setManualFont] = useState("")
+
+  // P5-09: on mount, re-show any completed-but-unacknowledged notification that
+  // survived a same-session reload, then acknowledge so it shows once. Runs once
+  // regardless of open state (this effect precedes the `!open` early return, so
+  // the hook order stays stable). Effect — not render — keeps it client-only and
+  // SSR-safe; `showToast`/the store reads are stable, so `[]` is correct.
+  useEffect(() => {
+    replayCompletedNotifications(showToast)
+  }, [])
 
   if (!open) return null
 
