@@ -69,8 +69,8 @@ export function PrdScreen() {
         ) : (
           <div className="prd-body" style={{ minHeight: 280 }}>
             <EmptyPane
-              title="No PRD draft loaded"
-              hint="When your LLM generates a mini-PRD, assign `content.prd` with `metaLine`, `title`, and `sections`. Toolbar actions stay available for future wiring."
+              title="No PRD yet"
+              hint="Open a finding in your Weekly brief and choose “Generate PRD” to draft one here."
               placeholders={0}
             />
           </div>

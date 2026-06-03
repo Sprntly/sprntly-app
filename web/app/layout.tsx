@@ -3,7 +3,7 @@ import "./globals.css"
 import { AuthProvider } from "./lib/auth"
 
 export const metadata: Metadata = {
-  title: "Sprntly Demo",
+  title: "Sprntly",
 }
 
 export default function RootLayout({
