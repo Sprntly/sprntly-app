@@ -31,6 +31,43 @@ from fastapi.testclient import TestClient
 from tests._fake_supabase import FakeSupabaseClient, reset_fake_db
 
 
+# ── P5-06: default a same-origin `Origin` header onto every test HTTP client ──
+# The P5-06 CSRF backstop (`require_same_origin`) rejects authed mutating Design Agent
+# requests whose `Origin` is missing or not in `settings.origins_list`. Real browsers
+# always send `Origin`; the test clients do not by default, so without this every
+# pre-existing authed-route test would 403. We wrap BOTH client classes the suite uses —
+# starlette's sync `TestClient` AND `httpx.AsyncClient` (the e2e/smoke files drive the app
+# over `httpx.AsyncClient` + ASGITransport, a different class a function-scoped autouse
+# fixture would miss) — to default `Origin` to the app's own allow-list entry. The default
+# is `setdefault`, so the csrf negative tests that pass an explicit (foreign/empty/absent)
+# Origin still exercise the 403 path. The Origin is pulled from `settings.origins_list`
+# (derived from ALLOWED_ORIGINS — the SAME allow-list CORS uses; no second list).
+def _wrap_client_origin(cls) -> None:
+    _orig = cls.__init__
+    if getattr(_orig, "_origin_wrapped", False):
+        return
+
+    def __init__(self, *a, **kw):
+        from app.config import settings  # read lazily so per-test config reloads apply
+
+        headers = dict(kw.pop("headers", None) or {})
+        headers.setdefault("origin", settings.origins_list[0])
+        kw["headers"] = headers
+        _orig(self, *a, **kw)
+
+    __init__._origin_wrapped = True  # type: ignore[attr-defined]
+    cls.__init__ = __init__
+
+
+def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
+    import starlette.testclient as _tc
+
+    _wrap_client_origin(_tc.TestClient)
+    import httpx
+
+    _wrap_client_origin(httpx.AsyncClient)
+
+
 # Modules that import `settings` at top level and therefore need to be
 # reloaded after env vars change. Order matters: config first, then its
 # consumers, then anything that imports the consumers.
@@ -272,6 +309,39 @@ def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.Mo
         "data_dir": tmp_data_dir,
         "supabase": fake_client,
     }
+
+
+@pytest.fixture(autouse=True)
+def _reset_iterate_limiter():
+    """Per-test isolation for the Design Agent rate limiters.
+
+    `app.design_agent.rate_limit` holds process-level `SlidingWindowLimiter`
+    singletons keyed by a request attribute:
+
+      - ITERATE_LIMITER        — keyed by `prototype_id` (P5-04).
+      - PUBLIC_TOKEN_LIMITER   — keyed by the share token (P5-07).
+      - PUBLIC_COMMENT_LIMITER — keyed by the client IP (P5-07).
+
+    Tests use a fresh per-test DB whose autoincrement restarts at 1 (so iterate
+    tests reuse key "1"), and the public-comment limiter is keyed by the
+    TestClient's constant "testclient" host (so EVERY public-comment POST in the
+    whole suite shares one key). Without this reset those windows accumulate across
+    the session and unrelated tests would spuriously 429. Clearing the windows
+    (rather than reloading the module) keeps the singletons' class identity stable,
+    so isinstance checks against them still hold under full-suite ordering."""
+    try:
+        from app.design_agent.rate_limit import (
+            ITERATE_LIMITER,
+            PUBLIC_COMMENT_LIMITER,
+            PUBLIC_TOKEN_LIMITER,
+        )
+
+        ITERATE_LIMITER._events.clear()
+        PUBLIC_TOKEN_LIMITER._events.clear()
+        PUBLIC_COMMENT_LIMITER._events.clear()
+    except Exception:
+        pass
+    yield
 
 
 @pytest.fixture

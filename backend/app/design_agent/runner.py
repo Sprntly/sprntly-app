@@ -57,7 +57,7 @@ from app.design_agent.tools import (
     dispatch,
     tool_definitions_for_mode,
 )
-from app.llm_telemetry import MODEL_PRICING, RunUsage, log_llm_run
+from app.llm_telemetry import MODEL_PRICING, RunUsage, log_llm_run, should_wrap_up
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +264,7 @@ async def agent_loop(
     start = time.perf_counter()
     iters = 0
     max_tokens_retried = False
+    cost_guard_nudged = False
     # Last assistant turn's content, salvaged on a max_iters exit so a near-
     # complete build (the agent ran out of turns mid-flow) is not discarded.
     last_assistant_content: list[dict[str, Any]] = []
@@ -294,6 +295,21 @@ async def agent_loop(
                 messages=messages,
             )
             usage.add(resp.usage)
+            # AD15 cost guard: when the projected next-iteration spend would
+            # cross the soft cap, inject the EXISTING wrap-up nudge ONCE so the
+            # agent converges on a partial bundle instead of starting new files.
+            # Independent of (and coexists with) the iteration-count graduated
+            # nudge above — count vs spend are separate convergence signals. The
+            # trailing message here is still the user turn (the assistant turn is
+            # appended below), so the nudge lands alternation-safe.
+            if not cost_guard_nudged and should_wrap_up(usage, MODEL, SOFT_CAP_USD):
+                _append_text_block(messages[-1], _wrap_up_nudge(0))  # hard-stop wording
+                cost_guard_nudged = True
+                logger.info(
+                    "cost_guard.degraded prototype_id=%s mode=%s reason=soft_cap_projection "
+                    "est_cost_usd=%.4f cap=%.2f",
+                    ctx.prototype_id, mode, usage.est_cost_usd(MODEL), SOFT_CAP_USD,
+                )
 
             stop = resp.stop_reason
             content = [b.model_dump() for b in resp.content]
