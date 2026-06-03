@@ -4511,3 +4511,31 @@
 }
 .modal-close:hover { background: var(--surface-2); color: var(--ink); }
 .modal-foot .btn + .btn { margin-left: 8px; }
+
+/* ─── Configure drawer — Test connection block (commit K) ─── */
+.conn-config-test {
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.conn-config-test-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.conn-config-test-label {
+  font-size: 12.5px;
+  color: #15201b;
+  font-weight: 500;
+}
+.conn-config-test-ok {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: #0c6e4a;
+}
+.conn-config-test-err {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--danger, #C13838);
+}

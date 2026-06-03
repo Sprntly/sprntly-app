@@ -46,6 +46,9 @@ function render(
     onClose: noop,
     onDisconnect: noop,
     isDisconnecting: false,
+    onTestConnection: noop,
+    isTesting: false,
+    testResult: null,
   }
   return renderToStaticMarkup(
     React.createElement(ConfigureConnectorDrawerView, { ...defaults, ...override }),
@@ -108,12 +111,54 @@ describe("ConfigureConnectorDrawerView", () => {
           onClose: noop,
           onDisconnect: noop,
           isDisconnecting: false,
+          onTestConnection: noop,
+          isTesting: false,
+          testResult: null,
         },
         React.createElement("div", { "data-testid": "slot-content" }, "drive folder picker"),
       ),
     )
     expect(html).toContain('data-testid="slot-content"')
     expect(html).toContain("drive folder picker")
+  })
+
+  // ───── Test connection block (commit K) ─────
+
+  it("renders a Test connection block with a Test now button", () => {
+    const html = render()
+    expect(html).toContain("Test connection")
+    expect(html).toContain("Test now")
+  })
+
+  it("disables the test button while a test is in flight ('Testing…')", () => {
+    const html = render({ isTesting: true })
+    expect(html).toContain("Testing…")
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Testing…<\/button>/)
+  })
+
+  it("shows success line with account label when testResult.kind is 'ok'", () => {
+    const html = render({
+      testResult: {
+        kind: "ok",
+        accountLabel: "alice@meridian.health",
+        testedAt: "2026-06-02T18:00:00.000Z",
+      },
+    })
+    expect(html).toContain("Connection working")
+    expect(html).toContain("alice@meridian.health")
+  })
+
+  it("shows error line when testResult.kind is 'error'", () => {
+    const html = render({
+      testResult: { kind: "error", message: "Token rejected by provider" },
+    })
+    expect(html).toContain("Token rejected by provider")
+    expect(html).toMatch(/conn-config-test-err/)
+  })
+
+  it("disables Test now when there's no connection (test makes no sense)", () => {
+    const html = render({ connection: null })
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Test now<\/button>/)
   })
 
   it("renders connection state hint when connection is null but item is non-null", () => {

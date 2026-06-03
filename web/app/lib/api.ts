@@ -455,6 +455,21 @@ export const connectorsApi = {
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
     ),
 
+  // ---- Generic test-connection (commit K) ---------------------------------
+  /**
+   * Re-validate a stored connection by re-running the provider's
+   * identity lookup with the decrypted token. Backs the "Test
+   * connection" button in the Configure drawer.
+   *
+   * Returns {ok, account_label, tested_at} on success; throws ApiError
+   * on 400 (token rejected) / 404 (not connected).
+   */
+  testConnection: (provider: string) =>
+    api.post<{ ok: true; account_label: string; tested_at: string }>(
+      `/v1/connectors/${encodeURIComponent(provider)}/test`,
+      {},
+    ),
+
   // ---- Generic start-OAuth (commit F) -------------------------------------
   /**
    * Returns the provider's OAuth authorize URL as JSON. The caller is

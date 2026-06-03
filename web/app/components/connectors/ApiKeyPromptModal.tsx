@@ -43,15 +43,21 @@ export function ApiKeyPromptModalView({
 }: ApiKeyPromptModalViewProps) {
   if (!open) return null
   const canSubmit = apiKey.trim().length > 0 && !submitting
+  // The overlay is a flex container; the modal MUST be a child of it
+  // (not a sibling) — the existing CSS uses `.modal-overlay.open .modal
+  // { transform: scale(1); }` to reveal the modal, so a sibling layout
+  // leaves it stuck at scale(0.96) and invisible.
   return (
-    <>
+    <div
+      className="modal-overlay open"
+      onClick={(e) => {
+        // Backdrop click closes; clicks inside the modal shouldn't.
+        if (e.target === e.currentTarget) onClose()
+      }}
+      aria-hidden={false}
+    >
       <div
-        className="modal-overlay open"
-        onClick={onClose}
-        aria-hidden
-      />
-      <div
-        className="modal modal-sm open"
+        className="modal modal-sm"
         role="dialog"
         aria-label={`Connect ${connectorName}`}
       >
@@ -98,7 +104,7 @@ export function ApiKeyPromptModalView({
           </button>
         </div>
       </div>
-    </>
+    </div>
   )
 }
 

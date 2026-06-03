@@ -161,6 +161,92 @@ def start_oauth(
     )
 
 
+# ─────────────────────── Test connection ───────────────────────
+#
+# POST /v1/connectors/{provider}/test — re-runs the provider's identity
+# lookup using the stored (decrypted) token. Backs the "Test connection"
+# button in the Configure drawer (commit K).
+
+
+@router.post("/{provider}/test")
+def test_connection(
+    provider: str,
+    _session: dict = Depends(require_session),
+):
+    """Re-validate a stored connection by re-running the provider's
+    identity lookup with the decrypted token.
+
+    Returns:
+        200 {ok: true, account_label, tested_at}  — token still valid
+        400 {detail}                              — provider rejected token
+        404                                       — provider not connected
+                                                    or unknown
+    """
+    from datetime import datetime, timezone
+
+    row = db.get_connection(provider)
+    if not row:
+        raise HTTPException(404, f"{provider!r} is not connected")
+
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except (TokenEncryptionError, json.JSONDecodeError) as e:
+        raise HTTPException(500, "Stored token unreadable") from e
+
+    user_obj: dict = {}
+
+    if provider == google_oauth.GOOGLE_DRIVE_PROVIDER:
+        # Drive: prove the token chain is healthy by attempting refresh.
+        try:
+            creds = google_oauth.credentials_from_token_json(
+                json.dumps(token_json)
+            )
+            if creds.expired and creds.refresh_token:
+                creds.refresh(GoogleAuthRequest())
+            user_obj = {
+                "email": row.get("google_email") or row.get("account_label") or "",
+            }
+        except Exception as e:
+            raise HTTPException(400, f"Google Drive token rejected: {e}") from e
+    elif provider == figma_oauth.FIGMA_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = figma_oauth.fetch_me(access_token) or {}
+    elif provider == github_app.GITHUB_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = github_app.fetch_authenticated_user(access_token) or {}
+    elif provider == clickup_oauth.CLICKUP_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = clickup_oauth.fetch_authenticated_user(access_token) or {}
+    elif provider == hubspot_oauth.HUBSPOT_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = hubspot_oauth.fetch_token_info(access_token) or {}
+    elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
+        api_key = token_json.get("api_key") or ""
+        user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
+    else:
+        raise HTTPException(
+            404, f"Test connection not supported for provider {provider!r}"
+        )
+
+    if not user_obj:
+        raise HTTPException(
+            400,
+            f"{provider} rejected the stored credential — disconnect and reconnect.",
+        )
+
+    label = (
+        user_obj.get("email")
+        or user_obj.get("user")
+        or user_obj.get("username")
+        or user_obj.get("login")
+        or user_obj.get("handle")
+        or user_obj.get("name")
+        or ""
+    )
+    tested_at = datetime.now(timezone.utc).isoformat()
+    return {"ok": True, "account_label": str(label), "tested_at": tested_at}
+
+
 @router.get("/google-drive/authorize")
 def google_drive_authorize(
     dataset: str | None = None,
