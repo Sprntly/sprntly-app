@@ -69,3 +69,19 @@ class SlidingWindowLimiter:
 # NOT hardcode anything iterate-specific into the class above; P5-07 instantiates
 # its own SlidingWindowLimiter for the public-surface limits.
 ITERATE_LIMITER = SlidingWindowLimiter(max_events=6, window_seconds=3600)
+
+# Module-level singletons consumed by the unauthenticated public share surface
+# (P5-07). Both REUSE the SlidingWindowLimiter primitive above — no new limiter
+# logic is introduced; they differ only in (max_events, window_seconds) and in the
+# key the route hands them:
+#
+#   PUBLIC_TOKEN_LIMITER  — GET /by-token/{token}: 60 requests/min PER TOKEN.
+#       Throttles a cheap brute-scan of one share token's view endpoint. Keyed by
+#       the token string (the token IS the public identity); the 61st in-window
+#       request returns 429. Keyed per-token because the view is per-share.
+#   PUBLIC_COMMENT_LIMITER — POST /by-token/{token}/comments: 10 comments/hour PER
+#       IP. Spam throttle on the anonymous public write. Keyed by the client IP —
+#       the same machine can comment across many tokens, so per-IP (not per-token)
+#       is the spam boundary; the 11th in-window comment returns 429.
+PUBLIC_TOKEN_LIMITER = SlidingWindowLimiter(max_events=60, window_seconds=60)
+PUBLIC_COMMENT_LIMITER = SlidingWindowLimiter(max_events=10, window_seconds=3600)

@@ -313,19 +313,32 @@ def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.Mo
 
 @pytest.fixture(autouse=True)
 def _reset_iterate_limiter():
-    """Per-test isolation for the P5-04 iterate rate limiter.
+    """Per-test isolation for the Design Agent rate limiters.
 
-    `app.design_agent.rate_limit.ITERATE_LIMITER` is a process-level singleton
-    keyed by `prototype_id`. Tests use a fresh per-test DB whose autoincrement
-    restarts at 1, so nearly every test reuses key "1"; without this reset the
-    limiter's 1-hour window accumulates across the whole session and unrelated
-    iterate tests would spuriously 429 after the 6th cumulative call. Clearing the
-    window (rather than reloading the module) keeps the singleton's class identity
-    stable, so isinstance checks against it still hold under full-suite ordering."""
+    `app.design_agent.rate_limit` holds process-level `SlidingWindowLimiter`
+    singletons keyed by a request attribute:
+
+      - ITERATE_LIMITER        — keyed by `prototype_id` (P5-04).
+      - PUBLIC_TOKEN_LIMITER   — keyed by the share token (P5-07).
+      - PUBLIC_COMMENT_LIMITER — keyed by the client IP (P5-07).
+
+    Tests use a fresh per-test DB whose autoincrement restarts at 1 (so iterate
+    tests reuse key "1"), and the public-comment limiter is keyed by the
+    TestClient's constant "testclient" host (so EVERY public-comment POST in the
+    whole suite shares one key). Without this reset those windows accumulate across
+    the session and unrelated tests would spuriously 429. Clearing the windows
+    (rather than reloading the module) keeps the singletons' class identity stable,
+    so isinstance checks against them still hold under full-suite ordering."""
     try:
-        from app.design_agent.rate_limit import ITERATE_LIMITER
+        from app.design_agent.rate_limit import (
+            ITERATE_LIMITER,
+            PUBLIC_COMMENT_LIMITER,
+            PUBLIC_TOKEN_LIMITER,
+        )
 
         ITERATE_LIMITER._events.clear()
+        PUBLIC_TOKEN_LIMITER._events.clear()
+        PUBLIC_COMMENT_LIMITER._events.clear()
     except Exception:
         pass
     yield
