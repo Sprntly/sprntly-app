@@ -31,6 +31,43 @@ from fastapi.testclient import TestClient
 from tests._fake_supabase import FakeSupabaseClient, reset_fake_db
 
 
+# ── P5-06: default a same-origin `Origin` header onto every test HTTP client ──
+# The P5-06 CSRF backstop (`require_same_origin`) rejects authed mutating Design Agent
+# requests whose `Origin` is missing or not in `settings.origins_list`. Real browsers
+# always send `Origin`; the test clients do not by default, so without this every
+# pre-existing authed-route test would 403. We wrap BOTH client classes the suite uses —
+# starlette's sync `TestClient` AND `httpx.AsyncClient` (the e2e/smoke files drive the app
+# over `httpx.AsyncClient` + ASGITransport, a different class a function-scoped autouse
+# fixture would miss) — to default `Origin` to the app's own allow-list entry. The default
+# is `setdefault`, so the csrf negative tests that pass an explicit (foreign/empty/absent)
+# Origin still exercise the 403 path. The Origin is pulled from `settings.origins_list`
+# (derived from ALLOWED_ORIGINS — the SAME allow-list CORS uses; no second list).
+def _wrap_client_origin(cls) -> None:
+    _orig = cls.__init__
+    if getattr(_orig, "_origin_wrapped", False):
+        return
+
+    def __init__(self, *a, **kw):
+        from app.config import settings  # read lazily so per-test config reloads apply
+
+        headers = dict(kw.pop("headers", None) or {})
+        headers.setdefault("origin", settings.origins_list[0])
+        kw["headers"] = headers
+        _orig(self, *a, **kw)
+
+    __init__._origin_wrapped = True  # type: ignore[attr-defined]
+    cls.__init__ = __init__
+
+
+def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
+    import starlette.testclient as _tc
+
+    _wrap_client_origin(_tc.TestClient)
+    import httpx
+
+    _wrap_client_origin(httpx.AsyncClient)
+
+
 # Modules that import `settings` at top level and therefore need to be
 # reloaded after env vars change. Order matters: config first, then its
 # consumers, then anything that imports the consumers.
