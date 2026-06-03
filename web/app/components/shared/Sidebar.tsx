@@ -11,7 +11,6 @@ import {
   IconEvidence,
   IconHome,
   IconPrd,
-  IconConnectors,
   IconSettings,
   IconSources,
 } from "./sidebar-icons"
@@ -154,16 +153,8 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
 
         <div className="sb-section-title">Workspace</div>
         <NavItem screen="sources" icon={<IconSources />} label="Sources" />
-        <NavItem
-          screen="connectors"
-          icon={<IconConnectors />}
-          label="Connectors"
-          count={
-            content.connectedConnectorIds.length > 0
-              ? content.connectedConnectorIds.length
-              : undefined
-          }
-        />
+        {/* Connectors NavItem removed in commit A — Settings → Connectors
+            is the sole surface per the sprntly_Design-3 reset. */}
         <NavItem screen="settings" icon={<IconSettings />} label="Settings" />
       </div>
 

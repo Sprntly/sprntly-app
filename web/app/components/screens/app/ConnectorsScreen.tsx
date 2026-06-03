@@ -1,3 +1,8 @@
+// DORMANT (commit A, 2026-06-01): This component is no longer rendered.
+// The standalone /connectors route was deleted as part of the design-3 reset
+// (see /Users/ceo/Projects/sprtnly/SETTINGS_PAGE_PLAN.md). The OAuth
+// handlers, sync flow, and folder-picker mount logic here are kept on disk
+// for salvage when commit D builds the new Settings → Connectors pane.
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"

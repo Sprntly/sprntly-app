@@ -236,16 +236,49 @@ export interface ConnectorItemRow {
   id: string
   logo: string
   name: string
+  /**
+   * Single-letter glyph rendered in the connector logo box (sprntly_Design-3).
+   * For example, "M" for Mixpanel. The legacy `logo` field stays for
+   * back-compat with the dormant ConnectorsScreen.tsx.
+   */
+  logoText?: string
+  /** Hex brand color for the logo box background (e.g. "#7856FF"). */
+  logoColor?: string
+  /** True if a working OAuth backend exists for this connector. */
+  oauth?: boolean
+  /**
+   * Connector auth model. Defaults to "oauth" when unset so the existing
+   * catalog rows (which use `oauth: true|false`) don't need a churn.
+   * Use "apikey" for providers (e.g. Fireflies) whose primary auth path
+   * is a user-issued API key pasted into a modal — no OAuth redirect.
+   */
+  authType?: "oauth" | "apikey"
 }
 
 export interface ConnectorCategoryRow {
   key: string
   title: string
-  /** Shown under the title (e.g. in connectors management UI) */
+  /** Longer prose descriptor (legacy field used by dormant ConnectorsScreen). */
   subtitle?: string
+  /**
+   * Short badge-style label shown to the right of the category title in
+   * sprntly_Design-3 (e.g. "required", "powers On-Call Agent"). Distinct
+   * from `subtitle`.
+   */
+  subLabel?: string
   /** Reserved for future API-driven icon keys (UI uses SVG placeholders). */
   icon?: string
   items: ConnectorItemRow[]
+  /**
+   * Human-readable accepted-types hint shown in the per-category upload
+   * strip (sprntly_Design-3), e.g. "PDF · CSV · XLSX".
+   */
+  uploadAccept?: string
+  /**
+   * Machine-readable accepted extensions for the upload `<input accept="">`
+   * attribute, e.g. [".pdf", ".csv", ".xlsx"].
+   */
+  uploadExtensions?: string[]
 }
 
 export interface DetailQuoteRow {

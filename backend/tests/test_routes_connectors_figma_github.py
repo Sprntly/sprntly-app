@@ -123,7 +123,9 @@ def test_figma_callback_stores_token(figma_client):
         )
 
     assert r.status_code == 307
-    assert r.headers["location"].startswith("http://localhost:3000/connectors")
+    assert r.headers["location"].startswith(
+        "http://localhost:3000/settings?section=connectors"
+    )
     assert "connected=figma" in r.headers["location"]
 
     # Row landed in db

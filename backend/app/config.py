@@ -67,6 +67,25 @@ class Settings(BaseSettings):
     figma_client_secret: str = ""
     figma_oauth_redirect_uri: str = ""
 
+    # ClickUp connector (OAuth 2.0)
+    clickup_client_id: str = ""
+    clickup_client_secret: str = ""
+    clickup_oauth_redirect_uri: str = ""
+
+    # HubSpot connector (OAuth 2.0 with refresh tokens)
+    hubspot_client_id: str = ""
+    hubspot_client_secret: str = ""
+    hubspot_oauth_redirect_uri: str = ""
+    # Space-separated scopes. Minimum is just `oauth`. Add more (e.g.
+    # `crm.objects.contacts.read`) when sync features actually need them.
+    hubspot_scopes: str = "oauth crm.objects.contacts.read"
+    # Which HubSpot OAuth API generation to use. v3 (modern, RFC 7662
+    # introspection, 30-minute access tokens, body-only credentials) is
+    # the default since legacy v1 endpoints are sunset-pending and new
+    # HubSpot accounts can't create legacy public apps. Set to "v1" for
+    # backward-compat with older legacy apps still active in production.
+    hubspot_oauth_version: str = "v3"
+
     # GitHub connector (GitHub App with user-to-server OAuth)
     github_app_id: str = ""
     github_app_client_id: str = ""

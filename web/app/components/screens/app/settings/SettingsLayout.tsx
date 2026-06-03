@@ -2,17 +2,75 @@
 
 import type { ReactNode } from "react"
 
-export type SettingsSectionId = "profile" | "workspace" | "kpi" | "strategic" | "flags" | "connectors" | "team" | "notifications"
+/**
+ * Settings section IDs, used as the `?section=` query param.
+ *
+ * The "active" IDs are the ones surfaced in SETTINGS_NAV and reachable
+ * from the sidebar. "Dormant" IDs remain in the union because their
+ * components still live on disk (StrategicSettings, FeatureFlagsSettings)
+ * — see commit A note in each. They're not linked from the nav per the
+ * sprntly_Design-3 reset (June 2026); the URL `/settings?section=strategic`
+ * falls back to the default Profile pane.
+ */
+export type SettingsSectionId =
+  // Active (rendered in SETTINGS_NAV)
+  | "profile"
+  | "comms-brief"
+  | "product-category"
+  | "goals-metrics"
+  | "team"
+  | "connectors"
+  | "billing"
+  | "security"
+  // Dormant (kept for component-file compatibility, not linked)
+  | "strategic"
+  | "flags"
 
-export const SETTINGS_NAV: { id: SettingsSectionId; label: string; available: boolean }[] = [
-  { id: "profile", label: "Profile", available: true },
-  { id: "workspace", label: "Workspace", available: true },
-  { id: "kpi", label: "KPI tree", available: true },
-  { id: "strategic", label: "Strategic context", available: true },
-  { id: "flags", label: "Feature flags", available: true },
-  { id: "connectors", label: "Connectors", available: false },
-  { id: "team", label: "Team", available: false },
-  { id: "notifications", label: "Notifications", available: true },
+export type SettingsNavItem = {
+  id: SettingsSectionId
+  label: string
+  /** False renders the item disabled with a "Soon" badge. */
+  available: boolean
+}
+
+export type SettingsNavGroup = {
+  groupLabel: string
+  items: SettingsNavItem[]
+}
+
+/**
+ * Grouped Settings nav per sprntly_Design-3 (2026-06-01 reset).
+ * The order of groups and items here is the order they render.
+ */
+export const SETTINGS_NAV: SettingsNavGroup[] = [
+  {
+    groupLabel: "You",
+    items: [
+      { id: "profile", label: "Profile", available: true },
+      { id: "comms-brief", label: "Comms & Brief", available: true },
+    ],
+  },
+  {
+    groupLabel: "Workspace",
+    items: [
+      { id: "product-category", label: "Product & Category", available: true },
+      { id: "goals-metrics", label: "Goals & metrics", available: true },
+      { id: "team", label: "Team & roles", available: false },
+    ],
+  },
+  {
+    groupLabel: "Data & Integrations",
+    items: [
+      { id: "connectors", label: "Connectors", available: true },
+    ],
+  },
+  {
+    groupLabel: "Account",
+    items: [
+      { id: "billing", label: "Billing", available: true },
+      { id: "security", label: "Security", available: true },
+    ],
+  },
 ]
 
 export function SettingsSection({

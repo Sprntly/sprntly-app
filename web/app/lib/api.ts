@@ -433,9 +433,58 @@ export const connectorsApi = {
   githubAuthorizeUrl: () => `${API_URL}/v1/connectors/github/authorize`,
   disconnectGithub: () =>
     api.delete<{ deleted: true; provider: string }>("/v1/connectors/github"),
+
+  // ---- ClickUp -------------------------------------------------------------
+  disconnectClickup: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/clickup"),
+
+  // ---- HubSpot -------------------------------------------------------------
+  disconnectHubspot: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/hubspot"),
+
+  // ---- Fireflies (API key, not OAuth) --------------------------------------
+  connectFirefliesWithApiKey: (apiKey: string) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      "/v1/connectors/fireflies/apikey",
+      { api_key: apiKey },
+    ),
+  disconnectFireflies: () =>
+    api.delete<{ deleted: true; provider: string }>("/v1/connectors/fireflies"),
   listGithubRepos: (perPage = 50) =>
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
+    ),
+
+  // ---- Generic test-connection (commit K) ---------------------------------
+  /**
+   * Re-validate a stored connection by re-running the provider's
+   * identity lookup with the decrypted token. Backs the "Test
+   * connection" button in the Configure drawer.
+   *
+   * Returns {ok, account_label, tested_at} on success; throws ApiError
+   * on 400 (token rejected) / 404 (not connected).
+   */
+  testConnection: (provider: string) =>
+    api.post<{ ok: true; account_label: string; tested_at: string }>(
+      `/v1/connectors/${encodeURIComponent(provider)}/test`,
+      {},
+    ),
+
+  // ---- Generic start-OAuth (commit F) -------------------------------------
+  /**
+   * Returns the provider's OAuth authorize URL as JSON. The caller is
+   * expected to navigate the browser to it (`window.location.href = url`).
+   *
+   * Why this exists: the legacy GET /authorize routes 307-redirect to
+   * Google/Figma/GitHub, but they require auth — and a browser URL-bar
+   * navigation can't attach the Supabase Bearer token. This endpoint
+   * runs the auth check via fetch + Bearer, then hands back the URL the
+   * browser should navigate to next.
+   */
+  startOauth: (provider: string, dataset?: string) =>
+    api.post<{ authorize_url: string }>(
+      `/v1/connectors/${encodeURIComponent(provider)}/start-oauth`,
+      dataset ? { dataset } : {},
     ),
 }
 
