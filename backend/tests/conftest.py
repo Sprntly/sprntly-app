@@ -127,6 +127,8 @@ def _reload_app_modules() -> None:
 # Postgres tables we actually use. Booleans + jsonb are translated by
 # the fake's encode/decode layer.
 _FAKE_SCHEMA = """
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE briefs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     dataset      TEXT NOT NULL,
@@ -206,9 +208,22 @@ CREATE TABLE datasets (
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Companies table is in the real Supabase migrations but the backend
+-- doesn't query it directly yet — only required here so connections.workspace_id
+-- has a valid FK target. Membership table comes when commit 3 adds the
+-- route-level membership dep.
+CREATE TABLE companies (
+    id           TEXT PRIMARY KEY,
+    slug         TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE connections (
     id                   TEXT PRIMARY KEY,
-    provider             TEXT NOT NULL UNIQUE,
+    workspace_id         TEXT NOT NULL
+                          REFERENCES companies (id) ON DELETE CASCADE,
+    provider             TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'active',
     google_email         TEXT,
     account_label        TEXT,
@@ -218,8 +233,10 @@ CREATE TABLE connections (
     last_sync_at         TEXT,
     last_sync_error      TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (workspace_id, provider)
 );
+CREATE INDEX connections_workspace_id_idx ON connections (workspace_id);
 
 CREATE TABLE github_installations (
     installation_id      INTEGER PRIMARY KEY,
