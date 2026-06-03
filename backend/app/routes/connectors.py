@@ -36,7 +36,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from pydantic import BaseModel
 
 from app import db
-from app.auth import require_session
+from app.auth import require_session, require_workspace_membership
 from app.config import settings
 from app.connectors import (
     clickup_oauth,
@@ -91,8 +91,10 @@ def _public_connection(row: dict) -> dict:
 
 
 @router.get("")
-def list_connections(_session: dict = Depends(require_session)):
-    rows = db.list_connections()
+def list_connections(
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    rows = db.list_connections(workspace_id)
     return {"connections": [_public_connection(r) for r in rows]}
 
 
@@ -116,12 +118,14 @@ class StartOauthIn(BaseModel):
 def start_oauth(
     provider: str,
     body: StartOauthIn | None = None,
-    _session: dict = Depends(require_session),
+    workspace_id: str = Depends(require_workspace_membership),
 ):
     payload = body or StartOauthIn()
 
     if provider == google_oauth.GOOGLE_DRIVE_PROVIDER:
-        state = google_oauth.sign_oauth_state(dataset=payload.dataset)
+        state = google_oauth.sign_oauth_state(
+            workspace_id=workspace_id, dataset=payload.dataset
+        )
         flow = google_oauth.build_flow()
         url, _ = flow.authorization_url(
             access_type="offline",
@@ -134,25 +138,33 @@ def start_oauth(
     if provider == figma_oauth.FIGMA_PROVIDER:
         if not figma_oauth.figma_configured():
             raise HTTPException(500, "Figma OAuth is not configured on the server")
-        url = figma_oauth.authorize_url(state=figma_oauth.sign_oauth_state())
+        url = figma_oauth.authorize_url(
+            state=figma_oauth.sign_oauth_state(workspace_id=workspace_id)
+        )
         return {"authorize_url": url}
 
     if provider == github_app.GITHUB_PROVIDER:
         if not github_app.github_oauth_configured():
             raise HTTPException(500, "GitHub OAuth is not configured on the server")
-        url = github_app.authorize_url(state=github_app.sign_oauth_state())
+        url = github_app.authorize_url(
+            state=github_app.sign_oauth_state(workspace_id=workspace_id)
+        )
         return {"authorize_url": url}
 
     if provider == clickup_oauth.CLICKUP_PROVIDER:
         if not clickup_oauth.clickup_configured():
             raise HTTPException(500, "ClickUp OAuth is not configured on the server")
-        url = clickup_oauth.authorize_url(state=clickup_oauth.sign_oauth_state())
+        url = clickup_oauth.authorize_url(
+            state=clickup_oauth.sign_oauth_state(workspace_id=workspace_id)
+        )
         return {"authorize_url": url}
 
     if provider == hubspot_oauth.HUBSPOT_PROVIDER:
         if not hubspot_oauth.hubspot_configured():
             raise HTTPException(500, "HubSpot OAuth is not configured on the server")
-        url = hubspot_oauth.authorize_url(state=hubspot_oauth.sign_oauth_state())
+        url = hubspot_oauth.authorize_url(
+            state=hubspot_oauth.sign_oauth_state(workspace_id=workspace_id)
+        )
         return {"authorize_url": url}
 
     raise HTTPException(
@@ -171,7 +183,7 @@ def start_oauth(
 @router.post("/{provider}/test")
 def test_connection(
     provider: str,
-    _session: dict = Depends(require_session),
+    workspace_id: str = Depends(require_workspace_membership),
 ):
     """Re-validate a stored connection by re-running the provider's
     identity lookup with the decrypted token.
@@ -184,7 +196,7 @@ def test_connection(
     """
     from datetime import datetime, timezone
 
-    row = db.get_connection(provider)
+    row = db.get_connection(workspace_id, provider)
     if not row:
         raise HTTPException(404, f"{provider!r} is not connected")
 
@@ -250,9 +262,9 @@ def test_connection(
 @router.get("/google-drive/authorize")
 def google_drive_authorize(
     dataset: str | None = None,
-    _session: dict = Depends(require_session),
+    workspace_id: str = Depends(require_workspace_membership),
 ):
-    state = google_oauth.sign_oauth_state(dataset=dataset)
+    state = google_oauth.sign_oauth_state(workspace_id=workspace_id, dataset=dataset)
     flow = google_oauth.build_flow()
     url, _ = flow.authorization_url(
         access_type="offline",
@@ -265,7 +277,12 @@ def google_drive_authorize(
 
 @router.get("/google-drive/callback")
 def google_drive_callback(code: str, state: str):
+    # Unauthenticated route — the user is bouncing back from Google with
+    # no Bearer token, so the signed state is the trust boundary. Workspace
+    # was verified at /authorize time and burned into the state JWT.
     payload = google_oauth.verify_oauth_state(state)
+    workspace_id = payload["workspace_id"]
+
     flow = google_oauth.build_flow()
     try:
         flow.fetch_token(code=code)
@@ -288,6 +305,7 @@ def google_drive_callback(code: str, state: str):
         config["dataset"] = payload["dataset"]
 
     db.upsert_connection(
+        workspace_id=workspace_id,
         provider=google_oauth.GOOGLE_DRIVE_PROVIDER,
         token_encrypted=token_encrypted,
         scopes=google_oauth.DRIVE_READONLY_SCOPE,
@@ -313,10 +331,10 @@ class GoogleDriveSyncIn(BaseModel):
 @router.get("/google-drive/folders")
 def google_drive_list_folders(
     parent_id: str | None = None,
-    _session: dict = Depends(require_session),
+    workspace_id: str = Depends(require_workspace_membership),
 ):
     try:
-        return browse_folders(parent_id)
+        return browse_folders(workspace_id, parent_id)
     except SyncConfigError as e:
         logger.warning("Drive folder browse failed: %s", e)
         raise HTTPException(400, str(e)) from e
@@ -325,9 +343,9 @@ def google_drive_list_folders(
 @router.post("/google-drive/config")
 def google_drive_config(
     body: GoogleDriveConfigIn,
-    _session: dict = Depends(require_session),
+    workspace_id: str = Depends(require_workspace_membership),
 ):
-    row = db.get_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
+    row = db.get_connection(workspace_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise HTTPException(404, "Google Drive is not connected")
     try:
@@ -346,11 +364,12 @@ def google_drive_config(
 @router.post("/google-drive/sync")
 def google_drive_sync(
     body: GoogleDriveSyncIn | None = None,
-    _session: dict = Depends(require_session),
+    workspace_id: str = Depends(require_workspace_membership),
 ):
     payload = body or GoogleDriveSyncIn()
     try:
         result = sync_google_drive(
+            workspace_id=workspace_id,
             dataset=payload.dataset,
             folder_id=payload.folder_id,
         )
@@ -360,8 +379,10 @@ def google_drive_sync(
 
 
 @router.delete("/google-drive")
-def google_drive_disconnect(_session: dict = Depends(require_session)):
-    row = db.get_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
+def google_drive_disconnect(
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    row = db.get_connection(workspace_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise HTTPException(404, "Google Drive is not connected")
 
@@ -375,7 +396,7 @@ def google_drive_disconnect(_session: dict = Depends(require_session)):
     except Exception:
         logger.warning("Could not revoke Google token on disconnect", exc_info=True)
 
-    db.delete_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
+    db.delete_connection(workspace_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     return {"deleted": True, "provider": google_oauth.GOOGLE_DRIVE_PROVIDER}
 
 
@@ -383,16 +404,21 @@ def google_drive_disconnect(_session: dict = Depends(require_session)):
 
 
 @router.get("/figma/authorize")
-def figma_authorize(_session: dict = Depends(require_session)):
+def figma_authorize(
+    workspace_id: str = Depends(require_workspace_membership),
+):
     if not figma_oauth.figma_configured():
         raise HTTPException(500, "Figma OAuth is not configured on the server")
-    url = figma_oauth.authorize_url(state=figma_oauth.sign_oauth_state())
+    url = figma_oauth.authorize_url(
+        state=figma_oauth.sign_oauth_state(workspace_id=workspace_id)
+    )
     return RedirectResponse(url)
 
 
 @router.get("/figma/callback")
 def figma_callback(code: str, state: str):
-    figma_oauth.verify_oauth_state(state)
+    payload = figma_oauth.verify_oauth_state(state)
+    workspace_id = payload["workspace_id"]
     token_json = figma_oauth.exchange_code_for_token(code)
     access_token = token_json.get("access_token")
     if not access_token:
@@ -407,6 +433,7 @@ def figma_callback(code: str, state: str):
         raise HTTPException(500, str(e)) from e
 
     db.upsert_connection(
+        workspace_id=workspace_id,
         provider=figma_oauth.FIGMA_PROVIDER,
         token_encrypted=token_encrypted,
         scopes=figma_oauth.DEFAULT_SCOPES,
@@ -419,18 +446,20 @@ def figma_callback(code: str, state: str):
 
 
 @router.delete("/figma")
-def figma_disconnect(_session: dict = Depends(require_session)):
-    row = db.get_connection(figma_oauth.FIGMA_PROVIDER)
+def figma_disconnect(
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    row = db.get_connection(workspace_id, figma_oauth.FIGMA_PROVIDER)
     if not row:
         raise HTTPException(404, "Figma is not connected")
     # Figma has no documented revoke endpoint; just drop our copy of the token.
-    db.delete_connection(figma_oauth.FIGMA_PROVIDER)
+    db.delete_connection(workspace_id, figma_oauth.FIGMA_PROVIDER)
     return {"deleted": True, "provider": figma_oauth.FIGMA_PROVIDER}
 
 
-def _figma_access_token() -> str:
+def _figma_access_token(workspace_id: str) -> str:
     """Decrypt the stored Figma token. Raises 404 if not connected."""
-    row = db.get_connection(figma_oauth.FIGMA_PROVIDER)
+    row = db.get_connection(workspace_id, figma_oauth.FIGMA_PROVIDER)
     if not row:
         raise HTTPException(404, "Figma is not connected")
     try:
@@ -444,20 +473,27 @@ def _figma_access_token() -> str:
 
 
 @router.get("/figma/files/{key}")
-def figma_get_file(key: str, depth: int = 2, _session: dict = Depends(require_session)):
+def figma_get_file(
+    key: str,
+    depth: int = 2,
+    workspace_id: str = Depends(require_workspace_membership),
+):
     """Fetch a Figma file's top-level structure. Used by Design Agent to
     extract frames/pages and to ground prototype generation in the team's
     actual canvases."""
-    token = _figma_access_token()
+    token = _figma_access_token(workspace_id)
     return figma_oauth.fetch_file(token, key, depth=depth)
 
 
 @router.get("/figma/files/{key}/styles")
-def figma_get_file_styles(key: str, _session: dict = Depends(require_session)):
+def figma_get_file_styles(
+    key: str,
+    workspace_id: str = Depends(require_workspace_membership),
+):
     """Fetch published styles for a Figma file. Used by Design Agent to
     extract design tokens (colors, fonts, effects) for Scenario A
     (Figma-connected) prototype generation."""
-    token = _figma_access_token()
+    token = _figma_access_token(workspace_id)
     return figma_oauth.fetch_file_styles(token, key)
 
 
@@ -465,16 +501,21 @@ def figma_get_file_styles(key: str, _session: dict = Depends(require_session)):
 
 
 @router.get("/github/authorize")
-def github_authorize(_session: dict = Depends(require_session)):
+def github_authorize(
+    workspace_id: str = Depends(require_workspace_membership),
+):
     if not github_app.github_oauth_configured():
         raise HTTPException(500, "GitHub OAuth is not configured on the server")
-    url = github_app.authorize_url(state=github_app.sign_oauth_state())
+    url = github_app.authorize_url(
+        state=github_app.sign_oauth_state(workspace_id=workspace_id)
+    )
     return RedirectResponse(url)
 
 
 @router.get("/github/callback")
 def github_callback(code: str, state: str):
-    github_app.verify_oauth_state(state)
+    payload = github_app.verify_oauth_state(state)
+    workspace_id = payload["workspace_id"]
     token_json = github_app.exchange_code_for_token(code)
     access_token = token_json.get("access_token")
     if not access_token:
@@ -492,6 +533,7 @@ def github_callback(code: str, state: str):
 
     scopes = token_json.get("scope") or github_app.DEFAULT_SCOPES
     db.upsert_connection(
+        workspace_id=workspace_id,
         provider=github_app.GITHUB_PROVIDER,
         token_encrypted=token_encrypted,
         scopes=scopes,
@@ -504,11 +546,13 @@ def github_callback(code: str, state: str):
 
 
 @router.delete("/github")
-def github_disconnect(_session: dict = Depends(require_session)):
-    row = db.get_connection(github_app.GITHUB_PROVIDER)
+def github_disconnect(
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    row = db.get_connection(workspace_id, github_app.GITHUB_PROVIDER)
     if not row:
         raise HTTPException(404, "GitHub is not connected")
-    db.delete_connection(github_app.GITHUB_PROVIDER)
+    db.delete_connection(workspace_id, github_app.GITHUB_PROVIDER)
     return {"deleted": True, "provider": github_app.GITHUB_PROVIDER}
 
 
@@ -525,9 +569,9 @@ def github_list_open_prs(
     return {"pull_requests": db.list_open_pull_requests(installation_id)}
 
 
-def _github_access_token() -> str:
+def _github_access_token(workspace_id: str) -> str:
     """Decrypt the stored GitHub user OAuth token. Raises 404 if not connected."""
-    row = db.get_connection(github_app.GITHUB_PROVIDER)
+    row = db.get_connection(workspace_id, github_app.GITHUB_PROVIDER)
     if not row:
         raise HTTPException(404, "GitHub is not connected")
     try:
@@ -541,11 +585,14 @@ def _github_access_token() -> str:
 
 
 @router.get("/github/repos")
-def github_list_repos(per_page: int = 50, _session: dict = Depends(require_session)):
+def github_list_repos(
+    per_page: int = 50,
+    workspace_id: str = Depends(require_workspace_membership),
+):
     """List repos the connected user can access. Engineer Agent uses this
     to discover the codebase context for a workspace; installation tokens
     will be used later for read-write operations."""
-    token = _github_access_token()
+    token = _github_access_token(workspace_id)
     return {"repositories": github_app.fetch_user_repos(token, per_page=per_page)}
 
 
@@ -557,7 +604,8 @@ def github_list_repos(per_page: int = 50, _session: dict = Depends(require_sessi
 
 @router.get("/clickup/callback")
 def clickup_callback(code: str, state: str):
-    clickup_oauth.verify_oauth_state(state)
+    payload = clickup_oauth.verify_oauth_state(state)
+    workspace_id = payload["workspace_id"]
     token_json = clickup_oauth.exchange_code_for_token(code)
     access_token = token_json.get("access_token")
     if not access_token:
@@ -574,6 +622,7 @@ def clickup_callback(code: str, state: str):
         raise HTTPException(500, str(e)) from e
 
     db.upsert_connection(
+        workspace_id=workspace_id,
         provider=clickup_oauth.CLICKUP_PROVIDER,
         token_encrypted=token_encrypted,
         scopes="",
@@ -586,11 +635,13 @@ def clickup_callback(code: str, state: str):
 
 
 @router.delete("/clickup")
-def clickup_disconnect(_session: dict = Depends(require_session)):
-    row = db.get_connection(clickup_oauth.CLICKUP_PROVIDER)
+def clickup_disconnect(
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    row = db.get_connection(workspace_id, clickup_oauth.CLICKUP_PROVIDER)
     if not row:
         raise HTTPException(404, "ClickUp is not connected")
-    db.delete_connection(clickup_oauth.CLICKUP_PROVIDER)
+    db.delete_connection(workspace_id, clickup_oauth.CLICKUP_PROVIDER)
     return {"deleted": True, "provider": clickup_oauth.CLICKUP_PROVIDER}
 
 
@@ -601,7 +652,8 @@ def clickup_disconnect(_session: dict = Depends(require_session)):
 
 @router.get("/hubspot/callback")
 def hubspot_callback(code: str, state: str):
-    hubspot_oauth.verify_oauth_state(state)
+    payload = hubspot_oauth.verify_oauth_state(state)
+    workspace_id = payload["workspace_id"]
     token_json = hubspot_oauth.exchange_code_for_token(code)
     access_token = token_json.get("access_token")
     if not access_token:
@@ -620,6 +672,7 @@ def hubspot_callback(code: str, state: str):
         raise HTTPException(500, str(e)) from e
 
     db.upsert_connection(
+        workspace_id=workspace_id,
         provider=hubspot_oauth.HUBSPOT_PROVIDER,
         token_encrypted=token_encrypted,
         scopes=" ".join(info.get("scopes") or []) if isinstance(info.get("scopes"), list) else "",
@@ -632,11 +685,13 @@ def hubspot_callback(code: str, state: str):
 
 
 @router.delete("/hubspot")
-def hubspot_disconnect(_session: dict = Depends(require_session)):
-    row = db.get_connection(hubspot_oauth.HUBSPOT_PROVIDER)
+def hubspot_disconnect(
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    row = db.get_connection(workspace_id, hubspot_oauth.HUBSPOT_PROVIDER)
     if not row:
         raise HTTPException(404, "HubSpot is not connected")
-    db.delete_connection(hubspot_oauth.HUBSPOT_PROVIDER)
+    db.delete_connection(workspace_id, hubspot_oauth.HUBSPOT_PROVIDER)
     return {"deleted": True, "provider": hubspot_oauth.HUBSPOT_PROVIDER}
 
 
@@ -660,7 +715,7 @@ class FirefliesApiKeyIn(BaseModel):
 @router.post("/fireflies/apikey")
 def fireflies_connect_apikey(
     body: FirefliesApiKeyIn,
-    _session: dict = Depends(require_session),
+    workspace_id: str = Depends(require_workspace_membership),
 ):
     api_key = body.api_key.strip()
     user = fireflies_apikey.fetch_authenticated_user(api_key)
@@ -681,6 +736,7 @@ def fireflies_connect_apikey(
         raise HTTPException(500, str(e)) from e
 
     db.upsert_connection(
+        workspace_id=workspace_id,
         provider=fireflies_apikey.FIREFLIES_PROVIDER,
         token_encrypted=token_encrypted,
         scopes="",
@@ -695,11 +751,13 @@ def fireflies_connect_apikey(
 
 
 @router.delete("/fireflies")
-def fireflies_disconnect(_session: dict = Depends(require_session)):
-    row = db.get_connection(fireflies_apikey.FIREFLIES_PROVIDER)
+def fireflies_disconnect(
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    row = db.get_connection(workspace_id, fireflies_apikey.FIREFLIES_PROVIDER)
     if not row:
         raise HTTPException(404, "Fireflies is not connected")
-    db.delete_connection(fireflies_apikey.FIREFLIES_PROVIDER)
+    db.delete_connection(workspace_id, fireflies_apikey.FIREFLIES_PROVIDER)
     return {"deleted": True, "provider": fireflies_apikey.FIREFLIES_PROVIDER}
 
 

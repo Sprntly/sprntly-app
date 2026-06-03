@@ -1,20 +1,8 @@
-"""Tests for the Fireflies.ai connector (commit J).
+"""Tests for the Fireflies.ai connector (API-key auth).
 
-Fireflies uses API key auth (not OAuth) — their own docs only document
-the Bearer-token path; OAuth endpoints exist but are partner-gated and
-not self-serve. Per Sprntly_Onboarding_Flow_Spec_v1 line 150 ("Connecting
-a source initiates an OAuth or API key flow"), API key is spec-allowed.
-
-The flow:
-  1. User clicks Connect on Fireflies in Settings → frontend shows a
-     modal: "Paste your Fireflies API key"
-  2. User pastes the key from fireflies.ai → Integrations → Fireflies API
-  3. Frontend POSTs the key to /v1/connectors/fireflies/apikey
-  4. Backend validates the key by hitting Fireflies' GraphQL endpoint
-     (POST https://api.fireflies.ai/graphql with "{ user { name email } }")
-  5. If valid, store the key encrypted with account_label = user.email
-
-All outbound HTTP is mocked.
+Fireflies uses an API key (not OAuth). All outbound HTTP is mocked.
+Routes are multitenant: every authenticated request passes
+?workspace_id=..., seeded via tests/_workspace_helpers.workspace_client.
 """
 from __future__ import annotations
 
@@ -24,7 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
+
+from tests._workspace_helpers import workspace_client
 
 
 def _reload_app_modules():
@@ -48,19 +37,10 @@ def fireflies_env(isolated_settings, monkeypatch):
     yield
 
 
-def _signed_in_client(fireflies_env):
-    import app.main as main_mod
-    client = TestClient(main_mod.app)
-    r = client.post("/v1/auth/login", json={"password": "test-pw"})
-    assert r.status_code == 200, r.text
-    return client
-
-
 # ─────────────────────────── Module unit tests ───────────────────────────
 
 
 def test_fetch_authenticated_user_posts_graphql_query(fireflies_env):
-    """Validation hits Fireflies GraphQL with a `user` query + Bearer header."""
     from app.connectors import fireflies_apikey
 
     mock_resp = MagicMock()
@@ -77,7 +57,6 @@ def test_fetch_authenticated_user_posts_graphql_query(fireflies_env):
     call_args = mock_post.call_args
     assert call_args.args[0] == "https://api.fireflies.ai/graphql"
     assert call_args.kwargs["headers"]["Authorization"] == "Bearer ff-api-key-xyz"
-    # GraphQL body shape — JSON with a `query` string field.
     body = call_args.kwargs.get("json") or {}
     assert "user" in body.get("query", "")
 
@@ -96,8 +75,6 @@ def test_fetch_authenticated_user_returns_empty_on_invalid_key(fireflies_env):
 
 
 def test_fetch_authenticated_user_handles_graphql_error(fireflies_env):
-    """Fireflies returns 200 + `errors` array when the query is malformed
-    or auth fails server-side. Treat as empty."""
     from app.connectors import fireflies_apikey
 
     mock_resp = MagicMock()
@@ -115,13 +92,14 @@ def test_fetch_authenticated_user_handles_graphql_error(fireflies_env):
 def test_apikey_route_requires_auth(unauth_client, fireflies_env):
     r = unauth_client.post(
         "/v1/connectors/fireflies/apikey",
+        params={"workspace_id": "x"},
         json={"api_key": "ff-key"},
     )
     assert r.status_code == 401
 
 
-def test_apikey_route_stores_connection_with_email_label(fireflies_env):
-    client = _signed_in_client(fireflies_env)
+def test_apikey_route_stores_connection_with_email_label(fireflies_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
 
     mock_resp = MagicMock()
     mock_resp.ok = True
@@ -129,8 +107,9 @@ def test_apikey_route_stores_connection_with_email_label(fireflies_env):
         "data": {"user": {"name": "Sarah", "email": "sarah@meridian.health"}},
     }
     with patch("app.connectors.fireflies_apikey.requests.post", return_value=mock_resp):
-        r = client.post(
+        r = ctx.client.post(
             "/v1/connectors/fireflies/apikey",
+            params={"workspace_id": ctx.workspace_id},
             json={"api_key": "ff-valid-key"},
         )
 
@@ -139,47 +118,59 @@ def test_apikey_route_stores_connection_with_email_label(fireflies_env):
     assert body.get("ok") is True
     assert body.get("provider") == "fireflies"
 
-    listed = client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+    ).json()
     rows = [c for c in listed["connections"] if c["provider"] == "fireflies"]
     assert len(rows) == 1
     assert rows[0]["account_label"] == "sarah@meridian.health"
     assert "token_json_encrypted" not in rows[0]
 
 
-def test_apikey_route_rejects_invalid_key(fireflies_env):
-    """If Fireflies rejects the key, we 400 — don't store a bad credential."""
-    client = _signed_in_client(fireflies_env)
+def test_apikey_route_rejects_invalid_key(fireflies_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
 
     mock_resp = MagicMock()
     mock_resp.ok = False
     mock_resp.status_code = 401
     mock_resp.text = "Unauthorized"
     with patch("app.connectors.fireflies_apikey.requests.post", return_value=mock_resp):
-        r = client.post(
+        r = ctx.client.post(
             "/v1/connectors/fireflies/apikey",
+            params={"workspace_id": ctx.workspace_id},
             json={"api_key": "bad-key"},
         )
 
     assert r.status_code == 400
-    listed = client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+    ).json()
     assert not any(c["provider"] == "fireflies" for c in listed["connections"])
 
 
-def test_apikey_route_rejects_empty_key(fireflies_env):
-    client = _signed_in_client(fireflies_env)
-    r = client.post("/v1/connectors/fireflies/apikey", json={"api_key": ""})
+def test_apikey_route_rejects_empty_key(fireflies_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/fireflies/apikey",
+        params={"workspace_id": ctx.workspace_id},
+        json={"api_key": ""},
+    )
     assert r.status_code == 422
 
 
-def test_apikey_route_rejects_missing_field(fireflies_env):
-    client = _signed_in_client(fireflies_env)
-    r = client.post("/v1/connectors/fireflies/apikey", json={})
+def test_apikey_route_rejects_missing_field(fireflies_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/fireflies/apikey",
+        params={"workspace_id": ctx.workspace_id},
+        json={},
+    )
     assert r.status_code == 422
 
 
-def test_apikey_route_updates_existing_connection(fireflies_env):
+def test_apikey_route_updates_existing_connection(fireflies_env, monkeypatch):
     """Re-posting with a new key overwrites the existing one (re-key flow)."""
-    client = _signed_in_client(fireflies_env)
+    ctx = workspace_client(monkeypatch)
 
     first = MagicMock()
     first.ok = True
@@ -190,43 +181,66 @@ def test_apikey_route_updates_existing_connection(fireflies_env):
     second.json.return_value = {"data": {"user": {"email": "second@test.com", "name": "Second"}}}
 
     with patch("app.connectors.fireflies_apikey.requests.post", return_value=first):
-        client.post("/v1/connectors/fireflies/apikey", json={"api_key": "key1"})
+        ctx.client.post(
+            "/v1/connectors/fireflies/apikey",
+            params={"workspace_id": ctx.workspace_id},
+            json={"api_key": "key1"},
+        )
     with patch("app.connectors.fireflies_apikey.requests.post", return_value=second):
-        client.post("/v1/connectors/fireflies/apikey", json={"api_key": "key2"})
+        ctx.client.post(
+            "/v1/connectors/fireflies/apikey",
+            params={"workspace_id": ctx.workspace_id},
+            json={"api_key": "key2"},
+        )
 
-    listed = client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+    ).json()
     rows = [c for c in listed["connections"] if c["provider"] == "fireflies"]
     assert len(rows) == 1
     assert rows[0]["account_label"] == "second@test.com"
 
 
-def test_delete_fireflies_disconnects(fireflies_env):
-    client = _signed_in_client(fireflies_env)
+def test_delete_fireflies_disconnects(fireflies_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
 
     mock_resp = MagicMock()
     mock_resp.ok = True
     mock_resp.json.return_value = {"data": {"user": {"email": "x@y.com"}}}
     with patch("app.connectors.fireflies_apikey.requests.post", return_value=mock_resp):
-        client.post("/v1/connectors/fireflies/apikey", json={"api_key": "k"})
+        ctx.client.post(
+            "/v1/connectors/fireflies/apikey",
+            params={"workspace_id": ctx.workspace_id},
+            json={"api_key": "k"},
+        )
 
-    r = client.delete("/v1/connectors/fireflies")
+    r = ctx.client.delete(
+        "/v1/connectors/fireflies", params={"workspace_id": ctx.workspace_id}
+    )
     assert r.status_code == 200
-    listed = client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+    ).json()
     assert not any(c["provider"] == "fireflies" for c in listed["connections"])
 
 
-def test_delete_fireflies_404_when_not_connected(fireflies_env):
-    client = _signed_in_client(fireflies_env)
-    r = client.delete("/v1/connectors/fireflies")
+def test_delete_fireflies_404_when_not_connected(fireflies_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
+    r = ctx.client.delete(
+        "/v1/connectors/fireflies", params={"workspace_id": ctx.workspace_id}
+    )
     assert r.status_code == 404
 
 
 # ─────────────────────────── Sanity ───────────────────────────
 
 
-def test_fireflies_does_not_appear_in_start_oauth_dispatch(fireflies_env):
+def test_fireflies_does_not_appear_in_start_oauth_dispatch(fireflies_env, monkeypatch):
     """Fireflies is API-key based, not OAuth — the start-oauth endpoint
     should NOT recognise it (returns 404)."""
-    client = _signed_in_client(fireflies_env)
-    r = client.post("/v1/connectors/fireflies/start-oauth")
+    ctx = workspace_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/fireflies/start-oauth",
+        params={"workspace_id": ctx.workspace_id},
+    )
     assert r.status_code == 404
