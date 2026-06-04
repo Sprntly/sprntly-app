@@ -167,8 +167,7 @@ function RenderBlock({
  * (PrdScreen passes `prd.prd_id`) — the F2 `DesignAgentLauncher` ("Generate
  * Prototype" button + drawer). Without a `prdId` (non-PRD callers, the
  * empty/demo states) it falls back to the original empty-state entry point.
- * The `data-design-agent-slot` div is retained as P1-09's forward-compat mount
- * target. Parsed `platformHint` / `notes` hints stay on the PrdState block
+ * Parsed `platformHint` / `notes` hints stay on the PrdState block
  * (for P1-05's scaffold prompt); the P1 renderer intentionally does not surface
  * them.
  */
@@ -185,11 +184,13 @@ function DesignSection({
       {prdId !== undefined ? (
         <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} />
       ) : (
-        <p className="prd-design-empty">
-          No prototype yet — use the Design Agent to generate one
-        </p>
+        <div className="design-agent-surface">
+          <p className="prd-design-empty">
+            No prototype yet. Open this PRD to generate an interactive prototype
+            from it.
+          </p>
+        </div>
       )}
-      <div className="prd-design-slot" data-design-agent-slot />
     </section>
   )
 }
