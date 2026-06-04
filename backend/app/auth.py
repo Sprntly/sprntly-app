@@ -21,6 +21,7 @@ use the audience-specific deps (`require_app_session`,
 The legacy single-audience cookie (`sprintly_session`) is no longer
 accepted; old logins will 401 once and re-login via the new flow.
 """
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Literal
@@ -286,3 +287,70 @@ def me(
     if not out["app"] and not out["demo"]:
         raise HTTPException(401, "Not signed in")
     return out
+
+
+# ─────────────────────── Tenant resolution (require_company) ───────────────────────
+#
+# `require_session` answers "who is this user?". `require_company` answers
+# "which company (tenant) are they acting in?" — the claim every tenant-
+# isolated surface (GraphFacade, connectors, agent routes) scopes by.
+#
+# Tenancy model (product decision 2026-06-04): a user belongs to exactly ONE
+# company; a company has many users. Resolution is therefore a pure lookup —
+# the client never passes a company id at all:
+#   - Supabase-authenticated sessions only (legacy demo/app cookies carry no
+#     user id → 403).
+#   - No membership → 403 (finish onboarding first).
+#   - Multiple membership rows → data-integrity anomaly (the schema enforces
+#     one); fail closed with 500 rather than guess a tenant.
+
+
+class CompanyContext(BaseModel):
+    """Resolved tenant context: pass `company_id` to GraphFacade et al."""
+
+    company_id: str
+    role: str
+    user_id: str
+
+
+def require_company(
+    authorization: str | None = Header(default=None),
+    sprntly_app_session: str | None = Cookie(default=None),
+    sprntly_demo_session: str | None = Cookie(default=None),
+) -> CompanyContext:
+    """FastAPI dependency — resolve the authenticated user's company.
+
+    Use as `company: CompanyContext = Depends(require_company)` on any
+    tenant-scoped route, then pass `company.company_id` as the
+    enterprise_id to GraphFacade / db helpers.
+    """
+    session = require_session(
+        authorization=authorization,
+        sprntly_app_session=sprntly_app_session,
+        sprntly_demo_session=sprntly_demo_session,
+    )
+    user_id = session.get("sub")
+    if session.get("aud") != "supabase" or not user_id:
+        # Legacy cookie sessions have no user identity — they cannot be
+        # resolved to a company membership.
+        raise HTTPException(403, "Company context requires a signed-in user")
+
+    from app.db.companies import memberships_for_user
+
+    memberships = memberships_for_user(user_id)
+    if not memberships:
+        raise HTTPException(403, "No company membership — complete onboarding first")
+    if len(memberships) > 1:
+        # One-company-per-user is the product invariant (and the schema
+        # enforces it — see 20260604*_one_company_per_user.sql). More than
+        # one row means corrupted membership data; never guess a tenant.
+        logging.getLogger(__name__).error(
+            "User %s has %d company memberships — data-integrity violation",
+            user_id, len(memberships),
+        )
+        raise HTTPException(500, "Membership data integrity error — contact support")
+
+    only = memberships[0]
+    return CompanyContext(
+        company_id=only["company_id"], role=only["role"], user_id=user_id
+    )
