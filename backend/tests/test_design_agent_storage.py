@@ -255,6 +255,7 @@ def _fake_vite_run(*, dist_files=None, returncode=0, stderr="", capture=None):
         if capture is not None:
             capture["cmd"] = cmd
             capture["cwd"] = cwd
+            capture["timeout"] = kwargs.get("timeout")  # P6-21 — the vite-build budget
             capture["node_modules_is_symlink"] = (Path(cwd) / "node_modules").is_symlink()
         if returncode == 0:
             dist = Path(cwd) / "dist"
@@ -303,11 +304,116 @@ async def test_vite_build_raises_on_nonzero_exit(monkeypatch):
 
 async def test_vite_build_raises_on_timeout(monkeypatch):
     def _timeout(cmd, cwd=None, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=cmd, timeout=60)
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 60))
     monkeypatch.setattr(storage.subprocess, "run", _timeout)
     with pytest.raises(ViteBuildError) as ei:
         await storage.vite_build({"src/App.tsx": "x"})
     assert "timed out" in str(ei.value)
+
+
+# ─── P6-21: env-configurable Vite build budget (read at call-time) ────────────
+
+
+async def test_build_timeout_reads_configured_value(monkeypatch):
+    """AC1 (regression — FAILS on unfixed code): the timeout passed to
+    subprocess.run is sourced from settings.design_agent_vite_build_timeout_seconds
+    at call-time, not the old hardcoded 60. Unfixed code passes 60 → assert fails."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 90, raising=False
+    )
+    capture: dict = {}
+    monkeypatch.setattr(storage.subprocess, "run", _fake_vite_run(capture=capture))
+    await storage.vite_build({"src/App.tsx": "export default () => null;"})
+    assert capture["timeout"] == 90
+
+
+def test_default_build_timeout_is_120():
+    """AC2: with no env override, the configured default is 120s."""
+    from app.config import settings as live_settings
+    assert live_settings.design_agent_vite_build_timeout_seconds == 120
+
+
+def test_env_override_build_timeout(monkeypatch):
+    """AC1: the field is env-overridable via DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS."""
+    from app.config import Settings
+    monkeypatch.setenv("DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS", "200")
+    fresh = Settings()
+    assert fresh.design_agent_vite_build_timeout_seconds == 200
+
+
+async def test_timeout_raises_vite_build_error_with_configured_value(monkeypatch):
+    """AC4: on TimeoutExpired the ViteBuildError message names the LIVE configured
+    budget (not a hardcoded 60), keeping the timeout class distinguishable."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 90, raising=False
+    )
+
+    def _timeout(cmd, cwd=None, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(storage.subprocess, "run", _timeout)
+    with pytest.raises(ViteBuildError) as ei:
+        await storage.vite_build({"src/App.tsx": "x"})
+    assert "timed out after 90s" in str(ei.value)
+    # distinct from the exit-code class and the no-dist class
+    assert "exit=" not in str(ei.value)
+
+
+async def test_timeout_propagates_through_repair_loop(monkeypatch):
+    """AC5: vite_build_with_repair re-raises a timeout ViteBuildError UNCHANGED
+    (a timeout is not a 'could not resolve' class), with no repair re-attempt —
+    proving the P6-07 import-repair path is untouched by P6-21."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 75, raising=False
+    )
+    calls = {"n": 0}
+
+    def _timeout(cmd, cwd=None, **kwargs):
+        calls["n"] += 1
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(storage.subprocess, "run", _timeout)
+    with pytest.raises(ViteBuildError) as ei:
+        await storage.vite_build_with_repair({"src/App.tsx": "x"})
+    assert "timed out after 75s" in str(ei.value)
+    # exactly one build attempt — no repair rebuild on a timeout class
+    assert calls["n"] == 1
+
+
+async def test_build_under_limit_succeeds(monkeypatch):
+    """AC3: raising the budget does not change the success path — a build that
+    completes (returncode=0) returns dist files normally regardless of the budget."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 300, raising=False
+    )
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_vite_run(dist_files={"index.html": "<html>ok</html>"}),
+    )
+    out = await storage.vite_build({"src/App.tsx": "export default () => null;"})
+    assert out["index.html"] == "<html>ok</html>"
+
+
+async def test_no_hardcoded_timeout_constant_used(monkeypatch):
+    """AC6: the call-time read tracks the setting — changing the setting changes
+    the subprocess.run timeout, so no stale 60 constant shadows it."""
+    capture: dict = {}
+    monkeypatch.setattr(storage.subprocess, "run", _fake_vite_run(capture=capture))
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 111, raising=False
+    )
+    await storage.vite_build({"src/App.tsx": "x"})
+    assert capture["timeout"] == 111
+    assert not hasattr(storage, "_VITE_BUILD_TIMEOUT_SECONDS")
+
+
+def test_settings_field_additive():
+    """AC8: the new field exists with the expected type/default and the import is
+    clean (the additive Settings change breaks no existing consumer)."""
+    from app.config import settings as live_settings
+    val = live_settings.design_agent_vite_build_timeout_seconds
+    assert isinstance(val, int)
+    assert val == 120
 
 
 async def test_vite_build_raises_when_dist_not_produced(monkeypatch):
