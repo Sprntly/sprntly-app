@@ -13,6 +13,7 @@ import {
 import { IterateComposer } from "../IterateComposer"
 import { ClarifyingQuestionSurface } from "../ClarifyingQuestionSurface"
 import { CommentsPanel } from "../CommentsPanel"
+import { PostGenerationResult } from "../PostGenerationResult"
 import { GenerationErrorBanner } from "../GenerationErrorBanner"
 import type { PrototypeRecord } from "../../../lib/api"
 import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
@@ -421,7 +422,14 @@ describe("post-iterate / clarify callback threading (AC4/AC5 wiring)", () => {
   })
 })
 
-describe("CommentsPanel mounts live on a newly-minted share_token (AC12 / #14)", () => {
+describe("CommentsPanel relocated into PostGenerationResult's `comments` prop (AC3/AC6c, #14)", () => {
+  // P6-13 (UX-3): CommentsPanel moved OUT of its post-PostGenerationResult
+  // sibling position and is now passed DOWN as the `comments` prop so a
+  // two-column `design-pane` grid can wrap viewer-left + comments-right. The
+  // share-token gate, `key`, `token`, `prototypeId`, and `onApply` wiring are
+  // carried byte-identical — only the LOCATION changed. These assertions REPLACE
+  // the pre-move `viewChildren(...).find(c => c.type === CommentsPanel)` checks,
+  // which would go red now that CommentsPanel is no longer a direct launcher child.
   const base: PrototypeRecord = {
     id: 7,
     status: "ready",
@@ -432,21 +440,76 @@ describe("CommentsPanel mounts live on a newly-minted share_token (AC12 / #14)",
     share_token: null,
   }
 
-  it("does NOT mount CommentsPanel while share_token is null", () => {
-    const children = viewChildren({ result: { ...base, share_token: null } })
-    expect(children.find((c) => c.type === CommentsPanel)).toBeFalsy()
-  })
+  /** Locate the <PostGenerationResult> element the launcher renders and read its
+   *  `comments` slot (the relocated CommentsPanel element, or null). */
+  function commentsSlot(
+    over: Partial<Parameters<typeof DesignAgentLauncherView>[0]> = {},
+  ): React.ReactElement | null {
+    const children = viewChildren(over)
+    const pgr = children.find((c) => c.type === PostGenerationResult)
+    expect(pgr).toBeTruthy()
+    return (pgr!.props as { comments?: React.ReactNode })
+      .comments as React.ReactElement | null
+  }
 
-  it("mounts CommentsPanel addressed by the new token once share_token is present (test_comments_panel_mounts_on_new_share_token)", () => {
-    // Surfacing a refetched record carrying a non-null share_token (same id)
-    // flips the share-gated mount on — no manual remount.
+  it("never renders CommentsPanel as a DIRECT launcher child anymore (relocation, inverted assertion)", () => {
     const children = viewChildren({
       result: { ...base, share_token: "tok-xyz-123" },
     })
-    const comments = children.find((c) => c.type === CommentsPanel)
-    expect(comments).toBeTruthy()
-    expect((comments!.props as { token: string }).token).toBe("tok-xyz-123")
-    expect((comments!.props as { prototypeId: number }).prototypeId).toBe(7)
+    expect(children.find((c) => c.type === CommentsPanel)).toBeFalsy()
+  })
+
+  it("passes NO comments node while share_token is null — gate preserved (test_comments_gate_preserved)", () => {
+    const slot = commentsSlot({ result: { ...base, share_token: null } })
+    expect(slot).toBeFalsy()
+  })
+
+  it("passes a CommentsPanel as the `comments` prop once share_token is present, addressed by the new token (test_launcher_passes_comments_as_prop_not_sibling)", () => {
+    const slot = commentsSlot({ result: { ...base, share_token: "tok-xyz-123" } })
+    expect(slot).toBeTruthy()
+    expect(slot!.type).toBe(CommentsPanel)
+    expect((slot!.props as { token: string }).token).toBe("tok-xyz-123")
+    expect((slot!.props as { prototypeId: number }).prototypeId).toBe(7)
+    // The Apply→IterateComposer handoff (onApply → setApplyTarget) is preserved
+    // on the relocated node, byte-identical to the pre-move sibling.
+    expect(typeof (slot!.props as { onApply: unknown }).onApply).toBe("function")
+  })
+})
+
+describe("IterateComposer + ClarifyingQuestionSurface stay full-width below the pane (AC6b)", () => {
+  // P6-13 relocates ONLY CommentsPanel. IterateComposer + ClarifyingQuestionSurface
+  // remain launcher-level siblings rendered AFTER <PostGenerationResult> (below the
+  // two-column design-pane), full-width — NOT folded into the comments column.
+  const base: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/index.html",
+    error: null,
+    is_complete: false,
+    share_mode: "private",
+    share_token: "tok-xyz-123",
+    pending_question: { question: "Mobile or desktop first?" },
+  }
+
+  it("renders both as launcher siblings positioned after PostGenerationResult, with wiring unchanged (test_iterate_and_clarify_stay_below_pane)", () => {
+    const children = viewChildren({ result: base, applyTarget: null })
+    const pgrIdx = children.findIndex((c) => c.type === PostGenerationResult)
+    const iterateIdx = children.findIndex((c) => c.type === IterateComposer)
+    const clarifyIdx = children.findIndex(
+      (c) => c.type === ClarifyingQuestionSurface,
+    )
+    expect(pgrIdx).toBeGreaterThanOrEqual(0)
+    expect(iterateIdx).toBeGreaterThan(pgrIdx)
+    expect(clarifyIdx).toBeGreaterThan(pgrIdx)
+    // They are NOT folded into PostGenerationResult's comments slot — the slot
+    // holds ONLY the relocated CommentsPanel.
+    const slot = (children[pgrIdx].props as { comments?: React.ReactElement | null })
+      .comments
+    expect(slot?.type).toBe(CommentsPanel)
+    // IterateComposer wiring byte-unchanged.
+    const iterate = children[iterateIdx]
+    expect((iterate.props as { prototypeId: number }).prototypeId).toBe(7)
+    expect((iterate.props as { isComplete: boolean }).isComplete).toBe(false)
   })
 })
 
