@@ -18,7 +18,7 @@
 
 import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
-import { designAgentApi } from "../../lib/api"
+import { connectorsApi, designAgentApi } from "../../lib/api"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
@@ -128,6 +128,28 @@ export function buildGenerateParams({
         ? { primary_color: manualColor, font_family: manualFont }
         : null,
   }
+}
+
+/**
+ * P6-15 (UX-5, AC3) — connect-affordance redirect. The source IA's "Connect
+ * Figma" / "Connect a repo" buttons reuse the EXACT entry points
+ * `ConnectorsScreen` uses (`connectorsApi.figmaAuthorizeUrl` /
+ * `connectorsApi.githubAuthorizeUrl`) via a plain `location.href` redirect —
+ * NO OAuth handshake, NO token exchange inside this drawer. The connector flow
+ * and its known prod bugs are Quokka's connectors lane; UX-5 only wires the
+ * affordance to the existing authorize-URL redirect.
+ *
+ * `location` is injected (defaulting to `window.location`) so the wiring is
+ * unit-testable in the repo's node vitest env — there is no DOM and no click, so
+ * the test asserts the redirect target on an injected `location` seam. The
+ * default is evaluated lazily (only on click), so SSR render never touches
+ * `window`.
+ */
+export function redirectToConnect(
+  authorizeUrl: () => string,
+  location: Pick<Location, "href"> = window.location,
+): void {
+  location.href = authorizeUrl()
 }
 
 /**
@@ -380,76 +402,152 @@ export function DesignAgentDrawerView({
             />
           </div>
 
-          {/* P5-02 Scenario B floor — only when no Figma source is connected.
-              A brand URL (matched automatically) plus a manual color + font that
-              guarantee styled output even with no extractor (the absolute floor). */}
-          {!figmaFileKey && (
-            <div style={{ marginTop: 16 }}>
-              <label className="field-label" htmlFor="dap-website-url">
-                Brand website URL (optional)
-              </label>
-              <input
-                type="url"
-                id="dap-website-url"
-                className="input"
-                value={websiteUrl}
-                onChange={(e) => setWebsiteUrl(e.target.value)}
-                placeholder="https://yourbrand.com"
-              />
-              <p
-                style={{
-                  fontSize: 11.5,
-                  color: "var(--muted)",
-                  margin: "6px 0 0",
-                }}
-              >
-                We&apos;ll match the site&apos;s colors and fonts. No site? Set a
-                brand color and font below.
-              </p>
-              <div
-                style={{
-                  display: "flex",
-                  gap: 12,
-                  marginTop: 12,
-                  alignItems: "flex-end",
-                }}
-              >
-                <div>
-                  <label className="field-label" htmlFor="dap-manual-color">
-                    Brand color
-                  </label>
-                  <input
-                    type="color"
-                    id="dap-manual-color"
-                    value={manualColor}
-                    onChange={(e) => setManualColor(e.target.value)}
-                    style={{
-                      display: "block",
-                      width: 48,
-                      height: 34,
-                      padding: 2,
-                      border: "1px solid var(--border)",
-                      borderRadius: 6,
-                      background: "var(--surface)",
-                    }}
-                  />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <label className="field-label" htmlFor="dap-manual-font">
-                    Brand font
-                  </label>
-                  <input
-                    type="text"
-                    id="dap-manual-font"
-                    className="input"
-                    value={manualFont}
-                    onChange={(e) => setManualFont(e.target.value)}
-                    placeholder="e.g. Inter"
-                  />
-                </div>
+          {/* P6-15 (UX-5) — source-first IA. Replaces the old read-only "Source
+              detected" info row with three EXPLICIT options: Connect Figma
+              (primary), Connect a repo (codebase), and the website-style
+              inference as the EXPLICIT fallback (the retained P5-02 floor, now
+              labelled). The connect buttons redirect to the SAME connectors
+              entry points ConnectorsScreen uses (connectorsApi.*AuthorizeUrl) —
+              no OAuth handshake in the drawer (Quokka's connectors lane owns the
+              flow). Rendered inside DesignAgentLauncher's `.design-agent-surface`
+              wrapper, so the appended `.design-agent-surface .src-*` rules apply. */}
+          <div style={{ marginTop: 16 }}>
+            <span className="field-label">Source for this prototype</span>
+
+            {/* Figma — primary. Connected state read from the existing
+                `figmaFileKey` prop (no new connectors-status fetch). */}
+            <div className="src-block">
+              <div className="src-block-head">
+                <span>Figma</span>
+                <span className="src-block-tag">primary</span>
+              </div>
+              <div className="src-row">
+                {figmaFileKey ? (
+                  <span className="src-connected">
+                    {sourceDetectedLabel(figmaFileKey)}
+                  </span>
+                ) : (
+                  <>
+                    <span className="src-not-connected">
+                      {sourceDetectedLabel(figmaFileKey)}
+                    </span>
+                    <button
+                      type="button"
+                      className="src-connect-btn"
+                      onClick={() =>
+                        redirectToConnect(connectorsApi.figmaAuthorizeUrl)
+                      }
+                    >
+                      Connect Figma
+                    </button>
+                  </>
+                )}
               </div>
             </div>
-          )}
+
+            {/* Repo / codebase — Sprntly passes no repo-connected prop today, so
+                render the connect affordance unconditionally (seam: a future
+                ticket may pass `repoConnected`; UX-5 does not invent one). */}
+            <div className="src-block">
+              <div className="src-block-head">
+                <span>Connect a repo</span>
+                <span className="src-block-tag">codebase</span>
+              </div>
+              <div className="src-row">
+                <span className="src-not-connected muted">
+                  Match an existing codebase&apos;s style
+                </span>
+                <button
+                  type="button"
+                  className="src-connect-btn ghost"
+                  onClick={() =>
+                    redirectToConnect(connectorsApi.githubAuthorizeUrl)
+                  }
+                >
+                  Connect a repo
+                </button>
+              </div>
+            </div>
+
+            {/* P5-02 Scenario B floor — the EXPLICIT website-style fallback, now
+                labelled with a `src-fallback-note`. Shown only when no Figma
+                source is connected: a brand URL (matched automatically) plus a
+                manual color + font that guarantee styled output even with no
+                extractor (the absolute floor — RETAINED verbatim, never deleted). */}
+            {!figmaFileKey && (
+              <>
+                <div className="src-fallback-note">
+                  No design source? We&apos;ll infer a style from a website, or
+                  set a brand color and font below.
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <label className="field-label" htmlFor="dap-website-url">
+                    Brand website URL (optional)
+                  </label>
+                  <input
+                    type="url"
+                    id="dap-website-url"
+                    className="input"
+                    value={websiteUrl}
+                    onChange={(e) => setWebsiteUrl(e.target.value)}
+                    placeholder="https://yourbrand.com"
+                  />
+                  <p
+                    style={{
+                      fontSize: 11.5,
+                      color: "var(--muted)",
+                      margin: "6px 0 0",
+                    }}
+                  >
+                    We&apos;ll match the site&apos;s colors and fonts. No site?
+                    Set a brand color and font below.
+                  </p>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 12,
+                      marginTop: 12,
+                      alignItems: "flex-end",
+                    }}
+                  >
+                    <div>
+                      <label className="field-label" htmlFor="dap-manual-color">
+                        Brand color
+                      </label>
+                      <input
+                        type="color"
+                        id="dap-manual-color"
+                        value={manualColor}
+                        onChange={(e) => setManualColor(e.target.value)}
+                        style={{
+                          display: "block",
+                          width: 48,
+                          height: 34,
+                          padding: 2,
+                          border: "1px solid var(--border)",
+                          borderRadius: 6,
+                          background: "var(--surface)",
+                        }}
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label className="field-label" htmlFor="dap-manual-font">
+                        Brand font
+                      </label>
+                      <input
+                        type="text"
+                        id="dap-manual-font"
+                        className="input"
+                        value={manualFont}
+                        onChange={(e) => setManualFont(e.target.value)}
+                        placeholder="e.g. Inter"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
 
           <label
             htmlFor="dap-notify"
@@ -470,19 +568,6 @@ export function DesignAgentDrawerView({
             />
             Notify me when ready
           </label>
-
-          <div
-            style={{
-              marginTop: 14,
-              padding: "10px 12px",
-              background: "var(--surface-2)",
-              borderRadius: 8,
-              fontSize: 12.5,
-              color: "var(--muted)",
-            }}
-          >
-            Source detected: {sourceDetectedLabel(figmaFileKey)}
-          </div>
         </div>
         <DrawerFooter
           submitting={submitting}
