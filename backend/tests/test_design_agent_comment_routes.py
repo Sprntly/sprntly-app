@@ -7,7 +7,7 @@
     GET   /v1/design-agent/by-token/{token}/comments            (public, no auth)
 
 The internal routes reuse the authed-route gates (feature flag +
-require_app_session + workspace filter); the public routes ride on the P2-05
+require_company + workspace filter); the public routes ride on the P2-05
 `by-token` resolver, where the share_token IS the access primitive (F6) — no
 auth, no session workspace claim, workspace taken from the resolved row. The
 security posture under test:
@@ -38,6 +38,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.conftest import _TEST_COMPANY_ID
 
 # SQLite-compatible end-state of `prototypes` (P1-06 + P2-06 sharing columns) +
 # `prototype_checkpoints` + `prototype_comments` (P3-01). Postgres-only constructs
@@ -94,7 +96,7 @@ CREATE TABLE prototype_comments (
 );
 """
 
-_OTHER_WS = "other-workspace"  # foreign to the app-session's aud ("app")
+_OTHER_WS = "other-workspace"  # foreign to the caller's company (_TEST_COMPANY_ID)
 
 
 @pytest.fixture
@@ -119,12 +121,9 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
 @pytest.fixture
@@ -138,7 +137,7 @@ def unauth(env) -> TestClient:
 
 def _seed_prototype(
     *,
-    workspace_id: str = "app",
+    workspace_id: str = _TEST_COMPANY_ID,
     share_mode: str = "private",
     status: str = "ready",
     is_complete: int = 0,
@@ -165,7 +164,7 @@ def _seed_prototype(
 def _seed_comment(
     *,
     prototype_id: int,
-    workspace_id: str = "app",
+    workspace_id: str = _TEST_COMPANY_ID,
     anchor_id: str = "a1b2c3d4",
     body: str = "seeded comment",
     author: str = "demo",
@@ -198,7 +197,7 @@ def _count_comments(prototype_id: int) -> int:
 
 def test_post_comment_authed_returns_open_comment(client):
     # AC1 — authed POST returns 200 with an open CommentOut + persists a row.
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     resp = client.post(
         f"/v1/design-agent/{proto.id}/comments",
         json={"anchor_id": "deadbeef", "body": "make this blue"},
@@ -225,8 +224,8 @@ def test_post_comment_wrong_workspace_returns_404(client):
 
 
 def test_post_comment_requires_session(unauth):
-    # AC (CRUD auth) — no session cookie → 401 from require_app_session.
-    proto = _seed_prototype(workspace_id="app")
+    # AC (CRUD auth) — no bearer → 401 from require_company.
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     resp = unauth.post(
         f"/v1/design-agent/{proto.id}/comments",
         json={"anchor_id": "deadbeef", "body": "x"},
@@ -236,7 +235,7 @@ def test_post_comment_requires_session(unauth):
 
 def test_get_comments_returns_all_statuses(client):
     # AC3 — GET returns every comment (all statuses), created_at-ascending.
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     _seed_comment(prototype_id=proto.id, status="open", anchor_id="aaa",
                   created_at="2026-01-01 00:00:01")
     _seed_comment(prototype_id=proto.id, status="resolved", anchor_id="bbb",
@@ -260,7 +259,7 @@ def test_get_comments_wrong_workspace_returns_404(client):
 
 def test_patch_resolve_flips_status(client):
     # AC4 — PATCH flips the comment to resolved + stamps resolved_at.
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     cid = _seed_comment(prototype_id=proto.id, status="open")
     resp = client.patch(f"/v1/design-agent/{proto.id}/comments/{cid}/resolve")
     assert resp.status_code == 200, resp.text
@@ -271,8 +270,8 @@ def test_patch_resolve_flips_status(client):
 
 def test_patch_resolve_comment_for_other_prototype_returns_404(client):
     # AC4 — a cid that belongs to a DIFFERENT prototype than the path → 404.
-    proto_a = _seed_prototype(workspace_id="app")
-    proto_b = _seed_prototype(workspace_id="app")
+    proto_a = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
+    proto_b = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     cid = _seed_comment(prototype_id=proto_a.id, status="open")
     resp = client.patch(f"/v1/design-agent/{proto_b.id}/comments/{cid}/resolve")
     assert resp.status_code == 404
@@ -374,7 +373,7 @@ def test_no_public_resolve_route(unauth):
 
 def test_post_comment_empty_body_returns_422(client):
     # Pydantic min_length=1 on body → 422 (not a silent empty insert).
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     resp = client.post(
         f"/v1/design-agent/{proto.id}/comments",
         json={"anchor_id": "deadbeef", "body": ""},
@@ -384,7 +383,7 @@ def test_post_comment_empty_body_returns_422(client):
 
 def test_post_comment_empty_anchor_returns_422(client):
     # Pydantic min_length=1 on anchor_id → 422.
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     resp = client.post(
         f"/v1/design-agent/{proto.id}/comments",
         json={"anchor_id": "", "body": "x"},

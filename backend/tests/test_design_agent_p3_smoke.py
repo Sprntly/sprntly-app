@@ -61,6 +61,13 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from tests.conftest import (
+    _TEST_COMPANY_ID,
+    _bearer_header,
+    _enable_supabase_bearer,
+    _seed_company_membership,
+)
+
 # ─── Fixture on disk (reused verbatim from P1-11/P2-11) ──────────────────────
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "design_agent"
@@ -223,6 +230,11 @@ def env(isolated_settings, monkeypatch):
     monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
     monkeypatch.setenv("DESIGN_AGENT_TOKEN_SECRET", "test-secret-only-used-for-binding")
 
+    # P6-10: wire the bearer-authed require_company path (this e2e suite stays async +
+    # ASGITransport for the background create_task; only the auth source changed).
+    _enable_supabase_bearer(monkeypatch)
+    _seed_company_membership(isolated_settings["supabase"])
+
     # Reload set mirrors the proven sibling route-tests (comment_routes +
     # prd_patch_routes): proto → comments → prd_patches → routes → main. We do NOT
     # reload app.db.prds / app.db — get_prd_rendered (the /v1/prd fold) resolves the
@@ -288,8 +300,9 @@ def _stub_build_and_source(monkeypatch, env, *, dist: dict):
 
 
 async def _login(ac):
-    resp = await ac.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
+    # P6-10: attach a Supabase Bearer JWT (require_company) instead of cookie login.
+    # workspace_id resolves to _TEST_COMPANY_ID via the membership seeded in `env`.
+    ac.headers.update(_bearer_header())
 
 
 async def _poll(ac, proto_id, predicate, *, what: str, budget=120):
@@ -469,7 +482,7 @@ async def test_p3_iterate_on_locked_prototype_returns_409(env, monkeypatch):
         "(prd_id, workspace_id, template_version, status, share_mode, share_token, "
         " bundle_url, current_checkpoint_id, is_complete) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [1, "app", 1, "ready", "private", token, "file:///x/index.html", 5, 1],
+        [1, _TEST_COMPANY_ID, 1, "ready", "private", token, "file:///x/index.html", 5, 1],
     )
     proto_id = cur.lastrowid
 

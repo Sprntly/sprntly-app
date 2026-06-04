@@ -44,7 +44,7 @@ WHY THIS MIRRORS P2-11/P3-13 BUT DIVERGES — all verified against the release H
   tmp dir): the manual-edit "source reflects the change" assertion (AC1) needs the
   raw `_source/` to genuinely round-trip stage → read, so it cannot be stubbed.
 
-- Auth is INJECTED via `app.dependency_overrides[require_app_session]` (the P4-02
+- Auth is INJECTED via `app.dependency_overrides[require_company]` (the P4-02
   mitigation) — the e2e does NOT rely on the local auth.py path. The public
   `/by-token` resolver carries no auth dependency and is unaffected.
 
@@ -62,6 +62,9 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+
+from app.auth import CompanyContext
+from tests.conftest import _TEST_COMPANY_ID, _TEST_USER_ID
 
 # ─── Generated source under test ─────────────────────────────────────────────
 #
@@ -293,10 +296,12 @@ def env(isolated_settings, monkeypatch, tmp_path):
     import app.main as main_mod
     importlib.reload(main_mod)
 
-    # Inject the app session (P4-02 mitigation): do NOT rely on the local auth.py
-    # Bearer path. The public /by-token routes carry no auth dependency, so they are
-    # unaffected by this override.
-    main_mod.app.dependency_overrides[routes_mod.require_app_session] = lambda: {"aud": "app"}
+    # Inject the company context (P4-02 mitigation): do NOT rely on the live auth.py
+    # require_company path. workspace_id resolves to _TEST_COMPANY_ID. The public
+    # /by-token routes carry no auth dependency, so they are unaffected by this override.
+    main_mod.app.dependency_overrides[routes_mod.require_company] = lambda: CompanyContext(
+        company_id=_TEST_COMPANY_ID, role="owner", user_id=_TEST_USER_ID
+    )
 
     import app.db as db_mod
     yield SimpleNamespace(

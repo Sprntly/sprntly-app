@@ -76,6 +76,13 @@ from httpx import ASGITransport, AsyncClient
 
 from app.design_agent import storage as _storage_mod
 
+from tests.conftest import (
+    _TEST_COMPANY_ID,
+    _bearer_header,
+    _enable_supabase_bearer,
+    _seed_company_membership,
+)
+
 # ─── Fixtures on disk ───────────────────────────────────────────────────────
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "design_agent"
@@ -207,6 +214,11 @@ def env(isolated_settings, monkeypatch):
     )
     monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
 
+    # P6-10: wire the bearer-authed require_company path (this e2e suite stays async +
+    # ASGITransport for the background create_task; only the auth source changed).
+    _enable_supabase_bearer(monkeypatch)
+    _seed_company_membership(isolated_settings["supabase"])
+
     import app.db.prototypes as proto_mod
     importlib.reload(proto_mod)
     import app.routes.design_agent as routes_mod
@@ -239,18 +251,19 @@ def _point_storage_to_tmp(monkeypatch, tmp_path: Path) -> None:
 
 @asynccontextmanager
 async def _login(env):
-    """An httpx AsyncClient driving the ASGI app, logged in with audience='app'.
+    """An httpx AsyncClient driving the ASGI app, authed via a Supabase Bearer JWT
+    (require_company). The seeded membership + JWT secret are wired by the `env`
+    fixture; authed calls resolve workspace_id to _TEST_COMPANY_ID.
 
     ASGITransport runs the app on the *current* event loop, so the route's
     `asyncio.create_task` background generation completes deterministically as
-    the test awaits — unlike a per-request-portal sync TestClient.
+    the test awaits — unlike a per-request-portal sync TestClient. (P6-10 keeps
+    this async harness; only the cookie-login → bearer-header swap changed.)
     """
     transport = ASGITransport(app=env.main.app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        resp = await client.post(
-            "/v1/auth/login", json={"password": "test-pw", "audience": "app"}
-        )
-        assert resp.status_code == 200, resp.text
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=_bearer_header()
+    ) as client:
         yield client
 
 
@@ -309,7 +322,7 @@ async def test_smoke_emits_cost_summary_log(env, monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         result, virtual_fs = await generate_prototype(
             prototype_id=4242,
-            workspace_id="app",
+            workspace_id=_TEST_COMPANY_ID,
             system_blocks=[{
                 "type": "text",
                 "text": "system prompt",
@@ -454,7 +467,7 @@ async def _run_scaffold(monkeypatch, caplog, *, scenario="A", user_text="build a
     with caplog.at_level(logging.INFO):
         result, _vfs = await generate_prototype(
             prototype_id=4242,
-            workspace_id="app",
+            workspace_id=_TEST_COMPANY_ID,
             system_blocks=[dict(_SYS_BLOCK)],
             user_message=_user_msg(user_text),
             figma_file_key=None,
@@ -471,7 +484,7 @@ async def _run_iterate(monkeypatch, caplog, *, scenario="A", user_text="tweak th
     with caplog.at_level(logging.INFO):
         result, _vfs = await iterate_prototype(
             prototype_id=4343,
-            workspace_id="app",
+            workspace_id=_TEST_COMPANY_ID,
             system_blocks=[dict(_SYS_BLOCK)],
             user_message=_user_msg(user_text),
             current_source=source or {"src/App.tsx": "export default function App(){return null}"},
@@ -489,7 +502,7 @@ async def _run_manual(monkeypatch, caplog, *, scenario="A", user_text="commit th
     with caplog.at_level(logging.INFO):
         result, _vfs = await manual_edit_prototype(
             prototype_id=4444,
-            workspace_id="app",
+            workspace_id=_TEST_COMPANY_ID,
             system_blocks=[dict(_SYS_BLOCK)],
             user_message=_user_msg(user_text),
             current_source=source or {"src/App.tsx": "export default function App(){return null}"},
@@ -758,7 +771,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     assert row["bundle_url"], "bundle_url is empty on a ready prototype"
 
     # AC2: prototypes.website_url is persisted from the request; no Figma key.
-    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id="app")
+    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id=_TEST_COMPANY_ID)
     assert persisted is not None
     assert persisted["website_url"] == "https://example.com", (
         f"website_url not persisted: {persisted.get('website_url')!r}"
@@ -826,7 +839,7 @@ async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
     assert row["bundle_url"], "bundle_url is empty on a ready prototype"
 
     # AC3: all three source columns are NULL (no Figma / website / GitHub).
-    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id="app")
+    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id=_TEST_COMPANY_ID)
     assert persisted is not None
     assert not persisted["figma_file_key"], (
         f"figma_file_key not NULL: {persisted.get('figma_file_key')!r}"

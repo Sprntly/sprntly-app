@@ -6,13 +6,13 @@
 
 These surface P3-09's `prd_patches` proposals to the PrdPatchBanner and resolve
 them. The routes reuse the authed-route gates (feature flag 404 when off +
-require_app_session 401 + workspace filter). Security/observability posture under
+require_company 401/403 + workspace filter). Security/observability posture under
 test:
 
   - workspace isolation (Rule #22): an accept/reject of a patch in a foreign
     workspace returns 404, never 403 (cross-tenant existence is not disclosed);
     the list route simply yields no rows under the wrong workspace.
-  - 401 without a session on every route (require_app_session).
+  - 401/403 without a valid bearer + company on every route (require_company).
   - accept flips status pending→applied + returns the row; reject flips
     pending→rejected; list returns ONLY pending rows, created_at-ascending.
   - observability (Rule #24 / AC12): accept/reject log `prd_patch_applied` /
@@ -32,6 +32,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.conftest import _TEST_COMPANY_ID
 
 # SQLite-compatible end-state of `prd_patches` after the P3-09 migration — mirrors
 # test_design_agent_prd_patches._PRD_PATCHES_DDL exactly. Postgres-only constructs
@@ -53,7 +55,7 @@ CREATE TABLE IF NOT EXISTS prd_patches (
 );
 """
 
-_OTHER_WS = "other-workspace"  # foreign to the app-session's aud ("app")
+_OTHER_WS = "other-workspace"  # foreign to the caller's company (_TEST_COMPANY_ID)
 
 
 @pytest.fixture
@@ -77,12 +79,9 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
 @pytest.fixture
@@ -98,7 +97,7 @@ def _seed_patch(
     *,
     prd_id: int = 1,
     prototype_id: int = 1,
-    workspace_id: str = "app",
+    workspace_id: str = _TEST_COMPANY_ID,
     rationale: str = "tighten the success metric",
     patch_md: str = "## Success metric\n\nActivation within 7 days, not 30.",
     status: str = "pending",
@@ -131,15 +130,15 @@ def _status_of(patch_id: int) -> str:
 def test_get_pending_patches_workspace_filtered(client):
     # AC6 — GET returns only PENDING rows for the prd, workspace-filtered,
     # created_at-ascending. Resolved rows + foreign-workspace rows are excluded.
-    _seed_patch(prd_id=1, workspace_id="app", status="pending",
+    _seed_patch(prd_id=1, workspace_id=_TEST_COMPANY_ID, status="pending",
                 rationale="first", created_at="2026-01-01 00:00:01")
-    _seed_patch(prd_id=1, workspace_id="app", status="pending",
+    _seed_patch(prd_id=1, workspace_id=_TEST_COMPANY_ID, status="pending",
                 rationale="second", created_at="2026-01-01 00:00:02")
-    _seed_patch(prd_id=1, workspace_id="app", status="applied",
+    _seed_patch(prd_id=1, workspace_id=_TEST_COMPANY_ID, status="applied",
                 rationale="already-applied")          # resolved → excluded
     _seed_patch(prd_id=1, workspace_id=_OTHER_WS, status="pending",
                 rationale="foreign")                   # foreign ws → excluded
-    _seed_patch(prd_id=2, workspace_id="app", status="pending",
+    _seed_patch(prd_id=2, workspace_id=_TEST_COMPANY_ID, status="pending",
                 rationale="other-prd")                 # different prd → excluded
 
     resp = client.get("/v1/design-agent/prd-patches", params={"prd_id": 1})
@@ -170,7 +169,7 @@ def test_get_pending_patches_requires_session(unauth):
 
 def test_accept_flips_to_applied(client):
     # AC6 — accept flips status pending→applied and returns the updated row.
-    pid = _seed_patch(workspace_id="app", status="pending")
+    pid = _seed_patch(workspace_id=_TEST_COMPANY_ID, status="pending")
     resp = client.post(f"/v1/design-agent/prd-patches/{pid}/accept")
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -189,7 +188,7 @@ def test_accept_wrong_workspace_returns_404(client):
 
 
 def test_accept_requires_session(unauth):
-    pid = _seed_patch(workspace_id="app", status="pending")
+    pid = _seed_patch(workspace_id=_TEST_COMPANY_ID, status="pending")
     resp = unauth.post(f"/v1/design-agent/prd-patches/{pid}/accept")
     assert resp.status_code == 401
     assert _status_of(pid) == "pending"
@@ -205,7 +204,7 @@ def test_accept_missing_patch_returns_404(client):
 
 def test_reject_flips_to_rejected(client):
     # AC6 — reject flips status pending→rejected and returns the updated row.
-    pid = _seed_patch(workspace_id="app", status="pending")
+    pid = _seed_patch(workspace_id=_TEST_COMPANY_ID, status="pending")
     resp = client.post(f"/v1/design-agent/prd-patches/{pid}/reject")
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -229,9 +228,9 @@ def test_routes_log_no_patch_content(client, caplog):
     # patch_id only; the patch_md / rationale (PRD body) NEVER reach the logs.
     secret_md = "## SECRET PRD BODY do-not-log"
     secret_rationale = "CONFIDENTIAL rationale do-not-log"
-    pid_a = _seed_patch(workspace_id="app", status="pending",
+    pid_a = _seed_patch(workspace_id=_TEST_COMPANY_ID, status="pending",
                         patch_md=secret_md, rationale=secret_rationale)
-    pid_r = _seed_patch(workspace_id="app", status="pending",
+    pid_r = _seed_patch(workspace_id=_TEST_COMPANY_ID, status="pending",
                         patch_md=secret_md, rationale=secret_rationale)
     with caplog.at_level(logging.INFO, logger="app.routes.design_agent"):
         assert client.post(f"/v1/design-agent/prd-patches/{pid_a}/accept").status_code == 200
