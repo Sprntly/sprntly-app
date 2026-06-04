@@ -28,8 +28,12 @@ logger = logging.getLogger(__name__)
 
 FIGMA_PROVIDER = "figma"
 FIGMA_AUTH_URL = "https://www.figma.com/oauth"
-FIGMA_TOKEN_URL = "https://www.figma.com/api/oauth/token"
-FIGMA_REFRESH_URL = "https://www.figma.com/api/oauth/refresh"
+# Post-Nov-2025 platform update: token + refresh moved off www.figma.com
+# onto api.figma.com, and credentials moved from body fields into the
+# HTTP Basic auth header.
+# https://developers.figma.com/docs/updates-to-figmas-developer-platform/
+FIGMA_TOKEN_URL = "https://api.figma.com/v1/oauth/token"
+FIGMA_REFRESH_URL = "https://api.figma.com/v1/oauth/refresh"
 FIGMA_ME_URL = "https://api.figma.com/v1/me"
 # Default scopes when nothing is configured. Comma-separated per Figma docs.
 # Per Figma's Nov 17, 2025 platform update, the old `files:read` scope is
@@ -93,15 +97,24 @@ def verify_oauth_state(state: str) -> dict:
     return payload
 
 
+def _basic_auth_header() -> dict[str, str]:
+    """`Authorization: Basic <base64(client_id:client_secret)>` — Figma's
+    new token + refresh endpoints take client credentials this way, not
+    in the request body."""
+    import base64
+
+    creds = f"{settings.figma_client_id}:{settings.figma_client_secret}"
+    return {"Authorization": f"Basic {base64.b64encode(creds.encode()).decode()}"}
+
+
 def exchange_code_for_token(code: str) -> dict[str, Any]:
     """Trade an authorization code for tokens. Returns the parsed JSON."""
     if not figma_configured():
         raise HTTPException(500, "Figma OAuth is not configured on the server")
     resp = requests.post(
         FIGMA_TOKEN_URL,
+        headers=_basic_auth_header(),
         data={
-            "client_id": settings.figma_client_id,
-            "client_secret": settings.figma_client_secret,
             "redirect_uri": settings.figma_oauth_redirect_uri,
             "code": code,
             "grant_type": "authorization_code",
@@ -119,11 +132,8 @@ def refresh_access_token(refresh_token: str) -> dict[str, Any]:
         raise HTTPException(500, "Figma OAuth is not configured on the server")
     resp = requests.post(
         FIGMA_REFRESH_URL,
-        data={
-            "client_id": settings.figma_client_id,
-            "client_secret": settings.figma_client_secret,
-            "refresh_token": refresh_token,
-        },
+        headers=_basic_auth_header(),
+        data={"refresh_token": refresh_token},
         timeout=15,
     )
     if not resp.ok:

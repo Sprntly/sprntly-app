@@ -65,6 +65,76 @@ def github_env(isolated_settings, monkeypatch):
     yield
 
 
+# ─────────────────────── Figma OAuth module unit tests ───────────────────────
+
+
+def test_exchange_code_for_token_posts_to_api_figma_with_basic_auth(figma_env):
+    """Post-Nov-2025: token URL moved from www.figma.com/api/oauth/token to
+    api.figma.com/v1/oauth/token, and credentials moved from body fields
+    into the HTTP Basic auth header. Both shifts are breaking; pin them
+    in a test so they can't silently regress."""
+    import base64
+    from unittest.mock import MagicMock
+    from app.connectors import figma_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {
+        "access_token": "fig-access",
+        "refresh_token": "fig-refresh",
+        "expires_in": 7776000,
+    }
+    with patch(
+        "app.connectors.figma_oauth.requests.post", return_value=mock_resp
+    ) as mock_post:
+        out = figma_oauth.exchange_code_for_token("auth-code-x")
+
+    assert out["access_token"] == "fig-access"
+    call_args = mock_post.call_args
+    assert call_args.args[0] == "https://api.figma.com/v1/oauth/token"
+
+    # Credentials ride in Authorization: Basic, not in the body
+    expected = base64.b64encode(
+        b"figma-client-id:figma-client-secret"
+    ).decode()
+    assert call_args.kwargs["headers"]["Authorization"] == f"Basic {expected}"
+
+    # Body is form-urlencoded with only the grant_type/code/redirect_uri trio
+    body = call_args.kwargs["data"]
+    assert body["grant_type"] == "authorization_code"
+    assert body["code"] == "auth-code-x"
+    assert body["redirect_uri"] == "http://testserver/v1/connectors/figma/callback"
+    assert "client_id" not in body
+    assert "client_secret" not in body
+
+
+def test_refresh_access_token_posts_to_api_figma_refresh(figma_env):
+    """Same migration applies to the refresh endpoint."""
+    import base64
+    from unittest.mock import MagicMock
+    from app.connectors import figma_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {"access_token": "new-access", "expires_in": 7776000}
+    with patch(
+        "app.connectors.figma_oauth.requests.post", return_value=mock_resp
+    ) as mock_post:
+        out = figma_oauth.refresh_access_token("old-refresh")
+
+    assert out["access_token"] == "new-access"
+    call_args = mock_post.call_args
+    assert call_args.args[0] == "https://api.figma.com/v1/oauth/refresh"
+    expected = base64.b64encode(
+        b"figma-client-id:figma-client-secret"
+    ).decode()
+    assert call_args.kwargs["headers"]["Authorization"] == f"Basic {expected}"
+    body = call_args.kwargs["data"]
+    assert body["refresh_token"] == "old-refresh"
+    assert "client_id" not in body
+    assert "client_secret" not in body
+
+
 # ─────────────────────── Figma ───────────────────────
 
 
