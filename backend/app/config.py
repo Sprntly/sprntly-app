@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     # rotation at handoff; falls back to anthropic_api_key with a startup
     # warning (see app/design_agent/client.py).
     design_agent_anthropic_api_key: str = ""
+    # AD15 backstop (P6-06): hard USD ceiling ABOVE the $0.50 soft cap. When a
+    # run's projected next-iteration spend reaches this, agent_loop ABORTS (clean
+    # terminal status, partial bundle salvaged) rather than degrade-and-continue.
+    # Default 2.00 only catches PATHOLOGICAL runs: the worst observed-legit run
+    # hit $0.76 realized → $1.52 projected (2× projection), so the cap MUST stay
+    # > $1.52; 2.00 ⇒ abort fires only when realized ≥ $1.00 (2× worst legit, 4×
+    # the soft cap). Env-overridable via DESIGN_AGENT_HARD_CAP_USD; never lower
+    # below $1.52 (would catch legit runs).
+    design_agent_hard_cap_usd: float = 2.00
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 
