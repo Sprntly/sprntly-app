@@ -24,6 +24,12 @@ export type ShareMenuProps = {
   prototypeId: number
   initialMode: ShareMode
   initialToken?: string | null
+  /** P6-20 (#14): fired ONLY after a successful share-mode change, with the new
+   *  (possibly null) token, AFTER the local mode/token state is set. The launcher
+   *  passes its share-success re-poll here so `result.share_token` goes live and
+   *  the share-gated CommentsPanel mounts without a re-mount. Optional so the
+   *  public-viewer composition and existing callers keep type-checking. */
+  onShared?: (token: string | null) => void
 }
 
 export type ShareMenuViewProps = {
@@ -68,6 +74,53 @@ export async function runApplyShareMode({
     next === "passcode" ? { mode: next, passcode } : { mode: next },
   )
   return { mode: next, token: res.share_token }
+}
+
+/**
+ * Orchestrate a share-mode change for the stateful container (busy → apply →
+ * mirror local state → fire `onShared`). Extracted as an exported pure async
+ * helper — mirroring `runApplyShareMode` / `runCopyShareLink` — so the new
+ * `onShared`-on-success behaviour is testable in the repo's node-env vitest (no
+ * DOM to click the radio). The container's `selectMode` is a thin wrapper.
+ *
+ * `onShared` fires ONLY on success, AFTER `setToken`, so a failed share never
+ * triggers a parent re-poll (P6-20 AC1/AC6); `setBusy(false)` always runs in
+ * `finally`. Behaviour is byte-identical to the prior inline `selectMode` plus
+ * the single new `onShared?.(token)` line.
+ */
+export async function runSelectMode({
+  prototypeId,
+  next,
+  passcode,
+  api,
+  setMode,
+  setToken,
+  setBusy,
+  setError,
+  onShared,
+}: {
+  prototypeId: number
+  next: ShareMode
+  passcode: string
+  api: Pick<typeof designAgentApi, "share">
+  setMode: (mode: ShareMode) => void
+  setToken: (token: string | null) => void
+  setBusy: (busy: boolean) => void
+  setError: (error: string | null) => void
+  onShared?: (token: string | null) => void
+}): Promise<void> {
+  setBusy(true)
+  setError(null)
+  try {
+    const result = await runApplyShareMode({ prototypeId, next, passcode, api })
+    setMode(result.mode)
+    setToken(result.token)
+    onShared?.(result.token)
+  } catch (e) {
+    setError(toMessage(e, "Failed to update share settings"))
+  } finally {
+    setBusy(false)
+  }
 }
 
 /** Build the public share URL from the opaque token (F6). */
@@ -179,7 +232,7 @@ export function ShareMenuView({
 
 /** Public component. Wires React state to the orchestration helpers and the
  *  canonical `designAgentApi`, then delegates rendering to the pure view. */
-export function ShareMenu({ prototypeId, initialMode, initialToken }: ShareMenuProps) {
+export function ShareMenu({ prototypeId, initialMode, initialToken, onShared }: ShareMenuProps) {
   const [mode, setMode] = useState<ShareMode>(initialMode)
   const [token, setToken] = useState<string | null>(initialToken ?? null)
   const [passcode, setPasscode] = useState("")
@@ -188,22 +241,17 @@ export function ShareMenu({ prototypeId, initialMode, initialToken }: ShareMenuP
   const [copied, setCopied] = useState(false)
 
   async function selectMode(next: ShareMode) {
-    setBusy(true)
-    setError(null)
-    try {
-      const result = await runApplyShareMode({
-        prototypeId,
-        next,
-        passcode,
-        api: designAgentApi,
-      })
-      setMode(result.mode)
-      setToken(result.token)
-    } catch (e) {
-      setError(toMessage(e, "Failed to update share settings"))
-    } finally {
-      setBusy(false)
-    }
+    await runSelectMode({
+      prototypeId,
+      next,
+      passcode,
+      api: designAgentApi,
+      setMode,
+      setToken,
+      setBusy,
+      setError,
+      onShared,
+    })
   }
 
   async function handleCopyLink() {

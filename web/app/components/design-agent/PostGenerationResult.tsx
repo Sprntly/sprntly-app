@@ -39,6 +39,11 @@ export type PostGenerationResultProps = {
    *  use this component (it composes its own chrome) → it passes nothing and the
    *  comments column is omitted. Null-by-default keeps the public shape intact. */
   comments?: ReactNode
+  /** P6-20 (#14): forwarded to `<ShareMenu>` — fired after a successful Share so
+   *  the launcher re-polls and `result.share_token` goes live (flipping the
+   *  share-gated comments column on without a re-mount). Optional/defaulted so the
+   *  public-viewer composition and existing direct calls keep type-checking. */
+  onShared?: (token: string | null) => void
 }
 
 export type PostGenerationResultViewProps = {
@@ -51,6 +56,9 @@ export type PostGenerationResultViewProps = {
   /** P6-13 (UX-3): comments node for the right cell of the `design-pane` grid.
    *  When absent, the viewer renders full-width (no comments cell, no grid). */
   comments?: ReactNode
+  /** P6-20 (#14): forwarded to `<ShareMenu onShared>` so a successful Share
+   *  re-polls the launcher result. Optional/defaulted. */
+  onShared?: (token: string | null) => void
 }
 
 /**
@@ -115,6 +123,7 @@ export function PostGenerationResultView({
   bundleUrl,
   onStateChange,
   comments,
+  onShared,
 }: PostGenerationResultViewProps) {
   const viewHref = resolveViewHref(bundleUrl, shareToken)
   // P4-10 — the EDITABLE viewer, rendered only when a built bundle exists. This
@@ -149,6 +158,7 @@ export function PostGenerationResultView({
         prototypeId={prototypeId}
         initialMode={shareMode}
         initialToken={shareToken}
+        onShared={onShared}
       />
       {/* P6-13 (UX-3): two-column pane — viewer left (main cell), comments right
           (320px cell). CompletionBar + ShareMenu stay above as full-width chrome;
@@ -186,7 +196,7 @@ export function PostGenerationResultView({
  * P2-06 columns by defaulting `is_complete`→false, `share_mode`→"private",
  * `share_token`→null (AC9).
  */
-export function PostGenerationResult({ prototype, comments }: PostGenerationResultProps) {
+export function PostGenerationResult({ prototype, comments, onShared }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
   )
@@ -221,6 +231,7 @@ export function PostGenerationResult({ prototype, comments }: PostGenerationResu
       bundleUrl={prototype.bundle_url}
       onStateChange={(state) => setIsComplete(state.isComplete)}
       comments={comments}
+      onShared={onShared}
     />
   )
 }
