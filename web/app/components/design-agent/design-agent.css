@@ -518,3 +518,95 @@
   font-family: var(--font-mono);
   font-size: 10.5px;
 }
+
+/* ── Device frame (UX-2/P6-12) ────────────────────────────────────────────
+ * APPENDED below P6-11's seed (which owns `.da-prototype-viewer` /
+ * `.da-prototype-chrome` / `.da-prototype-iframe` + the three `.proto-dot`
+ * hexes — NOT re-declared here). The outer `.da-prototype-viewer` already
+ * supplies the bordered, rounded, surface-3 browser-frame surface (matching the
+ * v3 mockup's `.proto-frame`), so the inner `.proto-frame` stays a transparent
+ * flex column contributing only the 580px dominant height + head/stage layout —
+ * no second border. Visual target: design-agent-ui-proposal-v3.html (:357-398).
+ * Tokens only; the phone bezel uses `var(--ink)` (the darkest token) — no new
+ * colour literals beyond P6-11's three dot hexes.
+ */
+.design-agent-surface .proto-frame {
+  display: flex;
+  flex-direction: column;
+  min-height: 580px;
+}
+.design-agent-surface .proto-frame-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+.design-agent-surface .proto-url {
+  flex: 1;
+  min-width: 0;
+  margin: 0 10px;
+  padding: 5px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.design-agent-surface .platform-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.design-agent-surface .platform-toggle button {
+  border: none;
+  background: transparent;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--ink-3);
+}
+.design-agent-surface .platform-toggle button:hover {
+  color: var(--ink);
+}
+.design-agent-surface .platform-toggle button.active {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+}
+.design-agent-surface .proto-stage {
+  position: relative;
+  flex: 1;
+  display: flex;
+  background: var(--surface);
+  transition: padding 0.25s, background 0.25s;
+}
+.design-agent-surface .proto-stage.desktop {
+  padding: 0;
+}
+.design-agent-surface .proto-stage.mobile {
+  padding: 30px 0;
+  background: var(--surface-4);
+  align-items: flex-start;
+  justify-content: center;
+}
+.design-agent-surface .proto-stage.mobile .da-prototype-iframe {
+  flex: 0 0 auto;
+  width: 360px;
+  max-width: 360px;
+  min-height: 540px;
+  border-radius: 30px;
+  overflow: hidden;
+  border: 9px solid var(--ink);
+  box-shadow: var(--shadow-lg);
+}
