@@ -208,7 +208,14 @@ export function ConfigureConnectorDrawerView({
 type ConfigureConnectorDrawerProps = {
   providerId: string | null
   connection: ConnectionSummary | null
-  workspaceId: string
+  /**
+   * Active workspace's uuid. Nullable on purpose — the workspace may
+   * still be loading when the drawer first mounts. While null, all
+   * actions (Test, Disconnect, the Drive folder slot) are inert; the
+   * type says null so the type system enforces the guard at every call
+   * site instead of papering over the unloaded state with `?? ""`.
+   */
+  workspaceId: string | null
   activeCompany: string
   onClose: () => void
   /** Fired after a successful disconnect so the parent can reload connections. */
@@ -267,7 +274,7 @@ export function ConfigureConnectorDrawer({
   }
 
   const handleTest = useCallback(async () => {
-    if (!providerId) return
+    if (!providerId || !workspaceId) return
     setIsTesting(true)
     setTestResult(null)
     try {
@@ -291,7 +298,7 @@ export function ConfigureConnectorDrawer({
   }, [providerId, workspaceId])
 
   const handleDisconnect = useCallback(async () => {
-    if (!providerId) return
+    if (!providerId || !workspaceId) return
     setIsDisconnecting(true)
     setDisconnectError(null)
     try {
@@ -311,9 +318,12 @@ export function ConfigureConnectorDrawer({
     }
   }, [providerId, workspaceId, onDisconnected, onClose])
 
-  // Slot: provider-specific config component.
+  // Slot: provider-specific config component. The folder picker reads
+  // and writes through workspace-scoped endpoints, so suppress it until
+  // the workspace is loaded — better than mounting it and watching it
+  // 422 on every request.
   let slot: React.ReactNode = null
-  if (providerId === "google_drive") {
+  if (providerId === "google_drive" && workspaceId) {
     slot = (
       <GoogleDriveFolderPicker
         workspaceId={workspaceId}

@@ -319,7 +319,7 @@ export function ConnectorsSettings() {
       <ConfigureConnectorDrawer
         providerId={configuringProviderId}
         connection={configuringConnection}
-        workspaceId={workspaceId ?? ""}
+        workspaceId={workspaceId}
         activeCompany={activeCompany}
         onClose={() => setConfiguringProviderId(null)}
         onDisconnected={() => void reload()}
