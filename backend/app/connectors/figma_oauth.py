@@ -37,7 +37,7 @@ FIGMA_ME_URL = "https://api.figma.com/v1/me"
 # https://developers.figma.com/docs/updates-to-figmas-developer-platform/
 DEFAULT_SCOPES = (
     "file_content:read,file_metadata:read,"
-    "file_variables:read,file_dev_resources:read,current_user:read"
+    "file_dev_resources:read,current_user:read"
 )
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
