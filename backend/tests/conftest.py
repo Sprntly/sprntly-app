@@ -253,8 +253,7 @@ CREATE TABLE github_pull_requests (
 );
 
 -- Tenancy primitive (mirrors 20260525140000_companies_and_profiles.sql).
--- Used by require_company tests; IF NOT EXISTS so branches that also seed
--- it (e.g. the KG foundation) merge cleanly.
+-- Used by require_company tests AND as the FK anchor for the kg_* tables.
 CREATE TABLE IF NOT EXISTS companies (
     id           TEXT PRIMARY KEY,
     slug         TEXT,
@@ -267,6 +266,83 @@ CREATE TABLE IF NOT EXISTS company_members (
     company_id TEXT NOT NULL,
     user_id    TEXT NOT NULL,
     role       TEXT NOT NULL DEFAULT 'member'
+);
+
+-- ---- KG foundation (Phase 0) ----
+CREATE TABLE kg_source (
+    id            TEXT PRIMARY KEY,
+    enterprise_id TEXT NOT NULL,
+    source_type   TEXT NOT NULL,
+    label         TEXT,
+    config        TEXT NOT NULL DEFAULT '{}',
+    status        TEXT NOT NULL DEFAULT 'active',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE kg_entity (
+    id              TEXT PRIMARY KEY,
+    enterprise_id   TEXT NOT NULL,
+    type            TEXT NOT NULL,
+    canonical_label TEXT NOT NULL,
+    aliases         TEXT NOT NULL DEFAULT '[]',
+    properties      TEXT NOT NULL DEFAULT '{}',
+    embedding       TEXT,
+    valid_at        TEXT NOT NULL,
+    transaction_at  TEXT NOT NULL,
+    provenance      TEXT NOT NULL DEFAULT '{}',
+    confidence      REAL NOT NULL DEFAULT 1.0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE kg_signal (
+    id             TEXT PRIMARY KEY,
+    enterprise_id  TEXT NOT NULL,
+    source_id      TEXT,
+    source_type    TEXT NOT NULL,
+    kind           TEXT NOT NULL,
+    content        TEXT NOT NULL,
+    properties     TEXT NOT NULL DEFAULT '{}',
+    embedding      TEXT,
+    valid_at       TEXT NOT NULL,
+    transaction_at TEXT NOT NULL,
+    stale_after    TEXT,
+    confidence     REAL NOT NULL DEFAULT 1.0,
+    weight         REAL NOT NULL DEFAULT 1.0,
+    provenance     TEXT NOT NULL DEFAULT '{}',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE kg_relationship (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    enterprise_id  TEXT NOT NULL,
+    type           TEXT NOT NULL,
+    source_kind    TEXT NOT NULL,
+    source_id      TEXT NOT NULL,
+    target_kind    TEXT NOT NULL,
+    target_id      TEXT NOT NULL,
+    properties     TEXT NOT NULL DEFAULT '{}',
+    confidence     REAL NOT NULL DEFAULT 1.0,
+    valid_at       TEXT NOT NULL,
+    transaction_at TEXT NOT NULL,
+    provenance     TEXT NOT NULL DEFAULT '{}',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE agent_decision_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    enterprise_id  TEXT NOT NULL,
+    agent          TEXT NOT NULL,
+    decision_type  TEXT NOT NULL,
+    factors        TEXT NOT NULL DEFAULT '{}',
+    reasoning      TEXT,
+    output         TEXT NOT NULL DEFAULT '{}',
+    model          TEXT,
+    prompt_version TEXT,
+    confidence     REAL,
+    kg_refs        TEXT NOT NULL DEFAULT '[]',
+    timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
