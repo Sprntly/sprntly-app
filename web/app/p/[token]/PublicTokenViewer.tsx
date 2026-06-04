@@ -91,20 +91,23 @@ export function PublicTokenViewer() {
   // throws into the nearest not-found boundary).
   if (state.kind === "notfound") notFound()
   if (state.kind === "loading") {
-    return <div className="da-public-loading">Loading prototype…</div>
+    return (
+      <div className="design-agent-surface da-public-loading">Loading prototype…</div>
+    )
   }
   if (state.kind === "error") {
     return (
-      <div className="da-public-error">
+      <div className="design-agent-surface da-public-error">
         Could not load this prototype. Please try again.
       </div>
     )
   }
   if (state.kind === "passcode") return <PasscodeGate token={token as string} />
   return (
-    <PrototypeViewer
-      bundleUrl={state.bundleUrl}
-      isComplete={state.isComplete}
+    <div className="design-agent-surface">
+      <PrototypeViewer
+        bundleUrl={state.bundleUrl}
+        isComplete={state.isComplete}
       // Public-viewer chrome: a read-only CompletionBar status badge (P2-10) +
       // the F8 CommentsPanel (P3-03). Neither passes a prototypeId — the public
       // resolver is minimum-disclosure, so the CompletionBar stays read-only and
@@ -123,6 +126,7 @@ export function PublicTokenViewer() {
           <ManualEditOverlay isComplete={state.isComplete} />
         </>
       }
-    />
+      />
+    </div>
   )
 }

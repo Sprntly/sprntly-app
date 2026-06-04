@@ -108,7 +108,7 @@ export function PostGenerationResultView({
 }: PostGenerationResultViewProps) {
   const viewHref = resolveViewHref(bundleUrl, shareToken)
   return (
-    <div className="design-agent-result" data-testid="post-generation-result">
+    <div className="design-agent-surface design-agent-result" data-testid="post-generation-result">
       <CompletionBar
         prototypeId={prototypeId}
         isComplete={isComplete}
