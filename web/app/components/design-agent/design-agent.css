@@ -610,3 +610,34 @@
   border: 9px solid var(--ink);
   box-shadow: var(--shadow-lg);
 }
+
+/* ---------- P6-14 (UX-4): "Export to Claude Code" gated handoff action ---------- */
+/* Appended by P6-14. Mirrors the v3 mockup `.btn-export` / `.export-caption`
+   (design-agent-ui-proposal-v3.html:491-503). Token-only; no literal colour. */
+.design-agent-surface .btn-export {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--ink);
+  color: var(--surface);
+  border: 1px solid var(--ink);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.design-agent-surface .btn-export:hover {
+  background: var(--ink-2);
+}
+.design-agent-surface .btn-export:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+.design-agent-surface .export-claude-code-caption {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-left: 10px;
+  max-width: 200px;
+  line-height: 1.4;
+}
