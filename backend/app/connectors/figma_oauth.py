@@ -32,7 +32,13 @@ FIGMA_TOKEN_URL = "https://www.figma.com/api/oauth/token"
 FIGMA_REFRESH_URL = "https://www.figma.com/api/oauth/refresh"
 FIGMA_ME_URL = "https://api.figma.com/v1/me"
 # Default scopes when nothing is configured. Comma-separated per Figma docs.
-DEFAULT_SCOPES = "files:read,file_variables:read,file_dev_resources:read,current_user:read"
+# Per Figma's Nov 17, 2025 platform update, the old `files:read` scope is
+# replaced by the granular pair `file_content:read` + `file_metadata:read`.
+# https://developers.figma.com/docs/updates-to-figmas-developer-platform/
+DEFAULT_SCOPES = (
+    "file_content:read,file_metadata:read,"
+    "file_variables:read,file_dev_resources:read,current_user:read"
+)
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
 

@@ -116,7 +116,9 @@ def test_figma_callback_stores_token(figma_env, monkeypatch):
     figma = next(c for c in listed if c["provider"] == "figma")
     assert figma["account_label"] == "alice@co.com"
     assert figma["status"] == "active"
-    assert "files:read" in figma["scopes"]
+    # Post-Nov-2025: `files:read` was replaced by granular file_* scopes.
+    assert "file_content:read" in figma["scopes"]
+    assert "file_metadata:read" in figma["scopes"]
 
 
 def test_figma_callback_rejects_bad_state(figma_env, monkeypatch):
