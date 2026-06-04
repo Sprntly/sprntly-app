@@ -35,8 +35,9 @@ export function Onboarding4() {
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
+    if (!workspace?.id) return
     void connectorsApi
-      .list()
+      .list(workspace.id)
       .then((r) => {
         const ids = new Set<string>()
         for (const c of r.connections) {
@@ -45,7 +46,7 @@ export function Onboarding4() {
         setConnected(ids)
       })
       .catch(() => {})
-  }, [])
+  }, [workspace?.id])
 
   // Pull the Analytics category's connector ids straight from the
   // catalog — keeps "at least one Analytics required" honest as the

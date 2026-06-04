@@ -208,6 +208,7 @@ export function ConfigureConnectorDrawerView({
 type ConfigureConnectorDrawerProps = {
   providerId: string | null
   connection: ConnectionSummary | null
+  workspaceId: string
   activeCompany: string
   onClose: () => void
   /** Fired after a successful disconnect so the parent can reload connections. */
@@ -222,19 +223,22 @@ function lookupItem(providerId: string): ConnectorItemRow | null {
   return null
 }
 
-async function callDisconnect(providerId: string): Promise<void> {
+async function callDisconnect(
+  workspaceId: string,
+  providerId: string,
+): Promise<void> {
   if (providerId === "google_drive") {
-    await connectorsApi.disconnectGoogleDrive()
+    await connectorsApi.disconnectGoogleDrive(workspaceId)
   } else if (providerId === "figma") {
-    await connectorsApi.disconnectFigma()
+    await connectorsApi.disconnectFigma(workspaceId)
   } else if (providerId === "github") {
-    await connectorsApi.disconnectGithub()
+    await connectorsApi.disconnectGithub(workspaceId)
   } else if (providerId === "clickup") {
-    await connectorsApi.disconnectClickup()
+    await connectorsApi.disconnectClickup(workspaceId)
   } else if (providerId === "hubspot") {
-    await connectorsApi.disconnectHubspot()
+    await connectorsApi.disconnectHubspot(workspaceId)
   } else if (providerId === "fireflies") {
-    await connectorsApi.disconnectFireflies()
+    await connectorsApi.disconnectFireflies(workspaceId)
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }
@@ -243,6 +247,7 @@ async function callDisconnect(providerId: string): Promise<void> {
 export function ConfigureConnectorDrawer({
   providerId,
   connection,
+  workspaceId,
   activeCompany,
   onClose,
   onDisconnected,
@@ -266,7 +271,7 @@ export function ConfigureConnectorDrawer({
     setIsTesting(true)
     setTestResult(null)
     try {
-      const r = await connectorsApi.testConnection(providerId)
+      const r = await connectorsApi.testConnection(workspaceId, providerId)
       setTestResult({
         kind: "ok",
         accountLabel: r.account_label || "",
@@ -283,14 +288,14 @@ export function ConfigureConnectorDrawer({
     } finally {
       setIsTesting(false)
     }
-  }, [providerId])
+  }, [providerId, workspaceId])
 
   const handleDisconnect = useCallback(async () => {
     if (!providerId) return
     setIsDisconnecting(true)
     setDisconnectError(null)
     try {
-      await callDisconnect(providerId)
+      await callDisconnect(workspaceId, providerId)
       onDisconnected()
       onClose()
     } catch (e) {
@@ -304,13 +309,14 @@ export function ConfigureConnectorDrawer({
     } finally {
       setIsDisconnecting(false)
     }
-  }, [providerId, onDisconnected, onClose])
+  }, [providerId, workspaceId, onDisconnected, onClose])
 
   // Slot: provider-specific config component.
   let slot: React.ReactNode = null
   if (providerId === "google_drive") {
     slot = (
       <GoogleDriveFolderPicker
+        workspaceId={workspaceId}
         dataset={activeCompany}
         selectedFolderId={connection?.config?.folder_id}
         selectedFolderName={connection?.config?.folder_name}

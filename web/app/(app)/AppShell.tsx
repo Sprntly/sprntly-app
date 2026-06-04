@@ -51,8 +51,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [workspace, setContent])
 
   useEffect(() => {
+    if (!workspace?.id) return
     void connectorsApi
-      .list()
+      .list(workspace.id)
       .then((r) => {
         setContent({
           connectedConnectorIds: r.connections
@@ -61,7 +62,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         })
       })
       .catch(() => {})
-  }, [setContent])
+  }, [setContent, workspace?.id])
 
   const { closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } = useNavigation()
 

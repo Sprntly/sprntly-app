@@ -394,68 +394,115 @@ export type DriveFolderBrowse = {
   folders: { id: string; name: string }[]
 }
 
+// Multitenant: every connector method requires workspaceId (the active
+// workspace's uuid). It's a required string, not `string | undefined` —
+// silent defaults are how the original cross-tenant leak came back.
+// Callers get workspaceId from `useWorkspace().workspace?.id` and must
+// guard for null before calling.
+
+const _qsWorkspace = (workspaceId: string, extra: string = ""): string => {
+  const base = `workspace_id=${encodeURIComponent(workspaceId)}`
+  return extra ? `?${base}&${extra}` : `?${base}`
+}
+
 export const connectorsApi = {
-  list: () => api.get<{ connections: ConnectionSummary[] }>("/v1/connectors"),
-  disconnectGoogleDrive: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/google-drive"),
-  browseGoogleDriveFolders: (parentId = "root") =>
-    api.get<DriveFolderBrowse>(
-      `/v1/connectors/google-drive/folders?parent_id=${encodeURIComponent(parentId)}`,
+  list: (workspaceId: string) =>
+    api.get<{ connections: ConnectionSummary[] }>(
+      `/v1/connectors${_qsWorkspace(workspaceId)}`,
     ),
-  setGoogleDriveConfig: (folderId: string, dataset?: string, folderName?: string) =>
+  disconnectGoogleDrive: (workspaceId: string) =>
+    api.delete<{ deleted: true; provider: string }>(
+      `/v1/connectors/google-drive${_qsWorkspace(workspaceId)}`,
+    ),
+  browseGoogleDriveFolders: (workspaceId: string, parentId = "root") =>
+    api.get<DriveFolderBrowse>(
+      `/v1/connectors/google-drive/folders${_qsWorkspace(
+        workspaceId,
+        `parent_id=${encodeURIComponent(parentId)}`,
+      )}`,
+    ),
+  setGoogleDriveConfig: (
+    workspaceId: string,
+    folderId: string,
+    dataset?: string,
+    folderName?: string,
+  ) =>
     api.post<{ ok: true; config: ConnectionSummary["config"] }>(
-      "/v1/connectors/google-drive/config",
+      `/v1/connectors/google-drive/config${_qsWorkspace(workspaceId)}`,
       { folder_id: folderId, folder_name: folderName, dataset },
     ),
-  syncGoogleDrive: (dataset?: string, folderId?: string) =>
-    api.post<GoogleDriveSyncResult>("/v1/connectors/google-drive/sync", {
-      dataset,
-      folder_id: folderId,
-    }),
+  syncGoogleDrive: (workspaceId: string, dataset?: string, folderId?: string) =>
+    api.post<GoogleDriveSyncResult>(
+      `/v1/connectors/google-drive/sync${_qsWorkspace(workspaceId)}`,
+      { dataset, folder_id: folderId },
+    ),
   /** Full-page navigation — OAuth must not use fetch. */
-  googleDriveAuthorizeUrl: (dataset: string) =>
-    `${API_URL}/v1/connectors/google-drive/authorize?dataset=${encodeURIComponent(dataset)}`,
+  googleDriveAuthorizeUrl: (workspaceId: string, dataset: string) =>
+    `${API_URL}/v1/connectors/google-drive/authorize${_qsWorkspace(
+      workspaceId,
+      `dataset=${encodeURIComponent(dataset)}`,
+    )}`,
 
   // ---- Figma ---------------------------------------------------------------
-  figmaAuthorizeUrl: () => `${API_URL}/v1/connectors/figma/authorize`,
-  disconnectFigma: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/figma"),
-  getFigmaFile: (key: string, depth = 2) =>
-    api.get<Record<string, unknown>>(
-      `/v1/connectors/figma/files/${encodeURIComponent(key)}?depth=${encodeURIComponent(String(depth))}`,
+  figmaAuthorizeUrl: (workspaceId: string) =>
+    `${API_URL}/v1/connectors/figma/authorize${_qsWorkspace(workspaceId)}`,
+  disconnectFigma: (workspaceId: string) =>
+    api.delete<{ deleted: true; provider: string }>(
+      `/v1/connectors/figma${_qsWorkspace(workspaceId)}`,
     ),
-  getFigmaFileStyles: (key: string) =>
+  getFigmaFile: (workspaceId: string, key: string, depth = 2) =>
     api.get<Record<string, unknown>>(
-      `/v1/connectors/figma/files/${encodeURIComponent(key)}/styles`,
+      `/v1/connectors/figma/files/${encodeURIComponent(key)}${_qsWorkspace(
+        workspaceId,
+        `depth=${encodeURIComponent(String(depth))}`,
+      )}`,
+    ),
+  getFigmaFileStyles: (workspaceId: string, key: string) =>
+    api.get<Record<string, unknown>>(
+      `/v1/connectors/figma/files/${encodeURIComponent(key)}/styles${_qsWorkspace(
+        workspaceId,
+      )}`,
     ),
 
   // ---- GitHub --------------------------------------------------------------
-  githubAuthorizeUrl: () => `${API_URL}/v1/connectors/github/authorize`,
-  disconnectGithub: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/github"),
+  githubAuthorizeUrl: (workspaceId: string) =>
+    `${API_URL}/v1/connectors/github/authorize${_qsWorkspace(workspaceId)}`,
+  disconnectGithub: (workspaceId: string) =>
+    api.delete<{ deleted: true; provider: string }>(
+      `/v1/connectors/github${_qsWorkspace(workspaceId)}`,
+    ),
+  listGithubRepos: (workspaceId: string, perPage = 50) =>
+    api.get<{ repositories: GitHubRepo[] }>(
+      `/v1/connectors/github/repos${_qsWorkspace(
+        workspaceId,
+        `per_page=${encodeURIComponent(String(perPage))}`,
+      )}`,
+    ),
 
   // ---- ClickUp -------------------------------------------------------------
-  disconnectClickup: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/clickup"),
+  disconnectClickup: (workspaceId: string) =>
+    api.delete<{ deleted: true; provider: string }>(
+      `/v1/connectors/clickup${_qsWorkspace(workspaceId)}`,
+    ),
 
   // ---- HubSpot -------------------------------------------------------------
-  disconnectHubspot: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/hubspot"),
+  disconnectHubspot: (workspaceId: string) =>
+    api.delete<{ deleted: true; provider: string }>(
+      `/v1/connectors/hubspot${_qsWorkspace(workspaceId)}`,
+    ),
 
   // ---- Fireflies (API key, not OAuth) --------------------------------------
-  connectFirefliesWithApiKey: (apiKey: string) =>
+  connectFirefliesWithApiKey: (workspaceId: string, apiKey: string) =>
     api.post<{ ok: true; provider: string; account_label: string }>(
-      "/v1/connectors/fireflies/apikey",
+      `/v1/connectors/fireflies/apikey${_qsWorkspace(workspaceId)}`,
       { api_key: apiKey },
     ),
-  disconnectFireflies: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/fireflies"),
-  listGithubRepos: (perPage = 50) =>
-    api.get<{ repositories: GitHubRepo[] }>(
-      `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
+  disconnectFireflies: (workspaceId: string) =>
+    api.delete<{ deleted: true; provider: string }>(
+      `/v1/connectors/fireflies${_qsWorkspace(workspaceId)}`,
     ),
 
-  // ---- Generic test-connection (commit K) ---------------------------------
+  // ---- Generic test-connection --------------------------------------------
   /**
    * Re-validate a stored connection by re-running the provider's
    * identity lookup with the decrypted token. Backs the "Test
@@ -464,13 +511,15 @@ export const connectorsApi = {
    * Returns {ok, account_label, tested_at} on success; throws ApiError
    * on 400 (token rejected) / 404 (not connected).
    */
-  testConnection: (provider: string) =>
+  testConnection: (workspaceId: string, provider: string) =>
     api.post<{ ok: true; account_label: string; tested_at: string }>(
-      `/v1/connectors/${encodeURIComponent(provider)}/test`,
+      `/v1/connectors/${encodeURIComponent(provider)}/test${_qsWorkspace(
+        workspaceId,
+      )}`,
       {},
     ),
 
-  // ---- Generic start-OAuth (commit F) -------------------------------------
+  // ---- Generic start-OAuth ------------------------------------------------
   /**
    * Returns the provider's OAuth authorize URL as JSON. The caller is
    * expected to navigate the browser to it (`window.location.href = url`).
@@ -481,9 +530,11 @@ export const connectorsApi = {
    * runs the auth check via fetch + Bearer, then hands back the URL the
    * browser should navigate to next.
    */
-  startOauth: (provider: string, dataset?: string) =>
+  startOauth: (workspaceId: string, provider: string, dataset?: string) =>
     api.post<{ authorize_url: string }>(
-      `/v1/connectors/${encodeURIComponent(provider)}/start-oauth`,
+      `/v1/connectors/${encodeURIComponent(provider)}/start-oauth${_qsWorkspace(
+        workspaceId,
+      )}`,
       dataset ? { dataset } : {},
     ),
 }

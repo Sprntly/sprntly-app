@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useContent } from "../../../../context/ContentContext"
+import { useWorkspace } from "../../../../context/WorkspaceContext"
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_IDS_WITH_OAUTH,
@@ -172,6 +173,11 @@ export function ConnectorsSettingsView({
 export function ConnectorsSettings() {
   const { activeCompany } = useCompany()
   const { setContent } = useContent()
+  // workspace.id (uuid) is the canonical tenant key the backend wants on
+  // every connector call. activeCompany (slug) stays for legacy
+  // dataset/brief APIs that haven't moved to uuid yet.
+  const { workspace } = useWorkspace()
+  const workspaceId = workspace?.id ?? null
 
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -183,9 +189,10 @@ export function ConnectorsSettings() {
     useState<ConnectorItemRow | null>(null)
 
   const reload = useCallback(async () => {
+    if (!workspaceId) return
     setLoadError(null)
     try {
-      const r = await connectorsApi.list()
+      const r = await connectorsApi.list(workspaceId)
       setConnections(r.connections)
       setContent({
         connectorCategories: CONNECTOR_CATALOG,
@@ -199,7 +206,7 @@ export function ConnectorsSettings() {
     } finally {
       setLoading(false)
     }
-  }, [setContent])
+  }, [setContent, workspaceId])
 
   useEffect(() => {
     setLoading(true)
@@ -213,6 +220,12 @@ export function ConnectorsSettings() {
 
   const onConnect = useCallback(
     async (providerId: string) => {
+      if (!workspaceId) {
+        setLoadError(
+          "No active workspace — finish onboarding before connecting integrations.",
+        )
+        return
+      }
       // Find the catalog row so we know which auth flow to take.
       const item = CONNECTOR_CATALOG
         .flatMap((c) => c.items)
@@ -225,32 +238,34 @@ export function ConnectorsSettings() {
       }
 
       if (!CONNECTOR_IDS_WITH_OAUTH.has(providerId)) return
-      // Go through the fetch-then-navigate path (commit F) so the auth
-      // check runs with the Supabase Bearer header before we hand
-      // control to the browser's URL bar. Direct navigation to the
-      // legacy GET /authorize routes fails with "Not signed in" in the
-      // Supabase-only auth world.
+      // Go through the fetch-then-navigate path so the auth check runs
+      // with the Supabase Bearer header (+ workspace_id) before we hand
+      // control to the browser's URL bar.
       try {
         const dataset =
           providerId === "google_drive" ? activeCompany : undefined
-        const r = await connectorsApi.startOauth(providerId, dataset)
+        const r = await connectorsApi.startOauth(workspaceId, providerId, dataset)
         if (r.authorize_url) {
           window.location.href = r.authorize_url
         }
       } catch (e) {
-        // Surface the auth/connect error in-place; no toast system yet.
         const msg = e instanceof Error ? e.message : String(e)
         setLoadError(`Could not start ${providerId} connect: ${msg}`)
       }
     },
-    [activeCompany],
+    [activeCompany, workspaceId],
   )
 
   const handleApiKeyConnect = useCallback(
     async (apiKey: string) => {
       if (!apiKeyConnectingItem) return
+      if (!workspaceId) {
+        throw new Error(
+          "No active workspace — finish onboarding before connecting integrations.",
+        )
+      }
       if (apiKeyConnectingItem.id === "fireflies") {
-        await connectorsApi.connectFirefliesWithApiKey(apiKey)
+        await connectorsApi.connectFirefliesWithApiKey(workspaceId, apiKey)
         await reload()
       } else {
         throw new Error(
@@ -258,7 +273,7 @@ export function ConnectorsSettings() {
         )
       }
     },
-    [apiKeyConnectingItem, reload],
+    [apiKeyConnectingItem, reload, workspaceId],
   )
 
   const onConfigure = useCallback((providerId: string) => {
@@ -304,6 +319,7 @@ export function ConnectorsSettings() {
       <ConfigureConnectorDrawer
         providerId={configuringProviderId}
         connection={configuringConnection}
+        workspaceId={workspaceId ?? ""}
         activeCompany={activeCompany}
         onClose={() => setConfiguringProviderId(null)}
         onDisconnected={() => void reload()}
