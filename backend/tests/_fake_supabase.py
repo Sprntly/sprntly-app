@@ -73,6 +73,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "kg_signal":         {"properties", "embedding", "provenance"},
     "kg_relationship":   {"properties", "provenance"},
     "agent_decision_log": {"factors", "output", "kg_refs"},
+    "enterprise_config": {"overrides"},
 }
 
 # Postgres bool columns surface as bool in supabase-py; SQLite stores 0/1.

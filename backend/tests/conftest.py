@@ -330,6 +330,12 @@ CREATE TABLE kg_relationship (
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE enterprise_config (
+    enterprise_id TEXT PRIMARY KEY,
+    overrides     TEXT NOT NULL DEFAULT '{}',
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE agent_decision_log (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     enterprise_id  TEXT NOT NULL,

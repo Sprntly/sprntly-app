@@ -1,12 +1,31 @@
-"""Thin wrapper over the Anthropic SDK."""
-import json
+"""Thin wrapper over the Anthropic SDK.
 
+All `messages.create` calls go through `_create_with_retries`, which adds
+exponential-backoff retries on transient failures (429 / 5xx / overloaded /
+timeouts / connection drops) and a per-request timeout. Existing callers
+(`call_json` / `call_md`) get this for free; the agent-facing gateway
+(`app.graph.gateway.llm_call`) layers tenant context + telemetry on top.
+"""
+import json
+import logging
+import random
+import time as _time
+
+import anthropic
 from anthropic import Anthropic
 from fastapi import HTTPException
 
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# Retry policy for transient API failures. 4 attempts ≈ 0.5s + 2s + 8s of
+# backoff (+ jitter) worst-case before surfacing the error.
+MAX_ATTEMPTS = 4
+_BACKOFF_BASE_S = 0.5
+_REQUEST_TIMEOUT_S = 120.0
 
 _client: Anthropic | None = None
 
@@ -16,8 +35,42 @@ def get_client() -> Anthropic:
     if _client is None:
         if not settings.anthropic_api_key:
             raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
-        _client = Anthropic(api_key=settings.anthropic_api_key)
+        # max_retries=0: the SDK's own retry layer is disabled so ours is the
+        # single source of truth (uniform logging + backoff policy).
+        _client = Anthropic(
+            api_key=settings.anthropic_api_key,
+            timeout=_REQUEST_TIMEOUT_S,
+            max_retries=0,
+        )
     return _client
+
+
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        # 429 rate limit, 5xx server errors, 529 overloaded.
+        return exc.status_code == 429 or exc.status_code >= 500
+    return False
+
+
+def _create_with_retries(client: Anthropic, **kwargs):
+    """`messages.create` with exponential backoff on transient failures."""
+    last: Exception | None = None
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            return client.messages.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001 — classified below
+            if not _is_retryable(exc) or attempt == MAX_ATTEMPTS - 1:
+                raise
+            delay = _BACKOFF_BASE_S * (4 ** attempt) * (1 + random.random() * 0.25)
+            logger.warning(
+                "LLM call transient failure (attempt %d/%d, retrying in %.1fs): %s",
+                attempt + 1, MAX_ATTEMPTS, delay, exc,
+            )
+            last = exc
+            _time.sleep(delay)
+    raise last  # pragma: no cover — loop always returns or raises
 
 
 def _build_base_kwargs(
@@ -64,6 +117,21 @@ def _build_base_kwargs(
     }
 
 
+def _capture_meta(meta_out: dict | None, msg, model: str) -> None:
+    """Populate caller-supplied meta_out with usage/stop info (gateway telemetry)."""
+    if meta_out is None:
+        return
+    u = getattr(msg, "usage", None)
+    meta_out.update({
+        "model": model,
+        "input_tokens": getattr(u, "input_tokens", 0) or 0,
+        "output_tokens": getattr(u, "output_tokens", 0) or 0,
+        "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,
+        "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", 0) or 0,
+        "stop_reason": getattr(msg, "stop_reason", None),
+    })
+
+
 def call_json(
     *,
     system: str,
@@ -72,6 +140,7 @@ def call_json(
     max_tokens: int = 16000,
     schema: dict | None = None,
     user_cacheable_prefix: str | None = None,
+    meta_out: dict | None = None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
 
@@ -103,11 +172,13 @@ def call_json(
             "description": "Submit the structured response. All fields required.",
             "input_schema": schema,
         }
-        msg = client.messages.create(
+        msg = _create_with_retries(
+            client,
             **base_kwargs,
             tools=[tool],
             tool_choice={"type": "tool", "name": "submit_response"},
         )
+        _capture_meta(meta_out, msg, model)
         for block in msg.content:
             if block.type == "tool_use" and block.name == "submit_response":
                 return dict(block.input) if not isinstance(block.input, dict) else block.input
@@ -115,7 +186,8 @@ def call_json(
             502, "LLM did not invoke the structured response tool"
         )
 
-    msg = client.messages.create(**base_kwargs)
+    msg = _create_with_retries(client, **base_kwargs)
+    _capture_meta(meta_out, msg, model)
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
     # Tolerate accidental fences
     if text.startswith("```"):
@@ -137,12 +209,15 @@ def call_md(
     user: str,
     model: str = DEFAULT_MODEL,
     max_tokens: int = 16000,
+    meta_out: dict | None = None,
 ) -> str:
     """Call Claude expecting plain markdown output."""
-    msg = get_client().messages.create(
+    msg = _create_with_retries(
+        get_client(),
         model=model,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
     )
+    _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()
