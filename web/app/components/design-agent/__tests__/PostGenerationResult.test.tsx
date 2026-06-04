@@ -15,7 +15,9 @@ import {
   PostGenerationResult,
   PostGenerationResultView,
   resolveViewHref,
+  reseedStep,
   type PostGenerationResultViewProps,
+  type ReseedBaseline,
 } from "../PostGenerationResult"
 import type { PrototypeRecord } from "../../../lib/api"
 
@@ -113,6 +115,67 @@ describe("PostGenerationResultView — View prototype link (AC: view affordance)
   it("hides the link when there is neither a bundle nor a token", () => {
     const html = renderView({ bundleUrl: null, shareToken: null })
     expect(html).not.toContain('data-testid="view-prototype-link"')
+  })
+
+  it("the iframe + View href follow a refreshed bundle_url (test_preview_refreshes_after_iterate, AC4)", () => {
+    // bundle_url is read straight from the prop in the view, so a refreshed
+    // record (post-iterate, same id) re-renders the iframe src + View href onto
+    // the NEW bundle with no manual remount — the #5 staleness this ticket fixes.
+    const oldHtml = renderView({ bundleUrl: "https://cdn/OLD/index.html" })
+    expect(oldHtml).toContain("https://cdn/OLD/index.html")
+    const newHtml = renderView({ bundleUrl: "https://cdn/NEW/index.html" })
+    expect(newHtml).toContain("https://cdn/NEW/index.html")
+    expect(newHtml).not.toContain("https://cdn/OLD/index.html")
+  })
+})
+
+// ─── P6-05 (#5): guarded re-seed of the local isComplete on a refetch ────────
+
+describe("reseedStep — guarded local-isComplete re-seed (AC4/AC5/AC10)", () => {
+  it("re-seeds on a genuine checkpoint advance with a differing prop is_complete (test_post_generation_result_reseeds_is_complete_on_genuine_advance)", () => {
+    // bundle_url changed AND prop is_complete (true) differs from baseline (false).
+    const base: ReseedBaseline = { bundle: "old/bundle", complete: false }
+    const out = reseedStep(base, "new/bundle", true)
+    expect(out.setComplete).toBe(true)
+    expect(out.baseline).toEqual({ bundle: "new/bundle", complete: true })
+  })
+
+  it("does NOT re-seed when only the bundle changed but prop is_complete equals the baseline", () => {
+    // A checkpoint advance whose prop is_complete (false) matches baseline (false):
+    // the baseline advances to the new bundle but the local copy is left alone.
+    const base: ReseedBaseline = { bundle: "old/bundle", complete: false }
+    const out = reseedStep(base, "new/bundle", false)
+    expect(out.setComplete).toBeNull()
+    expect(out.baseline).toEqual({ bundle: "new/bundle", complete: false })
+  })
+
+  it("no-ops when the bundle_url did not change (no checkpoint advance)", () => {
+    const base: ReseedBaseline = { bundle: "same/bundle", complete: false }
+    const out = reseedStep(base, "same/bundle", true)
+    expect(out.setComplete).toBeNull()
+    expect(out.baseline).toBe(base) // baseline unchanged
+  })
+
+  it("does NOT clobber a user's local Mark-Complete across prop changes (test_reseed_does_not_clobber_local_mark_complete)", () => {
+    // Sequence: prop seeds is_complete=false (baseline). User marks complete
+    // locally (the LOCAL copy is true; the baseline stays the prop-derived false).
+    // 1) A prop re-render with the SAME bundle must not re-seed → local stays true.
+    let baseline: ReseedBaseline = { bundle: "b1", complete: false }
+    const sameBundle = reseedStep(baseline, "b1", false)
+    expect(sameBundle.setComplete).toBeNull() // local Mark-Complete survives
+    baseline = sameBundle.baseline
+
+    // 2) A genuine checkpoint advance whose prop is_complete (false) equals the
+    //    last prop-derived baseline (false) → still no spurious revert.
+    const advanceSameComplete = reseedStep(baseline, "b2", false)
+    expect(advanceSameComplete.setComplete).toBeNull()
+    baseline = advanceSameComplete.baseline
+    expect(baseline).toEqual({ bundle: "b2", complete: false })
+
+    // 3) A checkpoint advance whose prop is_complete (true) differs from baseline
+    //    (false) DOES re-seed — a real prop change, not a clobber of local state.
+    const advanceDiffComplete = reseedStep(baseline, "b3", true)
+    expect(advanceDiffComplete.setComplete).toBe(true)
   })
 })
 

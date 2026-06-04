@@ -411,6 +411,51 @@ describe("B4 — Apply → prefill → estimate → Continue → iterate (mounte
   })
 })
 
+// ---- P6-05 (#5): onIterated re-poll callback (AC9) ---------------------------
+
+describe("onIterated callback (P6-05 #5, AC9)", () => {
+  it("fires onIterated after a successful runIterate, without re-estimating (test_iterate_composer_fires_on_iterated)", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+    const onIterated = vi.fn()
+
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "make it blue" }),
+      onIterated,
+    })
+    await viewProps.onContinue!()
+
+    expect(iter).toHaveBeenCalledTimes(1)
+    expect(onIterated).toHaveBeenCalledTimes(1)
+    // AD14 flow unchanged: Continue is still the only iterate path (no estimate here).
+    expect(est).not.toHaveBeenCalled()
+  })
+
+  it("does NOT fire onIterated when runIterate throws", async () => {
+    vi.spyOn(designAgentApi, "iterate").mockRejectedValue(new Error("boom"))
+    const onIterated = vi.fn()
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "x" }),
+      onIterated,
+    })
+    await viewProps.onContinue!()
+    expect(onIterated).not.toHaveBeenCalled()
+  })
+
+  it("existing callers omitting onIterated still type-check and Continue still works (test_iterate_composer_existing_callers_typecheck, AC9)", async () => {
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+    // No onIterated prop — the optional/defaulted prop keeps the old call valid.
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "x" }),
+    })
+    await viewProps.onContinue!()
+    expect(iter).toHaveBeenCalledTimes(1)
+  })
+})
+
 // ---- helper-level contract (kept as cheap unit coverage) --------------------
 
 describe("helpers — runEstimate / runIterate body shaping", () => {

@@ -26,7 +26,10 @@ import { CommentsPanel } from "./CommentsPanel"
 import { IterateComposer } from "./IterateComposer"
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
 import type { CommentRecord, PrototypeRecord } from "../../lib/api"
-import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
+import {
+  runDesignAgentGeneration,
+  type DesignAgentGenResult,
+} from "../../lib/runDesignAgentGeneration"
 
 export type DesignAgentLauncherProps = {
   prdId: number
@@ -59,6 +62,67 @@ export const defaultRenderDrawer = (props: LauncherDrawerProps): ReactNode => (
   <DesignAgentDrawer {...props} />
 )
 
+/** P6-05 (#5): the pending-question identity used to detect a clarify re-pause
+ *  across a refetch — the question text, or null when none is pending. A change
+ *  (null→Q, Q→null, or Q1→Q2) signals the record advanced off the prior state. */
+export function pendingKey(
+  p: Pick<PrototypeRecord, "pending_question">,
+): string | null {
+  return p.pending_question?.question ?? null
+}
+
+/** Dependency seams for `pollUntilAdvanced` — injected in tests so the loop runs
+ *  without real timers / network. Production defaults are the real poll helper,
+ *  a 4s sleep, the wall clock, and the 6-minute cap. */
+export type RefreshDeps = {
+  runGeneration?: (args: { prototypeId: number }) => Promise<DesignAgentGenResult>
+  sleep?: (ms: number) => Promise<void>
+  now?: () => number
+  deadlineMs?: number
+}
+
+/**
+ * P6-05 (#5) — race-safe post-iterate/clarify re-poll. Resolves with the fresh
+ * `PrototypeRecord` once the record advances OFF the pre-iterate checkpoint:
+ * a NEW `bundle_url` (a new checkpoint built) OR a changed `pending_question`
+ * (a clarify re-pause / a newly-asked question, including null→Q and Q1→Q2).
+ * Returns null on failure or if the deadline passes without an advance.
+ *
+ * Why it does NOT trust the first get(): the iterate/clarify callbacks fire
+ * immediately after kickoff, but the backend flips the prototype row to
+ * `generating` only inside its bg task — so the first `runDesignAgentGeneration`
+ * may still observe the PRE-iterate `ready` + OLD `bundle_url` (+ OLD
+ * `pending_question`) and return it as a terminal `{ok, ready}`. Resolving on
+ * that stale read would re-flow the old checkpoint (the exact #5 bug). So we
+ * gate on the OBSERVED transition off the captured prev values and re-sample
+ * (the backend may not have flipped yet) until it advances. `runDesignAgentGeneration`'s
+ * own 4s/6min loop carries an in-progress `generating` run to its next `ready`;
+ * this outer guard only adds the "wait for the transition off the OLD checkpoint"
+ * gate the helper alone cannot provide.
+ */
+export async function pollUntilAdvanced(
+  prototypeId: number,
+  prevBundle: string | null,
+  prevPending: string | null,
+  deps: RefreshDeps = {},
+): Promise<PrototypeRecord | null> {
+  const runGeneration = deps.runGeneration ?? runDesignAgentGeneration
+  const sleep =
+    deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  const now = deps.now ?? (() => Date.now())
+  const deadline = now() + (deps.deadlineMs ?? 6 * 60 * 1000)
+  while (now() < deadline) {
+    const r = await runGeneration({ prototypeId })
+    if (!r.ok) return null // surfaced via the existing failure path (#5 leaves failure handling to P6-08)
+    const advancedBundle =
+      r.prototype.bundle_url != null && r.prototype.bundle_url !== prevBundle
+    const advancedPending = pendingKey(r.prototype) !== prevPending
+    if (advancedBundle || advancedPending) return r.prototype
+    await sleep(4000) // re-sample; the backend may not have flipped to generating yet
+  }
+  return null
+}
+
 type LauncherViewProps = DesignAgentLauncherProps & {
   open: boolean
   setOpen: (open: boolean) => void
@@ -75,6 +139,14 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   /** P3-14 (F10): setter for `applyTarget` (CommentsPanel onApply → set;
    *  IterateComposer onClearApply → clear). */
   setApplyTarget?: (comment: CommentRecord | null) => void
+  /** P6-05 (#5): forwarded to IterateComposer — fired after a successful iterate
+   *  so the container re-polls + refreshes `result`. Optional/defaulted. */
+  onIterated?: () => void
+  /** P6-05 (#5): forwarded to ClarifyingQuestionSurface — fired after a
+   *  successful clarify answer so the container re-polls + refreshes `result`.
+   *  Optional/defaulted (the surface already declares `onAnswered`; it just
+   *  wasn't threaded from the launcher before). */
+  onAnswered?: () => void
   /** Injected in tests so the view renders without NavigationContext. */
   renderDrawer?: (props: LauncherDrawerProps) => ReactNode
 }
@@ -95,6 +167,8 @@ export function DesignAgentLauncherView({
   onGenerated,
   applyTarget = null,
   setApplyTarget,
+  onIterated,
+  onAnswered,
   renderDrawer = defaultRenderDrawer,
 }: LauncherViewProps) {
   return (
@@ -133,6 +207,7 @@ export function DesignAgentLauncherView({
           isComplete={result.is_complete ?? false}
           applyTarget={applyTarget}
           onClearApply={() => setApplyTarget?.(null)}
+          onIterated={onIterated}
         />
       )}
       {/* P3-16 (F12): the clarifying-question answer surface — rendered ONLY when
@@ -146,6 +221,7 @@ export function DesignAgentLauncherView({
           <ClarifyingQuestionSurface
             key={`clarify-${result.id}`}
             prototype={result}
+            onAnswered={onAnswered}
           />
         )}
       {renderDrawer({
@@ -185,6 +261,23 @@ export function DesignAgentLauncher({
     if (next) setResult(next)
   }
 
+  // P6-05 (#5): after an iterate/clarify advances the SAME prototype id to a new
+  // checkpoint, re-poll off the pre-iterate `bundle_url` / `pending_question`
+  // and replace `result` with the refetched record. Race-safe: `pollUntilAdvanced`
+  // never resolves on a first get() that still shows the pre-iterate checkpoint.
+  // Surfacing the refetched record also flows a newly-minted `share_token` into
+  // `result` (#14 facet), so the share-gated CommentsPanel mounts without a
+  // manual re-mount — no extra code, just the live snapshot.
+  const refreshResult = async () => {
+    if (!result) return
+    const fresh = await pollUntilAdvanced(
+      result.id,
+      result.bundle_url,
+      pendingKey(result),
+    )
+    if (fresh) setResult(fresh)
+  }
+
   return (
     <DesignAgentLauncherView
       prdId={prdId}
@@ -195,6 +288,8 @@ export function DesignAgentLauncher({
       onGenerated={handleGenerated}
       applyTarget={applyTarget}
       setApplyTarget={setApplyTarget}
+      onIterated={refreshResult}
+      onAnswered={refreshResult}
       renderDrawer={renderDrawer}
     />
   )

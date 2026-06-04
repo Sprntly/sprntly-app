@@ -16,7 +16,7 @@
  * behaviour is covered by SSR render + direct calls to these exported units.
  */
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { designAgentApi } from "../../lib/api"
 import {
@@ -24,10 +24,12 @@ import {
   type DesignAgentGenResult,
 } from "../../lib/runDesignAgentGeneration"
 import {
-  acknowledge,
   markCompleted,
   markPending,
+  markSeenThisLoad,
   pendingCompleted,
+  recordReplayShow,
+  wasSeenThisLoad,
 } from "./notificationStore"
 import { IconClose, IconSparkle } from "../shared/app-icons"
 
@@ -222,20 +224,34 @@ export function DrawerFooter({
 }
 
 /**
- * P5-09 — re-show any completed-but-unacknowledged ready notification that was
- * persisted before a same-session reload, then acknowledge each so it shows
- * exactly once per reload. `pending` entries are never re-shown (the store's
- * `pendingCompleted` excludes them). Pure (sessionStorage via notificationStore
- * + injected `showToast`) so the mount effect is a one-line wrapper and the
- * behaviour is unit-testable without a DOM (the repo's vitest env is `node`,
- * where effects do not fire under SSR render).
+ * P5-09 + P6-05 (Decision-D(b)) — re-show any completed-but-unacknowledged
+ * ready notification that was persisted before a same-session reload. Hoisted
+ * to the authed AppShell (`DesignAgentNotificationReplay`) so it fires on EVERY
+ * authed page, not only the PRD Design section where the drawer mounts.
+ *
+ * Decision-D(b) (RESOLVED 2026-06-04, Babajide): the toast persists until the
+ * user acknowledges — it is NOT auto-acked on first show (the bug P6-05 fixes).
+ * So this:
+ *   - skips ids already shown THIS page-load (`wasSeenThisLoad`) so it fires
+ *     once per load even as AppShell re-mounts the replay across navigations;
+ *   - shows the toast and records it (`recordReplayShow`) so the replay can ack
+ *     its OWN last-shown id when that toast later clears (ack-on-toast-clear,
+ *     wired in `DesignAgentNotificationReplay`);
+ *   - does NOT call `acknowledge` — the sessionStorage entry survives, so a
+ *     subsequent hard reload re-shows it again until the user clears the toast.
+ *
+ * Pure (sessionStorage + in-memory guards via notificationStore + injected
+ * `showToast`) so it stays unit-testable without a DOM (the repo's vitest env
+ * is `node`, where effects do not fire under SSR render).
  */
 export function replayCompletedNotifications(
   showToast: (title: string, sub: string) => void,
 ): void {
   for (const n of pendingCompleted()) {
+    if (wasSeenThisLoad(n.prototypeId)) continue
     showToast(READY_TOAST_TITLE, n.sub)
-    acknowledge(n.prototypeId)
+    markSeenThisLoad(n.prototypeId)
+    recordReplayShow(n.prototypeId, READY_TOAST_TITLE, n.sub)
   }
 }
 
@@ -261,14 +277,13 @@ export function DesignAgentDrawerView({
   const [manualColor, setManualColor] = useState("#3b82f6")
   const [manualFont, setManualFont] = useState("")
 
-  // P5-09: on mount, re-show any completed-but-unacknowledged notification that
-  // survived a same-session reload, then acknowledge so it shows once. Runs once
-  // regardless of open state (this effect precedes the `!open` early return, so
-  // the hook order stays stable). Effect — not render — keeps it client-only and
-  // SSR-safe; `showToast`/the store reads are stable, so `[]` is correct.
-  useEffect(() => {
-    replayCompletedNotifications(showToast)
-  }, [])
+  // P6-05: the completed-notification replay was hoisted OUT of this drawer up
+  // to the authed AppShell (`DesignAgentNotificationReplay`) so a hard reload
+  // landing on Home / No-draft (where the drawer never mounts) still re-shows an
+  // unacknowledged completion toast. Removing the drawer's own mount effect also
+  // avoids a double-show when a reload lands ON the Design section (both the
+  // shell and the drawer would otherwise replay). `markPending` / `markCompleted`
+  // (kickoff + completion persistence) stay in `runGenerateFlow` unchanged.
 
   if (!open) return null
 

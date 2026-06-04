@@ -263,6 +263,11 @@ export type IterateComposerProps = {
   /** Called after a successful iterate / after the Apply target is consumed, so
    *  the launcher can clear its lifted `applyTarget`. */
   onClearApply?: () => void
+  /** P6-05 (#5): fired after a successful `runIterate` kickoff so the launcher
+   *  can re-poll and refresh its `result` (the preview iframe + View href).
+   *  Optional/defaulted so existing callers keep type-checking; the AD14
+   *  estimate→Continue→iterate flow is otherwise unchanged. */
+  onIterated?: () => void
 }
 
 /**
@@ -275,6 +280,7 @@ export function IterateComposer({
   isComplete = false,
   applyTarget = null,
   onClearApply,
+  onIterated,
 }: IterateComposerProps) {
   const init = initialComposerState(applyTarget)
   const [prompt, setPrompt] = useState<string>(init.prompt)
@@ -337,6 +343,9 @@ export function IterateComposer({
       setPrompt("")
       setAppliedCommentId(null)
       onClearApply?.()
+      // P6-05 (#5): notify the launcher so it re-polls the prototype and
+      // refreshes the preview iframe + View href once the new checkpoint builds.
+      onIterated?.()
     } catch (e) {
       setError(toMessage(e, "Could not start the iteration"))
     } finally {

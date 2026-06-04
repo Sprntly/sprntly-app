@@ -13,7 +13,12 @@ import {
   runGenerateFlow,
   sourceDetectedLabel,
 } from "../DesignAgentDrawer"
-import { markCompleted, markPending, pendingCompleted } from "../notificationStore"
+import {
+  __resetPageLoadGuards,
+  markCompleted,
+  markPending,
+  pendingCompleted,
+} from "../notificationStore"
 import { designAgentApi } from "../../../lib/api"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
@@ -425,24 +430,43 @@ describe("notification persistence (P5-09)", () => {
 
   afterEach(() => {
     removeWindow()
+    // P6-05: the replay now uses module-level per-page-load guards; reset them
+    // between cases so a simulated reload re-shows (browser reload re-evaluates
+    // the module).
+    __resetPageLoadGuards()
   })
 
-  it("mount re-shows a completed entry once, then acknowledges it (AC2)", () => {
+  // P6-05 (Decision-D(b)) — the replay was hoisted to the shell AND no longer
+  // auto-acks on first show. This is the "moved-replay assertion" AC6 calls out:
+  // the only existing P5-09 test whose behaviour changes by design.
+  it("replay shows a completed entry once per page-load and does NOT auto-ack it (P6-05 AC3)", () => {
     installStorage()
     markCompleted(7, "Open the PRD's Design section to view it.")
 
     const showToast = vi.fn()
-    replayCompletedNotifications(showToast) // simulates the mount effect
+    replayCompletedNotifications(showToast) // simulates the shell replay on mount
     expect(showToast).toHaveBeenCalledTimes(1)
     expect(showToast).toHaveBeenCalledWith(
       "Prototype ready",
       "Open the PRD's Design section to view it.",
     )
 
-    // A second mount (still same session) must NOT re-show — it was acknowledged.
+    // P6-05: the entry is NOT acknowledged on show — it survives in sessionStorage
+    // so a subsequent hard reload re-shows it (acked-until-user-acks).
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 7, sub: "Open the PRD's Design section to view it." },
+    ])
+
+    // A second replay within the SAME page-load does NOT re-show (per-load guard).
     const showToast2 = vi.fn()
     replayCompletedNotifications(showToast2)
     expect(showToast2).not.toHaveBeenCalled()
+
+    // …but after a simulated hard reload (guards reset) it re-shows again.
+    __resetPageLoadGuards()
+    const showToast3 = vi.fn()
+    replayCompletedNotifications(showToast3)
+    expect(showToast3).toHaveBeenCalledTimes(1)
   })
 
   it("does NOT re-show a pending (not-yet-complete) entry on mount (AC3)", () => {

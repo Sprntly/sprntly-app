@@ -4,10 +4,16 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   DesignAgentLauncher,
   DesignAgentLauncherView,
+  pendingKey,
+  pollUntilAdvanced,
   resultFromGeneration,
   type LauncherDrawerProps,
 } from "../DesignAgentLauncher"
+import { IterateComposer } from "../IterateComposer"
+import { ClarifyingQuestionSurface } from "../ClarifyingQuestionSurface"
+import { CommentsPanel } from "../CommentsPanel"
 import type { PrototypeRecord } from "../../../lib/api"
+import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
 // esbuild transform defaults to the classic runtime, so expose React globally
@@ -218,5 +224,226 @@ describe("DesignAgentLauncher — post-generation result (P2-12)", () => {
 
   it("maps a failed outcome to null — no result view (AC5)", () => {
     expect(resultFromGeneration({ ok: false, message: "timed out" })).toBeNull()
+  })
+})
+
+// ─── P6-05 (#5): race-safe post-iterate/clarify re-poll + prop threading ─────
+
+function rec(over: Partial<PrototypeRecord> = {}): PrototypeRecord {
+  return { id: 7, status: "ready", bundle_url: null, error: null, ...over }
+}
+
+/** Call the pure view directly and return its flattened child elements (no DOM
+ *  render → real child components are NOT invoked, just inspected as elements). */
+function viewChildren(
+  over: Partial<Parameters<typeof DesignAgentLauncherView>[0]> = {},
+): React.ReactElement[] {
+  const tree = DesignAgentLauncherView({
+    prdId: 1,
+    figmaFileKey: null,
+    open: false,
+    setOpen: noop,
+    renderDrawer: () => null,
+    ...over,
+  }) as React.ReactElement
+  return React.Children.toArray(
+    (tree.props as { children: React.ReactNode }).children,
+  ) as React.ReactElement[]
+}
+
+describe("pendingKey (pure)", () => {
+  it("extracts the pending question text, or null when none is pending", () => {
+    expect(pendingKey({ pending_question: { question: "Why dark mode?" } })).toBe(
+      "Why dark mode?",
+    )
+    expect(pendingKey({ pending_question: null })).toBeNull()
+    expect(pendingKey({})).toBeNull()
+  })
+})
+
+describe("pollUntilAdvanced — race-safe re-poll (AC4/AC5)", () => {
+  const noSleep = async () => {}
+  const frozenNow = () => 0
+
+  it("ignores a stale pre-iterate ready and lands on the new bundle (test_refresh_ignores_stale_preiterate_ready, AC4)", async () => {
+    const OLD = "https://cdn/OLD/index.html"
+    const NEW = "https://cdn/NEW/index.html"
+    const seq: DesignAgentGenResult[] = [
+      // 1) stale: the row hasn't flipped off the pre-iterate checkpoint yet.
+      { ok: true, prototype: rec({ bundle_url: OLD, status: "ready" }) },
+      // 2) flipped to generating, not yet built (still OLD bundle).
+      { ok: true, prototype: rec({ bundle_url: OLD, status: "generating" }) },
+      // 3) new checkpoint built.
+      { ok: true, prototype: rec({ bundle_url: NEW, status: "ready" }) },
+    ]
+    let i = 0
+    const runGeneration = vi.fn(async () => seq[Math.min(i++, seq.length - 1)])
+
+    const fresh = await pollUntilAdvanced(7, OLD, null, {
+      runGeneration,
+      sleep: noSleep,
+      now: frozenNow,
+    })
+
+    expect(fresh?.bundle_url).toBe(NEW)
+    // Did NOT resolve on the first (stale) read — it re-sampled past it.
+    expect(runGeneration).toHaveBeenCalledTimes(3)
+  })
+
+  it("clarify refetch resolves on a new bundle, not the stale pre-answer read (test_clarify_answer_triggers_refetch, AC5)", async () => {
+    const seq: DesignAgentGenResult[] = [
+      // stale: same bundle AND the same pre-answer question still observed.
+      {
+        ok: true,
+        prototype: rec({
+          bundle_url: "OLD",
+          status: "ready",
+          pending_question: { question: "Q1" },
+        }),
+      },
+      // advanced: a new checkpoint built, question cleared.
+      {
+        ok: true,
+        prototype: rec({ bundle_url: "NEW", status: "ready", pending_question: null }),
+      },
+    ]
+    let i = 0
+    const runGeneration = vi.fn(async () => seq[Math.min(i++, seq.length - 1)])
+
+    const fresh = await pollUntilAdvanced(7, "OLD", "Q1", {
+      runGeneration,
+      sleep: noSleep,
+      now: frozenNow,
+    })
+
+    expect(fresh?.bundle_url).toBe("NEW")
+    expect(runGeneration).toHaveBeenCalledTimes(2)
+  })
+
+  it("clarify refetch resolves on a re-pause with a NEW question (pending_question transition, AC5)", async () => {
+    const seq: DesignAgentGenResult[] = [
+      {
+        ok: true,
+        prototype: rec({
+          bundle_url: "OLD",
+          status: "ready",
+          pending_question: { question: "Q1" },
+        }),
+      },
+      {
+        ok: true,
+        prototype: rec({
+          bundle_url: "OLD",
+          status: "ready",
+          pending_question: { question: "Q2" },
+        }),
+      },
+    ]
+    let i = 0
+    const runGeneration = vi.fn(async () => seq[Math.min(i++, seq.length - 1)])
+
+    const fresh = await pollUntilAdvanced(7, "OLD", "Q1", {
+      runGeneration,
+      sleep: noSleep,
+      now: frozenNow,
+    })
+
+    expect(pendingKey(fresh as PrototypeRecord)).toBe("Q2")
+    expect(runGeneration).toHaveBeenCalledTimes(2)
+  })
+
+  it("returns null on a failed poll (failure handed off to the existing path)", async () => {
+    const runGeneration = vi.fn(async () => ({ ok: false as const, message: "boom" }))
+    const fresh = await pollUntilAdvanced(7, "OLD", null, {
+      runGeneration,
+      sleep: noSleep,
+      now: frozenNow,
+    })
+    expect(fresh).toBeNull()
+    expect(runGeneration).toHaveBeenCalledTimes(1)
+  })
+
+  it("returns null when the deadline passes without an advance (bounded)", async () => {
+    const runGeneration = vi.fn(async () =>
+      ({ ok: true as const, prototype: rec({ bundle_url: "OLD", status: "ready" }) }),
+    )
+    let t = 0
+    const fresh = await pollUntilAdvanced(7, "OLD", null, {
+      runGeneration,
+      sleep: noSleep,
+      now: () => {
+        const v = t
+        t += 200_000
+        return v
+      },
+      deadlineMs: 300_000,
+    })
+    expect(fresh).toBeNull()
+  })
+})
+
+describe("post-iterate / clarify callback threading (AC4/AC5 wiring)", () => {
+  const base: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/index.html",
+    error: null,
+    is_complete: false,
+    share_mode: "private",
+    share_token: null,
+  }
+
+  it("forwards onIterated to the IterateComposer mount", () => {
+    const onIterated = vi.fn()
+    const children = viewChildren({ result: base, onIterated })
+    const iterate = children.find((c) => c.type === IterateComposer)
+    expect(iterate).toBeTruthy()
+    expect((iterate!.props as { onIterated?: () => void }).onIterated).toBe(
+      onIterated,
+    )
+  })
+
+  it("forwards onAnswered to the ClarifyingQuestionSurface mount", () => {
+    const onAnswered = vi.fn()
+    const clarifyProto = rec({
+      bundle_url: "https://cdn/x/index.html",
+      is_complete: false,
+      pending_question: { question: "Mobile or desktop first?" },
+    })
+    const children = viewChildren({ result: clarifyProto, onAnswered })
+    const clarify = children.find((c) => c.type === ClarifyingQuestionSurface)
+    expect(clarify).toBeTruthy()
+    expect((clarify!.props as { onAnswered?: () => void }).onAnswered).toBe(
+      onAnswered,
+    )
+  })
+})
+
+describe("CommentsPanel mounts live on a newly-minted share_token (AC12 / #14)", () => {
+  const base: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/index.html",
+    error: null,
+    is_complete: false,
+    share_mode: "private",
+    share_token: null,
+  }
+
+  it("does NOT mount CommentsPanel while share_token is null", () => {
+    const children = viewChildren({ result: { ...base, share_token: null } })
+    expect(children.find((c) => c.type === CommentsPanel)).toBeFalsy()
+  })
+
+  it("mounts CommentsPanel addressed by the new token once share_token is present (test_comments_panel_mounts_on_new_share_token)", () => {
+    // Surfacing a refetched record carrying a non-null share_token (same id)
+    // flips the share-gated mount on — no manual remount.
+    const children = viewChildren({
+      result: { ...base, share_token: "tok-xyz-123" },
+    })
+    const comments = children.find((c) => c.type === CommentsPanel)
+    expect(comments).toBeTruthy()
+    expect((comments!.props as { token: string }).token).toBe("tok-xyz-123")
+    expect((comments!.props as { prototypeId: number }).prototypeId).toBe(7)
   })
 })

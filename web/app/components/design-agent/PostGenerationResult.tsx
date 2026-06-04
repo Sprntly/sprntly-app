@@ -24,7 +24,7 @@
  * introduced.
  */
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { CompletionBar } from "./CompletionBar"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
 import { PrototypeViewer } from "./PrototypeViewer"
@@ -42,6 +42,43 @@ export type PostGenerationResultViewProps = {
   shareToken: string | null
   bundleUrl: string | null
   onStateChange?: (state: { isComplete: boolean; staleHandoff: boolean }) => void
+}
+
+/**
+ * P6-05 (#5) — guarded re-seed decision for the local `isComplete` copy.
+ *
+ * After an iterate/clarify advances the SAME prototype id to a new checkpoint,
+ * the launcher refetches and hands a fresh `prototype` prop down. We want the
+ * iframe + "View prototype" href to follow the new `bundle_url` (those read the
+ * prop directly, so they update for free), and we want the local `isComplete`
+ * copy to track a genuine checkpoint advance — WITHOUT clobbering a user's local
+ * Mark-Complete (`onStateChange`), which mutates `isComplete` independently of
+ * the prop.
+ *
+ * Rule: re-seed ONLY when `bundle_url` actually changed AND the new prop's
+ * `is_complete` differs from the last PROP-DERIVED baseline (tracked in refs, so
+ * a user's local toggle between prop changes is never the baseline). A bundle
+ * change whose prop `is_complete` equals the baseline advances the baseline but
+ * leaves the local copy alone. No bundle change → no-op.
+ *
+ * Pure (returns the next baseline + whether to call setIsComplete) so the
+ * sequence is unit-testable without a DOM (the repo's vitest env is `node`).
+ */
+export type ReseedBaseline = { bundle: string | null; complete: boolean }
+
+export function reseedStep(
+  baseline: ReseedBaseline,
+  nextBundle: string | null,
+  nextComplete: boolean,
+): { baseline: ReseedBaseline; setComplete: boolean | null } {
+  if (nextBundle !== baseline.bundle) {
+    const advanced = { bundle: nextBundle, complete: nextComplete }
+    return {
+      baseline: advanced,
+      setComplete: nextComplete !== baseline.complete ? nextComplete : null,
+    }
+  }
+  return { baseline, setComplete: null }
 }
 
 /**
@@ -127,6 +164,27 @@ export function PostGenerationResult({ prototype }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
   )
+
+  // P6-05 (#5): when the launcher refetches after an iterate/clarify and hands a
+  // fresh prop down (same id, new `bundle_url`), re-seed the local `isComplete`
+  // ONLY on a genuine checkpoint advance whose prop value differs from the last
+  // prop-derived baseline — never clobbering a user's local Mark-Complete. The
+  // iframe `src` + "View prototype" href read `bundle_url` straight from the prop
+  // in the view, so they refresh automatically; only this local copy needs care.
+  const baselineRef = useRef<ReseedBaseline>({
+    bundle: prototype.bundle_url,
+    complete: prototype.is_complete ?? false,
+  })
+  useEffect(() => {
+    const next = prototype.is_complete ?? false
+    const { baseline, setComplete } = reseedStep(
+      baselineRef.current,
+      prototype.bundle_url,
+      next,
+    )
+    baselineRef.current = baseline
+    if (setComplete !== null) setIsComplete(setComplete)
+  }, [prototype.bundle_url, prototype.is_complete])
 
   return (
     <PostGenerationResultView
