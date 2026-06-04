@@ -44,6 +44,16 @@ function renderView(
   )
 }
 
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0
+  let idx = haystack.indexOf(needle)
+  while (idx !== -1) {
+    count += 1
+    idx = haystack.indexOf(needle, idx + needle.length)
+  }
+  return count
+}
+
 function proto(over: Partial<PrototypeRecord> = {}): PrototypeRecord {
   return {
     id: 42,
@@ -103,33 +113,97 @@ describe("PostGenerationResultView — complete state (AC4)", () => {
   })
 })
 
-describe("PostGenerationResultView — View prototype link (AC: view affordance)", () => {
-  it("renders the link when a bundle_url is present (test_view_link_present_when_bundle_or_token)", () => {
-    const html = renderView({ bundleUrl: "https://cdn/x/bundle/index.html" })
-    expect(html).toContain('data-testid="view-prototype-link"')
-    expect(html).toContain("https://cdn/x/bundle/index.html")
-  })
-
-  it("falls back to the /p/<token> link when no bundle but shared", () => {
-    const html = renderView({ bundleUrl: null, shareToken: "tok-123" })
-    expect(html).toContain('data-testid="view-prototype-link"')
-    expect(html).toContain("/p/tok-123")
-  })
-
-  it("hides the link when there is neither a bundle nor a token", () => {
+// ─── P6-16 (UX-6): always-shown full-screen View affordance ──────────────────
+// INVERTED from the obsolete "View prototype link" block: the `view-prototype-link`
+// anchor (silently hidden when resolveViewHref returned null; a chrome-less raw
+// new tab otherwise) is replaced by an ALWAYS-shown "View full screen" trigger
+// (enabled when a bundle exists, disabled-with-label otherwise) + a full-screen
+// overlay that reuses the P6-12 device frame. resolveViewHref is KEPT (its pure
+// describe below still passes) but no longer gates a hidden link.
+describe("PostGenerationResultView — View affordance never dead (P6-16 AC1/AC4b)", () => {
+  // Regression — fails on unfixed code (`{viewHref && <a/>}` rendered NOTHING
+  // when resolveViewHref returned null).
+  it("test_view_affordance_never_hidden_when_no_bundle — always renders a (disabled) View control with no bundle or token", () => {
     const html = renderView({ bundleUrl: null, shareToken: null })
+    expect(html).toContain('data-testid="view-fullscreen-trigger"')
+    // Disabled + explanatory label — present, NOT removed.
+    expect(html).toMatch(/data-testid="view-fullscreen-trigger"[^>]*disabled/)
+    expect(html).toContain("Prototype building")
+    // The obsolete dead-end anchor is gone entirely.
     expect(html).not.toContain('data-testid="view-prototype-link"')
   })
 
-  it("the iframe + View href follow a refreshed bundle_url (test_preview_refreshes_after_iterate, AC4)", () => {
-    // bundle_url is read straight from the prop in the view, so a refreshed
-    // record (post-iterate, same id) re-renders the iframe src + View href onto
-    // the NEW bundle with no manual remount — the #5 staleness this ticket fixes.
+  it("test_view_affordance_enabled_when_bundle — enabled 'View full screen' trigger when a bundle exists", () => {
+    const html = renderView({ bundleUrl: "https://cdn/x/bundle/index.html" })
+    expect(html).toContain('data-testid="view-fullscreen-trigger"')
+    expect(html).toContain("View full screen")
+    expect(html).not.toMatch(/data-testid="view-fullscreen-trigger"[^>]*disabled/)
+  })
+
+  it("no bundle but shared (token present) still shows the always-present control, not the old /p link dead-end", () => {
+    const html = renderView({ bundleUrl: null, shareToken: "tok-123" })
+    // Always-shown control present (disabled — no bundle to open yet).
+    expect(html).toContain('data-testid="view-fullscreen-trigger"')
+    expect(html).toMatch(/data-testid="view-fullscreen-trigger"[^>]*disabled/)
+    // No raw new-tab /p link affordance remains here (ShareMenu owns sharing).
+    expect(html).not.toContain('data-testid="view-prototype-link"')
+  })
+
+  it("the inline iframe follows a refreshed bundle_url (test_preview_refreshes_after_iterate, AC4)", () => {
+    // bundle_url is read straight from the prop, so a refreshed record
+    // (post-iterate, same id) re-renders the inline viewer iframe onto the NEW
+    // bundle with no manual remount — the #5 staleness P6-05 fixed, preserved here.
     const oldHtml = renderView({ bundleUrl: "https://cdn/OLD/index.html" })
     expect(oldHtml).toContain("https://cdn/OLD/index.html")
     const newHtml = renderView({ bundleUrl: "https://cdn/NEW/index.html" })
     expect(newHtml).toContain("https://cdn/NEW/index.html")
     expect(newHtml).not.toContain("https://cdn/OLD/index.html")
+  })
+})
+
+describe("PostGenerationResultView — full-screen overlay (P6-16 AC2/AC3/AC3b)", () => {
+  const BUNDLE = "https://cdn/x/bundle/index.html"
+
+  it("test_trigger_opens_overlay — fullscreenOpen renders the proto-fullscreen dialog; closed renders none", () => {
+    const open = renderView({ bundleUrl: BUNDLE, fullscreenOpen: true })
+    expect(open).toContain('data-testid="proto-fullscreen"')
+    expect(open).toMatch(/role="dialog"/)
+    expect(open).toMatch(/aria-modal="true"/)
+    expect(open).toContain('data-testid="proto-fullscreen-close"')
+
+    const closed = renderView({ bundleUrl: BUNDLE, fullscreenOpen: false })
+    expect(closed).not.toContain('data-testid="proto-fullscreen"')
+  })
+
+  it("never renders the overlay without a bundle even if fullscreenOpen is true", () => {
+    const html = renderView({ bundleUrl: null, fullscreenOpen: true })
+    expect(html).not.toContain('data-testid="proto-fullscreen"')
+  })
+
+  it("test_overlay_mounts_device_frame — the open overlay mounts a <PrototypeViewer> (proto-frame device chrome), not a bare iframe", () => {
+    const html = renderView({ bundleUrl: BUNDLE, fullscreenOpen: true })
+    // The device frame (P6-12) is present inside the overlay.
+    expect(html).toContain('class="proto-frame"')
+    // The viewer's iframe carries the locked className (inside proto-frame),
+    // i.e. it is a PrototypeViewer, not a top-level bare <iframe>.
+    expect(html).toContain('class="da-prototype-iframe"')
+    // The same bundle url is passed to the overlay viewer.
+    expect(html).toContain(BUNDLE)
+  })
+
+  it("test_overlay_viewer_does_not_shadow_inline_edit_iframe — at most ONE da-prototype-iframe at any instant (AC3b)", () => {
+    // Overlay closed: exactly one (inline) iframe, with the inline editor.
+    const closed = renderView({ bundleUrl: BUNDLE, fullscreenOpen: false })
+    expect(countOccurrences(closed, 'class="da-prototype-iframe"')).toBe(1)
+    expect(closed).toContain('data-testid="manual-edit-overlay"')
+
+    // Overlay open: the inline viewer (its iframe AND its ManualEditOverlay
+    // editor) is unmounted, leaving exactly one (overlay, view-only) iframe — so
+    // ManualEditOverlay's GLOBAL querySelector can never resolve to a shadowing
+    // second iframe. The live collision is tester-verified (AC8).
+    const open = renderView({ bundleUrl: BUNDLE, fullscreenOpen: true })
+    expect(countOccurrences(open, 'class="da-prototype-iframe"')).toBe(1)
+    expect(open).not.toContain('data-testid="manual-edit-overlay"')
   })
 })
 
@@ -173,15 +247,17 @@ describe("PostGenerationResultView — two-column design-pane (AC1/AC4)", () => 
     expect(html).toContain("https://cdn/x/bundle/index.html")
   })
 
-  it("keeps the View-prototype link OUTSIDE the design-pane (chrome stays full-width)", () => {
+  it("keeps the View affordance OUTSIDE the design-pane (chrome stays full-width)", () => {
+    // P6-16: the View affordance is now the always-shown `view-fullscreen-trigger`
+    // (replacing the obsolete `view-prototype-link` anchor). It still follows the
+    // pane, not nested in a grid cell.
     const html = renderView({
       bundleUrl: "https://cdn/x/bundle/index.html",
       comments: sentinel(),
     })
-    // The link affordance follows the pane, not nested in a grid cell.
     const asideEnd = html.indexOf('data-testid="sentinel-comments"')
-    const linkIdx = html.indexOf('data-testid="view-prototype-link"')
-    expect(linkIdx).toBeGreaterThan(asideEnd)
+    const triggerIdx = html.indexOf('data-testid="view-fullscreen-trigger"')
+    expect(triggerIdx).toBeGreaterThan(asideEnd)
   })
 })
 
@@ -330,6 +406,29 @@ describe("design-agent.css — two-column design-pane appended + scoped (AC2)", 
     expect(paneRegion).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
     expect(paneRegion).not.toMatch(/rgba?\(/)
     expect(paneRegion).not.toMatch(/hsla?\(/)
+  })
+})
+
+describe("design-agent.css — full-screen overlay block appended + scoped (P6-16 AC6)", () => {
+  it("test_css_fullscreen_block_appended_and_scoped", () => {
+    expect(CSS).toContain(".design-agent-surface .proto-fullscreen")
+    expect(CSS).toContain(".design-agent-surface .proto-fullscreen-body")
+    expect(CSS).toContain(".design-agent-surface .proto-fullscreen-close")
+    expect(CSS).toContain(".design-agent-surface .proto-fullscreen-trigger")
+    // Every proto-fullscreen* selector occurrence is scoped under the surface.
+    const fsSelectors = CSS.match(/^\s*\.[^\n{]*proto-fullscreen[^\n{]*\{/gm) ?? []
+    expect(fsSelectors.length).toBeGreaterThan(0)
+    for (const sel of fsSelectors) {
+      expect(sel.trimStart()).toMatch(/^\.design-agent-surface\s/)
+    }
+    // The appended block uses tokens only — NO new colour literal (the scrim
+    // reuses var(--ink-alpha-45)); no documented-scrim exception is needed.
+    const block = CSS.slice(
+      CSS.indexOf(".design-agent-surface .proto-fullscreen-trigger"),
+    )
+    expect(block).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+    expect(block).not.toMatch(/rgba?\(/)
+    expect(block).not.toMatch(/hsla?\(/)
   })
 })
 

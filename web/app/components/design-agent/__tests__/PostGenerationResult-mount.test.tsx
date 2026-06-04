@@ -62,11 +62,17 @@ describe("PostGenerationResult internal mount — overlay reachable (AC1)", () =
 
   it("does not embed the editable viewer or overlay when there is no built bundle", () => {
     // Without a bundle there is no same-origin iframe to drive, so the embedded
-    // viewer + overlay do not mount; the link-out remains the only affordance.
+    // viewer + overlay do not mount. P6-16: the affordance is now the ALWAYS-shown
+    // full-screen trigger (disabled-with-label here), NOT the obsolete
+    // `view-prototype-link` anchor.
     const html = renderInternal({ bundleUrl: null, shareToken: "tok-123" })
     expect(html).not.toContain('class="da-prototype-iframe"')
     expect(html).not.toContain('data-testid="manual-edit-overlay"')
-    expect(html).toContain('data-testid="view-prototype-link"')
+    // The always-shown View control is present and disabled (no bundle yet) — the
+    // never-dead invariant (P6-16 AC1). The old anchor is gone.
+    expect(html).not.toContain('data-testid="view-prototype-link"')
+    expect(html).toContain('data-testid="view-fullscreen-trigger"')
+    expect(html).toMatch(/data-testid="view-fullscreen-trigger"[^>]*disabled/)
   })
 })
 

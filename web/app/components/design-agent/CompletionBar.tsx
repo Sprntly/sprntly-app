@@ -181,6 +181,20 @@ export function CompletionBarView({
           >
             Export disabled
           </span>
+          {/* P6-14 (UX-4) — distinct "hand this to my coding agent" action,
+              gated to Complete/locked (F16/F17). Disabled until complete; the
+              server /export also 409s on WIP (defence-in-depth). */}
+          <button
+            type="button"
+            className="btn-export"
+            disabled
+            data-testid="export-claude-code-btn"
+          >
+            Export to Claude Code
+          </button>
+          <span className="export-claude-code-caption">
+            Available once the prototype is marked Complete.
+          </span>
         </>
       ) : (
         <>
@@ -210,6 +224,19 @@ export function CompletionBarView({
             data-testid="copy-md-btn"
           >
             Copy to clipboard
+          </button>
+          {/* P6-14 (UX-4) — the distinct primary handoff action. REUSES the
+              existing onDownload prop (→ runDownloadMarkdown → exportMarkdown);
+              no parallel onExportClaudeCode prop (Check-25 reuse). The
+              distinction from "Download .md" is the label + btn-export ink. */}
+          <button
+            type="button"
+            className="btn-export"
+            onClick={onDownload}
+            disabled={busy}
+            data-testid="export-claude-code-btn"
+          >
+            Export to Claude Code
           </button>
         </>
       )}

@@ -59,6 +59,17 @@ export type PostGenerationResultViewProps = {
   /** P6-20 (#14): forwarded to `<ShareMenu onShared>` so a successful Share
    *  re-polls the launcher result. Optional/defaulted. */
   onShared?: (token: string | null) => void
+  /** P6-16 (UX-6): full-screen overlay open state + open/close handlers, owned by
+   *  the `PostGenerationResult` container (client-only `useState`). Threaded so the
+   *  pure view stays SSR-renderable: the always-shown trigger calls
+   *  `onOpenFullscreen`, the overlay Close calls `onCloseFullscreen`, and
+   *  `fullscreenOpen` decides whether the overlay renders (and, by the
+   *  selector-collision guard, whether the inline viewer stays mounted).
+   *  Optional/defaulted → existing direct view calls and the public composition
+   *  keep type-checking. */
+  fullscreenOpen?: boolean
+  onOpenFullscreen?: () => void
+  onCloseFullscreen?: () => void
 }
 
 /**
@@ -124,8 +135,17 @@ export function PostGenerationResultView({
   onStateChange,
   comments,
   onShared,
+  fullscreenOpen = false,
+  onOpenFullscreen,
+  onCloseFullscreen,
 }: PostGenerationResultViewProps) {
-  const viewHref = resolveViewHref(bundleUrl, shareToken)
+  // P6-16 (UX-6): the primary View affordance is ALWAYS rendered (never a hidden
+  // / dead link — the #6 bug). It is gated only on a built bundle existing:
+  // enabled "View full screen" when `bundleUrl` is present, otherwise a DISABLED
+  // "Prototype building…" control — never a removed element. `resolveViewHref`
+  // (below) is KEPT byte-for-byte but no longer consumed here; its null-return no
+  // longer hides the control. The real shared URL stays reachable via ShareMenu.
+  const canOpen = bundleUrl != null
   // P4-10 — the EDITABLE viewer, rendered only when a built bundle exists. This
   // surface only renders inside (app)/AuthGate, so it is internal by
   // construction; passing the real numeric `prototypeId` into the overlay IS the
@@ -137,7 +157,18 @@ export function PostGenerationResultView({
   // duplicating the block — the `bundleUrl &&` guard is preserved exactly as
   // P6-05 left it (the viewer cell only renders when a bundle exists; the
   // comments cell is independent and mounts on share regardless of bundle state).
-  const viewer = bundleUrl ? (
+  // P6-16 (UX-6) selector-collision guard (AC3b): the full-screen overlay mounts
+  // its OWN <PrototypeViewer> → a SECOND `da-prototype-iframe`. ManualEditOverlay
+  // reaches the editable iframe via a GLOBAL
+  // `document.querySelector("iframe.da-prototype-iframe")` (ManualEditOverlay.tsx
+  // `defaultGetPrototypeDoc`), which takes the FIRST match — so two such iframes
+  // could let manual-edit bind to the wrong one. We unmount the inline viewer (its
+  // iframe AND its ManualEditOverlay editor) whenever the overlay is open, so at
+  // most ONE `da-prototype-iframe` exists at any instant and it is always the
+  // active edit target. The overlay viewer is view-only (no `chrome` → no second
+  // editor). The live selector behaviour is tester-verified (AC8) — the node-env
+  // unit cannot exercise the real global query.
+  const viewer = bundleUrl && !fullscreenOpen ? (
     <PrototypeViewer
       bundleUrl={bundleUrl}
       isComplete={isComplete}
@@ -174,16 +205,47 @@ export function PostGenerationResultView({
       ) : (
         viewer
       )}
-      {viewHref && (
-        <a
-          className="btn"
-          href={viewHref}
-          data-testid="view-prototype-link"
-          target="_blank"
-          rel="noreferrer"
+      {/* P6-16 (UX-6): the always-shown primary View affordance. Never hidden —
+          enabled when a bundle exists (opens the full-screen overlay), DISABLED
+          with an explanatory label while the prototype is still building. This
+          replaces the old `{viewHref && <a target="_blank">}` dead-end (silently
+          hidden when no bundle/token; a chrome-less raw new tab otherwise). */}
+      <button
+        type="button"
+        className="btn proto-fullscreen-trigger"
+        data-testid="view-fullscreen-trigger"
+        disabled={!canOpen}
+        onClick={() => onOpenFullscreen?.()}
+      >
+        {canOpen ? "View full screen" : "Prototype building…"}
+      </button>
+      {/* The full-screen overlay reuses the SAME device frame (P6-12
+          `<PrototypeViewer>`) at viewport scale — not a bare iframe (keeps the
+          browser-frame chrome + Desktop/Mobile toggle + the P6-17 sandbox). It is
+          view-only (no `chrome` → no second ManualEditOverlay editor). Mounted
+          only while open AND a bundle exists; the inline viewer is unmounted while
+          it is open (selector-collision guard above). */}
+      {fullscreenOpen && bundleUrl && (
+        <div
+          className="proto-fullscreen"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Prototype full screen"
+          data-testid="proto-fullscreen"
         >
-          View prototype
-        </a>
+          <button
+            type="button"
+            className="proto-fullscreen-close"
+            aria-label="Close full screen"
+            data-testid="proto-fullscreen-close"
+            onClick={() => onCloseFullscreen?.()}
+          >
+            ×
+          </button>
+          <div className="proto-fullscreen-body">
+            <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} />
+          </div>
+        </div>
       )}
     </div>
   )
@@ -200,6 +262,11 @@ export function PostGenerationResult({ prototype, comments, onShared }: PostGene
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
   )
+
+  // P6-16 (UX-6): client-only open state for the full-screen overlay. Owned here
+  // (the stateful container) and threaded into the SSR-renderable pure view,
+  // matching the existing `onStateChange` threading pattern.
+  const [fullscreenOpen, setFullscreenOpen] = useState<boolean>(false)
 
   // P6-05 (#5): when the launcher refetches after an iterate/clarify and hands a
   // fresh prop down (same id, new `bundle_url`), re-seed the local `isComplete`
@@ -232,6 +299,9 @@ export function PostGenerationResult({ prototype, comments, onShared }: PostGene
       onStateChange={(state) => setIsComplete(state.isComplete)}
       comments={comments}
       onShared={onShared}
+      fullscreenOpen={fullscreenOpen}
+      onOpenFullscreen={() => setFullscreenOpen(true)}
+      onCloseFullscreen={() => setFullscreenOpen(false)}
     />
   )
 }
