@@ -286,3 +286,81 @@ def me(
     if not out["app"] and not out["demo"]:
         raise HTTPException(401, "Not signed in")
     return out
+
+
+# ─────────────────────── Tenant resolution (require_company) ───────────────────────
+#
+# `require_session` answers "who is this user?". `require_company` answers
+# "which company (tenant) are they acting in?" — the claim every tenant-
+# isolated surface (GraphFacade, connectors, agent routes) scopes by.
+#
+# Resolution rules:
+#   - Supabase-authenticated sessions only (legacy demo/app cookies carry no
+#     user id → 403).
+#   - Membership comes from company_members (owned by onboarding). The client
+#     never *asserts* a company; it can only *select among* its memberships
+#     via the X-Company-Id header (required when the user belongs to more
+#     than one company).
+#   - No membership → 403 (finish onboarding first).
+#   - X-Company-Id for a company the user is NOT a member of → 403.
+
+
+class CompanyContext(BaseModel):
+    """Resolved tenant context: pass `company_id` to GraphFacade et al."""
+
+    company_id: str
+    role: str
+    user_id: str
+
+
+def require_company(
+    authorization: str | None = Header(default=None),
+    sprntly_app_session: str | None = Cookie(default=None),
+    sprntly_demo_session: str | None = Cookie(default=None),
+    x_company_id: str | None = Header(default=None, alias="X-Company-Id"),
+) -> CompanyContext:
+    """FastAPI dependency — resolve the authenticated user's active company.
+
+    Use as `company: CompanyContext = Depends(require_company)` on any
+    tenant-scoped route, then pass `company.company_id` as the
+    enterprise_id to GraphFacade / db helpers.
+    """
+    session = require_session(
+        authorization=authorization,
+        sprntly_app_session=sprntly_app_session,
+        sprntly_demo_session=sprntly_demo_session,
+    )
+    user_id = session.get("sub")
+    if session.get("aud") != "supabase" or not user_id:
+        # Legacy cookie sessions have no user identity — they cannot be
+        # resolved to a company membership.
+        raise HTTPException(403, "Company context requires a signed-in user")
+
+    from app.db.companies import memberships_for_user
+
+    memberships = memberships_for_user(user_id)
+    if not memberships:
+        raise HTTPException(403, "No company membership — complete onboarding first")
+
+    by_id = {m["company_id"]: m for m in memberships}
+
+    if x_company_id:
+        chosen = by_id.get(x_company_id)
+        if chosen is None:
+            # Member of other companies, but not this one. Same status as
+            # no-membership: don't leak whether the company exists.
+            raise HTTPException(403, "Not a member of the requested company")
+        return CompanyContext(
+            company_id=chosen["company_id"], role=chosen["role"], user_id=user_id
+        )
+
+    if len(memberships) == 1:
+        only = memberships[0]
+        return CompanyContext(
+            company_id=only["company_id"], role=only["role"], user_id=user_id
+        )
+
+    raise HTTPException(
+        400,
+        "Multiple company memberships — pass X-Company-Id to select one",
+    )

@@ -251,6 +251,23 @@ CREATE TABLE github_pull_requests (
     last_event_at   TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (repo_full_name, pr_number)
 );
+
+-- Tenancy primitive (mirrors 20260525140000_companies_and_profiles.sql).
+-- Used by require_company tests; IF NOT EXISTS so branches that also seed
+-- it (e.g. the KG foundation) merge cleanly.
+CREATE TABLE IF NOT EXISTS companies (
+    id           TEXT PRIMARY KEY,
+    slug         TEXT,
+    display_name TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS company_members (
+    id         TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member'
+);
 """
 
 
