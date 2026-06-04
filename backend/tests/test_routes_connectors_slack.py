@@ -343,8 +343,10 @@ def test_list_channels_posts_with_bearer_and_correct_params(slack_env):
     assert call_args.args[0] == "https://slack.com/api/conversations.list"
     assert call_args.kwargs["headers"]["Authorization"] == "Bearer xoxb-1234"
     params = call_args.kwargs["params"]
-    assert "public_channel" in params["types"]
-    assert "private_channel" in params["types"]
+    # public_channel only — see slack_oauth.list_channels for the
+    # rationale (private channels would require the groups:read scope
+    # we deliberately don't request).
+    assert params["types"] == "public_channel"
     assert params["exclude_archived"] == "true"
 
 

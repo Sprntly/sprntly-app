@@ -179,9 +179,13 @@ def list_channels(bot_access_token: str) -> list[dict[str, Any]]:
         SLACK_CONVERSATIONS_LIST_URL,
         headers={"Authorization": f"Bearer {bot_access_token}"},
         params={
-            # Both public + private. private_channel hits work only for
-            # channels the bot has joined; that's the intended UX.
-            "types": "public_channel,private_channel",
+            # Public channels only. Listing private channels would require
+            # the `groups:read` scope, which we don't ask for by default —
+            # most users pick a public channel for notifications anyway,
+            # and asking for fewer scopes makes the install consent
+            # screen less intimidating. Add `groups:read` here + as a bot
+            # scope on the Slack app if private channels become a need.
+            "types": "public_channel",
             "exclude_archived": "true",
             "limit": str(CHANNELS_LIST_LIMIT),
         },
