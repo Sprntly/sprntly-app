@@ -24,7 +24,7 @@
  * introduced.
  */
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { CompletionBar } from "./CompletionBar"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
 import { PrototypeViewer } from "./PrototypeViewer"
@@ -33,6 +33,12 @@ import type { PrototypeRecord } from "../../lib/api"
 
 export type PostGenerationResultProps = {
   prototype: PrototypeRecord
+  /** P6-13 (UX-3): optional comments node placed in the right cell of the
+   *  two-column `design-pane` grid beside the viewer. The signed-in launcher
+   *  passes its `<CommentsPanel>` here; the public `/p/<token>` viewer does NOT
+   *  use this component (it composes its own chrome) → it passes nothing and the
+   *  comments column is omitted. Null-by-default keeps the public shape intact. */
+  comments?: ReactNode
 }
 
 export type PostGenerationResultViewProps = {
@@ -42,6 +48,9 @@ export type PostGenerationResultViewProps = {
   shareToken: string | null
   bundleUrl: string | null
   onStateChange?: (state: { isComplete: boolean; staleHandoff: boolean }) => void
+  /** P6-13 (UX-3): comments node for the right cell of the `design-pane` grid.
+   *  When absent, the viewer renders full-width (no comments cell, no grid). */
+  comments?: ReactNode
 }
 
 /**
@@ -105,8 +114,29 @@ export function PostGenerationResultView({
   shareToken,
   bundleUrl,
   onStateChange,
+  comments,
 }: PostGenerationResultViewProps) {
   const viewHref = resolveViewHref(bundleUrl, shareToken)
+  // P4-10 — the EDITABLE viewer, rendered only when a built bundle exists. This
+  // surface only renders inside (app)/AuthGate, so it is internal by
+  // construction; passing the real numeric `prototypeId` into the overlay IS the
+  // internal mount that makes F13 manual-edit reachable (AD13). The overlay
+  // reaches the same-origin iframe (`da-prototype-iframe`) for click→select. The
+  // public `/p/<token>` mount keeps passing no `prototypeId` → the overlay
+  // renders nothing (AC10 preserved, untouched here). Extracted into a const so
+  // P6-13's two-column `design-pane` grid can place it in the main cell without
+  // duplicating the block — the `bundleUrl &&` guard is preserved exactly as
+  // P6-05 left it (the viewer cell only renders when a bundle exists; the
+  // comments cell is independent and mounts on share regardless of bundle state).
+  const viewer = bundleUrl ? (
+    <PrototypeViewer
+      bundleUrl={bundleUrl}
+      isComplete={isComplete}
+      chrome={
+        <ManualEditOverlay prototypeId={prototypeId} isComplete={isComplete} />
+      }
+    />
+  ) : null
   return (
     <div className="design-agent-surface design-agent-result" data-testid="post-generation-result">
       <CompletionBar
@@ -120,23 +150,19 @@ export function PostGenerationResultView({
         initialMode={shareMode}
         initialToken={shareToken}
       />
-      {/* P4-10 — embed the EDITABLE viewer when a built bundle exists. This
-          surface only renders inside (app)/AuthGate, so it is internal by
-          construction; passing the real numeric `prototypeId` into the overlay
-          IS the internal mount that makes F13 manual-edit reachable (AD13). The
-          overlay reaches the same-origin iframe (`da-prototype-iframe`) for
-          click→select. The public `/p/<token>` mount keeps passing no
-          `prototypeId` → the overlay renders nothing (AC10 preserved, untouched
-          here). The link-out below is kept as a full-screen "open in new tab"
-          affordance. */}
-      {bundleUrl && (
-        <PrototypeViewer
-          bundleUrl={bundleUrl}
-          isComplete={isComplete}
-          chrome={
-            <ManualEditOverlay prototypeId={prototypeId} isComplete={isComplete} />
-          }
-        />
+      {/* P6-13 (UX-3): two-column pane — viewer left (main cell), comments right
+          (320px cell). CompletionBar + ShareMenu stay above as full-width chrome;
+          the "View prototype" link stays below. When no `comments` node is
+          supplied (e.g. the prototype isn't shared yet), the viewer renders
+          full-width with no grid (degrades to a single column). The 1fr/320px
+          split + the ≤1080px collapse are CSS (design-agent.css). */}
+      {comments ? (
+        <div className="design-pane">
+          <div className="design-pane-main">{viewer}</div>
+          <div className="design-pane-aside">{comments}</div>
+        </div>
+      ) : (
+        viewer
       )}
       {viewHref && (
         <a
@@ -160,7 +186,7 @@ export function PostGenerationResultView({
  * P2-06 columns by defaulting `is_complete`→false, `share_mode`→"private",
  * `share_token`→null (AC9).
  */
-export function PostGenerationResult({ prototype }: PostGenerationResultProps) {
+export function PostGenerationResult({ prototype, comments }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
   )
@@ -194,6 +220,7 @@ export function PostGenerationResult({ prototype }: PostGenerationResultProps) {
       shareToken={prototype.share_token ?? null}
       bundleUrl={prototype.bundle_url}
       onStateChange={(state) => setIsComplete(state.isComplete)}
+      comments={comments}
     />
   )
 }

@@ -35,6 +35,7 @@ import {
 } from "../IterateComposer"
 import { CommentsPanel } from "../CommentsPanel"
 import { DesignAgentLauncherView } from "../DesignAgentLauncher"
+import { PostGenerationResult } from "../PostGenerationResult"
 import { designAgentApi } from "../../../lib/api"
 import type {
   CommentRecord,
@@ -373,8 +374,17 @@ describe("B4 — Apply → prefill → estimate → Continue → iterate (mounte
       setApplyTarget,
       renderDrawer: () => null,
     }) as React.ReactElement
-    const panel = findChild(tree, CommentsPanel)
+    // P6-13 (UX-3): CommentsPanel was relocated OUT of its direct-sibling position
+    // into PostGenerationResult's `comments` prop (so a two-column design-pane grid
+    // can wrap viewer + comments). The Apply→applyTarget wiring is preserved
+    // byte-identical through the move — locate the panel via the `comments` prop,
+    // not as a direct launcher child.
+    const pgr = findChild(tree, PostGenerationResult)
+    expect(pgr).toBeTruthy()
+    const panel = (pgr!.props as { comments?: React.ReactElement | null })
+      .comments as React.ReactElement | null
     expect(panel).toBeTruthy()
+    expect(panel!.type).toBe(CommentsPanel)
     // Fire the panel's Apply handoff — it must set the lifted applyTarget.
     ;(panel!.props as { onApply: (c: CommentRecord) => void }).onApply(c)
     expect(setApplyTarget).toHaveBeenCalledWith(c)

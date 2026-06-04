@@ -222,17 +222,32 @@ export function DesignAgentLauncherView({
           (and the CompletionBar it mounts) seed state from props at mount only,
           so regenerating a second prototype in the same launcher instance must
           remount to avoid carrying the prior prototype's is_complete. */}
-      {result && <PostGenerationResult key={result.id} prototype={result} />}
-      {/* P3-14 (F10): signed-in CommentsPanel mount — the public mount lives in
-          PublicTokenViewer (P3-03). Comments are addressed by the share token,
-          so this mounts only once the prototype is shared. `onApply` enables the
-          Apply→IterateComposer handoff (absent on the public mount → no Apply). */}
-      {result && result.share_token && (
-        <CommentsPanel
-          key={`comments-${result.id}`}
-          token={result.share_token}
-          prototypeId={result.id}
-          onApply={(comment) => setApplyTarget?.(comment)}
+      {/* P6-13 (UX-3): the signed-in CommentsPanel is now passed DOWN as
+          PostGenerationResult's `comments` prop so a two-column `design-pane`
+          grid can wrap viewer-left + comments-right in ONE box (the launcher
+          cannot wrap them while they are separate siblings — the viewer lives
+          inside PostGenerationResult). Only the LOCATION moves (sibling → prop):
+          the launcher keeps ownership of the share-token gate, the `key`, the
+          `token`/`prototypeId`, and the `onApply → setApplyTarget` wiring, all
+          byte-identical. Comments are addressed by the share token, so the node
+          is built only once the prototype is shared (`result.share_token`),
+          else null → no comments cell. The public mount still lives in
+          PublicTokenViewer (P3-03); `onApply` enables the Apply→IterateComposer
+          handoff (absent on the public mount → no Apply). */}
+      {result && (
+        <PostGenerationResult
+          key={result.id}
+          prototype={result}
+          comments={
+            result.share_token ? (
+              <CommentsPanel
+                key={`comments-${result.id}`}
+                token={result.share_token}
+                prototypeId={result.id}
+                onApply={(comment) => setApplyTarget?.(comment)}
+              />
+            ) : null
+          }
         />
       )}
       {/* P3-14 (F9/F10): the iterate trigger surface — re-prompt always available

@@ -2,6 +2,9 @@
 // @testing-library), so — following the CompletionBar / DesignAgentDrawer
 // convention — we SSR-render the pure view via renderToStaticMarkup and
 // unit-test the extracted pure helper directly.
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -129,6 +132,58 @@ describe("PostGenerationResultView — View prototype link (AC: view affordance)
   })
 })
 
+// ─── P6-13 (UX-3): two-column design-pane (viewer + comments slot) ───────────
+
+describe("PostGenerationResultView — two-column design-pane (AC1/AC4)", () => {
+  const sentinel = () =>
+    React.createElement(
+      "div",
+      { "data-testid": "sentinel-comments" },
+      "SENTINEL_COMMENTS",
+    )
+
+  it("wraps the viewer (main cell) + comments (aside cell) as siblings in a design-pane (test_design_pane_wraps_viewer_and_comments)", () => {
+    const html = renderView({
+      bundleUrl: "https://cdn/x/bundle/index.html",
+      comments: sentinel(),
+    })
+    // The grid container + both cells render.
+    expect(html).toContain('class="design-pane"')
+    expect(html).toContain('class="design-pane-main"')
+    expect(html).toContain('class="design-pane-aside"')
+    // The viewer (its bundle url) sits in the main cell; the comments node in the aside.
+    expect(html).toContain("https://cdn/x/bundle/index.html")
+    expect(html).toContain('data-testid="sentinel-comments"')
+    // Siblings, in order, inside the pane: pane → main → aside.
+    const paneIdx = html.indexOf('class="design-pane"')
+    const mainIdx = html.indexOf('class="design-pane-main"')
+    const asideIdx = html.indexOf('class="design-pane-aside"')
+    expect(paneIdx).toBeGreaterThanOrEqual(0)
+    expect(mainIdx).toBeGreaterThan(paneIdx)
+    expect(asideIdx).toBeGreaterThan(mainIdx)
+  })
+
+  it("renders the viewer with NO comments cell when comments is absent — public-viewer shape (test_no_comments_cell_when_comments_null)", () => {
+    const html = renderView({ bundleUrl: "https://cdn/x/bundle/index.html" })
+    // No comments slot → no aside cell and no grid wrapper (degrades to one column).
+    expect(html).not.toContain("design-pane-aside")
+    expect(html).not.toContain('class="design-pane"')
+    // The viewer still renders.
+    expect(html).toContain("https://cdn/x/bundle/index.html")
+  })
+
+  it("keeps the View-prototype link OUTSIDE the design-pane (chrome stays full-width)", () => {
+    const html = renderView({
+      bundleUrl: "https://cdn/x/bundle/index.html",
+      comments: sentinel(),
+    })
+    // The link affordance follows the pane, not nested in a grid cell.
+    const asideEnd = html.indexOf('data-testid="sentinel-comments"')
+    const linkIdx = html.indexOf('data-testid="view-prototype-link"')
+    expect(linkIdx).toBeGreaterThan(asideEnd)
+  })
+})
+
 // ─── P6-05 (#5): guarded re-seed of the local isComplete on a refetch ────────
 
 describe("reseedStep — guarded local-isComplete re-seed (AC4/AC5/AC10)", () => {
@@ -188,6 +243,65 @@ describe("resolveViewHref (pure)", () => {
   })
   it("returns null when neither is available", () => {
     expect(resolveViewHref(null, null)).toBeNull()
+  })
+})
+
+// ─── P6-13 (UX-3): CSS structural + public-viewer-unchanged invariants ───────
+// WORKING-TREE content invariants read via fs — NEVER `git show <historical-rev>`
+// / `git diff <sha>`, which fails under CI's shallow clone (fetch-depth=1). The
+// "design-pane grid present" + "PublicTokenViewer does not use PostGenerationResult"
+// checks assert the CURRENT tree's content (the AC intent), method free.
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+// __tests__ → design-agent → components → app
+const APP_DIR = join(HERE, "..", "..", "..")
+const CSS = readFileSync(join(HERE, "..", "design-agent.css"), "utf8")
+const PUBLIC_VIEWER = readFileSync(
+  join(APP_DIR, "p", "[token]", "PublicTokenViewer.tsx"),
+  "utf8",
+)
+
+describe("design-agent.css — two-column design-pane appended + scoped (AC2)", () => {
+  it("defines a scoped .design-pane grid at 1fr/320px (test_css_design_pane_appended_and_scoped)", () => {
+    // The grid container is scoped under .design-agent-surface (P6-11's
+    // scoping-invariant test independently enforces this for every selector).
+    const block = CSS.match(
+      /\.design-agent-surface\s+\.design-pane\s*\{([^}]*)\}/,
+    )
+    expect(block).not.toBeNull()
+    const body = block![1]
+    expect(body).toMatch(/display:\s*grid/)
+    expect(body).toMatch(/grid-template-columns:\s*1fr\s+320px/)
+  })
+
+  it("collapses to a single column at ≤1080px via a media query", () => {
+    // The @media block flips grid-template-columns to a single 1fr track.
+    expect(CSS).toMatch(/@media\s*\(max-width:\s*1080px\)/)
+    const media = CSS.match(
+      /@media\s*\(max-width:\s*1080px\)\s*\{([\s\S]*?)\n\}/,
+    )
+    expect(media).not.toBeNull()
+    expect(media![1]).toMatch(
+      /\.design-agent-surface\s+\.design-pane\s*\{[^}]*grid-template-columns:\s*1fr\s*;/,
+    )
+  })
+
+  it("introduces no new colour literals in the appended block", () => {
+    // The appended P6-13 values are layout-only (grid/px) — no hex / rgb / hsl.
+    // (P6-11's palette test enforces this file-wide; this is a local guard.)
+    expect(CSS).toContain(".design-pane")
+    const paneRegion = CSS.slice(CSS.indexOf(".design-pane"))
+    expect(paneRegion).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+    expect(paneRegion).not.toMatch(/rgba?\(/)
+    expect(paneRegion).not.toMatch(/hsla?\(/)
+  })
+})
+
+describe("public viewer unaffected (AC4)", () => {
+  it("PublicTokenViewer does NOT use PostGenerationResult (test_public_viewer_unchanged)", () => {
+    // AC4: the public /p/<token> surface composes its own chrome and never
+    // mounts PostGenerationResult, so the two-column relocation cannot touch it.
+    expect(PUBLIC_VIEWER).not.toContain("PostGenerationResult")
   })
 })
 
