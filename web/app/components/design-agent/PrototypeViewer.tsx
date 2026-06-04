@@ -104,9 +104,13 @@ export function PrototypeViewer({
             src={bundleUrl}
             title="Generated prototype"
             // sandbox is EXACTLY scripts (the React bundle runs) + same-origin
-            // (it fetches its own static assets). Owned by P6-17 (which adds
-            // allow-forms) — carried byte-identical here.
-            sandbox="allow-scripts allow-same-origin"
+            // (it fetches its own static assets) + forms (so a form-centric
+            // prototype can submit its own in-bundle, JS-handled form — without
+            // allow-forms a sandboxed iframe blocks form submission entirely).
+            // allow-popups / allow-top-navigation / allow-top-navigation-by-user-activation
+            // remain DELIBERATELY omitted: the prototype is untrusted model-generated
+            // code and must never open new windows or navigate the parent host away.
+            sandbox="allow-scripts allow-same-origin allow-forms"
             className="da-prototype-iframe"
           />
         </div>
