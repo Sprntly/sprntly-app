@@ -118,8 +118,13 @@ def get_prd_rendered(prd_id: int) -> dict | None:
     # Lazy import: keeps db/prds.py importable without the prd_patches module on
     # every import path, and mirrors the lazy-import discipline used elsewhere in
     # the Design Agent DB layer.
-    from app.db.prd_patches import apply_patches_to_prd_md, list_applied_patches
-    patches = list_applied_patches(prd_id=prd_id)
+    try:
+        from app.db.prd_patches import apply_patches_to_prd_md, list_applied_patches
+        patches = list_applied_patches(prd_id=prd_id)
+    except Exception:
+        # prd_patches table may not exist yet (P3-09 migration pending).
+        # Gracefully fall back to the raw row — no patch folding.
+        return row
     if not patches:
         return row                      # fast path: no fold, raw row returned as-is
     rendered = dict(row)                # copy — never mutate the row object in place

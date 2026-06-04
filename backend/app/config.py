@@ -97,6 +97,12 @@ class Settings(BaseSettings):
         "groups:read,groups:history,users:read"
     )
 
+    # Pipeline scheduler
+    scheduler_enabled: bool = False
+    pipeline_interval_hours: int = 6
+    scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
+    ds_agent_url: str = ""  # e.g. http://localhost:8001
+
     # GitHub connector (GitHub App with user-to-server OAuth)
     github_app_id: str = ""
     github_app_client_id: str = ""

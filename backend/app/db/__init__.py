@@ -96,6 +96,25 @@ from app.db.input_sources import (
     upsert_input_source,
 )
 
+# Knowledge graph
+from app.db.knowledge import (
+    clear_entities,
+    list_entities,
+    list_relationships,
+    upsert_entity,
+    upsert_relationship,
+)
+
+# Pipeline runs
+from app.db.pipeline_runs import (
+    complete_run,
+    create_run,
+    fail_run,
+    get_latest_run,
+    list_runs,
+    update_run_stage,
+)
+
 # GitHub App (webhook-driven)
 from app.db.github import (
     delete_github_installation,

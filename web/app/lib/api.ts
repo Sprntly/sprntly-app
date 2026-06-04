@@ -530,6 +530,37 @@ export const sourcesApi = {
   // upload/regen reuse companiesApi.uploadFiles + companiesApi.generate.
 }
 
+// ---- pipeline ---------------------------------------------------------------
+
+export type PipelineStageResult = {
+  status: "completed" | "failed" | "skipped"
+  duration_ms?: number
+  error?: string
+  [key: string]: unknown
+}
+
+export type PipelineRunStatus = {
+  id: string
+  dataset: string
+  trigger: string
+  status: "running" | "completed" | "failed"
+  stages: Record<string, PipelineStageResult>
+  started_at: string
+  completed_at: string | null
+  error: string | null
+}
+
+export const pipelineApi = {
+  run: (company: string) =>
+    api.post<{ started: boolean; dataset: string; message: string }>(
+      `/v1/pipeline/${encodeURIComponent(company)}/run`,
+    ),
+  status: (company: string) =>
+    api.get<PipelineRunStatus>(
+      `/v1/pipeline/${encodeURIComponent(company)}/status`,
+    ),
+}
+
 export const prdApi = {
   /** Kicks off PRD generation in the background. Returns immediately with a
    *  prd_id; client should poll prdApi.get(id) until status === 'ready'.

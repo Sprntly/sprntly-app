@@ -29,6 +29,7 @@ from app.routes import (
     evidence,
     health,
     internal,
+    pipeline,
     prd,
 )
 
@@ -142,7 +143,24 @@ async def lifespan(app: FastAPI):
     # auto_generate_all is idempotent: it skips datasets that already have a
     # cached brief in SQLite at the current schema version.
     asyncio.create_task(auto_generate_all())
+
+    # Start the pipeline scheduler if enabled (opt-in via SCHEDULER_ENABLED=true).
+    if settings.scheduler_enabled:
+        try:
+            from app.scheduler import start_scheduler
+            start_scheduler()
+        except Exception:
+            logger.warning("Scheduler startup failed", exc_info=True)
+
     yield
+
+    # Teardown: shut down scheduler if it was started.
+    if settings.scheduler_enabled:
+        try:
+            from app.scheduler import shutdown_scheduler
+            shutdown_scheduler()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="Sprntly API", version="0.3.0", lifespan=lifespan)
@@ -165,3 +183,4 @@ app.include_router(prd.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
 app.include_router(design_agent.router)
+app.include_router(pipeline.router)
