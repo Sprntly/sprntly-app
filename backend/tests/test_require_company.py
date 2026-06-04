@@ -1,8 +1,9 @@
 """Tests for `app.auth.require_company` — JWT → company_id tenant resolution.
 
-The dependency layers on require_session: Supabase Bearer JWT → sub →
-company_members lookup → CompanyContext. The client can only *select among*
-its memberships (X-Company-Id), never assert an arbitrary company.
+Tenancy model: one user ↔ one company (product decision 2026-06-04). The
+dependency is a pure lookup — Supabase Bearer JWT → sub → company_members →
+CompanyContext. The client never passes a company id; multiple membership
+rows are a data-integrity anomaly (fail closed, 500).
 """
 from __future__ import annotations
 
@@ -45,19 +46,18 @@ def _seed_membership(db, company_id: str, user_id: str, role: str = "member",
     }).execute()
 
 
-def _call(authorization: str | None = None, x_company_id: str | None = None):
+def _call(authorization: str | None = None):
     from app.auth import require_company
     return require_company(
         authorization=authorization,
         sprntly_app_session=None,
         sprntly_demo_session=None,
-        x_company_id=x_company_id,
     )
 
 
-# ---------- happy paths ----------
+# ---------- happy path ----------
 
-def test_single_membership_resolves_without_header(auth_env):
+def test_membership_resolves(auth_env):
     _seed_membership(auth_env["supabase"], "co-acme", "user-1", role="owner")
     ctx = _call(authorization=f"Bearer {_mint_token('user-1')}")
     assert ctx.company_id == "co-acme"
@@ -65,41 +65,27 @@ def test_single_membership_resolves_without_header(auth_env):
     assert ctx.user_id == "user-1"
 
 
-def test_multi_membership_selects_via_header(auth_env):
-    _seed_membership(auth_env["supabase"], "co-acme", "user-1", role="member")
-    _seed_membership(auth_env["supabase"], "co-globex", "user-1", role="admin")
-    ctx = _call(authorization=f"Bearer {_mint_token('user-1')}",
-                x_company_id="co-globex")
-    assert ctx.company_id == "co-globex"
-    assert ctx.role == "admin"
-
-
-def test_header_also_works_with_single_membership(auth_env):
+def test_tenant_comes_from_membership_not_client(auth_env):
+    """The company is derived purely from the DB; another user's membership
+    is invisible (the anti-spoof property under the 1:1 model — there is no
+    client-supplied company id at all)."""
     _seed_membership(auth_env["supabase"], "co-acme", "user-1")
-    ctx = _call(authorization=f"Bearer {_mint_token('user-1')}",
-                x_company_id="co-acme")
-    assert ctx.company_id == "co-acme"
+    _seed_membership(auth_env["supabase"], "co-globex", "user-2")  # someone else's
+    ctx = _call(authorization=f"Bearer {_mint_token('user-1')}")
+    assert ctx.company_id == "co-acme"        # never co-globex
 
 
 # ---------- rejection paths ----------
 
-def test_multi_membership_without_header_is_400(auth_env):
+def test_multiple_memberships_is_500_integrity_error(auth_env):
+    """One-company-per-user is the invariant; >1 row = corrupted data →
+    fail closed rather than guess a tenant."""
     _seed_membership(auth_env["supabase"], "co-acme", "user-1")
     _seed_membership(auth_env["supabase"], "co-globex", "user-1")
     with pytest.raises(HTTPException) as e:
         _call(authorization=f"Bearer {_mint_token('user-1')}")
-    assert e.value.status_code == 400
-    assert "X-Company-Id" in e.value.detail
-
-
-def test_spoofed_company_header_is_403(auth_env):
-    """Member of A asserting B via header → 403 (the anti-spoof property)."""
-    _seed_membership(auth_env["supabase"], "co-acme", "user-1")
-    _seed_membership(auth_env["supabase"], "co-globex", "user-2")  # someone else's
-    with pytest.raises(HTTPException) as e:
-        _call(authorization=f"Bearer {_mint_token('user-1')}",
-              x_company_id="co-globex")
-    assert e.value.status_code == 403
+    assert e.value.status_code == 500
+    assert "integrity" in e.value.detail.lower()
 
 
 def test_no_membership_is_403(auth_env):
@@ -130,7 +116,6 @@ def test_legacy_cookie_session_is_403(auth_env):
             authorization=None,
             sprntly_app_session=None,
             sprntly_demo_session=cookie,
-            x_company_id=None,
         )
     assert e.value.status_code == 403
     assert "signed-in user" in e.value.detail
