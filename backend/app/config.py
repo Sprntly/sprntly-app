@@ -87,6 +87,16 @@ class Settings(BaseSettings):
     # backward-compat with older legacy apps still active in production.
     hubspot_oauth_version: str = "v3"
 
+    # Slack connector (OAuth v2, bot install)
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_oauth_redirect_uri: str = ""
+    # Comma-separated bot scopes. Defaults cover "list channels + post
+    # messages" — enough for the brief/Ask notification target. Add
+    # `groups:read` if posting into private channels matters; add
+    # `chat:write.public` to post into channels the bot hasn't joined.
+    slack_bot_scopes: str = "chat:write,channels:read"
+
     # GitHub connector (GitHub App with user-to-server OAuth)
     github_app_id: str = ""
     github_app_client_id: str = ""

@@ -1,0 +1,182 @@
+"""Slack OAuth v2 helpers — bot install for posting notifications.
+
+Flow:
+    1. Frontend hits POST /v1/connectors/slack/start-oauth
+    2. We build a state JWT (carrying workspace_id) + return Slack's
+       authorize URL
+    3. Browser navigates to Slack's bot-install consent screen
+    4. Slack redirects back to /v1/connectors/slack/callback?code=...&state=...
+    5. We exchange the code at slack.com/api/oauth.v2.access and store
+       an encrypted JSON blob under provider="slack"
+
+Slack v2 specifics worth knowing:
+    - The exchange response separates bot creds from user creds:
+        access_token       — the bot token (xoxb-...)  ← what we store + post with
+        team               — {id, name}                ← shown as account_label
+        bot_user_id        — the bot's own user id (handy for filtering messages)
+        authed_user.id     — the installing user's id
+      We only need the bot pieces for the notification-target use case;
+      we don't request user scopes.
+    - Bot install requires the installing user to be a workspace admin
+      (or for the workspace to allow non-admin installs). If your
+      installer isn't an admin, Slack returns an error page; the
+      callback never fires. That's an account-config issue, not a code
+      bug.
+    - Bot tokens don't expire by default — no refresh flow needed.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import time
+import uuid
+from typing import Any
+
+import jwt
+import requests
+from fastapi import HTTPException
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+SLACK_PROVIDER = "slack"
+# v2 authorize URL — note the explicit /v2/ path. The legacy /authorize
+# (v1) is still live but uses a different scopes shape and returns a
+# user-token-shaped payload; we want bot install, not user install.
+SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
+SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
+SLACK_TEAM_INFO_URL = "https://slack.com/api/team.info"
+JWT_ALG = "HS256"
+STATE_TTL_SECONDS = 600
+
+
+def slack_configured() -> bool:
+    return bool(
+        settings.slack_client_id
+        and settings.slack_client_secret
+        and settings.slack_oauth_redirect_uri
+    )
+
+
+def authorize_url(state: str, scopes: str | None = None) -> str:
+    """Build the URL the user gets redirected to for the Slack consent screen."""
+    if not slack_configured():
+        raise HTTPException(500, "Slack OAuth is not configured on the server")
+    from urllib.parse import urlencode
+
+    # Slack v2: bot scopes ride on `scope=`, optional user scopes on
+    # `user_scope=`. We only want bot scopes for the notification target.
+    params = {
+        "client_id": settings.slack_client_id,
+        "scope": scopes or settings.slack_bot_scopes,
+        "redirect_uri": settings.slack_oauth_redirect_uri,
+        "state": state,
+    }
+    return f"{SLACK_AUTH_URL}?{urlencode(params)}"
+
+
+def sign_oauth_state(*, workspace_id: str) -> str:
+    """Mint a signed state JWT that binds the OAuth round-trip to a
+    specific workspace. The callback (which has no user session) trusts
+    only this signature to know which workspace gets the new token."""
+    now = int(time.time())
+    payload = {
+        "provider": SLACK_PROVIDER,
+        "workspace_id": workspace_id,
+        "nonce": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + STATE_TTL_SECONDS,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALG)
+
+
+def verify_oauth_state(state: str) -> dict:
+    try:
+        payload = jwt.decode(state, settings.jwt_secret, algorithms=[JWT_ALG])
+    except jwt.PyJWTError as e:
+        raise HTTPException(400, "Invalid or expired OAuth state") from e
+    if payload.get("provider") != SLACK_PROVIDER:
+        raise HTTPException(400, "OAuth state provider mismatch")
+    if not payload.get("workspace_id"):
+        raise HTTPException(400, "OAuth state missing workspace_id")
+    return payload
+
+
+def exchange_code_for_token(code: str) -> dict[str, Any]:
+    """Trade an authorization code for a bot token.
+
+    Slack's `oauth.v2.access` is unusual: it returns 200 even on
+    failure, with `ok: false` + `error: "..."` in the body. We translate
+    that into a 400 like other providers.
+    """
+    if not slack_configured():
+        raise HTTPException(500, "Slack OAuth is not configured on the server")
+    resp = requests.post(
+        SLACK_TOKEN_URL,
+        data={
+            "client_id": settings.slack_client_id,
+            "client_secret": settings.slack_client_secret,
+            "redirect_uri": settings.slack_oauth_redirect_uri,
+            "code": code,
+        },
+        timeout=15,
+    )
+    body: dict[str, Any] = {}
+    try:
+        body = resp.json() or {}
+    except ValueError:
+        body = {}
+    if not resp.ok or not body.get("ok"):
+        logger.warning(
+            "Slack token exchange failed: http=%s ok=%s err=%s",
+            resp.status_code,
+            body.get("ok"),
+            body.get("error"),
+        )
+        raise HTTPException(400, "Slack token exchange failed")
+    return body
+
+
+def fetch_team_info(bot_access_token: str) -> dict[str, Any]:
+    """Return Slack's team.info payload — {id, name, domain, ...}.
+
+    The token-exchange response already includes team info, so this is
+    a fallback / re-fetch for the Test connection button. Slack's
+    team.info uses Bearer auth (unlike, say, ClickUp's raw header)."""
+    resp = requests.get(
+        SLACK_TEAM_INFO_URL,
+        headers={"Authorization": f"Bearer {bot_access_token}"},
+        timeout=10,
+    )
+    if not resp.ok:
+        logger.warning(
+            "Slack team.info failed: %s %s", resp.status_code, resp.text[:200]
+        )
+        return {}
+    body = resp.json() or {}
+    if not body.get("ok"):
+        logger.warning("Slack team.info returned ok=false: %s", body.get("error"))
+        return {}
+    return body.get("team") or {}
+
+
+def token_payload_to_store(token_json: dict[str, Any]) -> str:
+    """Pack the parts of Slack's oauth.v2.access response that we actually
+    need into a compact JSON blob for Fernet encryption.
+
+    Storing the whole response would also work, but it includes the
+    installing user's token (when user scopes are requested) plus other
+    pieces we'd rather not carry around. Bot token is what we post with;
+    bot_user_id is useful for filtering; team {id, name} backs the
+    account_label and the channel-picker UI."""
+    team = token_json.get("team") or {}
+    payload = {
+        "access_token": token_json.get("access_token"),
+        "bot_user_id": token_json.get("bot_user_id"),
+        "team_id": team.get("id"),
+        "team_name": team.get("name"),
+        "scope": token_json.get("scope") or "",
+        "obtained_at": int(time.time()),
+    }
+    return json.dumps(payload)

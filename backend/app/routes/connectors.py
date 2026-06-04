@@ -45,6 +45,7 @@ from app.connectors import (
     github_app,
     google_oauth,
     hubspot_oauth,
+    slack_oauth,
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
@@ -167,6 +168,14 @@ def start_oauth(
         )
         return {"authorize_url": url}
 
+    if provider == slack_oauth.SLACK_PROVIDER:
+        if not slack_oauth.slack_configured():
+            raise HTTPException(500, "Slack OAuth is not configured on the server")
+        url = slack_oauth.authorize_url(
+            state=slack_oauth.sign_oauth_state(workspace_id=workspace_id)
+        )
+        return {"authorize_url": url}
+
     raise HTTPException(
         404,
         f"OAuth start is not available for provider {provider!r}",
@@ -235,6 +244,13 @@ def test_connection(
     elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
         api_key = token_json.get("api_key") or ""
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
+    elif provider == slack_oauth.SLACK_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        team = slack_oauth.fetch_team_info(access_token) or {}
+        # The display label for Slack is the team name ("Acme"), not the
+        # domain ("acme"). Leave the email slot empty so the
+        # label-extraction below falls through to `name`.
+        user_obj = {"name": team.get("name")} if team else {}
     else:
         raise HTTPException(
             404, f"Test connection not supported for provider {provider!r}"
@@ -693,6 +709,59 @@ def hubspot_disconnect(
         raise HTTPException(404, "HubSpot is not connected")
     db.delete_connection(workspace_id, hubspot_oauth.HUBSPOT_PROVIDER)
     return {"deleted": True, "provider": hubspot_oauth.HUBSPOT_PROVIDER}
+
+
+# ─────────────────────── Slack ───────────────────────
+#
+# Slack v2 bot install: token is the bot token (xoxb-...), stored
+# encrypted. The "Slack as notification target" use case posts into a
+# user-chosen channel using `chat.postMessage` — that lives in
+# slack_oauth.post_message (added in commit 2).
+
+
+@router.get("/slack/callback")
+def slack_callback(code: str, state: str):
+    payload = slack_oauth.verify_oauth_state(state)
+    workspace_id = payload["workspace_id"]
+    token_json = slack_oauth.exchange_code_for_token(code)
+
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Slack did not return a bot access_token")
+
+    team = token_json.get("team") or {}
+    # Display "Acme (acme.slack.com)" when domain is present, else just team name.
+    label = team.get("name") or team.get("id") or "Slack"
+
+    try:
+        token_encrypted = encrypt_token_json(
+            slack_oauth.token_payload_to_store(token_json)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        workspace_id=workspace_id,
+        provider=slack_oauth.SLACK_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=token_json.get("scope") or "",
+        account_label=str(label),
+        config_json=json.dumps({"team": team}) if team else "{}",
+    )
+
+    q = urlencode({"section": "connectors", "connected": slack_oauth.SLACK_PROVIDER})
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+
+
+@router.delete("/slack")
+def slack_disconnect(
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    row = db.get_connection(workspace_id, slack_oauth.SLACK_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Slack is not connected")
+    db.delete_connection(workspace_id, slack_oauth.SLACK_PROVIDER)
+    return {"deleted": True, "provider": slack_oauth.SLACK_PROVIDER}
 
 
 # ─────────────────────── Fireflies (API key) ───────────────────────
