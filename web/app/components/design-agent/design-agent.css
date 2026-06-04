@@ -392,3 +392,38 @@
   border-radius: var(--radius);
   background: var(--surface);
 }
+
+/* ── Two-column design pane (P6-13 / UX-3) ────────────────────────────────
+ * Wraps the prototype viewer (left, fluid) + the CommentsPanel (right, fixed
+ * 320px) in PostGenerationResult. The viewer lives inside PostGenerationResult
+ * and the launcher passes <CommentsPanel> down as the `comments` slot, so this
+ * grid can host both in one box. Mockup target: v3 `.design-pane`
+ * (grid-template-columns: 1fr 320px, :350-353) collapsing to a single column
+ * at ≤1080px (:698-701). Tokens/values only — no colour literals; appended
+ * below P6-11's rules without editing them. */
+.design-agent-surface .design-pane {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 16px;
+  align-items: start;
+}
+/* `min-width: 0` lets the fluid main cell shrink below its iframe's intrinsic
+ * width instead of overflowing the grid track. */
+.design-agent-surface .design-pane-main { min-width: 0; }
+.design-agent-surface .design-pane-aside { min-width: 0; }
+/* Keep the comments column roughly viewer-height beside the iframe (matches
+ * `.da-prototype-iframe` min-height) and scroll its overflow, so a long thread
+ * doesn't stretch the pane taller than the prototype. Scoped to the aside so
+ * the public viewer's own comments-panel (outside `.design-pane`) is untouched. */
+.design-agent-surface .design-pane-aside .comments-panel {
+  max-height: 532px;
+  overflow-y: auto;
+}
+@media (max-width: 1080px) {
+  .design-agent-surface .design-pane {
+    grid-template-columns: 1fr;
+  }
+  .design-agent-surface .design-pane-aside .comments-panel {
+    max-height: none;
+  }
+}
