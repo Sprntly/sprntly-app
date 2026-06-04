@@ -165,12 +165,18 @@ describe("iframe contract (AC3)", () => {
     expect(tag).toContain('class="da-prototype-iframe"')
     expect(tag).toContain(`src="${BUNDLE}"`)
     expect(tag).toContain('title="Generated prototype"')
-    // sandbox carried byte-identical from 2d6a416 (P6-17 adds allow-forms — we
-    // assert this ticket adds/removes no sandbox token, NOT a byte-exact string).
+    // sandbox now carries allow-forms (landed by P6-17 / UX-7) alongside the
+    // baseline scripts+same-origin — seam-fill: P6-12 wrote this assertion at the
+    // 2-token state anticipating P6-17's third token. Assert the full token set,
+    // NOT a byte-exact string (order-independent).
     const sandbox = tag.match(/sandbox="([^"]*)"/)
     expect(sandbox).not.toBeNull()
     const tokens = sandbox![1].split(/\s+/).filter(Boolean).sort()
-    expect(tokens).toEqual(["allow-same-origin", "allow-scripts"])
+    expect(tokens).toEqual([
+      "allow-forms",
+      "allow-same-origin",
+      "allow-scripts",
+    ])
   })
 
   it("test_iframe_not_remounted_on_toggle — iframe tag identical across desktop/mobile", () => {
@@ -179,6 +185,47 @@ describe("iframe contract (AC3)", () => {
     const desktop = iframeTag(renderViewer({ initialPlatform: "desktop" }))
     const mobile = iframeTag(renderViewer({ initialPlatform: "mobile" }))
     expect(mobile).toBe(desktop)
+  })
+})
+
+// ── P6-17 (UX-7) Regression: sandbox grants allow-forms, still blocks parent nav ──
+// Fix ticket → opens with a Regression category (TICKET_STANDARD §2). These fail on
+// unfixed code (2d6a416 sandbox = "allow-scripts allow-same-origin", no allow-forms).
+// Node-env vitest cannot execute iframe sandbox semantics — we assert the rendered
+// `sandbox` token STRING only; real form-submit + blocked-parent-nav is tester-verified
+// in a browser (AC4).
+describe("sandbox allow-forms regression (P6-17 / UX-7)", () => {
+  it("test_iframe_sandbox_allows_forms — AC1: sandbox contains allow-forms", () => {
+    const tag = iframeTag(renderViewer())
+    const sandbox = tag.match(/sandbox="([^"]*)"/)
+    expect(sandbox).not.toBeNull()
+    const tokens = sandbox![1].split(/\s+/).filter(Boolean)
+    expect(tokens).toContain("allow-forms")
+  })
+
+  it("test_iframe_sandbox_blocks_parent_navigation — AC2: no parent-nav / popup tokens", () => {
+    const tag = iframeTag(renderViewer())
+    const sandbox = tag.match(/sandbox="([^"]*)"/)![1]
+    expect(sandbox).not.toContain("allow-top-navigation")
+    expect(sandbox).not.toContain("allow-top-navigation-by-user-activation")
+    expect(sandbox).not.toContain("allow-popups")
+  })
+
+  it("test_iframe_other_attributes_unchanged — AC3: class/src/title fixed; only sandbox gained allow-forms", () => {
+    const tag = iframeTag(renderViewer())
+    expect(tag).toContain('class="da-prototype-iframe"')
+    expect(tag).toContain(`src="${BUNDLE}"`)
+    expect(tag).toContain('title="Generated prototype"')
+    const tokens = tag
+      .match(/sandbox="([^"]*)"/)![1]
+      .split(/\s+/)
+      .filter(Boolean)
+      .sort()
+    expect(tokens).toEqual([
+      "allow-forms",
+      "allow-same-origin",
+      "allow-scripts",
+    ])
   })
 })
 
