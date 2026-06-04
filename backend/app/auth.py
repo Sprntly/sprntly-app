@@ -21,6 +21,7 @@ use the audience-specific deps (`require_app_session`,
 The legacy single-audience cookie (`sprintly_session`) is no longer
 accepted; old logins will 401 once and re-login via the new flow.
 """
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Literal
@@ -294,15 +295,14 @@ def me(
 # "which company (tenant) are they acting in?" — the claim every tenant-
 # isolated surface (GraphFacade, connectors, agent routes) scopes by.
 #
-# Resolution rules:
+# Tenancy model (product decision 2026-06-04): a user belongs to exactly ONE
+# company; a company has many users. Resolution is therefore a pure lookup —
+# the client never passes a company id at all:
 #   - Supabase-authenticated sessions only (legacy demo/app cookies carry no
 #     user id → 403).
-#   - Membership comes from company_members (owned by onboarding). The client
-#     never *asserts* a company; it can only *select among* its memberships
-#     via the X-Company-Id header (required when the user belongs to more
-#     than one company).
 #   - No membership → 403 (finish onboarding first).
-#   - X-Company-Id for a company the user is NOT a member of → 403.
+#   - Multiple membership rows → data-integrity anomaly (the schema enforces
+#     one); fail closed with 500 rather than guess a tenant.
 
 
 class CompanyContext(BaseModel):
@@ -317,9 +317,8 @@ def require_company(
     authorization: str | None = Header(default=None),
     sprntly_app_session: str | None = Cookie(default=None),
     sprntly_demo_session: str | None = Cookie(default=None),
-    x_company_id: str | None = Header(default=None, alias="X-Company-Id"),
 ) -> CompanyContext:
-    """FastAPI dependency — resolve the authenticated user's active company.
+    """FastAPI dependency — resolve the authenticated user's company.
 
     Use as `company: CompanyContext = Depends(require_company)` on any
     tenant-scoped route, then pass `company.company_id` as the
@@ -341,26 +340,17 @@ def require_company(
     memberships = memberships_for_user(user_id)
     if not memberships:
         raise HTTPException(403, "No company membership — complete onboarding first")
-
-    by_id = {m["company_id"]: m for m in memberships}
-
-    if x_company_id:
-        chosen = by_id.get(x_company_id)
-        if chosen is None:
-            # Member of other companies, but not this one. Same status as
-            # no-membership: don't leak whether the company exists.
-            raise HTTPException(403, "Not a member of the requested company")
-        return CompanyContext(
-            company_id=chosen["company_id"], role=chosen["role"], user_id=user_id
+    if len(memberships) > 1:
+        # One-company-per-user is the product invariant (and the schema
+        # enforces it — see 20260604*_one_company_per_user.sql). More than
+        # one row means corrupted membership data; never guess a tenant.
+        logging.getLogger(__name__).error(
+            "User %s has %d company memberships — data-integrity violation",
+            user_id, len(memberships),
         )
+        raise HTTPException(500, "Membership data integrity error — contact support")
 
-    if len(memberships) == 1:
-        only = memberships[0]
-        return CompanyContext(
-            company_id=only["company_id"], role=only["role"], user_id=user_id
-        )
-
-    raise HTTPException(
-        400,
-        "Multiple company memberships — pass X-Company-Id to select one",
+    only = memberships[0]
+    return CompanyContext(
+        company_id=only["company_id"], role=only["role"], user_id=user_id
     )
