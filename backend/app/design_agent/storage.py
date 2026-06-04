@@ -39,6 +39,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -257,6 +258,183 @@ def _read_dist(dist_dir: Path) -> dict[str, str]:
             # binary assets (fonts, images) under a .b64 sentinel key.
             dist_files[f"{rel}.b64"] = base64.b64encode(path.read_bytes()).decode("ascii")
     return dist_files
+
+
+# ─── Build-repair: bounded unresolved-relative-import repair (P6-07) ─────────
+#
+# Fix #11 (2/2-reproduced 2026-06-04): a multi-screen scaffold gen imports a
+# `./screens/*Screen` file into App.tsx that it never wrote (the per-write
+# autofixer flags it at write time, but the run ends — degrade-converged — before
+# the screen file is written, so the orphan survives into the final virtual_fs).
+# The initial-gen FINAL build then dies with `ViteBuildError: Could not resolve
+# "./screens/X"` and ships status=failed with no repair attempt.
+#
+# This is the FINAL-build backstop: across the whole virtual_fs, reconcile orphan
+# relative imports (stub a `./screens/*` target so the App route stays navigable,
+# strip a non-screen speculative import), then rebuild. Complementary to — not a
+# replacement for — the per-write autofixer (first line) and the P3-15 tsc gate
+# (which never runs on this class, because Vite/esbuild dies at bundle time
+# BEFORE tsc). The candidate semantics MIRROR autofixer.js:46-77 (re-implemented
+# in Python; the JS autofixer cannot be called from this pure helper) so the two
+# agree on what "resolves".
+
+
+class UnresolvedImportRepairExhausted(ViteBuildError):
+    """Build still fails with unresolved relative modules after max_repairs repair
+    passes. Distinct class (subclass of ViteBuildError, so the route's existing
+    except tuple still catches it) so the route surfaces a precise error_class the
+    P6-08 UI maps to a human 'a referenced screen could not be built' message."""
+
+
+# Mirror autofixer.js:53-58 `resolvesInVfs` candidate set, in Python.
+def _resolves_in_vfs(base: str, vfs_keys: set[str]) -> bool:
+    candidates = (
+        base, base + ".ts", base + ".tsx",
+        base + "/index.ts", base + "/index.tsx",
+    )
+    return any(c in vfs_keys for c in candidates)
+
+
+# Extract relative-import specifiers from a TSX/TS file's text. Mirrors the
+# autofixer's `src.startsWith(".")` relative branch (autofixer.js:65) — captures
+# both `import … from "<rel>"` and side-effect `import "<rel>"`. Pragmatic text
+# scan, not a full parser: dynamic `import("<rel>")` / `require("<rel>")` are out
+# of scope (the agent does not emit them in scaffold output).
+_REL_IMPORT_RE = re.compile(
+    r'''import\s+(?:[^'"]*?\s+from\s+)?['"](\.[^'"]+)['"]''',
+)
+
+# A `**/screens/*Screen` orphan is the load-bearing 2/2-reproduced case: a real
+# navigation target the agent meant to fill → stub it (keeps the App route
+# renderable). Everything else (helper/util) → strip the speculative import.
+_SCREEN_BASE_RE = re.compile(r'(?:^|/)screens/[^/]*Screen$')
+
+
+def _relative_imports(text: str) -> list[str]:
+    return _REL_IMPORT_RE.findall(text)
+
+
+def _screen_stub(component_name: str) -> str:
+    """A minimal default-exported placeholder component for a stubbed screen.
+
+    Carries NO `data-anchor-id` (AD4 — the Vite plugin applies anchors on rebuild;
+    this raw TSX is overlaid before the build, exactly like the agent's own raw
+    source). Valid default-export TSX so the P2-08 export serialiser reads it from
+    `_source/` without error."""
+    return (
+        f"export default function {component_name}() {{\n"
+        f"  return <div>{component_name}</div>;\n"
+        f"}}\n"
+    )
+
+
+def _strip_orphan_import(text: str, src: str) -> str:
+    """Drop the single-line import statement(s) for the orphan specifier `src`.
+
+    Conservative: removes only the import line itself (matched by the quoted
+    specifier on an `import …` line). Does NOT mutate JSX usage beyond the import
+    (per the ticket scope — a bare identifier-only import is what the agent emits
+    speculatively)."""
+    quoted = (f'"{src}"', f"'{src}'")
+    kept = [
+        line for line in text.splitlines(keepends=True)
+        if not (line.lstrip().startswith("import") and any(q in line for q in quoted))
+    ]
+    return "".join(kept)
+
+
+def repair_unresolved_relative_imports(
+    virtual_fs: dict[str, str],
+) -> tuple[dict[str, str], list[str]]:
+    """Reconcile orphan relative imports against the virtual_fs at FINAL-build time.
+
+    For EACH .tsx/.ts file `key`, extract its `./…`-relative imports, produce each
+    import's base via `os.path.normpath(os.path.join(os.path.dirname(key), src))`
+    (the autofixer's dir-join, autofixer.js:51+67), and check
+    `_resolves_in_vfs(base, set(virtual_fs))`. For an UNRESOLVED relative import:
+    if `base` matches `**/screens/*Screen` write a MINIMAL placeholder component at
+    `base + ".tsx"` (keeps the App route navigable) — else STRIP the orphan import
+    line. Returns the repaired map + a list of `"stub <path>"` /
+    `"strip <key>:<import>"` actions. Pure; no build, no network. Empty action
+    list ⇒ nothing to repair (idempotent on a clean / already-repaired map)."""
+    repaired = dict(virtual_fs)
+    vfs_keys = set(repaired)
+    actions: list[str] = []
+    for key in list(virtual_fs):
+        if not (key.endswith(".ts") or key.endswith(".tsx")):
+            continue
+        for src in _relative_imports(virtual_fs[key]):
+            base = os.path.normpath(os.path.join(os.path.dirname(key), src))
+            if _resolves_in_vfs(base, vfs_keys):
+                continue
+            if _SCREEN_BASE_RE.search(base):
+                stub_key = base + ".tsx"
+                if stub_key not in vfs_keys:
+                    repaired[stub_key] = _screen_stub(os.path.basename(base))
+                    vfs_keys.add(stub_key)
+                    actions.append(f"stub {stub_key}")
+            else:
+                stripped = _strip_orphan_import(repaired[key], src)
+                if stripped != repaired[key]:
+                    repaired[key] = stripped
+                    actions.append(f"strip {key}:{src}")
+    return repaired, actions
+
+
+# Real Rollup/esbuild emit is capital-C `Could not resolve "./screens/X" from …`
+# (verified against prototype-runtime/node_modules rollup/vite at HEAD). The
+# ViteBuildError message is `f"vite build exit={rc}: {stderr_tail}"` — the raw
+# stderr tail, so the capital-C survives verbatim. Match CASE-INSENSITIVELY + a
+# relative specifier (`./` / `../`); a literal lowercase match would MISS the real
+# error and still ship status=failed (the exact bug this fixes).
+_COULD_NOT_RESOLVE_RE = re.compile(
+    r"could not resolve\s+['\"]?(\.{1,2}/[^'\"\s]+)", re.IGNORECASE,
+)
+
+
+def _is_unresolved_relative_import_error(message: str) -> bool:
+    return bool(_COULD_NOT_RESOLVE_RE.search(message))
+
+
+async def vite_build_with_repair(
+    virtual_fs: dict[str, str], *, max_repairs: int = 2,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """vite_build, with a bounded unresolved-relative-import repair loop.
+
+    Returns `(dist_files, repaired_virtual_fs)` — the route REBINDS its local
+    `virtual_fs` to the second element BEFORE the `_source/` staging step so the
+    staged source matches the built dist. On a clean build (zero repairs) the
+    second element is the original map unchanged.
+
+    Attempt the build; on a ViteBuildError that names an unresolved relative
+    module (CASE-INSENSITIVE — real emit is capital-C `Could not resolve`), apply
+    `repair_unresolved_relative_imports` and rebuild, up to `max_repairs` times. A
+    repair pass that makes NO change (no orphan it can fix — e.g. a dynamic import,
+    or the failure is bad JSX / timeout) re-raises the ORIGINAL ViteBuildError
+    unchanged, so non-orphan failures are never masked. On exhaustion with residual
+    orphans, raise UnresolvedImportRepairExhausted. A non-matching ViteBuildError
+    (or TypeCheckError / FileNotFoundError, which are not ViteBuildError) propagates
+    untouched. Runs `vite_build` at most `max_repairs + 1` times."""
+    current = virtual_fs
+    last_error: ViteBuildError | None = None
+    for attempt in range(max_repairs + 1):
+        try:
+            dist_files = await vite_build(current)
+            return dist_files, current
+        except ViteBuildError as exc:
+            last_error = exc
+            if not _is_unresolved_relative_import_error(str(exc)):
+                raise  # bad JSX / timeout / non-relative — do NOT mask
+            if attempt == max_repairs:
+                break  # exhausted; fail-closed with the distinct class below
+            current, repair_actions = repair_unresolved_relative_imports(current)
+            if not repair_actions:
+                raise  # no orphan this pass can fix → re-raise the original error
+    residual = _COULD_NOT_RESOLVE_RE.findall(str(last_error)) if last_error else []
+    raise UnresolvedImportRepairExhausted(
+        f"unresolved relative modules after {max_repairs} repair passes: "
+        f"{', '.join(residual) or 'unknown'}"
+    ) from last_error
 
 
 # ─── Bundle staging (Supabase primary / filesystem fallback) ────────────────

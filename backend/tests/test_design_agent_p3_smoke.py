@@ -265,6 +265,12 @@ def _stub_build_and_source(monkeypatch, env, *, dist: dict):
     async def _fake_vite_build(virtual_fs):  # noqa: ARG001
         return dict(dist)
 
+    # P6-07: the complete path (_stage_complete_run) builds via vite_build_with_repair
+    # → (dist, repaired_vfs); the iterate path (_stage_iterate_run) still uses
+    # vite_build above. Patch BOTH so either path is stubbed.
+    async def _fake_vite_build_with_repair(virtual_fs):
+        return dict(dist), virtual_fs
+
     async def _fake_stage_bundle(*, prototype_id, checkpoint_id, files, sub_prefix=None):  # noqa: ARG001
         suffix = f"{sub_prefix}/" if sub_prefix else ""
         return f"file:///tmp/fake/{prototype_id}/{checkpoint_id}/{suffix}index.html"
@@ -273,6 +279,7 @@ def _stub_build_and_source(monkeypatch, env, *, dist: dict):
         return {"src/App.tsx": "export default function App(){ return <div/>; }"}
 
     monkeypatch.setattr(env.routes, "vite_build", _fake_vite_build)
+    monkeypatch.setattr(env.routes, "vite_build_with_repair", _fake_vite_build_with_repair)
     monkeypatch.setattr(env.routes, "stage_bundle", _fake_stage_bundle)
     monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", _fake_read_source)
     monkeypatch.setattr(

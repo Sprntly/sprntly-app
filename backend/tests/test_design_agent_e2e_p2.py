@@ -269,6 +269,11 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
     async def _fake_vite_build(virtual_fs):
         return {"index.html": "<html>fake</html>"}
 
+    # P6-07: _stage_complete_run builds via vite_build_with_repair → (dist, repaired_vfs);
+    # a clean build returns the source unchanged.
+    async def _fake_vite_build_with_repair(virtual_fs):
+        return {"index.html": "<html>fake</html>"}, virtual_fs
+
     async def _fake_stage_bundle(**kwargs):
         return (
             f"file:///tmp/fake-bundle/{kwargs['prototype_id']}/"
@@ -276,6 +281,7 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
         )
 
     monkeypatch.setattr(env.routes, "vite_build", _fake_vite_build)
+    monkeypatch.setattr(env.routes, "vite_build_with_repair", _fake_vite_build_with_repair)
     monkeypatch.setattr(env.routes, "stage_bundle", _fake_stage_bundle)
 
     # ── Mock the staged-source read so the export serialiser is insulated from

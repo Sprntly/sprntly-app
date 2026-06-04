@@ -82,7 +82,13 @@ from app.design_agent.prompts import (
     render_scaffold_user,
 )
 from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
-from app.design_agent.storage import TypeCheckError, ViteBuildError, stage_bundle, vite_build
+from app.design_agent.storage import (
+    TypeCheckError,
+    ViteBuildError,
+    stage_bundle,
+    vite_build,
+    vite_build_with_repair,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -465,9 +471,16 @@ async def _stage_complete_run(
     log lines) rather than propagated, so the error strings match the ticket ACs
     exactly; a DB-helper failure propagates to the caller's outer except.
     """
-    # Step 1 — Vite build (anchor-id plugin runs here).
+    # Step 1 — Vite build (anchor-id plugin runs here). P6-07: the bounded
+    # unresolved-relative-import repair wrapper stubs/strips an orphan `./screens/*`
+    # import (the degrade-converged 2/2-repro) and rebuilds instead of shipping
+    # status=failed; on exhaustion it raises UnresolvedImportRepairExhausted (a
+    # ViteBuildError subclass — caught by the tuple below, distinct error_class).
+    # vite_build_with_repair returns the (possibly) REPAIRED virtual_fs as its
+    # second element; we REBIND `virtual_fs` here, BEFORE the `_source/` staging
+    # step below, so the staged source matches the built dist.
     try:
-        dist_files = await vite_build(virtual_fs)
+        dist_files, repaired_virtual_fs = await vite_build_with_repair(virtual_fs)
     except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
         # P3-15 (B3): TypeCheckError joins the precise build-failure tuple so a
         # runtime-break diagnostic routes to fail_prototype with the diagnostic in
@@ -485,6 +498,21 @@ async def _stage_complete_run(
             error=f"{type(exc).__name__}: {exc}",
         )
         return
+    # P6-07: rebind to the repaired source BEFORE the `_source/` staging step so
+    # the staged source matches the built dist. On a clean build this is the same
+    # map. When a repair was applied (the map changed), emit build_repair_applied
+    # with an action count only (Rule #24 — no source / no import paths): stubs add
+    # keys, strips change file bodies.
+    if repaired_virtual_fs != virtual_fs:
+        repair_actions = len(set(repaired_virtual_fs) - set(virtual_fs)) + sum(
+            1 for k in virtual_fs
+            if k in repaired_virtual_fs and repaired_virtual_fs[k] != virtual_fs[k]
+        )
+        logger.info(
+            "build_repair_applied prototype_id=%s actions=%d",
+            prototype_id, repair_actions,
+        )
+    virtual_fs = repaired_virtual_fs
     logger.info(
         "vite_build_succeeded prototype_id=%s checkpoint_id=N/A dist_file_count=%s",
         prototype_id, len(dist_files),

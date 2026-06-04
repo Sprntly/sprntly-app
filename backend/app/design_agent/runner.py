@@ -186,13 +186,16 @@ def _wrap_up_nudge(iters_remaining: int) -> str:
         return (
             f"You have {iters_remaining} tool-call turn(s) left. STOP now: finish "
             f"the current file, do NOT start new ones, then end your turn with a "
-            f"1-2 sentence summary. A cut-off build is lost."
+            f"1-2 sentence summary. A cut-off build is lost. If you imported a file "
+            f"you have not written, remove that import now — a build cannot resolve "
+            f"a missing file."
         )
     return (
         f"You have ~{iters_remaining} tool-call turns left. Start converging: make "
         f"the core flow navigable, batch any remaining writes, prefer finishing the "
         f"primary flow over adding screens. End your turn (no tool calls) as soon as "
-        f"the core flow works."
+        f"the core flow works. If you imported a file you have not written, remove "
+        f"that import now — a build cannot resolve a missing file."
     )
 
 
