@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from app.auth import CompanyContext, require_company
 from app.graph.facade import GraphFacade
 from app.research.competitor import run_competitor_research
+from app.research.market import run_market_research
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,16 @@ def run_competitors(
             facade, company.company_id,
             competitors=(body.competitors if body else None),
         )
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+    return {"ok": True, **result}
+
+
+@router.post("/market/run")
+def run_market(company: CompanyContext = Depends(require_company)):
+    facade = GraphFacade()
+    try:
+        result = run_market_research(facade, company.company_id)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     return {"ok": True, **result}
