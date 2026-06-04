@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   DesignAgentLauncher,
   DesignAgentLauncherView,
+  failureFromGeneration,
   pendingKey,
   pollUntilAdvanced,
   resultFromGeneration,
@@ -12,6 +13,7 @@ import {
 import { IterateComposer } from "../IterateComposer"
 import { ClarifyingQuestionSurface } from "../ClarifyingQuestionSurface"
 import { CommentsPanel } from "../CommentsPanel"
+import { GenerationErrorBanner } from "../GenerationErrorBanner"
 import type { PrototypeRecord } from "../../../lib/api"
 import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
 
@@ -445,5 +447,176 @@ describe("CommentsPanel mounts live on a newly-minted share_token (AC12 / #14)",
     expect(comments).toBeTruthy()
     expect((comments!.props as { token: string }).token).toBe("tok-xyz-123")
     expect((comments!.props as { prototypeId: number }).prototypeId).toBe(7)
+  })
+})
+
+// ─── P6-08 (Fix #11 visibility half): fail-loud error surface ────────────────
+
+describe("failureFromGeneration (pure, AC1/AC9)", () => {
+  const proto: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/index.html",
+    error: null,
+  }
+
+  it("maps a failed outcome to a non-null failure message (test_banner_replaces_silent_revert, AC1)", () => {
+    // Regression: on unfixed code there is no `failureFromGeneration` and
+    // `handleGenerated` discards the failure → this asserts the failure is now
+    // CAPTURED (non-null) rather than silently dropped.
+    expect(
+      failureFromGeneration({ ok: false, message: "ViteBuildError: boom" }),
+    ).toEqual({ message: "ViteBuildError: boom" })
+  })
+
+  it("maps a successful outcome to null — clears any prior banner (AC4)", () => {
+    expect(failureFromGeneration({ ok: true, prototype: proto })).toBeNull()
+  })
+
+  it("returns a single slot so a second failure REPLACES the first (test_second_failure_replaces_banner, AC9)", () => {
+    // The state is a single `{ message } | null` slot; consecutive failures
+    // each map to a fresh single object holding the LATEST message — no array,
+    // no accumulation.
+    const first = failureFromGeneration({ ok: false, message: "first" })
+    const second = failureFromGeneration({ ok: false, message: "second" })
+    expect(first).toEqual({ message: "first" })
+    expect(second).toEqual({ message: "second" })
+  })
+})
+
+describe("DesignAgentLauncherView — fail-loud banner (P6-08, Fix #11)", () => {
+  const base: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/index.html",
+    error: null,
+    is_complete: false,
+    share_mode: "private",
+    share_token: null,
+  }
+
+  function viewHtml(
+    over: Partial<Parameters<typeof DesignAgentLauncherView>[0]> = {},
+  ): string {
+    const { renderDrawer } = makeDrawerSpy()
+    return renderToStaticMarkup(
+      React.createElement(DesignAgentLauncherView, {
+        prdId: 1,
+        figmaFileKey: null,
+        open: false,
+        setOpen: noop,
+        renderDrawer,
+        ...over,
+      }),
+    )
+  }
+
+  it("renders the banner (not the bare button alone) on a failure (test_failed_generation_renders_banner_not_bare_button, AC1)", () => {
+    // On unfixed code the view has no `failure` prop and renders no banner — the
+    // user is left with the bare Generate button. This asserts the banner is now
+    // mounted in the launcher view.
+    const children = viewChildren({
+      failure: { message: "ViteBuildError: boom" },
+      onRetry: noop,
+    })
+    const banner = children.find((c) => c.type === GenerationErrorBanner)
+    expect(banner).toBeTruthy()
+  })
+
+  it("maps the raw message to human copy before handing it to the banner (AC2)", () => {
+    const children = viewChildren({
+      failure: { message: "UnresolvedImportRepairExhausted: <Dashboard>" },
+      onRetry: noop,
+    })
+    const banner = children.find(
+      (c) => c.type === GenerationErrorBanner,
+    ) as React.ReactElement
+    expect((banner.props as { reason: string }).reason).toBe(
+      "A referenced screen couldn't be built. Try regenerating — describe the screens you want explicitly.",
+    )
+  })
+
+  it("never lets the raw backend error reach the DOM (AC2)", () => {
+    const html = viewHtml({
+      failure: {
+        message:
+          "ViteBuildError: /srv/internal/secret/App.tsx exit=1 stderr-tail",
+      },
+      onRetry: noop,
+    })
+    expect(html).toContain("The prototype failed to build. Try regenerating.")
+    expect(html).not.toContain("/srv/internal/secret")
+    expect(html).not.toContain("stderr-tail")
+  })
+
+  it("threads onRetry into the banner so its Retry control re-kicks (test_retry_clears_failure_and_reopens_drawer wiring, AC3)", () => {
+    const onRetry = vi.fn()
+    const children = viewChildren({
+      failure: { message: "boom" },
+      onRetry,
+    })
+    const banner = children.find(
+      (c) => c.type === GenerationErrorBanner,
+    ) as React.ReactElement
+    expect((banner.props as { onRetry: () => void }).onRetry).toBe(onRetry)
+  })
+
+  it("shows the banner AND retains the prior result view when both are present (test_failure_and_prior_result_coexist, AC5)", () => {
+    const html = viewHtml({
+      result: base,
+      failure: { message: "ViteBuildError: a retry failed" },
+      onRetry: noop,
+    })
+    expect(html).toContain('data-testid="generation-error-banner"')
+    expect(html).toContain('data-testid="post-generation-result"')
+  })
+
+  it("renders NO banner on the happy path (test_happy_path_unchanged_no_banner, AC4)", () => {
+    const children = viewChildren({ result: base, failure: null })
+    expect(children.find((c) => c.type === GenerationErrorBanner)).toBeFalsy()
+    const html = viewHtml({ result: base, failure: null })
+    expect(html).not.toContain('data-testid="generation-error-banner"')
+    expect(html).toContain('data-testid="post-generation-result"')
+  })
+
+  it("renders exactly ONE banner per failure — no stacking (test_second_failure_replaces_banner render, AC9)", () => {
+    const html = viewHtml({
+      failure: { message: "ViteBuildError: latest" },
+      onRetry: noop,
+    })
+    const count = html.split('data-testid="generation-error-banner"').length - 1
+    expect(count).toBe(1)
+  })
+
+  it("mounts the banner in the launcher view, NOT the drawer (test_no_drawer_edit, AC7)", () => {
+    // The drawer is injected via `renderDrawer` (here a spy that renders null), so
+    // a banner appearing in the view tree proves it attaches at the launcher
+    // level — not inside DesignAgentDrawer.tsx (the P6-05-owned, untouched file).
+    const children = viewChildren({
+      failure: { message: "boom" },
+      onRetry: noop,
+      renderDrawer: () => null,
+    })
+    expect(children.find((c) => c.type === GenerationErrorBanner)).toBeTruthy()
+  })
+})
+
+describe("DesignAgentLauncher — exported signatures unchanged (test_launcher_signatures_unchanged, AC8)", () => {
+  const proto: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/index.html",
+    error: null,
+  }
+
+  it("resultFromGeneration still (result) => PrototypeRecord | null", () => {
+    expect(typeof resultFromGeneration).toBe("function")
+    expect(resultFromGeneration({ ok: true, prototype: proto })).toBe(proto)
+    expect(resultFromGeneration({ ok: false, message: "x" })).toBeNull()
+  })
+
+  it("DesignAgentLauncher / DesignAgentLauncherView remain exported components", () => {
+    expect(typeof DesignAgentLauncher).toBe("function")
+    expect(typeof DesignAgentLauncherView).toBe("function")
   })
 })
