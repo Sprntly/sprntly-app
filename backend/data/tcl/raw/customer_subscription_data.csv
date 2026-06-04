@@ -1,6 +1,0 @@
-CustomerID,Company,Plan,Users,MonthlyRevenue,Country,JoinDate,RenewalRate,SupportCases
-C1001,TechNova,Enterprise,250,$8500,USA,2024-01-15,92%,5
-C1002,CloudWare,Professional,85,$3200,Canada,2024-03-10,88%,8
-C1003,DataFlow,Basic,25,$450,UK,2025-01-20,76%,12
-C1004,AI Labs,Enterprise,420,$12500,Germany,2023-11-05,95%,3
-C1005,MarketPro,Professional,120,$4100,Australia,2024-06-18,89%,7
