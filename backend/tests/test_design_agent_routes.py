@@ -8,14 +8,15 @@ add the `prototypes` tables on top (same approach as test_db_prototypes.py) and
 reload app.db.prototypes → app.routes.design_agent → app.main in dependency order
 so the route binds to the fake-Supabase-wired helpers.
 
-AUTH NOTE: the routes use `require_app_session` (app audience only, per the
-ticket + BUILD.md §6 — production traffic is the app cookie). So these tests log
-in with `audience="app"` (conftest's shared `app_client` uses the demo cookie and
-would 401 here). Cross-workspace isolation (AC #3/#7) is exercised by seeding a
-row under a *foreign* workspace_id directly via the DB helper and asserting the
-app-session GET returns 404 — the route is app-only, so a demo *session* never
-reaches the workspace filter (it 401s at the auth dep); the workspace filter
-itself is what we prove.
+AUTH NOTE (P6-10): the routes now gate on `require_company` — a Supabase
+`Authorization: Bearer` JWT resolved to a `company_members` row — instead of the
+legacy `sprntly_app_session` cookie. So these tests use conftest's bearer-authed
+`company_client` (via the local `client` fixture), whose calls resolve
+`workspace_id == _TEST_COMPANY_ID` ("co-test"). The distinct company id (not
+"app") is what proves the workspace value's SOURCE moved from the session aud to
+`company.company_id`. Cross-workspace isolation (AC #3/#7) is exercised by seeding
+a row under a *foreign* workspace_id directly via the DB helper and asserting the
+company GET returns 404 — the workspace filter itself is what we prove.
 """
 from __future__ import annotations
 
@@ -28,6 +29,14 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from app.auth import CompanyContext
+from tests.conftest import (
+    _TEST_COMPANY_ID,
+    _TEST_USER_ID,
+    _enable_supabase_bearer,
+    _mint_supabase_token,
+)
 
 # SQLite-compatible translation of the P1-06 prototypes migration (mirrors
 # test_db_prototypes.py — the fake exercises SQL semantics, not Postgres DDL).
@@ -90,12 +99,10 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client.
+    Every authed call resolves workspace_id to _TEST_COMPANY_ID."""
+    return company_client
 
 
 @pytest.fixture
@@ -194,7 +201,7 @@ def test_generate_succeeds_when_flag_one(env, client, monkeypatch):
 def test_get_returns_404_when_flag_unset(env, client, monkeypatch):
     # Seed a real row; with the flag ON the GET resolves it (200), with the flag
     # cleared the same id is invisible (404) — proves the gate, not a missing row.
-    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    pid = env.proto.start_prototype(prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1)
     assert client.get(f"/v1/design-agent/{pid}").status_code == 200
     monkeypatch.delenv("DESIGN_AGENT_ENABLED", raising=False)
     assert client.get(f"/v1/design-agent/{pid}").status_code == 404
@@ -207,10 +214,10 @@ def test_generate_short_circuits_on_existing_ready_row(env, client, monkeypatch)
     calls = _stub_generate(monkeypatch, env.routes)
     # A ready row at the current template_version for (prd_id, workspace).
     pid = env.proto.start_prototype(
-        prd_id=1, workspace_id="app",
+        prd_id=1, workspace_id=_TEST_COMPANY_ID,
         template_version=env.routes.DESIGN_AGENT_TEMPLATE_VERSION,
     )
-    env.proto.complete_prototype(prototype_id=pid, workspace_id="app", bundle_url="https://x")
+    env.proto.complete_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, bundle_url="https://x")
 
     resp = client.post("/v1/design-agent/generate", json={"prd_id": 1})
     assert resp.status_code == 200, resp.text
@@ -220,11 +227,11 @@ def test_generate_short_circuits_on_existing_ready_row(env, client, monkeypatch)
     # No new background run fired.
     assert calls == []
     # No duplicate row inserted.
-    rows = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    rows = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert rows is not None
     from tests import _fake_supabase
     all_rows = _fake_supabase.get_fake_db().execute(
-        "SELECT id FROM prototypes WHERE prd_id = 1 AND workspace_id = 'app'"
+        "SELECT id FROM prototypes WHERE prd_id = 1 AND workspace_id = ?", (_TEST_COMPANY_ID,)
     ).fetchall()
     assert len(all_rows) == 1
 
@@ -232,7 +239,7 @@ def test_generate_short_circuits_on_existing_ready_row(env, client, monkeypatch)
 def test_generate_short_circuits_on_existing_generating_row(env, client, monkeypatch):
     calls = _stub_generate(monkeypatch, env.routes)
     pid = env.proto.start_prototype(
-        prd_id=2, workspace_id="app",
+        prd_id=2, workspace_id=_TEST_COMPANY_ID,
         template_version=env.routes.DESIGN_AGENT_TEMPLATE_VERSION,
     )
     resp = client.post("/v1/design-agent/generate", json={"prd_id": 2})
@@ -246,28 +253,34 @@ def test_generate_short_circuits_on_existing_generating_row(env, client, monkeyp
 # ─── Workspace isolation (AC #2, #3, #7) ───────────────────────────────────
 
 
-def test_generate_writes_workspace_id_from_session_aud(env, client, monkeypatch):
+def test_generate_writes_workspace_id_from_company_id(env, client, monkeypatch):
+    # AC3: the persisted workspace_id comes from the caller's resolved company_id
+    # (_TEST_COMPANY_ID), NOT the hardcoded string "app". A distinct company id is
+    # what proves the SOURCE changed (session aud → company.company_id).
     _stub_generate(monkeypatch, env.routes)
     _seed_prd(env.db)
     resp = client.post("/v1/design-agent/generate", json={"prd_id": 1})
     assert resp.status_code == 200, resp.text
     pid = resp.json()["prototype_id"]
-    # Row is visible under 'app' (the session aud) and carries workspace_id='app'.
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    # Row is visible under the caller's company_id and carries it as workspace_id.
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row is not None
-    assert row["workspace_id"] == "app"
+    assert row["workspace_id"] == _TEST_COMPANY_ID
+    assert row["workspace_id"] != "app"
 
 
 def test_get_returns_row_for_same_workspace(env, client):
-    pid = env.proto.start_prototype(prd_id=5, workspace_id="app", template_version=1)
+    pid = env.proto.start_prototype(prd_id=5, workspace_id=_TEST_COMPANY_ID, template_version=1)
     resp = client.get(f"/v1/design-agent/{pid}")
     assert resp.status_code == 200, resp.text
     assert resp.json()["id"] == pid
 
 
 def test_get_returns_404_for_cross_workspace_id(env, client):
-    # Row seeded under a FOREIGN workspace ('demo'); the app-session caller
-    # filters by 'app' and must not see it.
+    # Row seeded under a FOREIGN workspace ('demo'); the company caller filters by
+    # its resolved company_id (_TEST_COMPANY_ID) and must not see it. Kept on a
+    # non-_TEST_COMPANY_ID value on purpose — cross-tenant invisibility holds with
+    # company_id as the workspace value exactly as it did with the session aud.
     pid = env.proto.start_prototype(prd_id=9, workspace_id="demo", template_version=1)
     resp = client.get(f"/v1/design-agent/{pid}")
     assert resp.status_code == 404
@@ -308,7 +321,12 @@ async def test_background_task_held_in_inflight_set(env, monkeypatch):
     _seed_prd(env.db)
 
     req = env.routes.GenerateRequest(prd_id=1)
-    resp = await env.routes.generate(body=req, session={"aud": "app"})
+    resp = await env.routes.generate(
+        body=req,
+        company=CompanyContext(
+            company_id=_TEST_COMPANY_ID, role="owner", user_id=_TEST_USER_ID
+        ),
+    )
     assert resp.status == "generating"
     # The task was created but has not been scheduled to run yet (no await
     # boundary crossed inside generate after create_task).
@@ -471,6 +489,77 @@ async def test_run_generation_bg_error_truncated_to_500_downstream(env, monkeypa
     assert row["status"] == "failed"
     assert len(row["error"]) == 500
     assert row["error"].startswith("agent_loop ended with status=error iters=1")
+
+
+# ─── P6-10: require_company migration (auth swap) ──────────────────────────
+
+
+def test_cookie_only_path_now_rejected(env):
+    """AC9 regression — proves the swap. A TestClient carrying only the legacy
+    `sprntly_app_session` cookie (NO Bearer) AND a valid Origin now floors to
+    401/403 from require_company. The valid Origin guarantees the rejection is the
+    AUTH gate, not require_same_origin's CSRF 403 firing first for a missing Origin.
+    Fails on unfixed code (where the cookie alone authed via require_app_session)."""
+    c = TestClient(env.main.app)
+    login = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
+    assert login.status_code == 200, login.text
+    # Cookie is set; no Authorization header. Explicit valid Origin so the rejection
+    # is the auth path (require_company → "requires a signed-in user" 403), not CSRF.
+    resp = c.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": 1},
+        headers={"Origin": "http://localhost:3000"},
+    )
+    assert resp.status_code in (401, 403), resp.text
+
+
+def test_no_bearer_no_company_floors_403(env):
+    """AC1 — a request with no auth at all is rejected before the handler body
+    (require_session → 401 "Not signed in"); the body never runs."""
+    c = TestClient(env.main.app)
+    resp = c.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": 1},
+        headers={"Origin": "http://localhost:3000"},
+    )
+    assert resp.status_code in (401, 403), resp.text
+
+
+def test_valid_bearer_no_membership_403(env, isolated_settings, monkeypatch):
+    """AC2 — a valid Supabase bearer whose `sub` has NO company_members row returns
+    403 "No company membership — complete onboarding first" (from require_company);
+    the handler body never runs. No membership seeded for this user."""
+    _enable_supabase_bearer(monkeypatch)
+    c = TestClient(env.main.app)
+    c.headers["Authorization"] = f"Bearer {_mint_supabase_token('user-no-membership')}"
+    resp = c.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": 1},
+        headers={"Origin": "http://localhost:3000"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert "No company membership" in resp.json().get("detail", "")
+
+
+def test_authed_route_resolves_under_company(env, client):
+    """AC1/AC6 — a row seeded under the caller's company_id is visible to the
+    bearer-authed company client (200)."""
+    pid = env.proto.start_prototype(
+        prd_id=42, workspace_id=_TEST_COMPANY_ID, template_version=1
+    )
+    resp = client.get(f"/v1/design-agent/{pid}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == pid
+
+
+def test_no_require_app_session_dep_remains():
+    """AC4 — static migration-completeness: no live `Depends(require_app_session)`
+    remains in the route module and exactly 16 handlers depend on require_company."""
+    import app.routes.design_agent as da
+
+    src = Path(da.__file__).read_text()
+    assert "Depends(require_app_session)" not in src
+    assert src.count("Depends(require_company)") == 16
 
 
 # ─── LLM-calling surface: system block + cache_control (AC #8) ─────────────

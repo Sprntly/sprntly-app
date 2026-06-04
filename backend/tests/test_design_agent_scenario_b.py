@@ -27,6 +27,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.auth import CompanyContext
+from tests.conftest import _TEST_COMPANY_ID, _TEST_USER_ID
+
 # SQLite-compatible translation of the P1-06 prototypes migration (identical to
 # test_design_agent_routes.py — the fake exercises SQL semantics, not PG DDL).
 _PROTOTYPE_DDL = """
@@ -166,10 +169,15 @@ async def test_generate_with_website_url_derives_scenario_b(env, monkeypatch):
     prd_id = _seed_prd(env.db)
 
     req = env.routes.GenerateRequest(prd_id=prd_id, website_url="https://example.com")
-    resp = await env.routes.generate(body=req, session={"aud": "app"})
+    resp = await env.routes.generate(
+        body=req,
+        company=CompanyContext(
+            company_id=_TEST_COMPANY_ID, role="owner", user_id=_TEST_USER_ID
+        ),
+    )
     await _drain_inflight(env.routes)
 
-    row = env.proto.get_prototype(prototype_id=resp.prototype_id, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=resp.prototype_id, workspace_id=_TEST_COMPANY_ID)
     assert row["website_url"] == "https://example.com"
     assert calls[0]["scenario"] == "B"
 
@@ -180,10 +188,15 @@ async def test_generate_with_no_source_derives_scenario_0(env, monkeypatch):
     prd_id = _seed_prd(env.db)
 
     req = env.routes.GenerateRequest(prd_id=prd_id)
-    resp = await env.routes.generate(body=req, session={"aud": "app"})
+    resp = await env.routes.generate(
+        body=req,
+        company=CompanyContext(
+            company_id=_TEST_COMPANY_ID, role="owner", user_id=_TEST_USER_ID
+        ),
+    )
     await _drain_inflight(env.routes)
 
-    row = env.proto.get_prototype(prototype_id=resp.prototype_id, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=resp.prototype_id, workspace_id=_TEST_COMPANY_ID)
     assert row["website_url"] is None
     assert calls[0]["scenario"] == "0"
 
@@ -197,7 +210,12 @@ async def test_generate_with_figma_derives_a_even_with_website(env, monkeypatch)
     req = env.routes.GenerateRequest(
         prd_id=prd_id, figma_file_key="FILEKEY", website_url="https://example.com"
     )
-    resp = await env.routes.generate(body=req, session={"aud": "app"})
+    resp = await env.routes.generate(
+        body=req,
+        company=CompanyContext(
+            company_id=_TEST_COMPANY_ID, role="owner", user_id=_TEST_USER_ID
+        ),
+    )
     await _drain_inflight(env.routes)
 
     assert calls[0]["scenario"] == "A"  # extractor would have raised if consulted
@@ -211,7 +229,12 @@ async def test_manual_only_no_url_is_scenario_0_with_hints(env, monkeypatch):
     md = env.routes.ManualDesignInput(primary_color="#ff8800", font_family="Poppins")
 
     req = env.routes.GenerateRequest(prd_id=prd_id, manual_design=md)
-    resp = await env.routes.generate(body=req, session={"aud": "app"})
+    resp = await env.routes.generate(
+        body=req,
+        company=CompanyContext(
+            company_id=_TEST_COMPANY_ID, role="owner", user_id=_TEST_USER_ID
+        ),
+    )
     await _drain_inflight(env.routes)
 
     assert calls[0]["scenario"] == "0"

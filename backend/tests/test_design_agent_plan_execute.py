@@ -56,6 +56,8 @@ from app.design_agent.tools import (
     tools_for_mode,
 )
 
+from tests.conftest import _TEST_COMPANY_ID
+
 ACTION_NAMES = {"view", "write", "line_replace", "search", "fetch_figma", "read_console"}
 PLAN_NAMES = {"view", "search", "fetch_figma", "read_console"}
 
@@ -294,7 +296,7 @@ def _install_client(monkeypatch, responses) -> _RecordingClient:
 
 
 def _ctx(**overrides) -> ToolContext:
-    base = dict(prototype_id=1, workspace_id="app", virtual_fs={})
+    base = dict(prototype_id=1, workspace_id=_TEST_COMPANY_ID, virtual_fs={})
     base.update(overrides)
     return ToolContext(**base)
 
@@ -368,7 +370,7 @@ def test_confirm_plan_prepends_plan_to_system_blocks(monkeypatch):
     monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
     base_blocks = _system()
     _run(runner.iterate_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=base_blocks, user_message=_user(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=base_blocks, user_message=_user(),
         current_source={}, figma_file_key=None, mode="execute",
         approved_plan="- recolour the CTA to blue\n- keep the layout",
     ))
@@ -395,7 +397,7 @@ def test_no_approved_plan_leaves_system_blocks_untouched(monkeypatch):
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
     monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
     _run(runner.iterate_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=_system(), user_message=_user(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={}, figma_file_key=None, mode="execute",
     ))
     assert len(captured["system_blocks"]) == 1
@@ -505,11 +507,9 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
 @pytest.fixture
@@ -517,7 +517,7 @@ def unauth(env) -> TestClient:
     return TestClient(env.main.app)
 
 
-def _seed_ready(env, *, workspace_id: str = "app", current_checkpoint_id=None) -> int:
+def _seed_ready(env, *, workspace_id: str = _TEST_COMPANY_ID, current_checkpoint_id=None) -> int:
     pid = env.proto.start_prototype(prd_id=1, workspace_id=workspace_id, template_version=1)
     env.proto.complete_prototype(
         prototype_id=pid, workspace_id=workspace_id,
@@ -526,7 +526,7 @@ def _seed_ready(env, *, workspace_id: str = "app", current_checkpoint_id=None) -
     return pid
 
 
-def _seed_locked(env, *, workspace_id: str = "app") -> int:
+def _seed_locked(env, *, workspace_id: str = _TEST_COMPANY_ID) -> int:
     pid = _seed_ready(env, workspace_id=workspace_id, current_checkpoint_id=7)
     env.proto.mark_complete(prototype_id=pid, workspace_id=workspace_id)
     return pid
@@ -626,7 +626,7 @@ async def test_plan_run_persists_plan_and_creates_no_checkpoint(env, monkeypatch
     monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
     pid = _seed_ready(env)  # no current_checkpoint → source read skipped
     iteration = env.queue.enqueue_iteration(
-        prototype_id=pid, workspace_id="app", prompt="rethink header", mode="plan",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="rethink header", mode="plan",
     )
 
     async def fake_iterate(**kwargs):
@@ -645,7 +645,7 @@ async def test_plan_run_persists_plan_and_creates_no_checkpoint(env, monkeypatch
     monkeypatch.setattr(env.routes, "create_checkpoint", lambda **k: ckpt_calls.append(1))
 
     await env.routes._run_iterate_bg(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         body=env.routes.IterateRequest(prompt="rethink header", mode="plan"),
         iteration_id=iteration["id"],
     )
@@ -656,7 +656,7 @@ async def test_plan_run_persists_plan_and_creates_no_checkpoint(env, monkeypatch
     assert build_calls == []
     assert ckpt_calls == []
     # Prototype row untouched (still ready, original bundle).
-    proto = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    proto = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert proto["status"] == "ready"
     assert proto["bundle_url"] == "https://bundle/original"
 
@@ -681,7 +681,7 @@ async def test_run_one_iteration_threads_approved_plan_for_execute(env, monkeypa
 
     pid = _seed_ready(env)
     await env.routes._run_one_iteration({
-        "id": 99, "prototype_id": pid, "workspace_id": "app",
+        "id": 99, "prototype_id": pid, "workspace_id": _TEST_COMPANY_ID,
         "prompt": "do the approved thing", "applied_comment_id": None,
         "mode": "execute", "plan": "- the approved plan",
     })

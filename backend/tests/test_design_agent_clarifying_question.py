@@ -45,6 +45,8 @@ from app.design_agent.tools import (
     tools_for_mode,
 )
 
+from tests.conftest import _TEST_COMPANY_ID
+
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
     / "supabase" / "migrations" / "20260601000180_design_agent_clarifying_question.sql"
@@ -128,7 +130,7 @@ def _user(text: str = "Build a landing page.") -> dict:
 
 
 def _ctx(**overrides) -> ToolContext:
-    base = dict(prototype_id=1, workspace_id="app", virtual_fs={})
+    base = dict(prototype_id=1, workspace_id=_TEST_COMPANY_ID, virtual_fs={})
     base.update(overrides)
     return ToolContext(**base)
 
@@ -340,7 +342,7 @@ def proto(isolated_settings, monkeypatch):
     return proto_mod
 
 
-def _seed_prototype(proto_mod, workspace_id: str = "app") -> int:
+def _seed_prototype(proto_mod, workspace_id: str = _TEST_COMPANY_ID) -> int:
     return proto_mod.start_prototype(
         prd_id=1, workspace_id=workspace_id, template_version=1,
     )
@@ -350,8 +352,8 @@ def test_set_pending_question_writes_jsonb(proto):
     # AC6: set_pending_question writes the dict to the prototype row.
     pid = _seed_prototype(proto)
     q = {"question": "Submit or modal?", "choices": ["Submit", "Modal"], "context": "ambiguous"}
-    proto.set_pending_question(prototype_id=pid, workspace_id="app", question=q)
-    row = proto.get_prototype(prototype_id=pid, workspace_id="app")
+    proto.set_pending_question(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, question=q)
+    row = proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["pending_question"] == q
 
 
@@ -359,24 +361,24 @@ def test_clear_pending_question_nulls_it(proto):
     # AC6: clear_pending_question nulls the column.
     pid = _seed_prototype(proto)
     proto.set_pending_question(
-        prototype_id=pid, workspace_id="app", question={"question": "Q?"},
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, question={"question": "Q?"},
     )
-    proto.clear_pending_question(prototype_id=pid, workspace_id="app")
-    row = proto.get_prototype(prototype_id=pid, workspace_id="app")
+    proto.clear_pending_question(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    row = proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["pending_question"] is None
 
 
 def test_pending_question_workspace_isolated(proto):
     # AC6: a 'demo' call does NOT touch an 'app' row.
-    app_pid = _seed_prototype(proto, workspace_id="app")
+    app_pid = _seed_prototype(proto, workspace_id=_TEST_COMPANY_ID)
     proto.set_pending_question(
-        prototype_id=app_pid, workspace_id="app", question={"question": "APP_Q"},
+        prototype_id=app_pid, workspace_id=_TEST_COMPANY_ID, question={"question": "APP_Q"},
     )
     # A write scoped to a different workspace must NOT mutate the app row.
     proto.set_pending_question(
         prototype_id=app_pid, workspace_id="demo", question={"question": "DEMO_Q"},
     )
-    row = proto.get_prototype(prototype_id=app_pid, workspace_id="app")
+    row = proto.get_prototype(prototype_id=app_pid, workspace_id=_TEST_COMPANY_ID)
     assert row["pending_question"] == {"question": "APP_Q"}
 
 
@@ -403,12 +405,12 @@ def test_iterate_persists_question_no_checkpoint(monkeypatch):
     monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
 
     result, vfs = _run(runner.iterate_prototype(
-        prototype_id=7, workspace_id="app", system_blocks=_system(),
+        prototype_id=7, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(),
         user_message=_user(), current_source={"src/App.tsx": "x"}, figma_file_key=None,
     ))
     assert result.status == "awaiting_clarification"
     assert captured["prototype_id"] == 7
-    assert captured["workspace_id"] == "app"
+    assert captured["workspace_id"] == _TEST_COMPANY_ID
     assert captured["question"] == {"question": "Q?", "choices": None, "context": None}
     # iterate_prototype never stages a checkpoint — the helper is not even imported
     # into the runner module (the route's _stage_iterate_run owns staging, and only
@@ -433,7 +435,7 @@ def test_generate_persists_question_on_pause(monkeypatch):
     monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
 
     _run(runner.generate_prototype(
-        prototype_id=9, workspace_id="app", system_blocks=_system(),
+        prototype_id=9, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(),
         user_message=_user(), figma_file_key=None,
     ))
     assert captured["prototype_id"] == 9
@@ -453,7 +455,7 @@ def test_complete_result_does_not_persist_question(monkeypatch):
                         lambda **kw: called.__setitem__("n", called["n"] + 1))
     monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
     _run(runner.iterate_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=_system(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(),
         user_message=_user(), current_source={}, figma_file_key=None,
     ))
     assert called["n"] == 0
@@ -489,7 +491,7 @@ def test_set_pending_question_logs_no_question_text(proto, caplog):
     secret = "SECRET_PRODUCT_DETAIL_XYZ"
     with caplog.at_level(logging.INFO, logger="app.db.prototypes"):
         proto.set_pending_question(
-            prototype_id=pid, workspace_id="app",
+            prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
             question={"question": secret, "context": "also " + secret},
         )
     log_text = " ".join(r.getMessage() for r in caplog.records)
@@ -501,7 +503,7 @@ def test_set_pending_question_logs_no_question_text(proto, caplog):
 def test_clear_pending_question_logs_cleared(proto, caplog):
     pid = _seed_prototype(proto)
     with caplog.at_level(logging.INFO, logger="app.db.prototypes"):
-        proto.clear_pending_question(prototype_id=pid, workspace_id="app")
+        proto.clear_pending_question(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     log_text = " ".join(r.getMessage() for r in caplog.records)
     assert "prototype_question_cleared" in log_text
 
@@ -616,15 +618,12 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
-def _seed_ready_route(env, *, workspace_id: str = "app", current_checkpoint_id=None) -> int:
+def _seed_ready_route(env, *, workspace_id: str = _TEST_COMPANY_ID, current_checkpoint_id=None) -> int:
     """Insert a ready, unlocked prototype (status='ready', is_complete=0) with a
     prior bundle — the pre-iterate state of the iterate-time pause path."""
     pid = env.proto.start_prototype(prd_id=1, workspace_id=workspace_id, template_version=1)
@@ -667,17 +666,17 @@ async def test_iterate_bg_pause_leaves_row_ready_not_failed(env, monkeypatch):
     # The runner (P3-08) persists the question during iterate_prototype; we stub
     # that call, so seed the sidecar here to mirror the real paused state.
     env.proto.set_pending_question(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         question={"question": "Submit or open a modal?"},
     )
-    before = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    before = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
 
     await env.routes._run_iterate_bg(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         body=env.routes.IterateRequest(prompt="make the CTA blue"),
     )
 
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["status"] == "ready"            # NOT 'failed'
     assert row["error"] is None
     assert row["pending_question"] == {"question": "Submit or open a modal?"}
@@ -694,15 +693,15 @@ def test_iterate_bg_pause_resume_not_409(env, client, monkeypatch):
     _stub_iterate_status(monkeypatch, env.routes, "awaiting_clarification")
     pid = _seed_ready_route(env, current_checkpoint_id=42)
     env.proto.set_pending_question(
-        prototype_id=pid, workspace_id="app", question={"question": "Q?"},
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, question={"question": "Q?"},
     )
     # Drive the pause through the bg layer (asyncio.run completes fully before the
     # sync TestClient call — no nested event loop).
     _run(env.routes._run_iterate_bg(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         body=env.routes.IterateRequest(prompt="x"),
     ))
-    assert env.proto.get_prototype(prototype_id=pid, workspace_id="app")["status"] == "ready"
+    assert env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)["status"] == "ready"
 
     # The answer submits as a new iterate; it must NOT be 409-blocked.
     resp = client.post(f"/v1/design-agent/{pid}/iterate", json={"prompt": "Submit the form"})
@@ -718,15 +717,15 @@ def test_mark_awaiting_clarification_sets_ready_clears_error(env):
     # AC3: sets status='ready' + error=None; does NOT touch bundle_url /
     # completed_at / current_checkpoint_id / share_token.
     pid = _seed_ready_route(env, current_checkpoint_id=99)
-    env.proto.set_share_config(prototype_id=pid, workspace_id="app", share_mode="public")
+    env.proto.set_share_config(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, share_mode="public")
     # Simulate the bug's intermediate state: the bg layer had flipped it failed.
-    env.proto.fail_prototype(prototype_id=pid, workspace_id="app", error="boom")
-    before = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    env.proto.fail_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, error="boom")
+    before = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert before["status"] == "failed" and before["share_token"]
 
-    env.proto.mark_awaiting_clarification(prototype_id=pid, workspace_id="app")
+    env.proto.mark_awaiting_clarification(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
 
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["status"] == "ready"
     assert row["error"] is None
     assert row["bundle_url"] == before["bundle_url"]
@@ -737,11 +736,11 @@ def test_mark_awaiting_clarification_sets_ready_clears_error(env):
 
 def test_mark_awaiting_clarification_workspace_isolated(env):
     # AC4: a 'demo'-scoped call does NOT mutate an 'app' row.
-    app_pid = _seed_ready_route(env, workspace_id="app")
-    env.proto.fail_prototype(prototype_id=app_pid, workspace_id="app", error="boom")
+    app_pid = _seed_ready_route(env, workspace_id=_TEST_COMPANY_ID)
+    env.proto.fail_prototype(prototype_id=app_pid, workspace_id=_TEST_COMPANY_ID, error="boom")
     # Cross-workspace call: must be a no-op against the app row.
     env.proto.mark_awaiting_clarification(prototype_id=app_pid, workspace_id="demo")
-    row = env.proto.get_prototype(prototype_id=app_pid, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=app_pid, workspace_id=_TEST_COMPANY_ID)
     assert row["status"] == "failed"   # unchanged — the demo-scoped call missed it
     assert row["error"] == "boom"
 
@@ -759,10 +758,10 @@ async def test_iterate_bg_genuine_failure_still_fails(env, monkeypatch):
     )
     pid = _seed_ready_route(env)
     await env.routes._run_iterate_bg(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         body=env.routes.IterateRequest(prompt="x"),
     )
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["status"] == "failed"
     assert "status=max_iters" in row["error"]
     assert "error_class=MaxIters" in row["error"]
@@ -786,13 +785,13 @@ async def test_generate_bg_pause_unchanged(env, monkeypatch):
     monkeypatch.setattr(env.routes, "generate_prototype", fake_generate)
     monkeypatch.setattr(env.routes, "_load_prd_body", lambda prd_id: "PRD body")
     monkeypatch.setattr(env.routes, "_figma_context_block", lambda key: "")
-    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    pid = env.proto.start_prototype(prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1)
 
     await env.routes._run_generation_bg(
-        prototype_id=pid, workspace_id="app", prd_id=1,
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prd_id=1,
         target_platform="both", instructions="", figma_file_key=None,
     )
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["status"] == "failed"   # generate-time pause still fails (loud), by design
 
 
@@ -807,12 +806,12 @@ async def test_iterate_bg_pause_logs_identifier_only(env, monkeypatch, caplog):
     pid = _seed_ready_route(env, current_checkpoint_id=42)
     secret = "SECRET_QUESTION_PRODUCT_DETAIL"
     env.proto.set_pending_question(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         question={"question": secret, "context": "also " + secret},
     )
     with caplog.at_level(logging.INFO):
         await env.routes._run_iterate_bg(
-            prototype_id=pid, workspace_id="app",
+            prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
             body=env.routes.IterateRequest(prompt="x"),
         )
     blob = "\n".join(r.getMessage() for r in caplog.records)

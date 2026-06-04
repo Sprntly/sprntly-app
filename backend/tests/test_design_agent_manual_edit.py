@@ -48,6 +48,9 @@ from app.design_agent.prompts import (
     render_manual_edit_user,
 )
 
+from app.auth import CompanyContext
+from tests.conftest import _TEST_COMPANY_ID, _TEST_USER_ID
+
 TELEMETRY_LOGGER = "app.llm_telemetry"
 
 
@@ -291,7 +294,7 @@ def test_manual_edit_prototype_threads_manual_mode_and_iter_cap(monkeypatch):
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
     monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
     _run(runner.manual_edit_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=_system(), user_message=_user(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={"src/App.tsx": "x"}, figma_file_key=None,
     ))
     assert captured["mode"] == "manual"
@@ -311,7 +314,7 @@ def test_manual_edit_runs_four_iter_max(monkeypatch):
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),  # replayed forever
     ])
     result, _vfs = _run(runner.manual_edit_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=_system(), user_message=_user(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={}, figma_file_key=None,
     ))
     assert result.status == "max_iters"
@@ -330,7 +333,7 @@ def test_manual_edit_emits_cost_summary_mode_manual_under_5c(monkeypatch, caplog
     ])
     with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER):
         result, _vfs = _run(runner.manual_edit_prototype(
-            prototype_id=55, workspace_id="app", system_blocks=_system(), user_message=_user(),
+            prototype_id=55, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
             current_source={"src/App.tsx": "x"}, figma_file_key=None, scenario="A",
         ))
     assert result.status == "complete"
@@ -359,7 +362,7 @@ def test_manual_edit_cost_log_carries_no_source_content(monkeypatch, caplog):
     user_message = {"role": "user", "content": [_text("EDIT_VALUE_SECRET")]}
     with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER):
         _run(runner.manual_edit_prototype(
-            prototype_id=1, workspace_id="app", system_blocks=system_blocks,
+            prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=system_blocks,
             user_message=user_message, current_source={"f.tsx": "SECRET_SOURCE_BODY"},
             figma_file_key=None,
         ))
@@ -377,7 +380,7 @@ def test_manual_edit_cache_read_nonzero_on_second_call(monkeypatch):
         _msg("end_turn", [_text("done")], usage=_usage(cache_read=120, inp=10, out=20)),
     ])
     result, _vfs = _run(runner.manual_edit_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=_system(), user_message=_user(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={"src/A.tsx": "x"}, figma_file_key=None,
     ))
     assert result.usage.cache_read_input_tokens >= 120
@@ -389,7 +392,7 @@ def test_manual_edit_uses_design_agent_client(monkeypatch):
     # the one called — no direct ANTHROPIC_API_KEY read on this path).
     client = _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
     _run(runner.manual_edit_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=_system(), user_message=_user(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={}, figma_file_key=None,
     ))
     assert len(client.calls) >= 1  # the run went through the injected design-agent client
@@ -474,25 +477,27 @@ def env(isolated_settings, monkeypatch):
 
 @pytest.fixture
 def client(env):
-    """TestClient with require_app_session INJECTED (P4-02 mitigation: do NOT rely
-    on the live auth.py path — override the dependency to a fixed app-audience
-    session)."""
+    """TestClient with require_company INJECTED (P4-02 mitigation: do NOT rely
+    on the live auth.py path — override the dependency to a fixed company context;
+    workspace_id resolves to _TEST_COMPANY_ID)."""
     c = TestClient(env.main.app)
-    env.main.app.dependency_overrides[env.routes.require_app_session] = lambda: {"aud": "app"}
+    env.main.app.dependency_overrides[env.routes.require_company] = lambda: CompanyContext(
+        company_id=_TEST_COMPANY_ID, role="owner", user_id=_TEST_USER_ID
+    )
     yield c
     env.main.app.dependency_overrides.clear()
 
 
 @pytest.fixture
 def unauth(env) -> TestClient:
-    """No dependency override — the REAL require_app_session runs (401 without a session)."""
+    """No dependency override — the REAL require_company runs (401 without a bearer)."""
     return TestClient(env.main.app)
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 
-def _seed_ready(env, *, workspace_id: str = "app", current_checkpoint_id=None) -> int:
+def _seed_ready(env, *, workspace_id: str = _TEST_COMPANY_ID, current_checkpoint_id=None) -> int:
     """Insert a ready, unlocked prototype (status='ready', is_complete=0)."""
     pid = env.proto.start_prototype(prd_id=1, workspace_id=workspace_id, template_version=1)
     env.proto.complete_prototype(
@@ -502,7 +507,7 @@ def _seed_ready(env, *, workspace_id: str = "app", current_checkpoint_id=None) -
     return pid
 
 
-def _seed_locked(env, *, workspace_id: str = "app") -> int:
+def _seed_locked(env, *, workspace_id: str = _TEST_COMPANY_ID) -> int:
     """A ready prototype that has been Marked Complete (is_complete=1, F14 lock)."""
     pid = _seed_ready(env, workspace_id=workspace_id, current_checkpoint_id=7)
     env.proto.mark_complete(prototype_id=pid, workspace_id=workspace_id)
@@ -581,7 +586,7 @@ def test_manual_edit_locked_409(env, client):
 
 def test_manual_edit_not_ready_409(env, client):
     # AC3: a generating prototype (status != ready) → 409.
-    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    pid = env.proto.start_prototype(prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1)
     resp = client.post(f"/v1/design-agent/{pid}/manual-edit", json=_GOOD_BODY)
     assert resp.status_code == 409
 
@@ -594,7 +599,7 @@ def test_manual_edit_cross_workspace_404(env, client):
 
 
 def test_manual_edit_requires_session(env, unauth):
-    # AC3: no app session → 401 (the REAL require_app_session runs here).
+    # AC3: no bearer → 401 (the REAL require_company runs here).
     resp = unauth.post("/v1/design-agent/1/manual-edit", json=_GOOD_BODY)
     assert resp.status_code == 401
 
@@ -643,7 +648,7 @@ async def test_run_manual_edit_bg_loads_source_and_threads_edits(env, monkeypatc
     pid = _seed_ready(env, current_checkpoint_id=42)
 
     body = env.routes.ManualEditRequest(**_GOOD_BODY)
-    await env.routes._run_manual_edit_bg(prototype_id=pid, workspace_id="app", body=body)
+    await env.routes._run_manual_edit_bg(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, body=body)
 
     assert read_calls == [(pid, 42)]  # positional (prototype_id, checkpoint_id)
     assert captured["current_source"] == {"src/App.tsx": "export default function App(){}"}
@@ -678,7 +683,7 @@ async def test_run_manual_edit_bg_stages_via_iterate_on_change(env, monkeypatch)
 
     pid = _seed_ready(env, current_checkpoint_id=9)
     body = env.routes.ManualEditRequest(**_GOOD_BODY)
-    await env.routes._run_manual_edit_bg(prototype_id=pid, workspace_id="app", body=body)
+    await env.routes._run_manual_edit_bg(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, body=body)
 
     assert len(stage_calls) == 1
     assert stage_calls[0]["virtual_fs"] == {"src/App.tsx": "CHANGED"}
@@ -713,7 +718,7 @@ async def test_manual_edit_stale_anchor_fails_not_silent(env, monkeypatch):
 
     pid = _seed_ready(env, current_checkpoint_id=9)
     body = env.routes.ManualEditRequest(**_GOOD_BODY)
-    await env.routes._run_manual_edit_bg(prototype_id=pid, workspace_id="app", body=body)
+    await env.routes._run_manual_edit_bg(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, body=body)
 
     assert stage_calls == []                      # NO checkpoint advance
     assert len(fail_calls) == 1
@@ -748,7 +753,7 @@ async def test_manual_edit_run_status_failure_marks_failed(env, monkeypatch):
 
     pid = _seed_ready(env)
     body = env.routes.ManualEditRequest(**_GOOD_BODY)
-    await env.routes._run_manual_edit_bg(prototype_id=pid, workspace_id="app", body=body)
+    await env.routes._run_manual_edit_bg(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, body=body)
 
     assert stage_calls == []
     assert len(fail_calls) == 1

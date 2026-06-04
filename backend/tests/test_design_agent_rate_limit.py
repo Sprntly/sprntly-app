@@ -31,6 +31,7 @@ from fastapi.testclient import TestClient
 
 from app.design_agent import rate_limit
 from app.design_agent.rate_limit import SlidingWindowLimiter
+from tests.conftest import _TEST_COMPANY_ID
 
 
 # SQLite-compatible mirror of the prototypes end-state (enough columns for
@@ -186,15 +187,12 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
-def _seed_ready(env, *, workspace_id: str = "app") -> int:
+def _seed_ready(env, *, workspace_id: str = _TEST_COMPANY_ID) -> int:
     """Insert a ready, unlocked prototype (status='ready', is_complete=0)."""
     pid = env.proto.start_prototype(prd_id=1, workspace_id=workspace_id, template_version=1)
     env.proto.complete_prototype(
@@ -268,8 +266,8 @@ def test_iterate_feature_off_404_before_429(env, client, monkeypatch):
 
 
 def test_iterate_no_session_401_before_429(env):
-    # AC6: even with the limiter saturated, a no-session iterate returns 401
-    # (require_app_session runs first), NOT 429.
+    # AC6: even with the limiter saturated, a no-auth iterate returns 401
+    # (require_company → require_session runs first), NOT 429.
     pid = _seed_ready(env)
     _saturate(env, pid)
     no_auth = TestClient(env.main.app)  # no login cookie
