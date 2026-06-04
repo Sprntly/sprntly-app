@@ -16,6 +16,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.db.client import require_client
+from app.graph.config_layers import resolve_config
 from app.graph.decision_log import log_agent_decision
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
@@ -86,13 +87,21 @@ def run_market_research(facade: GraphFacade, enterprise_id: str) -> dict:
     if profile.get("product_description"):
         subject_bits.append(f"What it does: {profile['product_description'][:300]}")
 
+    cfg = resolve_config(enterprise_id).get("research", {})
+    subject = product.get("name") or name
+    sweeps = "\n".join(
+        f"- {src['query'].format(subject=subject)}"
+        for src in cfg.get("social_sources", [])
+    )
     meta: dict = {}
     summary = call_with_web_search(
         system=_RESEARCH_SYSTEM,
         user=". ".join(subject_bits) + f". Today is {today}. "
-             "Focus on roughly the last 6 months.",
+             "Focus on roughly the last 6 months.\n"
+             "Run BOTH general searches AND these targeted channel sweeps "
+             "(adapt them to the product category):\n" + sweeps,
         meta_out=meta,
-        max_searches=8,
+        max_searches=int(cfg.get("max_searches", 12)),
     )
 
     totals = {"signals": 0, "themes": 0, "skipped": 0}

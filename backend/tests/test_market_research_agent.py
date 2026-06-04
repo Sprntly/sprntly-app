@@ -72,6 +72,10 @@ def test_run_extracts_and_logs(facade, isolated_settings, monkeypatch):
     # research prompt grounded in onboarding profile
     assert "Swayat AI" in captured["user"] and "swayat.com" in captured["user"]
     assert "customer_voice" in captured["hint"]
+    # configurable channel sweeps (§1c) — reddit/HN/linkedin targeted, subject substituted
+    assert "site:reddit.com Swayat" in captured["user"]
+    assert "site:news.ycombinator.com Swayat" in captured["user"]
+    assert "site:linkedin.com Swayat" in captured["user"]
 
     logs = isolated_settings["supabase"].table("agent_decision_log").select("*") \
         .eq("enterprise_id", "ent-A").execute().data
