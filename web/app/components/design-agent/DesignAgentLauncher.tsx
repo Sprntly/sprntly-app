@@ -22,6 +22,7 @@
 import { useState, type ReactNode } from "react"
 import { DesignAgentDrawer } from "./DesignAgentDrawer"
 import { PostGenerationResult } from "./PostGenerationResult"
+import { GenerationErrorBanner, reasonCopy } from "./GenerationErrorBanner"
 import { CommentsPanel } from "./CommentsPanel"
 import { IterateComposer } from "./IterateComposer"
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
@@ -55,6 +56,19 @@ export function resultFromGeneration(
   result: DesignAgentGenResult,
 ): PrototypeRecord | null {
   return result.ok ? result.prototype : null
+}
+
+/** P6-08 (Fix #11 visibility half): maps a generation outcome to launcher
+ *  FAILURE state — the failure `message` on a failed outcome, null on success
+ *  (which clears any prior banner). Single `{ message } | null` slot, so a second
+ *  failure REPLACES the first via `setFailure` (no banner stacking — AC9). Pure →
+ *  unit-testable without a DOM, mirroring `resultFromGeneration`. The raw
+ *  `message` is mapped to human copy by `reasonCopy` at render time, never shown
+ *  verbatim (Rule #24). */
+export function failureFromGeneration(
+  result: DesignAgentGenResult,
+): { message: string } | null {
+  return result.ok ? null : { message: result.message }
 }
 
 /** Default drawer renderer: the real, NavigationContext-wired DesignAgentDrawer. */
@@ -132,6 +146,15 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   result?: PrototypeRecord | null
   /** P2-12: handed to the drawer so a successful generation populates `result`. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** P6-08 (Fix #11): the last generation attempt's failure, or null. When set,
+   *  the view renders `<GenerationErrorBanner/>` (replacing the old silent
+   *  revert-to-Generate-button). Independent of `result`: a failed retry after a
+   *  prior success shows the banner AND retains the prior result view (AC5).
+   *  Optional/defaulted so existing direct-view test calls keep typechecking. */
+  failure?: { message: string } | null
+  /** P6-08: fired by the banner's Retry control — clears `failure` + re-opens the
+   *  drawer (`setOpen(true)`). Does NOT auto-re-POST. Optional/defaulted. */
+  onRetry?: () => void
   /** P3-14 (F10): the comment selected for Apply, lifted to the container so
    *  CommentsPanel's Apply action sets it and IterateComposer reads it. Optional
    *  so existing direct-view test calls keep typechecking. */
@@ -165,6 +188,8 @@ export function DesignAgentLauncherView({
   setOpen,
   result = null,
   onGenerated,
+  failure = null,
+  onRetry = () => {},
   applyTarget = null,
   setApplyTarget,
   onIterated,
@@ -180,6 +205,19 @@ export function DesignAgentLauncherView({
       >
         Generate Prototype
       </button>
+      {/* P6-08 (Fix #11): when the last generation FAILED, surface a persistent
+          banner with mapped human copy + Retry — instead of the old silent
+          revert to the bare button above. Mounted ABOVE the `result &&` blocks
+          and INDEPENDENT of `result`: a failed retry after a prior success shows
+          the banner alongside the still-good result view (AC5). `reasonCopy`
+          maps the raw `message` so the raw backend `error` never reaches the DOM
+          (Rule #24). */}
+      {failure && (
+        <GenerationErrorBanner
+          reason={reasonCopy(failure.message)}
+          onRetry={onRetry}
+        />
+      )}
       {/* `key` forces a clean remount per prototype id: PostGenerationResult
           (and the CompletionBar it mounts) seed state from props at mount only,
           so regenerating a second prototype in the same launcher instance must
@@ -249,16 +287,34 @@ export function DesignAgentLauncher({
 }) {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState<PrototypeRecord | null>(null)
+  // P6-08 (Fix #11): the last generation attempt's failure, or null. A non-null
+  // value renders the persistent GenerationErrorBanner (replacing the old silent
+  // revert). Kept INDEPENDENT of `result` so a failed retry after a prior success
+  // shows the banner without wiping the previously-good prototype (AC5).
+  const [failure, setFailure] = useState<{ message: string } | null>(null)
   // P3-14 (F10): lifted so CommentsPanel's Apply sets it and IterateComposer
   // reads it as its pre-fill.
   const [applyTarget, setApplyTarget] = useState<CommentRecord | null>(null)
 
-  // On a successful generation, mount the result view. On failure, leave the
-  // current state intact — the drawer's existing toast surfaces the error and
-  // no result view renders (AC5).
+  // On a successful generation, mount the result view AND clear any prior failure
+  // banner. On failure, STOP discarding it (the pre-P6-08 bug): set the single
+  // `failure` slot so the banner surfaces the reason — `result` is left intact so
+  // a previously-good prototype survives a failed retry (AC5). A second failure
+  // REPLACES the slot (no stacking — AC9). `resultFromGeneration` still owns the
+  // success-path mapping; `failureFromGeneration` owns the failure-path mapping.
   const handleGenerated = (outcome: DesignAgentGenResult) => {
     const next = resultFromGeneration(outcome)
     if (next) setResult(next)
+    setFailure(failureFromGeneration(outcome))
+  }
+
+  // P6-08: the banner's Retry — clear the failure banner and re-open the drawer so
+  // the user re-initiates a generation from the same surface. Deliberately does
+  // NOT auto-re-POST (avoids a silent retry loop on a deterministically-failing
+  // PRD); re-kicking is the user's explicit action inside the drawer.
+  const handleRetry = () => {
+    setFailure(null)
+    setOpen(true)
   }
 
   // P6-05 (#5): after an iterate/clarify advances the SAME prototype id to a new
@@ -286,6 +342,8 @@ export function DesignAgentLauncher({
       setOpen={setOpen}
       result={result}
       onGenerated={handleGenerated}
+      failure={failure}
+      onRetry={handleRetry}
       applyTarget={applyTarget}
       setApplyTarget={setApplyTarget}
       onIterated={refreshResult}
