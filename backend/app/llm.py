@@ -221,3 +221,35 @@ def call_md(
     )
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()
+
+
+def call_with_web_search(
+    *,
+    system: str,
+    user: str,
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = 8000,
+    max_searches: int = 5,
+    meta_out: dict | None = None,
+) -> str:
+    """Call Claude with the server-side web_search tool enabled.
+
+    Returns the final text answer (the model searches autonomously up to
+    `max_searches` times). Used by the outward research agents
+    (competitor / market). Web content is untrusted input — callers'
+    system prompts must treat it as data, never instructions.
+    """
+    msg = _create_with_retries(
+        get_client(),
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        tools=[{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": max_searches,
+        }],
+    )
+    _capture_meta(meta_out, msg, model)
+    return "".join(b.text for b in msg.content if b.type == "text").strip()
