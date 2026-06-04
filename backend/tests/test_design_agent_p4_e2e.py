@@ -235,6 +235,12 @@ async def _fake_vite_build(virtual_fs):  # noqa: ARG001
     return {"index.html": '<!doctype html><div data-anchor-id="aaaa1111"></div>'}
 
 
+async def _fake_vite_build_with_repair(virtual_fs):
+    """P6-07: _stage_complete_run builds via vite_build_with_repair → (dist, repaired_vfs).
+    A clean build returns the source map unchanged."""
+    return await _fake_vite_build(virtual_fs), virtual_fs
+
+
 # ─── Fixture ──────────────────────────────────────────────────────────────────
 
 
@@ -384,6 +390,7 @@ def _install_generate_mock(monkeypatch, env, side_effect):
         "app.design_agent.runner._resolve_figma_access_token", lambda k: None
     )
     monkeypatch.setattr(env.routes, "vite_build", _fake_vite_build)
+    monkeypatch.setattr(env.routes, "vite_build_with_repair", _fake_vite_build_with_repair)
     return client
 
 
@@ -606,6 +613,7 @@ async def test_p4_e2e_no_network_passes_in_ci(env, monkeypatch):
         "app.design_agent.runner._resolve_figma_access_token", lambda k: None
     )
     monkeypatch.setattr(env.routes, "vite_build", _fake_vite_build)
+    monkeypatch.setattr(env.routes, "vite_build_with_repair", _fake_vite_build_with_repair)
 
     # AC6: no Supabase Storage bucket configured → the filesystem fallback is in use.
     assert not (os.environ.get("SUPABASE_STORAGE_BUCKET") or "").strip()

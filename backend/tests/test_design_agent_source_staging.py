@@ -302,6 +302,11 @@ async def test_stage_complete_run_marks_ready_when_source_stage_fails(env, monke
     """AC #4: a source-stage failure logs and proceeds — the prototype still completes ready."""
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
     monkeypatch.setattr(env.routes, "vite_build", _async_return({"index.html": "<x/>"}))
+    # P6-07: _stage_complete_run builds via vite_build_with_repair → (dist, repaired_vfs).
+    monkeypatch.setattr(
+        env.routes, "vite_build_with_repair",
+        _async_return(({"index.html": "<x/>"}, {"src/App.tsx": "x"})),
+    )
     monkeypatch.setattr(
         env.routes, "stage_bundle", _stage_bundle_source_raises(RuntimeError("source boom")),
     )
@@ -321,6 +326,11 @@ async def test_stage_complete_run_logs_warning_on_source_stage_failure(env, monk
     """AC #9: failure emits source_stage_failed WARNING with identifiers + error_class only."""
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
     monkeypatch.setattr(env.routes, "vite_build", _async_return({"index.html": "<x/>"}))
+    # P6-07: _stage_complete_run builds via vite_build_with_repair → (dist, repaired_vfs).
+    monkeypatch.setattr(
+        env.routes, "vite_build_with_repair",
+        _async_return(({"index.html": "<x/>"}, {"src/App.tsx": "x"})),
+    )
     monkeypatch.setattr(
         env.routes, "stage_bundle",
         _stage_bundle_source_raises(RuntimeError("SECRET_SOURCE_blob")),
@@ -347,6 +357,13 @@ async def test_stage_complete_run_stages_source_under_source_prefix_on_success(e
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
     monkeypatch.setattr(env.routes, "vite_build", _async_return({"index.html": "<built/>"}))
+
+    # P6-07: _stage_complete_run builds via vite_build_with_repair → (dist, repaired_vfs);
+    # a clean build returns the source unchanged (so the _source/ staging gets the raw vfs).
+    async def _build_with_repair(virtual_fs):
+        return {"index.html": "<built/>"}, virtual_fs
+
+    monkeypatch.setattr(env.routes, "vite_build_with_repair", _build_with_repair)
     monkeypatch.setattr(env.routes, "stage_bundle", _stage)
     vfs = {"src/App.tsx": "raw-source"}
     await env.routes._stage_complete_run(prototype_id=pid, workspace_id="app", virtual_fs=vfs)
