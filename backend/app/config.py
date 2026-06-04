@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     # the soft cap). Env-overridable via DESIGN_AGENT_HARD_CAP_USD; never lower
     # below $1.52 (would catch legit runs).
     design_agent_hard_cap_usd: float = 2.00
+    # Vite build budget for a prototype gen (P6-21). Default 120s — the typical
+    # scaffold builds in ~5-15s, but a cold node start, a large single-file emit,
+    # or a busy host (esp. the colder prod EC2 build host) can exceed the prior
+    # hardcoded 60s and floor an otherwise-valid build. Env-overridable per
+    # environment via DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS. Read at call-time
+    # in design_agent/storage.py:_vite_build_sync so it stays tunable + testable.
+    design_agent_vite_build_timeout_seconds: int = 120
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 

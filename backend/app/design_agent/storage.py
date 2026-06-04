@@ -52,10 +52,13 @@ logger = logging.getLogger(__name__)
 
 _SIGNED_URL_TTL_SECONDS = 60 * 60 * 24  # 24h — long enough for a demo session,
 #                                         short enough a leaked URL expires soon.
-_VITE_BUILD_TIMEOUT_SECONDS = 60        # build budget — Vite scaffold ~5-15s typical.
+# Vite build budget — Vite scaffold ~5-15s typical. The budget is env-configurable
+# (P6-21): the single source of truth is settings.design_agent_vite_build_timeout_seconds
+# (default 120s, env DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS), read at CALL-TIME inside
+# _vite_build_sync so it stays tunable per environment and monkeypatchable in tests.
 _TSC_TIMEOUT_SECONDS = 60               # P3-15 — runtime-break type-check budget;
-#                                         mirrors the vite budget (tsc --noEmit on the
-#                                         small scaffold is a few seconds; no second knob).
+#                                         tsc --noEmit on the small scaffold is a few
+#                                         seconds; separate knob, not env-configurable.
 
 # prototype-runtime/ sits at the repo root. This file is at
 # backend/app/design_agent/storage.py → parents are [design_agent, app, backend,
@@ -118,8 +121,9 @@ async def vite_build(virtual_fs: dict[str, str]) -> dict[str, str]:
 
     Raises:
         FileNotFoundError: `prototype-runtime/` is missing.
-        ViteBuildError: non-zero exit (stderr tail in the message), 60s timeout,
-            or a build that produced no dist/.
+        ViteBuildError: non-zero exit (stderr tail in the message), a build that
+            exceeds the configured timeout (settings.design_agent_vite_build_timeout_seconds,
+            default 120s), or a build that produced no dist/.
     """
     if not (_RUNTIME_ROOT / "package.json").exists():
         raise FileNotFoundError(
@@ -130,6 +134,10 @@ async def vite_build(virtual_fs: dict[str, str]) -> dict[str, str]:
 
 
 def _vite_build_sync(runtime_root: Path, virtual_fs: dict[str, str]) -> dict[str, str]:
+    # P6-21 — read the build budget at CALL-TIME (not import-time) so it stays
+    # tunable per environment and monkeypatchable in tests. Single source of truth
+    # is config.py (default 120s); env override DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS.
+    timeout_s = settings.design_agent_vite_build_timeout_seconds
     with tempfile.TemporaryDirectory(prefix="design-agent-build-") as build_dir:
         build_path = Path(build_dir)
         _copy_scaffold(runtime_root, build_path)
@@ -145,12 +153,12 @@ def _vite_build_sync(runtime_root: Path, virtual_fs: dict[str, str]) -> dict[str
                 cwd=str(build_path),
                 capture_output=True,
                 text=True,
-                timeout=_VITE_BUILD_TIMEOUT_SECONDS,
+                timeout=timeout_s,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
             raise ViteBuildError(
-                f"vite build timed out after {_VITE_BUILD_TIMEOUT_SECONDS}s"
+                f"vite build timed out after {timeout_s}s"
             ) from exc
         if result.returncode != 0:
             stderr_tail = (result.stderr or "")[-1000:]
