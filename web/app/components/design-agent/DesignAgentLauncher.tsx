@@ -197,7 +197,7 @@ export function DesignAgentLauncherView({
   renderDrawer = defaultRenderDrawer,
 }: LauncherViewProps) {
   return (
-    <div className="prd-design-launcher" contentEditable={false}>
+    <div className="design-agent-surface prd-design-launcher" contentEditable={false}>
       <button
         type="button"
         className="btn btn-accent"
