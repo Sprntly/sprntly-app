@@ -610,3 +610,86 @@
   border: 9px solid var(--ink);
   box-shadow: var(--shadow-lg);
 }
+
+/* ── Passcode gate states (PasscodeGate / UX-8 / P6-18) ───────────────────
+ * Styles the public passcode-mode share gate. NEW here — P6-11 styled the
+ * da-public-loading/da-public-error states but NOT the passcode-gate classes,
+ * which had zero matching rules (unstyled flash for a first-time recipient).
+ *
+ * The gate <form> carries BOTH `design-agent-surface` and `da-passcode-gate`
+ * on the SAME element (an early return that is NOT under P6-11's main-return
+ * wrapper, so this ticket adds `design-agent-surface` to the form root). The
+ * same-element selector `.design-agent-surface.da-passcode-gate` (no space) is
+ * therefore required for the root, in addition to the descendant form — this
+ * mirrors P6-11's dual selector for `.da-public-loading`/`.da-public-error`.
+ * The child fields are descendants of the form, so the descendant selector
+ * suffices for them.
+ *
+ * Token-only: reuses the global `.input` / `.btn-accent` look via the same
+ * Lightfield tokens (NOT redeclaring `:root`/`.btn*`/`.input` — those stay
+ * global per the file header). No literal colour. */
+.design-agent-surface.da-passcode-gate,
+.design-agent-surface .da-passcode-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 360px;
+  margin: 48px auto;
+  padding: 28px 24px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+}
+.design-agent-surface .da-passcode-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.design-agent-surface .da-passcode-input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 14px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.design-agent-surface .da-passcode-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.design-agent-surface .da-passcode-error {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+.design-agent-surface .da-passcode-submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--surface-2);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.design-agent-surface .da-passcode-submit:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+.design-agent-surface .da-passcode-submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
