@@ -29,6 +29,7 @@ import {
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
+import { SlackChannelPicker } from "./SlackChannelPicker"
 
 // ─────────────────────────── Pure View ───────────────────────────
 
@@ -246,6 +247,8 @@ async function callDisconnect(
     await connectorsApi.disconnectHubspot(workspaceId)
   } else if (providerId === "fireflies") {
     await connectorsApi.disconnectFireflies(workspaceId)
+  } else if (providerId === "slack") {
+    await connectorsApi.disconnectSlack(workspaceId)
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }
@@ -318,9 +321,9 @@ export function ConfigureConnectorDrawer({
     }
   }, [providerId, workspaceId, onDisconnected, onClose])
 
-  // Slot: provider-specific config component. The folder picker reads
-  // and writes through workspace-scoped endpoints, so suppress it until
-  // the workspace is loaded — better than mounting it and watching it
+  // Slot: provider-specific config component. The pickers read + write
+  // through workspace-scoped endpoints, so suppress them until the
+  // workspace is loaded — better than mounting them and watching them
   // 422 on every request.
   let slot: React.ReactNode = null
   if (providerId === "google_drive" && workspaceId) {
@@ -331,6 +334,15 @@ export function ConfigureConnectorDrawer({
         selectedFolderId={connection?.config?.folder_id}
         selectedFolderName={connection?.config?.folder_name}
         onSelected={onDisconnected /* reuse the reload callback */}
+      />
+    )
+  } else if (providerId === "slack" && workspaceId) {
+    slot = (
+      <SlackChannelPicker
+        workspaceId={workspaceId}
+        savedChannelId={connection?.config?.channel_id as string | undefined}
+        savedChannelName={connection?.config?.channel_name as string | undefined}
+        onSaved={onDisconnected /* reuse the reload callback */}
       />
     )
   }

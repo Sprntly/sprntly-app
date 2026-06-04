@@ -362,7 +362,15 @@ export type ConnectionSummary = {
   google_email: string | null
   account_label?: string | null
   scopes: string
-  config: { dataset?: string; folder_id?: string; folder_name?: string }
+  config: {
+    // Google Drive
+    dataset?: string
+    folder_id?: string
+    folder_name?: string
+    // Slack
+    channel_id?: string
+    channel_name?: string
+  }
   last_sync_at: string | null
   last_sync_error: string | null
   created_at: string
@@ -392,6 +400,14 @@ export type DriveFolderBrowse = {
   current: { id: string; name: string }
   parent: { id: string; name: string } | null
   folders: { id: string; name: string }[]
+}
+
+export type SlackChannel = {
+  id: string
+  name: string
+  is_private: boolean
+  is_member: boolean
+  is_archived: boolean
 }
 
 // Multitenant: every connector method requires workspaceId (the active
@@ -489,6 +505,25 @@ export const connectorsApi = {
   disconnectHubspot: (workspaceId: string) =>
     api.delete<{ deleted: true; provider: string }>(
       `/v1/connectors/hubspot${_qsWorkspace(workspaceId)}`,
+    ),
+
+  // ---- Slack ---------------------------------------------------------------
+  disconnectSlack: (workspaceId: string) =>
+    api.delete<{ deleted: true; provider: string }>(
+      `/v1/connectors/slack${_qsWorkspace(workspaceId)}`,
+    ),
+  listSlackChannels: (workspaceId: string) =>
+    api.get<{ channels: SlackChannel[] }>(
+      `/v1/connectors/slack/channels${_qsWorkspace(workspaceId)}`,
+    ),
+  setSlackConfig: (
+    workspaceId: string,
+    channelId: string,
+    channelName?: string,
+  ) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+      `/v1/connectors/slack/config${_qsWorkspace(workspaceId)}`,
+      { channel_id: channelId, channel_name: channelName },
     ),
 
   // ---- Fireflies (API key, not OAuth) --------------------------------------
