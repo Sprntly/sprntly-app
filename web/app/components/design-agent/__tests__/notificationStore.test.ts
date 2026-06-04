@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it } from "vitest"
 import {
+  __resetPageLoadGuards,
   acknowledge,
+  getLastReplayShow,
   markCompleted,
   markPending,
+  markSeenThisLoad,
   pendingCompleted,
+  recordReplayShow,
+  shouldAckOnClear,
+  wasSeenThisLoad,
 } from "../notificationStore"
 
 /**
@@ -49,6 +55,7 @@ function removeWindow() {
 
 afterEach(() => {
   removeWindow()
+  __resetPageLoadGuards()
 })
 
 describe("notificationStore", () => {
@@ -106,5 +113,84 @@ describe("notificationStore", () => {
       "{not json",
     )
     expect(pendingCompleted()).toEqual([])
+  })
+})
+
+// ─── P6-05: per-page-load guard + Decision-D(b) ack precision ────────────────
+
+describe("per-page-load guard (P6-05)", () => {
+  it("markSeenThisLoad / wasSeenThisLoad track ids only within a page-load", () => {
+    expect(wasSeenThisLoad(7)).toBe(false)
+    markSeenThisLoad(7)
+    expect(wasSeenThisLoad(7)).toBe(true)
+    // A distinct id is independent.
+    expect(wasSeenThisLoad(8)).toBe(false)
+  })
+
+  it("the guard does NOT remove the sessionStorage entry — only acknowledge does (AC3)", () => {
+    installStorage()
+    markCompleted(5, "ready 5")
+    markSeenThisLoad(5)
+    // Seen-this-load is in-memory only; the persisted entry survives a reload.
+    expect(pendingCompleted()).toEqual([{ prototypeId: 5, sub: "ready 5" }])
+    acknowledge(5)
+    expect(pendingCompleted()).toEqual([])
+  })
+
+  it("__resetPageLoadGuards clears the guard (simulating a reload re-show)", () => {
+    markSeenThisLoad(5)
+    expect(wasSeenThisLoad(5)).toBe(true)
+    __resetPageLoadGuards()
+    expect(wasSeenThisLoad(5)).toBe(false)
+  })
+})
+
+describe("Decision-D(b) ack-on-toast-clear precision (P6-05)", () => {
+  it("records the last replay show and acks it when its own toast clears (AC11)", () => {
+    recordReplayShow(9, "Prototype ready", "sub9")
+    expect(getLastReplayShow()).toEqual({
+      prototypeId: 9,
+      title: "Prototype ready",
+      sub: "sub9",
+    })
+    const ackId = shouldAckOnClear(
+      { title: "Prototype ready", sub: "sub9" },
+      null,
+      getLastReplayShow(),
+    )
+    expect(ackId).toBe(9)
+  })
+
+  it("does NOT ack when a competing toast (different title/sub) cleared (AC11)", () => {
+    recordReplayShow(9, "Prototype ready", "sub9")
+    expect(
+      shouldAckOnClear(
+        { title: "Something else", sub: "other" },
+        null,
+        getLastReplayShow(),
+      ),
+    ).toBeNull()
+  })
+
+  it("does NOT ack on a non-clear (prev null, or current still set, or no last show)", () => {
+    recordReplayShow(9, "Prototype ready", "sub9")
+    const last = getLastReplayShow()
+    expect(shouldAckOnClear(null, null, last)).toBeNull()
+    expect(
+      shouldAckOnClear({ title: "Prototype ready", sub: "sub9" }, { title: "a", sub: "b" }, last),
+    ).toBeNull()
+    expect(shouldAckOnClear({ title: "Prototype ready", sub: "sub9" }, null, null)).toBeNull()
+  })
+
+  it("the LAST show wins after a multi-entry replay (only the last occupies the slot)", () => {
+    recordReplayShow(1, "Prototype ready", "a")
+    recordReplayShow(2, "Prototype ready", "b")
+    // Slot holds the last show (id 2); a clear matching id 1's sub does NOT ack.
+    expect(
+      shouldAckOnClear({ title: "Prototype ready", sub: "a" }, null, getLastReplayShow()),
+    ).toBeNull()
+    expect(
+      shouldAckOnClear({ title: "Prototype ready", sub: "b" }, null, getLastReplayShow()),
+    ).toBe(2)
   })
 })
