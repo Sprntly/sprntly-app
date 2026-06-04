@@ -26,6 +26,7 @@ from app.routes import (
     connectors,
     datasets as datasets_routes,
     design_agent,
+    synthesis,
     evidence,
     health,
     prd,
@@ -158,3 +159,4 @@ app.include_router(ask.router)
 app.include_router(prd.router)
 app.include_router(evidence.router)
 app.include_router(design_agent.router)
+app.include_router(synthesis.router)

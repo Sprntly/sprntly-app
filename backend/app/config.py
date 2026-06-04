@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     anthropic_api_key: str = ""
+    openai_api_key: str = ""  # embeddings (text-embedding-3-small)
     # Design Agent uses a dedicated key (AD16) for cost attribution + per-key
     # rotation at handoff; falls back to anthropic_api_key with a startup
     # warning (see app/design_agent/client.py).
