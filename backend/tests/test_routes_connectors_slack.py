@@ -311,6 +311,273 @@ def test_disconnect_requires_membership(slack_env, monkeypatch):
     assert r.status_code == 403
 
 
+# ─────────────────────── list_channels helper ───────────────────────
+
+
+def test_list_channels_posts_with_bearer_and_correct_params(slack_env):
+    from app.connectors import slack_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {
+        "ok": True,
+        "channels": [
+            {"id": "C1", "name": "general", "is_private": False, "is_member": True},
+            {"id": "C2", "name": "design", "is_private": True, "is_member": True},
+        ],
+    }
+    with patch(
+        "app.connectors.slack_oauth.requests.get", return_value=mock_resp
+    ) as mock_get:
+        channels = slack_oauth.list_channels("xoxb-1234")
+
+    assert len(channels) == 2
+    assert channels[0] == {
+        "id": "C1",
+        "name": "general",
+        "is_private": False,
+        "is_member": True,
+        "is_archived": False,
+    }
+    call_args = mock_get.call_args
+    assert call_args.args[0] == "https://slack.com/api/conversations.list"
+    assert call_args.kwargs["headers"]["Authorization"] == "Bearer xoxb-1234"
+    params = call_args.kwargs["params"]
+    assert "public_channel" in params["types"]
+    assert "private_channel" in params["types"]
+    assert params["exclude_archived"] == "true"
+
+
+def test_list_channels_returns_empty_on_ok_false(slack_env):
+    """Slack returns 200+ok:false on token issues — treat as empty list,
+    not an exception, so the picker can render 'no channels' instead of
+    blowing up the route."""
+    from app.connectors import slack_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {"ok": False, "error": "invalid_auth"}
+    with patch("app.connectors.slack_oauth.requests.get", return_value=mock_resp):
+        assert slack_oauth.list_channels("stale-token") == []
+
+
+# ─────────────────────── post_message helper ───────────────────────
+
+
+def test_post_message_posts_to_chat_postmessage_with_bearer(slack_env):
+    from app.connectors import slack_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {
+        "ok": True,
+        "ts": "1717010000.000100",
+        "channel": "C1",
+        "message": {"text": "hello"},
+    }
+    with patch(
+        "app.connectors.slack_oauth.requests.post", return_value=mock_resp
+    ) as mock_post:
+        out = slack_oauth.post_message("xoxb-1234", channel="C1", text="hello")
+
+    assert out["ok"] is True
+    assert out["ts"] == "1717010000.000100"
+    call_args = mock_post.call_args
+    assert call_args.args[0] == "https://slack.com/api/chat.postMessage"
+    assert call_args.kwargs["headers"]["Authorization"] == "Bearer xoxb-1234"
+    body = call_args.kwargs["json"]
+    assert body == {"channel": "C1", "text": "hello"}
+
+
+def test_post_message_forwards_blocks_when_provided(slack_env):
+    from app.connectors import slack_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {"ok": True, "ts": "1.0", "channel": "C1"}
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "*hi*"}}]
+    with patch(
+        "app.connectors.slack_oauth.requests.post", return_value=mock_resp
+    ) as mock_post:
+        slack_oauth.post_message(
+            "xoxb-1234", channel="C1", text="hi", blocks=blocks
+        )
+    assert mock_post.call_args.kwargs["json"]["blocks"] == blocks
+
+
+def test_post_message_raises_400_on_ok_false(slack_env):
+    """ok:false (e.g. channel_not_found, not_in_channel) is a real
+    failure the caller needs to surface. Don't pretend it succeeded."""
+    from app.connectors import slack_oauth
+    from fastapi import HTTPException
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {"ok": False, "error": "channel_not_found"}
+    with patch("app.connectors.slack_oauth.requests.post", return_value=mock_resp):
+        with pytest.raises(HTTPException) as exc:
+            slack_oauth.post_message(
+                "xoxb-1234", channel="C-missing", text="hi"
+            )
+    assert exc.value.status_code == 400
+    assert "channel_not_found" in exc.value.detail
+
+
+# ─────────────────────── /slack/channels route ───────────────────────
+
+
+def test_channels_route_lists_channels(slack_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
+    seed_connection(
+        workspace_id=ctx.workspace_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+        label="Meridian",
+    )
+    with patch(
+        "app.routes.connectors.slack_oauth.list_channels",
+        return_value=[
+            {
+                "id": "C1",
+                "name": "general",
+                "is_private": False,
+                "is_member": True,
+                "is_archived": False,
+            },
+        ],
+    ) as mock_list:
+        r = ctx.client.get(
+            "/v1/connectors/slack/channels",
+            params={"workspace_id": ctx.workspace_id},
+        )
+    assert r.status_code == 200
+    assert r.json() == {
+        "channels": [
+            {
+                "id": "C1",
+                "name": "general",
+                "is_private": False,
+                "is_member": True,
+                "is_archived": False,
+            },
+        ],
+    }
+    mock_list.assert_called_once_with("xoxb-real")
+
+
+def test_channels_route_404_when_not_connected(slack_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
+    r = ctx.client.get(
+        "/v1/connectors/slack/channels",
+        params={"workspace_id": ctx.workspace_id},
+    )
+    assert r.status_code == 404
+
+
+def test_channels_route_requires_membership(slack_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
+    from tests._workspace_helpers import seed_workspace
+    other_ws = seed_workspace(user_id="someone-else", slug="globex")
+    r = ctx.client.get(
+        "/v1/connectors/slack/channels",
+        params={"workspace_id": other_ws},
+    )
+    assert r.status_code == 403
+
+
+# ─────────────────────── /slack/config route ───────────────────────
+
+
+def test_config_route_persists_selected_channel(slack_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
+    seed_connection(
+        workspace_id=ctx.workspace_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+        label="Meridian",
+    )
+    r = ctx.client.post(
+        "/v1/connectors/slack/config",
+        params={"workspace_id": ctx.workspace_id},
+        json={"channel_id": "C123", "channel_name": "product-launches"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["config"]["channel_id"] == "C123"
+    assert body["config"]["channel_name"] == "product-launches"
+
+    # And persisted on the connection row.
+    listed = ctx.client.get(
+        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+    ).json()
+    slack_row = next(c for c in listed["connections"] if c["provider"] == "slack")
+    assert slack_row["config"]["channel_id"] == "C123"
+    assert slack_row["config"]["channel_name"] == "product-launches"
+
+
+def test_config_route_rejects_empty_channel_id(slack_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
+    seed_connection(
+        workspace_id=ctx.workspace_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    r = ctx.client.post(
+        "/v1/connectors/slack/config",
+        params={"workspace_id": ctx.workspace_id},
+        json={"channel_id": "", "channel_name": "x"},
+    )
+    assert r.status_code == 422
+
+
+def test_config_route_404_when_not_connected(slack_env, monkeypatch):
+    ctx = workspace_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/slack/config",
+        params={"workspace_id": ctx.workspace_id},
+        json={"channel_id": "C123"},
+    )
+    assert r.status_code == 404
+
+
+def test_config_route_does_not_leak_across_workspaces(slack_env, monkeypatch):
+    """Saving config in workspace A must not be visible in workspace B,
+    even if both have Slack connected."""
+    ctx = workspace_client(monkeypatch)
+    from tests._workspace_helpers import seed_workspace
+
+    other_ws = seed_workspace(user_id=ctx.user_id, slug="globex")
+    seed_connection(
+        workspace_id=ctx.workspace_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-A"},
+    )
+    seed_connection(
+        workspace_id=other_ws,
+        provider="slack",
+        token_blob={"access_token": "xoxb-B"},
+    )
+
+    ctx.client.post(
+        "/v1/connectors/slack/config",
+        params={"workspace_id": ctx.workspace_id},
+        json={"channel_id": "C-A", "channel_name": "a-channel"},
+    )
+
+    a_listed = ctx.client.get(
+        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+    ).json()
+    b_listed = ctx.client.get(
+        "/v1/connectors", params={"workspace_id": other_ws}
+    ).json()
+
+    a_row = next(c for c in a_listed["connections"] if c["provider"] == "slack")
+    b_row = next(c for c in b_listed["connections"] if c["provider"] == "slack")
+    assert a_row["config"].get("channel_id") == "C-A"
+    assert "channel_id" not in (b_row["config"] or {})
+
+
 def test_test_endpoint_dispatches_to_team_info(slack_env, monkeypatch):
     """The generic POST /{provider}/test endpoint routes Slack to
     slack_oauth.fetch_team_info — the canonical "is the bot token still

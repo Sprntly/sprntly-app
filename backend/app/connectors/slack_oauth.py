@@ -47,8 +47,13 @@ SLACK_PROVIDER = "slack"
 SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_TEAM_INFO_URL = "https://slack.com/api/team.info"
+SLACK_CONVERSATIONS_LIST_URL = "https://slack.com/api/conversations.list"
+SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
+# Channel-listing cap. Slack supports up to 1000 per page; 200 is a
+# generous default for the UI picker and avoids paginating in v1.
+CHANNELS_LIST_LIMIT = 200
 
 
 def slack_configured() -> bool:
@@ -159,6 +164,103 @@ def fetch_team_info(bot_access_token: str) -> dict[str, Any]:
         logger.warning("Slack team.info returned ok=false: %s", body.get("error"))
         return {}
     return body.get("team") or {}
+
+
+def list_channels(bot_access_token: str) -> list[dict[str, Any]]:
+    """List channels the bot can see — public + any private channels the
+    bot has been added to. Used to back the channel picker in the
+    Configure drawer.
+
+    Returns a trimmed shape: [{id, name, is_private, is_member, is_archived}].
+    Archived channels are filtered out. Returns [] if the call fails
+    (network, ok:false, etc.) — the caller decides whether that's a
+    user-visible error."""
+    resp = requests.get(
+        SLACK_CONVERSATIONS_LIST_URL,
+        headers={"Authorization": f"Bearer {bot_access_token}"},
+        params={
+            # Both public + private. private_channel hits work only for
+            # channels the bot has joined; that's the intended UX.
+            "types": "public_channel,private_channel",
+            "exclude_archived": "true",
+            "limit": str(CHANNELS_LIST_LIMIT),
+        },
+        timeout=15,
+    )
+    if not resp.ok:
+        logger.warning(
+            "Slack conversations.list failed: %s %s",
+            resp.status_code,
+            resp.text[:200],
+        )
+        return []
+    body = resp.json() or {}
+    if not body.get("ok"):
+        logger.warning(
+            "Slack conversations.list returned ok=false: %s",
+            body.get("error"),
+        )
+        return []
+    out: list[dict[str, Any]] = []
+    for ch in body.get("channels") or []:
+        out.append(
+            {
+                "id": ch.get("id"),
+                "name": ch.get("name"),
+                "is_private": bool(ch.get("is_private")),
+                "is_member": bool(ch.get("is_member")),
+                "is_archived": bool(ch.get("is_archived")),
+            }
+        )
+    return out
+
+
+def post_message(
+    bot_access_token: str,
+    *,
+    channel: str,
+    text: str,
+    blocks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Post a single message to a Slack channel. Used by the Comms Agent
+    (briefs, asks, alerts) — anywhere Sprntly needs to surface output in
+    Slack.
+
+    `channel` is the channel id (e.g. "C0123456789"), not the name.
+    `text` is the plain-text fallback that always renders even when
+    `blocks` is set (Slack requires it for accessibility + notifications).
+
+    On Slack-side rejection (ok:false), raises HTTPException(400) so the
+    caller surfaces a real error instead of silently dropping the message."""
+    body: dict[str, Any] = {"channel": channel, "text": text}
+    if blocks:
+        body["blocks"] = blocks
+    resp = requests.post(
+        SLACK_POST_MESSAGE_URL,
+        headers={
+            "Authorization": f"Bearer {bot_access_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json=body,
+        timeout=15,
+    )
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = resp.json() or {}
+    except ValueError:
+        parsed = {}
+    if not resp.ok or not parsed.get("ok"):
+        logger.warning(
+            "Slack chat.postMessage failed: http=%s ok=%s err=%s",
+            resp.status_code,
+            parsed.get("ok"),
+            parsed.get("error"),
+        )
+        raise HTTPException(
+            400,
+            f"Slack rejected the message: {parsed.get('error') or 'unknown error'}",
+        )
+    return parsed
 
 
 def token_payload_to_store(token_json: dict[str, Any]) -> str:

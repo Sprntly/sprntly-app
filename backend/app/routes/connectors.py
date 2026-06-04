@@ -764,6 +764,67 @@ def slack_disconnect(
     return {"deleted": True, "provider": slack_oauth.SLACK_PROVIDER}
 
 
+def _slack_bot_token(workspace_id: str) -> tuple[str, dict]:
+    """Decrypt and return (bot_token, connection_row) for the workspace's
+    Slack connection. 404 if not connected, 500 if the token is unreadable."""
+    row = db.get_connection(workspace_id, slack_oauth.SLACK_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Slack is not connected")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except (TokenEncryptionError, json.JSONDecodeError) as e:
+        raise HTTPException(500, "Slack token unreadable") from e
+    bot_token = token_json.get("access_token")
+    if not bot_token:
+        raise HTTPException(500, "Slack token has no bot access_token")
+    return bot_token, row
+
+
+@router.get("/slack/channels")
+def slack_list_channels(
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    """List channels the bot can post into. Backs the channel-picker
+    in the Configure drawer."""
+    token, _row = _slack_bot_token(workspace_id)
+    return {"channels": slack_oauth.list_channels(token)}
+
+
+class SlackConfigIn(BaseModel):
+    channel_id: str
+    channel_name: str | None = None
+
+    def model_post_init(self, _context) -> None:
+        if not self.channel_id or not self.channel_id.strip():
+            raise ValueError("channel_id cannot be empty")
+
+
+@router.post("/slack/config")
+def slack_save_config(
+    body: SlackConfigIn,
+    workspace_id: str = Depends(require_workspace_membership),
+):
+    """Save the user's selected notification-target channel. Stored on
+    the connection row's config so the Comms Agent can read it at
+    post-time without a separate lookup table."""
+    row = db.get_connection(workspace_id, slack_oauth.SLACK_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Slack is not connected")
+    patch: dict = {"channel_id": body.channel_id.strip()}
+    if body.channel_name:
+        patch["channel_name"] = body.channel_name.strip()
+    updated = db.patch_connection_config(
+        workspace_id, slack_oauth.SLACK_PROVIDER, patch
+    )
+    config: dict = {}
+    if updated:
+        try:
+            config = json.loads(updated.get("config_json") or "{}")
+        except (TypeError, ValueError):
+            config = {}
+    return {"ok": True, "config": config}
+
+
 # ─────────────────────── Fireflies (API key) ───────────────────────
 #
 # Commit J. Fireflies doesn't expose self-serve OAuth — auth is a user-
