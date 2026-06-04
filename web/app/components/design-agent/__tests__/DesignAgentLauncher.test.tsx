@@ -7,6 +7,7 @@ import {
   failureFromGeneration,
   pendingKey,
   pollUntilAdvanced,
+  refreshShareTokenStep,
   resultFromGeneration,
   type LauncherDrawerProps,
 } from "../DesignAgentLauncher"
@@ -510,6 +511,99 @@ describe("IterateComposer + ClarifyingQuestionSurface stay full-width below the 
     const iterate = children[iterateIdx]
     expect((iterate.props as { prototypeId: number }).prototypeId).toBe(7)
     expect((iterate.props as { isComplete: boolean }).isComplete).toBe(false)
+  })
+})
+
+// ─── P6-20 (#14): share-success → single-shot re-seed → CommentsPanel mounts ──
+
+describe("refreshShareTokenStep — share-success single-shot re-seed (AC3)", () => {
+  it("resolves on the FIRST get with the live token even though bundle_url is unchanged (test_share_only_repoll_resolves_without_bundle_advance)", async () => {
+    // A bare Share changes NEITHER bundle_url NOR pending_question, so
+    // `pollUntilAdvanced` would hang. The share endpoint sets share_token
+    // synchronously, so a single get() of the same id returns the live token.
+    const get = vi.fn(async () =>
+      rec({ id: 7, bundle_url: "SAME", share_token: "tok-new" }),
+    )
+    const fresh = await refreshShareTokenStep(7, { get })
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(get).toHaveBeenCalledWith(7)
+    expect(fresh?.share_token).toBe("tok-new")
+    expect(fresh?.bundle_url).toBe("SAME") // no bundle advance required
+  })
+
+  it("returns null when there is no current prototype id — no fetch", async () => {
+    const get = vi.fn()
+    const fresh = await refreshShareTokenStep(null, { get })
+    expect(fresh).toBeNull()
+    expect(get).not.toHaveBeenCalled()
+  })
+
+  it("returns null (silent) when the re-fetch fails — the local share link still stands (AC6/AC7)", async () => {
+    const get = vi.fn(async () => {
+      throw new Error("network boom")
+    })
+    const fresh = await refreshShareTokenStep(7, { get })
+    expect(fresh).toBeNull()
+  })
+})
+
+describe("share-success → launcher refresh mounts CommentsPanel (AC3/AC4, #14 regression)", () => {
+  const base: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/index.html",
+    error: null,
+    is_complete: false,
+    share_mode: "private",
+    share_token: null,
+  }
+
+  /** Read the `comments` slot the launcher passes to <PostGenerationResult>. */
+  function commentsSlot(
+    over: Partial<Parameters<typeof DesignAgentLauncherView>[0]> = {},
+  ): React.ReactElement | null {
+    const pgr = viewChildren(over).find((c) => c.type === PostGenerationResult)
+    expect(pgr).toBeTruthy()
+    return (pgr!.props as { comments?: React.ReactNode })
+      .comments as React.ReactElement | null
+  }
+
+  it("a share-success re-poll advances result null→token (same id) → CommentsPanel mounts, no re-mount (test_share_success_triggers_launcher_refresh_mounts_comments)", async () => {
+    // BEFORE the Share: share_token is null → the gate holds the comments node
+    // closed (exactly the stuck state #14 reports).
+    expect(commentsSlot({ result: { ...base, share_token: null } })).toBeFalsy()
+
+    // The share-success single-shot re-poll returns the SAME id with a live token.
+    const get = vi.fn(async () => ({ ...base, share_token: "tok-new" }))
+    const fresh = await refreshShareTokenStep(base.id, { get })
+    expect(fresh?.id).toBe(base.id) // same prototype id → no re-mount
+    expect(fresh?.share_token).toBe("tok-new")
+
+    // AFTER: feeding the refreshed record as `result` mounts the share-gated
+    // CommentsPanel, addressed by the new token.
+    const after = commentsSlot({ result: fresh! })
+    expect(after).toBeTruthy()
+    expect(after!.type).toBe(CommentsPanel)
+    expect((after!.props as { token: string }).token).toBe("tok-new")
+    expect((after!.props as { prototypeId: number }).prototypeId).toBe(7)
+  })
+
+  it("forwards onShared to the <PostGenerationResult> mount (test_launcher_passes_on_shared_to_post_generation_result, AC2)", () => {
+    const onShared = vi.fn()
+    const pgr = viewChildren({ result: base, onShared }).find(
+      (c) => c.type === PostGenerationResult,
+    )
+    expect(pgr).toBeTruthy()
+    expect((pgr!.props as { onShared?: unknown }).onShared).toBe(onShared)
+  })
+
+  it("does NOT alter the iterate/clarify re-poll wiring (AC5: onIterated/onAnswered still threaded)", () => {
+    // P6-20 adds a parallel share caller; the iterate/clarify forwarding is untouched.
+    const onIterated = vi.fn()
+    const children = viewChildren({ result: base, onIterated })
+    const iterate = children.find((c) => c.type === IterateComposer)
+    expect(iterate).toBeTruthy()
+    expect((iterate!.props as { onIterated?: () => void }).onIterated).toBe(onIterated)
   })
 })
 

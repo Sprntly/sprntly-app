@@ -26,7 +26,7 @@ import { GenerationErrorBanner, reasonCopy } from "./GenerationErrorBanner"
 import { CommentsPanel } from "./CommentsPanel"
 import { IterateComposer } from "./IterateComposer"
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
-import type { CommentRecord, PrototypeRecord } from "../../lib/api"
+import { designAgentApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
@@ -137,6 +137,32 @@ export async function pollUntilAdvanced(
   return null
 }
 
+/**
+ * P6-20 (#14) — share-success single-shot re-seed. A bare Share (no iterate)
+ * changes NEITHER `bundle_url` NOR `pending_question`, so `pollUntilAdvanced`
+ * would never resolve (it waits for an advance that never comes). But the share
+ * endpoint sets `share_token` synchronously before its POST returns, so there is
+ * no race to poll: a SINGLE `get()` of the same id returns the post-share record
+ * whose `share_token` is now live. The launcher sets it as `result` so the
+ * share-gated CommentsPanel mounts without a re-mount. Returns null when there is
+ * no current prototype or the fetch fails — the local `ShareMenu` token already
+ * shows the link, so a failed re-seed degrades silently (no spurious error, no
+ * unhandled rejection from the fire-and-forget `onShared` call). Pure of React
+ * (deps injected) → node-env testable, mirroring `pollUntilAdvanced`.
+ */
+export async function refreshShareTokenStep(
+  prototypeId: number | null,
+  api: Pick<typeof designAgentApi, "get"> = designAgentApi,
+): Promise<PrototypeRecord | null> {
+  if (prototypeId == null) return null
+  try {
+    const fresh = await api.get(prototypeId)
+    return fresh ?? null
+  } catch {
+    return null
+  }
+}
+
 type LauncherViewProps = DesignAgentLauncherProps & {
   open: boolean
   setOpen: (open: boolean) => void
@@ -170,6 +196,10 @@ type LauncherViewProps = DesignAgentLauncherProps & {
    *  Optional/defaulted (the surface already declares `onAnswered`; it just
    *  wasn't threaded from the launcher before). */
   onAnswered?: () => void
+  /** P6-20 (#14): forwarded to PostGenerationResult → ShareMenu — fired after a
+   *  successful Share so the container single-shot re-polls + refreshes `result`,
+   *  flipping the share-gated CommentsPanel live with no re-mount. Optional/defaulted. */
+  onShared?: (token: string | null) => void
   /** Injected in tests so the view renders without NavigationContext. */
   renderDrawer?: (props: LauncherDrawerProps) => ReactNode
 }
@@ -194,6 +224,7 @@ export function DesignAgentLauncherView({
   setApplyTarget,
   onIterated,
   onAnswered,
+  onShared,
   renderDrawer = defaultRenderDrawer,
 }: LauncherViewProps) {
   return (
@@ -248,6 +279,7 @@ export function DesignAgentLauncherView({
               />
             ) : null
           }
+          onShared={onShared}
         />
       )}
       {/* P3-14 (F9/F10): the iterate trigger surface — re-prompt always available
@@ -349,6 +381,17 @@ export function DesignAgentLauncher({
     if (fresh) setResult(fresh)
   }
 
+  // P6-20 (#14): after a bare Share (no iterate), `bundle_url` / `pending_question`
+  // do NOT change, so `pollUntilAdvanced` would never resolve. The share endpoint
+  // sets `share_token` synchronously, so single-shot re-fetch the SAME id and
+  // replace `result` → `result.share_token` goes live and the share-gated
+  // CommentsPanel mounts with no re-mount. Distinct from `refreshResult`
+  // (iterate/clarify), whose race-gate is left intact (AC5).
+  const refreshShareToken = async () => {
+    const fresh = await refreshShareTokenStep(result?.id ?? null, designAgentApi)
+    if (fresh) setResult(fresh)
+  }
+
   return (
     <DesignAgentLauncherView
       prdId={prdId}
@@ -363,6 +406,7 @@ export function DesignAgentLauncher({
       setApplyTarget={setApplyTarget}
       onIterated={refreshResult}
       onAnswered={refreshResult}
+      onShared={refreshShareToken}
       renderDrawer={renderDrawer}
     />
   )

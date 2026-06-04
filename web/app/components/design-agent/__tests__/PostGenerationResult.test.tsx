@@ -22,6 +22,7 @@ import {
   type PostGenerationResultViewProps,
   type ReseedBaseline,
 } from "../PostGenerationResult"
+import { ShareMenu } from "../ShareMenu"
 import type { PrototypeRecord } from "../../../lib/api"
 
 afterEach(() => {
@@ -231,6 +232,41 @@ describe("reseedStep — guarded local-isComplete re-seed (AC4/AC5/AC10)", () =>
     //    (false) DOES re-seed — a real prop change, not a clobber of local state.
     const advanceDiffComplete = reseedStep(baseline, "b3", true)
     expect(advanceDiffComplete.setComplete).toBe(true)
+  })
+})
+
+// ─── P6-20 (#14): forwards onShared down to <ShareMenu> ──────────────────────
+// The view is pure → call it directly and inspect the <ShareMenu> child element's
+// props (no DOM render, so the real ShareMenu is inspected as an element, not run).
+describe("PostGenerationResultView — forwards onShared to ShareMenu (P6-20 AC2)", () => {
+  function shareMenuEl(
+    over: Partial<PostGenerationResultViewProps> = {},
+  ): React.ReactElement | undefined {
+    const tree = PostGenerationResultView({
+      prototypeId: 42,
+      isComplete: false,
+      shareMode: "private",
+      shareToken: null,
+      bundleUrl: null,
+      ...over,
+    }) as React.ReactElement
+    const kids = React.Children.toArray(
+      (tree.props as { children: React.ReactNode }).children,
+    ) as React.ReactElement[]
+    return kids.find((c) => c.type === ShareMenu)
+  }
+
+  it("passes its onShared prop down to <ShareMenu> (test_post_generation_result_forwards_on_shared)", () => {
+    const onShared = vi.fn()
+    const share = shareMenuEl({ onShared })
+    expect(share).toBeTruthy()
+    expect((share!.props as { onShared?: unknown }).onShared).toBe(onShared)
+  })
+
+  it("ShareMenu receives onShared=undefined on the public-composition path (no handler supplied)", () => {
+    const share = shareMenuEl({})
+    expect(share).toBeTruthy()
+    expect((share!.props as { onShared?: unknown }).onShared).toBeUndefined()
   })
 })
 
