@@ -704,3 +704,34 @@ def test_cost_summary_emitted_even_on_error(monkeypatch, caplog):
     msg = next(r.getMessage() for r in caplog.records if r.name == TELEMETRY_LOGGER)
     assert "status=error" in msg
     assert "error_class=RuntimeError" in msg
+
+
+# ─── P7-01 regression: lock the AD15 soft-cap envelope ──────────────────────
+# These guard against the S2 ux-explore DO-NOT-COMMIT dev-hack
+# (DEFAULT_MAX_TOKENS 4096 -> 16000) ever silently riding into a commit, and
+# pin the AD2 model. They assert the working-tree module symbols directly — no
+# historical git rev is consulted (CI uses shallow clones).
+
+
+def test_default_max_tokens_is_4096():
+    """P7-01 AC1/AC3: the per-turn cap stays at 4096; fails on the 16000 hack."""
+    assert runner.DEFAULT_MAX_TOKENS == 4096
+
+
+def test_agent_loop_default_max_tokens_kwarg_is_4096():
+    """P7-01: the default ``max_tokens`` kwarg resolves to 4096.
+
+    The ticket calls this entry point ``run``; the actual public function
+    carrying ``max_tokens: int = DEFAULT_MAX_TOKENS`` (runner.py:250) is
+    ``agent_loop``. Asserting the resolved default catches both a constant
+    change and a signature override.
+    """
+    import inspect
+
+    default = inspect.signature(runner.agent_loop).parameters["max_tokens"].default
+    assert default == 4096
+
+
+def test_model_pin_is_sonnet_4_6():
+    """P7-01 AC2 / AD2 / D4: model constant stays sonnet-4-6 — no drift to 4-7."""
+    assert runner.MODEL == "claude-sonnet-4-6"
