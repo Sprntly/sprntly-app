@@ -219,11 +219,11 @@ async def extract_website_design_system(url: str) -> WebsiteDesignSystem | None:
             context = await browser.new_context()
             try:
                 page = await context.new_page()
-                # UX-EXPLORE (throwaway — REVERT): was wait_until="networkidle",
-                # which never fires on real sites with persistent connections
-                # (analytics/socket/streaming) — plotline.studio timed out at
-                # both 8s AND 20s. "load" succeeds in ~0.85s and pulls richer
-                # HTML for the sampler. Revert with the rest of the scratch edits.
+                # K1 fix: `wait_until="load"` (not `networkidle`). Real sites with
+                # persistent connections (analytics/sockets/streaming) never reach
+                # networkidle → 100% TimeoutError even at 8s/20s; `load` succeeds in
+                # ~0.85s and pulls richer HTML. Paired with the `_is_timeout`/`reason=`
+                # observability so the floor is debuggable from logs.
                 await page.goto(url, wait_until="load", timeout=_NAV_TIMEOUT_MS)
                 await _dismiss_cookie_banner(page)
                 raw = await page.evaluate(_SAMPLER_JS)
