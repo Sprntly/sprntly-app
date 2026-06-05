@@ -4,7 +4,7 @@ Fetch-friendly variant of the GET .../authorize routes — returns the
 OAuth authorize URL as JSON. The frontend calls it with a Bearer
 header and then navigates the browser to the returned URL.
 
-Multitenant: workspace_id is required on every call; the dep checks
+Multitenant: company_id is required on every call; the dep checks
 membership before minting any state.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from cryptography.fernet import Fernet
 
-from tests._workspace_helpers import workspace_client
+from tests._company_helpers import company_client
 
 
 def _reload_app_modules():
@@ -68,7 +68,6 @@ def all_oauth_env(isolated_settings, monkeypatch):
 def test_start_oauth_requires_auth(unauth_client, all_oauth_env):
     r = unauth_client.post(
         "/v1/connectors/google_drive/start-oauth",
-        params={"workspace_id": "x"},
     )
     assert r.status_code == 401
 
@@ -77,7 +76,7 @@ def test_start_oauth_requires_auth(unauth_client, all_oauth_env):
 
 
 def test_start_oauth_google_drive_returns_google_url(all_oauth_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     mock_flow = MagicMock()
     mock_flow.authorization_url.return_value = (
         "https://accounts.google.com/o/oauth2/auth?test=1",
@@ -89,7 +88,6 @@ def test_start_oauth_google_drive_returns_google_url(all_oauth_env, monkeypatch)
     ):
         r = ctx.client.post(
             "/v1/connectors/google_drive/start-oauth",
-            params={"workspace_id": ctx.workspace_id},
         )
     assert r.status_code == 200
     body = r.json()
@@ -100,11 +98,11 @@ def test_start_oauth_google_drive_returns_google_url(all_oauth_env, monkeypatch)
 def test_start_oauth_google_drive_passes_workspace_and_dataset_into_state(
     all_oauth_env, monkeypatch
 ):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     captured = {}
 
-    def fake_sign(*, workspace_id, dataset=None):
-        captured["workspace_id"] = workspace_id
+    def fake_sign(*, company_id, dataset=None):
+        captured["company_id"] = company_id
         captured["dataset"] = dataset
         return "signed-state-token"
 
@@ -125,19 +123,17 @@ def test_start_oauth_google_drive_passes_workspace_and_dataset_into_state(
     ):
         r = ctx.client.post(
             "/v1/connectors/google_drive/start-oauth",
-            params={"workspace_id": ctx.workspace_id},
             json={"dataset": "meridian"},
         )
     assert r.status_code == 200
-    assert captured["workspace_id"] == ctx.workspace_id
+    assert captured["company_id"] == ctx.company_id
     assert captured["dataset"] == "meridian"
 
 
 def test_start_oauth_figma_returns_figma_url(all_oauth_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/figma/start-oauth",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 200
     body = r.json()
@@ -146,10 +142,9 @@ def test_start_oauth_figma_returns_figma_url(all_oauth_env, monkeypatch):
 
 
 def test_start_oauth_github_returns_github_url(all_oauth_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/github/start-oauth",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 200
     body = r.json()
@@ -161,9 +156,8 @@ def test_start_oauth_github_returns_github_url(all_oauth_env, monkeypatch):
 
 
 def test_start_oauth_unknown_provider_404(all_oauth_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/notaprovider/start-oauth",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 404

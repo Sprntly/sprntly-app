@@ -1,10 +1,14 @@
 """OAuth connector storage — multitenant.
 
-Each row belongs to a workspace (`workspace_id` → `companies.id`); a
-provider can be connected once per workspace, never globally. Every
-helper requires the caller to specify which workspace they're acting
-on — there is no implicit "current workspace" fallback. Silent defaults
-are how the cross-tenant leak in this table came back the last time.
+Each row belongs to a company (`company_id` → `companies.id`); a
+provider can be connected once per company, never globally. Every
+helper requires the caller to pass the company id explicitly — there
+is no implicit "current company" fallback. Silent defaults are how the
+cross-tenant leak in this table came back the last time.
+
+Per the one-user-one-company product invariant, callers should resolve
+the company via `Depends(require_company)` and pass `company.company_id`
+into these helpers, rather than letting the client supply it.
 
 Tokens arrive Fernet-encrypted at the app layer (TOKEN_ENCRYPTION_KEY
 env var) before they ever reach the database. `account_label` is the
@@ -38,7 +42,7 @@ def _to_legacy_shape(row: dict) -> dict:
 
 def upsert_connection(
     *,
-    workspace_id: str,
+    company_id: str,
     provider: str,
     token_encrypted: str,
     scopes: str,
@@ -54,10 +58,10 @@ def upsert_connection(
     except (TypeError, ValueError):
         config_obj = {}
 
-    existing = get_connection(workspace_id, provider)
+    existing = get_connection(company_id, provider)
     now = utc_now()
     payload = {
-        "workspace_id": workspace_id,
+        "company_id": company_id,
         "provider": provider,
         "status": status,
         "google_email": google_email,
@@ -72,19 +76,19 @@ def upsert_connection(
         payload["id"] = uuid.uuid4().hex
         payload["created_at"] = now
     c.table("connections").upsert(
-        payload, on_conflict="workspace_id,provider"
+        payload, on_conflict="company_id,provider"
     ).execute()
-    row = get_connection(workspace_id, provider)
+    row = get_connection(company_id, provider)
     assert row is not None
     return row
 
 
-def get_connection(workspace_id: str, provider: str) -> dict | None:
+def get_connection(company_id: str, provider: str) -> dict | None:
     c = require_client()
     resp = (
         c.table("connections")
         .select("*")
-        .eq("workspace_id", workspace_id)
+        .eq("company_id", company_id)
         .eq("provider", provider)
         .limit(1)
         .execute()
@@ -94,24 +98,24 @@ def get_connection(workspace_id: str, provider: str) -> dict | None:
     return _to_legacy_shape(resp.data[0])
 
 
-def list_connections(workspace_id: str) -> list[dict]:
+def list_connections(company_id: str) -> list[dict]:
     c = require_client()
     resp = (
         c.table("connections")
         .select("*")
-        .eq("workspace_id", workspace_id)
+        .eq("company_id", company_id)
         .order("provider", desc=False)
         .execute()
     )
     return [_to_legacy_shape(r) for r in (resp.data or [])]
 
 
-def delete_connection(workspace_id: str, provider: str) -> bool:
+def delete_connection(company_id: str, provider: str) -> bool:
     c = require_client()
     resp = (
         c.table("connections")
         .delete()
-        .eq("workspace_id", workspace_id)
+        .eq("company_id", company_id)
         .eq("provider", provider)
         .execute()
     )
@@ -119,10 +123,10 @@ def delete_connection(workspace_id: str, provider: str) -> bool:
 
 
 def patch_connection_config(
-    workspace_id: str, provider: str, config: dict
+    company_id: str, provider: str, config: dict
 ) -> dict | None:
     """Merge keys into config (jsonb). Returns the updated row in legacy shape."""
-    existing = get_connection(workspace_id, provider)
+    existing = get_connection(company_id, provider)
     if not existing:
         return None
     current: dict = {}
@@ -135,15 +139,15 @@ def patch_connection_config(
     (
         c.table("connections")
         .update({"config": current, "updated_at": utc_now()})
-        .eq("workspace_id", workspace_id)
+        .eq("company_id", company_id)
         .eq("provider", provider)
         .execute()
     )
-    return get_connection(workspace_id, provider)
+    return get_connection(company_id, provider)
 
 
 def update_connection_tokens(
-    workspace_id: str, provider: str, token_encrypted: str
+    company_id: str, provider: str, token_encrypted: str
 ) -> None:
     c = require_client()
     (
@@ -151,14 +155,14 @@ def update_connection_tokens(
         .update(
             {"token_json_encrypted": token_encrypted, "updated_at": utc_now()}
         )
-        .eq("workspace_id", workspace_id)
+        .eq("company_id", company_id)
         .eq("provider", provider)
         .execute()
     )
 
 
 def update_connection_sync(
-    workspace_id: str,
+    company_id: str,
     provider: str,
     *,
     last_sync_at: str | None = None,
@@ -175,7 +179,7 @@ def update_connection_sync(
                 "updated_at": now,
             }
         )
-        .eq("workspace_id", workspace_id)
+        .eq("company_id", company_id)
         .eq("provider", provider)
         .execute()
     )

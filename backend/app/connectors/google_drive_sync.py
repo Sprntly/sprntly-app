@@ -116,12 +116,12 @@ def load_config(row: dict) -> dict:
 
 
 def merge_config(row: dict, patch: dict) -> dict:
-    # workspace_id comes off the row itself — the row IS the per-workspace
+    # company_id comes off the row itself — the row IS the per-company
     # connection; threading it as a separate arg would duplicate the truth.
     config = load_config(row)
     config.update(patch)
     updated_row = db.patch_connection_config(
-        row["workspace_id"], google_oauth.GOOGLE_DRIVE_PROVIDER, config
+        row["company_id"], google_oauth.GOOGLE_DRIVE_PROVIDER, config
     )
     return load_config(updated_row) if updated_row else config
 
@@ -142,7 +142,7 @@ def _refresh_credentials(row: dict):
                 "Google Drive authorization expired — disconnect and connect again."
             ) from e
         db.update_connection_tokens(
-            row["workspace_id"],
+            row["company_id"],
             google_oauth.GOOGLE_DRIVE_PROVIDER,
             encrypt_token_json(creds.to_json()),
         )
@@ -156,9 +156,9 @@ def build_drive_service(row: dict) -> Resource:
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def browse_folders(workspace_id: str, parent_id: str | None = None) -> dict:
+def browse_folders(company_id: str, parent_id: str | None = None) -> dict:
     """List child folders under parent_id (default: user's Drive root)."""
-    row = db.get_connection(workspace_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise SyncConfigError("Google Drive is not connected")
 
@@ -296,11 +296,11 @@ def download_file_content(service: Resource, meta: dict) -> tuple[str, bytes] | 
 
 def sync_google_drive(
     *,
-    workspace_id: str,
+    company_id: str,
     dataset: str | None = None,
     folder_id: str | None = None,
 ) -> SyncResult:
-    row = db.get_connection(workspace_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise SyncConfigError("Google Drive is not connected")
 
@@ -322,7 +322,7 @@ def sync_google_drive(
 
     if folder_id or dataset:
         merge_config(row, {"folder_id": fid, "dataset": slug})
-        row = db.get_connection(workspace_id, google_oauth.GOOGLE_DRIVE_PROVIDER) or row
+        row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER) or row
 
     config = load_config(row)
     mtime_map: dict[str, str] = dict(config.get("file_mtime") or {})
@@ -333,7 +333,7 @@ def sync_google_drive(
         files = list_folder_files(service, fid)
     except HttpError as e:
         msg = f"Drive API error: {e}"
-        db.update_connection_sync(workspace_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=msg)
+        db.update_connection_sync(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=msg)
         raise SyncConfigError(msg) from e
 
     for meta in files:
@@ -392,7 +392,7 @@ def sync_google_drive(
     if result.errors:
         err = f"{len(result.errors)} file(s) failed"
     db.update_connection_sync(
-        workspace_id,
+        company_id,
         google_oauth.GOOGLE_DRIVE_PROVIDER,
         last_sync_error=err,
     )

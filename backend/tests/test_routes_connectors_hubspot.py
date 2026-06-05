@@ -6,7 +6,7 @@ exchange_code_for_token, fetch_token_info, etc.) are identical across
 versions — only the URLs and introspection response shape differ.
 
 All outbound HTTP is mocked. Routes are multitenant — every authenticated
-request passes ?workspace_id=...; the membership dep + signed state
+request passes ?company_id=...; the membership dep + signed state
 ensure tokens land in the right workspace.
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from cryptography.fernet import Fernet
 
-from tests._workspace_helpers import workspace_client
+from tests._company_helpers import company_client
 
 
 def _reload_app_modules():
@@ -74,15 +74,15 @@ def test_hubspot_configured_reflects_env(hubspot_env_v3, monkeypatch):
 
 def test_sign_verify_oauth_state_round_trip(hubspot_env_v3):
     from app.connectors import hubspot_oauth
-    token = hubspot_oauth.sign_oauth_state(workspace_id="ws-x")
+    token = hubspot_oauth.sign_oauth_state(company_id="ws-x")
     payload = hubspot_oauth.verify_oauth_state(token)
     assert payload["provider"] == "hubspot"
-    assert payload["workspace_id"] == "ws-x"
+    assert payload["company_id"] == "ws-x"
 
 
 def test_verify_oauth_state_rejects_wrong_provider(hubspot_env_v3):
     from app.connectors import hubspot_oauth, figma_oauth
-    figma_state = figma_oauth.sign_oauth_state(workspace_id="ws-x")
+    figma_state = figma_oauth.sign_oauth_state(company_id="ws-x")
     from fastapi import HTTPException
     with pytest.raises(HTTPException):
         hubspot_oauth.verify_oauth_state(figma_state)
@@ -165,10 +165,9 @@ def test_v3_fetch_token_info_uses_introspect_endpoint(hubspot_env_v3):
 
 
 def test_v3_start_oauth_returns_hubspot_url(hubspot_env_v3, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/hubspot/start-oauth",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -178,9 +177,9 @@ def test_v3_start_oauth_returns_hubspot_url(hubspot_env_v3, monkeypatch):
 
 def test_v3_callback_stores_connection_with_normalised_label(hubspot_env_v3, monkeypatch):
     """End-to-end on v3."""
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import hubspot_oauth
-    state = hubspot_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = hubspot_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     mock_token = MagicMock()
     mock_token.ok = True
@@ -221,7 +220,7 @@ def test_v3_callback_stores_connection_with_normalised_label(hubspot_env_v3, mon
     assert "connected=hubspot" in r.headers["location"]
 
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()
     rows = [c for c in listed["connections"] if c["provider"] == "hubspot"]
     assert len(rows) == 1
@@ -278,9 +277,9 @@ def test_v1_fetch_token_info_uses_access_tokens_path_endpoint(hubspot_env_v1):
 
 def test_v1_callback_stores_connection(hubspot_env_v1, monkeypatch):
     """End-to-end on v1."""
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import hubspot_oauth
-    state = hubspot_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = hubspot_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     mock_token = MagicMock()
     mock_token.ok = True
@@ -311,7 +310,7 @@ def test_v1_callback_stores_connection(hubspot_env_v1, monkeypatch):
 
     assert r.status_code == 307
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()
     rows = [c for c in listed["connections"] if c["provider"] == "hubspot"]
     assert len(rows) == 1
@@ -327,18 +326,17 @@ def test_start_oauth_500_when_not_configured(isolated_settings, monkeypatch):
     monkeypatch.setenv("HUBSPOT_OAUTH_REDIRECT_URI", "")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     _reload_app_modules()
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/hubspot/start-oauth",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 500
 
 
 def test_callback_rejects_wrong_state(hubspot_env_v3, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import figma_oauth
-    wrong_state = figma_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    wrong_state = figma_oauth.sign_oauth_state(company_id=ctx.company_id)
     r = ctx.client.get(
         "/v1/connectors/hubspot/callback",
         params={"code": "x", "state": wrong_state},
@@ -348,10 +346,10 @@ def test_callback_rejects_wrong_state(hubspot_env_v3, monkeypatch):
 
 
 def test_delete_hubspot_disconnects(hubspot_env_v3, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import hubspot_oauth
 
-    state = hubspot_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = hubspot_oauth.sign_oauth_state(company_id=ctx.company_id)
     mock_token = MagicMock()
     mock_token.ok = True
     mock_token.json.return_value = {
@@ -371,18 +369,18 @@ def test_delete_hubspot_disconnects(hubspot_env_v3, monkeypatch):
         )
 
     r = ctx.client.delete(
-        "/v1/connectors/hubspot", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors/hubspot"
     )
     assert r.status_code == 200
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()
     assert not any(c["provider"] == "hubspot" for c in listed["connections"])
 
 
 def test_delete_hubspot_404_when_not_connected(hubspot_env_v3, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.delete(
-        "/v1/connectors/hubspot", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors/hubspot"
     )
     assert r.status_code == 404

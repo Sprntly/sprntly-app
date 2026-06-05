@@ -1,5 +1,5 @@
 """Tests proving each provider's signed OAuth state now carries the
-workspace_id of the workspace that initiated the flow (commit 3).
+company_id of the workspace that initiated the flow (commit 3).
 
 The callback path has no Bearer token — the user is arriving back from
 the provider, not from our app — so the signed state is the trust
@@ -34,26 +34,26 @@ PROVIDERS = [
 
 
 @pytest.mark.parametrize("name,mod,expected_provider", PROVIDERS)
-def test_state_roundtrip_carries_workspace_id(name, mod, expected_provider, isolated_settings):
-    state = mod.sign_oauth_state(workspace_id="ws-123")
+def test_state_roundtrip_carries_company_id(name, mod, expected_provider, isolated_settings):
+    state = mod.sign_oauth_state(company_id="ws-123")
     payload = mod.verify_oauth_state(state)
-    assert payload["workspace_id"] == "ws-123"
+    assert payload["company_id"] == "ws-123"
     assert payload["provider"] == expected_provider
 
 
 @pytest.mark.parametrize("name,mod,_", PROVIDERS)
-def test_sign_state_requires_workspace_id(name, mod, _, isolated_settings):
+def test_sign_state_requires_company_id(name, mod, _, isolated_settings):
     """Silent defaults are how the original cross-tenant bug came back —
-    the type system catches a missing workspace_id at the call site."""
+    the type system catches a missing company_id at the call site."""
     with pytest.raises(TypeError):
         mod.sign_oauth_state()  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize("name,mod,expected_provider", PROVIDERS)
-def test_verify_rejects_state_without_workspace_id(
+def test_verify_rejects_state_without_company_id(
     name, mod, expected_provider, isolated_settings
 ):
-    """A state JWT correctly signed but missing workspace_id (e.g. from an
+    """A state JWT correctly signed but missing company_id (e.g. from an
     old client or a forged payload) must be rejected, not silently
     accepted as a workspace-less callback."""
     from app.config import settings
@@ -64,7 +64,7 @@ def test_verify_rejects_state_without_workspace_id(
         "nonce": "x",
         "iat": now,
         "exp": now + 600,
-        # workspace_id deliberately omitted
+        # company_id deliberately omitted
     }
     # Match each provider's chosen alg.
     alg = getattr(mod, "JWT_ALG_STATE", None) or getattr(mod, "JWT_ALG", "HS256")
@@ -80,7 +80,7 @@ def test_verify_rejects_expired_state(name, mod, _, isolated_settings):
     rejected by PyJWT's `exp` check during verify."""
     from app.config import settings
 
-    state = mod.sign_oauth_state(workspace_id="ws-x")
+    state = mod.sign_oauth_state(company_id="ws-x")
     # Decode without verification, set exp to the past, re-sign.
     payload = jwt.decode(state, options={"verify_signature": False})
     payload["exp"] = int(time.time()) - 1

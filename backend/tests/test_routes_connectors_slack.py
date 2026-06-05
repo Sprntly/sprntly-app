@@ -8,7 +8,7 @@ Slack v2 specifics covered:
     must surface as 400, not 200
   - bot install — no user scopes requested
   - membership-checked routes (commit 4 multitenancy pattern)
-  - workspace_id round-trips through signed state on callback
+  - company_id round-trips through signed state on callback
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from cryptography.fernet import Fernet
 
-from tests._workspace_helpers import seed_connection, workspace_client
+from tests._company_helpers import seed_connection, company_client
 
 
 def _reload_app_modules():
@@ -64,17 +64,17 @@ def test_slack_configured_reflects_env(slack_env, monkeypatch):
 
 def test_sign_verify_oauth_state_round_trip(slack_env):
     from app.connectors import slack_oauth
-    token = slack_oauth.sign_oauth_state(workspace_id="ws-x")
+    token = slack_oauth.sign_oauth_state(company_id="ws-x")
     payload = slack_oauth.verify_oauth_state(token)
     assert payload["provider"] == "slack"
-    assert payload["workspace_id"] == "ws-x"
+    assert payload["company_id"] == "ws-x"
 
 
 def test_verify_oauth_state_rejects_wrong_provider(slack_env):
     from app.connectors import figma_oauth, slack_oauth
     from fastapi import HTTPException
 
-    figma_state = figma_oauth.sign_oauth_state(workspace_id="ws-x")
+    figma_state = figma_oauth.sign_oauth_state(company_id="ws-x")
     with pytest.raises(HTTPException):
         slack_oauth.verify_oauth_state(figma_state)
 
@@ -184,10 +184,9 @@ def test_fetch_team_info_uses_bearer_auth(slack_env):
 
 
 def test_start_oauth_slack_returns_slack_url(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/slack/start-oauth",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -201,18 +200,17 @@ def test_start_oauth_slack_500_when_not_configured(isolated_settings, monkeypatc
     monkeypatch.setenv("SLACK_OAUTH_REDIRECT_URI", "")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     _reload_app_modules()
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/slack/start-oauth",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 500
 
 
 def test_callback_stores_connection_with_team_name_label(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import slack_oauth
-    state = slack_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = slack_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     mock_resp = MagicMock()
     mock_resp.ok = True
@@ -234,7 +232,7 @@ def test_callback_stores_connection_with_team_name_label(slack_env, monkeypatch)
     assert "connected=slack" in r.headers["location"]
 
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()
     rows = [c for c in listed["connections"] if c["provider"] == "slack"]
     assert len(rows) == 1
@@ -244,10 +242,10 @@ def test_callback_stores_connection_with_team_name_label(slack_env, monkeypatch)
 
 
 def test_callback_rejects_wrong_state(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import figma_oauth
     # Figma-signed state must not be accepted by the Slack callback.
-    wrong_state = figma_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    wrong_state = figma_oauth.sign_oauth_state(company_id=ctx.company_id)
     r = ctx.client.get(
         "/v1/connectors/slack/callback",
         params={"code": "x", "state": wrong_state},
@@ -257,9 +255,9 @@ def test_callback_rejects_wrong_state(slack_env, monkeypatch):
 
 
 def test_callback_400_when_slack_returns_ok_false(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import slack_oauth
-    state = slack_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = slack_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     mock_resp = MagicMock()
     mock_resp.ok = True  # HTTP 200 with ok=false
@@ -274,41 +272,30 @@ def test_callback_400_when_slack_returns_ok_false(slack_env, monkeypatch):
 
 
 def test_delete_slack_disconnects(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real", "team_id": "T1"},
         label="Meridian",
     )
 
     r = ctx.client.delete(
-        "/v1/connectors/slack", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors/slack"
     )
     assert r.status_code == 200
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()
     assert not any(c["provider"] == "slack" for c in listed["connections"])
 
 
 def test_delete_slack_404_when_not_connected(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.delete(
-        "/v1/connectors/slack", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors/slack"
     )
     assert r.status_code == 404
-
-
-def test_disconnect_requires_membership(slack_env, monkeypatch):
-    """403 when caller isn't on the target workspace's roster."""
-    ctx = workspace_client(monkeypatch)
-    from tests._workspace_helpers import seed_workspace
-    other_ws = seed_workspace(user_id="someone-else", slug="globex")
-    r = ctx.client.delete(
-        "/v1/connectors/slack", params={"workspace_id": other_ws}
-    )
-    assert r.status_code == 403
 
 
 # ─────────────────────── list_channels helper ───────────────────────
@@ -429,9 +416,9 @@ def test_post_message_raises_400_on_ok_false(slack_env):
 
 
 def test_channels_route_lists_channels(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real"},
         label="Meridian",
@@ -450,7 +437,6 @@ def test_channels_route_lists_channels(slack_env, monkeypatch):
     ) as mock_list:
         r = ctx.client.get(
             "/v1/connectors/slack/channels",
-            params={"workspace_id": ctx.workspace_id},
         )
     assert r.status_code == 200
     assert r.json() == {
@@ -468,39 +454,26 @@ def test_channels_route_lists_channels(slack_env, monkeypatch):
 
 
 def test_channels_route_404_when_not_connected(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.get(
         "/v1/connectors/slack/channels",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 404
-
-
-def test_channels_route_requires_membership(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
-    from tests._workspace_helpers import seed_workspace
-    other_ws = seed_workspace(user_id="someone-else", slug="globex")
-    r = ctx.client.get(
-        "/v1/connectors/slack/channels",
-        params={"workspace_id": other_ws},
-    )
-    assert r.status_code == 403
 
 
 # ─────────────────────── /slack/config route ───────────────────────
 
 
 def test_config_route_persists_selected_channel(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real"},
         label="Meridian",
     )
     r = ctx.client.post(
         "/v1/connectors/slack/config",
-        params={"workspace_id": ctx.workspace_id},
         json={"channel_id": "C123", "channel_name": "product-launches"},
     )
     assert r.status_code == 200, r.text
@@ -511,7 +484,7 @@ def test_config_route_persists_selected_channel(slack_env, monkeypatch):
 
     # And persisted on the connection row.
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()
     slack_row = next(c for c in listed["connections"] if c["provider"] == "slack")
     assert slack_row["config"]["channel_id"] == "C123"
@@ -519,74 +492,35 @@ def test_config_route_persists_selected_channel(slack_env, monkeypatch):
 
 
 def test_config_route_rejects_empty_channel_id(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real"},
     )
     r = ctx.client.post(
         "/v1/connectors/slack/config",
-        params={"workspace_id": ctx.workspace_id},
         json={"channel_id": "", "channel_name": "x"},
     )
     assert r.status_code == 422
 
 
 def test_config_route_404_when_not_connected(slack_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/slack/config",
-        params={"workspace_id": ctx.workspace_id},
         json={"channel_id": "C123"},
     )
     assert r.status_code == 404
-
-
-def test_config_route_does_not_leak_across_workspaces(slack_env, monkeypatch):
-    """Saving config in workspace A must not be visible in workspace B,
-    even if both have Slack connected."""
-    ctx = workspace_client(monkeypatch)
-    from tests._workspace_helpers import seed_workspace
-
-    other_ws = seed_workspace(user_id=ctx.user_id, slug="globex")
-    seed_connection(
-        workspace_id=ctx.workspace_id,
-        provider="slack",
-        token_blob={"access_token": "xoxb-A"},
-    )
-    seed_connection(
-        workspace_id=other_ws,
-        provider="slack",
-        token_blob={"access_token": "xoxb-B"},
-    )
-
-    ctx.client.post(
-        "/v1/connectors/slack/config",
-        params={"workspace_id": ctx.workspace_id},
-        json={"channel_id": "C-A", "channel_name": "a-channel"},
-    )
-
-    a_listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
-    ).json()
-    b_listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": other_ws}
-    ).json()
-
-    a_row = next(c for c in a_listed["connections"] if c["provider"] == "slack")
-    b_row = next(c for c in b_listed["connections"] if c["provider"] == "slack")
-    assert a_row["config"].get("channel_id") == "C-A"
-    assert "channel_id" not in (b_row["config"] or {})
 
 
 def test_test_endpoint_dispatches_to_team_info(slack_env, monkeypatch):
     """The generic POST /{provider}/test endpoint routes Slack to
     slack_oauth.fetch_team_info — the canonical "is the bot token still
     valid?" check."""
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real"},
         label="Meridian",
@@ -597,7 +531,6 @@ def test_test_endpoint_dispatches_to_team_info(slack_env, monkeypatch):
     ) as mock_fetch:
         r = ctx.client.post(
             "/v1/connectors/slack/test",
-            params={"workspace_id": ctx.workspace_id},
         )
     assert r.status_code == 200
     assert "Meridian" in r.json()["account_label"]

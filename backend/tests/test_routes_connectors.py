@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet
 from google.oauth2.credentials import Credentials
 
 from app.connectors import google_oauth
-from tests._workspace_helpers import workspace_client
+from tests._company_helpers import company_client
 
 
 @pytest.fixture
@@ -38,21 +38,21 @@ def google_env(isolated_settings, monkeypatch):
 
 
 def test_list_requires_auth(unauth_client, google_env):
-    # workspace_id is required even on the listing endpoint, but a
+    # company_id is required even on the listing endpoint, but a
     # missing Authorization header still 401s first.
-    r = unauth_client.get("/v1/connectors", params={"workspace_id": "x"})
+    r = unauth_client.get("/v1/connectors")
     assert r.status_code == 401
 
 
 def test_list_empty(google_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
-    r = ctx.client.get("/v1/connectors", params={"workspace_id": ctx.workspace_id})
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get("/v1/connectors")
     assert r.status_code == 200
     assert r.json() == {"connections": []}
 
 
 def test_authorize_redirects(google_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     mock_flow = MagicMock()
     mock_flow.authorization_url.return_value = (
         "https://accounts.google.com/o/oauth2/auth?test=1",
@@ -61,7 +61,7 @@ def test_authorize_redirects(google_env, monkeypatch):
     with patch("app.routes.connectors.google_oauth.build_flow", return_value=mock_flow):
         r = ctx.client.get(
             "/v1/connectors/google-drive/authorize",
-            params={"workspace_id": ctx.workspace_id, "dataset": "acme"},
+            params={"dataset": "acme"},
             follow_redirects=False,
         )
     assert r.status_code == 307
@@ -69,8 +69,8 @@ def test_authorize_redirects(google_env, monkeypatch):
 
 
 def test_callback_stores_connection(google_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
-    state = google_oauth.sign_oauth_state(workspace_id=ctx.workspace_id, dataset="acme")
+    ctx = company_client(monkeypatch)
+    state = google_oauth.sign_oauth_state(company_id=ctx.company_id, dataset="acme")
     creds = Credentials(
         token="access",
         refresh_token="refresh",
@@ -97,7 +97,7 @@ def test_callback_stores_connection(google_env, monkeypatch):
     assert "connected=google_drive" in r.headers["location"]
 
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()
     assert len(listed["connections"]) == 1
     conn = listed["connections"][0]
@@ -108,8 +108,8 @@ def test_callback_stores_connection(google_env, monkeypatch):
 
 
 def test_disconnect(google_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
-    state = google_oauth.sign_oauth_state(workspace_id=ctx.workspace_id, dataset=None)
+    ctx = company_client(monkeypatch)
+    state = google_oauth.sign_oauth_state(company_id=ctx.company_id, dataset=None)
     creds = Credentials(
         token="access",
         refresh_token="refresh",
@@ -133,9 +133,9 @@ def test_disconnect(google_env, monkeypatch):
             params={"code": "x", "state": state},
         )
     r = ctx.client.delete(
-        "/v1/connectors/google-drive", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors/google-drive"
     )
     assert r.status_code == 200
     assert ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json() == {"connections": []}

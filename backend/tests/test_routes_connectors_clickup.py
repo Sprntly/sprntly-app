@@ -22,7 +22,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from tests._workspace_helpers import workspace_client
+from tests._company_helpers import company_client
 
 
 def _reload_app_modules():
@@ -68,15 +68,15 @@ def test_clickup_configured_reflects_env(clickup_env, monkeypatch):
 
 def test_sign_verify_oauth_state_round_trip(clickup_env):
     from app.connectors import clickup_oauth
-    token = clickup_oauth.sign_oauth_state(workspace_id="ws-x")
+    token = clickup_oauth.sign_oauth_state(company_id="ws-x")
     payload = clickup_oauth.verify_oauth_state(token)
     assert payload["provider"] == "clickup"
-    assert payload["workspace_id"] == "ws-x"
+    assert payload["company_id"] == "ws-x"
 
 
 def test_verify_oauth_state_rejects_wrong_provider(clickup_env):
     from app.connectors import clickup_oauth, figma_oauth
-    figma_state = figma_oauth.sign_oauth_state(workspace_id="ws-x")
+    figma_state = figma_oauth.sign_oauth_state(company_id="ws-x")
     from fastapi import HTTPException
     with pytest.raises(HTTPException):
         clickup_oauth.verify_oauth_state(figma_state)
@@ -149,10 +149,9 @@ def test_fetch_authenticated_user_returns_user_dict(clickup_env):
 
 
 def test_start_oauth_clickup_returns_clickup_url(clickup_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/clickup/start-oauth",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -167,18 +166,17 @@ def test_start_oauth_clickup_500_when_not_configured(isolated_settings, monkeypa
     monkeypatch.setenv("CLICKUP_OAUTH_REDIRECT_URI", "")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     _reload_app_modules()
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.post(
         "/v1/connectors/clickup/start-oauth",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 500
 
 
 def test_callback_stores_connection(clickup_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import clickup_oauth
-    state = clickup_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = clickup_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     mock_token_resp = MagicMock()
     mock_token_resp.ok = True
@@ -204,7 +202,7 @@ def test_callback_stores_connection(clickup_env, monkeypatch):
     assert "connected=clickup" in r.headers["location"]
 
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()
     rows = [c for c in listed["connections"] if c["provider"] == "clickup"]
     assert len(rows) == 1
@@ -213,9 +211,9 @@ def test_callback_stores_connection(clickup_env, monkeypatch):
 
 
 def test_callback_rejects_wrong_state(clickup_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import figma_oauth
-    wrong_state = figma_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    wrong_state = figma_oauth.sign_oauth_state(company_id=ctx.company_id)
     r = ctx.client.get(
         "/v1/connectors/clickup/callback",
         params={"code": "x", "state": wrong_state},
@@ -225,10 +223,10 @@ def test_callback_rejects_wrong_state(clickup_env, monkeypatch):
 
 
 def test_delete_clickup_disconnects(clickup_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import clickup_oauth
 
-    state = clickup_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = clickup_oauth.sign_oauth_state(company_id=ctx.company_id)
     mock_token_resp = MagicMock()
     mock_token_resp.ok = True
     mock_token_resp.json.return_value = {"access_token": "clk-token"}
@@ -246,18 +244,18 @@ def test_delete_clickup_disconnects(clickup_env, monkeypatch):
         )
 
     r = ctx.client.delete(
-        "/v1/connectors/clickup", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors/clickup"
     )
     assert r.status_code == 200
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()
     assert not any(c["provider"] == "clickup" for c in listed["connections"])
 
 
 def test_delete_clickup_404_when_not_connected(clickup_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.delete(
-        "/v1/connectors/clickup", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors/clickup"
     )
     assert r.status_code == 404

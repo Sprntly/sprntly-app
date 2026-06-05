@@ -208,10 +208,10 @@ CREATE TABLE datasets (
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Companies / company_members mirror the Supabase migrations. The
--- backend doesn't query companies directly yet, but connections.workspace_id
--- FKs into it and the workspace-membership check (commit 3) reads
--- company_members.
+-- Companies / company_members mirror the Supabase migrations.
+-- connections.company_id FKs into companies(id); require_company
+-- (auth.py) reads company_members to resolve the active tenant from
+-- the Supabase JWT.
 CREATE TABLE companies (
     id           TEXT PRIMARY KEY,
     slug         TEXT NOT NULL UNIQUE,
@@ -233,7 +233,7 @@ CREATE INDEX company_members_company_id_idx ON company_members (company_id);
 
 CREATE TABLE connections (
     id                   TEXT PRIMARY KEY,
-    workspace_id         TEXT NOT NULL
+    company_id           TEXT NOT NULL
                           REFERENCES companies (id) ON DELETE CASCADE,
     provider             TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'active',
@@ -246,9 +246,9 @@ CREATE TABLE connections (
     last_sync_error      TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (workspace_id, provider)
+    UNIQUE (company_id, provider)
 );
-CREATE INDEX connections_workspace_id_idx ON connections (workspace_id);
+CREATE INDEX connections_company_id_idx ON connections (company_id);
 
 CREATE TABLE github_installations (
     installation_id      INTEGER PRIMARY KEY,

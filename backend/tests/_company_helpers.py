@@ -1,16 +1,20 @@
-"""Shared helpers for connector route tests in the multitenancy slice
-(commit 4).
+"""Shared helpers for connector route tests post-require_company refactor.
 
-The connector routes now sit behind `require_workspace_membership`,
-which:
-  - rejects legacy demo cookies (they have no user identity)
-  - requires `workspace_id` as a query param
-  - looks up `company_members` to verify the bearer-token user is on
-    the workspace's roster
+The connector routes now sit behind `require_company`, which:
+  - rejects legacy demo cookies (no user identity)
+  - resolves the active company purely from the JWT (no client-side
+    workspace_id; one-user-one-company invariant)
+  - 403 if the user has no membership; 500 if the user has > 1 row
+    (data anomaly per the schema invariant)
 
 Helpers below give each connector test the minimum it needs to pass
-that gate: a real Supabase JWT, a seeded company, a member row, and a
-TestClient configured to send the Bearer header by default.
+that gate: a Supabase JWT for a test user, a seeded company, a
+company_members row, and a TestClient that sends the Bearer header
+by default.
+
+Naming note: this module replaces tests/_workspace_helpers.py from the
+pre-rebase shape of the slice. Same idea, new field names + no client
+workspace_id param.
 """
 from __future__ import annotations
 
@@ -46,34 +50,35 @@ def supabase_bearer(user_id: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def seed_workspace(*, user_id: str = "test-user", slug: str = "acme") -> str:
+def seed_company(*, user_id: str = "test-user", slug: str = "acme") -> str:
     """Seed a `companies` row and a `company_members` row linking
-    `user_id` as owner. Returns the workspace_id (uuid hex)."""
+    `user_id` as owner. Returns the company_id (uuid hex). Matches the
+    one-user-one-company invariant — call once per user."""
     from app.db.client import require_client
 
-    wsid = uuid.uuid4().hex
+    cid = uuid.uuid4().hex
     require_client().table("companies").insert(
-        {"id": wsid, "slug": slug, "display_name": slug.title()}
+        {"id": cid, "slug": slug, "display_name": slug.title()}
     ).execute()
     require_client().table("company_members").insert(
         {
             "id": uuid.uuid4().hex,
-            "company_id": wsid,
+            "company_id": cid,
             "user_id": user_id,
             "role": "owner",
         }
     ).execute()
-    return wsid
+    return cid
 
 
 def seed_connection(
     *,
-    workspace_id: str,
+    company_id: str,
     provider: str,
     token_blob: dict,
     label: str = "alice@co.com",
 ) -> None:
-    """Insert an already-encrypted connection row for the workspace."""
+    """Insert an already-encrypted connection row for the company."""
     import json
 
     from app import db
@@ -81,7 +86,7 @@ def seed_connection(
 
     enc = encrypt_token_json(json.dumps(token_blob))
     db.upsert_connection(
-        workspace_id=workspace_id,
+        company_id=company_id,
         provider=provider,
         token_encrypted=enc,
         scopes="",
@@ -90,27 +95,23 @@ def seed_connection(
     )
 
 
-def workspace_client(monkeypatch) -> SimpleNamespace:
+def company_client(monkeypatch) -> SimpleNamespace:
     """One-shot setup for a connector test: returns
-    `(client, workspace_id, user_id, bearer_headers)` where the client
-    already carries the Bearer header by default.
-
-    Equivalent to `_client(env)` in the pre-multitenancy tests, but
-    swaps the legacy demo cookie for a real Supabase session and seeds
-    a workspace the user is a member of.
-    """
+    `(client, company_id, user_id, headers)` where the client already
+    carries the Bearer header by default. Routes no longer take a
+    workspace_id query param — the dep resolves company from the JWT."""
     setup_supabase_auth(monkeypatch)
     import app.main as main_mod
 
     importlib.reload(sys.modules["app.main"])
 
     user_id = "test-user-" + uuid.uuid4().hex[:8]
-    workspace_id = seed_workspace(user_id=user_id)
+    company_id = seed_company(user_id=user_id)
     headers = supabase_bearer(user_id)
     client = TestClient(main_mod.app, headers=headers)
     return SimpleNamespace(
         client=client,
-        workspace_id=workspace_id,
+        company_id=company_id,
         user_id=user_id,
         headers=headers,
     )

@@ -2,7 +2,7 @@
 
 Flow:
     1. Frontend hits POST /v1/connectors/slack/start-oauth
-    2. We build a state JWT (carrying workspace_id) + return Slack's
+    2. We build a state JWT (carrying company_id) + return Slack's
        authorize URL
     3. Browser navigates to Slack's bot-install consent screen
     4. Slack redirects back to /v1/connectors/slack/callback?code=...&state=...
@@ -81,14 +81,14 @@ def authorize_url(state: str, scopes: str | None = None) -> str:
     return f"{SLACK_AUTH_URL}?{urlencode(params)}"
 
 
-def sign_oauth_state(*, workspace_id: str) -> str:
+def sign_oauth_state(*, company_id: str) -> str:
     """Mint a signed state JWT that binds the OAuth round-trip to a
-    specific workspace. The callback (which has no user session) trusts
-    only this signature to know which workspace gets the new token."""
+    specific company. The callback (which has no user session) trusts
+    only this signature to know which company gets the new token."""
     now = int(time.time())
     payload = {
         "provider": SLACK_PROVIDER,
-        "workspace_id": workspace_id,
+        "company_id": company_id,
         "nonce": uuid.uuid4().hex,
         "iat": now,
         "exp": now + STATE_TTL_SECONDS,
@@ -103,8 +103,8 @@ def verify_oauth_state(state: str) -> dict:
         raise HTTPException(400, "Invalid or expired OAuth state") from e
     if payload.get("provider") != SLACK_PROVIDER:
         raise HTTPException(400, "OAuth state provider mismatch")
-    if not payload.get("workspace_id"):
-        raise HTTPException(400, "OAuth state missing workspace_id")
+    if not payload.get("company_id"):
+        raise HTTPException(400, "OAuth state missing company_id")
     return payload
 
 

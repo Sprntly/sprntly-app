@@ -3,7 +3,7 @@
 Schema-level invariants (FK, composite unique, NOT NULL) live in
 test_db_connections_schema.py. This file proves the Python helper
 contract:
-  * every helper requires workspace_id (signature)
+  * every helper requires company_id (signature)
   * one provider can exist independently in two workspaces
   * reads/writes never cross a workspace boundary
 """
@@ -40,14 +40,14 @@ def test_upsert_and_get_roundtrip_for_one_workspace(isolated_settings, monkeypat
 
     cipher = encrypt_token_json('{"token":"t"}')
     row = db.upsert_connection(
-        workspace_id=ws,
+        company_id=ws,
         provider="google_drive",
         token_encrypted=cipher,
         scopes="drive.readonly",
         google_email="user@example.com",
         config_json='{"dataset":"acme"}',
     )
-    assert row["workspace_id"] == ws
+    assert row["company_id"] == ws
     assert row["provider"] == "google_drive"
     assert row["google_email"] == "user@example.com"
 
@@ -74,14 +74,14 @@ def test_same_provider_in_two_workspaces_does_not_collide(
     cipher = encrypt_token_json('{"token":"t"}')
 
     r1 = db.upsert_connection(
-        workspace_id=ws1,
+        company_id=ws1,
         provider="figma",
         token_encrypted=cipher,
         scopes="files:read",
         account_label="alice@acme.test",
     )
     r2 = db.upsert_connection(
-        workspace_id=ws2,
+        company_id=ws2,
         provider="figma",
         token_encrypted=cipher,
         scopes="files:read",
@@ -102,7 +102,7 @@ def test_get_is_scoped_to_workspace(isolated_settings, monkeypatch):
     cipher = encrypt_token_json('{"token":"t"}')
 
     db.upsert_connection(
-        workspace_id=ws2,
+        company_id=ws2,
         provider="figma",
         token_encrypted=cipher,
         scopes="",
@@ -121,13 +121,13 @@ def test_list_is_scoped_to_workspace(isolated_settings, monkeypatch):
     ws2 = _seed_company("globex")
     cipher = encrypt_token_json('{"token":"t"}')
     db.upsert_connection(
-        workspace_id=ws1, provider="figma", token_encrypted=cipher, scopes=""
+        company_id=ws1, provider="figma", token_encrypted=cipher, scopes=""
     )
     db.upsert_connection(
-        workspace_id=ws1, provider="github", token_encrypted=cipher, scopes=""
+        company_id=ws1, provider="github", token_encrypted=cipher, scopes=""
     )
     db.upsert_connection(
-        workspace_id=ws2, provider="figma", token_encrypted=cipher, scopes=""
+        company_id=ws2, provider="figma", token_encrypted=cipher, scopes=""
     )
 
     assert sorted(c["provider"] for c in db.list_connections(ws1)) == [
@@ -143,10 +143,10 @@ def test_delete_does_not_touch_other_workspaces(isolated_settings, monkeypatch):
     ws2 = _seed_company("globex")
     cipher = encrypt_token_json('{"token":"t"}')
     db.upsert_connection(
-        workspace_id=ws1, provider="figma", token_encrypted=cipher, scopes=""
+        company_id=ws1, provider="figma", token_encrypted=cipher, scopes=""
     )
     db.upsert_connection(
-        workspace_id=ws2, provider="figma", token_encrypted=cipher, scopes=""
+        company_id=ws2, provider="figma", token_encrypted=cipher, scopes=""
     )
 
     db.delete_connection(ws1, "figma")
@@ -161,14 +161,14 @@ def test_patch_config_is_scoped_to_workspace(isolated_settings, monkeypatch):
     ws2 = _seed_company("globex")
     cipher = encrypt_token_json('{"token":"t"}')
     db.upsert_connection(
-        workspace_id=ws1,
+        company_id=ws1,
         provider="google_drive",
         token_encrypted=cipher,
         scopes="",
         config_json='{"folder_id":"a"}',
     )
     db.upsert_connection(
-        workspace_id=ws2,
+        company_id=ws2,
         provider="google_drive",
         token_encrypted=cipher,
         scopes="",
@@ -182,7 +182,7 @@ def test_patch_config_is_scoped_to_workspace(isolated_settings, monkeypatch):
     assert db.get_connection(ws2, "google_drive")["config_json"] == '{"folder_id": "b"}'
 
 
-def test_helpers_reject_missing_workspace_id(isolated_settings):
+def test_helpers_reject_missing_company_id(isolated_settings):
     """Type-system guard rail — silent defaults are how this bug came back."""
     with pytest.raises(TypeError):
         db.get_connection("figma")  # type: ignore[call-arg]

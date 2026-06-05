@@ -1,8 +1,8 @@
 """Tests for the Figma + GitHub connector OAuth routes.
 
 All outbound HTTP (token exchange, user lookup) is mocked. Routes are
-multitenant: every authenticated request passes ?workspace_id=...,
-seeded via tests/_workspace_helpers.workspace_client.
+multitenant: every authenticated request passes ?company_id=...,
+seeded via tests/_company_helpers.company_client.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 from cryptography.fernet import Fernet
 
-from tests._workspace_helpers import seed_connection, workspace_client
+from tests._company_helpers import seed_connection, company_client
 
 
 def _reload_app_modules():
@@ -139,10 +139,9 @@ def test_refresh_access_token_posts_to_api_figma_refresh(figma_env):
 
 
 def test_figma_authorize_redirects_to_figma(figma_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.get(
         "/v1/connectors/figma/authorize",
-        params={"workspace_id": ctx.workspace_id},
         follow_redirects=False,
     )
     assert r.status_code == 307
@@ -154,9 +153,9 @@ def test_figma_authorize_redirects_to_figma(figma_env, monkeypatch):
 
 
 def test_figma_callback_stores_token(figma_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import figma_oauth
-    state = figma_oauth.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = figma_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     fake_token = {
         "access_token": "fig-access",
@@ -181,7 +180,7 @@ def test_figma_callback_stores_token(figma_env, monkeypatch):
     assert "connected=figma" in r.headers["location"]
 
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()["connections"]
     figma = next(c for c in listed if c["provider"] == "figma")
     assert figma["account_label"] == "alice@co.com"
@@ -192,7 +191,7 @@ def test_figma_callback_stores_token(figma_env, monkeypatch):
 
 
 def test_figma_callback_rejects_bad_state(figma_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.get(
         "/v1/connectors/figma/callback",
         params={"code": "abc", "state": "not.a.jwt"},
@@ -202,20 +201,20 @@ def test_figma_callback_rejects_bad_state(figma_env, monkeypatch):
 
 
 def test_figma_disconnect(figma_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="figma",
         token_blob={"access_token": "x"},
         label="alice@co.com",
     )
     r = ctx.client.delete(
-        "/v1/connectors/figma", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors/figma"
     )
     assert r.status_code == 200
     assert r.json()["deleted"] is True
     assert ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()["connections"] == []
 
 
@@ -223,10 +222,9 @@ def test_figma_disconnect(figma_env, monkeypatch):
 
 
 def test_github_authorize_redirects_to_github(github_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.get(
         "/v1/connectors/github/authorize",
-        params={"workspace_id": ctx.workspace_id},
         follow_redirects=False,
     )
     assert r.status_code == 307
@@ -237,9 +235,9 @@ def test_github_authorize_redirects_to_github(github_env, monkeypatch):
 
 
 def test_github_callback_stores_token(github_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import github_app
-    state = github_app.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = github_app.sign_oauth_state(company_id=ctx.company_id)
 
     fake_token = {
         "access_token": "gho_xxx",
@@ -262,7 +260,7 @@ def test_github_callback_stores_token(github_env, monkeypatch):
     assert "connected=github" in r.headers["location"]
 
     listed = ctx.client.get(
-        "/v1/connectors", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors"
     ).json()["connections"]
     gh = next(c for c in listed if c["provider"] == "github")
     assert gh["account_label"] == "@octocat"
@@ -270,9 +268,9 @@ def test_github_callback_stores_token(github_env, monkeypatch):
 
 
 def test_github_callback_rejects_error_payload(github_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     from app.connectors import github_app
-    state = github_app.sign_oauth_state(workspace_id=ctx.workspace_id)
+    state = github_app.sign_oauth_state(company_id=ctx.company_id)
     with patch(
         "app.routes.connectors.github_app.exchange_code_for_token",
         side_effect=lambda code: (_ for _ in ()).throw(__import__("fastapi").HTTPException(400, "GitHub token exchange error: bad_verification_code")),
@@ -286,15 +284,15 @@ def test_github_callback_rejects_error_payload(github_env, monkeypatch):
 
 
 def test_github_disconnect(github_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="github",
         token_blob={"access_token": "x"},
         label="@octocat",
     )
     r = ctx.client.delete(
-        "/v1/connectors/github", params={"workspace_id": ctx.workspace_id}
+        "/v1/connectors/github"
     )
     assert r.status_code == 200
     assert r.json()["deleted"] is True
@@ -304,18 +302,17 @@ def test_github_disconnect(github_env, monkeypatch):
 
 
 def test_figma_get_file_requires_connection(figma_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.get(
         "/v1/connectors/figma/files/abc123",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 404
 
 
 def test_figma_get_file_returns_figma_payload(figma_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="figma",
         token_blob={"access_token": "fig-access"},
     )
@@ -325,7 +322,7 @@ def test_figma_get_file_returns_figma_payload(figma_env, monkeypatch):
     ) as mock_fetch:
         r = ctx.client.get(
             "/v1/connectors/figma/files/abc123",
-            params={"workspace_id": ctx.workspace_id, "depth": 3},
+            params={"depth": 3},
         )
     assert r.status_code == 200
     assert r.json() == fake_doc
@@ -333,9 +330,9 @@ def test_figma_get_file_returns_figma_payload(figma_env, monkeypatch):
 
 
 def test_figma_get_file_styles_returns_figma_payload(figma_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="figma",
         token_blob={"access_token": "fig-access"},
     )
@@ -345,7 +342,6 @@ def test_figma_get_file_styles_returns_figma_payload(figma_env, monkeypatch):
     ) as mock_fetch:
         r = ctx.client.get(
             "/v1/connectors/figma/files/abc123/styles",
-            params={"workspace_id": ctx.workspace_id},
         )
     assert r.status_code == 200
     assert r.json() == fake_styles
@@ -356,18 +352,17 @@ def test_figma_get_file_styles_returns_figma_payload(figma_env, monkeypatch):
 
 
 def test_github_repos_requires_connection(github_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     r = ctx.client.get(
         "/v1/connectors/github/repos",
-        params={"workspace_id": ctx.workspace_id},
     )
     assert r.status_code == 404
 
 
 def test_github_repos_returns_trimmed_list(github_env, monkeypatch):
-    ctx = workspace_client(monkeypatch)
+    ctx = company_client(monkeypatch)
     seed_connection(
-        workspace_id=ctx.workspace_id,
+        company_id=ctx.company_id,
         provider="github",
         token_blob={"access_token": "gho_xxx"},
         label="@octocat",
@@ -382,7 +377,7 @@ def test_github_repos_returns_trimmed_list(github_env, monkeypatch):
     ) as mock_fetch:
         r = ctx.client.get(
             "/v1/connectors/github/repos",
-            params={"workspace_id": ctx.workspace_id, "per_page": 10},
+            params={"per_page": 10},
         )
     assert r.status_code == 200
     assert r.json() == {"repositories": fake_repos}

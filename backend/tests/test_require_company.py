@@ -38,6 +38,18 @@ def auth_env(isolated_settings, monkeypatch):
 
 def _seed_membership(db, company_id: str, user_id: str, role: str = "member",
                      row_id: str | None = None):
+    # Ensure the company exists first — the connector-multitenancy slice
+    # turned on PRAGMA foreign_keys in the fake supabase, so orphan
+    # company_members rows now violate the FK to companies(id).
+    existing = (
+        db.table("companies").select("id").eq("id", company_id).execute().data
+    )
+    if not existing:
+        db.table("companies").insert({
+            "id": company_id,
+            "slug": f"slug-{company_id}",
+            "display_name": company_id.title(),
+        }).execute()
     db.table("company_members").insert({
         "id": row_id or f"cm-{company_id}-{user_id}",
         "company_id": company_id,
