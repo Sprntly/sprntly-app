@@ -33,7 +33,7 @@ export function ApproveModal() {
   const { activeModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas } =
     useNavigation()
   const { content } = useContent()
-  // P7-05 (D3): the workspace hydration gate for the canvas resolver (AC5).
+  // The workspace hydration gate for the canvas resolver.
   const { loading: workspaceLoading } = useWorkspace()
   // UX-EXPLORE (throwaway — REVERT): local visibility for the new generate modal.
   const [generateOpen, setGenerateOpen] = useState(false)
@@ -92,8 +92,8 @@ export function ApproveModal() {
       const revealed = pendingCanvasRef.current
       setCanvasResult(revealed)
       pendingCanvasRef.current = null
-      // P7-05 (D3): push the refresh-stable canvas route as the canvas reveals,
-      // so a refresh re-resolves this prototype instead of dropping to the PRD.
+      // Push the refresh-stable canvas route as the canvas reveals, so a refresh
+      // re-resolves this prototype instead of dropping to the PRD.
       goToCanvas(revealed.id)
     }
   }, [clearTimers, goToCanvas])
@@ -150,8 +150,8 @@ export function ApproveModal() {
   const closeCanvas = useCallback(() => {
     setCanvasResult(null)
     setApplyTarget(null)
-    // P7-05 (D3): leave the canvas route so the URL and view stay consistent and
-    // the resolver does not immediately re-open the canvas. The canvas opens from
+    // Leave the canvas route so the URL and view stay consistent and the
+    // resolver does not immediately re-open the canvas. The canvas opens from
     // the approved PRD, so the PRD is its logical parent.
     if (canvasPrototypeId != null) goTo("prd")
   }, [canvasPrototypeId, goTo])
@@ -242,13 +242,12 @@ export function ApproveModal() {
     }
   }, [activeModal, prd?.prd_id])
 
-  // P7-05 (D3): refresh re-resolution. When the URL is the canvas route
-  // (`/design/{id}`) — e.g. after a page refresh while editing — re-open the
-  // canvas by fetching the prototype, instead of dropping to the empty PRD
-  // screen. Gated on workspace hydration (AC5: never resolve against an
-  // un-hydrated workspace). Records the id it resolved from the URL so the
-  // transient render during closeCanvas (route not yet updated) cannot refetch
-  // and reopen the canvas the user just closed.
+  // Refresh re-resolution. When the URL is the canvas route (`/design/{id}`) —
+  // e.g. after a page refresh while editing — re-open the canvas by fetching the
+  // prototype, instead of dropping to the empty PRD screen. Gated on workspace
+  // hydration (never resolve against an un-hydrated workspace). Records the id it
+  // resolved from the URL so the transient render during closeCanvas (route not
+  // yet updated) cannot refetch and reopen the canvas the user just closed.
   const urlResolvedIdRef = useRef<number | null>(null)
   useEffect(() => {
     const target = canvasResolveTarget(
@@ -394,8 +393,8 @@ export function ApproveModal() {
     closeModal()
     if (existing) {
       setCanvasResult(existing)
-      // P7-05 (D3): push the refresh-stable canvas route for the existing
-      // prototype too, so "View Prototype" → refresh re-opens the canvas.
+      // Push the refresh-stable canvas route for the existing prototype too, so
+      // "View Prototype" → refresh re-opens the canvas.
       goToCanvas(existing.id)
       return
     }

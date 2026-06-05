@@ -1,4 +1,4 @@
-// P7-05 (D3) — refresh-stable canvas route shell. Thin SERVER shell mirroring
+// Refresh-stable canvas route shell. Thin SERVER shell mirroring
 // web/app/p/[token]/page.tsx (and web/app/(app)/onboarding/[step]/page.tsx): a
 // server component that satisfies static export, delegating runtime behaviour to
 // a co-located client component.

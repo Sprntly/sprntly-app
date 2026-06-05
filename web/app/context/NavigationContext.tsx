@@ -34,9 +34,9 @@ interface NavigationContextType {
   currentScreen: ScreenId
   goTo: (screen: ScreenId) => void
 
-  // P7-05 (D3): canvas-ONLY refresh-stable route surface. Purely additive — the
-  // rest of this interface is unchanged. The canvas is the single deep-URL
-  // screen; everything else stays no-deep-URL.
+  // Canvas-ONLY refresh-stable route surface. Purely additive — the rest of this
+  // interface is unchanged. The canvas is the single deep-URL screen; everything
+  // else stays no-deep-URL.
   /** The prototype_id read from the canvas URL (`/design/{id}`), or null when
    *  the current path is not the canvas route. */
   canvasPrototypeId: number | null
@@ -97,8 +97,8 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
   const currentScreen = useMemo(() => screenIdFromPathname(pathname), [pathname])
-  // P7-05 (D3): the canvas prototype_id derived from the URL. null on every
-  // non-canvas path — does not affect currentScreen derivation above.
+  // The canvas prototype_id derived from the URL. null on every non-canvas path
+  // — does not affect currentScreen derivation above.
   const canvasPrototypeId = useMemo(
     () => prototypeIdFromCanvasPath(pathname),
     [pathname],
@@ -216,9 +216,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     [router],
   )
 
-  // P7-05 (D3): navigate to the refresh-stable canvas route. Pushes
-  // `/design/{id}` so a refresh re-resolves the canvas (ApproveModal's resolver
-  // reads canvasPrototypeId on mount). Layered on top of the existing local-state
+  // Navigate to the refresh-stable canvas route. Pushes `/design/{id}` so a
+  // refresh re-resolves the canvas (ApproveModal's resolver reads
+  // canvasPrototypeId on mount). Layered on top of the existing local-state
   // canvas flow — it does NOT replace it.
   const goToCanvas = useCallback(
     (prototypeId: number) => {

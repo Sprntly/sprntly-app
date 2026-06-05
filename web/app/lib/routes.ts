@@ -1,8 +1,8 @@
 import type { ScreenId } from "../types"
 
-/** P7-05 (D3): base path for the refresh-stable Design Agent canvas route. The
- *  full route carries the prototype_id (`/design/{prototype_id}`). This is the
- *  ONLY deep-URL screen in the app's otherwise no-deep-URL nav. */
+/** Base path for the refresh-stable Design Agent canvas route. The full route
+ *  carries the prototype_id (`/design/{prototype_id}`). This is the only
+ *  deep-URL screen in the app's otherwise no-deep-URL nav. */
 export const CANVAS_BASE_PATH = "/design"
 
 /** App routes (no basePath). Onboarding uses `/onboarding/[step]`. */
@@ -29,8 +29,8 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // the dormant ConnectorsScreen.tsx (see commit A note in that file).
   connectors: "/settings?section=connectors",
   sources: "/sources",
-  // P7-05 (D3): the refresh-stable canvas route. The bare base path; the
-  // id-bearing path (`/design/{prototype_id}`) is built by canvasPath() below.
+  // The refresh-stable canvas route. The bare base path; the id-bearing path
+  // (`/design/{prototype_id}`) is built by canvasPath() below.
   // pathForScreen("da-canvas") returns this base — canvas navigation goes
   // through goToCanvas(id)/canvasPath(id), never pathForScreen.
   "da-canvas": CANVAS_BASE_PATH,
@@ -46,9 +46,9 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/settings": "settings",
   "/team": "team",
   "/sources": "sources",
-  // P7-05 (D3): inverse for the canvas base path. screenIdFromPathname is left
-  // UNCHANGED — it exact-matches, so the bare "/design" resolves to "da-canvas"
-  // while the id-bearing "/design/{id}" falls through to "chat" (the canvas is a
+  // Inverse for the canvas base path. screenIdFromPathname is left UNCHANGED —
+  // it exact-matches, so the bare "/design" resolves to "da-canvas" while the
+  // id-bearing "/design/{id}" falls through to "chat" (the canvas is a
   // full-screen overlay driven by canvasResolveTarget, not by currentScreen).
   [CANVAS_BASE_PATH]: "da-canvas",
 }
@@ -74,10 +74,10 @@ export function pathForScreen(screen: ScreenId): string {
   return SCREEN_PATH[id]
 }
 
-// ── P7-05 (D3): canvas-ONLY refresh-stable route helpers ────────────────────
+// ── canvas-ONLY refresh-stable route helpers ────────────────────────────────
 // These are additive and scoped strictly to the canvas. They do NOT alter
 // normalizePathname / screenIdFromPathname / pathForScreen above — the rest of
-// the app's no-deep-URL nav is untouched (escalation boundary respected).
+// the app's no-deep-URL nav is untouched.
 
 /** Build the refresh-stable canvas path for a prototype, e.g.
  *  canvasPath(54) === "/design/54". The prototype_id is the ONLY state the
@@ -103,7 +103,7 @@ export function prototypeIdFromCanvasPath(pathname: string | null): number | nul
 /** Decide whether the canvas resolver should fetch — and which prototype_id —
  *  given the prototype_id read from the URL, whether the workspace has hydrated,
  *  and the id already mounted in the canvas. Returns the id to fetch, or null to
- *  do nothing. Gates on hydration (AC5: never resolve against an un-hydrated
+ *  do nothing. Gates on hydration (never resolve against an un-hydrated
  *  workspace) and skips a refetch when the canvas already shows that id. */
 export function canvasResolveTarget(
   routeProtoId: number | null,
