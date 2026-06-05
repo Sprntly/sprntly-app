@@ -91,7 +91,12 @@ function DaBreadcrumb({
     </nav>
   )
 }
-import { designAgentApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
+import {
+  designAgentApi,
+  withAuthRetry,
+  type CommentRecord,
+  type PrototypeRecord,
+} from "../../lib/api"
 import type { PrdSection } from "../../types/content"
 
 // UX-EXPLORE (throwaway — REVERT, CHANGE 3): a pin-anchored comment created via
@@ -1307,10 +1312,14 @@ export function PostGenerationResult({
       // UX-EXPLORE (throwaway — REVERT, CHANGE B): the authed create returns the
       // CommentRecord with the server-attributed author + created_at — mirror them
       // onto the pin so the saved row shows real identity + a relative timestamp.
-      const created = await designAgentApi.createComment(prototype.id, {
-        anchor_id: `pin-${n}`,
-        body: pin.draft.trim(),
-      })
+      // A bearer token can expire mid-interaction; retry once through the
+      // refresh so a transient 401 doesn't silently lose a saved comment.
+      const created = await withAuthRetry(() =>
+        designAgentApi.createComment(prototype.id, {
+          anchor_id: `pin-${n}`,
+          body: pin.draft.trim(),
+        }),
+      )
       setPins((prev) =>
         prev.map((p) =>
           p.n === n

@@ -21,6 +21,8 @@ import { useNavigation } from "../../context/NavigationContext"
 import {
   connectorsApi,
   designAgentApi,
+  withAuthRetry,
+  ApiError,
   type ConnectionSummary,
   type GitHubRepo,
 } from "../../lib/api"
@@ -101,13 +103,19 @@ export function GenerateModal({
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    void connectorsApi
-      .list()
+    void withAuthRetry(() => connectorsApi.list())
       .then((r) => {
         if (!cancelled) setConnections(r.connections)
       })
-      .catch(() => {
-        if (!cancelled) setConnections([])
+      .catch((err) => {
+        // A 401 here is a token-refresh race, not a real disconnect —
+        // withAuthRetry already retried once. If it still 401s, hold the
+        // last-known rows so the modal doesn't reflow and the Generate button
+        // doesn't move. Only a genuine non-auth failure clears to "Not
+        // connected".
+        if (!cancelled && !(err instanceof ApiError && err.status === 401)) {
+          setConnections([])
+        }
       })
     return () => {
       cancelled = true
@@ -122,13 +130,15 @@ export function GenerateModal({
     if (!open || !githubActive) return
     let cancelled = false
     setReposError(false)
-    void connectorsApi
-      .listGithubRepos()
+    void withAuthRetry(() => connectorsApi.listGithubRepos())
       .then((r) => {
         if (!cancelled) setRepos(r.repositories)
       })
-      .catch(() => {
-        if (!cancelled) {
+      .catch((err) => {
+        // Same token-refresh race: a transient 401 holds the last-known repo
+        // list (no "Couldn't load repos"). Only a genuine non-auth failure
+        // surfaces the error state.
+        if (!cancelled && !(err instanceof ApiError && err.status === 401)) {
           setRepos([])
           setReposError(true)
         }
