@@ -23,6 +23,7 @@ from app.prompts import (
 from app.routes import (
     ask,
     brief,
+    company,
     connectors,
     datasets as datasets_routes,
     design_agent,
@@ -164,3 +165,4 @@ app.include_router(design_agent.router)
 app.include_router(synthesis.router)
 app.include_router(ingest.router)
 app.include_router(research.router)
+app.include_router(company.router)
