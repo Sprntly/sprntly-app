@@ -101,9 +101,10 @@ def test_start_oauth_google_drive_passes_workspace_and_dataset_into_state(
     ctx = company_client(monkeypatch)
     captured = {}
 
-    def fake_sign(*, company_id, dataset=None):
+    def fake_sign(*, company_id, dataset=None, return_to=None):
         captured["company_id"] = company_id
         captured["dataset"] = dataset
+        captured["return_to"] = return_to
         return "signed-state-token"
 
     mock_flow = MagicMock()

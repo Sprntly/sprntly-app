@@ -53,19 +53,25 @@ def build_flow() -> Flow:
     )
 
 
-def sign_oauth_state(*, company_id: str, dataset: str | None = None) -> str:
+def sign_oauth_state(
+    *, company_id: str,
+    dataset: str | None = None,
+    return_to: str | None = None,
+) -> str:
     """Mint a signed state JWT that binds the OAuth round-trip to a
     specific company. The callback (which has no user session) trusts
     only this signature to know which company gets the new token.
 
     `dataset` is the legacy Drive-only field used by the folder picker;
     it's still carried for back-compat but the canonical tenant key is
-    company_id."""
+    company_id. `return_to` is an optional relative path the callback
+    redirects to instead of the default /settings?section=connectors."""
     now = int(time.time())
     payload = {
         "provider": GOOGLE_DRIVE_PROVIDER,
         "company_id": company_id,
         "dataset": dataset,
+        "return_to": return_to,
         "nonce": uuid.uuid4().hex,
         "iat": now,
         "exp": now + STATE_TTL_SECONDS,

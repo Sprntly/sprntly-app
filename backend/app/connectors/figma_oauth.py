@@ -70,14 +70,21 @@ def authorize_url(state: str, scopes: str | None = None) -> str:
     return f"{FIGMA_AUTH_URL}?{urlencode(params)}"
 
 
-def sign_oauth_state(*, company_id: str) -> str:
+def sign_oauth_state(
+    *, company_id: str, return_to: str | None = None,
+) -> str:
     """Mint a signed state JWT that binds the OAuth round-trip to a
     specific company. The callback (which has no user session) trusts
-    only this signature to know which company gets the new token."""
+    only this signature to know which company gets the new token.
+
+    `return_to` is an optional relative path (e.g. `/onboarding/4`)
+    that the callback will redirect to instead of the default
+    `/settings?section=connectors`. Validated upstream in routes."""
     now = int(time.time())
     payload = {
         "provider": FIGMA_PROVIDER,
         "company_id": company_id,
+        "return_to": return_to,
         "nonce": uuid.uuid4().hex,
         "iat": now,
         "exp": now + STATE_TTL_SECONDS,
