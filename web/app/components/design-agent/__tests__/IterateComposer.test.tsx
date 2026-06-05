@@ -485,3 +485,164 @@ describe("helpers — runEstimate / runIterate body shaping", () => {
     })
   })
 })
+
+// ---- iterate cost-confirm skip (skipCostConfirm) -----------------------------
+// The iterate path may run Submit directly, skipping the pre-flight cost-estimate
+// confirmation modal. The default (skipCostConfirm = false) keeps the modal for
+// any non-iterate caller. These tests lock that the skip is opt-in per mount and
+// that the estimate gate is otherwise untouched.
+
+describe("iterate cost-confirm skip — skipCostConfirm bypasses the estimate gate", () => {
+  it("Submit WITH skipCostConfirm runs the iteration directly and does not open the estimate modal (test_submit_with_skip_cost_confirm_does_not_open_estimate_modal)", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+
+    // Mounted with skipCostConfirm (no external runner) → Submit calls iterate
+    // directly, never estimateIterate.
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "make it blue" }),
+      skipCostConfirm: true,
+    })
+    await viewProps.onSubmit!()
+    expect(est).not.toHaveBeenCalled()
+    expect(iter).toHaveBeenCalledTimes(1)
+    expect(iter).toHaveBeenCalledWith(7, {
+      prompt: "make it blue",
+      applied_comment_id: 5,
+      mode: "execute",
+    })
+
+    // No estimate fetched → the cost-estimate modal never renders.
+    const html = renderToStaticMarkup(
+      React.createElement(IterateComposer, {
+        prototypeId: 7,
+        applyTarget: comment({ id: 5, body: "make it blue" }),
+        skipCostConfirm: true,
+      }),
+    )
+    expect(html).not.toContain('data-testid="cost-estimate-modal"')
+  })
+
+  it("Submit WITH skipCostConfirm + a shared external runner delegates to it, calling neither estimate nor iterate here (test_submit_with_skip_cost_confirm_delegates_to_external_runner)", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+    const runIterateExternal = vi.fn()
+
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "make it blue" }),
+      skipCostConfirm: true,
+      runIterateExternal,
+    })
+    await viewProps.onSubmit!()
+    // The composer hands the run to the shared runner; it does not estimate or
+    // POST iterate itself.
+    expect(runIterateExternal).toHaveBeenCalledTimes(1)
+    expect(runIterateExternal).toHaveBeenCalledWith("make it blue", 5)
+    expect(est).not.toHaveBeenCalled()
+    expect(iter).not.toHaveBeenCalled()
+  })
+
+  it("Submit WITHOUT skipCostConfirm still opens the estimate gate (test_submit_without_skip_cost_confirm_opens_estimate_modal)", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "make it blue" }),
+    })
+    await viewProps.onSubmit!()
+    // Default path: fetch the estimate, do NOT iterate from Submit.
+    expect(est).toHaveBeenCalledTimes(1)
+    expect(est).toHaveBeenCalledWith(7, { prompt: "make it blue", applied_comment_id: 5 })
+    expect(iter).not.toHaveBeenCalled()
+
+    // The on-screen estimate gate (Continue/Cancel) renders when the modal opens.
+    const html = renderView({
+      prompt: "make it blue",
+      isComplete: false,
+      mode: "reprompt",
+      showModal: true,
+      estimate: UNDER_CAP,
+    })
+    expect(html).toContain('data-testid="cost-estimate-modal"')
+    expect(html).toContain('data-testid="cost-estimate-continue"')
+  })
+
+  it("the prop default resolves to false when omitted — Submit gates by default (test_skip_cost_confirm_default_is_false)", async () => {
+    const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
+    const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)
+
+    // Omitting the prop → the default-false gated path (estimate, no direct iterate).
+    const viewProps = driveContainer({
+      prototypeId: 7,
+      applyTarget: comment({ id: 5, body: "x" }),
+    })
+    await viewProps.onSubmit!()
+    expect(est).toHaveBeenCalledTimes(1)
+    expect(iter).not.toHaveBeenCalled()
+
+    // The signature default is explicit.
+    const src = readFileSync(
+      join(process.cwd(), "app", "components", "design-agent", "IterateComposer.tsx"),
+      "utf8",
+    )
+    expect(src).toContain("skipCostConfirm = false")
+  })
+
+  it("the skipCostConfirm path carries the durable note, not a throwaway marker, in both files (test_no_ux_explore_marker_on_skip_path)", () => {
+    const DURABLE = "intentionally skips the pre-flight cost-estimate confirmation modal"
+
+    // Gather the contiguous comment lines immediately above a target source line.
+    function commentBlockAbove(lines: string[], idx: number): string {
+      const out: string[] = []
+      for (let i = idx - 1; i >= 0; i--) {
+        const t = lines[i].trim()
+        if (t === "") break
+        if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) {
+          out.unshift(
+            t
+              .replace(/^\/\*\*?/, "")
+              .replace(/^\*\/?/, "")
+              .replace(/^\/\//, "")
+              .trim(),
+          )
+        } else break
+      }
+      return out.join(" ").replace(/\s+/g, " ").trim()
+    }
+
+    // IterateComposer: the JSDoc above the prop declaration.
+    const composerSrc = readFileSync(
+      join(process.cwd(), "app", "components", "design-agent", "IterateComposer.tsx"),
+      "utf8",
+    )
+    const composerLines = composerSrc.split("\n")
+    const propIdx = composerLines.findIndex((l) => l.trim() === "skipCostConfirm?: boolean")
+    expect(propIdx).toBeGreaterThan(-1)
+    const propDoc = commentBlockAbove(composerLines, propIdx)
+    expect(propDoc).toContain(DURABLE)
+    expect(propDoc).not.toContain("UX-EXPLORE")
+
+    // ApproveModal: the comment above the prop pass on the primary canvas mount.
+    const modalSrc = readFileSync(
+      join(process.cwd(), "app", "components", "shared", "ApproveModal.tsx"),
+      "utf8",
+    )
+    const modalLines = modalSrc.split("\n")
+    const passIdx = modalLines.findIndex((l) => l.trim() === "skipCostConfirm")
+    expect(passIdx).toBeGreaterThan(-1)
+    const passDoc = commentBlockAbove(modalLines, passIdx)
+    expect(passDoc).toContain(DURABLE)
+    expect(passDoc).not.toContain("UX-EXPLORE")
+
+    // No line tying the throwaway marker to the skip path remains in either file.
+    for (const src of [composerSrc, modalSrc]) {
+      const offending = src
+        .split("\n")
+        .filter((l) => l.includes("UX-EXPLORE") && l.includes("skipCostConfirm"))
+      expect(offending).toEqual([])
+    }
+  })
+})

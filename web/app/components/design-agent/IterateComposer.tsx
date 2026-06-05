@@ -314,13 +314,13 @@ export type IterateComposerProps = {
    *  Optional/defaulted so existing callers keep type-checking; the AD14
    *  estimate→Continue→iterate flow is otherwise unchanged. */
   onIterated?: () => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE F): when true, Submit RUNS the
-   *  iteration directly — it bypasses the AD14 cost-estimate → "Continue"
-   *  cost-confirm modal entirely (no estimate fetched, no confirm step). Babajide
-   *  wants iterate-on-Submit for the reworked canvas. DEFAULTS to false so every
-   *  other caller keeps the AD14 gate. NB FOR THE TICKET: this is an INTENTIONAL
-   *  product decision that DEVIATES from AD14's cost-control gate — it must be
-   *  ticketed as an AD14 reconsideration, NOT treated as a silent removal. */
+  /**
+   * The iterate path intentionally skips the pre-flight cost-estimate
+   * confirmation modal. The per-generation soft/hard spend caps remain the
+   * guardrail, and the generate-path estimate is unchanged. The default
+   * (`skipCostConfirm = false`) preserves the confirmation modal for any
+   * non-iterate caller.
+   */
   skipCostConfirm?: boolean
   /** UX-EXPLORE (throwaway — REVERT, CHANGE A): when supplied (the reworked
    *  canvas), Submit DELEGATES the run to the host's SHARED iterate runner
@@ -411,10 +411,10 @@ export function IterateComposer({
 
   const mode: "reprompt" | "apply" = appliedCommentId != null ? "apply" : "reprompt"
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE F): the actual iterate run, shared by
-  // the AD14 modal Continue path AND the direct (skipCostConfirm) Submit path. On
-  // success it resets and hands off to the launcher's existing status/poll
-  // surface (AC5 — no self-poll).
+  // The shared iterate run, used by both the cost-confirm modal's Continue path
+  // and the direct (skipCostConfirm) Submit path. On success it resets the
+  // composer and hands off to the launcher's existing status/poll surface — the
+  // composer does not poll itself.
   async function runIterateNow() {
     setBusy(true)
     setError(null)
@@ -439,11 +439,11 @@ export function IterateComposer({
     }
   }
 
-  // Submit. UX-EXPLORE (throwaway — REVERT, CHANGE F): when `skipCostConfirm` is
-  // set (the reworked canvas), Submit RUNS the iteration directly — no estimate
-  // fetch, no cost-confirm modal (AD14 gate bypassed; flagged as a product
-  // decision, NOT a silent removal). Otherwise the original AD14 path stands:
-  // fetch the estimate and open the modal — never calls iterate from here.
+  // Submit. When `skipCostConfirm` is set, Submit runs the iteration directly,
+  // intentionally skipping the pre-flight cost-estimate confirmation modal; the
+  // per-generation soft/hard spend caps remain the guardrail. Otherwise the
+  // default path stands: fetch the estimate and open the confirmation modal —
+  // Submit never calls iterate from here.
   async function handleSubmit() {
     if (locked) return // F14 defense in depth (the locked view has no Submit)
     if (!prompt.trim()) return

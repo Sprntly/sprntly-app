@@ -349,10 +349,11 @@ export function ApproveModal() {
               applyTarget={applyTarget}
               onClearApply={() => setApplyTarget(null)}
               onIterated={refreshCanvas}
-              // UX-EXPLORE (throwaway — REVERT, CHANGE F): Submit runs the
-              // iteration directly — skips the AD14 cost-estimate/confirm modal.
-              // Intentional product decision (flagged for an AD14 reconsideration
-              // ticket, NOT a silent removal of the cost gate).
+              // The iterate path intentionally skips the pre-flight cost-estimate
+              // confirmation modal. The per-generation soft/hard spend caps remain
+              // the guardrail, and the generate-path estimate is unchanged. The
+              // default (`skipCostConfirm = false`) preserves the confirmation
+              // modal for any non-iterate caller.
               skipCostConfirm
               // UX-EXPLORE (throwaway — REVERT, CHANGE A): Submit DELEGATES to the
               // shared runner (single fixed iterate path with left-panel activity
