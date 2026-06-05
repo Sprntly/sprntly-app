@@ -4,7 +4,7 @@ POST /v1/ingest/{provider}/sync — tenant-scoped (require_company). Reads the
 stored connection, decrypts the credential, runs the provider's puller, and
 routes the records through the generic extractor into the KG.
 
-Connections are company-scoped (Martin's multitenancy, #136).
+Connections are company-scoped (one row per company+provider).
 """
 from __future__ import annotations
 

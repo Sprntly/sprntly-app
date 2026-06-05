@@ -24,6 +24,7 @@ from app.graph.gateway import llm_call
 from app.graph.types import Entity, Relationship
 from app.prompts import BRIEF_SCHEMA_VERSION
 from app.synthesis.convergence import ThemeConvergence, compute_convergence
+from app.synthesis.delivery import deliver_brief_to_slack
 
 logger = logging.getLogger(__name__)
 
@@ -209,4 +210,10 @@ def run_synthesis(
         "_schema_version": BRIEF_SCHEMA_VERSION,
     }
     save_brief(dataset_slug, week_label, brief, schema_version=BRIEF_SCHEMA_VERSION)
+    delivery = deliver_brief_to_slack(enterprise_id, brief)
+    if not delivery.get("delivered") and delivery.get("reason") not in (
+        "slack_not_connected", "no_channel_configured"
+    ):
+        logger.warning("brief slack delivery: %s", delivery)
+    brief["_slack_delivery"] = delivery
     return brief
