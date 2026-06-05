@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.db.briefs import save_brief
+from app.kpi_tree import load_kpi_tree
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
@@ -120,10 +121,16 @@ def run_synthesis(
         )
     cands = convergence[:MAX_CANDIDATES]
 
+    tree = load_kpi_tree(enterprise_id)
+    strategic = (
+        "STRATEGIC CONTEXT — the company's KPI tree. Weigh candidates by how "
+        "directly they move these metrics (north star first, then by weight):\n"
+        + tree.render_for_prompt() + "\n\n"
+    ) if tree else ""
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="rank_brief_insights",
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
-        input=_candidates_payload(cands), json_schema=_BRIEF_SCHEMA,
+        input=strategic + _candidates_payload(cands), json_schema=_BRIEF_SCHEMA,
     )
     payload = result.output
     insights = payload.get("insights", [])[:MAX_INSIGHTS]
