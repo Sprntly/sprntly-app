@@ -168,6 +168,7 @@ describe("runSelectMode — onShared fire (P6-20 #14)", () => {
     await runSelectMode({
       prototypeId: 7,
       next: "public",
+      current: "private",
       passcode: "",
       api: { share },
       ...s,
@@ -192,6 +193,7 @@ describe("runSelectMode — onShared fire (P6-20 #14)", () => {
     await runSelectMode({
       prototypeId: 7,
       next: "private",
+      current: "public",
       passcode: "",
       api: { share },
       ...setters(),
@@ -208,6 +210,7 @@ describe("runSelectMode — onShared fire (P6-20 #14)", () => {
     await runSelectMode({
       prototypeId: 7,
       next: "public",
+      current: "private",
       passcode: "",
       api: { share },
       ...s,
@@ -226,6 +229,7 @@ describe("runSelectMode — onShared fire (P6-20 #14)", () => {
     await runSelectMode({
       prototypeId: 7,
       next: "passcode",
+      current: "public",
       passcode: "",
       api: { share },
       ...s,
@@ -242,9 +246,105 @@ describe("runSelectMode — onShared fire (P6-20 #14)", () => {
       .mockResolvedValue({ prototype_id: 7, share_mode: "public", share_token: "tok-1" })
     const s = setters()
     await expect(
-      runSelectMode({ prototypeId: 7, next: "public", passcode: "", api: { share }, ...s }),
+      runSelectMode({
+        prototypeId: 7,
+        next: "public",
+        current: "private",
+        passcode: "",
+        api: { share },
+        ...s,
+      }),
     ).resolves.toBeUndefined()
     expect(s.setToken).toHaveBeenCalledWith("tok-1")
+  })
+})
+
+// ─── P6-22: runSelectMode optimistic mode select + revert (AC4) ──────────────
+// The mode is set BEFORE the api.share await so a click/arrow selection
+// registers immediately; on rejection it reverts to `current`. The token stays
+// strictly server-confirmed (set only AFTER the await). These assert the helper
+// logic in the reliable node harness; the jsdom sibling file covers the DOM.
+describe("runSelectMode — optimistic select + revert (P6-22 AC4)", () => {
+  function setters() {
+    return {
+      setMode: vi.fn(),
+      setToken: vi.fn(),
+      setBusy: vi.fn(),
+      setError: vi.fn(),
+    }
+  }
+
+  it("sets mode optimistically BEFORE api.share resolves; token stays post-await (Regression — fails on unfixed code)", async () => {
+    // Regression: unfixed `runSelectMode` only calls setMode AFTER the await on
+    // success, so before the deferred resolves setMode is never called. The
+    // optimistic fix calls setMode(next) up-front while the token is withheld.
+    let resolveShare: (v: {
+      prototype_id: number
+      share_mode: string
+      share_token: string | null
+    }) => void = () => {}
+    const share = vi.fn(
+      () =>
+        new Promise<{ prototype_id: number; share_mode: string; share_token: string | null }>(
+          (res) => {
+            resolveShare = res
+          },
+        ),
+    )
+    const s = setters()
+    const pending = runSelectMode({
+      prototypeId: 7,
+      next: "public",
+      current: "private",
+      passcode: "",
+      api: { share },
+      ...s,
+    })
+    // Optimistic: mode already reflected, token NOT yet set (server-confirmed).
+    expect(s.setMode).toHaveBeenCalledWith("public")
+    expect(s.setToken).not.toHaveBeenCalled()
+    resolveShare({ prototype_id: 7, share_mode: "public", share_token: "tok-1" })
+    await pending
+    // Post-await: token reconciled from the server response only.
+    expect(s.setToken).toHaveBeenCalledWith("tok-1")
+    expect(s.setBusy).toHaveBeenLastCalledWith(false)
+  })
+
+  it("reverts mode to `current` when api.share rejects; never sets a token (Regression)", async () => {
+    const share = vi.fn().mockRejectedValue(new Error("network boom"))
+    const s = setters()
+    await runSelectMode({
+      prototypeId: 7,
+      next: "public",
+      current: "private",
+      passcode: "",
+      api: { share },
+      ...s,
+    })
+    // Optimistic flip happened, then reverted to the prior mode.
+    expect(s.setMode).toHaveBeenCalledWith("public")
+    expect(s.setMode).toHaveBeenLastCalledWith("private")
+    // Token never set on the failure path (no optimistic/fabricated token).
+    expect(s.setToken).not.toHaveBeenCalled()
+    expect(s.setError).toHaveBeenCalledWith("network boom")
+    expect(s.setBusy).toHaveBeenLastCalledWith(false)
+  })
+
+  it("reverts to `current` when the empty-passcode guard rejects before the API", async () => {
+    const share = vi.fn()
+    const s = setters()
+    await runSelectMode({
+      prototypeId: 7,
+      next: "passcode",
+      current: "private",
+      passcode: "",
+      api: { share },
+      ...s,
+    })
+    expect(share).not.toHaveBeenCalled()
+    expect(s.setMode).toHaveBeenCalledWith("passcode") // optimistic
+    expect(s.setMode).toHaveBeenLastCalledWith("private") // reverted
+    expect(s.setError).toHaveBeenCalledWith("Enter a passcode first")
   })
 })
 

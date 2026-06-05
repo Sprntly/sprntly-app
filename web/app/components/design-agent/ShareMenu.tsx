@@ -77,20 +77,30 @@ export async function runApplyShareMode({
 }
 
 /**
- * Orchestrate a share-mode change for the stateful container (busy → apply →
- * mirror local state → fire `onShared`). Extracted as an exported pure async
- * helper — mirroring `runApplyShareMode` / `runCopyShareLink` — so the new
- * `onShared`-on-success behaviour is testable in the repo's node-env vitest (no
- * DOM to click the radio). The container's `selectMode` is a thin wrapper.
+ * Orchestrate a share-mode change for the stateful container (busy → optimistic
+ * mode → apply → reconcile local state → fire `onShared`). Extracted as an
+ * exported pure async helper — mirroring `runApplyShareMode` / `runCopyShareLink`
+ * — so the optimistic-select + `onShared`-on-success behaviour is testable in the
+ * repo's node-env vitest (no DOM to click the radio). The container's
+ * `selectMode` is a thin wrapper that passes the prior mode as `current`.
+ *
+ * Optimistic ordering (P6-22): `setMode(next)` fires BEFORE the await so a
+ * click/arrow selection registers immediately instead of snapping back during
+ * the round-trip. On rejection the mode reverts to `current`. The optimistic
+ * change reflects `mode` ONLY — `setToken` stays strictly AFTER the await
+ * (server-confirmed token; never optimistically fabricated), so `shareUrl`
+ * continues to derive from the real token (F6/F7). `busy` brackets the whole
+ * optimistic→await→finally window, which keeps the passcode field disabled
+ * throughout (AC5) and blocks a concurrent second select.
  *
  * `onShared` fires ONLY on success, AFTER `setToken`, so a failed share never
  * triggers a parent re-poll (P6-20 AC1/AC6); `setBusy(false)` always runs in
- * `finally`. Behaviour is byte-identical to the prior inline `selectMode` plus
- * the single new `onShared?.(token)` line.
+ * `finally`.
  */
 export async function runSelectMode({
   prototypeId,
   next,
+  current,
   passcode,
   api,
   setMode,
@@ -101,6 +111,10 @@ export async function runSelectMode({
 }: {
   prototypeId: number
   next: ShareMode
+  /** Prior mode, used to revert the optimistic `setMode(next)` if the share
+   *  round-trip rejects. Internal helper param only — NOT a ShareMenuView prop
+   *  and NOT a change to the ShareMode type. */
+  current: ShareMode
   passcode: string
   api: Pick<typeof designAgentApi, "share">
   setMode: (mode: ShareMode) => void
@@ -111,12 +125,14 @@ export async function runSelectMode({
 }): Promise<void> {
   setBusy(true)
   setError(null)
+  setMode(next) // optimistic — MODE ONLY; token stays server-confirmed below
   try {
     const result = await runApplyShareMode({ prototypeId, next, passcode, api })
-    setMode(result.mode)
-    setToken(result.token)
+    setMode(result.mode) // reconcile to the server-confirmed mode
+    setToken(result.token) // token is set strictly post-await (never optimistic)
     onShared?.(result.token)
   } catch (e) {
+    setMode(current) // revert the optimistic mode on failure
     setError(toMessage(e, "Failed to update share settings"))
   } finally {
     setBusy(false)
@@ -160,42 +176,59 @@ export function ShareMenuView({
 }: ShareMenuViewProps) {
   return (
     <div className="share-menu" data-testid="share-menu">
-      <fieldset>
+      <fieldset className="share-mode-fieldset">
         <legend className="field-label">Sharing</legend>
-        <label>
+        {/* Three contiguous native radios with explicit id+htmlFor association
+            (P6-22). Keep them adjacent with no interleaved focusable element so
+            native arrow-key traversal walks Private→Public→Passcode. */}
+        <div className="share-mode-option">
           <input
             type="radio"
+            id="share-mode-private"
             name="share-mode"
             value="private"
             checked={mode === "private"}
             disabled={busy}
             onChange={() => onSelectMode?.("private")}
           />
-          Private — only signed-in workspace members
-        </label>
-        <label>
+          <label htmlFor="share-mode-private">Private — only signed-in workspace members</label>
+        </div>
+        <div className="share-mode-option">
           <input
             type="radio"
+            id="share-mode-public"
             name="share-mode"
             value="public"
             checked={mode === "public"}
             disabled={busy}
             onChange={() => onSelectMode?.("public")}
           />
-          Public — anyone with the link
-        </label>
-        <label>
+          <label htmlFor="share-mode-public">Public — anyone with the link</label>
+        </div>
+        <div className="share-mode-option">
           <input
             type="radio"
+            id="share-mode-passcode"
             name="share-mode"
             value="passcode"
             checked={mode === "passcode"}
             disabled={busy}
             onChange={() => onSelectMode?.("passcode")}
           />
-          Passcode — anyone with link + passcode
+          <label htmlFor="share-mode-passcode">Passcode — anyone with link + passcode</label>
+        </div>
+        {/* Passcode value field — LIFTED OUT of the passcode radio's <label> so
+            it is no longer interleaved in the radio focus order (P6-22). It is a
+            text field, not part of the radio group; it stays gated to passcode
+            mode (the `busy` term keeps it disabled through the optimistic
+            window). */}
+        <div className="share-passcode-field">
+          <label htmlFor="share-passcode-input" className="share-passcode-label">
+            Passcode
+          </label>
           <input
             type="text"
+            id="share-passcode-input"
             className="input"
             data-testid="passcode-input"
             placeholder="Set passcode"
@@ -203,7 +236,7 @@ export function ShareMenuView({
             disabled={busy || mode !== "passcode"}
             onChange={(e) => onPasscodeChange?.(e.target.value)}
           />
-        </label>
+        </div>
       </fieldset>
       {shareUrl && (
         <div className="share-link" data-testid="share-link">
@@ -244,6 +277,7 @@ export function ShareMenu({ prototypeId, initialMode, initialToken, onShared }: 
     await runSelectMode({
       prototypeId,
       next,
+      current: mode, // prior mode — reverts the optimistic select on failure
       passcode,
       api: designAgentApi,
       setMode,

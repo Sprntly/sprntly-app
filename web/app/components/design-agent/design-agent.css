@@ -778,3 +778,48 @@
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+/* ── Share-mode radio group (P6-22) ───────────────────────────────────────
+ * The passcode text field was lifted OUT of the passcode radio's <label> so the
+ * three native radios form a contiguous group (restores keyboard arrow
+ * traversal). These rules give the restructured option rows + the lifted field
+ * block layout. Scoped under .design-agent-surface; colours via tokens only; no
+ * globals.css touch.
+ */
+.design-agent-surface .share-mode-fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
+}
+.design-agent-surface .share-mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.design-agent-surface .share-mode-option input[type="radio"] {
+  margin-top: 2px;
+  flex: none;
+}
+.design-agent-surface .share-mode-option label {
+  cursor: pointer;
+  line-height: 1.4;
+}
+.design-agent-surface .share-passcode-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+.design-agent-surface .share-passcode-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
