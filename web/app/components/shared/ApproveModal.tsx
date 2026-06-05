@@ -7,6 +7,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
+import { useWorkspace } from "../../context/WorkspaceContext"
+import { canvasResolveTarget } from "../../lib/routes"
 import { GenerateModal } from "../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../design-agent/PostGenerationResult"
@@ -28,8 +30,11 @@ const MIN_VISIBLE_MS = 2500
 const SAFETY_MAX_MS = 6.5 * 60 * 1000
 
 export function ApproveModal() {
-  const { activeModal, closeModal, openDrawer } = useNavigation()
+  const { activeModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas } =
+    useNavigation()
   const { content } = useContent()
+  // The workspace hydration gate for the canvas resolver.
+  const { loading: workspaceLoading } = useWorkspace()
   // UX-EXPLORE (throwaway — REVERT): local visibility for the new generate modal.
   const [generateOpen, setGenerateOpen] = useState(false)
   // UX-EXPLORE (throwaway — REVERT): full-screen loading-overlay visibility.
@@ -84,10 +89,14 @@ export function ApproveModal() {
     // timeout pendingCanvasRef stays null → no canvas (failure surfacing is the
     // existing flow's toast/banner, left untouched).
     if (pendingCanvasRef.current) {
-      setCanvasResult(pendingCanvasRef.current)
+      const revealed = pendingCanvasRef.current
+      setCanvasResult(revealed)
       pendingCanvasRef.current = null
+      // Push the refresh-stable canvas route as the canvas reveals, so a refresh
+      // re-resolves this prototype instead of dropping to the PRD.
+      goToCanvas(revealed.id)
     }
-  }, [clearTimers])
+  }, [clearTimers, goToCanvas])
 
   // Fired when Generate is clicked: show the overlay and arm the safety ceiling.
   const handleGenStart = useCallback(() => {
@@ -141,7 +150,11 @@ export function ApproveModal() {
   const closeCanvas = useCallback(() => {
     setCanvasResult(null)
     setApplyTarget(null)
-  }, [])
+    // Leave the canvas route so the URL and view stay consistent and the
+    // resolver does not immediately re-open the canvas. The canvas opens from
+    // the approved PRD, so the PRD is its logical parent.
+    if (canvasPrototypeId != null) goTo("prd")
+  }, [canvasPrototypeId, goTo])
 
   // UX-EXPLORE (throwaway — REVERT): after a Share or an iterate advances the
   // SAME prototype, re-fetch the record so the in-canvas share-gated CommentsPanel
@@ -228,6 +241,37 @@ export function ApproveModal() {
       cancelled = true
     }
   }, [activeModal, prd?.prd_id])
+
+  // Refresh re-resolution. When the URL is the canvas route (`/design/{id}`) —
+  // e.g. after a page refresh while editing — re-open the canvas by fetching the
+  // prototype, instead of dropping to the empty PRD screen. Gated on workspace
+  // hydration (never resolve against an un-hydrated workspace). Records the id it
+  // resolved from the URL so the transient render during closeCanvas (route not
+  // yet updated) cannot refetch and reopen the canvas the user just closed.
+  const urlResolvedIdRef = useRef<number | null>(null)
+  useEffect(() => {
+    const target = canvasResolveTarget(
+      canvasPrototypeId,
+      !workspaceLoading,
+      canvasResult?.id ?? null,
+    )
+    if (target == null) return
+    if (urlResolvedIdRef.current === target) return
+    urlResolvedIdRef.current = target
+    let cancelled = false
+    designAgentApi
+      .get(target)
+      .then((proto) => {
+        if (!cancelled && proto) setCanvasResult(proto)
+      })
+      .catch(() => {
+        // Degrade silently — a bad/stale id just leaves the canvas closed; the
+        // PRD screen (base) still renders behind.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [canvasPrototypeId, workspaceLoading, canvasResult?.id])
 
   // UX-EXPLORE (throwaway — REVERT): render GenerateModal even when the approve
   // modal itself is closed, so closing "approve" before opening "generate"
@@ -349,6 +393,9 @@ export function ApproveModal() {
     closeModal()
     if (existing) {
       setCanvasResult(existing)
+      // Push the refresh-stable canvas route for the existing prototype too, so
+      // "View Prototype" → refresh re-opens the canvas.
+      goToCanvas(existing.id)
       return
     }
     setGenerateOpen(true)
