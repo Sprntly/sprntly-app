@@ -529,6 +529,22 @@ def _seed_company_membership(
     """Seed a company_members row so require_company resolves user_id → company_id.
     Mirrors test_require_company._seed_membership. `db` is the fake Supabase client
     (isolated_settings["supabase"])."""
+    # The connector-multitenancy slice (#136) turned on PRAGMA foreign_keys in the
+    # fake supabase, so an orphan company_members row now violates the FK to
+    # companies(id). Seed the parent first (mirrors
+    # test_require_company._seed_membership). Existence-guarded so a test that
+    # already seeded the company doesn't hit a duplicate-PK.
+    existing = (
+        db.table("companies").select("id").eq("id", company_id).execute().data
+    )
+    if not existing:
+        db.table("companies").insert(
+            {
+                "id": company_id,
+                "slug": f"slug-{company_id}",
+                "display_name": company_id.title(),
+            }
+        ).execute()
     db.table("company_members").insert(
         {
             "id": f"cm-{company_id}-{user_id}",
