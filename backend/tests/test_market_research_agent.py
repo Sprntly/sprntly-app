@@ -102,3 +102,36 @@ def test_missing_company_raises(facade, monkeypatch):
     monkeypatch.setattr(market, "require_client", lambda: _fake_client(None))
     with pytest.raises(ValueError, match="Company not found"):
         market.run_market_research(facade, "ent-gone")
+
+
+def test_run_with_real_extractor_lands_signals_in_kg(facade, isolated_settings, monkeypatch):
+    """Integration through the REAL extract_document (only LLM + embeddings
+    patched) — guards against signature drift between agent and extractor
+    (the mocked-seam gap the #122 rebase surfaced)."""
+    from app.graph.gateway import LLMResult
+    from app.research import market
+    from app.graph import extractor as ex
+
+    monkeypatch.setattr(market, "require_client",
+                        lambda: _fake_client(_COMPANY, _PRODUCT))
+    monkeypatch.setattr(
+        market, "call_with_web_search",
+        lambda **kw: "Reviewers on g2.com complain about offline sync reliability.")
+
+    extracted = {"signals": [{
+        "kind": "sentiment", "content": "G2 reviewers complain about offline sync",
+        "source_type": "customer_voice", "theme": "offline sync",
+        "relationship": "AFFECTS", "confidence": 0.8,
+    }]}
+    monkeypatch.setattr(ex, "llm_call", lambda **kw: LLMResult(
+        output=extracted, model="claude-sonnet-4-6", prompt_version="t",
+        input_tokens=1, output_tokens=1, cache_read_input_tokens=0,
+        cache_creation_input_tokens=0, cost_usd=0, latency_ms=1, stop_reason="end_turn"))
+    monkeypatch.setattr(ex, "embed_texts", lambda t, **k: [[0.1] * 4 for _ in t])
+
+    out = market.run_market_research(facade, "ent-A")
+    assert out["signals"] == 1 and out["found"] is True
+    sigs = facade.active_signals("ent-A", source_types=["customer_voice"])
+    assert len(sigs) == 1 and "offline sync" in sigs[0].content
+    themes = facade.query_entities("ent-A", type="theme")
+    assert [t.canonical_label for t in themes] == ["offline sync"]
