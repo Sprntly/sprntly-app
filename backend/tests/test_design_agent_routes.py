@@ -553,17 +553,16 @@ def test_authed_route_resolves_under_company(env, client):
 
 
 def test_no_require_app_session_dep_remains():
-    """AC4 — static migration-completeness (P6-10 zero-bypass invariant): NO live
-    `Depends(require_app_session)` remains in the route module. Every Design Agent
-    route gates on session/company auth via `require_company`; none bypasses back to
-    the old `require_app_session`.
+    """Migration-completeness guard: no live `Depends(require_app_session)` remains
+    in the route module. Every Design Agent route gates on session/company auth via
+    `require_company`; none bypasses back to the old `require_app_session`.
 
-    The load-bearing assertion is `require_app_session`-dep == 0. The count of
-    `require_company` deps is intentionally NOT pinned to an exact number — that
-    figure grows by one at every newly-added authed route (P7-09 by-prd, P7-24 SSE,
-    P7-25 comments, …), so an equality check is brittle by design and re-breaks on
-    legitimate route additions. A floor guards against the company gate being
-    dropped wholesale without coupling the test to the exact route count."""
+    The load-bearing assertion is that the `require_app_session` dependency count is
+    0. The count of `require_company` deps is intentionally NOT pinned to an exact
+    number — that figure grows by one at every newly-added authenticated route, so an
+    exact-equality check is brittle by design and re-breaks on legitimate route
+    additions. A floor guards against the company gate being dropped wholesale
+    without coupling the test to the exact route count."""
     import app.routes.design_agent as da
 
     src = Path(da.__file__).read_text()
