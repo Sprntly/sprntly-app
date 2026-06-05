@@ -30,6 +30,7 @@
 import { useCallback, useRef, useState } from "react"
 import {
   designAgentApi,
+  withAuthRetry,
   type PendingQuestion,
   type PrototypeRecord,
 } from "../../lib/api"
@@ -157,7 +158,10 @@ export function useIterateRun({
         //    background; `status` returns to 'ready' when the new checkpoint is
         //    built (or `pending_question` is set if the agent paused to ask).
         const startedAt = Date.now()
-        let proto = await api.get(prototypeId)
+        // A bearer token can expire mid-poll; a transient 401 here used to abort
+        // the whole run even though the background iterate completes. Retry once
+        // through the refresh so the run survives the blip and still lands.
+        let proto = await withAuthRetry(() => api.get(prototypeId))
         // The run is in-progress while status is 'generating'. Some backends keep
         // status 'ready' and only flip bundle_url/pending_question — so we also
         // break out the moment a pending_question appears.
@@ -177,7 +181,7 @@ export function useIterateRun({
             })
           }
           await new Promise((r) => setTimeout(r, TICK_MS))
-          proto = await api.get(prototypeId)
+          proto = await withAuthRetry(() => api.get(prototypeId))
         }
 
         // 4a) Agent paused with a clarifying question → surface it in-stream.

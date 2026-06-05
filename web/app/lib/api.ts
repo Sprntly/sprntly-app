@@ -853,3 +853,51 @@ export type ManualEditResponse = {
   status: string
   queue_position: number
 }
+
+// ---- transient-auth resilience (shared primitive) ---------------------------
+// Supabase issues short-lived bearer tokens; `accessTokenProvider` refreshes
+// them in the background. A request that lands DURING a refresh can come back
+// 401 even though the session is healthy — a transient failure, not a real auth
+// loss. Today every authed poll / status fetch treats a 401 as terminal, so a
+// single mid-refresh blip aborts the work or flips connected rows to "off".
+//
+// `withAuthRetry` is the one place that handles this: it runs the wrapped call,
+// and on a 401 it re-acquires the token (forcing the in-flight refresh to
+// settle) and retries the call exactly once after a short backoff. Non-401
+// errors propagate untouched, and a 401 that survives the retry is re-thrown so
+// a genuine auth failure still surfaces to the caller's own error handling. The
+// primitive owns no UI state and never swallows errors — callers wrap any authed
+// read that polls or auto-refreshes and decide for themselves what a persistent
+// failure means.
+
+export type WithAuthRetryOptions = {
+  /** Backoff before the single retry, in milliseconds. Defaults to 250. Tests
+   *  pass 0 to keep the retry path instant. */
+  backoffMs?: number
+}
+
+export async function withAuthRetry<T>(
+  fn: () => Promise<T>,
+  opts: WithAuthRetryOptions = {},
+): Promise<T> {
+  try {
+    return await fn()
+  } catch (err) {
+    // Only a 401 is treated as a transient token-refresh race; everything else
+    // (including a non-ApiError throw) propagates immediately, no retry.
+    if (!(err instanceof ApiError) || err.status !== 401) {
+      throw err
+    }
+    // Re-acquire the token so the retry carries the refreshed bearer, wait out
+    // the refresh window, then retry once. A 401 that persists re-throws from
+    // this second attempt.
+    if (accessTokenProvider) {
+      await accessTokenProvider()
+    }
+    const backoffMs = opts.backoffMs ?? 250
+    if (backoffMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, backoffMs))
+    }
+    return await fn()
+  }
+}

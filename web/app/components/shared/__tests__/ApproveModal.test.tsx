@@ -47,6 +47,12 @@ vi.mock("../../../lib/api", () => ({
     githubAuthorizeUrl: "https://github.example/auth",
   },
   designAgentApi: { generate: vi.fn() },
+  // The connector fetch now runs through the shared auth-retry primitive; expose
+  // a pass-through plus a minimal error type so this full mock stays complete.
+  withAuthRetry: (fn: () => Promise<unknown>) => fn(),
+  ApiError: class ApiError extends Error {
+    status = 0
+  },
 }))
 
 import {
