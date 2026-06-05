@@ -12,6 +12,21 @@ import {
 } from "../lib/auth-validation"
 import { publicPath } from "../lib/public-path"
 
+// Roles from design-v4 page 03 ("Who are you?"). Captured at sign-up so
+// the workspace can tailor itself to how the PM works.
+const V4_ROLES = [
+  "Founder / CEO",
+  "Product Manager",
+  "Head of Product / CPO",
+  "Engineering",
+  "Data / Analytics",
+  "Design / UX",
+  "Customer Success",
+  "Marketing",
+  "Operations",
+  "Other",
+] as const
+
 export default function SignUpPage() {
   return (
     <Suspense fallback={<div className="ob-shell">Loading…</div>}>
@@ -30,6 +45,7 @@ function SignUpForm() {
   const [password, setPassword] = useState("")
   const [firstName, setFirstName] = useState("")
   const [lastName, setLastName] = useState("")
+  const [role, setRole] = useState("")
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -51,6 +67,10 @@ function SignUpForm() {
       setError("First and last name are required.")
       return
     }
+    if (!role) {
+      setError("Tell us your role so we can tailor your workspace.")
+      return
+    }
     setSubmitting(true)
     try {
       const result = await auth.signUpWithPassword({
@@ -58,6 +78,7 @@ function SignUpForm() {
         password,
         firstName,
         lastName,
+        role,
       })
       if (result === "confirm_email") {
         router.replace(`/verify-email?email=${encodeURIComponent(email)}`)
@@ -83,9 +104,9 @@ function SignUpForm() {
     <div className="ob-shell">
       <div className="auth-card">
         <div className="ob-brand-mark">spr<span>ntly</span></div>
-        <div className="ob-eyebrow">Get started</div>
-        <h1 className="ob-title">Create your account</h1>
-        <p className="ob-desc">We&apos;ll use this to personalize your onboarding interview.</p>
+        <div className="ob-eyebrow">Create account</div>
+        <h1 className="ob-title">Create your account.</h1>
+        <p className="ob-desc">Start with the basics. We&apos;ll personalize the rest next.</p>
 
         <form onSubmit={onSubmit}>
           <div className="field-row">
@@ -118,6 +139,24 @@ function SignUpForm() {
               </button>
             </div>
             <PasswordStrengthBar password={password} />
+          </div>
+          <div className="field">
+            <label className="field-label">Your role</label>
+            <select
+              className="input"
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              required
+            >
+              <option value="" disabled>
+                Select your role
+              </option>
+              {V4_ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
           </div>
           {error && <div className="auth-error">{error}</div>}
           <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={submitting}>

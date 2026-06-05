@@ -31,6 +31,8 @@ export type SignUpInput = {
   password: string
   firstName: string
   lastName: string
+  /** v4 page 03 "about you" — optional self-reported role. */
+  role?: string
 }
 
 type AuthCtx = AuthState & {
@@ -116,6 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           data: {
             first_name: input.firstName.trim(),
             last_name: input.lastName.trim(),
+            ...(input.role?.trim() ? { role: input.role.trim() } : {}),
           },
         },
       })
