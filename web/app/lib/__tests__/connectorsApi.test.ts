@@ -80,6 +80,21 @@ describe("connectorsApi.startOauth", () => {
     const res = await connectorsApi.startOauth("figma")
     expect(res.authorize_url).toBe("https://example.com/auth")
   })
+
+  it("includes return_to in the body when provided (3rd positional arg)", async () => {
+    await connectorsApi.startOauth("figma", undefined, "/onboarding/4")
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
+      return_to: "/onboarding/4",
+    })
+  })
+
+  it("includes both dataset and return_to when both are provided", async () => {
+    await connectorsApi.startOauth("google_drive", "meridian", "/onboarding/4")
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
+      dataset: "meridian",
+      return_to: "/onboarding/4",
+    })
+  })
 })
 
 describe("connectorsApi Slack methods", () => {
