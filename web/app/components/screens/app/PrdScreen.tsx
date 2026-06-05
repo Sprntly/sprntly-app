@@ -18,6 +18,12 @@ import {
 } from "../../shared/app-icons"
 import { PrdPatchBanner } from "../../design-agent/PrdPatchBanner"
 
+/**
+ * Hot-file exception (sanctioned): this screen is an append-only hot file. The
+ * only change here threads `prdTitle={prd.title}` into <PrdSections> so the
+ * relocated generate trigger's preview card + canvas breadcrumb can label the
+ * PRD. The editable PRD-body region is deliberately left untouched.
+ */
 export function PrdScreen() {
   const { goTo, openModal, shareMenuOpen, setShareMenuOpen, showToast } =
     useNavigation()
