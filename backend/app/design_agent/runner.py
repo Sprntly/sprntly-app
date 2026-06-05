@@ -40,6 +40,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.config import settings
 from app.db.prototype_comments import list_comments, mark_comments_orphaned
 from app.db.prototype_pending_iterations import (
     dequeue_next,
@@ -57,7 +58,13 @@ from app.design_agent.tools import (
     dispatch,
     tool_definitions_for_mode,
 )
-from app.llm_telemetry import MODEL_PRICING, RunUsage, log_llm_run, should_wrap_up
+from app.llm_telemetry import (
+    MODEL_PRICING,
+    RunUsage,
+    log_llm_run,
+    should_abort,
+    should_wrap_up,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +75,14 @@ TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
 
 # ── Pre-flight cost estimate (AD14 / AD15, P3-11) ────────────────────────────
 SOFT_CAP_USD = 0.50  # AD15 per-generation soft cap (trust primitive, not a hard gate)
+# AD15 BACKSTOP (P6-06): a fail-closed HARD ceiling ABOVE SOFT_CAP_USD. When a
+# run's projected next-iteration spend reaches this, agent_loop ABORTS (clean
+# terminal "aborted" status, partial bundle salvaged) rather than degrade-and-
+# continue. The soft-cap nudge stays the primary AD15 mechanism; this only
+# catches pathological runs it failed to converge. Env-overridable so Apurva can
+# tighten/loosen in prod without a code change. See config.py for the headroom
+# justification on the 2.00 default.
+HARD_CAP_USD = settings.design_agent_hard_cap_usd
 # Deterministic token heuristic: chars/4 (agent-build-research.md §3.3). No network,
 # no SDK token-counter dependency, ±20% accuracy band — the estimate is a "~$" guide,
 # not a billing figure (the REAL cost is the post-flight cost-log emitted by P3-05).
@@ -161,7 +176,7 @@ def reconcile_comments_on_checkpoint(
 
 @dataclass
 class RunResult:
-    status: str  # "complete" | "max_iters" | "refused" | "max_tokens" | "error" | "awaiting_clarification"
+    status: str  # "complete" | "max_iters" | "aborted" | "refused" | "max_tokens" | "error" | "awaiting_clarification"
     iters: int
     usage: RunUsage
     duration_ms: int
@@ -186,13 +201,16 @@ def _wrap_up_nudge(iters_remaining: int) -> str:
         return (
             f"You have {iters_remaining} tool-call turn(s) left. STOP now: finish "
             f"the current file, do NOT start new ones, then end your turn with a "
-            f"1-2 sentence summary. A cut-off build is lost."
+            f"1-2 sentence summary. A cut-off build is lost. If you imported a file "
+            f"you have not written, remove that import now — a build cannot resolve "
+            f"a missing file."
         )
     return (
         f"You have ~{iters_remaining} tool-call turns left. Start converging: make "
         f"the core flow navigable, batch any remaining writes, prefer finishing the "
         f"primary flow over adding screens. End your turn (no tool calls) as soon as "
-        f"the core flow works."
+        f"the core flow works. If you imported a file you have not written, remove "
+        f"that import now — a build cannot resolve a missing file."
     )
 
 
@@ -315,6 +333,23 @@ async def agent_loop(
             content = [b.model_dump() for b in resp.content]
             messages.append({"role": "assistant", "content": content})
             last_assistant_content = content
+
+            # AD15 BACKSTOP (P6-06): the soft nudge above is advisory; if projected
+            # spend crosses the HARD cap the run is pathological — abort with a
+            # clean terminal status (not an exception) so the route's existing
+            # terminal handling persists the partial work + the cost log fires.
+            # Salvage the CURRENT iteration's assistant turn (just assigned to
+            # last_assistant_content above), exactly as the max_iters exit does.
+            # Placed AFTER the assignment so the salvaged content is this turn's,
+            # not the prior iteration's (or the initial [] on iteration 1).
+            if should_abort(usage, MODEL, HARD_CAP_USD):
+                logger.warning(
+                    "cost_guard.aborted prototype_id=%s mode=%s reason=hard_cap_projection "
+                    "est_cost_usd=%.4f hard_cap=%.2f soft_cap=%.2f iters=%d",
+                    ctx.prototype_id, mode, usage.est_cost_usd(MODEL),
+                    HARD_CAP_USD, SOFT_CAP_USD, iters,
+                )
+                return _finish(usage, "aborted", iters, start, last_assistant_content)
 
             if stop == "end_turn":
                 return _finish(usage, "complete", iters, start, content)

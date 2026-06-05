@@ -16,6 +16,7 @@ import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
 import { useAuth } from "../lib/auth"
 import { connectorsApi } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
+import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const auth = useAuth()
@@ -100,6 +101,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {children}
       <AIBar />
       <Toast />
+      {/* P6-05 (#8): replay an unacknowledged completion toast on EVERY authed
+          page (not only the Design section) after a same-session reload. Renders
+          null; sits beside <Toast/> inside NavigationProvider. */}
+      <DesignAgentNotificationReplay />
       <ApproveModal />
       <InviteModal />
       <ClaudeDrawer />

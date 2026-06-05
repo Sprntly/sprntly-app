@@ -2,7 +2,7 @@
 
 `app.design_agent.csrf.require_same_origin` is a FastAPI dependency attached to every
 AUTHED MUTATING Design Agent route (POST/PATCH/DELETE that depend on
-`require_app_session`). It rejects (403 `{"error": "origin_mismatch"}`) a request whose
+`require_company`). It rejects (403 `{"error": "origin_mismatch"}`) a request whose
 `Origin` header is missing or not in `settings.origins_list` — the SAME allow-list CORS
 uses (config.py / main.py), no second list. It is NEVER attached to the anonymous public
 `/by-token/*` routes, which are cross-origin by design (F6).
@@ -101,13 +101,10 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session). Does NOT set
-    a default Origin — each test supplies the Origin it wants to exercise."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client. Tests
+    that exercise the Origin gate supply the Origin header they want explicitly."""
+    return company_client
 
 
 @pytest.fixture
@@ -185,10 +182,10 @@ def _dependency_calls(dependant) -> set:
     return calls
 
 
-def _authed_mutating_routes(app, *, require_app_session):
+def _authed_mutating_routes(app, *, require_company):
     """Yield (path, methods, calls) for every authed-mutating Design Agent route
     (POST/PATCH/DELETE on /v1/design-agent, NOT a /by-token/* public route, carrying
-    require_app_session)."""
+    require_company)."""
     for route in app.router.routes:
         path = getattr(route, "path", "")
         methods = getattr(route, "methods", set()) or set()
@@ -199,7 +196,7 @@ def _authed_mutating_routes(app, *, require_app_session):
         if not (methods & _MUTATING_METHODS):
             continue
         calls = _dependency_calls(route.dependant)
-        if require_app_session in calls:
+        if require_company in calls:
             yield path, methods, calls
 
 
@@ -207,11 +204,11 @@ def test_all_authed_mutating_routes_have_origin_dep(env):
     # AC4 (inventory) — EVERY authed POST/PATCH/DELETE Design Agent route (not /by-token)
     # carries require_same_origin. This is the structural regression guard: a future
     # authed mutating route added without the gate fails here.
-    require_app_session = env.routes.require_app_session
+    require_company = env.routes.require_company
     require_same_origin = env.routes.require_same_origin
 
     found = list(
-        _authed_mutating_routes(env.main.app, require_app_session=require_app_session)
+        _authed_mutating_routes(env.main.app, require_company=require_company)
     )
     assert found, "expected to discover authed-mutating Design Agent routes"
     missing = [
@@ -304,7 +301,7 @@ def test_feature_off_404_before_origin_403(client, monkeypatch):
 
 
 def test_no_session_401_with_valid_origin(unauth):
-    # AC8 — a valid Origin but no session still 401s (require_app_session): the Origin gate
+    # AC8 — a valid Origin but no session still 401s (require_company): the Origin gate
     # does not leak feature existence to an attacker who supplies a good Origin.
     resp = unauth.post(
         "/v1/design-agent/999999/complete",

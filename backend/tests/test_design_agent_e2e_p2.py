@@ -74,6 +74,12 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from tests.conftest import (
+    _bearer_header,
+    _enable_supabase_bearer,
+    _seed_company_membership,
+)
+
 # ─── Fixture on disk (reused verbatim from P1-11 — no new fixture needed) ────
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "design_agent"
@@ -219,6 +225,11 @@ def env(isolated_settings, monkeypatch):
     # consumed by the share path, but set it so any future binding stays hermetic.
     monkeypatch.setenv("DESIGN_AGENT_TOKEN_SECRET", "test-secret-only-used-for-binding")
 
+    # P6-10: wire the bearer-authed require_company path (this e2e suite stays async +
+    # ASGITransport for the background create_task; only the auth source changed).
+    _enable_supabase_bearer(monkeypatch)
+    _seed_company_membership(isolated_settings["supabase"])
+
     # Reload in dependency order so each module rebinds to the reloaded one below
     # it. require_client() resolves the (monkeypatched) fake at CALL time, so the
     # in-memory Supabase is wired through every helper.
@@ -269,6 +280,11 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
     async def _fake_vite_build(virtual_fs):
         return {"index.html": "<html>fake</html>"}
 
+    # P6-07: _stage_complete_run builds via vite_build_with_repair → (dist, repaired_vfs);
+    # a clean build returns the source unchanged.
+    async def _fake_vite_build_with_repair(virtual_fs):
+        return {"index.html": "<html>fake</html>"}, virtual_fs
+
     async def _fake_stage_bundle(**kwargs):
         return (
             f"file:///tmp/fake-bundle/{kwargs['prototype_id']}/"
@@ -276,6 +292,7 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
         )
 
     monkeypatch.setattr(env.routes, "vite_build", _fake_vite_build)
+    monkeypatch.setattr(env.routes, "vite_build_with_repair", _fake_vite_build_with_repair)
     monkeypatch.setattr(env.routes, "stage_bundle", _fake_stage_bundle)
 
     # ── Mock the staged-source read so the export serialiser is insulated from
@@ -290,7 +307,9 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
     )
 
     transport = httpx.ASGITransport(app=env.main.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers=_bearer_header()
+    ) as ac:
         # 1. Seed a ready PRD with a :::design block (real sync helpers).
         prd_id = env.db.start_prd(
             brief_id=1, insight_index=0, title="Smoke", template_version=1, variant="v2"
@@ -300,11 +319,7 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
             md="# Smoke\nbody\n:::design\nkey: value\n:::\n",
         )
 
-        # 2. Sign in (app audience → workspace_id 'app').
-        login = await ac.post(
-            "/v1/auth/login", json={"password": "test-pw", "audience": "app"}
-        )
-        assert login.status_code == 200, login.text
+        # 2. Authed via Supabase Bearer JWT (require_company → workspace_id _TEST_COMPANY_ID).
 
         # 3. POST /generate → background task fires the (mocked) agent loop.
         gen = await ac.post("/v1/design-agent/generate", json={"prd_id": prd_id})

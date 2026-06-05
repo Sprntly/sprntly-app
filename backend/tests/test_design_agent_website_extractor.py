@@ -257,3 +257,221 @@ async def test_extract_logs_host_only_not_full_url(monkeypatch, caplog):
     assert "token=" not in blob
     # Confidence boolean is recorded on completion.
     assert "confident=True" in blob
+
+
+# --- P6-09: fail-loud observable floor reason --------------------------------
+
+def _raise_import_error():
+    """A ``_resolve_async_playwright`` replacement that raises ImportError, as a
+    missing/broken Playwright dependency would. Mirrors the prod EC2 case where
+    Chromium/Playwright is absent (P6-01 handoff dep)."""
+    raise ImportError("No module named 'playwright'")
+
+
+def _completion_lines(caplog):
+    return [r.getMessage() for r in caplog.records if "website_extract_complete" in r.getMessage()]
+
+
+# Regression (required — fails on unfixed code) -------------------------------
+
+async def test_import_error_floors_with_signal(monkeypatch, caplog):
+    """AC1: when _resolve_async_playwright raises ImportError, the extractor
+    returns None (the floor), does NOT let the ImportError escape, and emits
+    website_extract_complete confident=False reason=import_unavailable. On
+    UNFIXED code the import resolve sits before the try, so the ImportError
+    escapes this call (no completion line) and the test fails."""
+    monkeypatch.setattr(website, "_resolve_async_playwright", _raise_import_error)
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        # Must NOT raise — the ImportError is now caught inside the extractor.
+        ds = await website.extract_website_design_system("https://example.com")
+
+    assert ds is None
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "website_extract_complete" in blob
+    assert "confident=False" in blob
+    assert "reason=import_unavailable" in blob
+    assert "error_class=ImportError" in blob
+
+
+async def test_no_completion_line_lost_on_import_failure(monkeypatch, caplog):
+    """AC6: exactly one website_extract_complete line on the import-failure path
+    (the inner finally is always reached because the resolve is inside the try).
+    On unfixed code: zero lines."""
+    monkeypatch.setattr(website, "_resolve_async_playwright", _raise_import_error)
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        await website.extract_website_design_system("https://example.com")
+
+    assert len(_completion_lines(caplog)) == 1
+
+
+# Reason classification -------------------------------------------------------
+
+async def test_confident_path_reason_ok(monkeypatch, caplog):
+    """AC2: a confident extraction returns the design system and logs
+    confident=True reason=ok."""
+    h = _build_fake()
+    _install(monkeypatch, h)
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        ds = await website.extract_website_design_system("https://example.com")
+
+    assert ds is not None
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "confident=True" in blob
+    assert "reason=ok" in blob
+
+
+async def test_below_confidence_reason_low_confidence(monkeypatch, caplog):
+    """AC3: an extraction that maps but trips _below_confidence floors to None
+    and logs confident=False reason=low_confidence."""
+    raw = dict(_GOOD_RAW, primary_color="")
+    h = _build_fake(evaluate_return=raw)
+    _install(monkeypatch, h)
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        ds = await website.extract_website_design_system("https://example.com")
+
+    assert ds is None
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "confident=False" in blob
+    assert "reason=low_confidence" in blob
+
+
+async def test_timeout_reason_timeout(monkeypatch, caplog):
+    """AC4: a Playwright nav TimeoutError (classified name-based) floors to None
+    and logs reason=timeout — without any top-level playwright import."""
+
+    class TimeoutError(Exception):  # noqa: A001 — mimic playwright.async_api.TimeoutError by name
+        pass
+
+    h = _build_fake(goto_side_effect=TimeoutError("Timeout 8000ms exceeded"))
+    _install(monkeypatch, h)
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        ds = await website.extract_website_design_system("https://slow.example.com")
+
+    assert ds is None
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "confident=False" in blob
+    assert "reason=timeout" in blob
+    assert "error_class=TimeoutError" in blob
+
+
+async def test_other_error_reason_error(monkeypatch, caplog):
+    """AC5: any other in-try Exception floors to None and logs reason=error
+    error_class=<Class>."""
+    h = _build_fake(goto_side_effect=RuntimeError("net::ERR_CONNECTION_REFUSED"))
+    _install(monkeypatch, h)
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        ds = await website.extract_website_design_system("https://broken.example.com")
+
+    assert ds is None
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "confident=False" in blob
+    assert "reason=error" in blob
+    assert "error_class=RuntimeError" in blob
+
+
+# Contract / observability / module-purity ------------------------------------
+
+async def test_floor_output_unchanged(monkeypatch):
+    """AC7: None on every failure path (import / below-confidence / nav error),
+    WebsiteDesignSystem on success — byte-identical to the pre-fix return
+    contract (only the observability changed)."""
+    # success
+    h = _build_fake()
+    _install(monkeypatch, h)
+    assert await website.extract_website_design_system("https://ok.example.com") is not None
+
+    # import failure
+    monkeypatch.setattr(website, "_resolve_async_playwright", _raise_import_error)
+    assert await website.extract_website_design_system("https://noplaywright.example.com") is None
+
+    # below confidence
+    h2 = _build_fake(evaluate_return=dict(_GOOD_RAW, heading_font_family=""))
+    _install(monkeypatch, h2)
+    assert await website.extract_website_design_system("https://weak.example.com") is None
+
+    # nav error
+    h3 = _build_fake(goto_side_effect=RuntimeError("boom"))
+    _install(monkeypatch, h3)
+    assert await website.extract_website_design_system("https://flaky.example.com") is None
+
+
+async def test_completion_line_logs_host_only_with_reason(monkeypatch, caplog):
+    """AC9: the completion line carries url_host (host only), reason, confident —
+    no full URL / query string / sampled colors or fonts."""
+    h = _build_fake()
+    _install(monkeypatch, h)
+    url = "https://shop.example.com/pricing?token=secret999"
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        await website.extract_website_design_system(url)
+
+    line = _completion_lines(caplog)[0]
+    assert "url_host=shop.example.com" in line
+    assert "reason=" in line
+    # No PII / path / query string.
+    assert "secret999" not in line
+    assert "/pricing" not in line
+    # No sampled style values leak into the line.
+    assert "rgb(37, 99, 235)" not in line
+    assert "Inter" not in line
+
+
+def test_module_imports_without_playwright():
+    """AC8: no TOP-LEVEL playwright import — the only playwright import stays
+    indented inside _resolve_async_playwright, keeping the module importable on
+    a host with no playwright installed. Mirrors the ticket's grep AC."""
+    src_lines = Path(website.__file__).read_text().splitlines()
+    top_level = [
+        ln for ln in src_lines
+        if ln.startswith("import playwright") or ln.startswith("from playwright")
+    ]
+    assert top_level == [], f"unexpected top-level playwright import: {top_level}"
+
+
+# Two-tier floor / clause ordering --------------------------------------------
+
+async def test_inner_import_error_precedes_broad_except(monkeypatch, caplog):
+    """AC12: an ImportError from _resolve_async_playwright sets
+    reason=import_unavailable (the narrow `except ImportError` clause wins), NOT
+    reason=error (which would prove the broad `except Exception` caught it first).
+    Exactly one completion line is logged (the inner finally is always reached)."""
+    monkeypatch.setattr(website, "_resolve_async_playwright", _raise_import_error)
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        ds = await website.extract_website_design_system("https://example.com")
+
+    assert ds is None
+    lines = _completion_lines(caplog)
+    assert len(lines) == 1
+    assert "reason=import_unavailable" in lines[0]
+    assert "reason=error" not in lines[0]
+
+
+async def test_module_absent_floors_via_caller_no_completion_line(monkeypatch, caplog):
+    """AC11 tier (b): a MODULE-level ImportError (the `website` module / P5-01
+    absent) is the CALLER's safety net (routes/design_agent.py:740 → ds=None),
+    NOT the extractor's inner handler. The extractor function body never runs in
+    that case, so NO lifecycle line is emitted — distinct from tier (a) (AC1),
+    where the inner ImportError IS caught and DOES emit started + complete.
+
+    This asserts the documented seam by exercising tier (a) and confirming the
+    function body ran (started + complete both fire); tier (b) is upstream of
+    this function entirely and unchanged by P6-09."""
+    monkeypatch.setattr(website, "_resolve_async_playwright", _raise_import_error)
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        ds = await website.extract_website_design_system("https://example.com")
+
+    assert ds is None
+    msgs = [r.getMessage() for r in caplog.records]
+    # Tier (a): the body ran, so BOTH lifecycle lines fired.
+    assert any("website_extract_started" in m for m in msgs)
+    assert any("website_extract_complete" in m for m in msgs)
+    # Tier (b) — module absence — would emit NEITHER (the body never executes);
+    # that floor is the caller's `except ImportError`, which P6-09 leaves intact.

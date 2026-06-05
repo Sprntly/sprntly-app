@@ -47,7 +47,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
+from app.auth import CompanyContext, require_company  # company-scoped auth dep (P6-10)
 from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
@@ -82,7 +82,13 @@ from app.design_agent.prompts import (
     render_scaffold_user,
 )
 from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
-from app.design_agent.storage import TypeCheckError, ViteBuildError, stage_bundle, vite_build
+from app.design_agent.storage import (
+    TypeCheckError,
+    ViteBuildError,
+    stage_bundle,
+    vite_build,
+    vite_build_with_repair,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +165,7 @@ class GenerateResponse(BaseModel):
 )
 async def generate(
     body: GenerateRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> GenerateResponse:
     """Kick off prototype generation in the background; return the id in <200ms.
 
@@ -168,9 +174,7 @@ async def generate(
     dedupe) so a double-click on Generate does not fan out duplicate runs.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
 
     # Sync DB helpers, called directly (no await) — see CALL-STYLE NOTE.
     existing = find_existing_prototype(
@@ -272,7 +276,7 @@ def _patch_to_out(row: dict[str, Any]) -> dict[str, Any]:
 @router.get("/prd-patches", response_model=list[PrdPatchOut])
 def get_pending_patches(
     prd_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> list[PrdPatchOut]:
     """List the PENDING patches for a PRD (created_at-ascending), workspace-filtered.
 
@@ -281,9 +285,7 @@ def get_pending_patches(
     renders nothing). 401 without a session; 404-invisibility is moot here (a
     foreign-workspace PRD simply yields no rows under this workspace filter)."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     return [
         PrdPatchOut(**_patch_to_out(p))
         for p in list_pending_patches(prd_id=prd_id, workspace_id=workspace_id)
@@ -293,7 +295,7 @@ def get_pending_patches(
 @router.get("/{prototype_id}")
 def get_one(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> dict[str, Any]:
     """Return the full prototype row for the frontend poller (P1-09).
 
@@ -303,9 +305,7 @@ def get_one(
     so cross-tenant existence is not even disclosed (Rule #22).
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -465,9 +465,16 @@ async def _stage_complete_run(
     log lines) rather than propagated, so the error strings match the ticket ACs
     exactly; a DB-helper failure propagates to the caller's outer except.
     """
-    # Step 1 — Vite build (anchor-id plugin runs here).
+    # Step 1 — Vite build (anchor-id plugin runs here). P6-07: the bounded
+    # unresolved-relative-import repair wrapper stubs/strips an orphan `./screens/*`
+    # import (the degrade-converged 2/2-repro) and rebuilds instead of shipping
+    # status=failed; on exhaustion it raises UnresolvedImportRepairExhausted (a
+    # ViteBuildError subclass — caught by the tuple below, distinct error_class).
+    # vite_build_with_repair returns the (possibly) REPAIRED virtual_fs as its
+    # second element; we REBIND `virtual_fs` here, BEFORE the `_source/` staging
+    # step below, so the staged source matches the built dist.
     try:
-        dist_files = await vite_build(virtual_fs)
+        dist_files, repaired_virtual_fs = await vite_build_with_repair(virtual_fs)
     except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
         # P3-15 (B3): TypeCheckError joins the precise build-failure tuple so a
         # runtime-break diagnostic routes to fail_prototype with the diagnostic in
@@ -485,6 +492,21 @@ async def _stage_complete_run(
             error=f"{type(exc).__name__}: {exc}",
         )
         return
+    # P6-07: rebind to the repaired source BEFORE the `_source/` staging step so
+    # the staged source matches the built dist. On a clean build this is the same
+    # map. When a repair was applied (the map changed), emit build_repair_applied
+    # with an action count only (Rule #24 — no source / no import paths): stubs add
+    # keys, strips change file bodies.
+    if repaired_virtual_fs != virtual_fs:
+        repair_actions = len(set(repaired_virtual_fs) - set(virtual_fs)) + sum(
+            1 for k in virtual_fs
+            if k in repaired_virtual_fs and repaired_virtual_fs[k] != virtual_fs[k]
+        )
+        logger.info(
+            "build_repair_applied prototype_id=%s actions=%d",
+            prototype_id, repair_actions,
+        )
+    virtual_fs = repaired_virtual_fs
     logger.info(
         "vite_build_succeeded prototype_id=%s checkpoint_id=N/A dist_file_count=%s",
         prototype_id, len(dist_files),
@@ -912,7 +934,7 @@ class CompleteResponse(BaseModel):
 )
 async def post_complete(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> CompleteResponse:
     """F14: lock the prototype. Sets is_complete=true and promotes
     current_checkpoint_id → complete_checkpoint_id. Idempotent: a second
@@ -927,9 +949,7 @@ async def post_complete(
     `await` per the CALL-STYLE NOTE; only the export hook is awaited.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -961,7 +981,7 @@ class ResumeResponse(BaseModel):
 )
 def post_resume(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> ResumeResponse:
     """F15: unlock the prototype + flag any open handoff record as stale.
 
@@ -972,9 +992,7 @@ def post_resume(
     Idempotent: resume-on-WIP is a 200 no-op.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1006,7 +1024,7 @@ class ShareResponse(BaseModel):
 def post_share(
     prototype_id: int,
     body: ShareRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> ShareResponse:
     """F6: set / update share configuration. Wraps set_share_config (P2-06).
 
@@ -1014,9 +1032,7 @@ def post_share(
     (caught by pydantic). On row-not-found in this workspace → 404.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     if body.mode == "passcode" and not body.passcode:
         raise HTTPException(status_code=400, detail="passcode-mode requires a passcode")
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
@@ -1051,7 +1067,7 @@ def post_share(
 @router.get("/{prototype_id}/export")
 async def get_export(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> Response:
     """F16/F17: return the markdown export of the locked checkpoint.
 
@@ -1063,9 +1079,7 @@ async def get_export(
     reads the text body and copies via navigator.clipboard.writeText).
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1169,15 +1183,13 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
 def post_comment(
     prototype_id: int,
     body: CommentCreate,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> CommentOut:
     """Create a comment as an internal user. Workspace-filtered: 404 if the
     prototype is not in the caller's workspace (cross-tenant existence is not
     disclosed — Rule #22). Attributed to the internal author label."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1194,14 +1206,12 @@ def post_comment(
 @router.get("/{prototype_id}/comments", response_model=list[CommentOut])
 def get_comments(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> list[CommentOut]:
     """List every comment for a prototype (all statuses, created_at-ascending).
     Workspace-filtered: 404 if the prototype is not in the caller's workspace."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1219,16 +1229,14 @@ def get_comments(
 def patch_resolve_comment(
     prototype_id: int,
     cid: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> CommentOut:
     """Resolve a comment (internal only — external viewers cannot resolve, per
     spec §4 Stage 2 'only internal users with credentials can act'). Returns 404
     when the comment is not in the caller's workspace OR belongs to a different
     prototype than the one in the path (no cross-prototype resolve)."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = resolve_comment(comment_id=cid, workspace_id=workspace_id)
     if not row or row["prototype_id"] != prototype_id:
         raise HTTPException(status_code=404, detail="Comment not found")
@@ -1367,7 +1375,7 @@ class IterateResponse(BaseModel):
 async def post_iterate(
     prototype_id: int,
     body: IterateRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> IterateResponse:
     """F9/F10: kick off an iterate of an existing prototype; return in <200ms.
 
@@ -1381,9 +1389,7 @@ async def post_iterate(
     A full queue returns 429. No Anthropic call in the request path.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1453,7 +1459,7 @@ class EstimateRequest(BaseModel):
 async def post_iterate_estimate(
     prototype_id: int,
     body: EstimateRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> dict:
     """Pre-flight cost estimate (AD14): return the token + dollar estimate + soft-cap
     warning the CostEstimateModal renders BEFORE an iterate run. Deterministic, no
@@ -1470,9 +1476,7 @@ async def post_iterate_estimate(
     bundle content.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1512,7 +1516,7 @@ class ConfirmPlanRequest(BaseModel):
 async def post_confirm_plan(
     prototype_id: int,
     body: ConfirmPlanRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> IterateResponse:
     """Plan->Execute transition (P3-07, AD10): run the approved plan in EXECUTE mode.
 
@@ -1523,9 +1527,7 @@ async def post_confirm_plan(
     in <200ms — no Anthropic call in the request path.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1932,7 +1934,7 @@ async def _stage_iterate_run(
 )
 def post_accept_patch(
     patch_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> PrdPatchOut:
     """Accept a proposed PRD patch: flip its status to `applied` (P3-09
     `mark_patch_applied`) and return the updated row. The rendered PRD reflects the
@@ -1942,9 +1944,7 @@ def post_accept_patch(
     workspace (cross-tenant invisibility, Rule #22). Idempotent: re-accepting an
     already-applied patch is a no-op flip that returns the row."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = mark_patch_applied(patch_id=patch_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found")
@@ -1962,16 +1962,14 @@ def post_accept_patch(
 )
 def post_reject_patch(
     patch_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> PrdPatchOut:
     """Reject a proposed PRD patch: flip its status to `rejected` (P3-09
     `mark_patch_rejected`) and return the updated row. The PRD is unaffected
     (rejected patches are excluded by `apply_patches_to_prd_md`). 404 when not in
     the caller's workspace. Idempotent (mirrors accept)."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = mark_patch_rejected(patch_id=patch_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found")
@@ -2046,7 +2044,7 @@ class ManualEditResponse(BaseModel):
 async def post_manual_edit(
     prototype_id: int,
     body: ManualEditRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> ManualEditResponse:
     """F13/AD23: commit a batch of manual visual edits into the prototype source.
 
@@ -2059,9 +2057,7 @@ async def post_manual_edit(
     Anthropic call in the request path (AC1/AC4 — the LLM runs once, in the bg).
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")

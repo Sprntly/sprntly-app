@@ -255,6 +255,7 @@ def _fake_vite_run(*, dist_files=None, returncode=0, stderr="", capture=None):
         if capture is not None:
             capture["cmd"] = cmd
             capture["cwd"] = cwd
+            capture["timeout"] = kwargs.get("timeout")  # P6-21 — the vite-build budget
             capture["node_modules_is_symlink"] = (Path(cwd) / "node_modules").is_symlink()
         if returncode == 0:
             dist = Path(cwd) / "dist"
@@ -303,11 +304,116 @@ async def test_vite_build_raises_on_nonzero_exit(monkeypatch):
 
 async def test_vite_build_raises_on_timeout(monkeypatch):
     def _timeout(cmd, cwd=None, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=cmd, timeout=60)
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 60))
     monkeypatch.setattr(storage.subprocess, "run", _timeout)
     with pytest.raises(ViteBuildError) as ei:
         await storage.vite_build({"src/App.tsx": "x"})
     assert "timed out" in str(ei.value)
+
+
+# ─── P6-21: env-configurable Vite build budget (read at call-time) ────────────
+
+
+async def test_build_timeout_reads_configured_value(monkeypatch):
+    """AC1 (regression — FAILS on unfixed code): the timeout passed to
+    subprocess.run is sourced from settings.design_agent_vite_build_timeout_seconds
+    at call-time, not the old hardcoded 60. Unfixed code passes 60 → assert fails."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 90, raising=False
+    )
+    capture: dict = {}
+    monkeypatch.setattr(storage.subprocess, "run", _fake_vite_run(capture=capture))
+    await storage.vite_build({"src/App.tsx": "export default () => null;"})
+    assert capture["timeout"] == 90
+
+
+def test_default_build_timeout_is_120():
+    """AC2: with no env override, the configured default is 120s."""
+    from app.config import settings as live_settings
+    assert live_settings.design_agent_vite_build_timeout_seconds == 120
+
+
+def test_env_override_build_timeout(monkeypatch):
+    """AC1: the field is env-overridable via DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS."""
+    from app.config import Settings
+    monkeypatch.setenv("DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS", "200")
+    fresh = Settings()
+    assert fresh.design_agent_vite_build_timeout_seconds == 200
+
+
+async def test_timeout_raises_vite_build_error_with_configured_value(monkeypatch):
+    """AC4: on TimeoutExpired the ViteBuildError message names the LIVE configured
+    budget (not a hardcoded 60), keeping the timeout class distinguishable."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 90, raising=False
+    )
+
+    def _timeout(cmd, cwd=None, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(storage.subprocess, "run", _timeout)
+    with pytest.raises(ViteBuildError) as ei:
+        await storage.vite_build({"src/App.tsx": "x"})
+    assert "timed out after 90s" in str(ei.value)
+    # distinct from the exit-code class and the no-dist class
+    assert "exit=" not in str(ei.value)
+
+
+async def test_timeout_propagates_through_repair_loop(monkeypatch):
+    """AC5: vite_build_with_repair re-raises a timeout ViteBuildError UNCHANGED
+    (a timeout is not a 'could not resolve' class), with no repair re-attempt —
+    proving the P6-07 import-repair path is untouched by P6-21."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 75, raising=False
+    )
+    calls = {"n": 0}
+
+    def _timeout(cmd, cwd=None, **kwargs):
+        calls["n"] += 1
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(storage.subprocess, "run", _timeout)
+    with pytest.raises(ViteBuildError) as ei:
+        await storage.vite_build_with_repair({"src/App.tsx": "x"})
+    assert "timed out after 75s" in str(ei.value)
+    # exactly one build attempt — no repair rebuild on a timeout class
+    assert calls["n"] == 1
+
+
+async def test_build_under_limit_succeeds(monkeypatch):
+    """AC3: raising the budget does not change the success path — a build that
+    completes (returncode=0) returns dist files normally regardless of the budget."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 300, raising=False
+    )
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_vite_run(dist_files={"index.html": "<html>ok</html>"}),
+    )
+    out = await storage.vite_build({"src/App.tsx": "export default () => null;"})
+    assert out["index.html"] == "<html>ok</html>"
+
+
+async def test_no_hardcoded_timeout_constant_used(monkeypatch):
+    """AC6: the call-time read tracks the setting — changing the setting changes
+    the subprocess.run timeout, so no stale 60 constant shadows it."""
+    capture: dict = {}
+    monkeypatch.setattr(storage.subprocess, "run", _fake_vite_run(capture=capture))
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 111, raising=False
+    )
+    await storage.vite_build({"src/App.tsx": "x"})
+    assert capture["timeout"] == 111
+    assert not hasattr(storage, "_VITE_BUILD_TIMEOUT_SECONDS")
+
+
+def test_settings_field_additive():
+    """AC8: the new field exists with the expected type/default and the import is
+    clean (the additive Settings change breaks no existing consumer)."""
+    from app.config import settings as live_settings
+    val = live_settings.design_agent_vite_build_timeout_seconds
+    assert isinstance(val, int)
+    assert val == 120
 
 
 async def test_vite_build_raises_when_dist_not_produced(monkeypatch):
@@ -746,8 +852,13 @@ async def test_run_generation_bg_marks_failed_on_max_iters(env, monkeypatch):
 
 
 async def test_run_generation_bg_marks_failed_on_stage_bundle_exception(env, monkeypatch):
+    # P6-07: _stage_complete_run now calls vite_build_with_repair (returns
+    # (dist, repaired_vfs)); patch that seam, not the now-internal vite_build.
     _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
-    monkeypatch.setattr(env.routes, "vite_build", _async_return({"index.html": "<html></html>"}))
+    monkeypatch.setattr(
+        env.routes, "vite_build_with_repair",
+        _async_return(({"index.html": "<html></html>"}, {"src/App.tsx": "x"})),
+    )
     monkeypatch.setattr(env.routes, "stage_bundle", _async_raise(RuntimeError("boom")))
     prd_id = _seed_prd(env.db)
     pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
@@ -767,8 +878,11 @@ async def test_run_generation_bg_marks_failed_on_stage_bundle_exception(env, mon
 async def test_route_complete_path_creates_checkpoint_and_marks_ready(env, monkeypatch):
     _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
     monkeypatch.setattr(
-        env.routes, "vite_build",
-        _async_return({"index.html": '<html><body><div data-anchor-id="abcd1234"></div></body></html>'}),
+        env.routes, "vite_build_with_repair",
+        _async_return(
+            ({"index.html": '<html><body><div data-anchor-id="abcd1234"></div></body></html>'},
+             {"src/App.tsx": "x"}),
+        ),
     )
     monkeypatch.setattr(env.routes, "stage_bundle", _async_return("https://x.example/prototypes/1/1/index.html"))
     prd_id = _seed_prd(env.db)
@@ -794,16 +908,18 @@ async def test_route_hook_runs_vite_build_before_stage_bundle(env, monkeypatch):
     dist = {"index.html": "<html>built</html>"}
     vfs = {"src/App.tsx": "raw-source"}
 
+    # P6-07: the route now calls vite_build_with_repair (returns (dist, repaired_vfs));
+    # a clean build returns the source unchanged.
     async def _vite(virtual_fs):
         calls.append(("vite_build", virtual_fs))
-        return dist
+        return dist, virtual_fs
 
     async def _stage(*, prototype_id, checkpoint_id, files):
         calls.append(("stage_bundle", files))
         return "https://x/index.html"
 
     _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs=vfs)
-    monkeypatch.setattr(env.routes, "vite_build", _vite)
+    monkeypatch.setattr(env.routes, "vite_build_with_repair", _vite)
     monkeypatch.setattr(env.routes, "stage_bundle", _stage)
     prd_id = _seed_prd(env.db)
     pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
@@ -820,7 +936,10 @@ async def test_route_hook_marks_failed_on_vite_build_error(env, monkeypatch):
     """AC #12: vite_build error → failed; NO checkpoint; stage_bundle NOT called."""
     stage_mock = MagicMock()
     _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
-    monkeypatch.setattr(env.routes, "vite_build", _async_raise(ViteBuildError("vite build exit=1: SyntaxError")))
+    monkeypatch.setattr(
+        env.routes, "vite_build_with_repair",
+        _async_raise(ViteBuildError("vite build exit=1: SyntaxError")),
+    )
     monkeypatch.setattr(env.routes, "stage_bundle", stage_mock)
     prd_id = _seed_prd(env.db)
     pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
@@ -839,18 +958,28 @@ async def test_stage_complete_run_emits_observability_logs(env, monkeypatch, cap
     """AC #16: vite_build_succeeded on success, vite_build_failed on build error."""
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
 
-    # Success → vite_build_succeeded (with dist_file_count), no stderr.
-    monkeypatch.setattr(env.routes, "vite_build", _async_return({"index.html": "<x/>"}))
+    # Success → vite_build_succeeded (with dist_file_count), no stderr. P6-07: the
+    # repair wrapper returns (dist, repaired_vfs); a clean build returns the source
+    # unchanged, so no build_repair_applied line is emitted (asserted below).
+    monkeypatch.setattr(
+        env.routes, "vite_build_with_repair",
+        _async_return(({"index.html": "<x/>"}, {"a": "b"})),
+    )
     monkeypatch.setattr(env.routes, "stage_bundle", _async_return("file:///x/index.html"))
     with caplog.at_level(logging.INFO):
         await env.routes._stage_complete_run(prototype_id=pid, workspace_id="app", virtual_fs={"a": "b"})
     succeeded = [r.getMessage() for r in caplog.records if r.getMessage().startswith("vite_build_succeeded")]
     assert succeeded and "dist_file_count=1" in succeeded[0]
+    # No-op build (no repair) must NOT log build_repair_applied (AC6).
+    assert not [r for r in caplog.records if r.getMessage().startswith("build_repair_applied")]
 
     # Failure → vite_build_failed with error_class only (no stderr in the log line).
     caplog.clear()
     pid2 = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
-    monkeypatch.setattr(env.routes, "vite_build", _async_raise(ViteBuildError("vite build exit=1: secret-stderr-blob")))
+    monkeypatch.setattr(
+        env.routes, "vite_build_with_repair",
+        _async_raise(ViteBuildError("vite build exit=1: secret-stderr-blob")),
+    )
     with caplog.at_level(logging.WARNING):
         await env.routes._stage_complete_run(prototype_id=pid2, workspace_id="app", virtual_fs={"a": "b"})
     failed = [r.getMessage() for r in caplog.records if r.getMessage().startswith("vite_build_failed")]
@@ -874,8 +1003,11 @@ async def test_complete_path_routes_typecheck_error_to_precise_fail(env, monkeyp
     the generic outer except. No checkpoint; stage_bundle never called."""
     stage_mock = MagicMock()
     _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
+    # P6-07: the complete path builds via vite_build_with_repair; a TypeCheckError
+    # (not a ViteBuildError) propagates out of the wrapper unchanged → the route's
+    # widened except routes it to fail_prototype exactly as before.
     monkeypatch.setattr(
-        env.routes, "vite_build",
+        env.routes, "vite_build_with_repair",
         _async_raise(env.routes.TypeCheckError(
             "runtime-breaking type errors: src/App.tsx(1,47): error TS2304: Cannot find name 'useState'."
         )),
@@ -899,8 +1031,10 @@ async def test_complete_path_typecheck_uses_precise_log(env, monkeypatch, caplog
     """AC #1a: the precise `vite_build_failed` log fires (not the generic outer
     `design_agent.generation_failed`) when a TypeCheckError is raised."""
     _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
+    # P6-07: complete path builds via vite_build_with_repair; a TypeCheckError
+    # propagates unchanged into the route's precise except.
     monkeypatch.setattr(
-        env.routes, "vite_build",
+        env.routes, "vite_build_with_repair",
         _async_raise(env.routes.TypeCheckError("runtime-breaking type errors: error TS2307: ...")),
     )
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)

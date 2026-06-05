@@ -27,6 +27,8 @@ from fastapi.testclient import TestClient
 from app import llm_telemetry
 from app.design_agent import runner
 
+from tests.conftest import _TEST_COMPANY_ID
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Unit — estimate_iterate_cost (pure calc, monkeypatched data deps)
@@ -50,7 +52,7 @@ def _patch_calc(monkeypatch, *, source=None, comments=None, checkpoint_id=10):
 def test_estimate_returns_expected_shape(monkeypatch):
     _patch_calc(monkeypatch)
     out = asyncio.run(
-        runner.estimate_iterate_cost(prototype_id=1, workspace_id="app", prompt="make it blue")
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="make it blue")
     )
     assert set(out.keys()) == {
         "cached_input_tokens",
@@ -73,7 +75,7 @@ def test_estimate_uses_model_pricing_not_duplicate(monkeypatch):
 
     _patch_calc(monkeypatch, source={"App.tsx": "x" * 4000})
     out = asyncio.run(
-        runner.estimate_iterate_cost(prototype_id=1, workspace_id="app", prompt="hello")
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hello")
     )
     # Recompute independently from the shared pricing dict + the documented formula.
     p = llm_telemetry.MODEL_PRICING["claude-sonnet-4-6"]
@@ -89,7 +91,7 @@ def test_estimate_uses_model_pricing_not_duplicate(monkeypatch):
 def test_estimate_under_soft_cap_for_small_input(monkeypatch):
     _patch_calc(monkeypatch, source={"App.tsx": "small bundle"})
     out = asyncio.run(
-        runner.estimate_iterate_cost(prototype_id=1, workspace_id="app", prompt="tweak the header")
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="tweak the header")
     )
     assert out["est_cost_usd"] < 0.50
     assert out["exceeds_soft_cap"] is False
@@ -99,7 +101,7 @@ def test_estimate_exceeds_soft_cap_for_large_input(monkeypatch):
     # ~8M chars of bundle source → ~2M cached tokens → well over the $0.50 guide.
     _patch_calc(monkeypatch, source={"App.tsx": "x" * 8_000_000})
     out = asyncio.run(
-        runner.estimate_iterate_cost(prototype_id=1, workspace_id="app", prompt="big change")
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="big change")
     )
     assert out["est_cost_usd"] > 0.50
     assert out["exceeds_soft_cap"] is True
@@ -111,7 +113,7 @@ def test_estimate_is_deterministic(monkeypatch):
         source={"App.tsx": "y" * 1234},
         comments=[{"anchor_id": "a1", "body": "fix", "status": "open"}],
     )
-    args = dict(prototype_id=1, workspace_id="app", prompt="same prompt")
+    args = dict(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="same prompt")
     first = asyncio.run(runner.estimate_iterate_cost(**args))
     second = asyncio.run(runner.estimate_iterate_cost(**args))
     assert first == second
@@ -122,7 +124,7 @@ def test_estimate_makes_no_anthropic_call(monkeypatch):
     fake_client = MagicMock()
     monkeypatch.setattr(runner, "get_design_agent_client", lambda: fake_client)
     asyncio.run(
-        runner.estimate_iterate_cost(prototype_id=1, workspace_id="app", prompt="no api please")
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="no api please")
     )
     fake_client.messages.create.assert_not_called()
 
@@ -136,11 +138,11 @@ def test_estimate_only_counts_open_comments(monkeypatch):
     ]
     _patch_calc(monkeypatch, comments=mixed)
     out = asyncio.run(
-        runner.estimate_iterate_cost(prototype_id=1, workspace_id="app", prompt="hi")
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hi")
     )
     _patch_calc(monkeypatch, comments=[{"anchor_id": "a1", "body": "keep", "status": "open"}])
     out2 = asyncio.run(
-        runner.estimate_iterate_cost(prototype_id=1, workspace_id="app", prompt="hi")
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hi")
     )
     assert out["cached_input_tokens"] == out2["cached_input_tokens"]
 
@@ -156,7 +158,7 @@ def test_estimate_missing_checkpoint_yields_empty_bundle(monkeypatch):
 
     monkeypatch.setattr(runner, "read_source_files_for_checkpoint", _boom)
     out = asyncio.run(
-        runner.estimate_iterate_cost(prototype_id=1, workspace_id="app", prompt="hi")
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hi")
     )
     # cacheable = system prompt only; volatile = "hi".
     assert out["new_input_tokens"] == len("hi") // 4
@@ -226,7 +228,7 @@ def env(isolated_settings, monkeypatch):
     )
 
 
-def _seed_prototype(env, *, pid=1, workspace_id="app", checkpoint_id=None):
+def _seed_prototype(env, *, pid=1, workspace_id=_TEST_COMPANY_ID, checkpoint_id=None):
     from tests import _fake_supabase
 
     _fake_supabase.get_fake_db().execute(
@@ -238,11 +240,9 @@ def _seed_prototype(env, *, pid=1, workspace_id="app", checkpoint_id=None):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
 @pytest.fixture

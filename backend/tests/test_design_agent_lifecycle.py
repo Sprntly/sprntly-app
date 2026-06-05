@@ -17,10 +17,12 @@ below. This ticket ships ZERO migrations; the DDL here is a test mirror of P2-09
 future table, not the source of truth. When the P2-07/08/09 trio batch-merges,
 P2-09's real migration lands the column before the helper runs against a real DB.
 
-AUTH NOTE (mirrors test_design_agent_routes.py): the routes use
-`require_app_session`, so the client fixture logs in with `audience="app"`
-(workspace_id="app"). Cross-workspace isolation is proven by seeding a row under
-a FOREIGN workspace and asserting the app-session call returns 404.
+AUTH NOTE (P6-10, mirrors test_design_agent_routes.py): the routes now gate on
+`require_company` (Supabase Bearer JWT → company membership), so the client
+fixture delegates to conftest's bearer-authed `company_client`; authed calls
+resolve workspace_id to `_TEST_COMPANY_ID`. Cross-workspace isolation is proven
+by seeding a row under a FOREIGN workspace ('demo') and asserting the company
+call returns 404.
 """
 from __future__ import annotations
 
@@ -31,6 +33,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.conftest import _TEST_COMPANY_ID
 
 # SQLite-compatible end-state of `prototypes` AFTER P1-06 + the P2-06 sharing
 # migration (base columns + share_mode/share_token/share_passcode_hash/
@@ -109,12 +113,9 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
 @pytest.fixture
@@ -126,7 +127,7 @@ def unauth(env) -> TestClient:
 # ─── helpers ──────────────────────────────────────────────────────────────
 
 
-def _seed_ready(env, *, workspace_id="app", checkpoint_id=None) -> int:
+def _seed_ready(env, *, workspace_id=_TEST_COMPANY_ID, checkpoint_id=None) -> int:
     """Insert a prototype and complete it to status='ready' (optionally with a
     current_checkpoint_id), so /complete's status gate passes."""
     pid = env.proto.start_prototype(
@@ -141,7 +142,7 @@ def _seed_ready(env, *, workspace_id="app", checkpoint_id=None) -> int:
     return pid
 
 
-def _seed_export(prototype_id: int, *, workspace_id="app", is_stale=0) -> int:
+def _seed_export(prototype_id: int, *, workspace_id=_TEST_COMPANY_ID, is_stale=0) -> int:
     """Insert a TEST-LOCAL prototype_exports row (the handoff record) and return
     its id."""
     from tests import _fake_supabase
@@ -224,7 +225,7 @@ def test_complete_invokes_record_export_at_complete_once(env, client, monkeypatc
     pid = _seed_ready(env, checkpoint_id=3)
     resp = client.post(f"/v1/design-agent/{pid}/complete")
     assert resp.status_code == 200, resp.text
-    assert calls == [{"prototype_id": pid, "workspace_id": "app"}]
+    assert calls == [{"prototype_id": pid, "workspace_id": _TEST_COMPANY_ID}]
 
 
 # ─── Error handling — POST /complete (AC #2, #3, #10, #11) ──────────────────
@@ -232,15 +233,15 @@ def test_complete_invokes_record_export_at_complete_once(env, client, monkeypatc
 
 def test_complete_returns_409_on_generating(env, client):
     # AC #2
-    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    pid = env.proto.start_prototype(prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1)
     resp = client.post(f"/v1/design-agent/{pid}/complete")
     assert resp.status_code == 409
     assert resp.json()["detail"] == "Cannot complete: status=generating"
 
 
 def test_complete_returns_409_on_failed(env, client):
-    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
-    env.proto.fail_prototype(prototype_id=pid, workspace_id="app", error="boom")
+    pid = env.proto.start_prototype(prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1)
+    env.proto.fail_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, error="boom")
     resp = client.post(f"/v1/design-agent/{pid}/complete")
     assert resp.status_code == 409
     assert resp.json()["detail"] == "Cannot complete: status=failed"
@@ -287,7 +288,7 @@ def test_resume_preserves_complete_checkpoint_id(env, client):
     client.post(f"/v1/design-agent/{pid}/complete")
     resp = client.post(f"/v1/design-agent/{pid}/resume")
     assert resp.status_code == 200, resp.text
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["complete_checkpoint_id"] == 5  # historical lock point retained
 
 
@@ -380,7 +381,7 @@ def test_share_passcode_stores_argon2_hash(env, client):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["share_token"] is not None
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert env.proto.verify_share_passcode("hunter2", row["share_passcode_hash"]) is True
 
 
@@ -437,46 +438,46 @@ def test_share_returns_401_when_unauthenticated(env, unauth):
 
 def test_mark_complete_helper_idempotent(env):
     pid = _seed_ready(env, checkpoint_id=7)
-    first = env.proto.mark_complete(prototype_id=pid, workspace_id="app")
+    first = env.proto.mark_complete(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert first["is_complete"] in (1, True)
     assert first["complete_checkpoint_id"] == 7
     _set_checkpoint(pid, 42)
-    second = env.proto.mark_complete(prototype_id=pid, workspace_id="app")
+    second = env.proto.mark_complete(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert second["complete_checkpoint_id"] == 7  # not moved by the re-call
 
 
 def test_mark_complete_helper_raises_when_missing(env):
     with pytest.raises(ValueError):
-        env.proto.mark_complete(prototype_id=999999, workspace_id="app")
+        env.proto.mark_complete(prototype_id=999999, workspace_id=_TEST_COMPANY_ID)
 
 
 def test_resume_iteration_helper_idempotent(env):
     pid = _seed_ready(env, checkpoint_id=1)
-    env.proto.mark_complete(prototype_id=pid, workspace_id="app")
-    once = env.proto.resume_iteration(prototype_id=pid, workspace_id="app")
+    env.proto.mark_complete(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    once = env.proto.resume_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert once["is_complete"] in (0, False)
-    twice = env.proto.resume_iteration(prototype_id=pid, workspace_id="app")
+    twice = env.proto.resume_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert twice["is_complete"] in (0, False)  # no state change
 
 
 def test_flag_stale_handoff_marks_recent_export_stale_when_present(env):
     pid = _seed_ready(env, checkpoint_id=1)
     export_id = _seed_export(pid, is_stale=0)
-    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id="app") == 1
+    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == 1
     assert _export_row(export_id)["is_stale"] == 1
 
 
 def test_flag_stale_handoff_returns_zero_when_no_export(env):
     pid = _seed_ready(env, checkpoint_id=1)
-    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id="app") == 0
+    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == 0
 
 
 def test_flag_stale_handoff_is_idempotent_on_already_stale(env):
     pid = _seed_ready(env, checkpoint_id=1)
     _seed_export(pid, is_stale=0)
-    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id="app") == 1
+    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == 1
     # Second call: the only export is now stale → filter excludes it → 0.
-    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id="app") == 0
+    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == 0
 
 
 def test_flag_stale_handoff_targets_most_recent_export(env):
@@ -484,7 +485,7 @@ def test_flag_stale_handoff_targets_most_recent_export(env):
     pid = _seed_ready(env, checkpoint_id=1)
     older = _seed_export(pid, is_stale=0)
     newer = _seed_export(pid, is_stale=0)
-    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id="app") == 1
+    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == 1
     assert _export_row(newer)["is_stale"] == 1
     assert _export_row(older)["is_stale"] == 0  # untouched
 
@@ -493,14 +494,14 @@ def test_flag_stale_handoff_respects_workspace(env):
     # An export under a foreign workspace is invisible to the app-workspace flag.
     pid = _seed_ready(env, checkpoint_id=1)
     _seed_export(pid, workspace_id="demo", is_stale=0)
-    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id="app") == 0
+    assert env.proto.flag_stale_handoff(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == 0
 
 
 async def test_record_export_at_complete_is_noop_when_prototype_missing(env):
     # P2-09 made this async + real. With no prototype row (id=1 unseeded here)
     # it no-ops gracefully: returns None, raises nothing, inserts no export row.
     assert (
-        await env.proto.record_export_at_complete(prototype_id=1, workspace_id="app")
+        await env.proto.record_export_at_complete(prototype_id=1, workspace_id=_TEST_COMPANY_ID)
         is None
     )
 
@@ -514,7 +515,7 @@ def test_mark_complete_logs_completed_line_no_pii(env, caplog):
     # AC #15 — prototype_completed INFO line with the checkpoint id; no PRD/PII.
     pid = _seed_ready(env, checkpoint_id=11)
     with caplog.at_level(logging.INFO, logger="app.db.prototypes"):
-        env.proto.mark_complete(prototype_id=pid, workspace_id="app")
+        env.proto.mark_complete(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     blob = "\n".join(r.getMessage() for r in caplog.records)
     assert "prototype_completed" in blob
     assert f"prototype_id={pid}" in blob
@@ -525,7 +526,7 @@ def test_resume_iteration_logs_resumed_line(env, caplog):
     # AC #15 — prototype_resumed INFO line with the id.
     pid = _seed_ready(env, checkpoint_id=1)
     with caplog.at_level(logging.INFO, logger="app.db.prototypes"):
-        env.proto.resume_iteration(prototype_id=pid, workspace_id="app")
+        env.proto.resume_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     blob = "\n".join(r.getMessage() for r in caplog.records)
     assert "prototype_resumed" in blob
     assert f"prototype_id={pid}" in blob

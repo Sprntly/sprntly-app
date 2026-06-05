@@ -61,7 +61,7 @@ export function PasscodeGateView(props: {
     )
   }
   return (
-    <form onSubmit={props.onSubmit} className="da-passcode-gate">
+    <form onSubmit={props.onSubmit} className="design-agent-surface da-passcode-gate">
       <label className="da-passcode-label">
         Enter passcode to view prototype
         <input

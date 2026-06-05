@@ -41,6 +41,8 @@ from app.design_agent.prompts import (
     render_iterate_user,
 )
 
+from tests.conftest import _TEST_COMPANY_ID
+
 TELEMETRY_LOGGER = "app.llm_telemetry"
 
 
@@ -207,7 +209,7 @@ def test_iterate_prototype_prepopulates_virtual_fs(monkeypatch):
         _msg("end_turn", [_text("done")]),
     ])
     result, vfs = _run(runner.iterate_prototype(
-        prototype_id=1, workspace_id="app",
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID,
         system_blocks=_system(), user_message=_user(),
         current_source={"src/App.tsx": "export default function App(){ return <div>HELLO</div> }"},
         figma_file_key=None,
@@ -234,7 +236,7 @@ def test_iterate_prototype_threads_execute_mode_and_seeds_ctx(monkeypatch):
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
     monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
     _run(runner.iterate_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=_system(), user_message=_user(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={"src/App.tsx": "x"}, figma_file_key=None,
     ))
     assert captured["mode"] == "execute"
@@ -249,7 +251,7 @@ def test_iterate_prototype_emits_iterate_cost_log(monkeypatch, caplog):
     ])
     with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER):
         result, _vfs = _run(runner.iterate_prototype(
-            prototype_id=77, workspace_id="app", system_blocks=_system(), user_message=_user(),
+            prototype_id=77, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
             current_source={}, figma_file_key=None, scenario="A",
         ))
     assert result.status == "complete"
@@ -276,7 +278,7 @@ def test_iterate_cost_log_carries_no_pii_or_content(monkeypatch, caplog):
     user_message = {"role": "user", "content": [_text("COMMENT_PII jane.doe@example.com")]}
     with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER):
         _run(runner.iterate_prototype(
-            prototype_id=1, workspace_id="app", system_blocks=system_blocks,
+            prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=system_blocks,
             user_message=user_message, current_source={"f.tsx": "SECRET_SOURCE_BODY"},
             figma_file_key=None,
         ))
@@ -294,7 +296,7 @@ def test_iterate_prototype_cache_read_nonzero_on_second_call(monkeypatch):
         _msg("end_turn", [_text("done")], usage=_usage(cache_read=120, inp=10, out=20)),
     ])
     result, _vfs = _run(runner.iterate_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=_system(), user_message=_user(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={"src/A.tsx": "x"}, figma_file_key=None,
     ))
     assert result.usage.cache_read_input_tokens >= 120
@@ -307,7 +309,7 @@ def test_iterate_prototype_honours_max_iters(monkeypatch):
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),  # replayed forever
     ])
     result, _vfs = _run(runner.iterate_prototype(
-        prototype_id=1, workspace_id="app", system_blocks=_system(), user_message=_user(),
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={}, figma_file_key=None,
     ))
     assert result.status == "max_iters"
@@ -411,12 +413,9 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
 @pytest.fixture
@@ -427,7 +426,7 @@ def unauth(env) -> TestClient:
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 
-def _seed_ready(env, *, workspace_id: str = "app", current_checkpoint_id=None) -> int:
+def _seed_ready(env, *, workspace_id: str = _TEST_COMPANY_ID, current_checkpoint_id=None) -> int:
     """Insert a ready, unlocked prototype (status='ready', is_complete=0)."""
     pid = env.proto.start_prototype(prd_id=1, workspace_id=workspace_id, template_version=1)
     env.proto.complete_prototype(
@@ -437,7 +436,7 @@ def _seed_ready(env, *, workspace_id: str = "app", current_checkpoint_id=None) -
     return pid
 
 
-def _seed_locked(env, *, workspace_id: str = "app") -> int:
+def _seed_locked(env, *, workspace_id: str = _TEST_COMPANY_ID) -> int:
     """A ready prototype that has been Marked Complete (is_complete=1, F14 lock)."""
     pid = _seed_ready(env, workspace_id=workspace_id, current_checkpoint_id=7)
     env.proto.mark_complete(prototype_id=pid, workspace_id=workspace_id)
@@ -493,7 +492,7 @@ def test_post_iterate_locked_returns_409(env, client):
 
 def test_post_iterate_not_ready_returns_409(env, client):
     # AC8: a generating prototype (status != ready) → 409.
-    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)  # 'generating'
+    pid = env.proto.start_prototype(prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1)  # 'generating'
     resp = client.post(f"/v1/design-agent/{pid}/iterate", json={"prompt": "x"})
     assert resp.status_code == 409
 
@@ -556,7 +555,7 @@ async def test_run_iterate_bg_loads_source_from_current_checkpoint(env, monkeypa
     pid = _seed_ready(env, current_checkpoint_id=42)
 
     await env.routes._run_iterate_bg(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         body=env.routes.IterateRequest(prompt="tweak the header"),
     )
     assert read_calls == [(pid, 42)]  # positional (prototype_id, checkpoint_id)
@@ -572,12 +571,12 @@ async def test_run_iterate_bg_merges_applied_comment(env, monkeypatch):
     captured = _stub_iterate_capture(monkeypatch, env.routes)
     pid = _seed_ready(env)  # no current_checkpoint → source read skipped
     c = env.comments.insert_comment(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         anchor_id="a1b2c3d4", body="Make this CTA larger", author="demo",
     )
 
     await env.routes._run_iterate_bg(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         body=env.routes.IterateRequest(prompt="and center it", applied_comment_id=c["id"]),
     )
     user_message = captured["user_message"]
@@ -594,14 +593,14 @@ async def test_run_iterate_bg_open_comments_in_cacheable_prefix(env, monkeypatch
     monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
     captured = _stub_iterate_capture(monkeypatch, env.routes)
     pid = _seed_ready(env)
-    env.comments.insert_comment(prototype_id=pid, workspace_id="app",
+    env.comments.insert_comment(prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
                                 anchor_id="open1", body="OPEN_COMMENT_BODY", author="demo")
-    resolved = env.comments.insert_comment(prototype_id=pid, workspace_id="app",
+    resolved = env.comments.insert_comment(prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
                                            anchor_id="res1", body="RESOLVED_COMMENT_BODY", author="demo")
-    env.comments.resolve_comment(comment_id=resolved["id"], workspace_id="app")
+    env.comments.resolve_comment(comment_id=resolved["id"], workspace_id=_TEST_COMPANY_ID)
 
     await env.routes._run_iterate_bg(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         body=env.routes.IterateRequest(prompt="do the thing"),
     )
     blocks = captured["user_message"]["content"]
@@ -645,7 +644,7 @@ async def test_stage_iterate_run_does_not_call_complete_prototype(env, monkeypat
     pid = _seed_ready(env)
 
     await env.routes._stage_iterate_run(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         virtual_fs={"src/App.tsx": "x"}, iterate_prompt="make it blue",
     )
     # AC6a: complete_prototype NEVER called on the iterate path.
@@ -675,13 +674,13 @@ async def test_stage_iterate_run_advances_current_checkpoint(env, monkeypatch, c
 
     with caplog.at_level(logging.INFO):
         await env.routes._stage_iterate_run(
-            prototype_id=pid, workspace_id="app",
+            prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
             virtual_fs={"a.tsx": "x"}, iterate_prompt="p",
         )
     blob = "\n".join(r.getMessage() for r in caplog.records)
     assert "prototype_checkpoint_advanced" in blob
     # The advance actually moved the row to the new checkpoint + staged bundle.
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["current_checkpoint_id"] == 555
     assert row["bundle_url"] == "https://bundle/iterated"
 
@@ -702,10 +701,10 @@ async def test_run_iterate_bg_failure_marks_prototype_failed(env, monkeypatch):
     pid = _seed_ready(env)
 
     await env.routes._run_iterate_bg(
-        prototype_id=pid, workspace_id="app",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
         body=env.routes.IterateRequest(prompt="x"),
     )
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["status"] == "failed"
     assert "status=error" in row["error"]
     assert "error_class=BadRequestError" in row["error"]

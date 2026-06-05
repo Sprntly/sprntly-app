@@ -22,11 +22,15 @@
 import { useState, type ReactNode } from "react"
 import { DesignAgentDrawer } from "./DesignAgentDrawer"
 import { PostGenerationResult } from "./PostGenerationResult"
+import { GenerationErrorBanner, reasonCopy } from "./GenerationErrorBanner"
 import { CommentsPanel } from "./CommentsPanel"
 import { IterateComposer } from "./IterateComposer"
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
-import type { CommentRecord, PrototypeRecord } from "../../lib/api"
-import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
+import { designAgentApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
+import {
+  runDesignAgentGeneration,
+  type DesignAgentGenResult,
+} from "../../lib/runDesignAgentGeneration"
 
 export type DesignAgentLauncherProps = {
   prdId: number
@@ -54,10 +58,110 @@ export function resultFromGeneration(
   return result.ok ? result.prototype : null
 }
 
+/** P6-08 (Fix #11 visibility half): maps a generation outcome to launcher
+ *  FAILURE state — the failure `message` on a failed outcome, null on success
+ *  (which clears any prior banner). Single `{ message } | null` slot, so a second
+ *  failure REPLACES the first via `setFailure` (no banner stacking — AC9). Pure →
+ *  unit-testable without a DOM, mirroring `resultFromGeneration`. The raw
+ *  `message` is mapped to human copy by `reasonCopy` at render time, never shown
+ *  verbatim (Rule #24). */
+export function failureFromGeneration(
+  result: DesignAgentGenResult,
+): { message: string } | null {
+  return result.ok ? null : { message: result.message }
+}
+
 /** Default drawer renderer: the real, NavigationContext-wired DesignAgentDrawer. */
 export const defaultRenderDrawer = (props: LauncherDrawerProps): ReactNode => (
   <DesignAgentDrawer {...props} />
 )
+
+/** P6-05 (#5): the pending-question identity used to detect a clarify re-pause
+ *  across a refetch — the question text, or null when none is pending. A change
+ *  (null→Q, Q→null, or Q1→Q2) signals the record advanced off the prior state. */
+export function pendingKey(
+  p: Pick<PrototypeRecord, "pending_question">,
+): string | null {
+  return p.pending_question?.question ?? null
+}
+
+/** Dependency seams for `pollUntilAdvanced` — injected in tests so the loop runs
+ *  without real timers / network. Production defaults are the real poll helper,
+ *  a 4s sleep, the wall clock, and the 6-minute cap. */
+export type RefreshDeps = {
+  runGeneration?: (args: { prototypeId: number }) => Promise<DesignAgentGenResult>
+  sleep?: (ms: number) => Promise<void>
+  now?: () => number
+  deadlineMs?: number
+}
+
+/**
+ * P6-05 (#5) — race-safe post-iterate/clarify re-poll. Resolves with the fresh
+ * `PrototypeRecord` once the record advances OFF the pre-iterate checkpoint:
+ * a NEW `bundle_url` (a new checkpoint built) OR a changed `pending_question`
+ * (a clarify re-pause / a newly-asked question, including null→Q and Q1→Q2).
+ * Returns null on failure or if the deadline passes without an advance.
+ *
+ * Why it does NOT trust the first get(): the iterate/clarify callbacks fire
+ * immediately after kickoff, but the backend flips the prototype row to
+ * `generating` only inside its bg task — so the first `runDesignAgentGeneration`
+ * may still observe the PRE-iterate `ready` + OLD `bundle_url` (+ OLD
+ * `pending_question`) and return it as a terminal `{ok, ready}`. Resolving on
+ * that stale read would re-flow the old checkpoint (the exact #5 bug). So we
+ * gate on the OBSERVED transition off the captured prev values and re-sample
+ * (the backend may not have flipped yet) until it advances. `runDesignAgentGeneration`'s
+ * own 4s/6min loop carries an in-progress `generating` run to its next `ready`;
+ * this outer guard only adds the "wait for the transition off the OLD checkpoint"
+ * gate the helper alone cannot provide.
+ */
+export async function pollUntilAdvanced(
+  prototypeId: number,
+  prevBundle: string | null,
+  prevPending: string | null,
+  deps: RefreshDeps = {},
+): Promise<PrototypeRecord | null> {
+  const runGeneration = deps.runGeneration ?? runDesignAgentGeneration
+  const sleep =
+    deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  const now = deps.now ?? (() => Date.now())
+  const deadline = now() + (deps.deadlineMs ?? 6 * 60 * 1000)
+  while (now() < deadline) {
+    const r = await runGeneration({ prototypeId })
+    if (!r.ok) return null // surfaced via the existing failure path (#5 leaves failure handling to P6-08)
+    const advancedBundle =
+      r.prototype.bundle_url != null && r.prototype.bundle_url !== prevBundle
+    const advancedPending = pendingKey(r.prototype) !== prevPending
+    if (advancedBundle || advancedPending) return r.prototype
+    await sleep(4000) // re-sample; the backend may not have flipped to generating yet
+  }
+  return null
+}
+
+/**
+ * P6-20 (#14) — share-success single-shot re-seed. A bare Share (no iterate)
+ * changes NEITHER `bundle_url` NOR `pending_question`, so `pollUntilAdvanced`
+ * would never resolve (it waits for an advance that never comes). But the share
+ * endpoint sets `share_token` synchronously before its POST returns, so there is
+ * no race to poll: a SINGLE `get()` of the same id returns the post-share record
+ * whose `share_token` is now live. The launcher sets it as `result` so the
+ * share-gated CommentsPanel mounts without a re-mount. Returns null when there is
+ * no current prototype or the fetch fails — the local `ShareMenu` token already
+ * shows the link, so a failed re-seed degrades silently (no spurious error, no
+ * unhandled rejection from the fire-and-forget `onShared` call). Pure of React
+ * (deps injected) → node-env testable, mirroring `pollUntilAdvanced`.
+ */
+export async function refreshShareTokenStep(
+  prototypeId: number | null,
+  api: Pick<typeof designAgentApi, "get"> = designAgentApi,
+): Promise<PrototypeRecord | null> {
+  if (prototypeId == null) return null
+  try {
+    const fresh = await api.get(prototypeId)
+    return fresh ?? null
+  } catch {
+    return null
+  }
+}
 
 type LauncherViewProps = DesignAgentLauncherProps & {
   open: boolean
@@ -68,6 +172,15 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   result?: PrototypeRecord | null
   /** P2-12: handed to the drawer so a successful generation populates `result`. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** P6-08 (Fix #11): the last generation attempt's failure, or null. When set,
+   *  the view renders `<GenerationErrorBanner/>` (replacing the old silent
+   *  revert-to-Generate-button). Independent of `result`: a failed retry after a
+   *  prior success shows the banner AND retains the prior result view (AC5).
+   *  Optional/defaulted so existing direct-view test calls keep typechecking. */
+  failure?: { message: string } | null
+  /** P6-08: fired by the banner's Retry control — clears `failure` + re-opens the
+   *  drawer (`setOpen(true)`). Does NOT auto-re-POST. Optional/defaulted. */
+  onRetry?: () => void
   /** P3-14 (F10): the comment selected for Apply, lifted to the container so
    *  CommentsPanel's Apply action sets it and IterateComposer reads it. Optional
    *  so existing direct-view test calls keep typechecking. */
@@ -75,6 +188,18 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   /** P3-14 (F10): setter for `applyTarget` (CommentsPanel onApply → set;
    *  IterateComposer onClearApply → clear). */
   setApplyTarget?: (comment: CommentRecord | null) => void
+  /** P6-05 (#5): forwarded to IterateComposer — fired after a successful iterate
+   *  so the container re-polls + refreshes `result`. Optional/defaulted. */
+  onIterated?: () => void
+  /** P6-05 (#5): forwarded to ClarifyingQuestionSurface — fired after a
+   *  successful clarify answer so the container re-polls + refreshes `result`.
+   *  Optional/defaulted (the surface already declares `onAnswered`; it just
+   *  wasn't threaded from the launcher before). */
+  onAnswered?: () => void
+  /** P6-20 (#14): forwarded to PostGenerationResult → ShareMenu — fired after a
+   *  successful Share so the container single-shot re-polls + refreshes `result`,
+   *  flipping the share-gated CommentsPanel live with no re-mount. Optional/defaulted. */
+  onShared?: (token: string | null) => void
   /** Injected in tests so the view renders without NavigationContext. */
   renderDrawer?: (props: LauncherDrawerProps) => ReactNode
 }
@@ -93,12 +218,17 @@ export function DesignAgentLauncherView({
   setOpen,
   result = null,
   onGenerated,
+  failure = null,
+  onRetry = () => {},
   applyTarget = null,
   setApplyTarget,
+  onIterated,
+  onAnswered,
+  onShared,
   renderDrawer = defaultRenderDrawer,
 }: LauncherViewProps) {
   return (
-    <div className="prd-design-launcher" contentEditable={false}>
+    <div className="design-agent-surface prd-design-launcher" contentEditable={false}>
       <button
         type="button"
         className="btn btn-accent"
@@ -106,21 +236,50 @@ export function DesignAgentLauncherView({
       >
         Generate Prototype
       </button>
+      {/* P6-08 (Fix #11): when the last generation FAILED, surface a persistent
+          banner with mapped human copy + Retry — instead of the old silent
+          revert to the bare button above. Mounted ABOVE the `result &&` blocks
+          and INDEPENDENT of `result`: a failed retry after a prior success shows
+          the banner alongside the still-good result view (AC5). `reasonCopy`
+          maps the raw `message` so the raw backend `error` never reaches the DOM
+          (Rule #24). */}
+      {failure && (
+        <GenerationErrorBanner
+          reason={reasonCopy(failure.message)}
+          onRetry={onRetry}
+        />
+      )}
       {/* `key` forces a clean remount per prototype id: PostGenerationResult
           (and the CompletionBar it mounts) seed state from props at mount only,
           so regenerating a second prototype in the same launcher instance must
           remount to avoid carrying the prior prototype's is_complete. */}
-      {result && <PostGenerationResult key={result.id} prototype={result} />}
-      {/* P3-14 (F10): signed-in CommentsPanel mount — the public mount lives in
-          PublicTokenViewer (P3-03). Comments are addressed by the share token,
-          so this mounts only once the prototype is shared. `onApply` enables the
-          Apply→IterateComposer handoff (absent on the public mount → no Apply). */}
-      {result && result.share_token && (
-        <CommentsPanel
-          key={`comments-${result.id}`}
-          token={result.share_token}
-          prototypeId={result.id}
-          onApply={(comment) => setApplyTarget?.(comment)}
+      {/* P6-13 (UX-3): the signed-in CommentsPanel is now passed DOWN as
+          PostGenerationResult's `comments` prop so a two-column `design-pane`
+          grid can wrap viewer-left + comments-right in ONE box (the launcher
+          cannot wrap them while they are separate siblings — the viewer lives
+          inside PostGenerationResult). Only the LOCATION moves (sibling → prop):
+          the launcher keeps ownership of the share-token gate, the `key`, the
+          `token`/`prototypeId`, and the `onApply → setApplyTarget` wiring, all
+          byte-identical. Comments are addressed by the share token, so the node
+          is built only once the prototype is shared (`result.share_token`),
+          else null → no comments cell. The public mount still lives in
+          PublicTokenViewer (P3-03); `onApply` enables the Apply→IterateComposer
+          handoff (absent on the public mount → no Apply). */}
+      {result && (
+        <PostGenerationResult
+          key={result.id}
+          prototype={result}
+          comments={
+            result.share_token ? (
+              <CommentsPanel
+                key={`comments-${result.id}`}
+                token={result.share_token}
+                prototypeId={result.id}
+                onApply={(comment) => setApplyTarget?.(comment)}
+              />
+            ) : null
+          }
+          onShared={onShared}
         />
       )}
       {/* P3-14 (F9/F10): the iterate trigger surface — re-prompt always available
@@ -133,6 +292,7 @@ export function DesignAgentLauncherView({
           isComplete={result.is_complete ?? false}
           applyTarget={applyTarget}
           onClearApply={() => setApplyTarget?.(null)}
+          onIterated={onIterated}
         />
       )}
       {/* P3-16 (F12): the clarifying-question answer surface — rendered ONLY when
@@ -146,6 +306,7 @@ export function DesignAgentLauncherView({
           <ClarifyingQuestionSurface
             key={`clarify-${result.id}`}
             prototype={result}
+            onAnswered={onAnswered}
           />
         )}
       {renderDrawer({
@@ -173,16 +334,62 @@ export function DesignAgentLauncher({
 }) {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState<PrototypeRecord | null>(null)
+  // P6-08 (Fix #11): the last generation attempt's failure, or null. A non-null
+  // value renders the persistent GenerationErrorBanner (replacing the old silent
+  // revert). Kept INDEPENDENT of `result` so a failed retry after a prior success
+  // shows the banner without wiping the previously-good prototype (AC5).
+  const [failure, setFailure] = useState<{ message: string } | null>(null)
   // P3-14 (F10): lifted so CommentsPanel's Apply sets it and IterateComposer
   // reads it as its pre-fill.
   const [applyTarget, setApplyTarget] = useState<CommentRecord | null>(null)
 
-  // On a successful generation, mount the result view. On failure, leave the
-  // current state intact — the drawer's existing toast surfaces the error and
-  // no result view renders (AC5).
+  // On a successful generation, mount the result view AND clear any prior failure
+  // banner. On failure, STOP discarding it (the pre-P6-08 bug): set the single
+  // `failure` slot so the banner surfaces the reason — `result` is left intact so
+  // a previously-good prototype survives a failed retry (AC5). A second failure
+  // REPLACES the slot (no stacking — AC9). `resultFromGeneration` still owns the
+  // success-path mapping; `failureFromGeneration` owns the failure-path mapping.
   const handleGenerated = (outcome: DesignAgentGenResult) => {
     const next = resultFromGeneration(outcome)
     if (next) setResult(next)
+    setFailure(failureFromGeneration(outcome))
+  }
+
+  // P6-08: the banner's Retry — clear the failure banner and re-open the drawer so
+  // the user re-initiates a generation from the same surface. Deliberately does
+  // NOT auto-re-POST (avoids a silent retry loop on a deterministically-failing
+  // PRD); re-kicking is the user's explicit action inside the drawer.
+  const handleRetry = () => {
+    setFailure(null)
+    setOpen(true)
+  }
+
+  // P6-05 (#5): after an iterate/clarify advances the SAME prototype id to a new
+  // checkpoint, re-poll off the pre-iterate `bundle_url` / `pending_question`
+  // and replace `result` with the refetched record. Race-safe: `pollUntilAdvanced`
+  // never resolves on a first get() that still shows the pre-iterate checkpoint.
+  // Surfacing the refetched record also flows a newly-minted `share_token` into
+  // `result` (#14 facet), so the share-gated CommentsPanel mounts without a
+  // manual re-mount — no extra code, just the live snapshot.
+  const refreshResult = async () => {
+    if (!result) return
+    const fresh = await pollUntilAdvanced(
+      result.id,
+      result.bundle_url,
+      pendingKey(result),
+    )
+    if (fresh) setResult(fresh)
+  }
+
+  // P6-20 (#14): after a bare Share (no iterate), `bundle_url` / `pending_question`
+  // do NOT change, so `pollUntilAdvanced` would never resolve. The share endpoint
+  // sets `share_token` synchronously, so single-shot re-fetch the SAME id and
+  // replace `result` → `result.share_token` goes live and the share-gated
+  // CommentsPanel mounts with no re-mount. Distinct from `refreshResult`
+  // (iterate/clarify), whose race-gate is left intact (AC5).
+  const refreshShareToken = async () => {
+    const fresh = await refreshShareTokenStep(result?.id ?? null, designAgentApi)
+    if (fresh) setResult(fresh)
   }
 
   return (
@@ -193,8 +400,13 @@ export function DesignAgentLauncher({
       setOpen={setOpen}
       result={result}
       onGenerated={handleGenerated}
+      failure={failure}
+      onRetry={handleRetry}
       applyTarget={applyTarget}
       setApplyTarget={setApplyTarget}
+      onIterated={refreshResult}
+      onAnswered={refreshResult}
+      onShared={refreshShareToken}
       renderDrawer={renderDrawer}
     />
   )

@@ -44,7 +44,7 @@ WHY THIS MIRRORS P2-11/P3-13 BUT DIVERGES — all verified against the release H
   tmp dir): the manual-edit "source reflects the change" assertion (AC1) needs the
   raw `_source/` to genuinely round-trip stage → read, so it cannot be stubbed.
 
-- Auth is INJECTED via `app.dependency_overrides[require_app_session]` (the P4-02
+- Auth is INJECTED via `app.dependency_overrides[require_company]` (the P4-02
   mitigation) — the e2e does NOT rely on the local auth.py path. The public
   `/by-token` resolver carries no auth dependency and is unaffected.
 
@@ -62,6 +62,9 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+
+from app.auth import CompanyContext
+from tests.conftest import _TEST_COMPANY_ID, _TEST_USER_ID
 
 # ─── Generated source under test ─────────────────────────────────────────────
 #
@@ -235,6 +238,12 @@ async def _fake_vite_build(virtual_fs):  # noqa: ARG001
     return {"index.html": '<!doctype html><div data-anchor-id="aaaa1111"></div>'}
 
 
+async def _fake_vite_build_with_repair(virtual_fs):
+    """P6-07: _stage_complete_run builds via vite_build_with_repair → (dist, repaired_vfs).
+    A clean build returns the source map unchanged."""
+    return await _fake_vite_build(virtual_fs), virtual_fs
+
+
 # ─── Fixture ──────────────────────────────────────────────────────────────────
 
 
@@ -287,10 +296,12 @@ def env(isolated_settings, monkeypatch, tmp_path):
     import app.main as main_mod
     importlib.reload(main_mod)
 
-    # Inject the app session (P4-02 mitigation): do NOT rely on the local auth.py
-    # Bearer path. The public /by-token routes carry no auth dependency, so they are
-    # unaffected by this override.
-    main_mod.app.dependency_overrides[routes_mod.require_app_session] = lambda: {"aud": "app"}
+    # Inject the company context (P4-02 mitigation): do NOT rely on the live auth.py
+    # require_company path. workspace_id resolves to _TEST_COMPANY_ID. The public
+    # /by-token routes carry no auth dependency, so they are unaffected by this override.
+    main_mod.app.dependency_overrides[routes_mod.require_company] = lambda: CompanyContext(
+        company_id=_TEST_COMPANY_ID, role="owner", user_id=_TEST_USER_ID
+    )
 
     import app.db as db_mod
     yield SimpleNamespace(
@@ -384,6 +395,7 @@ def _install_generate_mock(monkeypatch, env, side_effect):
         "app.design_agent.runner._resolve_figma_access_token", lambda k: None
     )
     monkeypatch.setattr(env.routes, "vite_build", _fake_vite_build)
+    monkeypatch.setattr(env.routes, "vite_build_with_repair", _fake_vite_build_with_repair)
     return client
 
 
@@ -606,6 +618,7 @@ async def test_p4_e2e_no_network_passes_in_ci(env, monkeypatch):
         "app.design_agent.runner._resolve_figma_access_token", lambda k: None
     )
     monkeypatch.setattr(env.routes, "vite_build", _fake_vite_build)
+    monkeypatch.setattr(env.routes, "vite_build_with_repair", _fake_vite_build_with_repair)
 
     # AC6: no Supabase Storage bucket configured → the filesystem fallback is in use.
     assert not (os.environ.get("SUPABASE_STORAGE_BUCKET") or "").strip()

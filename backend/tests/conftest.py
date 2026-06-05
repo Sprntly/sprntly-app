@@ -22,9 +22,11 @@ from __future__ import annotations
 import importlib
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
+import jwt as pyjwt
 import pytest
 from fastapi.testclient import TestClient
 
@@ -517,3 +519,102 @@ def unauth_client(fake_llm) -> TestClient:
     """TestClient without authentication, for testing the auth gate itself."""
     import app.main as main_mod
     return TestClient(main_mod.app)
+
+
+# ── P6-10: Supabase-bearer auth seam for the Design Agent route suites ────────
+# After the require_app_session → require_company migration, the authed DA routes
+# gate on a Supabase `Authorization: Bearer` JWT + a company_members row (resolved
+# by require_company) instead of the legacy `sprntly_app_session` cookie. These
+# helpers + the `company_client` fixture give the route suites a bearer-authed
+# client whose resolved `workspace_id` is `_TEST_COMPANY_ID`. The JWT shape +
+# membership seed are lifted verbatim from test_require_company.py (_mint_token,
+# _seed_membership) so the suites exercise the real require_company path.
+_TEST_SUPABASE_SECRET = "shared-hs256-test-secret"
+_TEST_COMPANY_ID = "co-test"
+_TEST_USER_ID = "user-test"
+
+
+def _mint_supabase_token(sub: str = _TEST_USER_ID) -> str:
+    """An HS256 Supabase JWT (aud='authenticated') the way require_session/
+    _decode_supabase_token expects. Mirrors test_require_company._mint_token."""
+    return pyjwt.encode(
+        {"sub": sub, "aud": "authenticated", "exp": int(time.time()) + 300},
+        _TEST_SUPABASE_SECRET,
+        algorithm="HS256",
+    )
+
+
+def _bearer_header(sub: str = _TEST_USER_ID) -> dict[str, str]:
+    """`Authorization: Bearer <token>` header dict for the given user."""
+    return {"Authorization": f"Bearer {_mint_supabase_token(sub)}"}
+
+
+def _seed_company_membership(
+    db,
+    company_id: str = _TEST_COMPANY_ID,
+    user_id: str = _TEST_USER_ID,
+    role: str = "owner",
+) -> None:
+    """Seed a company_members row so require_company resolves user_id → company_id.
+    Mirrors test_require_company._seed_membership. `db` is the fake Supabase client
+    (isolated_settings["supabase"])."""
+    # The connector-multitenancy slice (#136) turned on PRAGMA foreign_keys in the
+    # fake supabase, so an orphan company_members row now violates the FK to
+    # companies(id). Seed the parent first (mirrors
+    # test_require_company._seed_membership). Existence-guarded so a test that
+    # already seeded the company doesn't hit a duplicate-PK.
+    existing = (
+        db.table("companies").select("id").eq("id", company_id).execute().data
+    )
+    if not existing:
+        db.table("companies").insert(
+            {
+                "id": company_id,
+                "slug": f"slug-{company_id}",
+                "display_name": company_id.title(),
+            }
+        ).execute()
+    db.table("company_members").insert(
+        {
+            "id": f"cm-{company_id}-{user_id}",
+            "company_id": company_id,
+            "user_id": user_id,
+            "role": role,
+        }
+    ).execute()
+
+
+def _enable_supabase_bearer(monkeypatch) -> None:
+    """Make the already-built app's `require_company` verify a minted HS256 bearer.
+
+    `require_company` → `require_session` → `_decode_supabase_token` reads
+    `app.auth.settings.supabase_jwt_secret` at call time. `app.auth.settings` is
+    the same Settings object the live dependency closes over (only conftest's
+    `isolated_settings` reloads config/auth; no DA suite reloads auth again), so
+    patching the attribute on it — rather than reloading config/auth/routes/main —
+    is sufficient and reload-free. Same monkeypatch-on-settings pattern the smoke
+    suite already uses for storage_dir."""
+    import app.auth as auth_mod
+
+    monkeypatch.setattr(
+        auth_mod.settings, "supabase_jwt_secret", _TEST_SUPABASE_SECRET, raising=False
+    )
+
+
+@pytest.fixture
+def company_client(env, isolated_settings, monkeypatch) -> TestClient:
+    """Sync TestClient authed via a Supabase Bearer JWT + a seeded company membership
+    (the require_company path). Drop-in replacement for the legacy cookie-login
+    `client` fixture across the Class-1 DA route suites: every authed call resolves
+    `workspace_id == _TEST_COMPANY_ID`.
+
+    Composes on the suite-local `env` fixture (which reloads the DA module stack and
+    builds `env.main.app`); it only patches the bearer secret onto the live settings,
+    seeds the membership row, and pre-attaches the Authorization header. The P5-06
+    pytest_configure hook already defaults a same-origin `Origin` header, so authed
+    mutating routes are not rejected by require_same_origin."""
+    _enable_supabase_bearer(monkeypatch)
+    _seed_company_membership(isolated_settings["supabase"])
+    c = TestClient(env.main.app)
+    c.headers["Authorization"] = f"Bearer {_mint_supabase_token()}"
+    return c

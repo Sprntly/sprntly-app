@@ -116,6 +116,22 @@ def should_wrap_up(usage: RunUsage, model: str, soft_cap: float) -> bool:
     return project_next_iter_cost(usage, model) >= soft_cap
 
 
+def should_abort(usage: RunUsage, model: str, hard_cap: float) -> bool:
+    """True iff the projected next-iteration spend would reach/exceed the HARD cap.
+
+    The fail-closed BACKSTOP above AD15's soft cap: when the soft-cap nudge
+    (``should_wrap_up``) failed to converge a pathological run, this signals the
+    caller (``agent_loop``) to ABORT — terminate the run with a clean terminal
+    status rather than keep burning budget. Reuses ``project_next_iter_cost``
+    (same realized+projected model as ``should_wrap_up``, so the two thresholds
+    are measured consistently); boundary inclusive (projection == hard_cap →
+    True). Pure / deterministic; raises ``UnknownModelError`` on an unpriced
+    model. The hard cap is the caller's to pass — cap-agnostic for cross-agent
+    reuse.
+    """
+    return project_next_iter_cost(usage, model) >= hard_cap
+
+
 def log_llm_run(
     *,
     operation: str,
