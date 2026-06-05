@@ -43,8 +43,9 @@ export function PrdSections({
   prdId?: number
   /** Figma file key for the prd-design launcher; null/undefined → no source. */
   figmaFileKey?: string | null
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE 2/3): PRD title threaded to the
-   *  prd-design launcher for the preview card + canvas breadcrumb. */
+  /** PRD title, threaded to the prd-design launcher so the preview card and the
+   *  canvas breadcrumb can label the PRD. Optional so non-PRD callers (and the
+   *  empty/demo states) keep type-checking. */
   prdTitle?: string | null
 }) {
   return (
@@ -189,10 +190,12 @@ function DesignSection({
 }) {
   return (
     <section className="prd-design">
-      {/* UX-EXPLORE (throwaway): the "Design" section heading is removed per the
-          redesign; the section wrapper + launcher are kept. NB for the ticket:
-          PrdSections.tsx / prd-design is an APPEND-ONLY hot file in the engagement
-          rules — this strip is only acceptable on the throwaway scratch branch. */}
+      {/* Hot-file exception (sanctioned): this append-only prd-design region
+          carries the relocated generate trigger, which now opens the Approve
+          modal / canvas flow instead of a bare inline button. The PRD-body
+          contentEditable region is deliberately untouched. The "Design" section
+          heading was removed in the redesign; the section wrapper + launcher are
+          kept. */}
       {prdId !== undefined ? (
         <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} />
       ) : (
