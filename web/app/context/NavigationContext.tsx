@@ -49,8 +49,8 @@ interface NavigationContextType {
   closeDrawers: () => void
 
   // Modal state
-  activeModal: "approve" | "invite" | null
-  openModal: (modal: "approve" | "invite") => void
+  activeModal: "approve" | "invite" | "generate" | null
+  openModal: (modal: "approve" | "invite" | "generate") => void
   closeModal: () => void
 
   // Share menu
@@ -105,7 +105,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   )
 
   const [activeDrawer, setActiveDrawer] = useState<"claude" | "ticket" | "design-agent" | null>(null)
-  const [activeModal, setActiveModal] = useState<"approve" | "invite" | null>(null)
+  const [activeModal, setActiveModal] = useState<"approve" | "invite" | "generate" | null>(null)
   const [shareMenuOpen, setShareMenuOpen] = useState(false)
   const [reviewPastOpen, setReviewPastOpen] = useState(false)
   const [toast, setToast] = useState<{ title: string; sub: string; link?: string } | null>(null)
@@ -235,7 +235,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     setActiveDrawer(null)
   }, [])
 
-  const openModal = useCallback((modal: "approve" | "invite") => {
+  const openModal = useCallback((modal: "approve" | "invite" | "generate") => {
     setActiveModal(modal)
   }, [])
 

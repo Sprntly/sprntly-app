@@ -44,10 +44,10 @@ const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
 ]
 
 /**
- * UX-EXPLORE (throwaway — REVERT): controlled by ApproveModal via local React
- * state (the NavigationContext modal union is not widened — keeps the change
- * localized). `open` toggles render; `prdId`/`figmaFileKey` come from the
- * current PRD content.
+ * Visibility is driven by the shared navigation modal union: the parent threads
+ * `open={activeModal === "generate"}` and `onClose={closeModal}` in via these
+ * props. `open` toggles render; `prdId`/`figmaFileKey` come from the current PRD
+ * content.
  */
 export function GenerateModal({
   open,
