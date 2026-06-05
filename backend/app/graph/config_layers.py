@@ -54,6 +54,18 @@ PLATFORM_DEFAULTS: dict[str, Any] = {
         "attribution": {"sim_threshold": 0.75, "window_days": 14},
         "learning_rate": None,  # TBD — tuned in Phase 3
     },
+    "research": {
+        # Social/community channels the Market Research agent sweeps with
+        # targeted site: queries. Per-enterprise overridable (Settings) —
+        # e.g. a healthcare company might drop reddit and add specialty forums.
+        "social_sources": [
+            {"id": "reddit",      "query": "site:reddit.com {subject} (also search relevant subreddits for the product category)"},
+            {"id": "hackernews",  "query": "site:news.ycombinator.com {subject}"},
+            {"id": "linkedin",    "query": "site:linkedin.com {subject} (public posts; coverage is partial — LinkedIn is login-walled)"},
+            {"id": "g2",          "query": "site:g2.com OR site:capterra.com {subject} reviews"},
+        ],
+        "max_searches": 12,
+    },
     "scoring": {
         "dimensions": [
             "kpi_impact", "strategic_alignment", "convergence",

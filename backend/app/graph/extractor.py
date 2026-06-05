@@ -71,6 +71,7 @@ def extract_document(
     doc_name: str,
     text: str,
     agent: str = "extractor",
+    source_hint: str | None = None,
 ) -> dict:
     """Extract one document into the KG. Returns {signals, themes, skipped}."""
     cfg = resolve_config(enterprise_id)
@@ -79,7 +80,8 @@ def extract_document(
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="extract_document",
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
-        input=f"<document name={doc_name!r}>\n{text}\n</document>",
+        input=(f"source system: {source_hint}\n" if source_hint else "")
+              + f"<document name={doc_name!r}>\n{text}\n</document>",
         json_schema=_EXTRACT_SCHEMA,
     )
     items = result.output.get("signals", [])
@@ -118,7 +120,9 @@ def extract_document(
 
     written = skipped = 0
     for item, vec in zip(items, sig_vecs):
-        sig_id = str(uuid.uuid5(_NS, f"{enterprise_id}|{doc_name}|{item['content']}"))
+        # Content-keyed (not doc-keyed): re-syncs + shifting ingest batches
+        # cannot duplicate the same fact under a different doc name.
+        sig_id = str(uuid.uuid5(_NS, f"{enterprise_id}|{item['content']}"))
         signal = Signal(
             id=sig_id,
             enterprise_id=enterprise_id,
