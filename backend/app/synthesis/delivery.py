@@ -1,7 +1,7 @@
 """Brief delivery — push a freshly generated brief to the company's Slack.
 
-Uses Martin's Slack connector (#136-era): bot token on the company's
-connection row, target channel in `config.channel_id` (set via the Settings
+The Slack connector stores the bot token on the company's connection row;
+the target channel lives in `config.channel_id` (set via the Settings
 channel picker / POST /v1/connectors/slack/config).
 
 Delivery is a SIDE EFFECT of brief generation: it must never break or block
