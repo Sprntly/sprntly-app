@@ -644,3 +644,97 @@ def test_main_py_calls_lifespan_invalidation_helpers():
     src = _MAIN_PY.read_text()
     assert "invalidate_orphan_generating_prototypes" in src
     assert "invalidate_stale_prototypes" in src
+
+
+# ─── GET /by-prd/{prd_id} — read-only PRD→ready-prototype lookup ────────────
+
+
+def _seed_ready_prototype(env, *, prd_id: int, workspace_id: str) -> int:
+    """Seed a READY prototype row for a PRD under a workspace; return its id.
+
+    Mirrors the ready-row seeding used by the generate short-circuit test:
+    start a generating row, then mark it complete (status='ready', bundle_url
+    populated)."""
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id=workspace_id, template_version=1
+    )
+    env.proto.complete_prototype(
+        prototype_id=pid, workspace_id=workspace_id, bundle_url="https://x"
+    )
+    return pid
+
+
+def test_by_prd_returns_ready_prototype(env, client):
+    # A ready prototype for the PRD in the caller's workspace resolves to 200
+    # with the prototype row.
+    pid = _seed_ready_prototype(env, prd_id=70, workspace_id=_TEST_COMPANY_ID)
+    resp = client.get("/v1/design-agent/by-prd/70")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == pid
+    assert body["prd_id"] == 70
+    assert body["status"] == "ready"
+
+
+def test_by_prd_returns_404_when_none(env, client):
+    # No ready prototype for the PRD → 404 (the frontend swallows 404→null).
+    resp = client.get("/v1/design-agent/by-prd/71")
+    assert resp.status_code == 404
+
+
+def test_by_prd_no_generate_side_effect(env, client):
+    # The lookup is a pure read: calling it for a PRD with no prototype must NOT
+    # insert a prototypes row (count stays 0), unlike POST /generate.
+    from tests import _fake_supabase
+
+    resp = client.get("/v1/design-agent/by-prd/72")
+    assert resp.status_code == 404
+    rows = _fake_supabase.get_fake_db().execute(
+        "SELECT id FROM prototypes WHERE prd_id = ? AND workspace_id = ?",
+        (72, _TEST_COMPANY_ID),
+    ).fetchall()
+    assert rows == []
+
+
+def test_by_prd_cross_workspace_returns_404(env, client):
+    # A ready prototype under a FOREIGN workspace ('demo') is invisible to the
+    # company caller (filtered by its resolved company_id) → 404, not 403, not
+    # 200: cross-tenant existence is never disclosed.
+    _seed_ready_prototype(env, prd_id=73, workspace_id="demo")
+    resp = client.get("/v1/design-agent/by-prd/73")
+    assert resp.status_code == 404
+
+
+def test_by_prd_returns_404_when_flag_off(env, client, monkeypatch):
+    # Seed a real ready row; with the flag ON the lookup resolves it (200), with
+    # the flag cleared the same PRD is invisible (404) — proves the gate, not a
+    # missing row.
+    _seed_ready_prototype(env, prd_id=74, workspace_id=_TEST_COMPANY_ID)
+    assert client.get("/v1/design-agent/by-prd/74").status_code == 200
+    monkeypatch.delenv("DESIGN_AGENT_ENABLED", raising=False)
+    assert client.get("/v1/design-agent/by-prd/74").status_code == 404
+
+
+def test_by_prd_without_app_session_returns_401(env, unauth):
+    # No signed-in session → 401 (require_company runs before the handler body,
+    # so the auth rejection precedes the feature-flag check).
+    resp = unauth.get("/v1/design-agent/by-prd/70")
+    assert resp.status_code == 401
+
+
+def test_by_prd_two_segment_resolves(env, client):
+    # The two-segment path /by-prd/{prd_id} resolves to get_by_prd and is NOT
+    # consumed by the single-segment GET /{prototype_id} catch-all. A one-segment
+    # route pattern can only match one-segment paths, so /by-prd/<id> can never
+    # be coerced into the int prototype_id param (a 422 never occurs here),
+    # regardless of declaration order. A ready row → 200 with the by-prd result
+    # (keyed by prd_id, not prototype_id) confirms reachability; no row → 404.
+    pid = _seed_ready_prototype(env, prd_id=75, workspace_id=_TEST_COMPANY_ID)
+    resp = client.get("/v1/design-agent/by-prd/75")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == pid
+    assert body["prd_id"] == 75
+    # And a PRD with no ready prototype resolves to the handler's 404, not a
+    # 422 path-validation error from the single-segment catch-all.
+    assert client.get("/v1/design-agent/by-prd/76").status_code == 404
