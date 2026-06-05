@@ -268,12 +268,13 @@ def find_ready_prototype_by_prd(
     prd_id: int,
     workspace_id: str,
 ) -> dict[str, Any] | None:
-    """UX-EXPLORE (throwaway — REVERT): most-recent READY prototype for a PRD.
+    """Return the most-recent READY prototype for a PRD, or None.
 
     Read-only sibling of find_existing_prototype WITHOUT the generate dedup's
     side-effect — backs GET /by-prd/{prd_id} so the PRD screen can show a
-    preview card / flip Approve to "View Prototype" on load. READY only (not
-    'generating'), workspace-filtered (Rule #22), newest by id.
+    preview card / flip Approve to "View Prototype" on load. Matches READY
+    prototypes only (not 'generating'), filtered to the caller's workspace,
+    newest by id.
     """
     c = require_client()
     resp = (

@@ -64,7 +64,7 @@ from app.db.prototypes import (
     fail_prototype,
     find_existing_prototype,
     find_prototype_by_share_token,
-    find_ready_prototype_by_prd,  # UX-EXPLORE (throwaway — REVERT)
+    find_ready_prototype_by_prd,
     flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
@@ -343,15 +343,18 @@ def get_by_prd(
     prd_id: int,
     company: CompanyContext = Depends(require_company),
 ) -> dict[str, Any]:
-    """UX-EXPLORE (throwaway — REVERT): most-recent READY prototype for a PRD.
+    """Return the most-recent READY prototype for a PRD (read-only lookup).
 
-    Read-only PRD→prototype lookup with NO generate side-effect (unlike the
-    dedup inside POST /generate, which kicks a gen when none exists) — safe to
-    call on PRD-screen load so the frontend can render a preview card / flip
-    Approve to "View Prototype". 404 when no ready prototype (frontend swallows
-    404→null). Workspace-filtered: a prototype in another workspace returns 404,
-    not 403 (Rule #22). Path is two-segment (`/by-prd/{id}`) so it never collides
-    with the single-segment `GET /{prototype_id:int}` route above.
+    A pure read with NO generate side-effect — unlike the dedup inside
+    POST /generate, which kicks off a generation when none exists. That makes
+    it safe to call on PRD-screen load so the frontend can render a preview
+    card / flip Approve to "View Prototype". Returns 404 when no ready
+    prototype exists (the frontend swallows 404→null). Workspace-filtered: a
+    prototype in another workspace returns 404, not 403, so cross-tenant
+    existence is not disclosed. The path is two-segment (`/by-prd/{prd_id}`),
+    so it can never be shadowed by the single-segment `GET /{prototype_id}`
+    catch-all above regardless of declaration order — a one-segment route
+    pattern only ever matches one-segment paths.
     """
     _require_feature_enabled()
     row = find_ready_prototype_by_prd(
