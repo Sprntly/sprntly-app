@@ -64,7 +64,7 @@ export function PrdScreen() {
           >
             <div className="prd-meta">{prd.metaLine}</div>
             <h1 className="prd-title">{prd.title}</h1>
-            <PrdSections sections={prd.sections} prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} />
+            <PrdSections sections={prd.sections} prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} prdTitle={prd.title} />
           </div>
         ) : (
           <div className="prd-body" style={{ minHeight: 280 }}>

@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   PostGenerationResult,
   PostGenerationResultView,
+  DaControlBar,
   resolveViewHref,
   reseedStep,
   type PostGenerationResultViewProps,
@@ -64,52 +65,38 @@ function proto(over: Partial<PrototypeRecord> = {}): PrototypeRecord {
   }
 }
 
-describe("PostGenerationResultView — editable CompletionBar (AC1)", () => {
-  it("renders an editable Mark Complete button for a WIP prototype (test_renders_editable_completion_bar_with_prototype_id)", () => {
+// UX-EXPLORE (throwaway — REVERT): the control bar is now a COMPACT single row.
+// The full CompletionBar (Mark Complete / Resume / Export) + full ShareMenu
+// radios are NO LONGER rendered inline — they live inside closed dropdown
+// popovers (Actions ⋯ / Share) that only open client-side. So the SSR markup now
+// asserts the COMPACT TRIGGERS exist, not the expanded panels.
+describe("PostGenerationResultView — compact control bar (UX-EXPLORE)", () => {
+  it("renders the compact control bar with the Actions (handoff) + Share triggers, not the inline panels", () => {
     const html = renderView({ isComplete: false })
-    expect(html).toContain('data-testid="mark-complete-btn"')
-    expect(html).toContain("Mark Complete")
+    expect(html).toContain('data-testid="da-controlbar"')
+    // Compact triggers present…
+    expect(html).toContain('data-testid="da-actions-toggle"')
+    expect(html).toContain('data-testid="da-share-toggle"')
+    // …and the expanded CompletionBar / ShareMenu panels are NOT inline (closed
+    // popovers): the bar never bloats with the full button stack / radios.
+    expect(html).not.toContain('data-testid="mark-complete-btn"')
+    expect(html).not.toContain('data-testid="share-menu"')
   })
 
   it("mounts the result wrapper", () => {
     const html = renderView()
     expect(html).toContain('data-testid="post-generation-result"')
   })
-})
 
-describe("PostGenerationResultView — ShareMenu (AC2)", () => {
-  it("renders the ShareMenu with the initial mode checked (test_renders_share_menu_with_initial_mode)", () => {
-    const html = renderView({ shareMode: "public" })
-    expect(html).toContain('data-testid="share-menu"')
-    // Three radios render; the current mode's radio carries `checked`.
-    expect(html).toMatch(/<input[^>]*checked[^>]*value="public"[^>]*>/)
-    expect(html).not.toMatch(/<input[^>]*checked[^>]*value="private"[^>]*>/)
+  it("renders the LEFT-cluster Desktop/Mobile platform toggle in the bar", () => {
+    const html = renderView()
+    expect(html).toContain('class="da-controlbar-l"')
+    expect(html).toContain('class="platform-toggle da-controlbar-platform"')
   })
 
-  it("checks the private radio when private", () => {
-    const html = renderView({ shareMode: "private" })
-    expect(html).toMatch(/<input[^>]*checked[^>]*value="private"[^>]*>/)
-  })
-})
-
-describe("PostGenerationResultView — editable, not read-only (AC3)", () => {
-  it("does NOT render the read-only completion bar (test_is_editable_not_readonly)", () => {
+  it("never renders the read-only completion bar on the editable surface (test_is_editable_not_readonly)", () => {
     const html = renderView({ isComplete: false })
     expect(html).not.toContain('data-testid="completion-bar-readonly"')
-    // The editable container is mounted instead.
-    expect(html).toContain('data-testid="completion-bar"')
-  })
-})
-
-describe("PostGenerationResultView — complete state (AC4)", () => {
-  it("reflects the complete state — resume/download/copy render when isComplete (test_complete_state_reflects_after_onStateChange)", () => {
-    // The container's onStateChange handler feeds the new isComplete straight
-    // into this prop; rendering with isComplete=true is the post-change view.
-    const html = renderView({ isComplete: true })
-    expect(html).toContain('data-testid="resume-btn"')
-    expect(html).toContain('data-testid="download-md-btn"')
-    expect(html).toContain('data-testid="copy-md-btn"')
-    expect(html).not.toContain('data-testid="mark-complete-btn"')
   })
 })
 
@@ -121,13 +108,15 @@ describe("PostGenerationResultView — complete state (AC4)", () => {
 // overlay that reuses the P6-12 device frame. resolveViewHref is KEPT (its pure
 // describe below still passes) but no longer gates a hidden link.
 describe("PostGenerationResultView — View affordance never dead (P6-16 AC1/AC4b)", () => {
-  // Regression — fails on unfixed code (`{viewHref && <a/>}` rendered NOTHING
-  // when resolveViewHref returned null).
+  // UX-EXPLORE (throwaway — REVERT): the always-shown View control is now the
+  // COMPACT `proto-fullscreen-trigger` icon button in the control bar (renamed
+  // from the prior center-toolbar `view-fullscreen-trigger`). Still never a dead
+  // link: enabled when a bundle exists, disabled-with-title otherwise.
   it("test_view_affordance_never_hidden_when_no_bundle — always renders a (disabled) View control with no bundle or token", () => {
     const html = renderView({ bundleUrl: null, shareToken: null })
-    expect(html).toContain('data-testid="view-fullscreen-trigger"')
-    // Disabled + explanatory label — present, NOT removed.
-    expect(html).toMatch(/data-testid="view-fullscreen-trigger"[^>]*disabled/)
+    expect(html).toContain('data-testid="proto-fullscreen-trigger"')
+    // Disabled + explanatory title — present, NOT removed.
+    expect(html).toMatch(/data-testid="proto-fullscreen-trigger"[^>]*disabled/)
     expect(html).toContain("Prototype building")
     // The obsolete dead-end anchor is gone entirely.
     expect(html).not.toContain('data-testid="view-prototype-link"')
@@ -135,16 +124,16 @@ describe("PostGenerationResultView — View affordance never dead (P6-16 AC1/AC4
 
   it("test_view_affordance_enabled_when_bundle — enabled 'View full screen' trigger when a bundle exists", () => {
     const html = renderView({ bundleUrl: "https://cdn/x/bundle/index.html" })
-    expect(html).toContain('data-testid="view-fullscreen-trigger"')
+    expect(html).toContain('data-testid="proto-fullscreen-trigger"')
     expect(html).toContain("View full screen")
-    expect(html).not.toMatch(/data-testid="view-fullscreen-trigger"[^>]*disabled/)
+    expect(html).not.toMatch(/data-testid="proto-fullscreen-trigger"[^>]*disabled/)
   })
 
   it("no bundle but shared (token present) still shows the always-present control, not the old /p link dead-end", () => {
     const html = renderView({ bundleUrl: null, shareToken: "tok-123" })
     // Always-shown control present (disabled — no bundle to open yet).
-    expect(html).toContain('data-testid="view-fullscreen-trigger"')
-    expect(html).toMatch(/data-testid="view-fullscreen-trigger"[^>]*disabled/)
+    expect(html).toContain('data-testid="proto-fullscreen-trigger"')
+    expect(html).toMatch(/data-testid="proto-fullscreen-trigger"[^>]*disabled/)
     // No raw new-tab /p link affordance remains here (ShareMenu owns sharing).
     expect(html).not.toContain('data-testid="view-prototype-link"')
   })
@@ -207,57 +196,91 @@ describe("PostGenerationResultView — full-screen overlay (P6-16 AC2/AC3/AC3b)"
   })
 })
 
-// ─── P6-13 (UX-3): two-column design-pane (viewer + comments slot) ───────────
+// ─── UX-EXPLORE (throwaway — REVERT): control bar + 3-section body ───────────
+// The signed-in post-gen surface mounts a compact control bar (`.da-controlbar`)
+// + a `.da-ready` flex body with a LEFT collapsible sidebar (`.da-left`: PRD +
+// iterate compose `da-canvas-iterate`), a CENTER full-area canvas (`.da-stage`,
+// testid `da-canvas-center`), and a RIGHT collapsible comments sidebar
+// (`.da-right`, testid `da-canvas-comments`) that — per Problem 2 — ALWAYS exists
+// (with CommentsPanel when present, else an empty state).
+describe("PostGenerationResultView — control bar + 3-section body (UX-EXPLORE)", () => {
+  const sentinel = (id: string, text: string) =>
+    React.createElement("div", { "data-testid": id }, text)
 
-describe("PostGenerationResultView — two-column design-pane (AC1/AC4)", () => {
-  const sentinel = () =>
-    React.createElement(
-      "div",
-      { "data-testid": "sentinel-comments" },
-      "SENTINEL_COMMENTS",
-    )
-
-  it("wraps the viewer (main cell) + comments (aside cell) as siblings in a design-pane (test_design_pane_wraps_viewer_and_comments)", () => {
+  it("wraps a control bar + LEFT sidebar (iterate), CENTER canvas, RIGHT comments", () => {
     const html = renderView({
       bundleUrl: "https://cdn/x/bundle/index.html",
-      comments: sentinel(),
+      iterate: sentinel("sentinel-iterate", "SENTINEL_ITERATE"),
+      comments: sentinel("sentinel-comments", "SENTINEL_COMMENTS"),
     })
-    // The grid container + both cells render.
-    expect(html).toContain('class="design-pane"')
-    expect(html).toContain('class="design-pane-main"')
-    expect(html).toContain('class="design-pane-aside"')
-    // The viewer (its bundle url) sits in the main cell; the comments node in the aside.
+    expect(html).toContain('data-testid="da-controlbar"')
+    expect(html).toContain('class="da-ready"')
+    expect(html).toContain('data-testid="da-canvas-iterate"')
+    expect(html).toContain('data-testid="da-canvas-center"')
+    expect(html).toContain('data-testid="da-canvas-comments"')
+    // The slots land in their regions; the viewer (its bundle url) is in the center.
     expect(html).toContain("https://cdn/x/bundle/index.html")
+    expect(html).toContain('data-testid="sentinel-iterate"')
     expect(html).toContain('data-testid="sentinel-comments"')
-    // Siblings, in order, inside the pane: pane → main → aside.
-    const paneIdx = html.indexOf('class="design-pane"')
-    const mainIdx = html.indexOf('class="design-pane-main"')
-    const asideIdx = html.indexOf('class="design-pane-aside"')
-    expect(paneIdx).toBeGreaterThanOrEqual(0)
-    expect(mainIdx).toBeGreaterThan(paneIdx)
-    expect(asideIdx).toBeGreaterThan(mainIdx)
+    // Order: control bar → body → left → center → right.
+    const barIdx = html.indexOf('data-testid="da-controlbar"')
+    const bodyIdx = html.indexOf('class="da-ready"')
+    const iterateIdx = html.indexOf('data-testid="da-canvas-iterate"')
+    const centerIdx = html.indexOf('data-testid="da-canvas-center"')
+    const commentsIdx = html.indexOf('data-testid="da-canvas-comments"')
+    expect(barIdx).toBeGreaterThanOrEqual(0)
+    expect(bodyIdx).toBeGreaterThan(barIdx)
+    expect(centerIdx).toBeGreaterThan(iterateIdx)
+    expect(commentsIdx).toBeGreaterThan(centerIdx)
   })
 
-  it("renders the viewer with NO comments cell when comments is absent — public-viewer shape (test_no_comments_cell_when_comments_null)", () => {
+  it("Problem 2 — the RIGHT comments sidebar ALWAYS exists; unshared shows the empty state", () => {
+    // No comments node (unshared): the sidebar shell + empty-state still render
+    // so the control-bar comments-toggle has something to reveal.
     const html = renderView({ bundleUrl: "https://cdn/x/bundle/index.html" })
-    // No comments slot → no aside cell and no grid wrapper (degrades to one column).
-    expect(html).not.toContain("design-pane-aside")
-    expect(html).not.toContain('class="design-pane"')
-    // The viewer still renders.
-    expect(html).toContain("https://cdn/x/bundle/index.html")
+    expect(html).toContain('data-testid="da-canvas-comments"')
+    expect(html).toContain('data-testid="da-comments-empty"')
+    expect(html).toContain("Share this prototype to collect comments")
   })
 
-  it("keeps the View affordance OUTSIDE the design-pane (chrome stays full-width)", () => {
-    // P6-16: the View affordance is now the always-shown `view-fullscreen-trigger`
-    // (replacing the obsolete `view-prototype-link` anchor). It still follows the
-    // pane, not nested in a grid cell.
+  it("renders CommentsPanel content inside the right sidebar when a comments node is present", () => {
     const html = renderView({
       bundleUrl: "https://cdn/x/bundle/index.html",
-      comments: sentinel(),
+      comments: sentinel("sentinel-comments", "SENTINEL_COMMENTS"),
     })
-    const asideEnd = html.indexOf('data-testid="sentinel-comments"')
-    const triggerIdx = html.indexOf('data-testid="view-fullscreen-trigger"')
-    expect(triggerIdx).toBeGreaterThan(asideEnd)
+    expect(html).toContain('data-testid="da-canvas-comments"')
+    expect(html).toContain('data-testid="sentinel-comments"')
+    // The shared branch replaces the empty state.
+    expect(html).not.toContain('data-testid="da-comments-empty"')
+  })
+
+  it("the right sidebar reflects the commentsOpen toggle via the `.open` class", () => {
+    const closed = renderView({ bundleUrl: "https://cdn/x/bundle/index.html" })
+    expect(closed).toContain('class="da-right"')
+    const open = renderView({
+      bundleUrl: "https://cdn/x/bundle/index.html",
+      commentsOpen: true,
+    })
+    expect(open).toContain('class="da-right open"')
+  })
+
+  it("omits the iterate compose region when iterate is absent", () => {
+    const html = renderView({ bundleUrl: "https://cdn/x/bundle/index.html" })
+    expect(html).not.toContain('data-testid="da-canvas-iterate"')
+  })
+
+  it("places the View affordance inside the control bar", () => {
+    const html = renderView({
+      bundleUrl: "https://cdn/x/bundle/index.html",
+      comments: sentinel("sentinel-comments", "SENTINEL_COMMENTS"),
+    })
+    const barIdx = html.indexOf('data-testid="da-controlbar"')
+    const triggerIdx = html.indexOf('data-testid="proto-fullscreen-trigger"')
+    const bodyIdx = html.indexOf('class="da-ready"')
+    expect(barIdx).toBeGreaterThanOrEqual(0)
+    expect(triggerIdx).toBeGreaterThan(barIdx)
+    // The trigger is in the bar, before the body.
+    expect(triggerIdx).toBeLessThan(bodyIdx)
   })
 })
 
@@ -312,12 +335,39 @@ describe("reseedStep — guarded local-isComplete re-seed (AC4/AC5/AC10)", () =>
 })
 
 // ─── P6-20 (#14): forwards onShared down to <ShareMenu> ──────────────────────
-// The view is pure → call it directly and inspect the <ShareMenu> child element's
-// props (no DOM render, so the real ShareMenu is inspected as an element, not run).
-describe("PostGenerationResultView — forwards onShared to ShareMenu (P6-20 AC2)", () => {
-  function shareMenuEl(
-    over: Partial<PostGenerationResultViewProps> = {},
+// UX-EXPLORE (throwaway — REVERT): ShareMenu now lives inside DaControlBar's Share
+// dropdown popover (DaControlBar → DaPopover → ShareMenu). The chain is
+// PostGenerationResultView(onShared) → <DaControlBar onShared> → ... → <ShareMenu
+// onShared>. We assert BOTH hops: the view forwards to <DaControlBar>, and
+// DaControlBar threads it to the nested <ShareMenu>. We call each component as a
+// function (no DOM render) and walk the returned element tree's `children`.
+describe("PostGenerationResult — forwards onShared down to ShareMenu (P6-20 AC2)", () => {
+  function findByType(
+    node: React.ReactNode,
+    type: React.ElementType,
   ): React.ReactElement | undefined {
+    for (const child of React.Children.toArray(node) as React.ReactElement[]) {
+      if (!child || typeof child !== "object") continue
+      if (child.type === type) return child
+      const props = child.props as {
+        children?: React.ReactNode
+        trigger?: (open: boolean) => React.ReactNode
+      }
+      // DaPopover passes its panel content via `children` and its trigger via a
+      // `trigger` render-prop — descend into both so ShareMenu (in children) is found.
+      const found =
+        (props?.children ? findByType(props.children, type) : undefined) ??
+        (typeof props?.trigger === "function"
+          ? findByType(props.trigger(false), type)
+          : undefined)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  function controlBarEl(
+    over: Partial<PostGenerationResultViewProps> = {},
+  ): React.ReactElement {
     const tree = PostGenerationResultView({
       prototypeId: 42,
       isComplete: false,
@@ -326,13 +376,29 @@ describe("PostGenerationResultView — forwards onShared to ShareMenu (P6-20 AC2
       bundleUrl: null,
       ...over,
     }) as React.ReactElement
-    const kids = React.Children.toArray(
-      (tree.props as { children: React.ReactNode }).children,
-    ) as React.ReactElement[]
-    return kids.find((c) => c.type === ShareMenu)
+    const bar = findByType(tree, DaControlBar)
+    expect(bar).toBeTruthy()
+    return bar!
   }
 
-  it("passes its onShared prop down to <ShareMenu> (test_post_generation_result_forwards_on_shared)", () => {
+  function shareMenuEl(
+    over: Partial<PostGenerationResultViewProps> = {},
+  ): React.ReactElement | undefined {
+    // Render DaControlBar with the view-forwarded props to reach the nested ShareMenu.
+    const barEl = controlBarEl(over)
+    const rendered = DaControlBar(
+      barEl.props as Parameters<typeof DaControlBar>[0],
+    ) as React.ReactElement
+    return findByType(rendered, ShareMenu)
+  }
+
+  it("the view forwards its onShared prop to <DaControlBar>", () => {
+    const onShared = vi.fn()
+    const bar = controlBarEl({ onShared })
+    expect((bar.props as { onShared?: unknown }).onShared).toBe(onShared)
+  })
+
+  it("DaControlBar threads onShared down to the nested <ShareMenu> (test_post_generation_result_forwards_on_shared)", () => {
     const onShared = vi.fn()
     const share = shareMenuEl({ onShared })
     expect(share).toBeTruthy()
@@ -441,7 +507,12 @@ describe("public viewer unaffected (AC4)", () => {
 })
 
 describe("PostGenerationResult container — defaults from the prototype record (AC9)", () => {
-  it("mounts the editable chrome from a full record", () => {
+  // UX-EXPLORE (throwaway — REVERT): the editable handoff (CompletionBar) + share
+  // (ShareMenu) controls now live in CLOSED control-bar popovers, so the container
+  // SSR markup asserts the compact bar mounts (its triggers) rather than the
+  // expanded inline panels. The seed-from-prop behaviour the launcher `key` fix
+  // targets is still covered by reseedStep's pure unit tests below.
+  it("mounts the compact control bar from a full record", () => {
     const html = renderToStaticMarkup(
       React.createElement(PostGenerationResult, {
         prototype: proto({
@@ -452,32 +523,29 @@ describe("PostGenerationResult container — defaults from the prototype record 
       }),
     )
     expect(html).toContain('data-testid="post-generation-result"')
-    expect(html).toContain('data-testid="mark-complete-btn"')
-    expect(html).toMatch(/<input[^>]*checked[^>]*value="public"[^>]*>/)
+    expect(html).toContain('data-testid="da-controlbar"')
+    expect(html).toContain('data-testid="da-actions-toggle"')
+    expect(html).toContain('data-testid="da-share-toggle"')
   })
 
-  it("seeds the Complete view from a record with is_complete=true", () => {
-    // Guards the staleness class the launcher `key={result.id}` fix targets:
-    // the container seeds is_complete from the prop at mount, so a complete
-    // record must render the complete-state controls (not the WIP button).
+  it("a shared record (share_token present) mounts the right sidebar shell", () => {
     const html = renderToStaticMarkup(
       React.createElement(PostGenerationResult, {
         prototype: proto({ is_complete: true, share_mode: "private" }),
       }),
     )
-    expect(html).toContain('data-testid="resume-btn"')
-    expect(html).toContain('data-testid="download-md-btn"')
-    expect(html).not.toContain('data-testid="mark-complete-btn"')
+    // The right comments sidebar always exists (Problem 2); unshared → empty state.
+    expect(html).toContain('data-testid="da-canvas-comments"')
+    expect(html).toContain('data-testid="da-comments-empty"')
   })
 
-  it("defaults share_mode→private / is_complete→false when the columns are absent", () => {
-    // Older / partial rows that don't surface the P2-06 columns.
+  it("mounts cleanly when the P2-06 columns are absent (older/partial rows)", () => {
     const html = renderToStaticMarkup(
       React.createElement(PostGenerationResult, {
         prototype: proto(),
       }),
     )
-    expect(html).toContain('data-testid="mark-complete-btn"') // is_complete→false
-    expect(html).toMatch(/<input[^>]*checked[^>]*value="private"[^>]*>/) // share_mode→private
+    expect(html).toContain('data-testid="da-controlbar"')
+    expect(html).toContain('data-testid="post-generation-result"')
   })
 })

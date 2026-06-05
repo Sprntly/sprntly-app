@@ -398,10 +398,16 @@ describe("post-iterate / clarify callback threading (AC4/AC5 wiring)", () => {
   }
 
   it("forwards onIterated to the IterateComposer mount", () => {
+    // UX-EXPLORE (throwaway — REVERT): IterateComposer now lives in
+    // PostGenerationResult's `iterate` slot (the LEFT region of the 3-region
+    // canvas), not as a direct launcher child — read it off the slot.
     const onIterated = vi.fn()
     const children = viewChildren({ result: base, onIterated })
-    const iterate = children.find((c) => c.type === IterateComposer)
+    const pgr = children.find((c) => c.type === PostGenerationResult)
+    expect(pgr).toBeTruthy()
+    const iterate = (pgr!.props as { iterate?: React.ReactElement }).iterate
     expect(iterate).toBeTruthy()
+    expect(iterate!.type).toBe(IterateComposer)
     expect((iterate!.props as { onIterated?: () => void }).onIterated).toBe(
       onIterated,
     )
@@ -477,10 +483,12 @@ describe("CommentsPanel relocated into PostGenerationResult's `comments` prop (A
   })
 })
 
-describe("IterateComposer + ClarifyingQuestionSurface stay full-width below the pane (AC6b)", () => {
-  // P6-13 relocates ONLY CommentsPanel. IterateComposer + ClarifyingQuestionSurface
-  // remain launcher-level siblings rendered AFTER <PostGenerationResult> (below the
-  // two-column design-pane), full-width — NOT folded into the comments column.
+describe("IterateComposer is the canvas LEFT region; ClarifyingQuestionSurface stays a sibling (UX-EXPLORE)", () => {
+  // UX-EXPLORE (throwaway — REVERT): the 3-region canvas relocates IterateComposer
+  // INTO PostGenerationResult's `iterate` slot (the LEFT region) and CommentsPanel
+  // INTO its `comments` slot (the RIGHT region). ClarifyingQuestionSurface remains a
+  // launcher-level sibling rendered AFTER <PostGenerationResult> (the clarify flow
+  // is outside the approved 3-region scope, so it is left where it was).
   const base: PrototypeRecord = {
     id: 7,
     status: "ready",
@@ -492,25 +500,27 @@ describe("IterateComposer + ClarifyingQuestionSurface stay full-width below the 
     pending_question: { question: "Mobile or desktop first?" },
   }
 
-  it("renders both as launcher siblings positioned after PostGenerationResult, with wiring unchanged (test_iterate_and_clarify_stay_below_pane)", () => {
+  it("mounts IterateComposer in the iterate slot, CommentsPanel in the comments slot, and Clarify as a trailing sibling, wiring unchanged", () => {
     const children = viewChildren({ result: base, applyTarget: null })
     const pgrIdx = children.findIndex((c) => c.type === PostGenerationResult)
-    const iterateIdx = children.findIndex((c) => c.type === IterateComposer)
     const clarifyIdx = children.findIndex(
       (c) => c.type === ClarifyingQuestionSurface,
     )
     expect(pgrIdx).toBeGreaterThanOrEqual(0)
-    expect(iterateIdx).toBeGreaterThan(pgrIdx)
     expect(clarifyIdx).toBeGreaterThan(pgrIdx)
-    // They are NOT folded into PostGenerationResult's comments slot — the slot
-    // holds ONLY the relocated CommentsPanel.
-    const slot = (children[pgrIdx].props as { comments?: React.ReactElement | null })
-      .comments
-    expect(slot?.type).toBe(CommentsPanel)
-    // IterateComposer wiring byte-unchanged.
-    const iterate = children[iterateIdx]
-    expect((iterate.props as { prototypeId: number }).prototypeId).toBe(7)
-    expect((iterate.props as { isComplete: boolean }).isComplete).toBe(false)
+    const pgrProps = children[pgrIdx].props as {
+      comments?: React.ReactElement | null
+      iterate?: React.ReactElement | null
+    }
+    // RIGHT region: CommentsPanel.
+    expect(pgrProps.comments?.type).toBe(CommentsPanel)
+    // LEFT region: IterateComposer, wiring byte-unchanged.
+    const iterate = pgrProps.iterate
+    expect(iterate?.type).toBe(IterateComposer)
+    expect((iterate!.props as { prototypeId: number }).prototypeId).toBe(7)
+    expect((iterate!.props as { isComplete: boolean }).isComplete).toBe(false)
+    // IterateComposer is NOT also a direct launcher child anymore.
+    expect(children.find((c) => c.type === IterateComposer)).toBeFalsy()
   })
 })
 
@@ -599,10 +609,15 @@ describe("share-success → launcher refresh mounts CommentsPanel (AC3/AC4, #14 
 
   it("does NOT alter the iterate/clarify re-poll wiring (AC5: onIterated/onAnswered still threaded)", () => {
     // P6-20 adds a parallel share caller; the iterate/clarify forwarding is untouched.
+    // UX-EXPLORE (throwaway — REVERT): IterateComposer now lives in
+    // PostGenerationResult's `iterate` slot, so read onIterated off the slot.
     const onIterated = vi.fn()
     const children = viewChildren({ result: base, onIterated })
-    const iterate = children.find((c) => c.type === IterateComposer)
+    const pgr = children.find((c) => c.type === PostGenerationResult)
+    expect(pgr).toBeTruthy()
+    const iterate = (pgr!.props as { iterate?: React.ReactElement }).iterate
     expect(iterate).toBeTruthy()
+    expect(iterate!.type).toBe(IterateComposer)
     expect((iterate!.props as { onIterated?: () => void }).onIterated).toBe(onIterated)
   })
 })

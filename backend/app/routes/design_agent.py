@@ -54,6 +54,8 @@ from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_TOKEN_LIMITER,
 )
 from app.db.prds import get_prd_rendered
+# UX-EXPLORE (throwaway — REVERT): onboarding-website-as-design-source fallback.
+from app.db.products import get_company_website
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
     advance_current_checkpoint,
@@ -62,6 +64,7 @@ from app.db.prototypes import (
     fail_prototype,
     find_existing_prototype,
     find_prototype_by_share_token,
+    find_ready_prototype_by_prd,  # UX-EXPLORE (throwaway — REVERT)
     flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
@@ -186,6 +189,29 @@ async def generate(
     if existing:
         return GenerateResponse(prototype_id=existing["id"], status=existing["status"])
 
+    # UX-EXPLORE (throwaway — REVERT): onboarding-website-as-design-source fallback.
+    # Design-source precedence: Figma → website → manual → none. When the user
+    # connected NO Figma file AND typed NO website URL AND supplied no manual
+    # design hints, fall back to the company's onboarding website
+    # (products.website) so it becomes the automatic design source. We never
+    # override an explicit Figma file or a user-typed website_url, and we only
+    # consult the helper for the genuinely-empty case so Figma runs skip the DB
+    # read entirely. The resolved value is threaded into BOTH the prototype
+    # snapshot (below) and the background generation task, so it's observable on
+    # the prototype row's website_url column.
+    effective_website_url = body.website_url
+    typed = (body.website_url or "").strip()
+    if not body.figma_file_key and not typed and body.manual_design is None:
+        fallback_url = get_company_website(workspace_id)
+        if fallback_url:
+            effective_website_url = fallback_url
+            logger.info(
+                "design_agent_website_fallback company_id=%s prd_id=%s host=%s",
+                workspace_id,
+                body.prd_id,
+                urlsplit(fallback_url).hostname or "",
+            )
+
     # Insert the generating row. Scenario inputs (figma_file_key, etc.) are
     # stored as snapshots; the A/B/C/0 label is DERIVED at read time
     # (infer_scenario), never persisted — see db/prototypes.py.
@@ -197,7 +223,7 @@ async def generate(
         instructions=body.instructions,
         target_platform=body.normalised_platform(),
         figma_file_key=body.figma_file_key,
-        website_url=body.website_url,  # P5-02: Scenario B source snapshot
+        website_url=effective_website_url,  # P5-02 snapshot; UX-EXPLORE: now incl. onboarding fallback
         github_installation_id=None,  # populated in P4-05 (Scenario C)
     )
 
@@ -209,7 +235,7 @@ async def generate(
             target_platform=body.normalised_platform(),
             instructions=body.instructions,
             figma_file_key=body.figma_file_key,
-            website_url=body.website_url,
+            website_url=effective_website_url,  # UX-EXPLORE: onboarding fallback threaded through
             manual_design=body.manual_design,
         )
     )
@@ -309,6 +335,30 @@ def get_one(
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Prototype not found")
+    return row
+
+
+@router.get("/by-prd/{prd_id}")
+def get_by_prd(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> dict[str, Any]:
+    """UX-EXPLORE (throwaway — REVERT): most-recent READY prototype for a PRD.
+
+    Read-only PRD→prototype lookup with NO generate side-effect (unlike the
+    dedup inside POST /generate, which kicks a gen when none exists) — safe to
+    call on PRD-screen load so the frontend can render a preview card / flip
+    Approve to "View Prototype". 404 when no ready prototype (frontend swallows
+    404→null). Workspace-filtered: a prototype in another workspace returns 404,
+    not 403 (Rule #22). Path is two-segment (`/by-prd/{id}`) so it never collides
+    with the single-segment `GET /{prototype_id:int}` route above.
+    """
+    _require_feature_enabled()
+    row = find_ready_prototype_by_prd(
+        prd_id=prd_id, workspace_id=company.company_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
     return row
 
 

@@ -644,6 +644,36 @@ export const designAgentApi = {
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
     api.get<PrototypeRecord>(`/v1/design-agent/${prototypeId}`),
+  /**
+   * UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): READ-ONLY "does this PRD have a
+   * ready prototype?" lookup, by PRD id. Powers the PRD-screen preview card
+   * (CHANGE 3) and the "View Prototype" vs "Generate Prototype" label/skip-loading
+   * decision (CHANGE 4) WITHOUT side effects.
+   *
+   * IMPORTANT — BACKEND GAP (flagged in the RETURN): there is currently NO
+   * read-only GET-by-PRD route. The existing PRD→prototype lookup is
+   * `find_existing_prototype`, but it lives INSIDE the side-effecting
+   * `POST /v1/design-agent/generate` (the dedup short-circuit), which KICKS OFF A
+   * REAL GENERATION when none exists — so it is unsafe to call on PRD-screen load.
+   *
+   * This stub points at the INTENDED route `GET /v1/design-agent/by-prd/{prd_id}`
+   * (proposed: returns the most-recent ready prototype row for the PRD under the
+   * caller's workspace, or 404 when none — a pure read mirroring
+   * `find_existing_prototype`'s query). Until that route ships the call 404s; the
+   * callers swallow the error → null → no preview card, label stays
+   * "Generate Prototype" (graceful degrade, NEVER faking existence / NEVER kicking
+   * a generation). When the endpoint lands, the frontend consumes it as-is. */
+  getByPrd: async (prdId: number): Promise<PrototypeRecord | null> => {
+    try {
+      return await api.get<PrototypeRecord>(
+        `/v1/design-agent/by-prd/${encodeURIComponent(String(prdId))}`,
+      )
+    } catch {
+      // No read-only endpoint yet (404) / not found / transient → degrade to
+      // "no existing prototype" so the card hides and the label stays Generate.
+      return null
+    }
+  },
   /** F14 — mark a prototype complete. Empty body. */
   complete: (prototypeId: number) =>
     api.post<{
@@ -696,6 +726,15 @@ export const designAgentApi = {
       `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
       body,
     ),
+  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3): authed comment CREATE for the
+   *  signed-in canvas (mark-and-comment pin flow). Hits the EXISTING authed route
+   *  `POST /v1/design-agent/{id}/comments` (backend `post_comment`,
+   *  same-origin/CSRF gated). NOTE: the backend `CommentCreate` schema accepts
+   *  ONLY { anchor_id, body } — there is NO x/y/position field, so the pin's
+   *  on-canvas coordinates are NOT persisted server-side (they live in local UI
+   *  state only). Persisting pin position needs a backend schema change. */
+  createComment: (prototypeId: number, body: { anchor_id: string; body: string }) =>
+    api.post<CommentRecord>(`/v1/design-agent/${prototypeId}/comments`, body),
   /** Public-route comment read: lists every comment for the token's prototype
    *  (all statuses). Same 404 posture as the resolver for missing/private. */
   listCommentsByToken: (token: string) =>

@@ -26,37 +26,44 @@ function render(props: React.ComponentProps<typeof ShareMenuView>): string {
 }
 
 describe("ShareMenuView — rendering (AC8)", () => {
-  it("renders three radio buttons", () => {
+  // UX-EXPLORE (throwaway — REVERT): the visibility selector was restyled from
+  // native <input type="radio"> rows into a tidy row-list of role="radio"
+  // buttons (Claude/Lovable-style), and the passcode field is now
+  // progressive-disclosure (only mounted when mode === "passcode"). These three
+  // presentation assertions are updated to the new structure; the wired-behaviour
+  // tests below (runApplyShareMode / runSelectMode / runCopyShareLink) are
+  // unchanged and still prove the share API plumbing.
+  it("renders three selectable visibility rows", () => {
     const html = render({ mode: "private", passcode: "" })
-    const radios = html.match(/type="radio"/g) ?? []
-    expect(radios).toHaveLength(3)
-    expect(html).toContain('value="private"')
-    expect(html).toContain('value="public"')
-    expect(html).toContain('value="passcode"')
+    const rows = html.match(/role="radio"/g) ?? []
+    expect(rows).toHaveLength(3)
+    expect(html).toContain('data-testid="share-mode-private"')
+    expect(html).toContain('data-testid="share-mode-public"')
+    expect(html).toContain('data-testid="share-mode-passcode"')
   })
 
-  it("checks the radio matching the current mode", () => {
-    // Attribute order is React's concern; assert the checked input is the one
-    // carrying the active mode's value (order-independent).
+  it("marks the row matching the current mode as checked", () => {
+    // The active row carries aria-checked="true"; the others "false".
     expect(render({ mode: "private", passcode: "" })).toMatch(
-      /<input[^>]*checked[^>]*value="private"[^>]*>/,
+      /data-testid="share-mode-private"[^>]*aria-checked="true"|aria-checked="true"[^>]*data-testid="share-mode-private"/,
     )
     expect(render({ mode: "public", passcode: "" })).toMatch(
-      /<input[^>]*checked[^>]*value="public"[^>]*>/,
+      /data-testid="share-mode-public"[^>]*aria-checked="true"|aria-checked="true"[^>]*data-testid="share-mode-public"/,
     )
-    // ...and the non-active radios are not checked.
-    expect(render({ mode: "private", passcode: "" })).not.toMatch(
-      /<input[^>]*checked[^>]*value="public"[^>]*>/,
+    // ...and a non-active row is not checked.
+    expect(render({ mode: "private", passcode: "" })).toMatch(
+      /data-testid="share-mode-public"[^>]*aria-checked="false"|aria-checked="false"[^>]*data-testid="share-mode-public"/,
     )
   })
 
-  it("disables the passcode input when mode is not passcode", () => {
+  it("hides the passcode input unless mode is passcode (progressive disclosure)", () => {
     const html = render({ mode: "private", passcode: "" })
-    expect(html).toMatch(/data-testid="passcode-input"[^>]*disabled/)
+    expect(html).not.toContain('data-testid="passcode-input"')
   })
 
-  it("enables the passcode input when mode is passcode", () => {
+  it("shows an enabled passcode input when mode is passcode", () => {
     const html = render({ mode: "passcode", passcode: "" })
+    expect(html).toContain('data-testid="passcode-input"')
     expect(html).not.toMatch(/data-testid="passcode-input"[^>]*disabled/)
   })
 })

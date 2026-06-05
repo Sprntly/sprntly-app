@@ -19,13 +19,14 @@
  * NavigationContext provider, no @testing-library).
  */
 
-import { useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { DesignAgentDrawer } from "./DesignAgentDrawer"
 import { PostGenerationResult } from "./PostGenerationResult"
 import { GenerationErrorBanner, reasonCopy } from "./GenerationErrorBanner"
 import { CommentsPanel } from "./CommentsPanel"
 import { IterateComposer } from "./IterateComposer"
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
+import { PrototypePreviewCard } from "./PrototypePreviewCard"
 import { designAgentApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
 import {
   runDesignAgentGeneration,
@@ -35,6 +36,10 @@ import {
 export type DesignAgentLauncherProps = {
   prdId: number
   figmaFileKey?: string | null
+  /** UX-EXPLORE (throwaway — REVERT, CHANGE 2/3): PRD title, threaded from
+   *  PrdScreen → PrdSections so the preview card + the canvas breadcrumb can label
+   *  the PRD. Optional so existing callers keep type-checking. */
+  prdTitle?: string | null
 }
 
 /** Props the launcher hands to whatever drawer it mounts. Mirrors
@@ -163,9 +168,34 @@ export async function refreshShareTokenStep(
   }
 }
 
+// UX-EXPLORE (throwaway — REVERT): the `fetchExistingPrototypeStep` helper
+// (mount-time generate-dedup fetch that auto-seeded the PRD-screen canvas) has
+// been REMOVED along with its auto-mount effect. The post-gen canvas should not
+// auto-render on the PRD screen; `result` is now only populated by the
+// in-launcher drawer/iterate/share flows.
+
 type LauncherViewProps = DesignAgentLauncherProps & {
   open: boolean
   setOpen: (open: boolean) => void
+  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): the PRD's existing ready
+   *  prototype (resolved read-only via getByPrd), or null when none exists yet.
+   *  Drives the preview card + the "View Prototype" skip-loading open. */
+  existing?: PrototypeRecord | null
+  /** PRD title for the preview card label. */
+  prdTitle?: string | null
+  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): open the full-screen canvas for
+   *  the existing prototype (skips the loading screen). */
+  onOpenExisting?: () => void
+  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): the prototype currently shown in
+   *  the launcher-owned full-screen canvas, or null. */
+  canvasResult?: PrototypeRecord | null
+  /** Close the launcher-owned full-screen canvas (returns to the PRD). */
+  onCloseCanvas?: () => void
+  /** Pin-apply seam for the canvas (mirrors ApproveModal). */
+  onPinApply?: (comment: CommentRecord) => void
+  /** Refresh the canvas record after a share / iterate (distinct from the inline
+   *  result's refreshers so the two surfaces never cross-refresh). */
+  onCanvasRefresh?: () => void
   /** P2-12: the generated prototype to show post-generation. Null → no result
    *  view yet (the Generate button is the only chrome). Optional/defaulted so
    *  existing direct-view test calls keep typechecking. */
@@ -225,17 +255,34 @@ export function DesignAgentLauncherView({
   onIterated,
   onAnswered,
   onShared,
+  existing = null,
+  prdTitle = null,
+  onOpenExisting,
+  canvasResult = null,
+  onCloseCanvas,
+  onPinApply,
+  onCanvasRefresh,
   renderDrawer = defaultRenderDrawer,
 }: LauncherViewProps) {
   return (
     <div className="design-agent-surface prd-design-launcher" contentEditable={false}>
-      <button
-        type="button"
-        className="btn btn-accent"
-        onClick={() => setOpen(true)}
-      >
-        Generate Prototype
-      </button>
+      {/* UX-EXPLORE (throwaway): the "Generate Prototype" button is removed from
+          the PRD Design section per the redesign — the generation trigger moves to
+          the "Approve & next step" modal. Launcher state / drawer / result wiring
+          below is intentionally KEPT so functionality is preserved. */}
+      {/* UX-EXPLORE (throwaway — REVERT, CHANGE 3): when the PRD already has a ready
+          prototype (read-only getByPrd), show a preview card here. Clicking it opens
+          the full-screen canvas (CHANGE 4 — skips the loading screen). When none
+          exists this renders nothing (the Design section stays empty). Suppressed
+          while the launcher's own in-session `result` is mounted below to avoid a
+          duplicate surface. */}
+      {existing && !result && (
+        <PrototypePreviewCard
+          prototype={existing}
+          prdTitle={prdTitle}
+          onOpen={() => onOpenExisting?.()}
+        />
+      )}
       {/* P6-08 (Fix #11): when the last generation FAILED, surface a persistent
           banner with mapped human copy + Retry — instead of the old silent
           revert to the bare button above. Mounted ABOVE the `result &&` blocks
@@ -265,6 +312,14 @@ export function DesignAgentLauncherView({
           else null → no comments cell. The public mount still lives in
           PublicTokenViewer (P3-03); `onApply` enables the Apply→IterateComposer
           handoff (absent on the public mount → no Apply). */}
+      {/* UX-EXPLORE (throwaway — REVERT): the post-gen surface now adopts David's
+          3-region canvas. The IterateComposer (P3-14, the change-request input) is
+          handed DOWN as PostGenerationResult's `iterate` slot so it becomes the
+          LEFT region; CommentsPanel stays the `comments` slot (RIGHT region); the
+          PrototypeViewer + thin toolbar are the CENTER region. Only the LOCATION
+          of IterateComposer moves (sibling → `iterate` prop) — its props
+          (prototypeId / isComplete / applyTarget / onClearApply / onIterated) are
+          byte-identical, so the Apply→iterate and re-prompt flows are unchanged. */}
       {result && (
         <PostGenerationResult
           key={result.id}
@@ -279,20 +334,17 @@ export function DesignAgentLauncherView({
               />
             ) : null
           }
+          iterate={
+            <IterateComposer
+              key={`iterate-${result.id}`}
+              prototypeId={result.id}
+              isComplete={result.is_complete ?? false}
+              applyTarget={applyTarget}
+              onClearApply={() => setApplyTarget?.(null)}
+              onIterated={onIterated}
+            />
+          }
           onShared={onShared}
-        />
-      )}
-      {/* P3-14 (F9/F10): the iterate trigger surface — re-prompt always available
-          (when unlocked); Apply pre-fills from `applyTarget`. Mounted ONLY here
-          (authed surface), never in the public route. */}
-      {result && (
-        <IterateComposer
-          key={`iterate-${result.id}`}
-          prototypeId={result.id}
-          isComplete={result.is_complete ?? false}
-          applyTarget={applyTarget}
-          onClearApply={() => setApplyTarget?.(null)}
-          onIterated={onIterated}
         />
       )}
       {/* P3-16 (F12): the clarifying-question answer surface — rendered ONLY when
@@ -316,6 +368,53 @@ export function DesignAgentLauncherView({
         figmaFileKey,
         onGenerated,
       })}
+      {/* UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): launcher-owned full-screen
+          canvas for the EXISTING prototype, opened from the preview card. Mirrors
+          ApproveModal's `da-canvas-fullscreen` shell + PostGenerationResult
+          composition (Done in the control bar; comments gated on share_token;
+          IterateComposer reflecting real lock state with skipCostConfirm). Opened
+          DIRECTLY (no GenerationLoadingScreen) per CHANGE 4. */}
+      {canvasResult && (
+        <div
+          className="da-canvas-fullscreen design-agent-surface"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Existing prototype"
+          data-testid="da-launcher-canvas-fullscreen"
+        >
+          <div className="da-canvas-fullscreen-body">
+            <PostGenerationResult
+              key={`existing-${canvasResult.id}`}
+              prototype={canvasResult}
+              prdTitle={prdTitle}
+              onDone={onCloseCanvas}
+              onPinApply={onPinApply}
+              comments={
+                canvasResult.share_token ? (
+                  <CommentsPanel
+                    key={`existing-comments-${canvasResult.id}`}
+                    token={canvasResult.share_token}
+                    prototypeId={canvasResult.id}
+                    onApply={(comment) => setApplyTarget?.(comment)}
+                  />
+                ) : null
+              }
+              iterate={
+                <IterateComposer
+                  key={`existing-iterate-${canvasResult.id}`}
+                  prototypeId={canvasResult.id}
+                  isComplete={canvasResult.is_complete ?? false}
+                  applyTarget={applyTarget}
+                  onClearApply={() => setApplyTarget?.(null)}
+                  onIterated={onCanvasRefresh}
+                  skipCostConfirm
+                />
+              }
+              onShared={onCanvasRefresh}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -328,12 +427,21 @@ export function DesignAgentLauncherView({
 export function DesignAgentLauncher({
   prdId,
   figmaFileKey,
+  prdTitle = null,
   renderDrawer,
 }: DesignAgentLauncherProps & {
   renderDrawer?: (props: LauncherDrawerProps) => ReactNode
 }) {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState<PrototypeRecord | null>(null)
+  // UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): the PRD's existing ready prototype
+  // (read-only getByPrd), or null. Resolved once on mount; degrades to null when no
+  // read-only endpoint/record exists (getByPrd swallows the 404 → null) so the card
+  // simply does not render and NO generation is kicked.
+  const [existing, setExisting] = useState<PrototypeRecord | null>(null)
+  // UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): the prototype shown in the
+  // launcher-owned full-screen canvas (opened from the preview card), or null.
+  const [canvasResult, setCanvasResult] = useState<PrototypeRecord | null>(null)
   // P6-08 (Fix #11): the last generation attempt's failure, or null. A non-null
   // value renders the persistent GenerationErrorBanner (replacing the old silent
   // revert). Kept INDEPENDENT of `result` so a failed retry after a prior success
@@ -392,6 +500,55 @@ export function DesignAgentLauncher({
     if (fresh) setResult(fresh)
   }
 
+  // UX-EXPLORE (throwaway — REVERT): the path (a) auto-mount effect that
+  // fetched the PRD's existing prototype on Design-section load (via the
+  // generate-dedup) and seeded it as `result` has been REMOVED — the
+  // PostGenerationResult 3-region canvas should NOT auto-render on the PRD
+  // screen. `result` now starts null and is only set by the in-launcher
+  // drawer/iterate/share flows (handleGenerated / refreshResult /
+  // refreshShareToken), leaving the Design section empty on PRD load.
+
+  // UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): READ-ONLY existence check on
+  // mount. `getByPrd` hits the intended `GET /v1/design-agent/by-prd/{prd_id}` and
+  // (until that route ships) swallows the 404 → null, so this NEVER kicks a
+  // generation and degrades to "no card / no View label" gracefully. Only adopts a
+  // genuinely-ready prototype with a bundle_url for the preview card.
+  useEffect(() => {
+    let cancelled = false
+    designAgentApi
+      .getByPrd(prdId)
+      .then((proto) => {
+        if (cancelled) return
+        if (proto && proto.status === "ready" && proto.bundle_url) {
+          setExisting(proto)
+        }
+      })
+      .catch(() => {
+        /* degrade silently — no card, label stays Generate */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [prdId])
+
+  // CHANGE 4: open the existing prototype DIRECTLY in the full-screen canvas —
+  // no loading screen (the bundle already exists).
+  const openExisting = () => {
+    if (existing) setCanvasResult(existing)
+  }
+  const closeCanvas = () => {
+    setCanvasResult(null)
+    setApplyTarget(null)
+  }
+  // Refresh the canvas record after a share / iterate so the in-canvas comments +
+  // viewer reflect it (single-shot, mirrors ApproveModal.refreshCanvas).
+  const refreshCanvas = async () => {
+    const id = canvasResult?.id
+    if (id == null) return
+    const fresh = await refreshShareTokenStep(id, designAgentApi)
+    if (fresh) setCanvasResult(fresh)
+  }
+
   return (
     <DesignAgentLauncherView
       prdId={prdId}
@@ -407,6 +564,13 @@ export function DesignAgentLauncher({
       onIterated={refreshResult}
       onAnswered={refreshResult}
       onShared={refreshShareToken}
+      existing={existing}
+      prdTitle={prdTitle}
+      onOpenExisting={openExisting}
+      canvasResult={canvasResult}
+      onCloseCanvas={closeCanvas}
+      onPinApply={(comment) => setApplyTarget(comment)}
+      onCanvasRefresh={refreshCanvas}
       renderDrawer={renderDrawer}
     />
   )

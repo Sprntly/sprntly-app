@@ -198,15 +198,11 @@ export function CompletionBarView({
         </>
       ) : (
         <>
-          <button
-            type="button"
-            className="btn"
-            onClick={onResume}
-            disabled={busy}
-            data-testid="resume-btn"
-          >
-            Resume Iteration
-          </button>
+          {/* UX-EXPLORE (throwaway — REVERT, CHANGE 1): the "Resume Iteration"
+              button is removed — the left composer is now usable by default, so
+              there is no manual resume gate to click. `onResume` / `runResume`
+              are kept on the component for the actual backend semantics, just no
+              longer surfaced as a button here. */}
           <button
             type="button"
             className="btn"

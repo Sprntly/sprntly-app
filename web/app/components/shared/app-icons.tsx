@@ -153,6 +153,74 @@ export function IconListBullet({ size = 16 }: { size?: number }) {
   )
 }
 
+// UX-EXPLORE (throwaway — REVERT): control-bar + sidebar-collapse icons for the
+// reworked post-generation canvas. Same inline-stroke style as the set above.
+export function IconFullscreen({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" {...stroke} />
+    </svg>
+  )
+}
+
+export function IconChevronLeft({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M15 6l-6 6 6 6" {...stroke} />
+    </svg>
+  )
+}
+
+// UX-EXPLORE (throwaway — REVERT): compact control-bar icons — Share / overflow /
+// chevron-down for the reworked post-gen tool bar. Same inline-stroke style.
+export function IconChevronDown({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M6 9l6 6 6-6" {...stroke} />
+    </svg>
+  )
+}
+
+export function IconShare({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M4 12v7a1 1 0 001 1h14a1 1 0 001-1v-7M12 3v12M12 3L8 7M12 3l4 4" {...stroke} />
+    </svg>
+  )
+}
+
+// UX-EXPLORE (throwaway — REVERT, CHANGE 3): map-pin / "Mark & comment" tool icon
+// (David's `ti-pin`). Same inline-stroke style as the set above.
+export function IconPin({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M12 21s7-6.5 7-12a7 7 0 10-14 0c0 5.5 7 12 7 12z" {...stroke} />
+      <circle cx="12" cy="9" r="2.5" {...stroke} />
+    </svg>
+  )
+}
+
+export function IconMore({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+// UX-EXPLORE (throwaway — REVERT, CHANGE 2/3): an "open / go to" arrow used by the
+// canvas breadcrumb chevrons and the PRD-screen prototype preview card's open
+// affordance. Same inline-stroke style as the rest of the set.
+export function IconArrowRight({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M5 12h14M13 6l6 6-6 6" {...stroke} />
+    </svg>
+  )
+}
+
 const LEGACY_CARD_ICON: Record<string, ChatCardIconId> = {
   "✦": "sparkle",
   "💬": "message",

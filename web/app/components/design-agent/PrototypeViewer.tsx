@@ -43,6 +43,19 @@ type Props = {
    *  initial platform is injectable to assert both rendered branches. Production
    *  call sites never set it; defaults to "desktop". */
   initialPlatform?: Platform
+  /** UX-EXPLORE (throwaway — REVERT): controlled-platform seam. When BOTH are
+   *  supplied the viewer becomes controlled — it reads `platform` from the prop
+   *  and reports clicks via `onPlatformChange` instead of owning local state.
+   *  PostGenerationResult uses this to LIFT the Desktop/Mobile toggle up into the
+   *  new top control bar (the toggle then renders in the control bar, not here).
+   *  Uncontrolled call sites (the public viewer, fullscreen overlay) pass neither
+   *  and keep the in-frame toggle + local state exactly as before. */
+  platform?: Platform
+  onPlatformChange?: (platform: Platform) => void
+  /** UX-EXPLORE (throwaway — REVERT): when true the in-frame Desktop/Mobile
+   *  toggle is NOT rendered (it has been lifted into the control bar). The stage
+   *  class still tracks `platform`, so canvas width still switches. */
+  hideToggle?: boolean
 }
 
 export function PrototypeViewer({
@@ -51,8 +64,21 @@ export function PrototypeViewer({
   chrome,
   urlSlug,
   initialPlatform = "desktop",
+  platform: platformProp,
+  onPlatformChange,
+  hideToggle = false,
 }: Props) {
-  const [platform, setPlatform] = useState<Platform>(initialPlatform)
+  // UX-EXPLORE (throwaway — REVERT): controlled when a `platform` prop is given;
+  // otherwise own the state locally as before. Either way `platform` below is the
+  // effective value the stage class reads, so the single iframe is never
+  // re-mounted on a switch.
+  const [platformState, setPlatformState] = useState<Platform>(initialPlatform)
+  const controlled = platformProp != null
+  const platform = controlled ? platformProp : platformState
+  const setPlatform = (p: Platform) => {
+    if (!controlled) setPlatformState(p)
+    onPlatformChange?.(p)
+  }
   const slug = urlSlug ?? DEFAULT_URL_SLUG
   return (
     <div
@@ -69,28 +95,33 @@ export function PrototypeViewer({
           <span className="proto-url" data-testid="proto-url">
             {slug}
           </span>
-          <div
-            className="platform-toggle"
-            role="group"
-            aria-label="Preview platform"
-          >
-            <button
-              type="button"
-              className={platform === "desktop" ? "active" : ""}
-              aria-pressed={platform === "desktop"}
-              onClick={() => setPlatform("desktop")}
+          {/* UX-EXPLORE (throwaway — REVERT): the toggle is hidden when lifted
+              into the control bar (`hideToggle`); otherwise it renders in-frame
+              exactly as before for the public viewer + fullscreen overlay. */}
+          {!hideToggle && (
+            <div
+              className="platform-toggle"
+              role="group"
+              aria-label="Preview platform"
             >
-              Desktop
-            </button>
-            <button
-              type="button"
-              className={platform === "mobile" ? "active" : ""}
-              aria-pressed={platform === "mobile"}
-              onClick={() => setPlatform("mobile")}
-            >
-              Mobile
-            </button>
-          </div>
+              <button
+                type="button"
+                className={platform === "desktop" ? "active" : ""}
+                aria-pressed={platform === "desktop"}
+                onClick={() => setPlatform("desktop")}
+              >
+                Desktop
+              </button>
+              <button
+                type="button"
+                className={platform === "mobile" ? "active" : ""}
+                aria-pressed={platform === "mobile"}
+                onClick={() => setPlatform("mobile")}
+              >
+                Mobile
+              </button>
+            </div>
+          )}
         </div>
         {/* The chrome slot is ALWAYS rendered (even when `chrome` is undefined)
             so the testid stays queryable and the overlay has a stable mount

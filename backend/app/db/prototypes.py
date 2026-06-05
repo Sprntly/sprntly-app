@@ -263,6 +263,32 @@ def find_existing_prototype(
     return resp.data[0] if resp.data else None
 
 
+def find_ready_prototype_by_prd(
+    *,
+    prd_id: int,
+    workspace_id: str,
+) -> dict[str, Any] | None:
+    """UX-EXPLORE (throwaway — REVERT): most-recent READY prototype for a PRD.
+
+    Read-only sibling of find_existing_prototype WITHOUT the generate dedup's
+    side-effect — backs GET /by-prd/{prd_id} so the PRD screen can show a
+    preview card / flip Approve to "View Prototype" on load. READY only (not
+    'generating'), workspace-filtered (Rule #22), newest by id.
+    """
+    c = require_client()
+    resp = (
+        c.table(_TABLE)
+        .select("*")
+        .eq("prd_id", prd_id)
+        .eq("workspace_id", workspace_id)
+        .eq("status", "ready")
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
 def create_checkpoint(
     *,
     prototype_id: int,

@@ -34,6 +34,7 @@ export function PrdSections({
   sections,
   prdId,
   figmaFileKey,
+  prdTitle,
 }: {
   sections: PrdState["sections"]
   /** PRD DB id, threaded to the prd-design block so the F2 launcher can call
@@ -42,6 +43,9 @@ export function PrdSections({
   prdId?: number
   /** Figma file key for the prd-design launcher; null/undefined → no source. */
   figmaFileKey?: string | null
+  /** UX-EXPLORE (throwaway — REVERT, CHANGE 2/3): PRD title threaded to the
+   *  prd-design launcher for the preview card + canvas breadcrumb. */
+  prdTitle?: string | null
 }) {
   return (
     <>
@@ -51,6 +55,7 @@ export function PrdSections({
           block={block}
           prdId={prdId}
           figmaFileKey={figmaFileKey}
+          prdTitle={prdTitle}
         />
       ))}
     </>
@@ -61,10 +66,12 @@ function RenderBlock({
   block,
   prdId,
   figmaFileKey,
+  prdTitle,
 }: {
   block: PrdSection
   prdId?: number
   figmaFileKey?: string | null
+  prdTitle?: string | null
 }) {
   switch (block.type) {
     case "h2":
@@ -152,7 +159,7 @@ function RenderBlock({
     case "prd-dod":
       return <DodChecklist items={block.items} />
     case "prd-design":
-      return <DesignSection prdId={prdId} figmaFileKey={figmaFileKey} />
+      return <DesignSection prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} />
     default:
       // Evidence variants and any unknown future blocks render as no-op
       // in the PRD renderer; the dedicated EvidenceSections covers them.
@@ -174,15 +181,20 @@ function RenderBlock({
 function DesignSection({
   prdId,
   figmaFileKey,
+  prdTitle,
 }: {
   prdId?: number
   figmaFileKey?: string | null
+  prdTitle?: string | null
 }) {
   return (
     <section className="prd-design">
-      <h2 className="prd-h2">Design</h2>
+      {/* UX-EXPLORE (throwaway): the "Design" section heading is removed per the
+          redesign; the section wrapper + launcher are kept. NB for the ticket:
+          PrdSections.tsx / prd-design is an APPEND-ONLY hot file in the engagement
+          rules — this strip is only acceptable on the throwaway scratch branch. */}
       {prdId !== undefined ? (
-        <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} />
+        <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} />
       ) : (
         <div className="design-agent-surface">
           <p className="prd-design-empty">

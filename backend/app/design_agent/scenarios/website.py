@@ -219,7 +219,12 @@ async def extract_website_design_system(url: str) -> WebsiteDesignSystem | None:
             context = await browser.new_context()
             try:
                 page = await context.new_page()
-                await page.goto(url, wait_until="networkidle", timeout=_NAV_TIMEOUT_MS)
+                # UX-EXPLORE (throwaway — REVERT): was wait_until="networkidle",
+                # which never fires on real sites with persistent connections
+                # (analytics/socket/streaming) — plotline.studio timed out at
+                # both 8s AND 20s. "load" succeeds in ~0.85s and pulls richer
+                # HTML for the sampler. Revert with the rest of the scratch edits.
+                await page.goto(url, wait_until="load", timeout=_NAV_TIMEOUT_MS)
                 await _dismiss_cookie_banner(page)
                 raw = await page.evaluate(_SAMPLER_JS)
                 ds = _map_sample(raw)

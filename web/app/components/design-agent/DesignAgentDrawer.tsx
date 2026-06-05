@@ -85,6 +85,12 @@ type GenerateFlowDeps = {
   setSubmitting: (value: boolean) => void
   /** F3 opt-in: only toast on ready-completion when the user asked to be notified. */
   notifyOnReady: boolean
+  /** UX-EXPLORE (throwaway — REVERT): controls the kickoff "Design Agent
+   *  generating" toast. Defaults to true (the legacy DesignAgentDrawer flow is
+   *  unchanged). The GenerateModal → full-screen-loading-screen path passes
+   *  false: the GenerationLoadingScreen overlay now provides generation feedback,
+   *  so the kickoff toast is redundant there. Failure toasts are unaffected. */
+  notifyOnKickoff?: boolean
   /** P2-12: receives the terminal poll outcome so the host can render the
    *  post-generation result view. Optional — absent in the pre-P2-12 flow. */
   onGenerated?: (result: DesignAgentGenResult) => void
@@ -169,6 +175,7 @@ export async function runGenerateFlow({
   showToast,
   setSubmitting,
   notifyOnReady,
+  notifyOnKickoff = true,
   onGenerated,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
@@ -178,10 +185,16 @@ export async function runGenerateFlow({
     // completes still captures the ready notification.
     markPending(kickoff.prototype_id)
     onOpenChange(false)
-    showToast(
-      "Design Agent generating",
-      "We'll let you know when the prototype is ready.",
-    )
+    // UX-EXPLORE (throwaway — REVERT): the kickoff "Design Agent generating"
+    // toast is gated on `notifyOnKickoff` (default true → legacy drawer
+    // unchanged). The GenerateModal path passes false because the full-screen
+    // GenerationLoadingScreen now provides the kickoff feedback.
+    if (notifyOnKickoff) {
+      showToast(
+        "Design Agent generating",
+        "We'll let you know when the prototype is ready.",
+      )
+    }
     void runGeneration({ prototypeId: kickoff.prototype_id }).then((result) => {
       if (result.ok) {
         // P5-09: record completion BEFORE the live toast so a subsequent
