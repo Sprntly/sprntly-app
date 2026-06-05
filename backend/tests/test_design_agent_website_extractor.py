@@ -475,3 +475,71 @@ async def test_module_absent_floors_via_caller_no_completion_line(monkeypatch, c
     assert any("website_extract_complete" in m for m in msgs)
     # Tier (b) — module absence — would emit NEITHER (the body never executes);
     # that floor is the caller's `except ImportError`, which P6-09 leaves intact.
+
+
+# --- P7-08: networkidle→load fix (K1) ----------------------------------------
+
+
+async def test_goto_uses_wait_until_load(monkeypatch):
+    """P7-08 regression (AC4): page.goto is invoked with wait_until="load" — the
+    K1 fix. This FAILS if website.py is reverted to wait_until="networkidle".
+    The paired timeout=8000 wall-clock cap (AC5) is unchanged by the fix."""
+    h = _build_fake()
+    _install(monkeypatch, h)
+
+    await website.extract_website_design_system("https://example.com")
+
+    assert h.page.goto.await_count == 1
+    assert h.page.goto.await_args.kwargs["wait_until"] == "load"
+    # AC5: _NAV_TIMEOUT_MS unchanged — the fix only touched the wait_until value.
+    assert h.page.goto.await_args.kwargs["timeout"] == 8000
+
+
+async def test_extract_load_path_returns_design_system(monkeypatch):
+    """P7-08 creation (AC6): a resolving goto (no side-effect) on the load path +
+    a valid sampler return yields a confident 8-field design system — the
+    preserve-functionality contract (tester proto-54 Plotline success behaviour).
+    "Reachable fixture site" = the scriptable fake page whose goto resolves."""
+    h = _build_fake()  # goto_side_effect=None -> resolves; _GOOD_RAW sampler return
+    _install(monkeypatch, h)
+
+    ds = await website.extract_website_design_system("https://plotline.studio")
+
+    assert ds is not None
+    # The success ran through the load path.
+    assert h.page.goto.await_args.kwargs["wait_until"] == "load"
+    assert set(ds.keys()) == {
+        "primary_color",
+        "background_color",
+        "heading_font_family",
+        "heading_size_scale",
+        "body_font_family",
+        "border_radius_convention",
+        "spacing_scale_samples",
+        "logo_url",
+    }
+    assert ds["primary_color"] == "rgb(37, 99, 235)"
+    assert ds["heading_font_family"] == "Inter"
+
+
+async def test_extract_load_path_timeout_still_floors(monkeypatch, caplog):
+    """P7-08 edge (AC3): even with the load fix, a goto timeout still floors to
+    None and logs reason=timeout — the _is_timeout/reason= observability stays
+    intact. The fix changes only how nav waits, not the timeout floor behaviour."""
+
+    class TimeoutError(Exception):  # noqa: A001 — mimic playwright.async_api.TimeoutError by name
+        pass
+
+    h = _build_fake(goto_side_effect=TimeoutError("Timeout 8000ms exceeded"))
+    _install(monkeypatch, h)
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.scenarios.website"):
+        ds = await website.extract_website_design_system("https://slow.example.com")
+
+    assert ds is None
+    # The fix value still reached goto on the timeout path.
+    assert h.page.goto.await_args.kwargs["wait_until"] == "load"
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "confident=False" in blob
+    assert "reason=timeout" in blob
+    assert "error_class=TimeoutError" in blob
