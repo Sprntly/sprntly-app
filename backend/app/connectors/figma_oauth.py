@@ -28,11 +28,21 @@ logger = logging.getLogger(__name__)
 
 FIGMA_PROVIDER = "figma"
 FIGMA_AUTH_URL = "https://www.figma.com/oauth"
-FIGMA_TOKEN_URL = "https://www.figma.com/api/oauth/token"
-FIGMA_REFRESH_URL = "https://www.figma.com/api/oauth/refresh"
+# Post-Nov-2025 platform update: token + refresh moved off www.figma.com
+# onto api.figma.com, and credentials moved from body fields into the
+# HTTP Basic auth header.
+# https://developers.figma.com/docs/updates-to-figmas-developer-platform/
+FIGMA_TOKEN_URL = "https://api.figma.com/v1/oauth/token"
+FIGMA_REFRESH_URL = "https://api.figma.com/v1/oauth/refresh"
 FIGMA_ME_URL = "https://api.figma.com/v1/me"
 # Default scopes when nothing is configured. Comma-separated per Figma docs.
-DEFAULT_SCOPES = "files:read,file_variables:read,file_dev_resources:read,current_user:read"
+# Per Figma's Nov 17, 2025 platform update, the old `files:read` scope is
+# replaced by the granular pair `file_content:read` + `file_metadata:read`.
+# https://developers.figma.com/docs/updates-to-figmas-developer-platform/
+DEFAULT_SCOPES = (
+    "file_content:read,file_metadata:read,"
+    "file_dev_resources:read,current_user:read"
+)
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
 
@@ -60,10 +70,14 @@ def authorize_url(state: str, scopes: str | None = None) -> str:
     return f"{FIGMA_AUTH_URL}?{urlencode(params)}"
 
 
-def sign_oauth_state() -> str:
+def sign_oauth_state(*, company_id: str) -> str:
+    """Mint a signed state JWT that binds the OAuth round-trip to a
+    specific company. The callback (which has no user session) trusts
+    only this signature to know which company gets the new token."""
     now = int(time.time())
     payload = {
         "provider": FIGMA_PROVIDER,
+        "company_id": company_id,
         "nonce": uuid.uuid4().hex,
         "iat": now,
         "exp": now + STATE_TTL_SECONDS,
@@ -78,7 +92,19 @@ def verify_oauth_state(state: str) -> dict:
         raise HTTPException(400, "Invalid or expired OAuth state") from e
     if payload.get("provider") != FIGMA_PROVIDER:
         raise HTTPException(400, "OAuth state provider mismatch")
+    if not payload.get("company_id"):
+        raise HTTPException(400, "OAuth state missing company_id")
     return payload
+
+
+def _basic_auth_header() -> dict[str, str]:
+    """`Authorization: Basic <base64(client_id:client_secret)>` — Figma's
+    new token + refresh endpoints take client credentials this way, not
+    in the request body."""
+    import base64
+
+    creds = f"{settings.figma_client_id}:{settings.figma_client_secret}"
+    return {"Authorization": f"Basic {base64.b64encode(creds.encode()).decode()}"}
 
 
 def exchange_code_for_token(code: str) -> dict[str, Any]:
@@ -87,9 +113,8 @@ def exchange_code_for_token(code: str) -> dict[str, Any]:
         raise HTTPException(500, "Figma OAuth is not configured on the server")
     resp = requests.post(
         FIGMA_TOKEN_URL,
+        headers=_basic_auth_header(),
         data={
-            "client_id": settings.figma_client_id,
-            "client_secret": settings.figma_client_secret,
             "redirect_uri": settings.figma_oauth_redirect_uri,
             "code": code,
             "grant_type": "authorization_code",
@@ -107,11 +132,8 @@ def refresh_access_token(refresh_token: str) -> dict[str, Any]:
         raise HTTPException(500, "Figma OAuth is not configured on the server")
     resp = requests.post(
         FIGMA_REFRESH_URL,
-        data={
-            "client_id": settings.figma_client_id,
-            "client_secret": settings.figma_client_secret,
-            "refresh_token": refresh_token,
-        },
+        headers=_basic_auth_header(),
+        data={"refresh_token": refresh_token},
         timeout=15,
     )
     if not resp.ok:

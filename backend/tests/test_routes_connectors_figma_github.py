@@ -1,25 +1,20 @@
 """Tests for the Figma + GitHub connector OAuth routes.
 
-All outbound HTTP (token exchange, user lookup) is mocked. We assert:
-  - authorize returns a 307 to the right consent URL with a state JWT
-  - callback exchanges code, decodes state, stores an encrypted token,
-    redirects to the frontend with ?connected=<provider>
-  - list_connections shows the new row with account_label populated
-  - delete removes the row
+All outbound HTTP (token exchange, user lookup) is mocked. Routes are
+multitenant: every authenticated request passes ?company_id=...,
+seeded via tests/_company_helpers.company_client.
 """
 from __future__ import annotations
 
 import importlib
 import json
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
 
-
-# ─────────────────────── fixtures ───────────────────────
+from tests._company_helpers import seed_connection, company_client
 
 
 def _reload_app_modules():
@@ -70,29 +65,85 @@ def github_env(isolated_settings, monkeypatch):
     yield
 
 
-def _logged_in_client():
-    import app.main as main_mod
-    client = TestClient(main_mod.app)
-    r = client.post("/v1/auth/login", json={"password": "test-pw"})
-    assert r.status_code == 200, r.text
-    return client
+# ─────────────────────── Figma OAuth module unit tests ───────────────────────
 
 
-@pytest.fixture
-def figma_client(figma_env):
-    return _logged_in_client()
+def test_exchange_code_for_token_posts_to_api_figma_with_basic_auth(figma_env):
+    """Post-Nov-2025: token URL moved from www.figma.com/api/oauth/token to
+    api.figma.com/v1/oauth/token, and credentials moved from body fields
+    into the HTTP Basic auth header. Both shifts are breaking; pin them
+    in a test so they can't silently regress."""
+    import base64
+    from unittest.mock import MagicMock
+    from app.connectors import figma_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {
+        "access_token": "fig-access",
+        "refresh_token": "fig-refresh",
+        "expires_in": 7776000,
+    }
+    with patch(
+        "app.connectors.figma_oauth.requests.post", return_value=mock_resp
+    ) as mock_post:
+        out = figma_oauth.exchange_code_for_token("auth-code-x")
+
+    assert out["access_token"] == "fig-access"
+    call_args = mock_post.call_args
+    assert call_args.args[0] == "https://api.figma.com/v1/oauth/token"
+
+    # Credentials ride in Authorization: Basic, not in the body
+    expected = base64.b64encode(
+        b"figma-client-id:figma-client-secret"
+    ).decode()
+    assert call_args.kwargs["headers"]["Authorization"] == f"Basic {expected}"
+
+    # Body is form-urlencoded with only the grant_type/code/redirect_uri trio
+    body = call_args.kwargs["data"]
+    assert body["grant_type"] == "authorization_code"
+    assert body["code"] == "auth-code-x"
+    assert body["redirect_uri"] == "http://testserver/v1/connectors/figma/callback"
+    assert "client_id" not in body
+    assert "client_secret" not in body
 
 
-@pytest.fixture
-def github_client(github_env):
-    return _logged_in_client()
+def test_refresh_access_token_posts_to_api_figma_refresh(figma_env):
+    """Same migration applies to the refresh endpoint."""
+    import base64
+    from unittest.mock import MagicMock
+    from app.connectors import figma_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {"access_token": "new-access", "expires_in": 7776000}
+    with patch(
+        "app.connectors.figma_oauth.requests.post", return_value=mock_resp
+    ) as mock_post:
+        out = figma_oauth.refresh_access_token("old-refresh")
+
+    assert out["access_token"] == "new-access"
+    call_args = mock_post.call_args
+    assert call_args.args[0] == "https://api.figma.com/v1/oauth/refresh"
+    expected = base64.b64encode(
+        b"figma-client-id:figma-client-secret"
+    ).decode()
+    assert call_args.kwargs["headers"]["Authorization"] == f"Basic {expected}"
+    body = call_args.kwargs["data"]
+    assert body["refresh_token"] == "old-refresh"
+    assert "client_id" not in body
+    assert "client_secret" not in body
 
 
 # ─────────────────────── Figma ───────────────────────
 
 
-def test_figma_authorize_redirects_to_figma(figma_client):
-    r = figma_client.get("/v1/connectors/figma/authorize", follow_redirects=False)
+def test_figma_authorize_redirects_to_figma(figma_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get(
+        "/v1/connectors/figma/authorize",
+        follow_redirects=False,
+    )
     assert r.status_code == 307
     loc = r.headers["location"]
     assert loc.startswith("https://www.figma.com/oauth?")
@@ -101,10 +152,10 @@ def test_figma_authorize_redirects_to_figma(figma_client):
     assert "scope=" in loc
 
 
-def test_figma_callback_stores_token(figma_client):
-    # Sign a real state so the callback validates.
+def test_figma_callback_stores_token(figma_env, monkeypatch):
+    ctx = company_client(monkeypatch)
     from app.connectors import figma_oauth
-    state = figma_oauth.sign_oauth_state()
+    state = figma_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     fake_token = {
         "access_token": "fig-access",
@@ -116,7 +167,7 @@ def test_figma_callback_stores_token(figma_client):
 
     with patch("app.routes.connectors.figma_oauth.exchange_code_for_token", return_value=fake_token), \
          patch("app.routes.connectors.figma_oauth.fetch_me", return_value=fake_me):
-        r = figma_client.get(
+        r = ctx.client.get(
             "/v1/connectors/figma/callback",
             params={"code": "abc", "state": state},
             follow_redirects=False,
@@ -128,16 +179,20 @@ def test_figma_callback_stores_token(figma_client):
     )
     assert "connected=figma" in r.headers["location"]
 
-    # Row landed in db
-    listed = figma_client.get("/v1/connectors").json()["connections"]
+    listed = ctx.client.get(
+        "/v1/connectors"
+    ).json()["connections"]
     figma = next(c for c in listed if c["provider"] == "figma")
     assert figma["account_label"] == "alice@co.com"
     assert figma["status"] == "active"
-    assert "files:read" in figma["scopes"]
+    # Post-Nov-2025: `files:read` was replaced by granular file_* scopes.
+    assert "file_content:read" in figma["scopes"]
+    assert "file_metadata:read" in figma["scopes"]
 
 
-def test_figma_callback_rejects_bad_state(figma_client):
-    r = figma_client.get(
+def test_figma_callback_rejects_bad_state(figma_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get(
         "/v1/connectors/figma/callback",
         params={"code": "abc", "state": "not.a.jwt"},
         follow_redirects=False,
@@ -145,28 +200,33 @@ def test_figma_callback_rejects_bad_state(figma_client):
     assert r.status_code == 400
 
 
-def test_figma_disconnect(figma_client):
-    # Insert a row directly via the db API.
-    from app.connectors import figma_oauth
-    from app.connectors.tokens import encrypt_token_json
-    import app.db as db_mod
-    db_mod.upsert_connection(
-        provider=figma_oauth.FIGMA_PROVIDER,
-        token_encrypted=encrypt_token_json(json.dumps({"access_token": "x"})),
-        scopes=figma_oauth.DEFAULT_SCOPES,
-        account_label="alice@co.com",
+def test_figma_disconnect(figma_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        provider="figma",
+        token_blob={"access_token": "x"},
+        label="alice@co.com",
     )
-    r = figma_client.delete("/v1/connectors/figma")
+    r = ctx.client.delete(
+        "/v1/connectors/figma"
+    )
     assert r.status_code == 200
     assert r.json()["deleted"] is True
-    assert figma_client.get("/v1/connectors").json()["connections"] == []
+    assert ctx.client.get(
+        "/v1/connectors"
+    ).json()["connections"] == []
 
 
 # ─────────────────────── GitHub ───────────────────────
 
 
-def test_github_authorize_redirects_to_github(github_client):
-    r = github_client.get("/v1/connectors/github/authorize", follow_redirects=False)
+def test_github_authorize_redirects_to_github(github_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get(
+        "/v1/connectors/github/authorize",
+        follow_redirects=False,
+    )
     assert r.status_code == 307
     loc = r.headers["location"]
     assert loc.startswith("https://github.com/login/oauth/authorize?")
@@ -174,9 +234,10 @@ def test_github_authorize_redirects_to_github(github_client):
     assert "state=" in loc
 
 
-def test_github_callback_stores_token(github_client):
+def test_github_callback_stores_token(github_env, monkeypatch):
+    ctx = company_client(monkeypatch)
     from app.connectors import github_app
-    state = github_app.sign_oauth_state()
+    state = github_app.sign_oauth_state(company_id=ctx.company_id)
 
     fake_token = {
         "access_token": "gho_xxx",
@@ -189,7 +250,7 @@ def test_github_callback_stores_token(github_client):
 
     with patch("app.routes.connectors.github_app.exchange_code_for_token", return_value=fake_token), \
          patch("app.routes.connectors.github_app.fetch_authenticated_user", return_value=fake_user):
-        r = github_client.get(
+        r = ctx.client.get(
             "/v1/connectors/github/callback",
             params={"code": "abc", "state": state},
             follow_redirects=False,
@@ -198,21 +259,23 @@ def test_github_callback_stores_token(github_client):
     assert r.status_code == 307
     assert "connected=github" in r.headers["location"]
 
-    listed = github_client.get("/v1/connectors").json()["connections"]
+    listed = ctx.client.get(
+        "/v1/connectors"
+    ).json()["connections"]
     gh = next(c for c in listed if c["provider"] == "github")
     assert gh["account_label"] == "@octocat"
     assert gh["scopes"] == "read:user,user:email"
 
 
-def test_github_callback_rejects_error_payload(github_client):
+def test_github_callback_rejects_error_payload(github_env, monkeypatch):
+    ctx = company_client(monkeypatch)
     from app.connectors import github_app
-    state = github_app.sign_oauth_state()
-    # GitHub returns 200 + {error: ...} on app errors — make sure that 400s.
+    state = github_app.sign_oauth_state(company_id=ctx.company_id)
     with patch(
         "app.routes.connectors.github_app.exchange_code_for_token",
         side_effect=lambda code: (_ for _ in ()).throw(__import__("fastapi").HTTPException(400, "GitHub token exchange error: bad_verification_code")),
     ):
-        r = github_client.get(
+        r = ctx.client.get(
             "/v1/connectors/github/callback",
             params={"code": "bad", "state": state},
             follow_redirects=False,
@@ -220,17 +283,17 @@ def test_github_callback_rejects_error_payload(github_client):
     assert r.status_code == 400
 
 
-def test_github_disconnect(github_client):
-    from app.connectors import github_app
-    from app.connectors.tokens import encrypt_token_json
-    import app.db as db_mod
-    db_mod.upsert_connection(
-        provider=github_app.GITHUB_PROVIDER,
-        token_encrypted=encrypt_token_json(json.dumps({"access_token": "x"})),
-        scopes="read:user",
-        account_label="@octocat",
+def test_github_disconnect(github_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        provider="github",
+        token_blob={"access_token": "x"},
+        label="@octocat",
     )
-    r = github_client.delete("/v1/connectors/github")
+    r = ctx.client.delete(
+        "/v1/connectors/github"
+    )
     assert r.status_code == 200
     assert r.json()["deleted"] is True
 
@@ -238,42 +301,48 @@ def test_github_disconnect(github_client):
 # ─────────────────────── Figma data endpoints (Design Agent input) ───────────────────────
 
 
-def _seed_figma_token(token: str = "fig-access") -> None:
-    from app.connectors import figma_oauth
-    from app.connectors.tokens import encrypt_token_json
-    import app.db as db_mod
-    db_mod.upsert_connection(
-        provider=figma_oauth.FIGMA_PROVIDER,
-        token_encrypted=encrypt_token_json(json.dumps({"access_token": token})),
-        scopes=figma_oauth.DEFAULT_SCOPES,
-        account_label="alice@co.com",
+def test_figma_get_file_requires_connection(figma_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get(
+        "/v1/connectors/figma/files/abc123",
     )
-
-
-def test_figma_get_file_requires_connection(figma_client):
-    r = figma_client.get("/v1/connectors/figma/files/abc123")
     assert r.status_code == 404
 
 
-def test_figma_get_file_returns_figma_payload(figma_client):
-    _seed_figma_token()
+def test_figma_get_file_returns_figma_payload(figma_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        provider="figma",
+        token_blob={"access_token": "fig-access"},
+    )
     fake_doc = {"name": "Design System", "document": {"id": "0:1", "children": []}}
     with patch(
         "app.routes.connectors.figma_oauth.fetch_file", return_value=fake_doc
     ) as mock_fetch:
-        r = figma_client.get("/v1/connectors/figma/files/abc123?depth=3")
+        r = ctx.client.get(
+            "/v1/connectors/figma/files/abc123",
+            params={"depth": 3},
+        )
     assert r.status_code == 200
     assert r.json() == fake_doc
     mock_fetch.assert_called_once_with("fig-access", "abc123", depth=3)
 
 
-def test_figma_get_file_styles_returns_figma_payload(figma_client):
-    _seed_figma_token()
+def test_figma_get_file_styles_returns_figma_payload(figma_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        provider="figma",
+        token_blob={"access_token": "fig-access"},
+    )
     fake_styles = {"meta": {"styles": [{"key": "S:1", "name": "Brand/Primary"}]}}
     with patch(
         "app.routes.connectors.figma_oauth.fetch_file_styles", return_value=fake_styles
     ) as mock_fetch:
-        r = figma_client.get("/v1/connectors/figma/files/abc123/styles")
+        r = ctx.client.get(
+            "/v1/connectors/figma/files/abc123/styles",
+        )
     assert r.status_code == 200
     assert r.json() == fake_styles
     mock_fetch.assert_called_once_with("fig-access", "abc123")
@@ -282,25 +351,22 @@ def test_figma_get_file_styles_returns_figma_payload(figma_client):
 # ─────────────────────── GitHub data endpoints (Engineer Agent input) ───────────────────────
 
 
-def _seed_github_token(token: str = "gho_xxx") -> None:
-    from app.connectors import github_app
-    from app.connectors.tokens import encrypt_token_json
-    import app.db as db_mod
-    db_mod.upsert_connection(
-        provider=github_app.GITHUB_PROVIDER,
-        token_encrypted=encrypt_token_json(json.dumps({"access_token": token})),
-        scopes="read:user user:email",
-        account_label="@octocat",
+def test_github_repos_requires_connection(github_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get(
+        "/v1/connectors/github/repos",
     )
-
-
-def test_github_repos_requires_connection(github_client):
-    r = github_client.get("/v1/connectors/github/repos")
     assert r.status_code == 404
 
 
-def test_github_repos_returns_trimmed_list(github_client):
-    _seed_github_token()
+def test_github_repos_returns_trimmed_list(github_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        provider="github",
+        token_blob={"access_token": "gho_xxx"},
+        label="@octocat",
+    )
     fake_repos = [
         {"full_name": "octocat/hello", "name": "hello", "private": False,
          "html_url": "https://github.com/octocat/hello", "default_branch": "main",
@@ -309,7 +375,10 @@ def test_github_repos_returns_trimmed_list(github_client):
     with patch(
         "app.routes.connectors.github_app.fetch_user_repos", return_value=fake_repos
     ) as mock_fetch:
-        r = github_client.get("/v1/connectors/github/repos?per_page=10")
+        r = ctx.client.get(
+            "/v1/connectors/github/repos",
+            params={"per_page": 10},
+        )
     assert r.status_code == 200
     assert r.json() == {"repositories": fake_repos}
     mock_fetch.assert_called_once_with("gho_xxx", per_page=10)

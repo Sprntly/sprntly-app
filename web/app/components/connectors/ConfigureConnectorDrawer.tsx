@@ -29,6 +29,7 @@ import {
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
+import { SlackChannelPicker } from "./SlackChannelPicker"
 
 // ─────────────────────────── Pure View ───────────────────────────
 
@@ -235,6 +236,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectHubspot()
   } else if (providerId === "fireflies") {
     await connectorsApi.disconnectFireflies()
+  } else if (providerId === "slack") {
+    await connectorsApi.disconnectSlack()
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }
@@ -306,7 +309,9 @@ export function ConfigureConnectorDrawer({
     }
   }, [providerId, onDisconnected, onClose])
 
-  // Slot: provider-specific config component.
+  // Slot: provider-specific config component. The pickers fetch with
+  // the Bearer-only API client — require_company resolves the tenant
+  // server-side, so no workspaceId prop is needed here.
   let slot: React.ReactNode = null
   if (providerId === "google_drive") {
     slot = (
@@ -315,6 +320,14 @@ export function ConfigureConnectorDrawer({
         selectedFolderId={connection?.config?.folder_id}
         selectedFolderName={connection?.config?.folder_name}
         onSelected={onDisconnected /* reuse the reload callback */}
+      />
+    )
+  } else if (providerId === "slack") {
+    slot = (
+      <SlackChannelPicker
+        savedChannelId={connection?.config?.channel_id as string | undefined}
+        savedChannelName={connection?.config?.channel_name as string | undefined}
+        onSaved={onDisconnected /* reuse the reload callback */}
       />
     )
   }

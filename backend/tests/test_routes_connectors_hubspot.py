@@ -1,21 +1,13 @@
-"""Tests for the HubSpot OAuth connector (commit I + I.1 modular v1/v3).
-
-HubSpot's OAuth API has two generations:
-
-  v1 (legacy):   POST /oauth/v1/token, GET /oauth/v1/access-tokens/{token}
-                 Sunset-pending in Q1 2026; new HubSpot accounts can't
-                 create legacy-public apps anymore but existing apps in
-                 older accounts keep working.
-  v3 (modern):   POST /oauth/v3/token, POST /oauth/v3/introspect (RFC 7662)
-                 The default for new apps via `hs project create` (CLI).
+"""Tests for the HubSpot OAuth connector (modular v1/v3).
 
 `hubspot_oauth.py` dispatches on `settings.hubspot_oauth_version`
 (default "v3"). Public function signatures (authorize_url,
 exchange_code_for_token, fetch_token_info, etc.) are identical across
 versions — only the URLs and introspection response shape differ.
 
-Tests are split into version-agnostic + v1-specific + v3-specific
-groups. All outbound HTTP is mocked.
+All outbound HTTP is mocked. Routes are multitenant — every authenticated
+request passes ?company_id=...; the membership dep + signed state
+ensure tokens land in the right workspace.
 """
 from __future__ import annotations
 
@@ -25,7 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
+
+from tests._company_helpers import company_client
 
 
 def _reload_app_modules():
@@ -56,26 +49,14 @@ def _base_env(monkeypatch, version: str):
 
 @pytest.fixture
 def hubspot_env_v3(isolated_settings, monkeypatch):
-    """Default: v3 (modern). New apps via `hs project create` use this."""
     _base_env(monkeypatch, "v3")
     yield
 
 
 @pytest.fixture
 def hubspot_env_v1(isolated_settings, monkeypatch):
-    """v1 (legacy). For HubSpot accounts that pre-date the public-app cutoff."""
     _base_env(monkeypatch, "v1")
     yield
-
-
-def _signed_in_client(env_fixture):
-    """env_fixture is the yielded value of a hubspot_env_* fixture; ignored
-    here but ensures pytest evaluates fixture dependencies."""
-    import app.main as main_mod
-    client = TestClient(main_mod.app)
-    r = client.post("/v1/auth/login", json={"password": "test-pw"})
-    assert r.status_code == 200, r.text
-    return client
 
 
 # ─────────────────────────── Version-agnostic OAuth module tests ───────────────────────────
@@ -93,21 +74,21 @@ def test_hubspot_configured_reflects_env(hubspot_env_v3, monkeypatch):
 
 def test_sign_verify_oauth_state_round_trip(hubspot_env_v3):
     from app.connectors import hubspot_oauth
-    token = hubspot_oauth.sign_oauth_state()
+    token = hubspot_oauth.sign_oauth_state(company_id="ws-x")
     payload = hubspot_oauth.verify_oauth_state(token)
     assert payload["provider"] == "hubspot"
+    assert payload["company_id"] == "ws-x"
 
 
 def test_verify_oauth_state_rejects_wrong_provider(hubspot_env_v3):
     from app.connectors import hubspot_oauth, figma_oauth
-    figma_state = figma_oauth.sign_oauth_state()
+    figma_state = figma_oauth.sign_oauth_state(company_id="ws-x")
     from fastapi import HTTPException
     with pytest.raises(HTTPException):
         hubspot_oauth.verify_oauth_state(figma_state)
 
 
 def test_authorize_url_has_required_params(hubspot_env_v3):
-    """Authorize URL is identical between v1 and v3 — same host, same params."""
     from app.connectors import hubspot_oauth
     url = hubspot_oauth.authorize_url(state="state-token")
     assert url.startswith("https://app.hubspot.com/oauth/authorize")
@@ -149,9 +130,7 @@ def test_v3_exchange_code_for_token_posts_to_hubspot_v3_endpoint(hubspot_env_v3)
 
     assert out["access_token"] == "hub-v3-access"
     call_args = mock_post.call_args
-    # v3 host
     assert call_args.args[0] == "https://api.hubspot.com/oauth/v3/token"
-    # form-urlencoded body — fields same as v1
     data = call_args.kwargs["data"]
     assert data["grant_type"] == "authorization_code"
     assert data["code"] == "auth-code"
@@ -165,7 +144,6 @@ def test_v3_fetch_token_info_uses_introspect_endpoint(hubspot_env_v3):
 
     mock_resp = MagicMock()
     mock_resp.ok = True
-    # RFC 7662 / HubSpot v3 introspect shape
     mock_resp.json.return_value = {
         "active": True,
         "username": "sarah@meridian.health",
@@ -177,7 +155,6 @@ def test_v3_fetch_token_info_uses_introspect_endpoint(hubspot_env_v3):
     with patch("app.connectors.hubspot_oauth.requests.post", return_value=mock_resp) as mock_post:
         info = hubspot_oauth.fetch_token_info("hub-v3-access")
 
-    # Normalised output — `username` becomes `user`, scope string becomes list
     assert info["user"] == "sarah@meridian.health"
     assert info["hub_id"] == 12345678
     assert info["scopes"] == ["oauth", "crm.objects.contacts.read"]
@@ -187,21 +164,22 @@ def test_v3_fetch_token_info_uses_introspect_endpoint(hubspot_env_v3):
     assert call_args.kwargs["data"] == {"token": "hub-v3-access"}
 
 
-def test_v3_start_oauth_returns_hubspot_url(hubspot_env_v3):
-    client = _signed_in_client(hubspot_env_v3)
-    r = client.post("/v1/connectors/hubspot/start-oauth")
+def test_v3_start_oauth_returns_hubspot_url(hubspot_env_v3, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/hubspot/start-oauth",
+    )
     assert r.status_code == 200, r.text
     body = r.json()
     assert "authorize_url" in body
     assert "hubspot.com" in body["authorize_url"]
 
 
-def test_v3_callback_stores_connection_with_normalised_label(hubspot_env_v3):
-    """End-to-end on v3: introspect response uses `username`, callback
-    normalises it into account_label as the user's email."""
-    client = _signed_in_client(hubspot_env_v3)
+def test_v3_callback_stores_connection_with_normalised_label(hubspot_env_v3, monkeypatch):
+    """End-to-end on v3."""
+    ctx = company_client(monkeypatch)
     from app.connectors import hubspot_oauth
-    state = hubspot_oauth.sign_oauth_state()
+    state = hubspot_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     mock_token = MagicMock()
     mock_token.ok = True
@@ -221,7 +199,6 @@ def test_v3_callback_stores_connection_with_normalised_label(hubspot_env_v3):
         "scope": "oauth",
     }
 
-    # Both v3 token exchange AND introspect are POST — same patched method.
     def post_side_effect(url, *args, **kwargs):
         if "/v3/token" in url:
             return mock_token
@@ -230,7 +207,7 @@ def test_v3_callback_stores_connection_with_normalised_label(hubspot_env_v3):
         raise AssertionError(f"Unexpected POST to {url}")
 
     with patch("app.connectors.hubspot_oauth.requests.post", side_effect=post_side_effect):
-        r = client.get(
+        r = ctx.client.get(
             "/v1/connectors/hubspot/callback",
             params={"code": "auth-code", "state": state},
             follow_redirects=False,
@@ -242,7 +219,9 @@ def test_v3_callback_stores_connection_with_normalised_label(hubspot_env_v3):
     )
     assert "connected=hubspot" in r.headers["location"]
 
-    listed = client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors"
+    ).json()
     rows = [c for c in listed["connections"] if c["provider"] == "hubspot"]
     assert len(rows) == 1
     assert rows[0]["account_label"] == "sarah@meridian.health"
@@ -268,7 +247,6 @@ def test_v1_exchange_code_for_token_posts_to_hubapi_v1_endpoint(hubspot_env_v1):
 
     assert out["access_token"] == "hub-v1-access"
     call_args = mock_post.call_args
-    # v1 host (hubapi.com, not hubspot.com)
     assert call_args.args[0] == "https://api.hubapi.com/oauth/v1/token"
     data = call_args.kwargs["data"]
     assert data["grant_type"] == "authorization_code"
@@ -297,11 +275,11 @@ def test_v1_fetch_token_info_uses_access_tokens_path_endpoint(hubspot_env_v1):
     )
 
 
-def test_v1_callback_stores_connection(hubspot_env_v1):
-    """End-to-end on v1: introspect response uses `user` directly."""
-    client = _signed_in_client(hubspot_env_v1)
+def test_v1_callback_stores_connection(hubspot_env_v1, monkeypatch):
+    """End-to-end on v1."""
+    ctx = company_client(monkeypatch)
     from app.connectors import hubspot_oauth
-    state = hubspot_oauth.sign_oauth_state()
+    state = hubspot_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     mock_token = MagicMock()
     mock_token.ok = True
@@ -324,14 +302,16 @@ def test_v1_callback_stores_connection(hubspot_env_v1):
         patch("app.connectors.hubspot_oauth.requests.post", return_value=mock_token),
         patch("app.connectors.hubspot_oauth.requests.get", return_value=mock_info),
     ):
-        r = client.get(
+        r = ctx.client.get(
             "/v1/connectors/hubspot/callback",
             params={"code": "auth-code", "state": state},
             follow_redirects=False,
         )
 
     assert r.status_code == 307
-    listed = client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors"
+    ).json()
     rows = [c for c in listed["connections"] if c["provider"] == "hubspot"]
     assert len(rows) == 1
     assert rows[0]["account_label"] == "sarah@meridian.health"
@@ -346,18 +326,18 @@ def test_start_oauth_500_when_not_configured(isolated_settings, monkeypatch):
     monkeypatch.setenv("HUBSPOT_OAUTH_REDIRECT_URI", "")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     _reload_app_modules()
-    import app.main as main_mod
-    client = TestClient(main_mod.app)
-    client.post("/v1/auth/login", json={"password": "test-pw"})
-    r = client.post("/v1/connectors/hubspot/start-oauth")
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/hubspot/start-oauth",
+    )
     assert r.status_code == 500
 
 
-def test_callback_rejects_wrong_state(hubspot_env_v3):
-    client = _signed_in_client(hubspot_env_v3)
+def test_callback_rejects_wrong_state(hubspot_env_v3, monkeypatch):
+    ctx = company_client(monkeypatch)
     from app.connectors import figma_oauth
-    wrong_state = figma_oauth.sign_oauth_state()
-    r = client.get(
+    wrong_state = figma_oauth.sign_oauth_state(company_id=ctx.company_id)
+    r = ctx.client.get(
         "/v1/connectors/hubspot/callback",
         params={"code": "x", "state": wrong_state},
         follow_redirects=False,
@@ -365,11 +345,11 @@ def test_callback_rejects_wrong_state(hubspot_env_v3):
     assert r.status_code == 400
 
 
-def test_delete_hubspot_disconnects(hubspot_env_v3):
-    client = _signed_in_client(hubspot_env_v3)
+def test_delete_hubspot_disconnects(hubspot_env_v3, monkeypatch):
+    ctx = company_client(monkeypatch)
     from app.connectors import hubspot_oauth
 
-    state = hubspot_oauth.sign_oauth_state()
+    state = hubspot_oauth.sign_oauth_state(company_id=ctx.company_id)
     mock_token = MagicMock()
     mock_token.ok = True
     mock_token.json.return_value = {
@@ -383,18 +363,24 @@ def test_delete_hubspot_disconnects(hubspot_env_v3):
         return mock_introspect if "/introspect" in url else mock_token
 
     with patch("app.connectors.hubspot_oauth.requests.post", side_effect=post_side_effect):
-        client.get(
+        ctx.client.get(
             "/v1/connectors/hubspot/callback",
             params={"code": "x", "state": state},
         )
 
-    r = client.delete("/v1/connectors/hubspot")
+    r = ctx.client.delete(
+        "/v1/connectors/hubspot"
+    )
     assert r.status_code == 200
-    listed = client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors"
+    ).json()
     assert not any(c["provider"] == "hubspot" for c in listed["connections"])
 
 
-def test_delete_hubspot_404_when_not_connected(hubspot_env_v3):
-    client = _signed_in_client(hubspot_env_v3)
-    r = client.delete("/v1/connectors/hubspot")
+def test_delete_hubspot_404_when_not_connected(hubspot_env_v3, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.delete(
+        "/v1/connectors/hubspot"
+    )
     assert r.status_code == 404

@@ -5,10 +5,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
-from fastapi.testclient import TestClient
 from google.oauth2.credentials import Credentials
 
 from app.connectors import google_oauth
+from tests._company_helpers import company_client
 
 
 @pytest.fixture
@@ -37,44 +37,40 @@ def google_env(isolated_settings, monkeypatch):
     yield
 
 
-@pytest.fixture
-def connector_client(google_env):
-    import app.main as main_mod
-
-    client = TestClient(main_mod.app)
-    resp = client.post("/v1/auth/login", json={"password": "test-pw"})
-    assert resp.status_code == 200, resp.text
-    return client
-
-
 def test_list_requires_auth(unauth_client, google_env):
+    # company_id is required even on the listing endpoint, but a
+    # missing Authorization header still 401s first.
     r = unauth_client.get("/v1/connectors")
     assert r.status_code == 401
 
 
-def test_list_empty(connector_client):
-    r = connector_client.get("/v1/connectors")
+def test_list_empty(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get("/v1/connectors")
     assert r.status_code == 200
     assert r.json() == {"connections": []}
 
 
-def test_authorize_redirects(connector_client):
+def test_authorize_redirects(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
     mock_flow = MagicMock()
     mock_flow.authorization_url.return_value = (
         "https://accounts.google.com/o/oauth2/auth?test=1",
         None,
     )
     with patch("app.routes.connectors.google_oauth.build_flow", return_value=mock_flow):
-        r = connector_client.get(
-            "/v1/connectors/google-drive/authorize?dataset=acme",
+        r = ctx.client.get(
+            "/v1/connectors/google-drive/authorize",
+            params={"dataset": "acme"},
             follow_redirects=False,
         )
     assert r.status_code == 307
     assert "accounts.google.com" in r.headers["location"]
 
 
-def test_callback_stores_connection(connector_client):
-    state = google_oauth.sign_oauth_state(dataset="acme")
+def test_callback_stores_connection(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    state = google_oauth.sign_oauth_state(company_id=ctx.company_id, dataset="acme")
     creds = Credentials(
         token="access",
         refresh_token="refresh",
@@ -92,7 +88,7 @@ def test_callback_stores_connection(connector_client):
             return_value="pm@company.com",
         ),
     ):
-        r = connector_client.get(
+        r = ctx.client.get(
             "/v1/connectors/google-drive/callback",
             params={"code": "auth-code", "state": state},
             follow_redirects=False,
@@ -100,7 +96,9 @@ def test_callback_stores_connection(connector_client):
     assert r.status_code == 307
     assert "connected=google_drive" in r.headers["location"]
 
-    listed = connector_client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors"
+    ).json()
     assert len(listed["connections"]) == 1
     conn = listed["connections"][0]
     assert conn["provider"] == "google_drive"
@@ -109,8 +107,9 @@ def test_callback_stores_connection(connector_client):
     assert "token_json_encrypted" not in conn
 
 
-def test_disconnect(connector_client):
-    state = google_oauth.sign_oauth_state(dataset=None)
+def test_disconnect(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    state = google_oauth.sign_oauth_state(company_id=ctx.company_id, dataset=None)
     creds = Credentials(
         token="access",
         refresh_token="refresh",
@@ -129,10 +128,14 @@ def test_disconnect(connector_client):
         ),
         patch("app.routes.connectors.google_oauth.try_revoke_credentials"),
     ):
-        connector_client.get(
+        ctx.client.get(
             "/v1/connectors/google-drive/callback",
             params={"code": "x", "state": state},
         )
-    r = connector_client.delete("/v1/connectors/google-drive")
+    r = ctx.client.delete(
+        "/v1/connectors/google-drive"
+    )
     assert r.status_code == 200
-    assert connector_client.get("/v1/connectors").json() == {"connections": []}
+    assert ctx.client.get(
+        "/v1/connectors"
+    ).json() == {"connections": []}

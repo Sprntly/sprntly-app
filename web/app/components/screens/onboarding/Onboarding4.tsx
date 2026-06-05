@@ -35,6 +35,9 @@ export function Onboarding4() {
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
+    // Skip until the user has signed in (workspace presence is the proxy);
+    // /v1/connectors 401s without a Supabase bearer.
+    if (!workspace?.id) return
     void connectorsApi
       .list()
       .then((r) => {
@@ -45,7 +48,7 @@ export function Onboarding4() {
         setConnected(ids)
       })
       .catch(() => {})
-  }, [])
+  }, [workspace?.id])
 
   // Pull the Analytics category's connector ids straight from the
   // catalog — keeps "at least one Analytics required" honest as the

@@ -362,7 +362,15 @@ export type ConnectionSummary = {
   google_email: string | null
   account_label?: string | null
   scopes: string
-  config: { dataset?: string; folder_id?: string; folder_name?: string }
+  config: {
+    // Google Drive
+    dataset?: string
+    folder_id?: string
+    folder_name?: string
+    // Slack
+    channel_id?: string
+    channel_name?: string
+  }
   last_sync_at: string | null
   last_sync_error: string | null
   created_at: string
@@ -394,21 +402,41 @@ export type DriveFolderBrowse = {
   folders: { id: string; name: string }[]
 }
 
+export type SlackChannel = {
+  id: string
+  name: string
+  is_private: boolean
+  is_member: boolean
+  is_archived: boolean
+}
+
+// Multitenant: connector routes resolve the active company entirely
+// from the JWT (`Depends(require_company)`) — no client-side workspace
+// or company id is sent. Methods below therefore take only the inputs
+// that aren't derivable server-side (folder ids, channel ids, etc.).
+
 export const connectorsApi = {
-  list: () => api.get<{ connections: ConnectionSummary[] }>("/v1/connectors"),
+  list: () =>
+    api.get<{ connections: ConnectionSummary[] }>(`/v1/connectors`),
   disconnectGoogleDrive: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/google-drive"),
+    api.delete<{ deleted: true; provider: string }>(
+      `/v1/connectors/google-drive`,
+    ),
   browseGoogleDriveFolders: (parentId = "root") =>
     api.get<DriveFolderBrowse>(
       `/v1/connectors/google-drive/folders?parent_id=${encodeURIComponent(parentId)}`,
     ),
-  setGoogleDriveConfig: (folderId: string, dataset?: string, folderName?: string) =>
+  setGoogleDriveConfig: (
+    folderId: string,
+    dataset?: string,
+    folderName?: string,
+  ) =>
     api.post<{ ok: true; config: ConnectionSummary["config"] }>(
-      "/v1/connectors/google-drive/config",
+      `/v1/connectors/google-drive/config`,
       { folder_id: folderId, folder_name: folderName, dataset },
     ),
   syncGoogleDrive: (dataset?: string, folderId?: string) =>
-    api.post<GoogleDriveSyncResult>("/v1/connectors/google-drive/sync", {
+    api.post<GoogleDriveSyncResult>(`/v1/connectors/google-drive/sync`, {
       dataset,
       folder_id: folderId,
     }),
@@ -419,7 +447,7 @@ export const connectorsApi = {
   // ---- Figma ---------------------------------------------------------------
   figmaAuthorizeUrl: () => `${API_URL}/v1/connectors/figma/authorize`,
   disconnectFigma: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/figma"),
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/figma`),
   getFigmaFile: (key: string, depth = 2) =>
     api.get<Record<string, unknown>>(
       `/v1/connectors/figma/files/${encodeURIComponent(key)}?depth=${encodeURIComponent(String(depth))}`,
@@ -432,30 +460,41 @@ export const connectorsApi = {
   // ---- GitHub --------------------------------------------------------------
   githubAuthorizeUrl: () => `${API_URL}/v1/connectors/github/authorize`,
   disconnectGithub: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/github"),
-
-  // ---- ClickUp -------------------------------------------------------------
-  disconnectClickup: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/clickup"),
-
-  // ---- HubSpot -------------------------------------------------------------
-  disconnectHubspot: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/hubspot"),
-
-  // ---- Fireflies (API key, not OAuth) --------------------------------------
-  connectFirefliesWithApiKey: (apiKey: string) =>
-    api.post<{ ok: true; provider: string; account_label: string }>(
-      "/v1/connectors/fireflies/apikey",
-      { api_key: apiKey },
-    ),
-  disconnectFireflies: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/fireflies"),
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/github`),
   listGithubRepos: (perPage = 50) =>
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
     ),
 
-  // ---- Generic test-connection (commit K) ---------------------------------
+  // ---- ClickUp -------------------------------------------------------------
+  disconnectClickup: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/clickup`),
+
+  // ---- HubSpot -------------------------------------------------------------
+  disconnectHubspot: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/hubspot`),
+
+  // ---- Slack ---------------------------------------------------------------
+  disconnectSlack: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/slack`),
+  listSlackChannels: () =>
+    api.get<{ channels: SlackChannel[] }>(`/v1/connectors/slack/channels`),
+  setSlackConfig: (channelId: string, channelName?: string) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+      `/v1/connectors/slack/config`,
+      { channel_id: channelId, channel_name: channelName },
+    ),
+
+  // ---- Fireflies (API key, not OAuth) --------------------------------------
+  connectFirefliesWithApiKey: (apiKey: string) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      `/v1/connectors/fireflies/apikey`,
+      { api_key: apiKey },
+    ),
+  disconnectFireflies: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
+
+  // ---- Generic test-connection --------------------------------------------
   /**
    * Re-validate a stored connection by re-running the provider's
    * identity lookup with the decrypted token. Backs the "Test
@@ -470,7 +509,7 @@ export const connectorsApi = {
       {},
     ),
 
-  // ---- Generic start-OAuth (commit F) -------------------------------------
+  // ---- Generic start-OAuth ------------------------------------------------
   /**
    * Returns the provider's OAuth authorize URL as JSON. The caller is
    * expected to navigate the browser to it (`window.location.href = url`).

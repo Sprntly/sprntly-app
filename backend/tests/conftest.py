@@ -127,6 +127,8 @@ def _reload_app_modules() -> None:
 # Postgres tables we actually use. Booleans + jsonb are translated by
 # the fake's encode/decode layer.
 _FAKE_SCHEMA = """
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE briefs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     dataset      TEXT NOT NULL,
@@ -206,9 +208,34 @@ CREATE TABLE datasets (
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Companies / company_members mirror the Supabase migrations.
+-- connections.company_id FKs into companies(id); require_company
+-- (auth.py) reads company_members to resolve the active tenant from
+-- the Supabase JWT.
+CREATE TABLE companies (
+    id           TEXT PRIMARY KEY,
+    slug         TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE company_members (
+    id         TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member'
+                CHECK (role IN ('owner', 'admin', 'member')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, user_id)
+);
+CREATE INDEX company_members_user_id_idx    ON company_members (user_id);
+CREATE INDEX company_members_company_id_idx ON company_members (company_id);
+
 CREATE TABLE connections (
     id                   TEXT PRIMARY KEY,
-    provider             TEXT NOT NULL UNIQUE,
+    company_id           TEXT NOT NULL
+                          REFERENCES companies (id) ON DELETE CASCADE,
+    provider             TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'active',
     google_email         TEXT,
     account_label        TEXT,
@@ -218,8 +245,10 @@ CREATE TABLE connections (
     last_sync_at         TEXT,
     last_sync_error      TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, provider)
 );
+CREATE INDEX connections_company_id_idx ON connections (company_id);
 
 CREATE TABLE github_installations (
     installation_id      INTEGER PRIMARY KEY,

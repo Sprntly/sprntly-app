@@ -1,4 +1,14 @@
-"""OAuth connector storage (Google Drive / Figma / GitHub user OAuth).
+"""OAuth connector storage — multitenant.
+
+Each row belongs to a company (`company_id` → `companies.id`); a
+provider can be connected once per company, never globally. Every
+helper requires the caller to pass the company id explicitly — there
+is no implicit "current company" fallback. Silent defaults are how the
+cross-tenant leak in this table came back the last time.
+
+Per the one-user-one-company product invariant, callers should resolve
+the company via `Depends(require_company)` and pass `company.company_id`
+into these helpers, rather than letting the client supply it.
 
 Tokens arrive Fernet-encrypted at the app layer (TOKEN_ENCRYPTION_KEY
 env var) before they ever reach the database. `account_label` is the
@@ -9,8 +19,7 @@ directly; new providers should use account_label.
 
 Back-compat note: the prior SQLite shape exposed `config` as a JSON
 string under the key `config_json`. We preserve that key in returned
-dicts so existing callers (google_drive_sync.py, routes/connectors.py)
-don't have to change.
+dicts so existing callers don't have to change.
 """
 import json
 import uuid
@@ -33,6 +42,7 @@ def _to_legacy_shape(row: dict) -> dict:
 
 def upsert_connection(
     *,
+    company_id: str,
     provider: str,
     token_encrypted: str,
     scopes: str,
@@ -48,9 +58,10 @@ def upsert_connection(
     except (TypeError, ValueError):
         config_obj = {}
 
-    existing = get_connection(provider)
+    existing = get_connection(company_id, provider)
     now = utc_now()
     payload = {
+        "company_id": company_id,
         "provider": provider,
         "status": status,
         "google_email": google_email,
@@ -64,35 +75,58 @@ def upsert_connection(
     if not existing:
         payload["id"] = uuid.uuid4().hex
         payload["created_at"] = now
-    c.table("connections").upsert(payload, on_conflict="provider").execute()
-    row = get_connection(provider)
+    c.table("connections").upsert(
+        payload, on_conflict="company_id,provider"
+    ).execute()
+    row = get_connection(company_id, provider)
     assert row is not None
     return row
 
 
-def get_connection(provider: str) -> dict | None:
+def get_connection(company_id: str, provider: str) -> dict | None:
     c = require_client()
-    resp = c.table("connections").select("*").eq("provider", provider).limit(1).execute()
+    resp = (
+        c.table("connections")
+        .select("*")
+        .eq("company_id", company_id)
+        .eq("provider", provider)
+        .limit(1)
+        .execute()
+    )
     if not resp.data:
         return None
     return _to_legacy_shape(resp.data[0])
 
 
-def list_connections() -> list[dict]:
+def list_connections(company_id: str) -> list[dict]:
     c = require_client()
-    resp = c.table("connections").select("*").order("provider", desc=False).execute()
+    resp = (
+        c.table("connections")
+        .select("*")
+        .eq("company_id", company_id)
+        .order("provider", desc=False)
+        .execute()
+    )
     return [_to_legacy_shape(r) for r in (resp.data or [])]
 
 
-def delete_connection(provider: str) -> bool:
+def delete_connection(company_id: str, provider: str) -> bool:
     c = require_client()
-    resp = c.table("connections").delete().eq("provider", provider).execute()
+    resp = (
+        c.table("connections")
+        .delete()
+        .eq("company_id", company_id)
+        .eq("provider", provider)
+        .execute()
+    )
     return bool(resp.count) if resp.count is not None else True
 
 
-def patch_connection_config(provider: str, config: dict) -> dict | None:
+def patch_connection_config(
+    company_id: str, provider: str, config: dict
+) -> dict | None:
     """Merge keys into config (jsonb). Returns the updated row in legacy shape."""
-    existing = get_connection(provider)
+    existing = get_connection(company_id, provider)
     if not existing:
         return None
     current: dict = {}
@@ -102,22 +136,33 @@ def patch_connection_config(provider: str, config: dict) -> dict | None:
         current = {}
     current.update(config)
     c = require_client()
-    c.table("connections").update({
-        "config": current,
-        "updated_at": utc_now(),
-    }).eq("provider", provider).execute()
-    return get_connection(provider)
+    (
+        c.table("connections")
+        .update({"config": current, "updated_at": utc_now()})
+        .eq("company_id", company_id)
+        .eq("provider", provider)
+        .execute()
+    )
+    return get_connection(company_id, provider)
 
 
-def update_connection_tokens(provider: str, token_encrypted: str) -> None:
+def update_connection_tokens(
+    company_id: str, provider: str, token_encrypted: str
+) -> None:
     c = require_client()
-    c.table("connections").update({
-        "token_json_encrypted": token_encrypted,
-        "updated_at": utc_now(),
-    }).eq("provider", provider).execute()
+    (
+        c.table("connections")
+        .update(
+            {"token_json_encrypted": token_encrypted, "updated_at": utc_now()}
+        )
+        .eq("company_id", company_id)
+        .eq("provider", provider)
+        .execute()
+    )
 
 
 def update_connection_sync(
+    company_id: str,
     provider: str,
     *,
     last_sync_at: str | None = None,
@@ -125,8 +170,16 @@ def update_connection_sync(
 ) -> None:
     now = utc_now()
     c = require_client()
-    c.table("connections").update({
-        "last_sync_at": last_sync_at or now,
-        "last_sync_error": last_sync_error,
-        "updated_at": now,
-    }).eq("provider", provider).execute()
+    (
+        c.table("connections")
+        .update(
+            {
+                "last_sync_at": last_sync_at or now,
+                "last_sync_error": last_sync_error,
+                "updated_at": now,
+            }
+        )
+        .eq("company_id", company_id)
+        .eq("provider", provider)
+        .execute()
+    )
