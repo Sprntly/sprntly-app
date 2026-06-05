@@ -1,9 +1,10 @@
 "use client"
 
-// UX-EXPLORE (throwaway — REVERT): "Generate Prototype" now opens the new v3
-// GenerateModal (local state) instead of the legacy ClaudeDrawer. "Create a
-// ticket" is untouched. GenerateModal is mounted as a sibling here so it can
-// read the current PRD from ContentContext and survive ApproveModal closing.
+// "Generate Prototype" opens the GenerateModal (instead of the legacy
+// ClaudeDrawer); "Create a ticket" is untouched. GenerateModal is mounted as a
+// sibling here so it can read the current PRD from ContentContext and survive
+// ApproveModal closing. Its open/close state lives in the shared navigation
+// modal union (`activeModal === "generate"`), not local component state.
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
@@ -30,13 +31,11 @@ const MIN_VISIBLE_MS = 2500
 const SAFETY_MAX_MS = 6.5 * 60 * 1000
 
 export function ApproveModal() {
-  const { activeModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas } =
+  const { activeModal, openModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas } =
     useNavigation()
   const { content } = useContent()
   // The workspace hydration gate for the canvas resolver.
   const { loading: workspaceLoading } = useWorkspace()
-  // UX-EXPLORE (throwaway — REVERT): local visibility for the new generate modal.
-  const [generateOpen, setGenerateOpen] = useState(false)
   // UX-EXPLORE (throwaway — REVERT): full-screen loading-overlay visibility.
   const [genLoading, setGenLoading] = useState(false)
   // UX-EXPLORE (throwaway — REVERT): the prototype to show in the FULL-SCREEN
@@ -68,10 +67,11 @@ export function ApproveModal() {
   // delay). Held in a ref so the deferred dismissal closure reads the latest
   // value without re-binding. Null on failure/timeout → no canvas revealed.
   const pendingCanvasRef = useRef<PrototypeRecord | null>(null)
-  // UX-EXPLORE (throwaway — REVERT): live mirror of generateOpen for the
-  // kickoff-failure guard's deferred timeout (avoids a stale closure).
-  const generateOpenRef = useRef(false)
-  generateOpenRef.current = generateOpen
+  // Live mirror of the generate modal's open state for the kickoff-failure
+  // guard's deferred timeout (avoids a stale closure). Sourced from the shared
+  // navigation modal union.
+  const generateActiveRef = useRef(false)
+  generateActiveRef.current = activeModal === "generate"
 
   const clearTimers = useCallback(() => {
     if (safetyTimerRef.current) clearTimeout(safetyTimerRef.current)
@@ -108,14 +108,14 @@ export function ApproveModal() {
     setGenLoading(true)
     if (safetyTimerRef.current) clearTimeout(safetyTimerRef.current)
     safetyTimerRef.current = setTimeout(hideLoading, SAFETY_MAX_MS)
-    // UX-EXPLORE (throwaway — REVERT): kickoff-failure guard. runGenerateFlow
-    // swallows a kickoff error (toasts "Generate failed", leaves the modal OPEN,
-    // never fires onGenerated) — so on success it ALWAYS calls onClose, closing
-    // GenerateModal (generateOpen → false). If the modal is still open a beat
+    // Kickoff-failure guard. runGenerateFlow swallows a kickoff error (toasts
+    // "Generate failed", leaves the modal OPEN, never fires onGenerated) — so on
+    // success it ALWAYS calls onClose, which closes the generate modal (clears
+    // it from the navigation modal union). If the modal is still open a beat
     // after start, the kickoff failed: dismiss the overlay so it doesn't hang to
     // the safety ceiling.
     setTimeout(() => {
-      if (!resolvedRef.current && generateOpenRef.current) hideLoading()
+      if (!resolvedRef.current && generateActiveRef.current) hideLoading()
     }, 1500)
   }, [hideLoading])
 
@@ -273,10 +273,9 @@ export function ApproveModal() {
     }
   }, [canvasPrototypeId, workspaceLoading, canvasResult?.id])
 
-  // UX-EXPLORE (throwaway — REVERT): render GenerateModal even when the approve
-  // modal itself is closed, so closing "approve" before opening "generate"
-  // doesn't unmount the new modal. The loading overlay is a top-level sibling so
-  // it covers the whole viewport (incl. the sidebar) regardless of modal state.
+  // Render the generate-modal subtree regardless of which modal is active, so
+  // the loading overlay (a top-level sibling) covers the whole viewport (incl.
+  // the sidebar) regardless of modal state.
   // UX-EXPLORE (throwaway — REVERT): the full-screen post-generation canvas.
   // Revealed only after a SUCCESSFUL generation (David's flow: loading takeover →
   // canvas), NOT embedded in the PRD screen. Fixed inset:0 above the app chrome
@@ -371,8 +370,8 @@ export function ApproveModal() {
   const generateModal = (
     <>
       <GenerateModal
-        open={generateOpen}
-        onClose={() => setGenerateOpen(false)}
+        open={activeModal === "generate"}
+        onClose={closeModal}
         prdId={prd?.prd_id ?? null}
         figmaFileKey={prd?.figma_file_key ?? null}
         onGenStart={handleGenStart}
@@ -390,15 +389,17 @@ export function ApproveModal() {
   // prototype, SKIPPING the loading sequence (no GenerationLoadingScreen). Else
   // "Generate Prototype" → GenerateModal → loading screen → canvas (unchanged).
   const handleClaudeClick = () => {
-    closeModal()
     if (existing) {
+      closeModal()
       setCanvasResult(existing)
       // Push the refresh-stable canvas route for the existing prototype too, so
       // "View Prototype" → refresh re-opens the canvas.
       goToCanvas(existing.id)
       return
     }
-    setGenerateOpen(true)
+    // Hand the generate modal's visibility to the navigation modal union; this
+    // swaps the "approve" modal out for "generate".
+    openModal("generate")
   }
 
   const handleTicketClick = () => {
@@ -454,7 +455,7 @@ export function ApproveModal() {
         </div>
       </div>
     </div>
-    {/* UX-EXPLORE (throwaway — REVERT): new generate modal sibling */}
+    {/* generate-modal subtree (modal + loading overlay + canvas) */}
     {generateModal}
     </>
   )
