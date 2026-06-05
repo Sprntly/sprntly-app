@@ -18,6 +18,10 @@ export type ScreenId =
   | "team"
   | "connectors"
   | "sources"
+  // P7-05 (D3): the post-generation Design Agent canvas — the ONE refresh-stable
+  // deep-URL screen (`/design/{prototype_id}`). Layered on top of the existing
+  // no-deep-URL nav; see lib/routes.ts canvasPath / prototypeIdFromCanvasPath.
+  | "da-canvas"
 
 export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-1",
@@ -67,6 +71,10 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   team: "Team",
   connectors: "Connectors",
   sources: "Sources",
+  // P7-05: the canvas renders as a full-screen overlay (its own breadcrumb), so
+  // this chrome title is never actually shown; present only for Record<ScreenId>
+  // completeness.
+  "da-canvas": "Prototype",
 }
 
 export function getMainChromeTitle(screen: ScreenId): string {
