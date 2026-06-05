@@ -20,6 +20,8 @@ import {
   DaControlBar,
   resolveViewHref,
   reseedStep,
+  viewerSrc,
+  viewerRemountKey,
   type PostGenerationResultViewProps,
   type ReseedBaseline,
 } from "../PostGenerationResult"
@@ -547,5 +549,68 @@ describe("PostGenerationResult container — defaults from the prototype record 
     )
     expect(html).toContain('data-testid="da-controlbar"')
     expect(html).toContain('data-testid="post-generation-result"')
+  })
+})
+
+// ─── viewer iframe src + remount key: follow the live build path ─────────────
+
+// Pull the inline viewer iframe's `src` out of the SSR markup. The inline viewer
+// is the only `da-prototype-iframe` when the full-screen overlay is closed.
+function inlineIframeSrc(html: string): string | null {
+  const m = html.match(/<iframe[^>]*\bclass="da-prototype-iframe"[^>]*>/)
+  if (!m) return null
+  const src = m[0].match(/\bsrc="([^"]*)"/)
+  return src ? src[1] : null
+}
+
+describe("viewer src + remount key — follows the live build path", () => {
+  const OLD = "https://cdn/p/54/27/index.html"
+  const NEW = "https://cdn/p/54/32/index.html"
+
+  it("test_iframe_src_repoints_on_new_bundle_url — the iframe src base follows a new build path", () => {
+    // A completed iterate lands the rebuild at a NEW path and the refetch hands a
+    // fresh prop down. The src must reflect the NEW base, not the OLD base with a
+    // busted query — fails if the base were captured/cached rather than read live.
+    const oldHtml = renderView({ bundleUrl: OLD, bundleReloadNonce: 3 })
+    expect(inlineIframeSrc(oldHtml)).toBe(`${OLD}?v=3`)
+
+    const newHtml = renderView({ bundleUrl: NEW, bundleReloadNonce: 3 })
+    expect(inlineIframeSrc(newHtml)).toBe(`${NEW}?v=3`)
+    expect(newHtml).not.toContain("54/27")
+  })
+
+  it("test_viewer_remounts_on_build_swap_even_when_nonce_unchanged — a new build path forces a fresh mount", () => {
+    // The reload nonce and the build-path advance need not move in lockstep (the
+    // path arrives on the refetch, after the iterate-complete event). Keying on
+    // the path means a build swap forces a remount on its own — so the canvas
+    // never reuses a frame stuck on the prior build. Fails if the key tracked the
+    // nonce alone (both keys would collide at the same nonce).
+    expect(viewerRemountKey(OLD, 5)).not.toBe(viewerRemountKey(NEW, 5))
+  })
+
+  it("test_same_bundle_url_nonce_bump_still_cache_busts — same path, bumped nonce still busts + remounts", () => {
+    expect(viewerSrc(OLD, 1)).toBe(`${OLD}?v=1`)
+    expect(viewerSrc(OLD, 2)).toBe(`${OLD}?v=2`)
+    // The remount key still changes on a same-path nonce bump, so the frame
+    // reloads even when the backend overwrites the bundle in place.
+    expect(viewerRemountKey(OLD, 1)).not.toBe(viewerRemountKey(OLD, 2))
+  })
+
+  it("test_initial_render_uses_first_bundle_url — first build renders a clean, unbusted src", () => {
+    // Nonce 0 (no rebuild yet) → the src is the bare first build path, no query,
+    // keeping the initial/SSR output stable.
+    expect(viewerSrc(NEW, 0)).toBe(NEW)
+    const html = renderView({ bundleUrl: NEW, bundleReloadNonce: 0 })
+    expect(inlineIframeSrc(html)).toBe(NEW)
+  })
+
+  it("appends the cache-bust with & when the build path already carries a query", () => {
+    const withQuery = "https://cdn/p/54/32/index.html?t=abc"
+    expect(viewerSrc(withQuery, 4)).toBe(`${withQuery}&v=4`)
+  })
+
+  it("returns the null/absent bundle untouched (nothing to render yet)", () => {
+    expect(viewerSrc(null, 0)).toBeNull()
+    expect(viewerSrc(null, 7)).toBeNull()
   })
 })
