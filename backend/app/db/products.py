@@ -1,9 +1,8 @@
-# UX-EXPLORE (throwaway — REVERT): onboarding-website-as-design-source fallback.
-# New db helper module reading the onboarding `products` table so prototype
-# generation can fall back to the company's primary product website when no
-# Figma source is connected. Mirrors the supabase-py sync helper pattern in
-# the rest of `app/db/` (require_client(), company filtering, identifiers-only
-# logging). Schema: supabase/migrations/20260525150300_products.sql.
+# Read-only helper for the onboarding `products` table so prototype generation
+# can fall back to the company's primary product website when no Figma source is
+# connected. Mirrors the supabase-py sync helper pattern in the rest of `app/db/`
+# (require_client(), company filtering, identifiers-only logging).
+# Schema: supabase/migrations/20260525150300_products.sql.
 """Products — onboarding's per-company product rows (read-only here).
 
 `products` is owned by the onboarding flow (migration 20260525150300_products.sql);
