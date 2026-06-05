@@ -4,9 +4,7 @@ POST /v1/ingest/{provider}/sync — tenant-scoped (require_company). Reads the
 stored connection, decrypts the credential, runs the provider's puller, and
 routes the records through the generic extractor into the KG.
 
-NOTE: connections are currently keyed by provider only (single-tenant) —
-Martin's connector-multitenancy work will scope them per company; this route
-already resolves the tenant via require_company so it picks that up for free.
+Connections are company-scoped (Martin's multitenancy, #136).
 """
 from __future__ import annotations
 
@@ -31,7 +29,7 @@ def sync(provider: str, company: CompanyContext = Depends(require_company)):
     if provider not in PULLERS:
         raise HTTPException(404, f"No ingestion puller for provider {provider!r}")
 
-    row = db.get_connection(provider)
+    row = db.get_connection(company.company_id, provider)
     if not row:
         raise HTTPException(404, f"{provider!r} is not connected")
     try:
@@ -48,5 +46,5 @@ def sync(provider: str, company: CompanyContext = Depends(require_company)):
         raise HTTPException(502, f"{provider} sync failed: {e}") from e
 
     from app.db.client import utc_now
-    db.update_connection_sync(provider, last_sync_at=utc_now(), last_sync_error=None)
+    db.update_connection_sync(company.company_id, provider, last_sync_at=utc_now(), last_sync_error=None)
     return {"ok": True, "provider": provider, **result}

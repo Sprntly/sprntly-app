@@ -168,3 +168,29 @@ def test_token_for_picks_right_field():
     assert token_for("fireflies", {"api_key": "k"}) == "k"
     with pytest.raises(ValueError, match="api_key"):
         token_for("fireflies", {"access_token": "wrong-shape"})
+
+
+def test_sync_route_uses_company_scoped_connection(isolated_settings, monkeypatch):
+    """Route-level: get_connection/update_connection_sync must be called with
+    company_id first (Martin's #136 multitenancy) — guards the seam that broke
+    when #114 and #136 landed in parallel."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+    from app.auth import CompanyContext
+    import app.routes.ingest as ingest_route
+    # Override via the route module's OWN captured reference — app.auth may
+    # have been reloaded by fixtures, making a fresh import a different object.
+    require_company = ingest_route.require_company
+
+    calls = {}
+    monkeypatch.setattr(ingest_route.db, "get_connection",
+                        lambda cid, prov: calls.setdefault("get", (cid, prov)) and None)
+    main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
+        company_id="co-X", role="member", user_id="u1")
+    try:
+        client = TestClient(main_mod.app)
+        r = client.post("/v1/ingest/clickup/sync")
+    finally:
+        main_mod.app.dependency_overrides.pop(require_company, None)
+    assert r.status_code == 404                  # no connection row → 404
+    assert calls["get"] == ("co-X", "clickup")   # company-scoped call shape
