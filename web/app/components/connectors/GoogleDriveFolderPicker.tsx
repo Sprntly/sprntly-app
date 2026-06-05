@@ -6,7 +6,6 @@ import { ApiError, apiErrorMessage, connectorsApi, type DriveFolderBrowse } from
 type Crumb = { id: string; name: string }
 
 type Props = {
-  workspaceId: string
   dataset: string
   selectedFolderId?: string | null
   selectedFolderName?: string | null
@@ -14,7 +13,6 @@ type Props = {
 }
 
 export function GoogleDriveFolderPicker({
-  workspaceId,
   dataset,
   selectedFolderId,
   selectedFolderName,
@@ -35,7 +33,7 @@ export function GoogleDriveFolderPicker({
     setLoading(true)
     setError(null)
     try {
-      const r = await connectorsApi.browseGoogleDriveFolders(workspaceId, parentId)
+      const r = await connectorsApi.browseGoogleDriveFolders(parentId)
       setBrowse(r)
     } catch (e) {
       const msg =
@@ -49,7 +47,7 @@ export function GoogleDriveFolderPicker({
     } finally {
       setLoading(false)
     }
-  }, [workspaceId])
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -73,7 +71,7 @@ export function GoogleDriveFolderPicker({
     setError(null)
     try {
       const name = browse?.current.name ?? currentId
-      await connectorsApi.setGoogleDriveConfig(workspaceId, currentId, dataset, name)
+      await connectorsApi.setGoogleDriveConfig(currentId, dataset, name)
       setOpen(false)
       onSelected()
     } catch (e) {

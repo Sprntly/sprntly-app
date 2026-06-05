@@ -209,14 +209,6 @@ export function ConfigureConnectorDrawerView({
 type ConfigureConnectorDrawerProps = {
   providerId: string | null
   connection: ConnectionSummary | null
-  /**
-   * Active workspace's uuid. Nullable on purpose — the workspace may
-   * still be loading when the drawer first mounts. While null, all
-   * actions (Test, Disconnect, the Drive folder slot) are inert; the
-   * type says null so the type system enforces the guard at every call
-   * site instead of papering over the unloaded state with `?? ""`.
-   */
-  workspaceId: string | null
   activeCompany: string
   onClose: () => void
   /** Fired after a successful disconnect so the parent can reload connections. */
@@ -231,24 +223,21 @@ function lookupItem(providerId: string): ConnectorItemRow | null {
   return null
 }
 
-async function callDisconnect(
-  workspaceId: string,
-  providerId: string,
-): Promise<void> {
+async function callDisconnect(providerId: string): Promise<void> {
   if (providerId === "google_drive") {
-    await connectorsApi.disconnectGoogleDrive(workspaceId)
+    await connectorsApi.disconnectGoogleDrive()
   } else if (providerId === "figma") {
-    await connectorsApi.disconnectFigma(workspaceId)
+    await connectorsApi.disconnectFigma()
   } else if (providerId === "github") {
-    await connectorsApi.disconnectGithub(workspaceId)
+    await connectorsApi.disconnectGithub()
   } else if (providerId === "clickup") {
-    await connectorsApi.disconnectClickup(workspaceId)
+    await connectorsApi.disconnectClickup()
   } else if (providerId === "hubspot") {
-    await connectorsApi.disconnectHubspot(workspaceId)
+    await connectorsApi.disconnectHubspot()
   } else if (providerId === "fireflies") {
-    await connectorsApi.disconnectFireflies(workspaceId)
+    await connectorsApi.disconnectFireflies()
   } else if (providerId === "slack") {
-    await connectorsApi.disconnectSlack(workspaceId)
+    await connectorsApi.disconnectSlack()
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }
@@ -257,7 +246,6 @@ async function callDisconnect(
 export function ConfigureConnectorDrawer({
   providerId,
   connection,
-  workspaceId,
   activeCompany,
   onClose,
   onDisconnected,
@@ -277,11 +265,11 @@ export function ConfigureConnectorDrawer({
   }
 
   const handleTest = useCallback(async () => {
-    if (!providerId || !workspaceId) return
+    if (!providerId) return
     setIsTesting(true)
     setTestResult(null)
     try {
-      const r = await connectorsApi.testConnection(workspaceId, providerId)
+      const r = await connectorsApi.testConnection(providerId)
       setTestResult({
         kind: "ok",
         accountLabel: r.account_label || "",
@@ -298,14 +286,14 @@ export function ConfigureConnectorDrawer({
     } finally {
       setIsTesting(false)
     }
-  }, [providerId, workspaceId])
+  }, [providerId])
 
   const handleDisconnect = useCallback(async () => {
-    if (!providerId || !workspaceId) return
+    if (!providerId) return
     setIsDisconnecting(true)
     setDisconnectError(null)
     try {
-      await callDisconnect(workspaceId, providerId)
+      await callDisconnect(providerId)
       onDisconnected()
       onClose()
     } catch (e) {
@@ -319,27 +307,24 @@ export function ConfigureConnectorDrawer({
     } finally {
       setIsDisconnecting(false)
     }
-  }, [providerId, workspaceId, onDisconnected, onClose])
+  }, [providerId, onDisconnected, onClose])
 
-  // Slot: provider-specific config component. The pickers read + write
-  // through workspace-scoped endpoints, so suppress them until the
-  // workspace is loaded — better than mounting them and watching them
-  // 422 on every request.
+  // Slot: provider-specific config component. The pickers fetch with
+  // the Bearer-only API client — require_company resolves the tenant
+  // server-side, so no workspaceId prop is needed here.
   let slot: React.ReactNode = null
-  if (providerId === "google_drive" && workspaceId) {
+  if (providerId === "google_drive") {
     slot = (
       <GoogleDriveFolderPicker
-        workspaceId={workspaceId}
         dataset={activeCompany}
         selectedFolderId={connection?.config?.folder_id}
         selectedFolderName={connection?.config?.folder_name}
         onSelected={onDisconnected /* reuse the reload callback */}
       />
     )
-  } else if (providerId === "slack" && workspaceId) {
+  } else if (providerId === "slack") {
     slot = (
       <SlackChannelPicker
-        workspaceId={workspaceId}
         savedChannelId={connection?.config?.channel_id as string | undefined}
         savedChannelName={connection?.config?.channel_name as string | undefined}
         onSaved={onDisconnected /* reuse the reload callback */}

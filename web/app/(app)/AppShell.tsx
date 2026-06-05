@@ -51,9 +51,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [workspace, setContent])
 
   useEffect(() => {
+    // Skip until we have a signed-in session; the connectors route 401s
+    // without a Bearer token (require_company → require_session).
     if (!workspace?.id) return
     void connectorsApi
-      .list(workspace.id)
+      .list()
       .then((r) => {
         setContent({
           connectedConnectorIds: r.connections

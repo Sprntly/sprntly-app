@@ -111,7 +111,6 @@ export function SlackChannelPickerView({
 // ───────────────────── Hooks-wired wrapper ─────────────────────
 
 type Props = {
-  workspaceId: string
   /** The currently-saved channel id from the connection's config (if any). */
   savedChannelId?: string | null
   /** The currently-saved channel name from the connection's config. */
@@ -121,7 +120,6 @@ type Props = {
 }
 
 export function SlackChannelPicker({
-  workspaceId,
   savedChannelId,
   savedChannelName,
   onSaved,
@@ -140,7 +138,7 @@ export function SlackChannelPicker({
     setLoading(true)
     setError(null)
     try {
-      const r = await connectorsApi.listSlackChannels(workspaceId)
+      const r = await connectorsApi.listSlackChannels()
       setChannels(r.channels)
     } catch (e) {
       const msg =
@@ -154,7 +152,7 @@ export function SlackChannelPicker({
     } finally {
       setLoading(false)
     }
-  }, [workspaceId])
+  }, [])
 
   useEffect(() => {
     void load()
@@ -166,11 +164,7 @@ export function SlackChannelPicker({
     setIsSaving(true)
     setError(null)
     try {
-      await connectorsApi.setSlackConfig(
-        workspaceId,
-        selectedChannelId,
-        picked?.name,
-      )
+      await connectorsApi.setSlackConfig(selectedChannelId, picked?.name)
       onSaved()
     } catch (e) {
       const msg =
@@ -183,7 +177,7 @@ export function SlackChannelPicker({
     } finally {
       setIsSaving(false)
     }
-  }, [selectedChannelId, channels, workspaceId, onSaved])
+  }, [selectedChannelId, channels, onSaved])
 
   return (
     <SlackChannelPickerView

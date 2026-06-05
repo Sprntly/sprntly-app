@@ -16,7 +16,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useContent } from "../../../../context/ContentContext"
-import { useWorkspace } from "../../../../context/WorkspaceContext"
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_IDS_WITH_OAUTH,
@@ -173,11 +172,6 @@ export function ConnectorsSettingsView({
 export function ConnectorsSettings() {
   const { activeCompany } = useCompany()
   const { setContent } = useContent()
-  // workspace.id (uuid) is the canonical tenant key the backend wants on
-  // every connector call. activeCompany (slug) stays for legacy
-  // dataset/brief APIs that haven't moved to uuid yet.
-  const { workspace } = useWorkspace()
-  const workspaceId = workspace?.id ?? null
 
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -188,11 +182,13 @@ export function ConnectorsSettings() {
   const [apiKeyConnectingItem, setApiKeyConnectingItem] =
     useState<ConnectorItemRow | null>(null)
 
+  // Connector routes resolve the active company entirely from the
+  // Supabase JWT (require_company), so the frontend doesn't need to
+  // hold a tenant id — just call and let 401/403 surface as errors.
   const reload = useCallback(async () => {
-    if (!workspaceId) return
     setLoadError(null)
     try {
-      const r = await connectorsApi.list(workspaceId)
+      const r = await connectorsApi.list()
       setConnections(r.connections)
       setContent({
         connectorCategories: CONNECTOR_CATALOG,
@@ -206,7 +202,7 @@ export function ConnectorsSettings() {
     } finally {
       setLoading(false)
     }
-  }, [setContent, workspaceId])
+  }, [setContent])
 
   useEffect(() => {
     setLoading(true)
@@ -220,12 +216,6 @@ export function ConnectorsSettings() {
 
   const onConnect = useCallback(
     async (providerId: string) => {
-      if (!workspaceId) {
-        setLoadError(
-          "No active workspace — finish onboarding before connecting integrations.",
-        )
-        return
-      }
       // Find the catalog row so we know which auth flow to take.
       const item = CONNECTOR_CATALOG
         .flatMap((c) => c.items)
@@ -239,12 +229,12 @@ export function ConnectorsSettings() {
 
       if (!CONNECTOR_IDS_WITH_OAUTH.has(providerId)) return
       // Go through the fetch-then-navigate path so the auth check runs
-      // with the Supabase Bearer header (+ workspace_id) before we hand
-      // control to the browser's URL bar.
+      // with the Supabase Bearer header before we hand control to the
+      // browser's URL bar.
       try {
         const dataset =
           providerId === "google_drive" ? activeCompany : undefined
-        const r = await connectorsApi.startOauth(workspaceId, providerId, dataset)
+        const r = await connectorsApi.startOauth(providerId, dataset)
         if (r.authorize_url) {
           window.location.href = r.authorize_url
         }
@@ -253,19 +243,14 @@ export function ConnectorsSettings() {
         setLoadError(`Could not start ${providerId} connect: ${msg}`)
       }
     },
-    [activeCompany, workspaceId],
+    [activeCompany],
   )
 
   const handleApiKeyConnect = useCallback(
     async (apiKey: string) => {
       if (!apiKeyConnectingItem) return
-      if (!workspaceId) {
-        throw new Error(
-          "No active workspace — finish onboarding before connecting integrations.",
-        )
-      }
       if (apiKeyConnectingItem.id === "fireflies") {
-        await connectorsApi.connectFirefliesWithApiKey(workspaceId, apiKey)
+        await connectorsApi.connectFirefliesWithApiKey(apiKey)
         await reload()
       } else {
         throw new Error(
@@ -273,7 +258,7 @@ export function ConnectorsSettings() {
         )
       }
     },
-    [apiKeyConnectingItem, reload, workspaceId],
+    [apiKeyConnectingItem, reload],
   )
 
   const onConfigure = useCallback((providerId: string) => {
@@ -319,7 +304,6 @@ export function ConnectorsSettings() {
       <ConfigureConnectorDrawer
         providerId={configuringProviderId}
         connection={configuringConnection}
-        workspaceId={workspaceId}
         activeCompany={activeCompany}
         onClose={() => setConfiguringProviderId(null)}
         onDisconnected={() => void reload()}

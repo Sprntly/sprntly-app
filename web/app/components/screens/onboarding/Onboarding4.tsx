@@ -35,9 +35,11 @@ export function Onboarding4() {
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
+    // Skip until the user has signed in (workspace presence is the proxy);
+    // /v1/connectors 401s without a Supabase bearer.
     if (!workspace?.id) return
     void connectorsApi
-      .list(workspace.id)
+      .list()
       .then((r) => {
         const ids = new Set<string>()
         for (const c of r.connections) {

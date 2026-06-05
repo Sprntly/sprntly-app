@@ -1,43 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { API_URL, connectorsApi } from "../api"
 
-const WS = "ws-uuid-acme"
+// Post-require_company refactor: routes resolve the active company
+// entirely from the JWT, so connectorsApi methods take no tenant arg.
+// Tests below pin the new (clean) URL shapes.
 
 describe("connectorsApi authorize URLs", () => {
-  it("builds google drive authorize URL with workspace + dataset", () => {
-    expect(connectorsApi.googleDriveAuthorizeUrl(WS, "acme")).toBe(
-      `${API_URL}/v1/connectors/google-drive/authorize?workspace_id=${WS}&dataset=acme`,
+  it("builds google drive authorize URL with just dataset", () => {
+    expect(connectorsApi.googleDriveAuthorizeUrl("acme")).toBe(
+      `${API_URL}/v1/connectors/google-drive/authorize?dataset=acme`,
     )
   })
 
   it("encodes the dataset slug", () => {
-    expect(connectorsApi.googleDriveAuthorizeUrl(WS, "a b/c")).toBe(
-      `${API_URL}/v1/connectors/google-drive/authorize?workspace_id=${WS}&dataset=a%20b%2Fc`,
+    expect(connectorsApi.googleDriveAuthorizeUrl("a b/c")).toBe(
+      `${API_URL}/v1/connectors/google-drive/authorize?dataset=a%20b%2Fc`,
     )
   })
 
-  it("builds figma authorize URL with workspace_id only", () => {
-    expect(connectorsApi.figmaAuthorizeUrl(WS)).toBe(
-      `${API_URL}/v1/connectors/figma/authorize?workspace_id=${WS}`,
+  it("figma authorize URL is parameter-free (company resolved server-side)", () => {
+    expect(connectorsApi.figmaAuthorizeUrl()).toBe(
+      `${API_URL}/v1/connectors/figma/authorize`,
     )
   })
 
-  it("builds github authorize URL with workspace_id only", () => {
-    expect(connectorsApi.githubAuthorizeUrl(WS)).toBe(
-      `${API_URL}/v1/connectors/github/authorize?workspace_id=${WS}`,
-    )
-  })
-
-  it("URL-encodes the workspace_id (safety against pathological ids)", () => {
-    expect(connectorsApi.figmaAuthorizeUrl("ws with space")).toBe(
-      `${API_URL}/v1/connectors/figma/authorize?workspace_id=ws%20with%20space`,
+  it("github authorize URL is parameter-free", () => {
+    expect(connectorsApi.githubAuthorizeUrl()).toBe(
+      `${API_URL}/v1/connectors/github/authorize`,
     )
   })
 })
 
-// Fetch-driven endpoints — workspace_id always rides as a query param so
-// the backend's require_workspace_membership dep can validate it before
-// the route body runs.
 describe("connectorsApi.startOauth", () => {
   let originalFetch: typeof globalThis.fetch
   let lastCall: { url: string; init: RequestInit | undefined } | null
@@ -58,20 +51,18 @@ describe("connectorsApi.startOauth", () => {
     globalThis.fetch = originalFetch
   })
 
-  it("POSTs to /v1/connectors/{provider}/start-oauth with workspace_id query", async () => {
-    await connectorsApi.startOauth(WS, "figma")
+  it("POSTs to /v1/connectors/{provider}/start-oauth with no query string", async () => {
+    await connectorsApi.startOauth("figma")
     expect(lastCall).not.toBeNull()
-    expect(lastCall!.url).toBe(
-      `${API_URL}/v1/connectors/figma/start-oauth?workspace_id=${WS}`,
-    )
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/figma/start-oauth`)
     expect(lastCall!.init?.method).toBe("POST")
     expect(JSON.parse(String(lastCall!.init?.body ?? "{}"))).toEqual({})
   })
 
-  it("POSTs the dataset slug in the body when provided (Google Drive)", async () => {
-    await connectorsApi.startOauth(WS, "google_drive", "meridian")
+  it("POSTs the dataset in the body when provided (Google Drive)", async () => {
+    await connectorsApi.startOauth("google_drive", "meridian")
     expect(lastCall!.url).toBe(
-      `${API_URL}/v1/connectors/google_drive/start-oauth?workspace_id=${WS}`,
+      `${API_URL}/v1/connectors/google_drive/start-oauth`,
     )
     expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
       dataset: "meridian",
@@ -79,14 +70,14 @@ describe("connectorsApi.startOauth", () => {
   })
 
   it("URL-encodes the provider segment", async () => {
-    await connectorsApi.startOauth(WS, "weird/provider")
+    await connectorsApi.startOauth("weird/provider")
     expect(lastCall!.url).toBe(
-      `${API_URL}/v1/connectors/weird%2Fprovider/start-oauth?workspace_id=${WS}`,
+      `${API_URL}/v1/connectors/weird%2Fprovider/start-oauth`,
     )
   })
 
   it("returns the authorize_url from the response", async () => {
-    const res = await connectorsApi.startOauth(WS, "figma")
+    const res = await connectorsApi.startOauth("figma")
     expect(res.authorize_url).toBe("https://example.com/auth")
   })
 })
@@ -110,19 +101,15 @@ describe("connectorsApi Slack methods", () => {
     globalThis.fetch = originalFetch
   })
 
-  it("listSlackChannels hits /slack/channels with workspace_id", async () => {
-    await connectorsApi.listSlackChannels(WS)
-    expect(lastCall!.url).toBe(
-      `${API_URL}/v1/connectors/slack/channels?workspace_id=${WS}`,
-    )
+  it("listSlackChannels hits /slack/channels with no query string", async () => {
+    await connectorsApi.listSlackChannels()
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/slack/channels`)
     expect(lastCall!.init?.method ?? "GET").toBe("GET")
   })
 
-  it("setSlackConfig POSTs channel_id + channel_name with workspace_id", async () => {
-    await connectorsApi.setSlackConfig(WS, "C123", "product-launches")
-    expect(lastCall!.url).toBe(
-      `${API_URL}/v1/connectors/slack/config?workspace_id=${WS}`,
-    )
+  it("setSlackConfig POSTs channel_id + channel_name in body only", async () => {
+    await connectorsApi.setSlackConfig("C123", "product-launches")
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/slack/config`)
     expect(lastCall!.init?.method).toBe("POST")
     expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
       channel_id: "C123",
@@ -130,20 +117,16 @@ describe("connectorsApi Slack methods", () => {
     })
   })
 
-  it("setSlackConfig omits channel_name when not provided (key sent as undefined → stripped)", async () => {
-    await connectorsApi.setSlackConfig(WS, "C123")
+  it("setSlackConfig omits channel_name when not provided", async () => {
+    await connectorsApi.setSlackConfig("C123")
     const body = JSON.parse(String(lastCall!.init!.body))
     expect(body.channel_id).toBe("C123")
-    // The api client may serialize undefined as missing; just confirm
-    // no spurious value sneaks in.
     expect(body.channel_name).toBeUndefined()
   })
 
-  it("disconnectSlack DELETEs with workspace_id", async () => {
-    await connectorsApi.disconnectSlack(WS)
-    expect(lastCall!.url).toBe(
-      `${API_URL}/v1/connectors/slack?workspace_id=${WS}`,
-    )
+  it("disconnectSlack DELETEs the bare endpoint", async () => {
+    await connectorsApi.disconnectSlack()
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/slack`)
     expect(lastCall!.init?.method).toBe("DELETE")
   })
 })
@@ -167,10 +150,8 @@ describe("connectorsApi.testConnection", () => {
     globalThis.fetch = originalFetch
   })
 
-  it("POSTs with workspace_id on the query string", async () => {
-    await connectorsApi.testConnection(WS, "figma")
-    expect(lastCall!.url).toBe(
-      `${API_URL}/v1/connectors/figma/test?workspace_id=${WS}`,
-    )
+  it("POSTs to the bare /v1/connectors/{provider}/test endpoint", async () => {
+    await connectorsApi.testConnection("figma")
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/figma/test`)
   })
 })
