@@ -252,6 +252,28 @@ CREATE TABLE connections (
 );
 CREATE INDEX connections_company_id_idx ON connections (company_id);
 
+-- Onboarding's per-company product rows (mirrors
+-- supabase/migrations/20260525150300_products.sql, SQLite-ized). The Design
+-- Agent reads it via app.db.products.get_company_website (called from
+-- app.routes.design_agent) to fall back to the company's primary-product
+-- website when no Figma source is connected. Seeded here so every Design Agent
+-- route/db test finds the table regardless of run order — previously only the
+-- ad-hoc fake in test_market_research_agent.py knew about it, so the shared
+-- fake raised `no such table: products`. Read-only in tests; FK target
+-- companies(id) is defined above. uuid PK / timestamptz are TEXT under SQLite,
+-- matching the other seeded tables.
+CREATE TABLE products (
+    id          TEXT PRIMARY KEY,
+    company_id  TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    website     TEXT,
+    description TEXT,
+    is_primary  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX products_company_id_idx ON products (company_id);
+
 CREATE TABLE github_installations (
     installation_id      INTEGER PRIMARY KEY,
     account_id           INTEGER NOT NULL,
