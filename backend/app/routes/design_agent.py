@@ -54,8 +54,7 @@ from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_TOKEN_LIMITER,
 )
 from app.db.prds import get_prd_rendered
-# UX-EXPLORE (throwaway — REVERT): onboarding-website-as-design-source fallback.
-from app.db.products import get_company_website
+from app.db.products import get_company_website  # onboarding-website fallback source
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
     advance_current_checkpoint,
@@ -189,7 +188,7 @@ async def generate(
     if existing:
         return GenerateResponse(prototype_id=existing["id"], status=existing["status"])
 
-    # UX-EXPLORE (throwaway — REVERT): onboarding-website-as-design-source fallback.
+    # Onboarding website as the automatic design source fallback.
     # Design-source precedence: Figma → website → manual → none. When the user
     # connected NO Figma file AND typed NO website URL AND supplied no manual
     # design hints, fall back to the company's onboarding website
@@ -223,7 +222,7 @@ async def generate(
         instructions=body.instructions,
         target_platform=body.normalised_platform(),
         figma_file_key=body.figma_file_key,
-        website_url=effective_website_url,  # P5-02 snapshot; UX-EXPLORE: now incl. onboarding fallback
+        website_url=effective_website_url,  # snapshot; resolved value incl. onboarding fallback
         github_installation_id=None,  # populated in P4-05 (Scenario C)
     )
 
@@ -235,7 +234,7 @@ async def generate(
             target_platform=body.normalised_platform(),
             instructions=body.instructions,
             figma_file_key=body.figma_file_key,
-            website_url=effective_website_url,  # UX-EXPLORE: onboarding fallback threaded through
+            website_url=effective_website_url,  # resolved value incl. onboarding fallback
             manual_design=body.manual_design,
         )
     )
