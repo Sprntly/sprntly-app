@@ -117,7 +117,7 @@ describe("PrototypePreviewCard — edge cases", () => {
 })
 
 describe("PrototypePreviewCard — non-breakage (source-read)", () => {
-  it("carries no throwaway exploration marker in its source (test_preview_card_no_ux_explore_marker)", () => {
+  it("carries no throwaway exploration marker in its source (test_preview_card_source_durable)", () => {
     // Read the working-tree source via fs (never a historical git rev — CI
     // shallow-clones), mirroring the design-agent-css source-read pattern.
     const source = readFileSync(SOURCE_PATH, "utf8")

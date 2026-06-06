@@ -102,8 +102,8 @@ import type { PrdSection } from "../../types/content"
 
 // a pin-anchored comment created via
 // the mark-and-comment flow. `xPct`/`yPct` are the pin's position over the canvas
-// stage (0–100, relative to the stage box) — UI-only, NOT persisted (the backend
-// CommentCreate schema has no position field; see api.createComment note + RETURN).
+// stage (0–100, relative to the stage box) — persisted via `pin_x_pct`/`pin_y_pct`
+// on the comment create, driving the durable pin position.
 // `saved` flips true once the authed create endpoint confirms; `error` surfaces a
 // failed create while the optimistic pin/row stays visible so nothing is lost.
 export type PinComment = {
@@ -1345,9 +1345,9 @@ export function PostGenerationResult({
 
   // Submit a pin's comment to the AUTHED create endpoint. The anchor_id carries a
   // synthetic pin marker (`pin-<n>`) — the iframe click cannot resolve a real
-  // data-anchor-id across the sandbox boundary, and the backend has no x/y field,
-  // so the pin's on-canvas position is NOT persisted (UI-only). The comment BODY
-  // is persisted. The row stays optimistic until the create resolves.
+  // data-anchor-id across the sandbox boundary. The pin's on-canvas position IS
+  // persisted via `pin_x_pct`/`pin_y_pct` alongside the comment body. The row
+  // stays optimistic until the create resolves.
   async function handlePinSubmit(n: number) {
     const pin = pins.find((p) => p.n === n)
     if (!pin || !pin.draft.trim()) return
@@ -1401,9 +1401,9 @@ export function PostGenerationResult({
   }
 
   // describe WHERE a pin sits on the
-  // canvas so the agent knows where the comment applies. The backend doesn't
-  // persist x/y (UI-only — see api.createComment note), so we compose it from the
-  // LOCAL pin state: pin number + a human region hint + the raw x/y %.
+  // canvas so the agent knows where the comment applies. The raw x/y ARE also
+  // persisted on the comment; here we compose a human region hint from the
+  // LOCAL pin state for the agent instruction.
   function pinRegionHint(xPct: number, yPct: number): string {
     const v = yPct < 33 ? "top" : yPct < 66 ? "middle" : "bottom"
     const h = xPct < 33 ? "left" : xPct < 66 ? "centre" : "right"

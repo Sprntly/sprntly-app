@@ -154,7 +154,7 @@ export function ApproveModal() {
     if (canvasPrototypeId != null) goTo("prd")
   }, [canvasPrototypeId, goTo])
 
-  // UX-EXPLORE (throwaway — REVERT): after a Share or an iterate advances the
+  // After a Share or an iterate advances the
   // SAME prototype, re-fetch the record so the in-canvas share-gated CommentsPanel
   // / viewer reflect it. Minimal single-shot refresh (the launcher's race-safe
   // pollUntilAdvanced is overkill for this throwaway full-screen path).
@@ -169,7 +169,7 @@ export function ApproveModal() {
     }
   }, [canvasResult?.id])
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE A): a reload nonce bumped on every
+  // A reload nonce bumped on every
   // completed iterate. The center iframe reads `bundle_url`; if the backend
   // OVERWRITES the bundle at the SAME url (rather than a new path), the iframe
   // src is unchanged and the browser never reloads the new version. Threading
@@ -272,7 +272,7 @@ export function ApproveModal() {
   // Render the generate-modal subtree regardless of which modal is active, so
   // the loading overlay (a top-level sibling) covers the whole viewport (incl.
   // the sidebar) regardless of modal state.
-  // UX-EXPLORE (throwaway — REVERT): the full-screen post-generation canvas.
+  // The full-screen post-generation canvas.
   // Revealed only after a SUCCESSFUL generation (David's flow: loading takeover →
   // canvas), NOT embedded in the PRD screen. Fixed inset:0 above the app chrome
   // (same footprint as the loading screen / proto-fullscreen), with a top-right
@@ -289,7 +289,7 @@ export function ApproveModal() {
       aria-label="Generated prototype"
       data-testid="da-canvas-fullscreen"
     >
-      {/* UX-EXPLORE (throwaway — REVERT): the standalone top-right Done button is
+      {/* The standalone top-right Done button is
           GONE — "Done" now lives in the new top control bar (threaded via
           `onDone={closeCanvas}` below), so the canvas has a single Done affordance
           per the reworked spec. The overlay shell itself is unchanged. */}
@@ -304,10 +304,10 @@ export function ApproveModal() {
           }
           prdSections={prd?.sections}
           prdTitle={prd?.title ?? null}
-          // UX-EXPLORE (throwaway — REVERT, CHANGE A): one-line PRD meta for the
+          // One-line PRD meta for the
           // condensed left context panel.
           prdMetaLine={prd?.metaLine ?? null}
-          // UX-EXPLORE (throwaway — REVERT, CHANGE B): a pin comment's Apply now
+          // A pin comment's Apply now
           // runs the iterate IMMEDIATELY through the shared runner (body+pin
           // context as the instruction) instead of pre-filling the composer.
           onPinIterate={runCanvasIterate}
@@ -328,7 +328,7 @@ export function ApproveModal() {
                 key={`comments-${canvasResult.id}`}
                 token={canvasResult.share_token}
                 prototypeId={canvasResult.id}
-                // UX-EXPLORE (throwaway — REVERT, CHANGE B): Apply → immediate
+                // Apply → immediate
                 // iterate via the shared runner + resolve (inside CommentsPanel).
                 onIterateComment={runCommentIterate}
                 iterateBusy={iterateRun.running}
@@ -336,7 +336,7 @@ export function ApproveModal() {
             ) : null
           }
           iterate={
-            // UX-EXPLORE (throwaway — REVERT, CHANGE 1): the left composer now
+            // The left composer now
             // reflects the prototype's REAL lock state. When the prototype is
             // LOCKED (`is_complete`) the composer disables itself and shows an
             // "Unlock" button (wired to the resume/unlock path inside

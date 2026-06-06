@@ -566,7 +566,7 @@ describe("Lock/Unlock state threading (regression + state)", () => {
     expect(html).toContain("Could not unlock the prototype")
   })
 
-  it("no UX-EXPLORE marker remains on the lock-state or handleUnlock lines (test_no_ux_explore_marker_on_lock_state_path)", () => {
+  it("the lock-state and handleUnlock comments are the durable plain-English version (test_lock_state_comments_are_durable)", () => {
     const src = readFileSync(
       join(process.cwd(), "app", "components", "design-agent", "IterateComposer.tsx"),
       "utf8",
@@ -708,7 +708,7 @@ describe("iterate cost-confirm skip — skipCostConfirm bypasses the estimate ga
     expect(src).toContain("skipCostConfirm = false")
   })
 
-  it("the skipCostConfirm path carries the durable note, not a throwaway marker, in both files (test_no_ux_explore_marker_on_skip_path)", () => {
+  it("the skipCostConfirm path carries the durable note in both files (test_skip_path_comment_is_durable)", () => {
     const DURABLE = "intentionally skips the pre-flight cost-estimate confirmation modal"
 
     // Gather the contiguous comment lines immediately above a target source line.

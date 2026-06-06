@@ -16,6 +16,7 @@ import { ClarifyingQuestionSurface } from "../ClarifyingQuestionSurface"
 import { CommentsPanel } from "../CommentsPanel"
 import { PostGenerationResult } from "../PostGenerationResult"
 import { GenerationErrorBanner } from "../GenerationErrorBanner"
+import { PrototypePreviewCard } from "../PrototypePreviewCard"
 import type { PrototypeRecord } from "../../../lib/api"
 import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
 import type { PrdSection } from "../../../types/content"
@@ -43,8 +44,8 @@ function makeDrawerSpy() {
   return { calls, renderDrawer }
 }
 
-describe("DesignAgentLauncher — button + wrapper markup", () => {
-  it("renders a 'Generate Prototype' button (test_launcher_renders_button_with_label)", () => {
+describe("DesignAgentLauncher — surface wrapper markup", () => {
+  it("renders the design-agent-surface wrapper without a direct Generate button (test_launcher_renders_surface_wrapper)", () => {
     const { renderDrawer } = makeDrawerSpy()
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncher, {
@@ -53,11 +54,13 @@ describe("DesignAgentLauncher — button + wrapper markup", () => {
         renderDrawer,
       }),
     )
-    expect(html).toContain("Generate Prototype")
-    expect(html).toMatch(/<button[^>]*type="button"/)
+    expect(html).toContain('class="design-agent-surface prd-design-launcher"')
+    expect(html).toMatch(/contenteditable="false"/i)
+    // The generation trigger moved to the Approve modal — no direct button here.
+    expect(html).not.toContain("Generate Prototype")
   })
 
-  it("wraps the button in a contentEditable={false} div (test_launcher_button_wrapped_in_content_editable_false)", () => {
+  it("the surface wrapper has contentEditable={false} — clickable inside the PRD editable region (test_launcher_content_editable_wrapper)", () => {
     const { renderDrawer } = makeDrawerSpy()
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncher, {
@@ -66,11 +69,10 @@ describe("DesignAgentLauncher — button + wrapper markup", () => {
         renderDrawer,
       }),
     )
-    // The wrapper div carries contentEditable="false" and the button is nested
-    // inside it — load-bearing so the button is clickable inside the PRD's
-    // contentEditable region. Case-insensitive: HTML attributes are
-    // case-insensitive and react-dom/server emits the camelCase form here.
-    expect(html).toMatch(/<div[^>]*contenteditable="false"[^>]*>\s*<button/i)
+    // The wrapper div carries contentEditable="false" — load-bearing for
+    // Sprntly's PRD editable region. Generation lives in the Approve modal now.
+    expect(html).toMatch(/contenteditable="false"/i)
+    expect(html).not.toContain("Generate Prototype")
   })
 })
 
@@ -125,24 +127,25 @@ describe("DesignAgentLauncher — drawer state + prop forwarding", () => {
 })
 
 describe("DesignAgentLauncher — open interaction (DI)", () => {
-  it("the button's onClick opens the drawer via setOpen(true) (test_launcher_click_opens_drawer)", () => {
-    const setOpen = vi.fn()
-    // The view is pure (no hooks), so calling it directly yields its element
-    // tree; we extract the button and invoke its handler — no DOM needed.
+  it("the preview card's onOpen calls onOpenExisting — existing-prototype open path (test_launcher_preview_card_opens_canvas)", () => {
+    const onOpenExisting = vi.fn()
+    // The view is pure (no hooks); call it directly to inspect the element tree.
     const tree = DesignAgentLauncherView({
       prdId: 1,
       figmaFileKey: null,
       open: false,
-      setOpen,
+      setOpen: vi.fn(),
+      existing: { id: 7, status: "ready", bundle_url: "https://cdn/x/bundle/index.html", error: null },
+      onOpenExisting,
       renderDrawer: () => null,
     }) as React.ReactElement
     const children = React.Children.toArray(
       (tree.props as { children: React.ReactNode }).children,
     ) as React.ReactElement[]
-    const button = children.find((c) => c.type === "button")
-    expect(button).toBeTruthy()
-    ;(button!.props as { onClick: () => void }).onClick()
-    expect(setOpen).toHaveBeenCalledWith(true)
+    const card = children.find((c) => c.type === PrototypePreviewCard)
+    expect(card).toBeTruthy()
+    ;(card!.props as { onOpen: () => void }).onOpen()
+    expect(onOpenExisting).toHaveBeenCalledTimes(1)
   })
 
   it("forwards onOpenChange === setOpen so the drawer can close itself", () => {
@@ -185,12 +188,12 @@ describe("DesignAgentLauncher — post-generation result (P2-12)", () => {
       }),
     )
     expect(html).toContain('data-testid="post-generation-result"')
-    // The editable chrome (not the public read-only badge) is mounted.
-    expect(html).toContain('data-testid="mark-complete-btn"')
+    // The editable control bar (not the public read-only badge) is mounted.
+    expect(html).toContain('data-testid="da-controlbar"')
     expect(html).not.toContain('data-testid="completion-bar-readonly"')
   })
 
-  it("renders no result view when generation has not succeeded (test_launcher_renders_error_on_generation_failure)", () => {
+  it("renders no result view when generation has not succeeded (test_launcher_renders_no_result_on_generation_failure)", () => {
     const { renderDrawer } = makeDrawerSpy()
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncherView, {
@@ -203,8 +206,8 @@ describe("DesignAgentLauncher — post-generation result (P2-12)", () => {
       }),
     )
     expect(html).not.toContain('data-testid="post-generation-result"')
-    // The Generate affordance remains; the error surfaces via the drawer toast.
-    expect(html).toContain("Generate Prototype")
+    // No Generate button — the generation trigger moved to the Approve modal.
+    expect(html).not.toContain("Generate Prototype")
   })
 
   it("forwards onGenerated to the drawer so a success can populate the result", () => {
