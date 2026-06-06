@@ -42,6 +42,7 @@ import { CommentAvatar, shortRelativeTime } from "./CommentsPanel"
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
+import { resolveAnchorAtPoint } from "./pinAnchorBridge"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
@@ -125,6 +126,9 @@ export type PinComment = {
   // Applied (pre-fill composer + resolve) or Ignored (resolve only). `resolved`
   // moves the row to the muted/collapsed state (David's `.resolved`).
   resolved?: boolean
+  // stable JSX anchor resolved at the click point inside the bundle iframe;
+  // null when the iframe is cross-origin or the click hit no anchored element.
+  resolvedAnchorId?: string | null
 }
 
 export type PostGenerationResultProps = {
@@ -245,7 +249,7 @@ export type PostGenerationResultViewProps = {
    *  edit/submit/remove a pin's comment. */
   markMode?: boolean
   onToggleMark?: () => void
-  onStageClick?: (xPct: number, yPct: number) => void
+  onStageClick?: (xPct: number, yPct: number, viewportX: number, viewportY: number) => void
   pins?: PinComment[]
   onPinDraftChange?: (n: number, value: string) => void
   onPinSubmit?: (n: number) => void
@@ -1037,6 +1041,8 @@ export function PostGenerationResultView({
                 onStageClick?.(
                   Math.max(0, Math.min(100, xPct)),
                   Math.max(0, Math.min(100, yPct)),
+                  e.clientX,
+                  e.clientY,
                 )
               }}
             />
@@ -1311,12 +1317,14 @@ export function PostGenerationResult({
   }
 
   // Drop a numbered pin at the clicked stage location + open its comment composer.
-  function handleStageClick(xPct: number, yPct: number) {
+  function handleStageClick(xPct: number, yPct: number, viewportX: number, viewportY: number) {
     pinCounter.current += 1
     const n = pinCounter.current
+    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+    const resolvedAnchorId = resolveAnchorAtPoint(iframe, viewportX, viewportY)
     setPins((prev) => [
       ...prev,
-      { n, xPct, yPct, draft: "", body: "", saved: false, busy: false, error: null },
+      { n, xPct, yPct, draft: "", body: "", saved: false, busy: false, error: null, resolvedAnchorId },
     ])
     setCommentsOpen(true)
     setMarkMode(false) // David exits mark mode per pin
@@ -1351,6 +1359,9 @@ export function PostGenerationResult({
         designAgentApi.createComment(prototype.id, {
           anchor_id: `pin-${n}`,
           body: pin.draft.trim(),
+          pin_x_pct: pin.xPct,
+          pin_y_pct: pin.yPct,
+          resolved_anchor_id: pin.resolvedAnchorId ?? null,
         }),
       )
       setPins((prev) =>

@@ -41,7 +41,10 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    pin_x_pct          REAL,
+    pin_y_pct          REAL,
+    resolved_anchor_id TEXT
 );
 """
 
@@ -376,3 +379,89 @@ def test_logs_identifiers_only_no_body(comments, caplog):
     assert "comments_orphaned prototype_id=1" in blob
     assert secret_body not in blob
     assert "another secret" not in blob
+
+
+# ─── Durable comment position (DB-level) ────────────────────────────────────
+
+_POSITION_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "supabase" / "migrations" / "20260606000000_design_agent_comment_position.sql"
+)
+
+
+def test_insert_comment_persists_position_fields(comments):
+    # Position round-trip: insert with all three position fields → list_comments
+    # returns a row carrying the exact values.
+    row = comments.insert_comment(
+        prototype_id=1,
+        workspace_id="app",
+        anchor_id="pin-1",
+        body="check the button",
+        pin_x_pct=12.5,
+        pin_y_pct=63.0,
+        resolved_anchor_id="fb3007b5",
+    )
+    assert row["pin_x_pct"] == pytest.approx(12.5)
+    assert row["pin_y_pct"] == pytest.approx(63.0)
+    assert row["resolved_anchor_id"] == "fb3007b5"
+
+    rows = comments.list_comments(prototype_id=1, workspace_id="app")
+    assert len(rows) == 1
+    assert rows[0]["pin_x_pct"] == pytest.approx(12.5)
+    assert rows[0]["pin_y_pct"] == pytest.approx(63.0)
+    assert rows[0]["resolved_anchor_id"] == "fb3007b5"
+
+
+def test_insert_comment_without_position_stores_null(comments):
+    # A comment inserted without position kwargs (the right-click anchor path)
+    # stores null for all three columns; the insert payload omits those keys.
+    row = comments.insert_comment(
+        prototype_id=1,
+        workspace_id="app",
+        anchor_id="abc12345",
+        body="anchor comment",
+    )
+    assert row.get("pin_x_pct") is None
+    assert row.get("pin_y_pct") is None
+    assert row.get("resolved_anchor_id") is None
+
+    rows = comments.list_comments(prototype_id=1, workspace_id="app")
+    assert rows[0].get("pin_x_pct") is None
+    assert rows[0].get("pin_y_pct") is None
+    assert rows[0].get("resolved_anchor_id") is None
+
+
+def test_insert_comment_existing_callsites_unaffected(comments):
+    # Regression guard: existing call-sites that pass only the prior positional/keyword
+    # set (no position) still succeed unchanged. The optional-kwarg widening must not
+    # break any existing caller.
+    row = comments.insert_comment(
+        prototype_id=7,
+        workspace_id="app",
+        anchor_id="legacy-anchor",
+        body="legacy call",
+        author="demo",
+    )
+    assert row["status"] == "open"
+    assert row["anchor_id"] == "legacy-anchor"
+    assert row.get("pin_x_pct") is None
+
+
+def test_migration_idempotent_apply_twice():
+    # The position migration uses `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for
+    # each new column, which is the Postgres-idempotency primitive (verified at
+    # string level — same convention as test_migration_applies_idempotently above;
+    # a live-Postgres apply-twice is deferred to the phase smoke run).
+    sql = _POSITION_MIGRATION_PATH.read_text().lower()
+    # Strip line comments so the check isn't confused by comment text.
+    lines_no_comments = "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+    # Every ADD COLUMN must carry IF NOT EXISTS.
+    add_column_blocks = re.findall(r"add\s+column\s+(if\s+not\s+exists)?\s*\w+", lines_no_comments)
+    for block in add_column_blocks:
+        assert block, "found an ALTER TABLE ADD COLUMN without IF NOT EXISTS — not idempotent"
+    # All three new columns are declared in the migration.
+    assert "pin_x_pct" in lines_no_comments
+    assert "pin_y_pct" in lines_no_comments
+    assert "resolved_anchor_id" in lines_no_comments
+    # The file must exist at the working-tree path (not a git-rev reference).
+    assert _POSITION_MIGRATION_PATH.exists()
