@@ -322,6 +322,16 @@ CREATE TABLE IF NOT EXISTS company_members (
     role       TEXT NOT NULL DEFAULT 'member'
 );
 
+-- User profiles (mirrors auth.users FK in prod; require_company reads this
+-- to resolve user_name instead of stale JWT user_metadata).
+CREATE TABLE IF NOT EXISTS profiles (
+    id         TEXT PRIMARY KEY,
+    full_name  TEXT,
+    first_name TEXT,
+    last_name  TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ---- KG foundation (Phase 0) ----
 CREATE TABLE kg_source (
     id            TEXT PRIMARY KEY,
@@ -632,6 +642,15 @@ def _seed_company_membership(
             "role": role,
         }
     ).execute()
+    # Seed a profiles row so require_company's profiles lookup resolves to None
+    # (no full_name/first_name/last_name in the test fixture) rather than raising
+    # "no such table: profiles". The author fallback in the route uses user_email
+    # then user_id, so the empty profile produces the expected "user-test" author.
+    existing_profile = (
+        db.table("profiles").select("id").eq("id", user_id).execute().data
+    )
+    if not existing_profile:
+        db.table("profiles").insert({"id": user_id}).execute()
 
 
 def _enable_supabase_bearer(monkeypatch) -> None:

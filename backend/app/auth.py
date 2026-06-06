@@ -353,9 +353,16 @@ def require_company(
         raise HTTPException(500, "Membership data integrity error — contact support")
 
     only = memberships[0]
-    meta = session.get("user_metadata") or {}
-    user_name = meta.get("full_name") or meta.get("name") or (
-        f"{meta.get('first_name', '')} {meta.get('last_name', '')}".strip() or None
+    from app.db.client import require_client
+    c = require_client()
+    profile_resp = c.table("profiles").select("full_name, first_name, last_name").eq("id", user_id).limit(1).execute()
+    profile = profile_resp.data[0] if profile_resp.data else {}
+    _first = profile.get("first_name") or ""
+    _last = profile.get("last_name") or ""
+    user_name = (
+        profile.get("full_name")
+        or f"{_first} {_last}".strip()
+        or None
     )
     return CompanyContext(
         company_id=only["company_id"], role=only["role"], user_id=user_id,
