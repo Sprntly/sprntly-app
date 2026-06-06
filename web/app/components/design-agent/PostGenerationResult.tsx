@@ -323,6 +323,42 @@ export function resolveViewHref(
 }
 
 /**
+ * Derive the viewer iframe `src`. Reads the live bundle path directly (never a
+ * captured/cached base) so that when an iterate rebuild lands at a NEW bundle
+ * path, the src follows it onto the new build. The reload nonce appends a
+ * cache-bust query for the same-path edge — a rebuild that overwrites the bundle
+ * at the existing path — and is omitted on the clean first load (keeps the SSR
+ * output stable until a rebuild has run). Returns null when no bundle exists yet.
+ * Pure → unit-testable without a DOM (the repo's vitest env is `node`).
+ */
+export function viewerSrc(
+  bundleUrl: string | null,
+  reloadNonce: number,
+): string | null {
+  if (!bundleUrl) return bundleUrl
+  if (reloadNonce > 0) {
+    return `${bundleUrl}${bundleUrl.includes("?") ? "&" : "?"}v=${reloadNonce}`
+  }
+  return bundleUrl
+}
+
+/**
+ * Derive the viewer remount `key`. The key changes whenever the bundle path
+ * advances to a new build OR a same-path rebuild bumps the reload nonce, so React
+ * mounts a fresh iframe at the current bundle in both cases. Keying on the path
+ * (not the nonce alone) is the fix for a build swap whose nonce did not move in
+ * lockstep with the refetch that delivers the new path: the new path by itself
+ * now forces the fresh mount, so the canvas never sticks on the prior build.
+ * Pure → unit-testable without a DOM.
+ */
+export function viewerRemountKey(
+  bundleUrl: string | null,
+  reloadNonce: number,
+): string {
+  return `viewer-${bundleUrl ?? "none"}-${reloadNonce}`
+}
+
+/**
  * UX-EXPLORE (throwaway — REVERT, CHANGE A): the condensed PRD context model.
  * David's left panel is LIGHTWEIGHT context, not the full document. We pull the
  * TL;DR triptych (Problem / Fix / Impact) from the `prd-tldr` block if present;
@@ -782,10 +818,7 @@ export function PostGenerationResultView({
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
   // Only appends when the nonce has advanced (keeps the initial load url clean +
   // SSR output stable when no iterate has run). Preserves any existing query.
-  const reloadBundleUrl =
-    bundleUrl && bundleReloadNonce > 0
-      ? `${bundleUrl}${bundleUrl.includes("?") ? "&" : "?"}v=${bundleReloadNonce}`
-      : bundleUrl
+  const reloadBundleUrl = viewerSrc(bundleUrl, bundleReloadNonce)
   // P6-16 (UX-6): the primary View affordance is ALWAYS rendered (never a hidden
   // / dead link — the #6 bug). It is gated only on a built bundle existing:
   // enabled "View full screen" when `bundleUrl` is present, otherwise a DISABLED
@@ -829,9 +862,10 @@ export function PostGenerationResultView({
     <PrototypeViewer
       // UX-EXPLORE (throwaway — REVERT, CHANGE A): cache-busted url so a completed
       // iterate reloads the rebuilt bundle (the iframe src changes → reload). The
-      // `key` ALSO follows the nonce so React remounts the iframe even if the
-      // browser would otherwise treat the new query as a same-document nav.
-      key={`viewer-${bundleReloadNonce}`}
+      // `key` follows BOTH the bundle path and the nonce, so React mounts a fresh
+      // iframe when the build advances to a new path AND when a same-path rebuild
+      // bumps the nonce — the canvas never reuses a frame stuck on a prior build.
+      key={viewerRemountKey(bundleUrl, bundleReloadNonce)}
       bundleUrl={reloadBundleUrl ?? bundleUrl}
       isComplete={isComplete}
       platform={platform}
