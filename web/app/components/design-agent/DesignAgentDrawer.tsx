@@ -18,7 +18,7 @@
 
 import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
-import { connectorsApi, designAgentApi } from "../../lib/api"
+import { designAgentApi } from "../../lib/api"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
@@ -144,37 +144,14 @@ export function buildGenerateParams({
 }
 
 /**
- * P6-15 (UX-5, AC3) / P7 fix — connect-affordance redirect. The source IA's
- * "Connect Figma" / "Connect a repo" buttons call `connectorsApi.startOauth`
- * (POST with Bearer token) first, which returns the actual OAuth redirect URL
- * from the server, then navigate to it. This matches the pattern used by
- * `ConnectorConnectModal` and `ConnectorsSettings` — the auth check runs server-
- * side before handing control to the browser's URL bar.
- *
- * `startOauth` is injected (defaulting to `connectorsApi.startOauth`) and
- * `location` is injected (defaulting to `window.location`) so the wiring is
- * unit-testable in the repo's node vitest env — there is no DOM and no click.
- * On a network failure, falls back to `/settings/connectors` so the user is
- * never stranded.
+ * P6-15 (UX-5, AC3) — connect-affordance redirect. The source IA's
+ * "Connect Figma" / "Connect a repo" buttons navigate to the Settings →
+ * Connectors page so the user can wire up their integration there. Simple and
+ * synchronous — no inline OAuth initiation, no server round-trip from the
+ * drawer. The Settings page owns the full OAuth handshake.
  */
-export async function redirectToConnect(
-  provider: "figma" | "github",
-  {
-    startOauth = connectorsApi.startOauth,
-    location: loc = window.location,
-  }: {
-    startOauth?: typeof connectorsApi.startOauth
-    location?: Pick<Location, "href">
-  } = {},
-): Promise<void> {
-  try {
-    const r = await startOauth(provider)
-    if (r.authorize_url) {
-      loc.href = r.authorize_url
-    }
-  } catch {
-    loc.href = "/settings/connectors"
-  }
+export function redirectToConnect(provider: "figma" | "github"): void {
+  location.href = `/settings?section=connectors`
 }
 
 /**

@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 import {
   buildGenerateParams,
   DesignAgentDrawerView,
@@ -82,47 +82,55 @@ describe("Figma block connected state (AC2)", () => {
   })
 })
 
-// ─── AC3: connect affordances call startOauth + navigate ─────────────────────
+// ─── AC3: connect affordances navigate to settings/connectors ────────────────
 
-describe("connect affordances call startOauth then navigate (AC3)", () => {
-  it("test_connect_figma_navigates_to_authorize_url — calls startOauth('figma'), sets loc.href to returned authorize_url", async () => {
+describe("connect affordances navigate to Settings → Connectors (AC3)", () => {
+  it("test_connect_figma_navigates_to_settings — sets location.href to /settings?section=connectors", () => {
+    // Stub global location so the sync assignment is observable in node env.
+    const original = globalThis.location
     const loc = { href: "" }
-    const startOauth = vi
-      .fn()
-      .mockResolvedValue({ authorize_url: "https://figma.com/oauth" })
-    await redirectToConnect("figma", { startOauth, location: loc })
-    expect(startOauth).toHaveBeenCalledWith("figma")
-    expect(loc.href).toBe("https://figma.com/oauth")
+    Object.defineProperty(globalThis, "location", {
+      value: loc,
+      writable: true,
+      configurable: true,
+    })
+    redirectToConnect("figma")
+    expect(loc.href).toBe("/settings?section=connectors")
     // Source uses provider string, not static authorize-URL helper.
     expect(drawerSource).toContain('redirectToConnect("figma")')
+    Object.defineProperty(globalThis, "location", {
+      value: original,
+      writable: true,
+      configurable: true,
+    })
   })
 
-  it("test_connect_repo_navigates_to_authorize_url — calls startOauth('github'), sets loc.href to returned authorize_url", async () => {
+  it("test_connect_repo_navigates_to_settings — sets location.href to /settings?section=connectors", () => {
+    const original = globalThis.location
     const loc = { href: "" }
-    const startOauth = vi
-      .fn()
-      .mockResolvedValue({ authorize_url: "https://github.com/login/oauth" })
-    await redirectToConnect("github", { startOauth, location: loc })
-    expect(startOauth).toHaveBeenCalledWith("github")
-    expect(loc.href).toBe("https://github.com/login/oauth")
+    Object.defineProperty(globalThis, "location", {
+      value: loc,
+      writable: true,
+      configurable: true,
+    })
+    redirectToConnect("github")
+    expect(loc.href).toBe("/settings?section=connectors")
     expect(drawerSource).toContain('redirectToConnect("github")')
-  })
-
-  it("test_connect_falls_back_to_settings_on_error — navigates to /settings/connectors when startOauth throws", async () => {
-    const loc = { href: "" }
-    const startOauth = vi.fn().mockRejectedValue(new Error("network"))
-    await redirectToConnect("figma", { startOauth, location: loc })
-    expect(loc.href).toBe("/settings/connectors")
+    Object.defineProperty(globalThis, "location", {
+      value: original,
+      writable: true,
+      configurable: true,
+    })
   })
 })
 
 // ─── AC5: drawer does not hand-roll OAuth state or connector internals ────────
 
 describe("drawer does not hand-roll OAuth state or connector internals (AC5)", () => {
-  it("test_drawer_uses_startOauth_not_static_urls — delegates to connectorsApi.startOauth; no hand-rolled authorize URLs or connector-state primitives", () => {
-    // The drawer delegates through connectorsApi.startOauth (injected as dep).
-    expect(drawerSource).toContain("startOauth")
-    // No static authorize-URL helpers bypassing the auth check.
+  it("test_drawer_redirects_to_settings_not_static_urls — navigates to Settings → Connectors; no hand-rolled authorize URLs or connector-state primitives", () => {
+    // The drawer redirects to the Settings → Connectors page (not inline OAuth).
+    expect(drawerSource).toContain("/settings?section=connectors")
+    // No static authorize-URL helpers bypassing the settings page.
     expect(drawerSource).not.toContain("figmaAuthorizeUrl")
     expect(drawerSource).not.toContain("githubAuthorizeUrl")
     // It does NOT touch any connector-internals / OAuth-state / status fetch.
