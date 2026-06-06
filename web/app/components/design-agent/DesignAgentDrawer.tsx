@@ -36,7 +36,7 @@ import { IconClose, IconSparkle } from "../shared/app-icons"
 /** P1-12 ready-completion toast copy. Reused for the live toast, the persisted
  *  entry's sub, and the post-reload re-show so all three are byte-identical. */
 const READY_TOAST_TITLE = "Prototype ready"
-const READY_TOAST_SUB = "Open the PRD's Design section to view it."
+const READY_TOAST_SUB = "Your prototype finished generating."
 
 export type TargetPlatform = "desktop" | "mobile" | "both"
 
