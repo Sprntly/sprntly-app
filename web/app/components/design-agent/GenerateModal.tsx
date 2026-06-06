@@ -18,7 +18,7 @@
  * selected GitHub repo threads in as prompt context (`github_repo`).
  */
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import {
   connectorsApi,
@@ -119,6 +119,7 @@ export function GenerateModal({
   const [figmaUrlKey, setFigmaUrlKey] = useState<string | null>(null)
   const [figmaUrlLabel, setFigmaUrlLabel] = useState<string | null>(null)
   const [figmaUrlValidating, setFigmaUrlValidating] = useState(false)
+  const figmaDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   /** Extract the Figma file key from a pasted design/file URL. */
   function extractFigmaKey(url: string): string | null {
@@ -132,7 +133,7 @@ export function GenerateModal({
    * file name as a confirmation label. Falls back to showing the raw key on
    * error so the user at least sees _something_ was parsed.
    */
-  async function handleFigmaUrlChange(raw: string) {
+  function handleFigmaUrlChange(raw: string) {
     setFigmaUrlInput(raw)
     const key = extractFigmaKey(raw)
     if (!key) {
@@ -142,18 +143,20 @@ export function GenerateModal({
     }
     setFigmaUrlKey(key)
     setFigmaUrlLabel(null)
-    setFigmaUrlValidating(true)
-    try {
-      const file = await connectorsApi.getFigmaFile(key)
-      // The Figma file node shape has a `name` field at the top level.
-      const name = file && typeof file === "object" && "name" in file
-        ? String((file as { name: string }).name)
-        : null
-      setFigmaUrlLabel(name ?? key)
-    } catch {
-      setFigmaUrlLabel(key) // show key as fallback so the user knows it was parsed
-    }
-    setFigmaUrlValidating(false)
+    if (figmaDebounceRef.current) clearTimeout(figmaDebounceRef.current)
+    figmaDebounceRef.current = setTimeout(async () => {
+      setFigmaUrlValidating(true)
+      try {
+        const file = await connectorsApi.getFigmaFile(key)
+        const name = file && typeof file === "object" && "name" in file
+          ? String((file as { name: string }).name)
+          : null
+        setFigmaUrlLabel(name ?? key)
+      } catch {
+        setFigmaUrlLabel(key)
+      }
+      setFigmaUrlValidating(false)
+    }, 500)
   }
 
   // Real connector status — figma + github rows derive connected vs not from
