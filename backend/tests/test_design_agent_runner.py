@@ -735,3 +735,94 @@ def test_agent_loop_default_max_tokens_kwarg_is_4096():
 def test_model_pin_is_sonnet_4_6():
     """P7-01 AC2 / AD2 / D4: model constant stays sonnet-4-6 — no drift to 4-7."""
     assert runner.MODEL == "claude-sonnet-4-6"
+
+
+# ─── SSE publish_step wiring ─────────────────────────────────────────────────
+
+
+def test_publish_step_called_once_per_loop_iteration(monkeypatch):
+    """publish_step fires at the start of every loop iteration so the SSE
+    stream gets a progress breadcrumb for each tool-use cycle."""
+    calls: list[tuple] = []
+
+    def _capture(pid, event):
+        calls.append((pid, event))
+
+    monkeypatch.setattr(runner, "publish_step", _capture)
+
+    # Two iterations: tool_use on iter 1, end_turn on iter 2.
+    client = _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "/"})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+
+    async def _fake_dispatch(name, input, ctx, allowed_names=None):
+        return {"content": "ok"}
+
+    monkeypatch.setattr(runner, "dispatch", _fake_dispatch)
+
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=42)))
+
+    assert len(calls) == 2, f"expected 2 publish_step calls, got {len(calls)}"
+    for pid, ev in calls:
+        assert pid == 42
+        assert ev["kind"] == "step"
+        assert ev["state"] == "active"
+
+
+def test_sse_stream_closed_with_done_on_complete_run(monkeypatch):
+    """_sse_close is called with kind='done' when the run completes normally."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=7)))
+
+    assert closed == [(7, "done")]
+
+
+def test_sse_stream_closed_with_error_on_non_complete_exit(monkeypatch):
+    """_sse_close is called with kind='error' for any non-complete exit (max_iters)."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    # One tool_use and max_iters=1 → the loop exits via max_iters (not complete).
+    async def _fake_dispatch(name, input, ctx, allowed_names=None):
+        return {"content": "ok"}
+
+    monkeypatch.setattr(runner, "dispatch", _fake_dispatch)
+
+    _install_client(monkeypatch, [_msg("tool_use", [_tool_use("t1", "view", {"path": "/"})])])
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=8), max_iters=1))
+
+    assert closed == [(8, "error")]
+
+
+def test_sse_not_closed_on_awaiting_clarification(monkeypatch):
+    """_sse_close is NOT called when the run pauses for a clarifying question —
+    the SSE stream stays open while the user composes their reply.
+
+    The loop detects clarifying_question in the tool_use block list and returns
+    early BEFORE dispatching any tool, so no _dispatch_tool stub is needed.
+    """
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    cq_block = _tool_use("cq1", "clarifying_question", {"question": "Which palette?"})
+    _install_client(monkeypatch, [_msg("tool_use", [cq_block])])
+
+    result = _run(agent_loop(_system(), _user(), _ctx(prototype_id=9)))
+    assert result.status == "awaiting_clarification"
+    assert closed == [], "stream must remain open during awaiting_clarification pause"
