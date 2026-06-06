@@ -1439,7 +1439,8 @@
     box-shadow: var(--shadow-xl); overflow: hidden; transform: scale(0.96); transition: transform 0.2s;
   }
   .modal-overlay.open .modal { transform: scale(1); }
-  .modal-head { padding: 24px 28px 4px; }
+  .modal-head { padding: 24px 28px 4px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .modal-head .modal-title { flex: 1 1 auto; }
   .modal-badge {
     display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
     background: var(--accent-soft); color: var(--accent-ink); border-radius: 999px;
@@ -4503,6 +4504,7 @@
 
 /* ─── API key modal (commit J — Fireflies-style apikey connectors) ─── */
 .modal-sm { width: 480px; max-width: 92vw; }
+.modal-md { width: 560px; max-width: 92vw; }
 .modal-body { padding: 4px 28px 14px; }
 .modal-close {
   background: transparent; border: none; color: var(--muted);
@@ -4511,6 +4513,47 @@
 }
 .modal-close:hover { background: var(--surface-2); color: var(--ink); }
 .modal-foot .btn + .btn { margin-left: 8px; }
+
+/* ─── ConnectorConnectModal (onboarding step 4) ─── */
+.conn-modal-blurb {
+  font-size: 13.5px;
+  color: var(--ink-3);
+  line-height: 1.5;
+  margin: 0 0 16px;
+}
+.conn-modal-status {
+  font-size: 14px;
+  color: var(--ink);
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: rgba(74, 140, 91, 0.08);
+  border: 1px solid rgba(74, 140, 91, 0.25);
+  border-radius: 8px;
+}
+.conn-modal-status strong { color: #4a8c5b; }
+.conn-modal-slot {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.conn-modal-error {
+  color: #c0392b;
+  font-size: 13px;
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  background: rgba(192, 57, 43, 0.08);
+  border-radius: 8px;
+}
+.conn-modal-prompt {
+  font-size: 14px;
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+.conn-modal-prompt p { margin: 0 0 14px; }
+.conn-modal-prompt-actions {
+  display: flex;
+  gap: 8px;
+}
 
 /* ─── Configure drawer — Test connection block (commit K) ─── */
 .conn-config-test {

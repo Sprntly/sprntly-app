@@ -111,13 +111,6 @@ export function ConnectorConnectModalView({
       <div className="modal modal-md" role="dialog" aria-label={`Connect ${item.name}`}>
         <div className="modal-head">
           <h2 className="modal-title">
-            <span
-              className="conn-modal-icon"
-              style={{ background: item.logoColor ?? undefined }}
-              aria-hidden
-            >
-              {item.logoText ?? item.logo}
-            </span>
             {isConnected ? `${item.name} connected` : `Connect ${item.name}`}
           </h2>
           <button
