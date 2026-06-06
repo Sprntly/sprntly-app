@@ -42,7 +42,7 @@ import { CommentAvatar, shortRelativeTime } from "./CommentsPanel"
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
-import { resolveAnchorAtPoint, getAnchorPosition } from "./pinAnchorBridge"
+import { resolveAnchorAtPoint, getAnchorPosition, setIframeHighlight, clearIframeHighlight } from "./pinAnchorBridge"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
@@ -1104,6 +1104,13 @@ export function PostGenerationResultView({
                   e.clientY,
                 )
               }}
+              onMouseMove={(e) => {
+                if (!markMode) return
+                const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+                const anchorId = resolveAnchorAtPoint(iframe, e.clientX, e.clientY)
+                setIframeHighlight(iframe, anchorId)
+              }}
+              onMouseLeave={() => clearIframeHighlight()}
             />
           )}
           {/* Pin layer — numbered teardrops positioned absolutely over the canvas.
@@ -1388,6 +1395,11 @@ export function PostGenerationResult({
     return () => document.removeEventListener("keydown", onKey)
   }, [fullscreenOpen])
 
+  // Clear any active iframe highlight whenever mark mode is exited.
+  useEffect(() => {
+    if (!markMode) clearIframeHighlight()
+  }, [markMode])
+
   function toggleMark() {
     setMarkMode((on) => {
       const next = !on
@@ -1408,6 +1420,7 @@ export function PostGenerationResult({
     ])
     setCommentsOpen(true)
     setMarkMode(false) // David exits mark mode per pin
+    clearIframeHighlight()
   }
 
   function handlePinDraftChange(n: number, value: string) {

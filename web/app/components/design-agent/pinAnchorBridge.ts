@@ -48,3 +48,32 @@ export function getAnchorPosition(
     return null
   }
 }
+
+let _activeHighlight: HTMLElement | null = null
+
+export function setIframeHighlight(
+  iframe: HTMLIFrameElement | null,
+  anchorId: string | null,
+): void {
+  try {
+    if (_activeHighlight) {
+      _activeHighlight.style.outline = ''
+      _activeHighlight.style.outlineOffset = ''
+      _activeHighlight.style.borderRadius = ''
+      _activeHighlight = null
+    }
+    if (!anchorId || !iframe?.contentDocument) return
+    const el = iframe.contentDocument.querySelector<HTMLElement>(
+      `[data-anchor-id="${CSS.escape(anchorId)}"]`
+    )
+    if (!el) return
+    el.style.outline = '2px solid var(--accent, #4a7c6b)'
+    el.style.outlineOffset = '3px'
+    el.style.borderRadius = '3px'
+    _activeHighlight = el
+  } catch { /* cross-origin — no-op */ }
+}
+
+export function clearIframeHighlight(): void {
+  setIframeHighlight(null, null)
+}
