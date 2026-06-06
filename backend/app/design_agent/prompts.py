@@ -154,6 +154,15 @@ MANDATORY:
 - Use `var(--foreground)` for primary text.
 - Do NOT introduce new color classes (`bg-blue-600`, `text-slate-900`, etc.) —
   use only the palette variables from `src/index.css`.
+- ZERO hardcoded colors anywhere: no `rgb(...)`, no `rgba(...)`, no `#hex`,
+  no `hsl(...)`, no `bg-green-500`, no `text-red-600` — every color reference
+  MUST resolve through a `var(--*)` token. This applies to `style={{}}` props,
+  Tailwind classes, and CSS-in-JS alike. Status/semantic colors must use a token
+  too — add `--success`, `--error`, `--warning` to `:root` if needed rather than
+  hardcoding `green`/`red`.
+- Build a coherent reusable component set (Button, Card, Input, Badge, etc.)
+  that ALL consume the same tokens. Every screen must compose from these shared
+  components — never re-implement a UI element with one-off inline styles.
 - If the source palette is DARK (`--background` is a dark hex), write a DARK app
   (dark backgrounds, light text). Never invert the palette's dark/light character.
 - Use `var(--font-sans)` (defined in `src/index.css`) as the body and heading
