@@ -79,6 +79,7 @@ from app.db.prototypes import (
     set_share_config,
     start_prototype,
     verify_share_passcode,
+    clear_pending_question,
 )
 from app.design_agent.client import get_design_agent_client
 from app.design_agent.prompts import (
@@ -1928,6 +1929,15 @@ async def _run_iterate_bg(
             prd_references_codebase=False,  # P4-05 implements the codebase detector
         )
         scenario_label = ",".join(sorted(scenario_set))
+
+        try:
+            await asyncio.to_thread(
+                clear_pending_question,
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+            )
+        except Exception:
+            pass
 
         result, virtual_fs = await iterate_prototype(
             prototype_id=prototype_id,
