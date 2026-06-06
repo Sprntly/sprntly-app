@@ -112,6 +112,50 @@ export function GenerateModal({
   const [instructions, setInstructions] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
+  // Figma URL paste state — URL input, extracted key, resolved label, and
+  // validating flag. When figmaUrlKey is set it is preferred over figmaFileSel
+  // (the dropdown) as the figma_file_key for generation.
+  const [figmaUrlInput, setFigmaUrlInput] = useState("")
+  const [figmaUrlKey, setFigmaUrlKey] = useState<string | null>(null)
+  const [figmaUrlLabel, setFigmaUrlLabel] = useState<string | null>(null)
+  const [figmaUrlValidating, setFigmaUrlValidating] = useState(false)
+
+  /** Extract the Figma file key from a pasted design/file URL. */
+  function extractFigmaKey(url: string): string | null {
+    const m = url.match(/(?:file|design)\/([A-Za-z0-9]+)/)
+    return m ? m[1] : null
+  }
+
+  /**
+   * Fired on every change to the Figma URL input. Parses the key immediately;
+   * if a key is found, hits GET /v1/connectors/figma/files/{key} to resolve the
+   * file name as a confirmation label. Falls back to showing the raw key on
+   * error so the user at least sees _something_ was parsed.
+   */
+  async function handleFigmaUrlChange(raw: string) {
+    setFigmaUrlInput(raw)
+    const key = extractFigmaKey(raw)
+    if (!key) {
+      setFigmaUrlKey(null)
+      setFigmaUrlLabel(null)
+      return
+    }
+    setFigmaUrlKey(key)
+    setFigmaUrlLabel(null)
+    setFigmaUrlValidating(true)
+    try {
+      const file = await connectorsApi.getFigmaFile(key)
+      // The Figma file node shape has a `name` field at the top level.
+      const name = file && typeof file === "object" && "name" in file
+        ? String((file as { name: string }).name)
+        : null
+      setFigmaUrlLabel(name ?? key)
+    } catch {
+      setFigmaUrlLabel(key) // show key as fallback so the user knows it was parsed
+    }
+    setFigmaUrlValidating(false)
+  }
+
   // Real connector status — figma + github rows derive connected vs not from
   // connectorsApi.list() (same source AppShell uses for connectedConnectorIds).
   const [connections, setConnections] = useState<ConnectionSummary[] | null>(null)
@@ -223,12 +267,11 @@ export function GenerateModal({
         prdId,
         platform,
         instructions,
-        // A real Figma-file selection (once a listing endpoint exists) overrides
-        // the figmaFileKey prop fallback. The selected GitHub repo now threads
-        // into generation as prompt context (github_repo) — only when GitHub is
-        // the active connected source; otherwise blank -> null. It tells the
-        // agent which existing codebase to match; no file fetch / clone / tool.
-        figmaFileKey: figmaFileSel || figmaFileKey,
+        // Priority order for figma_file_key:
+        //   1. figmaUrlKey — pasted URL (preferred: user explicitly targeted a file)
+        //   2. figmaFileSel — dropdown selection (once listing endpoint works)
+        //   3. figmaFileKey — prop fallback (pre-selected key from PRD context)
+        figmaFileKey: figmaUrlKey || figmaFileSel || figmaFileKey,
         websiteUrl: "",
         manualColor: "",
         manualFont: "",
@@ -359,6 +402,38 @@ export function GenerateModal({
                 </>
               )}
             </div>
+
+            {/* Figma URL paste — shown only when Figma is connected. The Figma
+                list-files API doesn't exist, so the dropdown above is always
+                empty. This input lets the user paste any Figma design/file URL;
+                the key is extracted client-side and validated against the real
+                GET /v1/connectors/figma/files/{key} endpoint. The resolved file
+                name is shown as a confirmation label. figmaUrlKey (when set)
+                takes precedence over the dropdown selection in generation. */}
+            {figmaActive && (
+              <div className="da-generate-figma-url">
+                <label className="da-generate-label" htmlFor="figma-url-input">
+                  Paste Figma file link
+                </label>
+                <input
+                  id="figma-url-input"
+                  type="url"
+                  className="da-generate-input"
+                  placeholder="https://www.figma.com/design/…"
+                  value={figmaUrlInput}
+                  onChange={(e) => void handleFigmaUrlChange(e.target.value)}
+                  data-testid="figma-url-input"
+                />
+                {figmaUrlValidating && (
+                  <span className="da-generate-hint">Checking…</span>
+                )}
+                {figmaUrlLabel && !figmaUrlValidating && (
+                  <span className="da-generate-hint da-generate-hint--ok">
+                    ✓ {figmaUrlLabel}
+                  </span>
+                )}
+              </div>
+            )}
 
             {/* Codebase / GitHub. */}
             <div className="src-row-compact">

@@ -652,6 +652,50 @@
   color: var(--muted);
   line-height: 1.4;
 }
+/* ── Figma URL paste input (P7 / design-kit) ──────────────────────────────
+ * Sits below the Figma src-row-compact when Figma is connected. Provides a
+ * URL text input as the primary Figma file selection path (the list-files
+ * dropdown is always empty because Figma has no list-files API). No hex
+ * literals — CSS custom properties only.
+ */
+.design-agent-surface.modal .da-generate-figma-url {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 4px;
+}
+.design-agent-surface.modal .da-generate-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.design-agent-surface.modal .da-generate-input {
+  /* Reuses the global .input look — same border/radius/padding tokens — but
+     scoped here so it sits naturally inside the compact modal layout. */
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+.design-agent-surface.modal .da-generate-input:focus {
+  border-color: var(--accent);
+}
+.design-agent-surface.modal .da-generate-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.design-agent-surface.modal .da-generate-hint--ok {
+  color: var(--accent);
+}
+
 /* short instructions textarea */
 .design-agent-surface.modal .textarea-compact { min-height: 48px; }
 
