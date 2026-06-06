@@ -652,7 +652,7 @@
   color: var(--muted);
   line-height: 1.4;
 }
-/* ── Figma URL paste input (P7 / design-kit) ──────────────────────────────
+/* ── Figma URL paste input ─────────────────────────────────────────────────
  * Sits below the Figma src-row-compact when Figma is connected. Provides a
  * URL text input as the primary Figma file selection path (the list-files
  * dropdown is always empty because Figma has no list-files API). No hex
