@@ -29,6 +29,7 @@ import { IterateComposer } from "./IterateComposer"
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
 import { PrototypePreviewCard } from "./PrototypePreviewCard"
 import { designAgentApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
+import type { PrdSection } from "../../types/content"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
@@ -41,6 +42,14 @@ export type DesignAgentLauncherProps = {
    *  canvas breadcrumb can label the PRD. Optional so existing callers keep
    *  type-checking. */
   prdTitle?: string | null
+  /** Full PRD section list, threaded from PrdScreen → PrdSections so the
+   *  condensed PRD panel in the canvas left sidebar can render the
+   *  Problem/Fix/Impact triptych. When absent the sidebar shows the empty-state.
+   *  Optional so non-PRD callers keep type-checking. */
+  prdSections?: PrdSection[]
+  /** PRD one-line meta, threaded alongside prdSections so the condensed panel
+   *  can display the subtitle. Optional so non-PRD callers keep type-checking. */
+  prdMetaLine?: string | null
 }
 
 /** Props the launcher hands to whatever drawer it mounts. Mirrors
@@ -258,6 +267,8 @@ export function DesignAgentLauncherView({
   onShared,
   existing = null,
   prdTitle = null,
+  prdSections,
+  prdMetaLine = null,
   onOpenExisting,
   canvasResult = null,
   onCloseCanvas,
@@ -312,18 +323,19 @@ export function DesignAgentLauncherView({
           else null → no comments cell. The public mount still lives in
           PublicTokenViewer (P3-03); `onApply` enables the Apply→IterateComposer
           handoff (absent on the public mount → no Apply). */}
-      {/* UX-EXPLORE (throwaway — REVERT): the post-gen surface now adopts David's
-          3-region canvas. The IterateComposer (P3-14, the change-request input) is
-          handed DOWN as PostGenerationResult's `iterate` slot so it becomes the
-          LEFT region; CommentsPanel stays the `comments` slot (RIGHT region); the
-          PrototypeViewer + thin toolbar are the CENTER region. Only the LOCATION
-          of IterateComposer moves (sibling → `iterate` prop) — its props
-          (prototypeId / isComplete / applyTarget / onClearApply / onIterated) are
-          byte-identical, so the Apply→iterate and re-prompt flows are unchanged. */}
+      {/* Post-generation canvas: IterateComposer lives in PostGenerationResult's
+          `iterate` slot (the left region of the 3-region canvas layout), and
+          CommentsPanel in its `comments` slot (the right region). The
+          PrototypeViewer + thin toolbar occupy the center region. PRD sections
+          and meta are now threaded on this path so the condensed PRD context
+          panel renders in the left sidebar. */}
       {result && (
         <PostGenerationResult
           key={result.id}
           prototype={result}
+          prdTitle={prdTitle}
+          prdSections={prdSections}
+          prdMetaLine={prdMetaLine}
           comments={
             result.share_token ? (
               <CommentsPanel
@@ -375,15 +387,10 @@ export function DesignAgentLauncherView({
           state with skipCostConfirm). Opened directly — no loading screen — since
           the bundle already exists.
 
-          PRD sidebar content note: this canvas threads `prdTitle` but not
-          `prdSections`. The launcher only receives `prdId` / `figmaFileKey` /
-          `prdTitle` from the PRD section — it does not have the PRD's sections,
-          and threading them would mean editing the append-only PrdScreen /
-          PrdSections files this surface is scoped to leave alone. So the
-          condensed PRD sidebar on this open path falls back to
-          PostGenerationResult's own empty-state; the modal "View Prototype" path
-          (which does have the full PRD) renders the sidebar content. Populating
-          the sidebar on this path is left to the condensed-PRD-sidebar work. */}
+          PRD sidebar content: prdSections and prdMetaLine are now threaded on
+          this path alongside prdTitle, so the condensed PRD context panel renders
+          in the left sidebar for the existing-prototype open path — matching the
+          modal "View Prototype" path. */}
       {canvasResult && (
         <div
           className="da-canvas-fullscreen design-agent-surface"
@@ -397,6 +404,8 @@ export function DesignAgentLauncherView({
               key={`existing-${canvasResult.id}`}
               prototype={canvasResult}
               prdTitle={prdTitle}
+              prdSections={prdSections}
+              prdMetaLine={prdMetaLine}
               onDone={onCloseCanvas}
               onPinApply={onPinApply}
               comments={

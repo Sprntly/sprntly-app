@@ -35,6 +35,7 @@ export function PrdSections({
   prdId,
   figmaFileKey,
   prdTitle,
+  prdMetaLine,
 }: {
   sections: PrdState["sections"]
   /** PRD DB id, threaded to the prd-design block so the F2 launcher can call
@@ -47,6 +48,10 @@ export function PrdSections({
    *  canvas breadcrumb can label the PRD. Optional so non-PRD callers (and the
    *  empty/demo states) keep type-checking. */
   prdTitle?: string | null
+  /** PRD one-line meta, threaded to the prd-design launcher so the condensed
+   *  PRD panel can display the subtitle. Optional so non-PRD callers keep
+   *  type-checking. */
+  prdMetaLine?: string | null
 }) {
   return (
     <>
@@ -57,6 +62,8 @@ export function PrdSections({
           prdId={prdId}
           figmaFileKey={figmaFileKey}
           prdTitle={prdTitle}
+          prdSections={sections}
+          prdMetaLine={prdMetaLine}
         />
       ))}
     </>
@@ -68,11 +75,15 @@ function RenderBlock({
   prdId,
   figmaFileKey,
   prdTitle,
+  prdSections,
+  prdMetaLine,
 }: {
   block: PrdSection
   prdId?: number
   figmaFileKey?: string | null
   prdTitle?: string | null
+  prdSections?: PrdSection[]
+  prdMetaLine?: string | null
 }) {
   switch (block.type) {
     case "h2":
@@ -160,7 +171,7 @@ function RenderBlock({
     case "prd-dod":
       return <DodChecklist items={block.items} />
     case "prd-design":
-      return <DesignSection prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} />
+      return <DesignSection prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} prdSections={prdSections} prdMetaLine={prdMetaLine} />
     default:
       // Evidence variants and any unknown future blocks render as no-op
       // in the PRD renderer; the dedicated EvidenceSections covers them.
@@ -183,10 +194,14 @@ function DesignSection({
   prdId,
   figmaFileKey,
   prdTitle,
+  prdSections,
+  prdMetaLine,
 }: {
   prdId?: number
   figmaFileKey?: string | null
   prdTitle?: string | null
+  prdSections?: PrdSection[]
+  prdMetaLine?: string | null
 }) {
   return (
     <section className="prd-design">
@@ -197,7 +212,7 @@ function DesignSection({
           heading was removed in the redesign; the section wrapper + launcher are
           kept. */}
       {prdId !== undefined ? (
-        <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} />
+        <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} prdSections={prdSections} prdMetaLine={prdMetaLine} />
       ) : (
         <div className="design-agent-surface">
           <p className="prd-design-empty">
