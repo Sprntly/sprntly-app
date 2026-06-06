@@ -190,6 +190,10 @@ export type PostGenerationResultProps = {
   /** bumped on each completed iterate
    *  to force the center iframe to reload the rebuilt bundle (cache-bust). */
   bundleReloadNonce?: number
+  /** Called when Mark Complete or Resume fires so the parent can merge the new
+   *  `is_complete` value into its own copy of the record without a round-trip.
+   *  Optional — existing callers that omit it keep type-checking. */
+  onStateChange?: (state: { isComplete: boolean }) => void
 }
 
 export type PostGenerationResultViewProps = {
@@ -1265,6 +1269,7 @@ export function PostGenerationResult({
   iteratePendingQuestion,
   onAnswerQuestion,
   bundleReloadNonce,
+  onStateChange,
 }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
@@ -1466,7 +1471,10 @@ export function PostGenerationResult({
       shareMode={prototype.share_mode ?? "private"}
       shareToken={prototype.share_token ?? null}
       bundleUrl={prototype.bundle_url}
-      onStateChange={(state) => setIsComplete(state.isComplete)}
+      onStateChange={(state) => {
+        setIsComplete(state.isComplete)
+        onStateChange?.(state)
+      }}
       comments={comments}
       iterate={iterate}
       onShared={onShared}

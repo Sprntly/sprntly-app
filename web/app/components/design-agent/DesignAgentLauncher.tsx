@@ -206,6 +206,10 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   /** Refresh the canvas record after a share / iterate (distinct from the inline
    *  result's refreshers so the two surfaces never cross-refresh). */
   onCanvasRefresh?: () => void
+  /** Called when the canvas prototype's completion state changes (Mark Complete /
+   *  Resume) so the container can merge `is_complete` into `canvasResult` without
+   *  a round-trip. Optional — omitting it keeps existing callers type-checking. */
+  onCanvasStateChange?: (state: { isComplete: boolean }) => void
   /** P2-12: the generated prototype to show post-generation. Null → no result
    *  view yet (the Generate button is the only chrome). Optional/defaulted so
    *  existing direct-view test calls keep typechecking. */
@@ -274,6 +278,7 @@ export function DesignAgentLauncherView({
   onCloseCanvas,
   onPinApply,
   onCanvasRefresh,
+  onCanvasStateChange,
   renderDrawer = defaultRenderDrawer,
 }: LauncherViewProps) {
   return (
@@ -406,6 +411,7 @@ export function DesignAgentLauncherView({
               prdTitle={prdTitle}
               prdSections={prdSections}
               prdMetaLine={prdMetaLine}
+              onStateChange={onCanvasStateChange}
               onDone={onCloseCanvas}
               onPinApply={onPinApply}
               comments={
@@ -591,6 +597,14 @@ export function DesignAgentLauncher({
     const fresh = await refreshShareTokenStep(id, designAgentApi)
     if (fresh) setCanvasResult(fresh)
   }
+  // Thread the completion-state change from the canvas PostGenerationResult back
+  // into canvasResult so IterateComposer's isComplete prop stays current after
+  // Mark Complete / Resume without a round-trip.
+  const handleCanvasStateChange = (state: { isComplete: boolean }) => {
+    setCanvasResult((prev) =>
+      prev ? { ...prev, is_complete: state.isComplete } : prev,
+    )
+  }
 
   return (
     <>
@@ -615,6 +629,7 @@ export function DesignAgentLauncher({
         onCloseCanvas={closeCanvas}
         onPinApply={(comment) => setApplyTarget(comment)}
         onCanvasRefresh={refreshCanvas}
+        onCanvasStateChange={handleCanvasStateChange}
         renderDrawer={renderDrawer}
       />
       {/* When the launcher-owned canvas is open, push the refresh-stable canvas

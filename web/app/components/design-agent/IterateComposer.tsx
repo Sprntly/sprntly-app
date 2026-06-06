@@ -149,12 +149,10 @@ export type IterateComposerViewProps = {
   onSubmit?: () => void
   onContinue?: () => void
   onCancel?: () => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE 1): when the prototype is LOCKED
-   *  (`isComplete` true) the composer renders a DISABLED box + an "Unlock" button
-   *  instead of the active form. Clicking Unlock fires `onUnlock` (wired to the
-   *  resume/unlock path) which re-enables iteration. `unlockBusy` disables the
-   *  button while the unlock request is in flight; `unlockError` surfaces a
-   *  failure. */
+  /** When the prototype is locked the composer renders a disabled textarea and an
+   *  "Unlock" button instead of the active form. Clicking Unlock fires `onUnlock`
+   *  (wired to the resume path) which re-enables iteration. `unlockBusy` disables
+   *  the button during the request; `unlockError` surfaces failure. */
   onUnlock?: () => void
   unlockBusy?: boolean
   unlockError?: string | null
@@ -185,11 +183,7 @@ export function IterateComposerView({
   unlockError = null,
 }: IterateComposerViewProps) {
   if (isComplete) {
-    // UX-EXPLORE (throwaway — REVERT, CHANGE 1): LOCKED state. The iteration box is
-    // DISABLED (a non-interactive, greyed textarea so the surface still reads as
-    // "the place you iterate") and an "Unlock" button takes the action slot.
-    // Clicking Unlock wires to the resume/unlock path; on success the container
-    // flips to UNLOCKED and the active form below renders.
+    // Locked state: disabled textarea and Unlock button instead of the active form.
     return (
       <div
         className="iterate-composer iterate-composer--locked"
@@ -365,11 +359,9 @@ export function IterateComposer({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [queueLine, setQueueLine] = useState<string | null>(null)
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 1): local unlock state. When the
-  // prototype is LOCKED (`isComplete`) the composer shows an Unlock button;
-  // clicking it resumes iteration (the repurposed F15 resume path) and flips this
-  // to true so the active form renders WITHOUT waiting on a prop refetch. Effective
-  // lock = `isComplete && !unlocked`.
+  // Local unlock state. When the prototype is locked (isComplete) the composer
+  // shows an Unlock button; clicking it calls designAgentApi.resume + flips unlocked
+  // so the active form renders before the host refetches. Effective lock = isComplete && !unlocked.
   const [unlocked, setUnlocked] = useState(false)
   const [unlockBusy, setUnlockBusy] = useState(false)
   const [unlockError, setUnlockError] = useState<string | null>(null)
@@ -381,10 +373,8 @@ export function IterateComposer({
     if (!isComplete) setUnlocked(false)
   }, [isComplete])
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 1): the Unlock action. Wires to the
-  // existing resume/unlock backend semantics (`designAgentApi.resume`, the same
-  // call the removed "Resume Iteration" button used). On success the composer
-  // becomes active locally; the backend now honours iterate runs again.
+  // The Unlock action: resumes the prototype via the API and flips the local
+  // unlocked flag so the active form renders immediately without waiting for a prop refetch.
   async function handleUnlock() {
     setUnlockBusy(true)
     setUnlockError(null)
