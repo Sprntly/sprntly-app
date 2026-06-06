@@ -2247,16 +2247,38 @@
 }
 /* inline clarifying-answer surface, rendered IN the activity stream. */
 .design-agent-surface .da-activity-answer {
-  margin-top: 4px;
-  padding: 10px;
-  background: var(--surface);
-  border: 1px solid var(--accent-alpha-18);
-  border-radius: var(--radius-sm);
+  margin-top: 2px;
+  padding: 0 0 0 10px;
+  border-left: 2px solid var(--accent-alpha-18);
 }
 .design-agent-surface .da-activity-answer-context {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--muted);
+  font-style: italic;
+}
+.design-agent-surface .da-activity-choice-btn {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent-alpha-40);
+  border-radius: 15px;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+  white-space: nowrap;
+}
+.design-agent-surface .da-activity-choice-btn:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.design-agent-surface .da-activity-choice-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .design-agent-surface .da-activity-answer-choices {
   display: flex;

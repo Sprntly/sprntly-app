@@ -733,6 +733,10 @@ export function DaControlBar({
  * (onAnswer → useIterateRun.answerQuestion). Local input state only → a leaf
  * client component (the file is already "use client").
  */
+function friendlyChoiceLabel(choice: string): string {
+  return choice.replace(/\s*\([^)]{1,50}\)\s*$/, '').trim() || choice
+}
+
 function InlineClarifyAnswer({
   question,
   busy,
@@ -761,12 +765,12 @@ function InlineClarifyAnswer({
             <button
               key={`${i}-${choice}`}
               type="button"
-              className="btn btn-accent"
+              className="da-activity-choice-btn"
               data-testid="da-activity-answer-choice"
               disabled={busy}
               onClick={() => void onAnswer(choice)}
             >
-              {choice}
+              {friendlyChoiceLabel(choice)}
             </button>
           ))}
         </div>

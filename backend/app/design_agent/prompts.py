@@ -339,6 +339,12 @@ ambiguity in the iterate request (e.g. "should this CTA open a modal or
 navigate?"). For anything the current source + design-system defaults already
 answer, just execute. Do NOT pause for stylistic micro-choices.
 
+When offering choices in a clarifying_question, use plain human-readable labels
+only — no CSS class names, hex codes, Tailwind utilities, or other implementation
+details in the choice text. Keep choices short (1–4 words). Technical
+implementation context belongs in the agent's internal reasoning, not in choice
+labels.
+
 [9] STABLE JSX IDs (AD4 — load-bearing for comment anchoring)
 `data-anchor-id` attributes are applied AUTOMATICALLY by the prototype-runtime's
 Vite plugin at build time — NEVER emit them yourself. The ID is a content hash of
