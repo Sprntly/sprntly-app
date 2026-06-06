@@ -30,15 +30,6 @@ class Settings(BaseSettings):
     # environment via DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS. Read at call-time
     # in design_agent/storage.py:_vite_build_sync so it stays tunable + testable.
     design_agent_vite_build_timeout_seconds: int = 120
-    # Preview-screenshot capture on generation-complete. Default OFF: the capture
-    # renders the staged bundle in headless Chromium, which requires a provisioned
-    # Chromium runtime on the host (the same runtime the website extractor needs).
-    # The feature ships dormant and safe — with this off, completion never attempts
-    # a capture and the prototype's preview_image_url stays null (the card uses its
-    # existing fallback). Flip on (DESIGN_AGENT_PREVIEW_CAPTURE_ENABLED=1) only once
-    # the host has a working Chromium; even then capture stays best-effort and
-    # honest-degrades to null on any failure.
-    design_agent_preview_capture_enabled: bool = False
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 

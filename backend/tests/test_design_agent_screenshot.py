@@ -244,12 +244,6 @@ def _async_raise(exc):
     return _f
 
 
-def _enable_capture(env, monkeypatch):
-    monkeypatch.setattr(
-        env.routes.settings, "design_agent_preview_capture_enabled", True, raising=False
-    )
-
-
 def _wire_successful_build(env, monkeypatch):
     """Stub the build + bundle stage so _stage_complete_run reaches the capture step."""
     monkeypatch.setattr(
@@ -264,7 +258,6 @@ def _wire_successful_build(env, monkeypatch):
 
 async def test_complete_run_sets_preview_url_on_success(env, monkeypatch):
     """Capture returns PNG → stage_preview_image stores it → row carries the URL."""
-    _enable_capture(env, monkeypatch)
     _wire_successful_build(env, monkeypatch)
     monkeypatch.setattr(env.routes, "capture_bundle_screenshot", _async_return(_FAKE_PNG))
     monkeypatch.setattr(
@@ -280,7 +273,6 @@ async def test_complete_run_sets_preview_url_on_success(env, monkeypatch):
 
 async def test_complete_run_completes_ready_when_capture_returns_none(env, monkeypatch):
     """Honest-degrade: capture None → ready, preview null, no stage_preview_image call."""
-    _enable_capture(env, monkeypatch)
     _wire_successful_build(env, monkeypatch)
     monkeypatch.setattr(env.routes, "capture_bundle_screenshot", _async_return(None))
     stage_preview = MagicMock()
@@ -295,7 +287,6 @@ async def test_complete_run_completes_ready_when_capture_returns_none(env, monke
 
 async def test_complete_run_does_not_fail_on_capture_exception(env, monkeypatch):
     """Best-effort: a raised capture/stage exception is swallowed; prototype still ready."""
-    _enable_capture(env, monkeypatch)
     _wire_successful_build(env, monkeypatch)
     monkeypatch.setattr(
         env.routes, "capture_bundle_screenshot", _async_raise(RuntimeError("kaboom")),
@@ -308,23 +299,8 @@ async def test_complete_run_does_not_fail_on_capture_exception(env, monkeypatch)
     assert row["preview_image_url"] is None
 
 
-async def test_complete_run_skips_capture_when_disabled(env, monkeypatch):
-    """Dormant by default: with the flag off the capture step never runs."""
-    # capture flag NOT enabled (default False)
-    _wire_successful_build(env, monkeypatch)
-    capture = MagicMock()
-    monkeypatch.setattr(env.routes, "capture_bundle_screenshot", capture)
-    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
-    await env.routes._stage_complete_run(prototype_id=pid, workspace_id="app", virtual_fs={"a": "b"})
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
-    assert row["status"] == "ready"
-    assert row["preview_image_url"] is None
-    assert capture.call_count == 0              # capture never attempted when dormant
-
-
 async def test_capture_not_attempted_on_build_failure(env, monkeypatch):
     """Success-path only: a build failure returns before the capture step."""
-    _enable_capture(env, monkeypatch)
     monkeypatch.setattr(
         env.routes, "vite_build_with_repair",
         _async_raise(env.routes.ViteBuildError("vite build exit=1: SyntaxError")),
@@ -341,7 +317,6 @@ async def test_capture_not_attempted_on_build_failure(env, monkeypatch):
 async def test_preview_url_written_under_caller_workspace_only(env, monkeypatch):
     """Workspace isolation: the URL lands on the in-workspace row; a same-prd row
     under a different workspace is unaffected."""
-    _enable_capture(env, monkeypatch)
     _wire_successful_build(env, monkeypatch)
     monkeypatch.setattr(env.routes, "capture_bundle_screenshot", _async_return(_FAKE_PNG))
     monkeypatch.setattr(env.routes, "stage_preview_image", _async_return("https://x/preview.png"))
@@ -356,7 +331,6 @@ async def test_preview_url_written_under_caller_workspace_only(env, monkeypatch)
 
 async def test_complete_run_logs_preview_captured_identifiers_only(env, monkeypatch, caplog):
     """Observability: preview_captured (INFO) on success carries identifiers, not URL."""
-    _enable_capture(env, monkeypatch)
     _wire_successful_build(env, monkeypatch)
     monkeypatch.setattr(env.routes, "capture_bundle_screenshot", _async_return(_FAKE_PNG))
     secret_url = "https://signed.example/SECRET-PREVIEW/preview.png"
@@ -373,7 +347,6 @@ async def test_complete_run_logs_preview_captured_identifiers_only(env, monkeypa
 
 async def test_complete_run_logs_preview_capture_failed_on_none(env, monkeypatch, caplog):
     """Observability: the degrade path logs preview_capture_failed (WARNING)."""
-    _enable_capture(env, monkeypatch)
     _wire_successful_build(env, monkeypatch)
     monkeypatch.setattr(env.routes, "capture_bundle_screenshot", _async_return(None))
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -386,7 +359,6 @@ async def test_complete_run_logs_preview_capture_failed_on_none(env, monkeypatch
 
 async def test_complete_run_logs_error_class_on_capture_exception(env, monkeypatch, caplog):
     """Observability: an exception path logs preview_capture_failed with error_class."""
-    _enable_capture(env, monkeypatch)
     _wire_successful_build(env, monkeypatch)
     monkeypatch.setattr(env.routes, "capture_bundle_screenshot", _async_raise(RuntimeError("boom")))
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
