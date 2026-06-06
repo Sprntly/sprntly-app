@@ -18,6 +18,7 @@ import { PostGenerationResult } from "../PostGenerationResult"
 import { GenerationErrorBanner } from "../GenerationErrorBanner"
 import type { PrototypeRecord } from "../../../lib/api"
 import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
+import type { PrdSection } from "../../../types/content"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
 // esbuild transform defaults to the classic runtime, so expose React globally
@@ -790,5 +791,98 @@ describe("DesignAgentLauncher — exported signatures unchanged (test_launcher_s
   it("DesignAgentLauncher / DesignAgentLauncherView remain exported components", () => {
     expect(typeof DesignAgentLauncher).toBe("function")
     expect(typeof DesignAgentLauncherView).toBe("function")
+  })
+})
+
+// ─── Condensed PRD panel threading on the launcher open paths ─────────────────
+
+describe("condensed PRD panel is forwarded on both launcher open paths", () => {
+  const sampleResult: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/bundle/index.html",
+    error: null,
+    is_complete: false,
+    share_mode: "private",
+    share_token: null,
+  }
+
+  // One tl;dr block: provides Problem/Fix/Impact cards without triggering the
+  // "View full PRD" expander (which would recursively render PrdSections).
+  const sampleSections = [
+    {
+      type: "prd-tldr",
+      problem: "Users drop off at the checkout step",
+      fix: "Streamline to a single-page flow",
+      impact: "Estimated 15 percent conversion lift",
+    },
+  ] as unknown as PrdSection[]
+
+  function panelHtml(
+    over: Partial<Parameters<typeof DesignAgentLauncherView>[0]> = {},
+  ): string {
+    return renderToStaticMarkup(
+      React.createElement(DesignAgentLauncherView, {
+        prdId: 1,
+        figmaFileKey: null,
+        open: false,
+        setOpen: noop,
+        renderDrawer: () => null,
+        ...over,
+      }),
+    )
+  }
+
+  it("renders the condensed panel on the in-session result path when sections are provided (test_launcher_in_session_mount_renders_condensed_panel)", () => {
+    const html = panelHtml({ result: sampleResult, prdSections: sampleSections })
+    expect(html).toContain('data-testid="da-prd-condensed"')
+    expect(html).toContain('data-testid="da-prd-pcx-problem"')
+    expect(html).toContain('data-testid="da-prd-pcx-fix"')
+    expect(html).toContain('data-testid="da-prd-pcx-impact"')
+    expect(html).not.toContain("PRD content unavailable.")
+  })
+
+  it("renders the condensed panel on the existing-prototype canvas path when sections are provided (test_launcher_existing_canvas_mount_renders_condensed_panel)", () => {
+    const html = panelHtml({ canvasResult: sampleResult, prdSections: sampleSections })
+    expect(html).toContain('data-testid="da-launcher-canvas-fullscreen"')
+    expect(html).toContain('data-testid="da-prd-condensed"')
+    expect(html).toContain('data-testid="da-prd-pcx-problem"')
+    expect(html).not.toContain("PRD content unavailable.")
+  })
+
+  it("threads prdMetaLine into the panel subtitle on both paths (test_meta_line_threads_into_panel_subtitle)", () => {
+    const metaLine = "Redesign initiative, Sprint 5"
+    const inSessionHtml = panelHtml({
+      result: sampleResult,
+      prdSections: sampleSections,
+      prdMetaLine: metaLine,
+    })
+    const canvasHtml = panelHtml({
+      canvasResult: sampleResult,
+      prdSections: sampleSections,
+      prdMetaLine: metaLine,
+    })
+    expect(inSessionHtml).toContain(metaLine)
+    expect(canvasHtml).toContain(metaLine)
+  })
+
+  it("falls back to the empty-state on the in-session path when sections are absent (test_launcher_no_sections_renders_empty_state)", () => {
+    const html = panelHtml({ result: sampleResult })
+    expect(html).toContain("PRD content unavailable.")
+    expect(html).not.toContain('data-testid="da-prd-condensed"')
+  })
+
+  it("falls back to the empty-state on the canvas path when sections are absent", () => {
+    const html = panelHtml({ canvasResult: sampleResult })
+    expect(html).toContain('data-testid="da-launcher-canvas-fullscreen"')
+    expect(html).toContain("PRD content unavailable.")
+    expect(html).not.toContain('data-testid="da-prd-condensed"')
+  })
+
+  it("renders without error and shows the empty-state when the new props are omitted (test_optional_props_keep_callers_type_safe)", () => {
+    // All new props are optional — omitting them renders the empty-state, no throw.
+    const html = panelHtml({ result: sampleResult })
+    expect(html).toContain('data-testid="post-generation-result"')
+    expect(html).toContain("PRD content unavailable.")
   })
 })

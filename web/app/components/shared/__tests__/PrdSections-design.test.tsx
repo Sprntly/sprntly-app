@@ -77,9 +77,13 @@ describe("PrdSections — prd-design block (UX-9: dead slot + empty-state)", () 
     // invariant — the component is internal and the integration render mounts the
     // real drawer, which needs an app-router-backed NavigationProvider
     // unavailable in node).
-    expect(PRD_SECTIONS_SRC).toMatch(
-      /<DesignAgentLauncher\s+prdId=\{prdId\}\s+figmaFileKey=\{figmaFileKey\}\s+prdTitle=\{prdTitle\}\s*\/>/,
-    )
+    // Each required prop is present on the DesignAgentLauncher call; checked
+    // individually because the prop list now also includes prdSections/prdMetaLine.
+    expect(PRD_SECTIONS_SRC).toContain("<DesignAgentLauncher prdId={prdId}")
+    expect(PRD_SECTIONS_SRC).toContain("figmaFileKey={figmaFileKey}")
+    expect(PRD_SECTIONS_SRC).toContain("prdTitle={prdTitle}")
+    expect(PRD_SECTIONS_SRC).toContain("prdSections={prdSections}")
+    expect(PRD_SECTIONS_SRC).toContain("prdMetaLine={prdMetaLine}")
     // Affordance invariant: the launcher renders the prd-design launcher root,
     // but the bare "Generate Prototype" button has moved into the Approve modal
     // flow — the launcher surface no longer carries an inline generate button
@@ -180,9 +184,10 @@ describe("PrdSections — prd-design generate-trigger relocation + hot-file exce
     // surfaces on the preview card / canvas breadcrumb, which need client state
     // (useEffect) that does not run under SSR.
     expect(PRD_SCREEN_SRC).toContain("prdTitle={prd.title}")
-    expect(PRD_SECTIONS_SRC).toMatch(
-      /return <DesignSection prdId=\{prdId\} figmaFileKey=\{figmaFileKey\} prdTitle=\{prdTitle\} \/>/,
-    )
+    // DesignSection call includes prdId, figmaFileKey, prdTitle, prdSections, prdMetaLine.
+    expect(PRD_SECTIONS_SRC).toContain("return <DesignSection prdId={prdId}")
+    expect(PRD_SECTIONS_SRC).toContain("prdSections={prdSections}")
+    expect(PRD_SECTIONS_SRC).toContain("prdMetaLine={prdMetaLine}")
     // PrdSections accepts prdTitle and forwards it down to each RenderBlock.
     expect(PRD_SECTIONS_SRC).toContain("prdTitle?: string | null")
     expect(PRD_SECTIONS_SRC).toMatch(/<RenderBlock[\s\S]*?prdTitle=\{prdTitle\}[\s\S]*?\/>/)
@@ -206,10 +211,11 @@ describe("PrdSections — prd-design generate-trigger relocation + hot-file exce
     expect(PRD_SCREEN_SRC).toMatch(
       /<div\s+className="prd-body"\s+contentEditable\s+spellCheck=\{false\}\s+suppressContentEditableWarning\s*>/,
     )
-    // The PrdSections mount still lives INSIDE that editable region, unchanged.
-    expect(PRD_SCREEN_SRC).toMatch(
-      /<PrdSections sections=\{prd\.sections\} prdId=\{prd\.prd_id\} figmaFileKey=\{prd\.figma_file_key \?\? null\} prdTitle=\{prd\.title\} \/>/,
-    )
+    // The PrdSections mount still lives INSIDE that editable region; prop list now
+    // also includes prdMetaLine, checked individually.
+    expect(PRD_SCREEN_SRC).toContain("<PrdSections sections={prd.sections}")
+    expect(PRD_SCREEN_SRC).toContain("prdTitle={prd.title}")
+    expect(PRD_SCREEN_SRC).toContain("prdMetaLine={prd.metaLine}")
   })
 
   it("test_no_ux_explore_marker_in_prd_design — both edited files carry the durable hot-file exception note, no throwaway scratch markers", () => {
