@@ -102,22 +102,25 @@ describe("ShareMenuView — contiguous radio group, passcode field lifted out (A
   })
 })
 
-describe("ShareMenuView — passcode field gating preserved (AC5)", () => {
-  it("disabled unless passcode mode; disabled while busy even in passcode mode", () => {
-    // not passcode mode → disabled
+describe("ShareMenuView — progressive-disclosure passcode field", () => {
+  it("absent unless passcode mode; present + enabled in passcode mode; disabled while busy", () => {
+    // not passcode mode → the passcode field is not mounted at all (progressive
+    // disclosure). This does not change radio traversal: the field was already
+    // lifted OUT of the radio focus order, so mounting/unmounting it leaves the
+    // three contiguous radios untouched.
     const r1 = render(
       React.createElement(ShareMenuView, { mode: "public", passcode: "" }),
     )
-    expect((screen.getByTestId("passcode-input") as HTMLInputElement).disabled).toBe(true)
+    expect(screen.queryByTestId("passcode-input")).toBeNull()
     r1.unmount()
-    // passcode mode + not busy → enabled
+    // passcode mode + not busy → present + enabled
     const r2 = render(
       React.createElement(ShareMenuView, { mode: "passcode", passcode: "", busy: false }),
     )
     expect((screen.getByTestId("passcode-input") as HTMLInputElement).disabled).toBe(false)
     r2.unmount()
-    // passcode mode + busy → STILL disabled (the `busy` term keeps the field
-    // gated through the optimistic window, AC5).
+    // passcode mode + busy → present but disabled (the `busy` term keeps the
+    // field gated through the optimistic window).
     render(
       React.createElement(ShareMenuView, { mode: "passcode", passcode: "", busy: true }),
     )
