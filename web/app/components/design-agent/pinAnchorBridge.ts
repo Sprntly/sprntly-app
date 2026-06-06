@@ -29,3 +29,22 @@ export function resolveAnchorAtPoint(
     return null
   }
 }
+
+export function getAnchorPosition(
+  iframe: HTMLIFrameElement | null,
+  anchorId: string,
+): { xPct: number; yPct: number } | null {
+  try {
+    const doc = iframe?.contentDocument
+    if (!doc) return null
+    const el = doc.querySelector(`[data-anchor-id="${CSS.escape(anchorId)}"]`)
+    if (!el) return null
+    const elRect = el.getBoundingClientRect()
+    const iRect = iframe.getBoundingClientRect()
+    const x = ((elRect.left - iRect.left + elRect.width / 2) / iRect.width) * 100
+    const y = ((elRect.top - iRect.top + elRect.height / 2) / iRect.height) * 100
+    return { xPct: Math.max(0, Math.min(100, x)), yPct: Math.max(0, Math.min(100, y)) }
+  } catch {
+    return null
+  }
+}

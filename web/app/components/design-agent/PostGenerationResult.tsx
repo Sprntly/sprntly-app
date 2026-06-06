@@ -24,7 +24,7 @@
  * introduced.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { CompletionBar } from "./CompletionBar"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
 import { PrototypeViewer, type Platform } from "./PrototypeViewer"
@@ -42,7 +42,7 @@ import { CommentAvatar, shortRelativeTime } from "./CommentsPanel"
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
-import { resolveAnchorAtPoint } from "./pinAnchorBridge"
+import { resolveAnchorAtPoint, getAnchorPosition } from "./pinAnchorBridge"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
@@ -277,6 +277,10 @@ export type PostGenerationResultViewProps = {
   /** cache-bust nonce → forces the
    *  iframe to reload the rebuilt bundle on each completed iterate. */
   bundleReloadNonce?: number
+  /** element-anchored computed positions for pins that have a `resolvedAnchorId`.
+   *  Keyed by pin.n; when present overrides the static xPct/yPct so pins track
+   *  the DOM element they were placed on across scroll and resize events. */
+  computedPinPositions?: Record<number, { xPct: number; yPct: number }>
 }
 
 /**
@@ -871,6 +875,7 @@ export function PostGenerationResultView({
   onAnswerQuestion,
   onPinIterate,
   bundleReloadNonce = 0,
+  computedPinPositions = {},
 }: PostGenerationResultViewProps) {
   // cache-bust the iframe src so a
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
@@ -1106,16 +1111,19 @@ export function PostGenerationResultView({
               the overlay so pins stay visible after mark mode exits. */}
           {viewer && pins.length > 0 && (
             <div className="da-pin-layer" data-testid="da-pin-layer" aria-hidden="true">
-              {pins.map((pin) => (
-                <span
-                  key={pin.n}
-                  className="pc-pin placed"
-                  data-testid={`da-pin-${pin.n}`}
-                  style={{ left: `${pin.xPct}%`, top: `${pin.yPct}%` }}
-                >
-                  <span className="pc-pin-num">{pin.n}</span>
-                </span>
-              ))}
+              {pins.map((pin) => {
+                const pos = computedPinPositions[pin.n] ?? { xPct: pin.xPct, yPct: pin.yPct }
+                return (
+                  <span
+                    key={pin.n}
+                    className="pc-pin placed"
+                    data-testid={`da-pin-${pin.n}`}
+                    style={{ left: `${pos.xPct}%`, top: `${pos.yPct}%` }}
+                  >
+                    <span className="pc-pin-num">{pin.n}</span>
+                  </span>
+                )
+              })}
             </div>
           )}
         </div>
@@ -1336,6 +1344,38 @@ export function PostGenerationResult({
   const [markMode, setMarkMode] = useState<boolean>(false)
   const [pins, setPins] = useState<PinComment[]>([])
   const pinCounter = useRef<number>(0)
+  const [computedPinPositions, setComputedPinPositions] = useState<Record<number, { xPct: number; yPct: number }>>({})
+
+  const recomputePinPositions = useCallback(() => {
+    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+    const updates: Record<number, { xPct: number; yPct: number }> = {}
+    for (const pin of pins) {
+      if (pin.resolvedAnchorId) {
+        const pos = getAnchorPosition(iframe, pin.resolvedAnchorId)
+        if (pos) updates[pin.n] = pos
+      }
+    }
+    setComputedPinPositions(updates)
+  }, [pins])
+
+  useEffect(() => {
+    recomputePinPositions()
+    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+    const win = iframe?.contentWindow
+    win?.addEventListener("scroll", recomputePinPositions, { passive: true })
+    window.addEventListener("resize", recomputePinPositions, { passive: true })
+    return () => {
+      win?.removeEventListener("scroll", recomputePinPositions)
+      window.removeEventListener("resize", recomputePinPositions)
+    }
+  }, [recomputePinPositions])
+
+  useEffect(() => {
+    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+    if (!iframe) return
+    iframe.addEventListener("load", recomputePinPositions)
+    return () => iframe.removeEventListener("load", recomputePinPositions)
+  }, [recomputePinPositions])
 
   // Escape closes the full-screen
   // overlay (in addition to the visible × close button). Bound only while open.
@@ -1563,6 +1603,7 @@ export function PostGenerationResult({
       onAnswerQuestion={onAnswerQuestion}
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
+      computedPinPositions={computedPinPositions}
     />
   )
 }
