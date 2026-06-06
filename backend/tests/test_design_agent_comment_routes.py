@@ -94,6 +94,7 @@ CREATE TABLE prototype_comments (
     pin_x_pct          REAL,
     pin_y_pct          REAL,
     resolved_anchor_id TEXT,
+    user_id            TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
 );
@@ -208,7 +209,9 @@ def test_post_comment_authed_returns_open_comment(client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "open"
-    assert body["author"] == "demo"
+    # B9a: author is now user_email when available, else user_id (UUID). The test
+    # JWT has no email claim, so the fallback is _TEST_USER_ID ("user-test").
+    assert body["author"] == "user-test"
     assert body["anchor_id"] == "deadbeef"
     assert body["body"] == "make this blue"
     assert body["resolved_at"] is None
@@ -292,26 +295,16 @@ def test_patch_resolve_other_workspace_returns_404(client):
 
 
 def test_post_comment_public_no_auth_persists_external_comment(unauth):
-    # AC5 — no-auth POST on a public ready prototype → 200, author='external',
-    # workspace from the resolved row.
+    # B9b: public comment CREATE is now disabled (returns 404).
+    # The route still exists (no import errors) but immediately raises 404 so
+    # unauthenticated external viewers cannot write comments.
     proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
     resp = unauth.post(
         f"/v1/design-agent/by-token/{proto.token}/comments",
         json={"anchor_id": "deadbeef", "body": "love this"},
     )
-    assert resp.status_code == 200, resp.text
-    assert resp.history == []                      # no redirect to /sign-in
-    assert "set-cookie" not in {k.lower() for k in resp.headers}
-    body = resp.json()
-    assert body["author"] == "external"
-    assert body["status"] == "open"
-    # workspace_id is internal — never surfaces in CommentOut — but the row must
-    # carry the resolved prototype's workspace, not a session claim.
-    from tests import _fake_supabase
-    ws = _fake_supabase.get_fake_db().execute(
-        "SELECT workspace_id FROM prototype_comments WHERE id = ?", [body["id"]]
-    ).fetchone()[0]
-    assert ws == "tenant-x"
+    assert resp.status_code == 404
+    assert _count_comments(proto.id) == 0  # nothing written
 
 
 def test_post_comment_public_private_mode_returns_404(unauth):
@@ -398,22 +391,18 @@ def test_post_comment_empty_anchor_returns_422(client):
 
 
 def test_public_write_logs_token_hash_not_raw(unauth, caplog):
-    # AC10 — the public write logs token_hash=<sha256[:8]>, never the raw token,
-    # and never the comment body (PII per Rule #24).
+    # B9b: public comment CREATE is disabled → 404 before any logging.
+    # The log-hygiene invariant (token never raw, body never logged) is vacuously
+    # satisfied because the route never reaches the insert or log statement.
     proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
-    expected_hash = hashlib.sha256(proto.token.encode("utf-8")).hexdigest()[:8]
     with caplog.at_level(logging.INFO, logger="app.routes.design_agent"):
         resp = unauth.post(
             f"/v1/design-agent/by-token/{proto.token}/comments",
             json={"anchor_id": "deadbeef", "body": "secret comment text"},
         )
-    assert resp.status_code == 200, resp.text
-    public_lines = [r for r in caplog.records if "comment_created_public" in r.getMessage()]
-    assert public_lines, "expected a comment_created_public log line"
-    text = caplog.text
-    assert f"token_hash={expected_hash}" in text
-    assert proto.token not in text                 # raw token never logged
-    assert "secret comment text" not in text        # comment body never logged
+    assert resp.status_code == 404
+    assert proto.token not in caplog.text      # raw token never in any log line
+    assert "secret comment text" not in caplog.text  # comment body never logged
 
 
 # ─── Non-breakage (AC9) ─────────────────────────────────────────────────────
@@ -527,7 +516,8 @@ def test_post_comment_authed_round_trips_position(client):
 
 
 def test_post_comment_public_round_trips_position(unauth):
-    # Public POST with position → persisted under the resolved prototype's workspace_id.
+    # B9b: public comment CREATE is disabled → 404 regardless of payload shape.
+    # Position fields are irrelevant; nothing is persisted.
     proto = _seed_prototype(workspace_id="tenant-pub", share_mode="public", status="ready")
     resp = unauth.post(
         f"/v1/design-agent/by-token/{proto.token}/comments",
@@ -539,18 +529,8 @@ def test_post_comment_public_round_trips_position(unauth):
             "resolved_anchor_id": "ef567890",
         },
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["pin_x_pct"] == pytest.approx(10.0)
-    assert body["pin_y_pct"] == pytest.approx(20.0)
-    assert body["resolved_anchor_id"] == "ef567890"
-
-    # Workspace written from the resolved row, not a session claim.
-    from tests import _fake_supabase
-    ws = _fake_supabase.get_fake_db().execute(
-        "SELECT workspace_id FROM prototype_comments WHERE id = ?", [body["id"]]
-    ).fetchone()[0]
-    assert ws == "tenant-pub"
+    assert resp.status_code == 404
+    assert _count_comments(proto.id) == 0  # nothing written
 
 
 def test_post_comment_omitted_position_defaults_null(client):

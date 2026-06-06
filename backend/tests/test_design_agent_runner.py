@@ -607,26 +607,26 @@ def test_hash_tool_call_differs_on_input():
 
 def test_resolve_figma_token_none_when_no_file_key():
     # No file to fetch → no token resolution, no import side effects.
-    assert runner._resolve_figma_access_token(None) is None
+    assert runner._resolve_figma_access_token(None, "ws-id") is None
 
 
 def test_resolve_figma_token_happy(monkeypatch):
     fake = types.ModuleType("app.routes.connectors")
-    fake._figma_access_token = lambda: "figd_tok_123"
+    fake._figma_access_token = lambda company_id: "figd_tok_123"
     monkeypatch.setitem(sys.modules, "app.routes.connectors", fake)
-    assert runner._resolve_figma_access_token("FILEKEY") == "figd_tok_123"
+    assert runner._resolve_figma_access_token("FILEKEY", "ws-id") == "figd_tok_123"
 
 
 def test_resolve_figma_token_nonfatal_on_connector_error(monkeypatch):
     fake = types.ModuleType("app.routes.connectors")
 
-    def _raise():
+    def _raise(company_id):
         raise RuntimeError("Figma is not connected")
 
     fake._figma_access_token = _raise
     monkeypatch.setitem(sys.modules, "app.routes.connectors", fake)
     # Non-fatal: resolver swallows the error and returns None so the run proceeds.
-    assert runner._resolve_figma_access_token("FILEKEY") is None
+    assert runner._resolve_figma_access_token("FILEKEY", "ws-id") is None
 
 
 def test_generate_prototype_injects_figma_token_onto_ctx(monkeypatch):
@@ -637,7 +637,7 @@ def test_generate_prototype_injects_figma_token_onto_ctx(monkeypatch):
         return RunResult(status="complete", iters=1, usage=runner.RunUsage(),
                          duration_ms=1, final_content=[])
 
-    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: "tok-xyz")
+    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key, ws: "tok-xyz")
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
     _run(generate_prototype(
         prototype_id=7, workspace_id="app", system_blocks=_system(),
@@ -741,8 +741,17 @@ def test_model_pin_is_sonnet_4_6():
 
 
 def test_publish_step_called_once_per_loop_iteration(monkeypatch):
-    """publish_step fires at the start of every loop iteration so the SSE
-    stream gets a progress breadcrumb for each tool-use cycle."""
+    """publish_step fires at the start of every loop iteration (coarse label)
+    AND before each tool dispatch (per-tool label), so the SSE stream gets
+    fine-grained progress breadcrumbs.
+
+    Setup: two iterations — tool_use "view" on iter 1, end_turn on iter 2.
+    Expected publish_step calls:
+      1. iter 1 loop-top coarse label ("Reading the change request")
+      2. per-tool label before "view" dispatch ("Running view")
+      3. iter 2 loop-top coarse label ("Analyzing the prototype")
+    Total: 3 calls.
+    """
     calls: list[tuple] = []
 
     def _capture(pid, event):
@@ -751,7 +760,7 @@ def test_publish_step_called_once_per_loop_iteration(monkeypatch):
     monkeypatch.setattr(runner, "publish_step", _capture)
 
     # Two iterations: tool_use on iter 1, end_turn on iter 2.
-    client = _install_client(monkeypatch, [
+    _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "/"})]),
         _msg("end_turn", [_text("done")]),
     ])
@@ -763,7 +772,8 @@ def test_publish_step_called_once_per_loop_iteration(monkeypatch):
 
     _run(agent_loop(_system(), _user(), _ctx(prototype_id=42)))
 
-    assert len(calls) == 2, f"expected 2 publish_step calls, got {len(calls)}"
+    # 1 coarse (iter 1) + 1 per-tool (view dispatch) + 1 coarse (iter 2) = 3
+    assert len(calls) == 3, f"expected 3 publish_step calls, got {len(calls)}"
     for pid, ev in calls:
         assert pid == 42
         assert ev["kind"] == "step"

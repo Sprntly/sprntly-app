@@ -18,7 +18,7 @@
 
 import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
-import { connectorsApi, designAgentApi } from "../../lib/api"
+import { designAgentApi } from "../../lib/api"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
@@ -144,25 +144,14 @@ export function buildGenerateParams({
 }
 
 /**
- * P6-15 (UX-5, AC3) — connect-affordance redirect. The source IA's "Connect
- * Figma" / "Connect a repo" buttons reuse the EXACT entry points
- * `ConnectorsScreen` uses (`connectorsApi.figmaAuthorizeUrl` /
- * `connectorsApi.githubAuthorizeUrl`) via a plain `location.href` redirect —
- * NO OAuth handshake, NO token exchange inside this drawer. The connector flow
- * and its known prod bugs are Quokka's connectors lane; UX-5 only wires the
- * affordance to the existing authorize-URL redirect.
- *
- * `location` is injected (defaulting to `window.location`) so the wiring is
- * unit-testable in the repo's node vitest env — there is no DOM and no click, so
- * the test asserts the redirect target on an injected `location` seam. The
- * default is evaluated lazily (only on click), so SSR render never touches
- * `window`.
+ * Connect-affordance redirect. The source IA's "Connect Figma" /
+ * "Connect a repo" buttons navigate to the Settings → Connectors page so
+ * the user can wire up their integration there. Simple and synchronous — no
+ * inline OAuth initiation, no server round-trip from the drawer. The
+ * Settings page owns the full OAuth handshake.
  */
-export function redirectToConnect(
-  authorizeUrl: () => string,
-  location: Pick<Location, "href"> = window.location,
-): void {
-  location.href = authorizeUrl()
+export function redirectToConnect(provider: "figma" | "github"): void {
+  location.href = `/settings?section=connectors`
 }
 
 /**
@@ -454,9 +443,7 @@ export function DesignAgentDrawerView({
                     <button
                       type="button"
                       className="src-connect-btn"
-                      onClick={() =>
-                        redirectToConnect(connectorsApi.figmaAuthorizeUrl)
-                      }
+                      onClick={() => void redirectToConnect("figma")}
                     >
                       Connect Figma
                     </button>
@@ -480,9 +467,7 @@ export function DesignAgentDrawerView({
                 <button
                   type="button"
                   className="src-connect-btn ghost"
-                  onClick={() =>
-                    redirectToConnect(connectorsApi.githubAuthorizeUrl)
-                  }
+                  onClick={() => void redirectToConnect("github")}
                 >
                   Connect a repo
                 </button>

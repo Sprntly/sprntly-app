@@ -315,7 +315,7 @@ async def test_smoke_emits_cost_summary_log(env, monkeypatch, caplog):
         "app.design_agent.runner.get_design_agent_client",
         lambda: _mock_design_agent_client(),
     )
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     from app.design_agent.runner import generate_prototype
 
     secret_user = "TOP_SECRET_PRD_BODY_VALUE"
@@ -360,7 +360,7 @@ async def test_smoke_runner_failure_marks_failed(env, monkeypatch):
         "app.design_agent.runner.get_design_agent_client",
         lambda: _mock_design_agent_client(raise_on_first=True),
     )
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     prd_id = _seed_prd(env.db)
 
     async with _login(env) as client:
@@ -437,7 +437,7 @@ def _install_mock(monkeypatch) -> None:
         lambda: _mock_design_agent_client(),
     )
     monkeypatch.setattr(
-        "app.design_agent.runner._resolve_figma_access_token", lambda k: None
+        "app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None
     )
 
 
@@ -637,7 +637,7 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
     )
     # Scenario A = a Figma file is present in the inputs; stub the connector
     # token lookup so the run is hermetic (the mocked agent never calls fetch_figma).
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     _point_storage_to_tmp(monkeypatch, tmp_path)
     prd_id = _seed_prd(env.db)
 
@@ -721,7 +721,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     )
     # No Figma in Scenario B; the figma-token resolver is stubbed only for parity
     # with test_scenario_a_smoke (the mocked agent never calls fetch_figma anyway).
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     # Mock the P5-01 extractor at its SOURCE module — `_website_context_block`
     # does a lazy `from app.design_agent.scenarios.website import
     # extract_website_design_system`, so the patch must land on that module for the
@@ -811,7 +811,7 @@ async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
         "app.design_agent.runner.get_design_agent_client",
         lambda: _mock_design_agent_client(),
     )
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     _point_storage_to_tmp(monkeypatch, tmp_path)
     prd_id = _seed_prd(env.db)
 

@@ -402,7 +402,7 @@ def test_iterate_persists_question_no_checkpoint(monkeypatch):
 
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
     monkeypatch.setattr(runner, "set_pending_question", fake_set)
-    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
+    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key, ws: None)
 
     result, vfs = _run(runner.iterate_prototype(
         prototype_id=7, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(),
@@ -432,7 +432,7 @@ def test_generate_persists_question_on_pause(monkeypatch):
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
     monkeypatch.setattr(runner, "set_pending_question",
                         lambda **kw: captured.update(kw))
-    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
+    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key, ws: None)
 
     _run(runner.generate_prototype(
         prototype_id=9, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(),
@@ -453,7 +453,7 @@ def test_complete_result_does_not_persist_question(monkeypatch):
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
     monkeypatch.setattr(runner, "set_pending_question",
                         lambda **kw: called.__setitem__("n", called["n"] + 1))
-    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
+    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key, ws: None)
     _run(runner.iterate_prototype(
         prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(),
         user_message=_user(), current_source={}, figma_file_key=None,
@@ -571,7 +571,8 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    user_id        TEXT
 );
 CREATE TABLE prototype_pending_iterations (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -662,6 +663,13 @@ async def test_iterate_bg_pause_leaves_row_ready_not_failed(env, monkeypatch):
     # unchanged. FAILS on the unfixed code (the else→fail_prototype flips it to
     # 'failed'). Durable home for the dropped P3-13 AC9.
     _stub_iterate_status(monkeypatch, env.routes, "awaiting_clarification")
+    # Stub clear_pending_question so the pre-seeded question survives the bg run.
+    # (In production the bg run clears the old question at start, then
+    # iterate_prototype re-sets a new one; here iterate_prototype is stubbed so
+    # we block the clear to keep the assertion meaningful.)
+    monkeypatch.setattr(
+        "app.routes.design_agent.clear_pending_question", lambda **kw: None
+    )
     pid = _seed_ready_route(env, current_checkpoint_id=42)
     # The runner (P3-08) persists the question during iterate_prototype; we stub
     # that call, so seed the sidecar here to mirror the real paused state.

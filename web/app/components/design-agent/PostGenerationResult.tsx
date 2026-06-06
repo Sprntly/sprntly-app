@@ -24,7 +24,7 @@
  * introduced.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { CompletionBar } from "./CompletionBar"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
 import { PrototypeViewer, type Platform } from "./PrototypeViewer"
@@ -42,7 +42,19 @@ import { CommentAvatar, shortRelativeTime } from "./CommentsPanel"
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
-import { resolveAnchorAtPoint } from "./pinAnchorBridge"
+import {
+  getElementAtIframePoint,
+  getElementAnchor,
+  getAnchorPosition,
+  getClickOffsetInElement,
+  getAnchorPositionWithOffset,
+  findByAnchor,
+  getElementDescription,
+  parseStoredAnchor,
+  serializeAnchor,
+  setElementHighlight,
+  clearElementHighlight,
+} from "./pinAnchorBridge"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
@@ -128,7 +140,15 @@ export type PinComment = {
   resolved?: boolean
   // stable JSX anchor resolved at the click point inside the bundle iframe;
   // null when the iframe is cross-origin or the click hit no anchored element.
-  resolvedAnchorId?: string | null
+  // Typed anchor object (anchor-id or xpath) replaces the old string field.
+  anchor: { type: 'anchor-id' | 'xpath'; value: string } | null
+  /** click position within the anchor element (0–100). Null for DB-loaded pins. */
+  xPctInEl: number | null
+  yPctInEl: number | null
+  /** friendly label shown in the UI: e.g. '"Schedule Demo" button' */
+  elementFriendly: string | null
+  /** technical element context sent to the agent */
+  elementTechnical: string | null
 }
 
 export type PostGenerationResultProps = {
@@ -253,7 +273,7 @@ export type PostGenerationResultViewProps = {
    *  edit/submit/remove a pin's comment. */
   markMode?: boolean
   onToggleMark?: () => void
-  onStageClick?: (xPct: number, yPct: number, viewportX: number, viewportY: number) => void
+  onStageClick?: (xPct: number, yPct: number, viewportX: number, viewportY: number, anchor: { type: 'anchor-id' | 'xpath'; value: string } | null) => void
   pins?: PinComment[]
   onPinDraftChange?: (n: number, value: string) => void
   onPinSubmit?: (n: number) => void
@@ -277,6 +297,15 @@ export type PostGenerationResultViewProps = {
   /** cache-bust nonce → forces the
    *  iframe to reload the rebuilt bundle on each completed iterate. */
   bundleReloadNonce?: number
+  /** element-anchored computed positions for pins that have a `resolvedAnchorId`.
+   *  Keyed by pin.n; when present overrides the static xPct/yPct so pins track
+   *  the DOM element they were placed on across scroll and resize events. */
+  computedPinPositions?: Record<number, { xPct: number; yPct: number }>
+  /** Ref forwarded from the container so the activity-scroll useEffect (which
+   *  can only live in a client component) can scrollIntoView the activity section
+   *  when the first SSE event arrives. Threaded through the pure view without a
+   *  hook so the view stays SSR-renderable. */
+  leftPanelRef?: RefObject<HTMLDivElement | null>
 }
 
 /**
@@ -709,6 +738,10 @@ export function DaControlBar({
  * (onAnswer → useIterateRun.answerQuestion). Local input state only → a leaf
  * client component (the file is already "use client").
  */
+function friendlyChoiceLabel(choice: string): string {
+  return choice.replace(/\s*\([^)]{1,50}\)\s*$/, '').trim() || choice
+}
+
 function InlineClarifyAnswer({
   question,
   busy,
@@ -737,12 +770,12 @@ function InlineClarifyAnswer({
             <button
               key={`${i}-${choice}`}
               type="button"
-              className="btn btn-accent"
+              className="da-activity-choice-btn"
               data-testid="da-activity-answer-choice"
               disabled={busy}
               onClick={() => void onAnswer(choice)}
             >
-              {choice}
+              {friendlyChoiceLabel(choice)}
             </button>
           ))}
         </div>
@@ -775,6 +808,95 @@ function InlineClarifyAnswer({
           </div>
         </form>
       )}
+    </div>
+  )
+}
+
+function FullscreenOverlay({
+  bundleUrl,
+  isComplete,
+  onCloseFullscreen,
+}: {
+  bundleUrl: string
+  isComplete: boolean
+  onCloseFullscreen?: () => void
+}) {
+  const fullscreenRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (fullscreenRef.current) {
+      fullscreenRef.current.requestFullscreen().catch(() => {})
+    }
+  }, [])
+
+  useEffect(() => {
+    const handler = () => {
+      if (!document.fullscreenElement) onCloseFullscreen?.()
+    }
+    document.addEventListener('fullscreenchange', handler)
+    return () => document.removeEventListener('fullscreenchange', handler)
+  }, [onCloseFullscreen])
+
+  return (
+    <div
+      ref={fullscreenRef}
+      className="proto-fullscreen"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Prototype full screen"
+      data-testid="proto-fullscreen"
+    >
+      <button
+        type="button"
+        className="proto-fullscreen-close"
+        aria-label="Close full screen"
+        data-testid="proto-fullscreen-close"
+        onClick={() => { document.exitFullscreen().catch(() => {}); onCloseFullscreen?.() }}
+      >
+        ×
+      </button>
+      <div className="proto-fullscreen-body">
+        <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Client-only wrapper for the `.da-left-activity` panel. Owns the scroll
+ * sentinel ref so the pure `PostGenerationResultView` stays SSR-renderable
+ * (no hooks in the pure view itself). Scrolls the sentinel into view whenever
+ * `iterateActivity` grows so the latest step is always visible.
+ */
+function ActivityPanel({
+  iterateActivity,
+  iterateRunning,
+  iteratePendingQuestion,
+  onAnswerQuestion,
+}: {
+  iterateActivity: import("./useIterateRun").ActivityEvent[]
+  iterateRunning: boolean
+  iteratePendingQuestion: import("../../lib/api").PendingQuestion | null
+  onAnswerQuestion?: (answer: string) => void | Promise<void>
+}) {
+  const activityEndRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    activityEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [iterateActivity])
+  return (
+    <div className="da-left-activity" data-testid="da-canvas-activity">
+      <IterateActivityStream
+        activity={iterateActivity}
+        running={iterateRunning}
+      />
+      {iteratePendingQuestion && onAnswerQuestion && (
+        <InlineClarifyAnswer
+          question={iteratePendingQuestion}
+          busy={iterateRunning}
+          onAnswer={onAnswerQuestion}
+        />
+      )}
+      <div ref={activityEndRef} />
     </div>
   )
 }
@@ -821,6 +943,8 @@ export function PostGenerationResultView({
   onAnswerQuestion,
   onPinIterate,
   bundleReloadNonce = 0,
+  computedPinPositions = {},
+  leftPanelRef,
 }: PostGenerationResultViewProps) {
   // cache-bust the iframe src so a
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
@@ -932,13 +1056,20 @@ export function PostGenerationResultView({
       >
         {/* LEFT collapsible sidebar — PRD (top, scrollable) + iterate (bottom). */}
         <aside
-          className={`da-left${leftOpen ? "" : " collapsed"}`}
+          ref={leftPanelRef}
+          className={`da-left${leftOpen ? "" : " collapsed"}${iterateRunning ? " is-running" : ""}`}
           data-testid="da-left"
         >
           <div className="da-left-top">
             <span className="da-left-title">
               {prdTitle || "PRD"}
             </span>
+            {iterateRunning && (
+              <span className="da-left-running-pill" aria-live="polite">
+                <span className="da-activity-spinner" aria-hidden="true" />
+                Working…
+              </span>
+            )}
             <button
               type="button"
               className="da-left-handle"
@@ -973,19 +1104,12 @@ export function PostGenerationResultView({
               pauses on a clarifying question, the INLINE answer surface renders
               right here in the stream (not detached) and continues the iterate. */}
           {(iterateActivity.length > 0 || iteratePendingQuestion) && (
-            <div className="da-left-activity" data-testid="da-canvas-activity">
-              <IterateActivityStream
-                activity={iterateActivity}
-                running={iterateRunning}
-              />
-              {iteratePendingQuestion && onAnswerQuestion && (
-                <InlineClarifyAnswer
-                  question={iteratePendingQuestion}
-                  busy={iterateRunning}
-                  onAnswer={onAnswerQuestion}
-                />
-              )}
-            </div>
+            <ActivityPanel
+              iterateActivity={iterateActivity}
+              iterateRunning={iterateRunning}
+              iteratePendingQuestion={iteratePendingQuestion}
+              onAnswerQuestion={onAnswerQuestion}
+            />
           )}
           {/* the prop-driven
               clarifying surface (from a prototype row that already carried a
@@ -1039,16 +1163,25 @@ export function PostGenerationResultView({
               aria-hidden={markMode ? "false" : "true"}
               onClick={(e) => {
                 if (!markMode) return
-                const rect = e.currentTarget.getBoundingClientRect()
-                const xPct = ((e.clientX - rect.left) / rect.width) * 100
-                const yPct = ((e.clientY - rect.top) / rect.height) * 100
-                onStageClick?.(
-                  Math.max(0, Math.min(100, xPct)),
-                  Math.max(0, Math.min(100, yPct)),
-                  e.clientX,
-                  e.clientY,
-                )
+                const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+                const ir = iframe?.getBoundingClientRect()
+                if (!ir) return
+                if (e.clientX < ir.left || e.clientX > ir.left + ir.width ||
+                    e.clientY < ir.top || e.clientY > ir.top + ir.height) return
+                const el = getElementAtIframePoint(iframe, e.clientX, e.clientY)
+                const anchor = el ? getElementAnchor(el) : null
+                const xPct = Math.max(0, Math.min(100, ((e.clientX - ir.left) / ir.width) * 100))
+                const yPct = Math.max(0, Math.min(100, ((e.clientY - ir.top) / ir.height) * 100))
+                clearElementHighlight()
+                onStageClick?.(xPct, yPct, e.clientX, e.clientY, anchor)
               }}
+              onMouseMove={(e) => {
+                if (!markMode) return
+                const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+                const el = getElementAtIframePoint(iframe, e.clientX, e.clientY)
+                setElementHighlight(el)
+              }}
+              onMouseLeave={() => clearElementHighlight()}
             />
           )}
           {/* Pin layer — numbered teardrops positioned absolutely over the canvas.
@@ -1056,16 +1189,19 @@ export function PostGenerationResultView({
               the overlay so pins stay visible after mark mode exits. */}
           {viewer && pins.length > 0 && (
             <div className="da-pin-layer" data-testid="da-pin-layer" aria-hidden="true">
-              {pins.map((pin) => (
-                <span
-                  key={pin.n}
-                  className="pc-pin placed"
-                  data-testid={`da-pin-${pin.n}`}
-                  style={{ left: `${pin.xPct}%`, top: `${pin.yPct}%` }}
-                >
-                  <span className="pc-pin-num">{pin.n}</span>
-                </span>
-              ))}
+              {pins.map((pin) => {
+                const pos = computedPinPositions[pin.n] ?? { xPct: pin.xPct, yPct: pin.yPct }
+                return (
+                  <span
+                    key={pin.n}
+                    className="pc-pin placed"
+                    data-testid={`da-pin-${pin.n}`}
+                    style={{ left: `${pos.xPct}%`, top: `${pos.yPct}%` }}
+                  >
+                    <span className="pc-pin-num">{pin.n}</span>
+                  </span>
+                )
+              })}
             </div>
           )}
         </div>
@@ -1110,13 +1246,13 @@ export function PostGenerationResultView({
                     data-testid={`da-pin-comment-${pin.n}`}
                     data-status={pin.resolved ? "resolved" : pin.saved ? "open" : "draft"}
                   >
-                    <span className="proto-comment-pin">{pin.n}</span>
                     <div className="proto-comment-main">
                       {pin.saved ? (
                         <>
                           {/* author +
                               avatar + relative time on the saved pin comment. */}
                           <div className="proto-comment-au-row">
+                            <span className="proto-comment-pin">{pin.n}</span>
                             <CommentAvatar author={pin.author ?? "demo"} />
                             <span className="proto-comment-au">{pin.author ?? "demo"}</span>
                             <time
@@ -1225,26 +1361,11 @@ export function PostGenerationResultView({
           only while open AND a bundle exists; the inline viewer is unmounted while
           it is open (selector-collision guard above). */}
       {fullscreenOpen && bundleUrl && (
-        <div
-          className="proto-fullscreen"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Prototype full screen"
-          data-testid="proto-fullscreen"
-        >
-          <button
-            type="button"
-            className="proto-fullscreen-close"
-            aria-label="Close full screen"
-            data-testid="proto-fullscreen-close"
-            onClick={() => onCloseFullscreen?.()}
-          >
-            ×
-          </button>
-          <div className="proto-fullscreen-body">
-            <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} />
-          </div>
-        </div>
+        <FullscreenOverlay
+          bundleUrl={bundleUrl}
+          isComplete={isComplete}
+          onCloseFullscreen={onCloseFullscreen}
+        />
       )}
     </div>
   )
@@ -1301,6 +1422,42 @@ export function PostGenerationResult({
   const [markMode, setMarkMode] = useState<boolean>(false)
   const [pins, setPins] = useState<PinComment[]>([])
   const pinCounter = useRef<number>(0)
+  const [computedPinPositions, setComputedPinPositions] = useState<Record<number, { xPct: number; yPct: number }>>({})
+  const leftPanelRef = useRef<HTMLDivElement>(null)
+
+  const recomputePinPositions = useCallback(() => {
+    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+    const updates: Record<number, { xPct: number; yPct: number }> = {}
+    for (const pin of pins) {
+      if (pin.anchor) {
+        const pos =
+          pin.xPctInEl != null && pin.yPctInEl != null
+            ? getAnchorPositionWithOffset(iframe, pin.anchor, pin.xPctInEl, pin.yPctInEl)
+            : getAnchorPosition(iframe, pin.anchor)
+        if (pos) updates[pin.n] = pos
+      }
+    }
+    setComputedPinPositions(updates)
+  }, [pins])
+
+  useEffect(() => {
+    recomputePinPositions()
+    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+    const win = iframe?.contentWindow
+    win?.addEventListener("scroll", recomputePinPositions, { passive: true })
+    window.addEventListener("resize", recomputePinPositions, { passive: true })
+    return () => {
+      win?.removeEventListener("scroll", recomputePinPositions)
+      window.removeEventListener("resize", recomputePinPositions)
+    }
+  }, [recomputePinPositions])
+
+  useEffect(() => {
+    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+    if (!iframe) return
+    iframe.addEventListener("load", recomputePinPositions)
+    return () => iframe.removeEventListener("load", recomputePinPositions)
+  }, [recomputePinPositions])
 
   // Escape closes the full-screen
   // overlay (in addition to the visible × close button). Bound only while open.
@@ -1313,6 +1470,23 @@ export function PostGenerationResult({
     return () => document.removeEventListener("keydown", onKey)
   }, [fullscreenOpen])
 
+  // Clear any active element highlight whenever mark mode is exited.
+  useEffect(() => {
+    if (!markMode) clearElementHighlight()
+  }, [markMode])
+
+  // Scroll to the activity section when the FIRST SSE event arrives so the
+  // user sees the stream without having to scroll. Only fires on the transition
+  // from 0 → 1 events (length === 1). The leftPanelRef is attached to the
+  // `.da-left` aside via the pure view; the activityEl query finds `.da-left-activity`
+  // within it, matching the ActivityPanel mount point.
+  useEffect(() => {
+    if ((iterateActivity?.length ?? 0) === 1) {
+      const activityEl = leftPanelRef.current?.querySelector('.da-left-activity')
+      activityEl?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [iterateActivity?.length])
+
   function toggleMark() {
     setMarkMode((on) => {
       const next = !on
@@ -1322,17 +1496,36 @@ export function PostGenerationResult({
   }
 
   // Drop a numbered pin at the clicked stage location + open its comment composer.
-  function handleStageClick(xPct: number, yPct: number, viewportX: number, viewportY: number) {
+  function handleStageClick(xPct: number, yPct: number, viewportX: number, viewportY: number, anchor: { type: 'anchor-id' | 'xpath'; value: string } | null) {
+    const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+    let xPctInEl: number | null = null
+    let yPctInEl: number | null = null
+    let finalXPct = xPct
+    let finalYPct = yPct
+    let elementFriendly: string | null = null
+    let elementTechnical: string | null = null
+    if (anchor && iframe) {
+      const offset = getClickOffsetInElement(iframe, viewportX, viewportY, anchor)
+      if (offset) {
+        xPctInEl = offset.xPctInEl
+        yPctInEl = offset.yPctInEl
+        const pos = getAnchorPositionWithOffset(iframe, anchor, xPctInEl, yPctInEl)
+        if (pos) { finalXPct = pos.xPct; finalYPct = pos.yPct }
+      }
+      const anchorEl = findByAnchor(iframe, anchor)
+      const desc = getElementDescription(anchorEl)
+      elementFriendly = desc?.friendly ?? null
+      elementTechnical = desc?.technical ?? null
+    }
     pinCounter.current += 1
     const n = pinCounter.current
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    const resolvedAnchorId = resolveAnchorAtPoint(iframe, viewportX, viewportY)
     setPins((prev) => [
       ...prev,
-      { n, xPct, yPct, draft: "", body: "", saved: false, busy: false, error: null, resolvedAnchorId },
+      { n, xPct: finalXPct, yPct: finalYPct, xPctInEl, yPctInEl, anchor, elementFriendly, elementTechnical, draft: "", body: "", saved: false, busy: false, error: null },
     ])
     setCommentsOpen(true)
-    setMarkMode(false) // David exits mark mode per pin
+    setMarkMode(false)
+    clearElementHighlight()
   }
 
   function handlePinDraftChange(n: number, value: string) {
@@ -1366,7 +1559,7 @@ export function PostGenerationResult({
           body: pin.draft.trim(),
           pin_x_pct: pin.xPct,
           pin_y_pct: pin.yPct,
-          resolved_anchor_id: pin.resolvedAnchorId ?? null,
+          resolved_anchor_id: serializeAnchor(pin.anchor),
         }),
       )
       setPins((prev) =>
@@ -1422,9 +1615,10 @@ export function PostGenerationResult({
     const pin = pins.find((p) => p.n === n)
     if (!pin || !pin.saved) return
     const region = pinRegionHint(pin.xPct, pin.yPct)
-    const instruction = `Re: pin #${pin.n} (near the ${region} of the prototype, at ~${Math.round(
-      pin.xPct,
-    )}%,${Math.round(pin.yPct)}%): ${pin.body}`
+    const elPart = pin.elementFriendly ? ` on ${pin.elementFriendly}` : ''
+    const instruction = pin.elementTechnical
+      ? `Re: pin #${pin.n}${elPart} (${region}):\n${pin.body}\n[ref: ${pin.elementTechnical}]`
+      : `Re: pin #${pin.n}${elPart} (${region}): ${pin.body}`
     // pin Apply now runs the iterate
     // IMMEDIATELY through the shared runner (pin context + body as the
     // instruction) when `onPinIterate` is supplied — same fixed path as the
@@ -1528,6 +1722,8 @@ export function PostGenerationResult({
       onAnswerQuestion={onAnswerQuestion}
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
+      computedPinPositions={computedPinPositions}
+      leftPanelRef={leftPanelRef}
     />
   )
 }

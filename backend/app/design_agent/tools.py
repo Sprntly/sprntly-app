@@ -556,6 +556,113 @@ def _extract_top_level_frames(file_doc: dict, frame_ids: list[str]) -> list[dict
     return out
 
 
+def _extract_palette_summary(file_doc: dict) -> dict:
+    """Walk the Figma document tree and extract the dominant fill palette.
+
+    Returns a dict with:
+      - background: hex of the most common large-area dark/light fill
+      - accent: hex of the least-common (likely interactive/highlight) fill
+      - is_dark: True when the dominant background is dark
+      - swatches: list of all unique hex colors found (up to 12, deduplicated)
+    Falls back gracefully to empty on any structure error.
+    """
+    from collections import Counter
+
+    fills: list[str] = []
+
+    def _walk(node: object) -> None:
+        if not isinstance(node, dict):
+            return
+        for fill in (node.get("fills") or []):
+            if not isinstance(fill, dict):
+                continue
+            if fill.get("type") != "SOLID":
+                continue
+            if fill.get("visible") is False:
+                continue
+            c = fill.get("color", {})
+            r = int((c.get("r", 0) or 0) * 255)
+            g = int((c.get("g", 0) or 0) * 255)
+            b = int((c.get("b", 0) or 0) * 255)
+            fills.append(f"#{r:02x}{g:02x}{b:02x}")
+        for child in (node.get("children") or []):
+            _walk(child)
+
+    try:
+        _walk(file_doc.get("document", {}))
+    except Exception:
+        return {}
+
+    if not fills:
+        return {}
+
+    counter = Counter(fills)
+    ordered = [c for c, _ in counter.most_common()]
+
+    def _luminance(hex_color: str) -> float:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        return 0.299 * r + 0.587 * g + 0.114 * b
+
+    # Background: most common fill among the dark ones (luminance < 80).
+    # Falls back to most common fill if none are dark.
+    dark_fills = [c for c in ordered if _luminance(c) < 80]
+    background = dark_fills[0] if dark_fills else ordered[0] if ordered else None
+
+    is_dark = bool(background and _luminance(background) < 128)
+
+    # Accent: most SATURATED fill in the mid-luminance range (60–220).
+    # Saturation = (max_channel - min_channel) / max_channel.
+    # This picks the "pop" color (e.g. gold, coral) over neutral grays that
+    # happen to land in the same luminance band but have low saturation.
+    def _saturation(hex_color: str) -> float:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        mx = max(r, g, b)
+        return (mx - min(r, g, b)) / mx if mx else 0.0
+
+    mid_fills = [c for c in ordered if 60 <= _luminance(c) <= 220]
+    saturated = sorted(mid_fills, key=_saturation, reverse=True)
+    accent = saturated[0] if saturated else (ordered[-1] if len(ordered) > 1 else None)
+
+    # After collecting fills, also collect typography from TEXT nodes
+    fonts: dict[str, set[int]] = {}  # fontFamily → set of fontWeights
+
+    def _walk_text(node: object) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "TEXT":
+            style = node.get("style", {})
+            family = style.get("fontFamily")
+            weight = style.get("fontWeight")
+            if family:
+                fonts.setdefault(family, set())
+                if isinstance(weight, (int, float)):
+                    fonts[family].add(int(weight))
+        for child in (node.get("children") or []):
+            _walk_text(child)
+
+    try:
+        _walk_text(file_doc.get("document", {}))
+    except Exception:
+        pass
+
+    # Dominant font = most-used family; collect its weights sorted
+    dominant_font = max(fonts, key=lambda f: len(fonts[f])) if fonts else None
+    dominant_weights = sorted(fonts.get(dominant_font, set())) if dominant_font else []
+
+    return {
+        "background": background,
+        "accent": accent,
+        "is_dark": is_dark,
+        "swatches": ordered[:12],
+        "font_family": dominant_font,        # e.g. "Inter"
+        "font_weights": dominant_weights,    # e.g. [400, 700]
+    }
+
+
 async def _exec_fetch_figma(inp: dict, ctx: ToolContext) -> dict:
     if not ctx.figma_file_key:
         return {"is_error": True, "content": "No Figma file key configured for this prototype.", "tool_name": "fetch_figma"}
@@ -578,7 +685,7 @@ async def _exec_fetch_figma(inp: dict, ctx: ToolContext) -> dict:
     file_doc = await asyncio.to_thread(fetch_file, ctx.figma_access_token, ctx.figma_file_key)
     styles = await asyncio.to_thread(fetch_file_styles, ctx.figma_access_token, ctx.figma_file_key)
     frames = _extract_top_level_frames(file_doc, frame_ids)[:5]
-    return {"frames": frames, "styles": styles}
+    return {"frames": frames, "styles": styles, "palette": _extract_palette_summary(file_doc)}
 
 
 async def _exec_read_console(inp: dict, ctx: ToolContext) -> dict:

@@ -54,13 +54,14 @@ from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
-from app.db.prds import get_prd_rendered
+from app.db.prds import get_prd_rendered, reset_prd_to_draft
 from app.db.products import get_company_website  # onboarding-website fallback source
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
     advance_current_checkpoint,
     complete_prototype,
     create_checkpoint,
+    delete_prototype,
     fail_prototype,
     find_existing_prototype,
     find_prototype_by_share_token,
@@ -78,7 +79,9 @@ from app.db.prototypes import (
     set_share_config,
     start_prototype,
     verify_share_passcode,
+    clear_pending_question,
 )
+from app.design_agent.client import get_design_agent_client
 from app.design_agent.prompts import (
     DESIGN_AGENT_SCAFFOLD_SYSTEM,
     DESIGN_AGENT_TEMPLATE_VERSION,
@@ -423,6 +426,21 @@ def get_one(
     if not row:
         raise HTTPException(status_code=404, detail="Prototype not found")
     return row
+
+
+@router.delete("/{prototype_id}", status_code=204, dependencies=[Depends(require_same_origin)])
+def delete_prototype_route(
+    prototype_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> Response:
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    existing = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    delete_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    reset_prd_to_draft(existing["prd_id"])
+    return Response(status_code=204)
 
 
 @router.get("/by-prd/{prd_id}")
@@ -1313,7 +1331,7 @@ def _export_filename(proto: dict[str, Any]) -> str:
 # credentials can act"), external viewers create + read only; there is NO public
 # resolve route. Public-write rate limiting is OUT of scope here — it lands in
 # P5-07 (per TICKET_LIST shared-resources).
-from app.db.prototype_comments import insert_comment, list_comments, resolve_comment
+from app.db.prototype_comments import insert_comment, list_comments, resolve_comment, delete_comment
 
 
 class CommentCreate(BaseModel):
@@ -1383,7 +1401,8 @@ def post_comment(
         workspace_id=workspace_id,
         anchor_id=body.anchor_id,
         body=body.body,
-        author="demo",
+        author=company.user_name or company.user_email or company.user_id,
+        user_id=company.user_id,
         pin_x_pct=body.pin_x_pct,
         pin_y_pct=body.pin_y_pct,
         resolved_anchor_id=body.resolved_anchor_id,
@@ -1431,6 +1450,18 @@ def patch_resolve_comment(
     return CommentOut(**_comment_to_out(row))
 
 
+@router.delete("/{prototype_id}/comments/{cid}", status_code=204, dependencies=[Depends(require_same_origin)])
+def delete_comment_route(
+    prototype_id: int,
+    cid: int,
+    company: CompanyContext = Depends(require_company),
+) -> Response:
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    delete_comment(comment_id=cid, workspace_id=workspace_id)
+    return Response(status_code=204)
+
+
 # ─── Public (token-resolved, NO auth) comment routes ──────────────────────
 #
 # F8: "anyone with the URL can comment." The token IS the access primitive.
@@ -1446,6 +1477,7 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     prototype is private or not ready (404, matching get_by_token's posture).
     The comment is attributed to the anonymous external author label, and the
     workspace_id is taken from the resolved row — never a session claim."""
+    raise HTTPException(status_code=404, detail="Not found")
     _require_feature_enabled()
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
@@ -1500,6 +1532,67 @@ def get_comments_public(token: str) -> list[CommentOut]:
         CommentOut(**_comment_to_out(r))
         for r in list_comments(prototype_id=proto["id"], workspace_id=proto["workspace_id"])
     ]
+
+
+# ─── Comment clarify ────────────────────────────────────────────────────────────
+#
+# POST /{prototype_id}/clarify-comment
+#
+# Lightweight LLM call (claude-haiku-4-5-20251001, max_tokens=200) that
+# generates a single clarifying question for a comment body before the Apply
+# flow commits an iterate. Backed by the shared `get_design_agent_client()`
+# factory. Uses the design agent API key.
+# Not in the iterate queue — this is a synchronous pre-flight, fast enough
+# (<1s on Haiku) to sit in the request path without a background task.
+
+
+class ClarifyCommentRequest(BaseModel):
+    comment_body: str = Field(..., min_length=1, max_length=4000)
+
+
+class ClarifyCommentResponse(BaseModel):
+    question: str
+
+
+@router.post("/{prototype_id}/clarify-comment", response_model=ClarifyCommentResponse, dependencies=[Depends(require_same_origin)])
+def clarify_comment_route(
+    prototype_id: int,
+    body: ClarifyCommentRequest,
+    company: CompanyContext = Depends(require_company),
+) -> ClarifyCommentResponse:
+    """Return a single clarifying question for a comment before Apply is confirmed.
+
+    Workspace-isolated (require_company) and feature-flag-gated. Uses the shared
+    Design Agent Anthropic client with a lightweight Haiku call so the
+    dialog loads in <1s without touching the iterate queue.
+    """
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if proto is None:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    client = get_design_agent_client()
+    FALLBACK_QUESTION = "Looks good — any additional context to add?"
+    try:
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            timeout=10.0,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f'You are reviewing a design feedback comment about to be applied to a UI prototype.\n'
+                    f'Comment: "{body.comment_body}"\n'
+                    f'Ask exactly ONE brief, specific clarifying question to understand the designer\'s intent before applying this change. '
+                    f'Be concise (one sentence max). Do not explain yourself, just ask the question.'
+                ),
+            }],
+        )
+        text_blocks = [b for b in (msg.content or []) if hasattr(b, "text")]
+        question = text_blocks[0].text.strip() if text_blocks else FALLBACK_QUESTION
+    except Exception:
+        question = FALLBACK_QUESTION
+    return ClarifyCommentResponse(question=question)
 
 
 # ─── Iterate: re-prompt + Apply-driven edits (P3-05) ───────────────────────────
@@ -1842,6 +1935,15 @@ async def _run_iterate_bg(
             prd_references_codebase=False,  # P4-05 implements the codebase detector
         )
         scenario_label = ",".join(sorted(scenario_set))
+
+        try:
+            await asyncio.to_thread(
+                clear_pending_question,
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+            )
+        except Exception:
+            pass
 
         result, virtual_fs = await iterate_prototype(
             prototype_id=prototype_id,

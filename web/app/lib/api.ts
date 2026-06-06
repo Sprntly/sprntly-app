@@ -674,6 +674,8 @@ export const designAgentApi = {
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
     api.get<PrototypeRecord>(`/v1/design-agent/${prototypeId}`),
+  delete: (prototypeId: number) =>
+    api.delete<void>(`/v1/design-agent/${prototypeId}`),
   /**
    * READ-ONLY "does this PRD have a ready prototype?" lookup, by PRD id. Powers
    * the PRD-screen preview card and the "View Prototype" vs "Generate Prototype"
@@ -774,6 +776,8 @@ export const designAgentApi = {
     api.patch<CommentRecord>(
       `/v1/design-agent/${prototypeId}/comments/${commentId}/resolve`,
     ),
+  deleteComment: (prototypeId: number, commentId: number) =>
+    api.delete<void>(`/v1/design-agent/${prototypeId}/comments/${commentId}`),
   // ── F11 PRD patches (P3-10) ───────────────────────────────────────────────
   /** List the PENDING PRD patches for a PRD (workspace-filtered server-side).
    *  The PrdPatchBanner calls this on mount to decide whether to surface. */
@@ -855,6 +859,11 @@ export const designAgentApi = {
    *  auditable in one place. */
   eventsUrl: (prototypeId: number, token: string): string =>
     `${API_URL}/v1/design-agent/${prototypeId}/events?token=${encodeURIComponent(token)}`,
+  /** Ask the LLM for a single clarifying question about a comment body before
+   *  the Apply flow commits an iterate. Lightweight Haiku call — resolves in
+   *  <1s. Returns { question }. */
+  clarifyComment: (prototypeId: number, commentBody: string) =>
+    api.post<{ question: string }>(`/v1/design-agent/${prototypeId}/clarify-comment`, { comment_body: commentBody }),
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */

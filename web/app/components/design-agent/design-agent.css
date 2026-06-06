@@ -107,33 +107,20 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  padding: 12px 13px;
+  padding: 10px 12px;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .design-agent-surface .comment-thread:hover { border-color: var(--line-strong); }
 .design-agent-surface .comment--resolved { opacity: 0.72; }
 .design-agent-surface .comment--orphaned { border-style: dashed; border-color: var(--warn); }
-.design-agent-surface .comment-pin {
-  width: 20px;
-  height: 20px;
-  background: var(--accent);
-  color: var(--surface-2);
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  font-weight: 700;
-  font-family: var(--font-mono);
-  flex-shrink: 0;
-}
+.design-agent-surface .comment-pin { display: none; }
 .design-agent-surface .comment-pin--resolved { background: var(--ink-3); }
 .design-agent-surface .comment-pin-extra { font-size: 10.5px; color: var(--muted); margin-left: 6px; }
 .design-agent-surface .comment-body {
   font-size: 13px;
   color: var(--ink-2);
   line-height: 1.55;
-  margin: 6px 0 9px;
+  margin: 4px 0 6px;
 }
 .design-agent-surface .comment-meta {
   display: flex;
@@ -145,7 +132,6 @@
 .design-agent-surface .comment-author { color: var(--ink); font-weight: 600; }
 .design-agent-surface .comment-timestamp { color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; }
 .design-agent-surface .comment-resolve-btn { padding: 4px 10px; font-size: 12px; }
-.design-agent-surface .comment-apply-btn { padding: 4px 10px; font-size: 12px; }
 
 /* ── Comment composer (CommentsPanel) ─────────────────────────────────── */
 .design-agent-surface .comment-composer {
@@ -666,6 +652,50 @@
   color: var(--muted);
   line-height: 1.4;
 }
+/* ── Figma URL paste input ─────────────────────────────────────────────────
+ * Sits below the Figma src-row-compact when Figma is connected. Provides a
+ * URL text input as the primary Figma file selection path (the list-files
+ * dropdown is always empty because Figma has no list-files API). No hex
+ * literals — CSS custom properties only.
+ */
+.design-agent-surface.modal .da-generate-figma-url {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 4px;
+}
+.design-agent-surface.modal .da-generate-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.design-agent-surface.modal .da-generate-input {
+  /* Reuses the global .input look — same border/radius/padding tokens — but
+     scoped here so it sits naturally inside the compact modal layout. */
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+.design-agent-surface.modal .da-generate-input:focus {
+  border-color: var(--accent);
+}
+.design-agent-surface.modal .da-generate-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.design-agent-surface.modal .da-generate-hint--ok {
+  color: var(--accent);
+}
+
 /* short instructions textarea */
 .design-agent-surface.modal .textarea-compact { min-height: 48px; }
 
@@ -810,18 +840,40 @@
   inset: 0;
   z-index: 1000;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 32px;
-  background: var(--ink-alpha-45);
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 0;
+  background: var(--ink);
 }
 .design-agent-surface .proto-fullscreen-body {
   width: 100%;
-  max-width: 1200px;
-  max-height: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  overflow: auto;
+  overflow: hidden;
+}
+.design-agent-surface .proto-fullscreen .da-prototype-viewer {
+  flex: 1;
+  min-height: 0;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
+}
+.design-agent-surface .proto-fullscreen .proto-frame {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+.design-agent-surface .proto-fullscreen .proto-stage {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+.design-agent-surface .proto-fullscreen .da-prototype-iframe {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: auto;
 }
 .design-agent-surface .proto-fullscreen-close {
   position: absolute;
@@ -844,6 +896,8 @@
 .design-agent-surface .proto-fullscreen-close:hover {
   background: var(--surface-3);
 }
+.design-agent-surface .proto-fullscreen:fullscreen .proto-dot,
+.design-agent-surface .proto-fullscreen:fullscreen .proto-url { display: none; }
 
 
 /* ── Passcode gate states (PasscodeGate / UX-8 / P6-18) ───────────────────
@@ -1732,9 +1786,14 @@
   gap: 10px;
   border-bottom: 1px solid var(--line);
 }
-.design-agent-surface .proto-comment {
+.design-agent-surface .da-comment-compose {
   display: flex;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 12px 0;
+}
+.design-agent-surface .proto-comment {
+  display: block;
   padding: 10px;
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -1859,7 +1918,79 @@
   flex-shrink: 0;
   padding: 12px;
   border-top: 1px solid var(--line);
-  background: var(--accent-soft);
+  background: var(--surface-2);
+}
+.design-agent-surface .clarifying-question-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.design-agent-surface .clarifying-question-text {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.45;
+}
+.design-agent-surface .clarifying-question-context {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+  line-height: 1.4;
+}
+.design-agent-surface .clarifying-question-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.design-agent-surface .clarifying-question-choice.btn.btn-accent,
+.design-agent-surface .clarifying-question-choice {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  cursor: pointer;
+  transition: border-color 120ms, color 120ms;
+  white-space: nowrap;
+  line-height: 1;
+}
+.design-agent-surface .clarifying-question-choice.btn.btn-accent:hover,
+.design-agent-surface .clarifying-question-choice:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.design-agent-surface .clarifying-question-choice.btn.btn-accent:disabled,
+.design-agent-surface .clarifying-question-choice:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.design-agent-surface .clarifying-question-input {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+  padding: 8px;
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.design-agent-surface .clarifying-question-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.design-agent-surface .clarifying-question-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 /* CHANGE B — initials avatar (David's `.pc-av`), brand-tinted. Shared by the
@@ -1897,15 +2028,42 @@
 }
 
 /* CHANGE C — Apply / Ignore action row in CommentsPanel threads. */
+.design-agent-surface .comment-apply-btn,
+.design-agent-surface .comment-ignore-btn {
+  all: unset;
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid transparent;
+  line-height: 1.4;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.design-agent-surface .comment-apply-btn {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border-color: var(--accent-alpha-18);
+}
+.design-agent-surface .comment-apply-btn:hover {
+  background: var(--accent);
+  color: var(--surface);
+  border-color: var(--accent);
+}
+.design-agent-surface .comment-ignore-btn {
+  background: transparent;
+  color: var(--ink-3);
+  border-color: var(--line-strong);
+}
+.design-agent-surface .comment-ignore-btn:hover {
+  color: var(--ink);
+  border-color: var(--ink-3);
+}
 .design-agent-surface .comment-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
-}
-.design-agent-surface .comment-ignore-btn,
-.design-agent-surface .comment-apply-btn {
-  padding: 4px 10px;
-  font-size: 12px;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
 }
 
 /* CHANGE B/C — pin-comment author row + resolved state (David's `.resolved`). */
@@ -2015,6 +2173,89 @@
 }
 .design-agent-surface .da-preview-card:hover .da-preview-open {
   color: var(--accent);
+}
+.design-agent-surface .da-preview-card-wrapper {
+  position: relative;
+}
+.design-agent-surface .da-preview-delete-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+}
+.design-agent-surface .da-preview-card-wrapper:hover .da-preview-delete-btn {
+  display: inline-flex;
+}
+.design-agent-surface .da-preview-delete-btn:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--surface-2);
+}
+.design-agent-surface .modal-box {
+  background: var(--surface);
+  border-radius: var(--radius-xl);
+  max-width: 400px;
+  width: 100%;
+  box-shadow: var(--shadow-xl);
+  overflow: hidden;
+  transform: scale(0.96);
+  transition: transform 0.2s;
+}
+.design-agent-surface .modal-overlay.open .modal-box {
+  transform: scale(1);
+}
+.design-agent-surface .modal-subtitle {
+  color: var(--ink-3);
+  font-size: 13.5px;
+  margin: 0;
+  line-height: 1.5;
+}
+.design-agent-surface .modal-cancel {
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.design-agent-surface .modal-cancel:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--ink-3);
+}
+.design-agent-surface .modal-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.design-agent-surface .modal-confirm-danger {
+  margin-left: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--danger);
+  color: var(--surface-2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+.design-agent-surface .modal-confirm-danger:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.design-agent-surface .modal-confirm-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
@@ -2135,16 +2376,38 @@
 }
 /* inline clarifying-answer surface, rendered IN the activity stream. */
 .design-agent-surface .da-activity-answer {
-  margin-top: 4px;
-  padding: 10px;
-  background: var(--surface);
-  border: 1px solid var(--accent-alpha-18);
-  border-radius: var(--radius-sm);
+  margin-top: 2px;
+  padding: 0 0 0 10px;
+  border-left: 2px solid var(--accent-alpha-18);
 }
 .design-agent-surface .da-activity-answer-context {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--muted);
+  font-style: italic;
+}
+.design-agent-surface .da-activity-choice-btn {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent-alpha-40);
+  border-radius: 15px;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+  white-space: nowrap;
+}
+.design-agent-surface .da-activity-choice-btn:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.design-agent-surface .da-activity-choice-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .design-agent-surface .da-activity-answer-choices {
   display: flex;
@@ -2171,4 +2434,85 @@
   margin-top: 8px;
   display: flex;
   justify-content: flex-end;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   COMMENT-CLARIFY DIALOG.
+   The "Confirm change" dialog that intercepts the Apply flow — shows the
+   comment being applied, the LLM-generated clarifying question, and a
+   textarea for the user's optional answer before Apply is committed.
+   Modal chrome (`modal-box`, `modal-overlay`, `modal-cancel`) is shared;
+   only the clarify-specific parts live here.
+   ─────────────────────────────────────────────────────────────────────────── */
+.design-agent-surface .clarify-comment-quote {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.design-agent-surface .clarify-question {
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.design-agent-surface .clarify-loading { opacity: 0.5; }
+.design-agent-surface .clarify-textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--ink);
+  resize: vertical;
+}
+.design-agent-surface .clarify-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* modal-confirm: primary-action variant (non-destructive, accent-coloured).
+   Companion to the existing modal-confirm-danger. */
+.design-agent-surface .modal-confirm {
+  margin-left: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--surface);
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+.design-agent-surface .modal-confirm:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.design-agent-surface .modal-confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Iterate-running sidebar indicators (visible agent streaming) ────────────
+ * "Working…" pill in the left-sidebar header while an iterate is live.
+ * `.is-running` on `.da-left` grows the activity section and compresses the
+ * PRD scroll so both are comfortably visible during a run.
+ * Token-only — no hex literals. */
+.design-agent-surface .da-left-running-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 500;
+  opacity: 0.85;
+}
+.design-agent-surface .da-left.is-running .da-left-scroll {
+  flex: 1 1 0;
+  max-height: 55%;
+}
+.design-agent-surface .da-left.is-running .da-left-activity {
+  flex-shrink: 0;
+  min-height: 120px;
 }

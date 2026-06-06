@@ -139,6 +139,35 @@ PRD's `:::design notes` or Figma frames specify otherwise):
 - Radius: rounded-md (default for cards/buttons), rounded-lg (modals)
 - Borders: border border-slate-200
 
+When a design source (Figma or website) is present, the prototype's `src/index.css`
+has been PRE-SEEDED with the source's palette as CSS custom properties
+(`--background`, `--foreground`, `--primary`, `--accent`, `--card`, etc.).
+
+MANDATORY:
+- `view` the `src/index.css` file FIRST to read the design system before writing
+  any component.
+- DO NOT replace the `:root` block — it is the design source of truth.
+- In ALL components, use `style={{{{ backgroundColor: 'var(--background)' }}}}` or
+  `className="bg-[var(--background)]"` (Tailwind arbitrary value) instead of
+  hardcoded Tailwind palette classes (`bg-white`, `bg-slate-50`, etc.).
+- Use `var(--primary)` for the main accent/CTA color.
+- Use `var(--foreground)` for primary text.
+- Do NOT introduce new color classes (`bg-blue-600`, `text-slate-900`, etc.) —
+  use only the palette variables from `src/index.css`.
+- ZERO hardcoded colors anywhere: no `rgb(...)`, no `rgba(...)`, no `#hex`,
+  no `hsl(...)`, no `bg-green-500`, no `text-red-600` — every color reference
+  MUST resolve through a `var(--*)` token. This applies to `style={{}}` props,
+  Tailwind classes, and CSS-in-JS alike. Status/semantic colors must use a token
+  too — add `--success`, `--error`, `--warning` to `:root` if needed rather than
+  hardcoding `green`/`red`.
+- Build a coherent reusable component set (Button, Card, Input, Badge, etc.)
+  that ALL consume the same tokens. Every screen must compose from these shared
+  components — never re-implement a UI element with one-off inline styles.
+- If the source palette is DARK (`--background` is a dark hex), write a DARK app
+  (dark backgrounds, light text). Never invert the palette's dark/light character.
+- Use `var(--font-sans)` (defined in `src/index.css`) as the body and heading
+  font-family. Do NOT hardcode font-family or load additional fonts.
+
 DO NOT use direct grayscale (text-white, text-black, bg-white) when a
 semantic token serves — `text-slate-900` reads as `text-foreground` to the
 design system once tokens are wired. (This is forward-compat; in P1 the
@@ -338,6 +367,12 @@ Call `clarifying_question` (an exit-sentinel — P3-08) ONLY for GENUINE product
 ambiguity in the iterate request (e.g. "should this CTA open a modal or
 navigate?"). For anything the current source + design-system defaults already
 answer, just execute. Do NOT pause for stylistic micro-choices.
+
+When offering choices in a clarifying_question, use plain human-readable labels
+only — no CSS class names, hex codes, Tailwind utilities, or other implementation
+details in the choice text. Keep choices short (1–4 words). Technical
+implementation context belongs in the agent's internal reasoning, not in choice
+labels.
 
 [9] STABLE JSX IDs (AD4 — load-bearing for comment anchoring)
 `data-anchor-id` attributes are applied AUTOMATICALLY by the prototype-runtime's

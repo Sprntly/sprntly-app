@@ -367,7 +367,7 @@ def test_confirm_plan_prepends_plan_to_system_blocks(monkeypatch):
                                 duration_ms=1, final_content=[])
 
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
-    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
+    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key, ws: None)
     base_blocks = _system()
     _run(runner.iterate_prototype(
         prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=base_blocks, user_message=_user(),
@@ -395,7 +395,7 @@ def test_no_approved_plan_leaves_system_blocks_untouched(monkeypatch):
                                 duration_ms=1, final_content=[])
 
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
-    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
+    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key, ws: None)
     _run(runner.iterate_prototype(
         prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={}, figma_file_key=None, mode="execute",
@@ -464,7 +464,8 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    user_id        TEXT
 );
 CREATE TABLE prototype_pending_iterations (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,

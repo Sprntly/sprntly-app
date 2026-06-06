@@ -44,15 +44,40 @@ const STATUSES = [
 const ESTIMATE_MS = 30000
 const STEP_MS = 3200
 
+// Refresh-mode constants — shorter, simpler steps for the canvas load path.
+const REFRESH_STEPS = [
+  "Fetching your prototype…",
+  "Restoring your design…",
+  "Preparing the canvas…",
+  "Almost there…",
+]
+const REFRESH_STATUSES = [
+  "Fetching your prototype…",
+  "Restoring your design…",
+  "Preparing the canvas…",
+  "Almost there…",
+]
+const REFRESH_ESTIMATE_MS = 5000
+const REFRESH_STEP_MS = 800
+
 export function GenerationLoadingScreen({
   open,
   onDone,
+  mode = "generate",
 }: {
   open: boolean
   /** Optional: fired once the exit fade completes (cosmetic hook). */
   onDone?: () => void
+  /** "generate" (default) = full generation flow; "refresh" = canvas reload. */
+  mode?: "generate" | "refresh"
 }) {
-  // Number of steps marked done (0..STEPS.length). The "active" step is `done`.
+  // Derive active arrays and timings from mode.
+  const steps = mode === "refresh" ? REFRESH_STEPS : STEPS
+  const statuses = mode === "refresh" ? REFRESH_STATUSES : STATUSES
+  const estimateMs = mode === "refresh" ? REFRESH_ESTIMATE_MS : ESTIMATE_MS
+  const stepMs = mode === "refresh" ? REFRESH_STEP_MS : STEP_MS
+
+  // Number of steps marked done (0..steps.length). The "active" step is `done`.
   const [doneCount, setDoneCount] = useState(0)
   const [elapsedMs, setElapsedMs] = useState(0)
   const startedAtRef = useRef<number>(0)
@@ -74,18 +99,18 @@ export function GenerationLoadingScreen({
       setElapsedMs(Date.now() - startedAtRef.current)
     }, 100)
 
-    // Progressive step reveal — advance one step per STEP_MS, but never mark the
+    // Progressive step reveal — advance one step per stepMs, but never mark the
     // LAST step done while we're still waiting (so the final spinner keeps
     // spinning until the parent dismisses on real completion).
     const stepTimer = window.setInterval(() => {
-      setDoneCount((c) => (c < STEPS.length - 1 ? c + 1 : c))
-    }, STEP_MS)
+      setDoneCount((c) => (c < steps.length - 1 ? c + 1 : c))
+    }, stepMs)
 
     return () => {
       window.clearInterval(tick)
       window.clearInterval(stepTimer)
     }
-  }, [open])
+  }, [open, steps.length, stepMs])
 
   // Fire onDone after the overlay is removed.
   const prevOpen = useRef(open)
@@ -98,16 +123,19 @@ export function GenerationLoadingScreen({
 
   const elapsedS = elapsedMs / 1000
   // Cap the cosmetic fill at 96% until real completion dismisses the screen.
-  const pct = Math.min(96, Math.round((elapsedMs / ESTIMATE_MS) * 100))
-  const activeIndex = Math.min(doneCount, STEPS.length - 1)
-  const status = STATUSES[activeIndex] ?? STATUSES[STATUSES.length - 1]
+  const pct = Math.min(96, Math.round((elapsedMs / estimateMs) * 100))
+  const activeIndex = Math.min(doneCount, steps.length - 1)
+  const status = statuses[activeIndex] ?? statuses[statuses.length - 1]
+
+  const headline =
+    mode === "refresh" ? "Loading your prototype" : "Building your prototype"
 
   return (
     <div
       className="proto-gen-overlay design-agent-surface"
       role="status"
       aria-live="polite"
-      aria-label="Building your prototype"
+      aria-label={headline}
     >
       <div className="proto-gen-inner">
         <div className="proto-gen-orb" aria-hidden="true">
@@ -117,7 +145,7 @@ export function GenerationLoadingScreen({
           <div className="d" />
         </div>
         <div className="proto-gen-h">
-          Building your prototype
+          {headline}
           <span className="thinking-cursor" aria-hidden="true" />
         </div>
         <div className="proto-gen-s">{status}</div>
@@ -125,12 +153,14 @@ export function GenerationLoadingScreen({
           <div className="bar">
             <div className="fill" style={{ width: `${pct}%` }} />
           </div>
-          <div className="lbl">
-            {elapsedS.toFixed(1)}s · est. ~{Math.round(ESTIMATE_MS / 1000)}s
-          </div>
+          {mode !== "refresh" && (
+            <div className="lbl">
+              {elapsedS.toFixed(1)}s · est. ~{Math.round(estimateMs / 1000)}s
+            </div>
+          )}
         </div>
         <div className="proto-gen-steps">
-          {STEPS.map((label, i) => {
+          {steps.map((label, i) => {
             const isDone = i < doneCount
             const isActive = i === activeIndex && !isDone ? true : i === doneCount
             const cls =

@@ -149,11 +149,9 @@ export function useIterateRun({
 
       // 1) The user's request as a chat message.
       appendActivity({ kind: "user", text: prompt })
-      // 2) Single "Working…" placeholder so the activity stream shows motion
-      //    even if SSE never connects (graceful degrade to poll-only).
-      appendActivity({ kind: "step", text: COSMETIC_STEPS[0], state: "active" })
 
-      // 3) Open a real backend SSE stream for per-step events. Real backend
+      // 2) Open a real backend SSE stream for per-step events. The backend
+      //    already sends the first step; no pre-append here to avoid duplicates. Real backend
       //    events feed appendActivity directly via the same ActivityEventInput
       //    union. The poll loop below is the terminal-state resolver AND the
       //    fallback when SSE is unavailable — if EventSource fails to open or
@@ -166,6 +164,12 @@ export function useIterateRun({
           es.onmessage = (e) => {
             try {
               const event = JSON.parse(e.data) as ActivityEventInput
+              // Dedup: when a new step arrives while the previous one is still
+              // "active", flip it to "done" first so the activity list never
+              // accumulates two concurrent spinners (rapid backend step events).
+              if (event.kind === "step" && event.state === "active") {
+                markLastStepDone()
+              }
               appendActivity(event)
               if (event.kind === "done" || event.kind === "error") {
                 es.close()

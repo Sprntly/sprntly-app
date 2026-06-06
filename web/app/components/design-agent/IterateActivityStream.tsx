@@ -21,6 +21,10 @@
 
 import type { ActivityEvent } from "./useIterateRun"
 
+function stripAgentContext(text: string): string {
+  return text.split('\n').filter(l => !l.startsWith('[ref:')).join('\n').trim()
+}
+
 export function IterateActivityStream({
   activity,
   running,
@@ -46,7 +50,7 @@ export function IterateActivityStream({
                 className="proto-msg proto-msg--user"
                 data-testid="da-activity-user"
               >
-                <p className="proto-msg-body">{e.text}</p>
+                <p className="proto-msg-body">{stripAgentContext(e.text)}</p>
               </div>
             )
           case "step":

@@ -32,3 +32,8 @@ out/
 dist/
 build/
 .vercel/
+
+# Design Agent generated artifacts (not source-of-truth)
+backend/data/plotline/
+backend/data/prototypes/
+web/public/prototype-bundles

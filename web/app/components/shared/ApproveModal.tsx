@@ -15,7 +15,9 @@ import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen
 import { PostGenerationResult } from "../design-agent/PostGenerationResult"
 import { CommentsPanel } from "../design-agent/CommentsPanel"
 import { IterateComposer } from "../design-agent/IterateComposer"
-import { designAgentApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
+import { designAgentApi, prdApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
+import { markdownToPrdState } from "../../lib/prd-adapter"
+import type { PrdSection } from "../../types/content"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 import { useIterateRun } from "../design-agent/useIterateRun"
 import { IconCheck, IconSparkle } from "./app-icons"
@@ -31,7 +33,7 @@ const MIN_VISIBLE_MS = 2500
 const SAFETY_MAX_MS = 6.5 * 60 * 1000
 
 export function ApproveModal() {
-  const { activeModal, openModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas } =
+  const { activeModal, openModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas, showToast } =
     useNavigation()
   const { content } = useContent()
   // The workspace hydration gate for the canvas resolver.
@@ -54,6 +56,8 @@ export function ApproveModal() {
   // never kicks a generation — and degrades to null (label stays "Generate
   // Prototype") when no ready prototype exists for this PRD.
   const [existing, setExisting] = useState<PrototypeRecord | null>(null)
+  const [urlPrdSections, setUrlPrdSections] = useState<PrdSection[] | undefined>(undefined)
+  const [urlPrdTitle, setUrlPrdTitle] = useState<string | null>(null)
 
   // Min-duration bookkeeping: track when the overlay was shown and whether
   // generation has resolved, so dismissal waits for the later of the two.
@@ -148,6 +152,9 @@ export function ApproveModal() {
   const closeCanvas = useCallback(() => {
     setCanvasResult(null)
     setApplyTarget(null)
+    setUrlPrdSections(undefined)
+    setUrlPrdTitle(null)
+    urlResolvedIdRef.current = null
     // Leave the canvas route so the URL and view stay consistent and the
     // resolver does not immediately re-open the canvas. The canvas opens from
     // the approved PRD, so the PRD is its logical parent.
@@ -210,6 +217,9 @@ export function ApproveModal() {
     [runCanvasIterate],
   )
 
+  // Guard for "View Prototype" re-verification: prevents opening a stale canvas.
+  const [viewBusy, setViewBusy] = useState(false)
+
   const prd = content.prd
 
   // Resolve the PRD's existing ready prototype read-only while the approve modal
@@ -269,6 +279,18 @@ export function ApproveModal() {
     }
   }, [canvasPrototypeId, workspaceLoading, canvasResult?.id])
 
+  // When canvasResult is set by the URL resolver, fetch the PRD so the left
+  // panel has sections/title. Best-effort — swallows errors, no loading state.
+  const canvasResultPrdId = (canvasResult as (PrototypeRecord & { prd_id?: number }) | null)?.prd_id ?? null
+  useEffect(() => {
+    if (!canvasResultPrdId || urlPrdSections !== undefined) return
+    prdApi.get(canvasResultPrdId).then((prd) => {
+      const parsed = markdownToPrdState(prd.payload_md)
+      setUrlPrdSections(parsed.sections)
+      setUrlPrdTitle(prd.title ?? null)
+    }).catch(() => {/* best-effort */})
+  }, [canvasResultPrdId, urlPrdSections])
+
   // Render the generate-modal subtree regardless of which modal is active, so
   // the loading overlay (a top-level sibling) covers the whole viewport (incl.
   // the sidebar) regardless of modal state.
@@ -302,8 +324,8 @@ export function ApproveModal() {
               prev ? { ...prev, is_complete: state.isComplete } : prev,
             )
           }
-          prdSections={prd?.sections}
-          prdTitle={prd?.title ?? null}
+          prdSections={prd?.sections ?? urlPrdSections}
+          prdTitle={prd?.title ?? urlPrdTitle}
           // One-line PRD meta for the
           // condensed left context panel.
           prdMetaLine={prd?.metaLine ?? null}
@@ -383,17 +405,35 @@ export function ApproveModal() {
 
   if (activeModal !== "approve") return generateModal
 
-  // When the PRD already has a ready prototype, "View Prototype" opens the canvas
-  // directly with the existing prototype, skipping the loading sequence (no
-  // GenerationLoadingScreen). Otherwise "Generate Prototype" → GenerateModal →
-  // loading screen → canvas (unchanged).
-  const handleClaudeClick = () => {
+  // When the PRD already has a ready prototype, "View Prototype" re-verifies that
+  // the prototype still exists before opening the canvas (guard against stale
+  // `existing` after a delete). On null → switch the label back to "Generate
+  // Prototype" and surface a toast. Otherwise falls through to GenerateModal.
+  const handleClaudeClick = async () => {
     if (existing) {
-      closeModal()
-      setCanvasResult(existing)
-      // Push the refresh-stable canvas route for the existing prototype too, so
-      // "View Prototype" → refresh re-opens the canvas.
-      goToCanvas(existing.id)
+      const prdId = prd?.prd_id
+      if (prdId == null) return
+      setViewBusy(true)
+      try {
+        const fresh = await designAgentApi.getByPrd(prdId)
+        if (fresh && fresh.status === "ready" && fresh.bundle_url) {
+          closeModal()
+          setCanvasResult(fresh)
+          // Push the refresh-stable canvas route for the existing prototype too, so
+          // "View Prototype" → refresh re-opens the canvas.
+          goToCanvas(fresh.id)
+        } else {
+          // Prototype was deleted or is no longer ready — reset so the button
+          // switches back to "Generate Prototype".
+          setExisting(null)
+          showToast("Prototype unavailable", "The prototype was removed. Generate a new one.")
+        }
+      } catch {
+        setExisting(null)
+        showToast("Prototype unavailable", "The prototype was removed. Generate a new one.")
+      } finally {
+        setViewBusy(false)
+      }
       return
     }
     // Hand the generate modal's visibility to the navigation modal union; this
@@ -425,7 +465,10 @@ export function ApproveModal() {
           </p>
         </div>
         <div className="modal-options">
-          <div className="modal-option" onClick={handleClaudeClick}>
+          <div
+            className={`modal-option${viewBusy ? " opacity-50 pointer-events-none" : ""}`}
+            onClick={handleClaudeClick}
+          >
             <div className="modal-option-icon">
               <IconSparkle size={18} />
             </div>

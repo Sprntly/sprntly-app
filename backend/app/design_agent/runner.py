@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -72,7 +73,11 @@ logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"  # AD2; NEVER claude-sonnet-4-7
 DEFAULT_MAX_ITERS = 40
-DEFAULT_MAX_TOKENS = 4096
+try:
+    DEFAULT_MAX_TOKENS = int(os.environ.get("DESIGN_AGENT_MAX_TOKENS", "4096"))
+except ValueError:
+    logger.warning("DESIGN_AGENT_MAX_TOKENS is not a valid integer; falling back to 4096")
+    DEFAULT_MAX_TOKENS = 4096
 TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
 
 # ── Pre-flight cost estimate (AD14 / AD15, P3-11) ────────────────────────────
@@ -216,7 +221,7 @@ def _wrap_up_nudge(iters_remaining: int) -> str:
     )
 
 
-def _resolve_figma_access_token(figma_file_key: str | None) -> str | None:
+def _resolve_figma_access_token(figma_file_key: str | None, workspace_id: str) -> str | None:
     """Best-effort Figma access-token resolution for the `fetch_figma` tool.
 
     The tool executor never decrypts tokens itself (keeps tools.py importable
@@ -234,7 +239,7 @@ def _resolve_figma_access_token(figma_file_key: str | None) -> str | None:
         # FastAPI connector/db stack, and lets tests monkeypatch this resolver.
         from app.routes.connectors import _figma_access_token
 
-        return _figma_access_token()
+        return _figma_access_token(workspace_id)
     except Exception as exc:  # not-connected (HTTPException 404), decrypt errors, etc.
         logger.info(
             "design_agent.figma_token_unresolved figma_file_key=%s error_class=%s",
@@ -242,6 +247,83 @@ def _resolve_figma_access_token(figma_file_key: str | None) -> str | None:
             type(exc).__name__,
         )
         return None
+
+
+def _render_palette_css(palette: dict) -> str:
+    """Generate a minimal CSS file pre-seeding the design source palette.
+
+    Called ONCE before `generate_prototype`'s agent loop starts. The file is
+    written into `virtual_fs["src/index.css"]` so it is already on disk when
+    the agent's first `write` call fires. This guarantees the palette is the
+    starting point — the agent cannot start from stock Tailwind defaults and
+    then ignore a palette instruction it received only inside the tool result.
+
+    The agent prompt (§5 DESIGN SYSTEM) instructs the agent to `view`
+    `src/index.css` first and to use `var(--background)` etc. in all
+    components rather than hardcoded Tailwind palette classes.
+    """
+    bg = palette.get("background", "#ffffff")
+    accent = palette.get("accent", "#3b82f6")
+    is_dark = palette.get("is_dark", False)
+    swatches = palette.get("swatches", [])
+
+    # Derive foreground from is_dark (light text on dark bg, dark text on light bg)
+    fg = "#f4f1ea" if is_dark else "#1a1a1a"
+
+    # Find a surface color: second-most-common swatch, or bg
+    surface = swatches[1] if len(swatches) > 1 else bg
+
+    # muted: third swatch or similar
+    muted = swatches[2] if len(swatches) > 2 else surface
+
+    font_family = palette.get("font_family")
+    font_weights = palette.get("font_weights") or [400, 700]
+
+    # Generate Google Fonts import for web-safe fonts
+    # Only for common Google Fonts — fall back to system stack for others
+    GOOGLE_FONTS = {
+        "Inter", "Roboto", "Open Sans", "Lato", "Montserrat", "Poppins",
+        "Source Sans Pro", "Nunito", "Raleway", "Playfair Display",
+        "Merriweather", "PT Sans", "Ubuntu", "DM Sans", "Plus Jakarta Sans",
+    }
+
+    font_import = ""
+    font_stack = "ui-sans-serif, system-ui, sans-serif"
+    if font_family and font_family in GOOGLE_FONTS:
+        weights_str = ";".join(str(w) for w in sorted(set(font_weights or [400, 700])))
+        font_import = f'@import url("https://fonts.googleapis.com/css2?family={font_family.replace(" ", "+")}:wght@{weights_str}&display=swap");\n'
+        font_stack = f'"{font_family}", ui-sans-serif, system-ui, sans-serif'
+    elif font_family:
+        # Non-Google font — use it optimistically in the stack (may fall through)
+        font_stack = f'"{font_family}", ui-sans-serif, system-ui, sans-serif'
+
+    return f"""{font_import}/* Design source palette — generated from Figma file */
+/* DO NOT replace the :root block; use var(--background) etc. in all components */
+:root {{
+  --background: {bg};
+  --foreground: {fg};
+  --card: {surface};
+  --card-foreground: {fg};
+  --primary: {accent};
+  --primary-foreground: {"#000000" if is_dark else "#ffffff"};
+  --secondary: {surface};
+  --secondary-foreground: {fg};
+  --muted: {muted};
+  --muted-foreground: {fg}aa;
+  --accent: {accent};
+  --accent-foreground: {"#000000" if is_dark else "#ffffff"};
+  --border: {fg}22;
+  --input: {fg}22;
+  --ring: {accent};
+  --font-sans: {font_stack};
+}}
+
+body {{
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}}
+"""
 
 
 _STEP_LABELS = [
@@ -256,6 +338,29 @@ def _step_label(iters: int, mode: str) -> str:  # noqa: ARG001 — mode reserved
     """Map iteration count to a human-readable step label for the activity stream."""
     idx = min(iters - 1, len(_STEP_LABELS) - 1)
     return _STEP_LABELS[idx]
+
+
+# Per-tool step labels emitted BEFORE each tool dispatch so the frontend sees
+# what the agent is doing at the granularity of individual tool calls. Each
+# entry is a callable receiving the tool's `input` dict and returning a string.
+# Tools not listed fall back to "Running <name>". These labels appear in the
+# left-panel activity stream (SSE `kind:"step"` events).
+_TOOL_LABEL: dict[str, object] = {
+    "write": lambda args: f"Writing {args.get('path', 'file')}",
+    "line_replace": lambda args: f"Editing {args.get('path', 'file')}",
+    "read": lambda args: f"Reading {args.get('path', 'file')}",
+    "search": lambda args: "Searching codebase",
+    "fetch_figma": lambda args: "Fetching Figma assets",
+    "clarifying_question": lambda args: "Pausing — agent has a question",
+    "propose_prd_patch": lambda args: "Proposing PRD update",
+    "read_console": lambda args: "Reading console output",
+}
+
+
+def _tool_step_label(name: str, args: dict) -> str:
+    """Return a human-readable label for a tool call, for the SSE activity stream."""
+    fn = _TOOL_LABEL.get(name)
+    return fn(args) if callable(fn) else f"Running {name}"
 
 
 async def agent_loop(
@@ -464,6 +569,20 @@ async def agent_loop(
                 await dispatch(patch["name"], patch.get("input") or {}, ctx, allowed_tool_names)
                 return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
 
+            # Emit a per-tool step event BEFORE dispatch so the frontend
+            # activity stream shows what the agent is about to do at tool
+            # granularity (not just the coarse per-iteration label above).
+            # Advisory/non-blocking — a publish failure never alters loop behaviour.
+            for tu in tool_uses:
+                publish_step(
+                    ctx.prototype_id,
+                    {
+                        "kind": "step",
+                        "text": _tool_step_label(tu.get("name", ""), tu.get("input") or {}),
+                        "state": "active",
+                    },
+                )
+
             results = await asyncio.gather(*[
                 dispatch(tu["name"], tu.get("input") or {}, ctx, allowed_tool_names)
                 for tu in tool_uses
@@ -628,12 +747,34 @@ async def generate_prototype(
     Figma data API. Resolution is best-effort: a prototype without a Figma
     connection runs fine, with fetch_figma reporting its own is_error.
     """
+    # Pre-seed virtual_fs with Figma palette CSS when a Figma source is present.
+    # This guarantees the palette is on disk before the agent's first write, so
+    # it cannot start from stock Tailwind defaults and then ignore a palette
+    # instruction embedded only in a tool result. Best-effort: a failure here
+    # never aborts generation — the agent runs with an empty virtual_fs instead.
+    figma_access_token = _resolve_figma_access_token(figma_file_key, workspace_id)
+    virtual_fs: dict[str, str] = {}
+    if figma_file_key and figma_access_token:
+        try:
+            from app.connectors.figma_oauth import fetch_file as _fetch_file
+            from app.design_agent.tools import _extract_palette_summary
+            _file_doc = await asyncio.to_thread(_fetch_file, figma_access_token, figma_file_key, 10)
+            _palette = _extract_palette_summary(_file_doc)
+            if _palette and _palette.get("background"):
+                virtual_fs["src/index.css"] = _render_palette_css(_palette)
+                logger.info(
+                    "design_agent.palette_pre_seeded prototype_id=%s bg=%s accent=%s is_dark=%s",
+                    prototype_id, _palette.get("background"), _palette.get("accent"), _palette.get("is_dark"),
+                )
+        except Exception:
+            pass  # best-effort — generation continues without pre-seeded CSS
+
     ctx = ToolContext(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
-        virtual_fs={},
+        virtual_fs=virtual_fs,  # pre-seeded with palette CSS (may be {} if no Figma)
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key),
+        figma_access_token=figma_access_token,
     )
     result = await agent_loop(
         system_blocks=system_blocks,
@@ -741,7 +882,7 @@ async def iterate_prototype(
         # source dict; `view` returns real content because the seed is present.
         virtual_fs=dict(current_source),
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key),
+        figma_access_token=_resolve_figma_access_token(figma_file_key, workspace_id),
     )
     effective_system_blocks = (
         prepend_plan_addendum(system_blocks, approved_plan)
@@ -830,7 +971,7 @@ async def manual_edit_prototype(
         # source dict; `view` returns real content because the seed is present.
         virtual_fs=dict(current_source),
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key),
+        figma_access_token=_resolve_figma_access_token(figma_file_key, workspace_id),
     )
     result = await agent_loop(
         system_blocks=system_blocks,

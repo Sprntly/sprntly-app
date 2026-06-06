@@ -196,6 +196,7 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   /** Open the full-screen canvas for the existing prototype (skips the loading
    *  screen). */
   onOpenExisting?: () => void
+  onDeleteExisting?: () => Promise<void>
   /** The prototype currently shown in the launcher-owned full-screen canvas, or
    *  null. */
   canvasResult?: PrototypeRecord | null
@@ -274,6 +275,7 @@ export function DesignAgentLauncherView({
   prdSections,
   prdMetaLine = null,
   onOpenExisting,
+  onDeleteExisting,
   canvasResult = null,
   onCloseCanvas,
   onPinApply,
@@ -297,6 +299,7 @@ export function DesignAgentLauncherView({
           prototype={existing}
           prdTitle={prdTitle}
           onOpen={() => onOpenExisting?.()}
+          onDelete={onDeleteExisting}
         />
       )}
       {/* P6-08 (Fix #11): when the last generation FAILED, surface a persistent
@@ -572,6 +575,12 @@ export function DesignAgentLauncher({
     }
   }, [prdId])
 
+  const deleteExisting = async () => {
+    if (!existing) return
+    await designAgentApi.delete(existing.id)
+    setExisting(null)
+  }
+
   // Open the existing prototype directly in the full-screen canvas — no loading
   // screen, since the bundle already exists. Opening also pushes the
   // refresh-stable canvas route (`/design/{id}`) so a refresh re-resolves the
@@ -625,6 +634,7 @@ export function DesignAgentLauncher({
         existing={existing}
         prdTitle={prdTitle}
         onOpenExisting={openExisting}
+        onDeleteExisting={deleteExisting}
         canvasResult={canvasResult}
         onCloseCanvas={closeCanvas}
         onPinApply={(comment) => setApplyTarget(comment)}

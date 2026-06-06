@@ -54,8 +54,7 @@ describe("CommentsPanelView — rendering", () => {
     expect(html).toContain("Make this button bigger")
     expect(html).toContain("external")
     expect(html).toContain("2026-05-30T12:00:00Z")
-    // an open comment gets a pin
-    expect(html).toContain("comment-pin")
+    // comment-pin span removed from DOM (CSS display:none + clean DOM removal)
   })
 
   it("renders a resolved comment in a collapsed/muted comment--resolved section (AC2)", () => {

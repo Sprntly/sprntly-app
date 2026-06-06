@@ -10,28 +10,12 @@
 // route is layered on top of the existing local-state flow, not a rewrite). It
 // reads the prototype_id from the URL purely to render a brief, hydration-gated
 // "opening" base behind the overlay while ApproveModal's resolver runs.
-import { useNavigation } from "../../../context/NavigationContext"
+import { GenerationLoadingScreen } from "../../../components/design-agent/GenerationLoadingScreen"
 
 export function DesignCanvasRoute() {
-  const { canvasPrototypeId } = useNavigation()
   return (
-    <div
-      className="design-canvas-route-base"
-      data-testid="design-canvas-route"
-      role="status"
-      aria-live="polite"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        minHeight: "60vh",
-        opacity: 0.7,
-      }}
-    >
-      <p>
-        Opening prototype
-        {canvasPrototypeId != null ? ` #${canvasPrototypeId}` : ""}…
-      </p>
+    <div data-testid="design-canvas-route">
+      <GenerationLoadingScreen mode="refresh" open />
     </div>
   )
 }
