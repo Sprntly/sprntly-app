@@ -130,11 +130,11 @@ describe("proto-gen-overlay CSS scoping (own lane)", () => {
 })
 
 describe("no throwaway markers (regression)", () => {
-  it("test_loading_screen_no_ux_explore_marker — component source carries no throwaway marker", () => {
+  it("the component source carries no throwaway marker (test_loading_screen_source_durable)", () => {
     expect(COMPONENT_SRC).not.toContain("UX-EXPLORE")
   })
 
-  it("test_proto_gen_overlay_css_no_ux_explore_marker — the overlay CSS block carries no throwaway marker", () => {
+  it("the overlay CSS block carries no throwaway marker (test_overlay_css_block_durable)", () => {
     expect(overlayBlock(CSS)).not.toContain("UX-EXPLORE")
   })
 })

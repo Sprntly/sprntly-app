@@ -23,7 +23,7 @@ import {
   PostGenerationResultView,
   type PostGenerationResultViewProps,
 } from "../PostGenerationResult"
-import { ManualEditOverlay, LOCKED_AFFORDANCE } from "../ManualEditOverlay"
+import { ManualEditOverlay } from "../ManualEditOverlay"
 
 const BUNDLE = "https://cdn/x/bundle/index.html"
 
@@ -42,21 +42,18 @@ function renderInternal(
   )
 }
 
-describe("PostGenerationResult internal mount — overlay reachable (AC1)", () => {
+describe("PostGenerationResult internal mount — inline viewer renders (AC1)", () => {
   it("test_internal_mount_passes_numeric_prototype_id", () => {
     // The internal surface with a real numeric prototypeId + a built bundle
-    // embeds the editable viewer and mounts the overlay with that id → the
-    // toggle renders (enabled = prototypeId != null). This is the mount that
-    // makes F13 manual-edit reachable.
+    // embeds the inline viewer iframe. The ManualEditOverlay trigger is
+    // intentionally not rendered on the canvas — mark-and-comment is the
+    // annotation path (see PostGenerationResult.tsx).
     const html = renderInternal({ prototypeId: 42, bundleUrl: BUNDLE })
-    // The embedded same-origin iframe the overlay drives for click→select.
+    // The embedded iframe renders.
     expect(html).toContain('class="da-prototype-iframe"')
-    // The overlay mounted with a numeric prototypeId → it renders (not inert).
-    expect(html).toContain('data-testid="manual-edit-overlay"')
-    expect(html).toContain('data-testid="manual-edit-toggle"')
-    // Not locked (is_complete=false) → the toggle is the live edit affordance,
-    // not the disabled locked one.
-    expect(html).not.toMatch(/data-testid="manual-edit-toggle"[^>]*disabled/)
+    // The overlay trigger is intentionally absent from the canvas.
+    expect(html).not.toContain('data-testid="manual-edit-overlay"')
+    expect(html).not.toContain('data-testid="manual-edit-toggle"')
     expect(html).not.toContain('data-testid="manual-edit-locked-note"')
   })
 
@@ -97,15 +94,15 @@ describe("Public mount stays inert — AC10 no-regression (AC2)", () => {
   })
 })
 
-describe("Locked prototype disables the toggle on the internal mount (AC1/AC9)", () => {
+describe("Locked prototype on the internal mount — overlay intentionally absent (AC1/AC9)", () => {
   it("test_locked_prototype_disables_toggle_on_internal_mount", () => {
-    // A complete prototype on the internal mount: the overlay still mounts (real
-    // prototypeId) but the toggle is disabled with the F14 locked affordance —
-    // re-uses P4-01's LOCKED_AFFORDANCE, no edit until iteration resumes.
+    // A complete prototype on the internal mount: the canvas inline viewer still
+    // renders. ManualEditOverlay trigger is not on the canvas regardless of lock
+    // state — the overlay is intentionally absent (mark-and-comment is the path).
     const html = renderInternal({ prototypeId: 42, isComplete: true, bundleUrl: BUNDLE })
-    expect(html).toContain('data-testid="manual-edit-overlay"')
-    expect(html).toMatch(/data-testid="manual-edit-toggle"[^>]*disabled/)
-    expect(html).toContain('data-testid="manual-edit-locked-note"')
-    expect(html).toContain(LOCKED_AFFORDANCE)
+    expect(html).toContain('class="da-prototype-iframe"')
+    expect(html).not.toContain('data-testid="manual-edit-overlay"')
+    expect(html).not.toContain('data-testid="manual-edit-toggle"')
+    expect(html).not.toContain('data-testid="manual-edit-locked-note"')
   })
 })

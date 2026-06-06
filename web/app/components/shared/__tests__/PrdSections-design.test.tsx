@@ -218,7 +218,7 @@ describe("PrdSections — prd-design generate-trigger relocation + hot-file exce
     expect(PRD_SCREEN_SRC).toContain("prdMetaLine={prd.metaLine}")
   })
 
-  it("test_no_ux_explore_marker_in_prd_design — both edited files carry the durable hot-file exception note, no throwaway scratch markers", () => {
+  it("both edited files carry the durable hot-file exception note, no throwaway scratch markers (test_prd_design_files_durable)", () => {
     // Acceptance criterion: zero throwaway "UX-EXPLORE (throwaway — REVERT)"
     // markers remain on the prd-design path, and both edited files carry the
     // durable, plain-English sanctioned-exception note.

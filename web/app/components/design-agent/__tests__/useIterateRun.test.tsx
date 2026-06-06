@@ -450,7 +450,7 @@ describe("useIterateRun — answerQuestion", () => {
 // ---------------------------------------------------------------------------
 
 describe("useIterateRun — source marker guard", () => {
-  it("test_no_ux_explore_marker_in_use_iterate_run: the source file contains no UX-EXPLORE marker", () => {
+  it("the source file carries no throwaway exploration marker (test_source_carries_no_throwaway_marker)", () => {
     const source = readFileSync(USE_ITERATE_RUN_PATH, "utf8")
     expect(source).not.toContain("UX-EXPLORE")
   })

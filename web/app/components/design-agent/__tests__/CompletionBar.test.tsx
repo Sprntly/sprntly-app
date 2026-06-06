@@ -50,11 +50,12 @@ describe("CompletionBarView — editable rendering", () => {
     expect(html).toContain("Mark Complete")
   })
 
-  it("renders Resume + Download + Copy when complete and editable (AC2)", () => {
+  it("renders Download + Copy when complete and editable (AC2)", () => {
     const html = render({ isComplete: true, editable: true, prototypeId: 42 })
-    expect(html).toContain('data-testid="resume-btn"')
     expect(html).toContain('data-testid="download-md-btn"')
     expect(html).toContain('data-testid="copy-md-btn"')
+    // Resume button intentionally removed — the left composer is usable by default.
+    expect(html).not.toContain('data-testid="resume-btn"')
   })
 
   it("does not render Mark Complete once complete (AC2)", () => {
@@ -234,13 +235,14 @@ describe("CompletionBarView — Export to Claude Code gating (P6-14)", () => {
     expect(html).not.toContain('data-testid="export-claude-code-btn"')
   })
 
-  it("completed branch renders all four actions incl. the exact export label (AC5)", () => {
+  it("completed branch renders three actions incl. the exact export label (AC5)", () => {
     const html = render({ isComplete: true, editable: true, prototypeId: 42 })
-    expect(html).toContain('data-testid="resume-btn"')
     expect(html).toContain('data-testid="download-md-btn"')
     expect(html).toContain('data-testid="copy-md-btn"')
     expect(html).toContain('data-testid="export-claude-code-btn"')
     expect(html).toContain("Export to Claude Code")
+    // Resume button intentionally removed — the left composer is usable by default.
+    expect(html).not.toContain('data-testid="resume-btn"')
   })
 })
 

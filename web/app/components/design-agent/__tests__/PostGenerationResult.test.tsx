@@ -183,15 +183,14 @@ describe("PostGenerationResultView — full-screen overlay (P6-16 AC2/AC3/AC3b)"
   })
 
   it("test_overlay_viewer_does_not_shadow_inline_edit_iframe — at most ONE da-prototype-iframe at any instant (AC3b)", () => {
-    // Overlay closed: exactly one (inline) iframe, with the inline editor.
+    // Overlay closed: exactly one (inline) iframe. ManualEditOverlay trigger is
+    // intentionally absent from the canvas — no shadowing risk.
     const closed = renderView({ bundleUrl: BUNDLE, fullscreenOpen: false })
     expect(countOccurrences(closed, 'class="da-prototype-iframe"')).toBe(1)
-    expect(closed).toContain('data-testid="manual-edit-overlay"')
+    expect(closed).not.toContain('data-testid="manual-edit-overlay"')
 
-    // Overlay open: the inline viewer (its iframe AND its ManualEditOverlay
-    // editor) is unmounted, leaving exactly one (overlay, view-only) iframe — so
-    // ManualEditOverlay's GLOBAL querySelector can never resolve to a shadowing
-    // second iframe. The live collision is tester-verified (AC8).
+    // Overlay open: the inline viewer is unmounted, leaving exactly one
+    // (overlay, view-only) iframe — the single-iframe invariant holds.
     const open = renderView({ bundleUrl: BUNDLE, fullscreenOpen: true })
     expect(countOccurrences(open, 'class="da-prototype-iframe"')).toBe(1)
     expect(open).not.toContain('data-testid="manual-edit-overlay"')
