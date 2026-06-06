@@ -1197,13 +1197,13 @@ export function PostGenerationResultView({
                     data-testid={`da-pin-comment-${pin.n}`}
                     data-status={pin.resolved ? "resolved" : pin.saved ? "open" : "draft"}
                   >
-                    <span className="proto-comment-pin">{pin.n}</span>
                     <div className="proto-comment-main">
                       {pin.saved ? (
                         <>
                           {/* author +
                               avatar + relative time on the saved pin comment. */}
                           <div className="proto-comment-au-row">
+                            <span className="proto-comment-pin">{pin.n}</span>
                             <CommentAvatar author={pin.author ?? "demo"} />
                             <span className="proto-comment-au">{pin.author ?? "demo"}</span>
                             <time

@@ -253,19 +253,31 @@ function CommentThread({
       className={`comment-thread${resolved ? " comment--resolved resolved" : ""}`}
       data-testid={`comment-thread-${comment.id}`}
       data-status={comment.status}
+      onClick={() => {
+        if (!comment.resolved_anchor_id) return
+        try {
+          const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+          if (!iframe) return
+          const anchor = parseStoredAnchor(comment.resolved_anchor_id)
+          if (!anchor) return
+          const el = findByAnchor(iframe, anchor)
+          el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        } catch {}
+      }}
+      style={{ cursor: comment.resolved_anchor_id ? 'pointer' : 'default' }}
     >
-      {withPin && (
-        <span
-          className={`comment-pin${resolved ? " comment-pin--resolved" : ""}`}
-          data-testid={`comment-pin-${comment.id}`}
-          aria-hidden="true"
-        >
-          {resolved ? "✓" : "●"}
-          {pinExtra && <span className="comment-pin-extra">{pinExtra}</span>}
-        </span>
-      )}
       {/* Author + avatar + relative timestamp header. The avatar uses author initials, brand-tinted. */}
       <div className="comment-meta comment-meta-head">
+        {withPin && (
+          <span
+            className={`comment-pin${resolved ? " comment-pin--resolved" : ""}`}
+            data-testid={`comment-pin-${comment.id}`}
+            aria-hidden="true"
+          >
+            {resolved ? "✓" : "●"}
+            {pinExtra && <span className="comment-pin-extra">{pinExtra}</span>}
+          </span>
+        )}
         <CommentAvatar author={comment.author} />
         <span className="comment-author proto-comment-au">{comment.author}</span>
         <time
@@ -288,7 +300,7 @@ function CommentThread({
               className="btn btn-accent comment-apply-btn"
               data-testid={`comment-apply-${comment.id}`}
               disabled={busy}
-              onClick={() => onApply(comment)}
+              onClick={(e) => { e.stopPropagation(); onApply(comment) }}
             >
               Apply
             </button>
@@ -299,7 +311,7 @@ function CommentThread({
               className="btn comment-ignore-btn"
               data-testid={`comment-ignore-${comment.id}`}
               disabled={busy}
-              onClick={() => onIgnore(comment)}
+              onClick={(e) => { e.stopPropagation(); onIgnore(comment) }}
             >
               Ignore
             </button>
@@ -310,7 +322,7 @@ function CommentThread({
               type="button"
               className="btn comment-resolve-btn"
               data-testid={`comment-resolve-${comment.id}`}
-              onClick={() => onResolve?.(comment.id)}
+              onClick={(e) => { e.stopPropagation(); onResolve?.(comment.id) }}
             >
               Resolve
             </button>
@@ -501,6 +513,9 @@ export function CommentsPanel({
 }: CommentsPanelProps) {
   // (see handleApply / handleIgnore below for the CHANGE C resolve wiring)
   const [comments, setComments] = useState<CommentRecord[]>([])
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [freeformDraft, setFreeformDraft] = useState('')
+  const [freeformBusy, setFreeformBusy] = useState(false)
   const [composer, setComposer] = useState<{ anchorId: string; body: string } | null>(
     null,
   )
@@ -510,7 +525,7 @@ export function CommentsPanel({
   // P7 comment-clarify: the comment currently pending confirmation via the dialog.
   const [clarifyTarget, setClarifyTarget] = useState<CommentRecord | null>(null)
 
-  // Load existing comments once on mount.
+  // Load existing comments on mount and after a freeform submit.
   useEffect(() => {
     let active = true
     runLoadComments({ token, api: designAgentApi })
@@ -523,7 +538,7 @@ export function CommentsPanel({
     return () => {
       active = false
     }
-  }, [token])
+  }, [token, refreshKey])
 
   // Right-click anywhere with a reachable anchor id opens the composer for that
   // anchor. Suppressed in readOnly mode (public viewer — comment create disabled).
@@ -630,6 +645,20 @@ export function CommentsPanel({
     void handleResolve(comment.id)
   }
 
+  async function handleFreeformSubmit() {
+    if (!freeformDraft.trim() || freeformBusy || !prototypeId) return
+    setFreeformBusy(true)
+    try {
+      await designAgentApi.createComment(prototypeId, {
+        anchor_id: 'general',
+        body: freeformDraft.trim(),
+      })
+      setFreeformDraft('')
+      setRefreshKey((k) => k + 1)
+    } catch {}
+    setFreeformBusy(false)
+  }
+
   // Apply/Ignore are only meaningful when the parent wants the comment (either
   // the pre-fill seam OR the immediate-iterate seam) AND we can resolve (authed
   // mount). Public viewer → neither.
@@ -637,6 +666,26 @@ export function CommentsPanel({
 
   return (
     <div ref={panelRef} className="comments-panel-mount">
+      {!readOnly && prototypeId != null && (
+        <div className="da-comment-compose" data-testid="da-comment-compose">
+          <textarea
+            className="proto-comment-input"
+            placeholder="Add a comment…"
+            value={freeformDraft}
+            onChange={(e) => setFreeformDraft(e.target.value)}
+            rows={2}
+          />
+          <button
+            type="button"
+            className="btn btn-accent"
+            disabled={!freeformDraft.trim() || freeformBusy}
+            onClick={() => void handleFreeformSubmit()}
+            data-testid="da-comment-submit"
+          >
+            {freeformBusy ? 'Posting…' : 'Comment'}
+          </button>
+        </div>
+      )}
       <CommentsPanelView
         comments={comments}
         composer={readOnly ? null : composer}
