@@ -674,6 +674,8 @@ export const designAgentApi = {
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
     api.get<PrototypeRecord>(`/v1/design-agent/${prototypeId}`),
+  delete: (prototypeId: number) =>
+    api.delete<void>(`/v1/design-agent/${prototypeId}`),
   /**
    * READ-ONLY "does this PRD have a ready prototype?" lookup, by PRD id. Powers
    * the PRD-screen preview card and the "View Prototype" vs "Generate Prototype"

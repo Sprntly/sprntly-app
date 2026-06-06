@@ -61,6 +61,7 @@ from app.db.prototypes import (
     advance_current_checkpoint,
     complete_prototype,
     create_checkpoint,
+    delete_prototype,
     fail_prototype,
     find_existing_prototype,
     find_prototype_by_share_token,
@@ -423,6 +424,20 @@ def get_one(
     if not row:
         raise HTTPException(status_code=404, detail="Prototype not found")
     return row
+
+
+@router.delete("/{prototype_id}", status_code=204)
+def delete_prototype_route(
+    prototype_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> Response:
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    existing = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    delete_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    return Response(status_code=204)
 
 
 @router.get("/by-prd/{prd_id}")

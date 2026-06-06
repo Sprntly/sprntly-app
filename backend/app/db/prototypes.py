@@ -821,6 +821,19 @@ def advance_current_checkpoint(
 # counterpart.
 
 
+def delete_prototype(*, prototype_id: int, workspace_id: str) -> None:
+    """Hard-delete a prototype row. Workspace-filtered (Rule #22)."""
+    c = require_client()
+    (
+        c.table(_TABLE)
+        .delete()
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)
+        .execute()
+    )
+    logger.info("prototype_deleted prototype_id=%s", prototype_id)
+
+
 def mark_awaiting_clarification(*, prototype_id: int, workspace_id: str) -> None:
     """F12 (P4-08): return a paused prototype to the clean PAUSED state after a
     clarifying_question terminal-PAUSE in the route bg layer.

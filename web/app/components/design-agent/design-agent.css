@@ -2016,6 +2016,89 @@
 .design-agent-surface .da-preview-card:hover .da-preview-open {
   color: var(--accent);
 }
+.design-agent-surface .da-preview-card-wrapper {
+  position: relative;
+}
+.design-agent-surface .da-preview-delete-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+}
+.design-agent-surface .da-preview-card-wrapper:hover .da-preview-delete-btn {
+  display: inline-flex;
+}
+.design-agent-surface .da-preview-delete-btn:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--surface-2);
+}
+.design-agent-surface .modal-box {
+  background: var(--surface);
+  border-radius: var(--radius-xl);
+  max-width: 400px;
+  width: 100%;
+  box-shadow: var(--shadow-xl);
+  overflow: hidden;
+  transform: scale(0.96);
+  transition: transform 0.2s;
+}
+.design-agent-surface .modal-overlay.open .modal-box {
+  transform: scale(1);
+}
+.design-agent-surface .modal-subtitle {
+  color: var(--ink-3);
+  font-size: 13.5px;
+  margin: 0;
+  line-height: 1.5;
+}
+.design-agent-surface .modal-cancel {
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.design-agent-surface .modal-cancel:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--ink-3);
+}
+.design-agent-surface .modal-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.design-agent-surface .modal-confirm-danger {
+  margin-left: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--danger);
+  color: var(--surface-2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+.design-agent-surface .modal-confirm-danger:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.design-agent-surface .modal-confirm-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* ───────────────────────────────────────────────────────────────────────────
    LEFT-PANEL AGENT-FLOW ACTIVITY.
