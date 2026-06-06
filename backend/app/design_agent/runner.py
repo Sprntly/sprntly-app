@@ -216,7 +216,7 @@ def _wrap_up_nudge(iters_remaining: int) -> str:
     )
 
 
-def _resolve_figma_access_token(figma_file_key: str | None) -> str | None:
+def _resolve_figma_access_token(figma_file_key: str | None, workspace_id: str) -> str | None:
     """Best-effort Figma access-token resolution for the `fetch_figma` tool.
 
     The tool executor never decrypts tokens itself (keeps tools.py importable
@@ -234,7 +234,7 @@ def _resolve_figma_access_token(figma_file_key: str | None) -> str | None:
         # FastAPI connector/db stack, and lets tests monkeypatch this resolver.
         from app.routes.connectors import _figma_access_token
 
-        return _figma_access_token()
+        return _figma_access_token(workspace_id)
     except Exception as exc:  # not-connected (HTTPException 404), decrypt errors, etc.
         logger.info(
             "design_agent.figma_token_unresolved figma_file_key=%s error_class=%s",
@@ -670,7 +670,7 @@ async def generate_prototype(
         workspace_id=workspace_id,
         virtual_fs={},
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key),
+        figma_access_token=_resolve_figma_access_token(figma_file_key, workspace_id),
     )
     result = await agent_loop(
         system_blocks=system_blocks,
@@ -778,7 +778,7 @@ async def iterate_prototype(
         # source dict; `view` returns real content because the seed is present.
         virtual_fs=dict(current_source),
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key),
+        figma_access_token=_resolve_figma_access_token(figma_file_key, workspace_id),
     )
     effective_system_blocks = (
         prepend_plan_addendum(system_blocks, approved_plan)
@@ -867,7 +867,7 @@ async def manual_edit_prototype(
         # source dict; `view` returns real content because the seed is present.
         virtual_fs=dict(current_source),
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key),
+        figma_access_token=_resolve_figma_access_token(figma_file_key, workspace_id),
     )
     result = await agent_loop(
         system_blocks=system_blocks,
