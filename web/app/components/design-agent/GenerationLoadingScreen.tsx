@@ -1,33 +1,23 @@
 "use client"
 
 /*
- * UX-EXPLORE (throwaway — REVERT): Full-screen "Building your prototype" loading
- * screen, shown WHILE a prototype generates and dismissed when generation
- * resolves. Faithfully reproduces David's mockup `.proto-generating` block
- * (12-prototype.html lines ~1589–1604 + sprntly.css) — animated orb, blinking
- * cursor headline, status line, progress bar with elapsed-time label, and a
- * streamed steps checklist (spinner → check, one-by-one).
- *
- * ADAPTED for THIS app:
- *  - Colors/fonts use the app's design tokens (forest-green --accent, off-white
- *    surfaces, --font-serif / --font-mono). NO coral, NO new palette.
- *  - Step copy is generic + plausible for this app's generation (no demo lines
- *    like care-web / "86 components from Figma" / "Instrument Serif, coral").
- *  - Full-screen FIXED overlay (inset:0, z-index above the app chrome incl. the
- *    sidebar) so it takes over the whole viewport — see .proto-gen-overlay in
- *    design-agent.css.
- *
- * IMPORTANT — the step reveal + progress fill are COSMETIC. The real backend
- * (runDesignAgentGeneration) does NOT emit per-step events; it only resolves
- * ready/failed/timeout. So the steps animate on a local timer purely to give the
- * wait some texture. Actual dismissal is driven by the parent (`open` flips
- * false once generation resolves AND the min-visible duration elapsed).
+ * Full-screen "Building your prototype" loading screen, shown while a prototype
+ * generates and dismissed when generation resolves. Reproduces the product
+ * mockup's generating block — animated forest-green orb (app `--accent` token,
+ * no coral), blinking-cursor headline, status line, progress bar with elapsed
+ * time, and a steps checklist. The step reveal + progress fill are COSMETIC: the
+ * generation backend does not emit per-step events today, so the steps animate
+ * on a local timer purely to give the wait some texture. Actual dismissal is
+ * driven by the parent (`open` flips false once generation resolves AND the
+ * min-visible duration has elapsed). Live per-step events are a future
+ * enhancement.
  */
 
 import { useEffect, useRef, useState } from "react"
 
-// UX-EXPLORE (throwaway — REVERT): generic, plausible steps for this app's
-// generation (NOT David's demo-specific care-web/Figma/coral lines).
+// Generic, plausible step labels for this app's generation. These are cosmetic
+// placeholders revealed on a local timer — the backend emits no per-step events
+// yet — not live progress.
 const STEPS = [
   "Reading the PRD",
   "Analyzing the design source",
