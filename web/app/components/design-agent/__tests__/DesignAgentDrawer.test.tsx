@@ -19,6 +19,7 @@ import {
   markPending,
   pendingCompleted,
 } from "../notificationStore"
+import { figmaFileOptions } from "../GenerateModal"
 import { designAgentApi } from "../../../lib/api"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
@@ -566,5 +567,62 @@ describe("buildGenerateParams github_repo threading", () => {
     expect(buildGenerateParams({ ...base, githubRepo: "" }).github_repo).toBeNull()
     // Omitted entirely → still null.
     expect(buildGenerateParams({ ...base }).github_repo).toBeNull()
+  })
+})
+
+describe("GenerateModal Figma file selector (file listing)", () => {
+  it("maps a fetched file list to value=key options the user can pick", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(
+        "select",
+        {},
+        figmaFileOptions([
+          { key: "k1", name: "Home" },
+          { key: "k2", name: "Checkout" },
+        ]),
+      ),
+    )
+    // Each file is an <option value={key}>{name}> the selection feeds into
+    // figmaFileSel → figma_file_key.
+    expect(html).toContain('value="k1"')
+    expect(html).toContain("Home")
+    expect(html).toContain('value="k2"')
+    expect(html).toContain("Checkout")
+    expect(html).toContain("Pick design")
+  })
+
+  it("renders the honest empty state and NO fake files on empty/error", () => {
+    const html = renderToStaticMarkup(
+      React.createElement("select", {}, figmaFileOptions([])),
+    )
+    // The empty list is what both a non-401 fetch failure and an unprovisioned
+    // listing collapse to — honest "Couldn't load designs", never fabricated.
+    expect(html).toContain("load designs")
+    expect(html).not.toContain('value="k1"')
+    expect(html).not.toContain("Pick design")
+  })
+
+  it("shows a loading option before the list resolves", () => {
+    const html = renderToStaticMarkup(
+      React.createElement("select", {}, figmaFileOptions(null)),
+    )
+    expect(html).toContain("Loading designs")
+  })
+
+  it("listFigmaFiles requests the figma-files route and returns the files", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ files: [{ key: "k1", name: "Home" }] }),
+    }))
+    vi.stubGlobal("fetch", fetchMock)
+    try {
+      const r = await designAgentApi.listFigmaFiles()
+      expect(r.files).toEqual([{ key: "k1", name: "Home" }])
+      const calledUrl = String(fetchMock.mock.calls[0][0])
+      expect(calledUrl).toContain("/v1/design-agent/figma-files")
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

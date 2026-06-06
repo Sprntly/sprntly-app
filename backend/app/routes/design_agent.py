@@ -336,6 +336,71 @@ def get_pending_patches(
     ]
 
 
+# ─── Figma file listing (Generate modal design-source selector) ──────────────
+
+
+class FigmaFileItem(BaseModel):
+    """One listable Figma file for the Generate modal's design selector."""
+
+    key: str
+    name: str
+
+
+class FigmaFilesResponse(BaseModel):
+    files: list[FigmaFileItem]
+
+
+@router.get("/figma-files", response_model=FigmaFilesResponse)
+def list_figma_files(
+    company: CompanyContext = Depends(require_company),
+) -> FigmaFilesResponse:
+    """List the caller's Figma files for the Generate modal's design selector.
+
+    A read-only proxy over the Figma REST API using the company's stored Figma
+    OAuth token. Single-segment static path declared ABOVE the
+    `GET /{prototype_id}` catch-all so a request here is never shadowed into it.
+
+    Gating order matters: the feature flag is checked FIRST, so a probe with the
+    flag off returns 404 (never 401/403) and cannot tell this route from a
+    missing one -- matching every other Design Agent route's posture. Then the
+    Figma token is resolved scoped to the CALLER's company only
+    (`company.company_id`): a company never resolves another company's files, and
+    an unconnected company gets the same 404 the by-key route returns.
+
+    Honest degradation: the current Figma OAuth grant has no project/team-listing
+    scope and no stored team id, and the Figma REST API has no flat "list my
+    files" endpoint, so `fetch_files` returns an empty list until that upstream
+    provisioning lands (a connectors-lane dependency). Any upstream listing
+    failure is mapped to an empty list here -- never a 500 leaking the upstream
+    body -- so the modal renders an honest empty state rather than fake files.
+    """
+    _require_feature_enabled()
+    # Lazy imports mirror runner.py's `_resolve_figma_access_token`: they keep
+    # this module importable without the connector/db stack at import time (which
+    # the route-test module-reload env depends on) and let tests patch the token
+    # resolver + the REST helper. routes/connectors.py owns the token decryption
+    # (reused, not reimplemented); connectors/figma_oauth.py owns the REST call.
+    from app.connectors import figma_oauth
+    from app.routes.connectors import _figma_access_token
+
+    token = _figma_access_token(company.company_id)  # 404 when Figma not connected
+    try:
+        files = figma_oauth.fetch_files(token)
+    except Exception:  # upstream listing failure -> honest empty state, never 500
+        logger.warning(
+            "design_agent.figma_files_list_failed company_id=%s", company.company_id
+        )
+        files = []
+    logger.info(
+        "design_agent.figma_files_listed company_id=%s count=%d",
+        company.company_id,
+        len(files),
+    )
+    return FigmaFilesResponse(
+        files=[FigmaFileItem(key=f["key"], name=f["name"]) for f in files]
+    )
+
+
 @router.get("/{prototype_id}")
 def get_one(
     prototype_id: int,

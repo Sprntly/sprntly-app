@@ -188,6 +188,73 @@ def fetch_file(access_token: str, file_key: str, depth: int = 2) -> dict[str, An
     return resp.json()
 
 
+def fetch_files(access_token: str, team_id: str | None = None) -> list[dict[str, str]]:
+    """List the user's Figma files as a normalised ``[{"key", "name"}]`` list.
+
+    Figma's REST API has no flat "list all my files" endpoint: listing requires
+    walking ``GET /v1/teams/{team_id}/projects`` -> ``GET
+    /v1/projects/{project_id}/files``, which needs both a ``team_id`` AND a
+    project-listing OAuth scope. The current connection requests neither (see
+    ``DEFAULT_SCOPES`` -- no project/team-listing scope) and captures no
+    ``team_id`` at connect time, so without a ``team_id`` this returns ``[]`` -- an
+    honest empty list the caller renders as "no designs", never fabricated files.
+    Provisioning the listing scope + a stored ``team_id`` is a connectors-lane
+    dependency; once it lands and a ``team_id`` is supplied, this walks the
+    hierarchy and returns the real list.
+
+    Failures are non-fatal: any upstream error is logged at WARNING (status +
+    truncated body, identifiers only -- never the token or file contents) and
+    yields ``[]`` so the caller degrades to an honest empty state. Uses
+    ``requests.get`` with an explicit timeout, mirroring ``fetch_file`` /
+    ``fetch_file_styles``; the caller is responsible for token refresh.
+    """
+    if not team_id:
+        # No team-listing scope / team_id provisioned yet -> honest empty list.
+        return []
+    files: list[dict[str, str]] = []
+    try:
+        projects_resp = requests.get(
+            f"{FIGMA_API_BASE}/teams/{team_id}/projects",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        if not projects_resp.ok:
+            logger.warning(
+                "Figma /teams/%s/projects failed: %s %s",
+                team_id,
+                projects_resp.status_code,
+                projects_resp.text[:200],
+            )
+            return []
+        for project in projects_resp.json().get("projects", []):
+            project_id = project.get("id")
+            if not project_id:
+                continue
+            files_resp = requests.get(
+                f"{FIGMA_API_BASE}/projects/{project_id}/files",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            )
+            if not files_resp.ok:
+                logger.warning(
+                    "Figma /projects/%s/files failed: %s %s",
+                    project_id,
+                    files_resp.status_code,
+                    files_resp.text[:200],
+                )
+                continue
+            for f in files_resp.json().get("files", []):
+                key = f.get("key")
+                name = f.get("name")
+                if key and name:
+                    files.append({"key": str(key), "name": str(name)})
+    except requests.RequestException as exc:
+        # Network-level failure (timeout, connection error): identifiers only.
+        logger.warning("Figma file listing failed: error_class=%s", type(exc).__name__)
+        return []
+    return files
+
+
 def fetch_file_styles(access_token: str, file_key: str) -> dict[str, Any]:
     """Fetch published styles (colors, fonts, effects) for a Figma file.
 
