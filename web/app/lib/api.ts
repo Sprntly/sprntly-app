@@ -776,6 +776,8 @@ export const designAgentApi = {
     api.patch<CommentRecord>(
       `/v1/design-agent/${prototypeId}/comments/${commentId}/resolve`,
     ),
+  deleteComment: (prototypeId: number, commentId: number) =>
+    api.delete<void>(`/v1/design-agent/${prototypeId}/comments/${commentId}`),
   // ── F11 PRD patches (P3-10) ───────────────────────────────────────────────
   /** List the PENDING PRD patches for a PRD (workspace-filtered server-side).
    *  The PrdPatchBanner calls this on mount to decide whether to surface. */

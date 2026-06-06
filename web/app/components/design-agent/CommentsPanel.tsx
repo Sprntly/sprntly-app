@@ -221,6 +221,7 @@ export type CommentsPanelViewProps = {
   /** Ignore — resolve the comment WITHOUT pre-filling the composer. Supplied only
    *  on the signed-in mount (alongside `onApply`). Absent → no Ignore button. */
   onIgnore?: (comment: CommentRecord) => void
+  onDelete?: (commentId: number) => void
 }
 
 function CommentThread({
@@ -232,6 +233,7 @@ function CommentThread({
   onResolve,
   onApply,
   onIgnore,
+  onDelete,
 }: {
   comment: CommentRecord
   withPin: boolean
@@ -246,6 +248,7 @@ function CommentThread({
   onApply?: (comment: CommentRecord) => void
   /** Ignore — resolve without pre-fill. */
   onIgnore?: (comment: CommentRecord) => void
+  onDelete?: (commentId: number) => void
 }) {
   const resolved = comment.status === "resolved"
   return (
@@ -327,6 +330,16 @@ function CommentThread({
               Resolve
             </button>
           )}
+          {onDelete && (
+            <button
+              type="button"
+              className="btn comment-delete-btn"
+              data-testid={`comment-delete-${comment.id}`}
+              onClick={(e) => { e.stopPropagation(); onDelete(comment.id) }}
+            >
+              Delete
+            </button>
+          )}
         </div>
       )}
     </li>
@@ -348,6 +361,7 @@ export function CommentsPanelView({
   onResolve,
   onApply,
   onIgnore,
+  onDelete,
 }: CommentsPanelViewProps) {
   const byNewestFirst = (a: CommentRecord, b: CommentRecord) =>
     new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
@@ -419,6 +433,7 @@ export function CommentsPanelView({
                 onResolve={onResolve}
                 onApply={onApply}
                 onIgnore={onIgnore}
+                onDelete={onDelete}
               />
             ))}
           </ul>
@@ -647,6 +662,12 @@ export function CommentsPanel({
     void handleResolve(comment.id)
   }
 
+  async function handleDelete(commentId: number) {
+    if (!prototypeId) return
+    await designAgentApi.deleteComment(prototypeId, commentId).catch(() => {})
+    setComments((prev) => prev.filter((c) => c.id !== commentId))
+  }
+
   async function handleFreeformSubmit() {
     if (!freeformDraft.trim() || freeformBusy || !prototypeId) return
     setFreeformBusy(true)
@@ -702,6 +723,7 @@ export function CommentsPanel({
         onResolve={handleResolve}
         onApply={canApply ? handleApply : undefined}
         onIgnore={canApply ? handleIgnore : undefined}
+        onDelete={prototypeId != null ? handleDelete : undefined}
       />
       {prototypeId != null && (
         <CommentClarifyDialog

@@ -180,6 +180,15 @@ def resolve_comment(
     return resp.data[0]
 
 
+def delete_comment(*, comment_id: int, workspace_id: str) -> bool:
+    """Hard-delete a comment. Workspace-filtered. Returns True when deleted, False when not found."""
+    c = require_client()
+    (c.table(_TABLE).delete()
+     .eq("id", comment_id).eq("workspace_id", workspace_id).execute())
+    logger.info("comment_deleted comment_id=%s", comment_id)
+    return True
+
+
 def list_open_comment_anchor_ids(
     *,
     prototype_id: int,

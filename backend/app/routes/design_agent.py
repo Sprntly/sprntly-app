@@ -1330,7 +1330,7 @@ def _export_filename(proto: dict[str, Any]) -> str:
 # credentials can act"), external viewers create + read only; there is NO public
 # resolve route. Public-write rate limiting is OUT of scope here — it lands in
 # P5-07 (per TICKET_LIST shared-resources).
-from app.db.prototype_comments import insert_comment, list_comments, resolve_comment
+from app.db.prototype_comments import insert_comment, list_comments, resolve_comment, delete_comment
 
 
 class CommentCreate(BaseModel):
@@ -1447,6 +1447,18 @@ def patch_resolve_comment(
     if not row or row["prototype_id"] != prototype_id:
         raise HTTPException(status_code=404, detail="Comment not found")
     return CommentOut(**_comment_to_out(row))
+
+
+@router.delete("/{prototype_id}/comments/{cid}", status_code=204)
+def delete_comment_route(
+    prototype_id: int,
+    cid: int,
+    company: CompanyContext = Depends(require_company),
+) -> Response:
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    delete_comment(comment_id=cid, workspace_id=workspace_id)
+    return Response(status_code=204)
 
 
 # ─── Public (token-resolved, NO auth) comment routes ──────────────────────

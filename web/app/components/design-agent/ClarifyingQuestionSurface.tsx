@@ -164,12 +164,12 @@ export function ClarifyingQuestionSurfaceView({
             <button
               key={`${i}-${choice}`}
               type="button"
-              className="btn btn-accent clarifying-question-choice"
+              className="clarifying-question-choice"
               data-testid="clarifying-question-choice"
               disabled={busy}
               onClick={() => onChoose?.(choice)}
             >
-              {choice}
+              {choice.replace(/\s*\([^)]{1,50}\)\s*$/, '').trim() || choice}
             </button>
           ))}
         </div>
