@@ -6,6 +6,7 @@ const basePath = process.env.NEXT_PUBLIC_BASE_PATH?.replace(/\/$/, "") || ""
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  output: "export",
   ...(basePath ? { basePath } : {}),
   trailingSlash: false,
   images: {
