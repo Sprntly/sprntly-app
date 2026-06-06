@@ -54,7 +54,7 @@ from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
-from app.db.prds import get_prd_rendered
+from app.db.prds import get_prd_rendered, reset_prd_to_draft
 from app.db.products import get_company_website  # onboarding-website fallback source
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
@@ -437,6 +437,7 @@ def delete_prototype_route(
     if existing is None:
         raise HTTPException(status_code=404, detail="Prototype not found")
     delete_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    reset_prd_to_draft(existing["prd_id"])
     return Response(status_code=204)
 
 

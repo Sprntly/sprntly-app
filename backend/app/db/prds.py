@@ -3,7 +3,11 @@
 One row per generation attempt for a (brief_id, insight_index, variant).
 `status` walks generating → ready (or failed/invalidated).
 """
+import logging
+
 from app.db.client import require_client
+
+logger = logging.getLogger(__name__)
 
 
 def save_prd(brief_id: int, insight_index: int, title: str, md: str) -> int:
@@ -147,3 +151,9 @@ def find_existing_prd(
         .execute()
     )
     return resp.data[0] if resp.data else None
+
+
+def reset_prd_to_draft(prd_id: int) -> None:
+    c = require_client()
+    c.table("prds").update({"status": "draft"}).eq("id", prd_id).execute()
+    logger.info("prd_reset_to_draft prd_id=%s", prd_id)
