@@ -219,11 +219,13 @@ describe("useIterateRun — terminal state follows the real poll, not a timer", 
     expect(
       activity.filter((e) => e.kind === "done" && e.text === "Change applied"),
     ).toHaveLength(1)
-    // And it is the LAST thing in the stream — it follows the cosmetic steps,
+    // And it is the LAST thing in the stream — it follows the working step,
     // never precedes the resolution.
     expect(activity[activity.length - 1].kind).toBe("done")
-    // The cosmetic steps still advanced while polling (no in-progress regression).
-    expect(activity.filter((e) => e.kind === "step").length).toBeGreaterThan(1)
+    // At least one step is present (the fallback "Working…" placeholder).
+    // When SSE is unavailable (token=null in this test), no additional steps
+    // arrive from the backend — the poll fallback still resolves correctly.
+    expect(activity.filter((e) => e.kind === "step").length).toBeGreaterThanOrEqual(1)
     expect(onComplete).toHaveBeenCalledTimes(1)
     expect(onComplete.mock.calls[0][0].status).toBe("ready")
   })
@@ -451,5 +453,193 @@ describe("useIterateRun — source marker guard", () => {
   it("test_no_ux_explore_marker_in_use_iterate_run: the source file contains no UX-EXPLORE marker", () => {
     const source = readFileSync(USE_ITERATE_RUN_PATH, "utf8")
     expect(source).not.toContain("UX-EXPLORE")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SSE EventSource integration
+// ---------------------------------------------------------------------------
+
+/** Minimal EventSource mock that captures instances for test control. */
+class MockEventSource {
+  url: string
+  onmessage: ((e: { data: string }) => void) | null = null
+  onerror: ((e: Event) => void) | null = null
+  close = vi.fn()
+
+  constructor(url: string) {
+    this.url = url
+    MockEventSource.instances.push(this)
+  }
+
+  /** Simulate a message frame from the server. */
+  emit(data: unknown) {
+    this.onmessage?.({ data: JSON.stringify(data) })
+  }
+
+  /** Simulate a connection error. */
+  error() {
+    this.onerror?.(new Event("error"))
+  }
+
+  static instances: MockEventSource[] = []
+  static clear() {
+    MockEventSource.instances = []
+  }
+  static latest(): MockEventSource {
+    return MockEventSource.instances[MockEventSource.instances.length - 1]
+  }
+}
+
+// Helpers that set a non-null token so the SSE branch is taken.
+function makeApiWithSse(get: ReturnType<typeof vi.fn>) {
+  return makeApi(get)
+}
+
+describe("useIterateRun — SSE EventSource wiring", () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    MockEventSource.clear()
+    // Provide a non-null token so the EventSource branch is entered.
+    setAccessTokenProvider(() => Promise.resolve("test-sse-bearer"))
+    vi.stubGlobal("EventSource", MockEventSource)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    vi.resetAllMocks()
+  })
+
+  it("test_sse_step_event_appended: a step event received from EventSource appears in activity via appendActivity", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValue(proto("ready"))
+
+    const onComplete = vi.fn()
+    const api = makeApiWithSse(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("make the header bold")
+      // getAccessToken() is an async function that itself awaits a resolved
+      // promise, so we need two microtask yields before EventSource is created.
+      await Promise.resolve()
+      await Promise.resolve()
+      const es = MockEventSource.latest()
+      es.emit({ kind: "step", text: "Analyzing the prototype", state: "active" })
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const stepEvents = result.current.activity.filter(
+      (e) => e.kind === "step" && "text" in e && e.text === "Analyzing the prototype",
+    )
+    expect(stepEvents.length).toBeGreaterThanOrEqual(1)
+    expect(result.current.error).toBeNull()
+  })
+
+  it("test_sse_done_event_closes_source: a done event from EventSource closes the connection", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValue(proto("ready"))
+
+    const onComplete = vi.fn()
+    const api = makeApiWithSse(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("tweak the palette")
+      await Promise.resolve()
+      await Promise.resolve()
+      const es = MockEventSource.latest()
+      es.emit({ kind: "done", text: "Change applied" })
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const es = MockEventSource.latest()
+    expect(es.close).toHaveBeenCalled()
+  })
+
+  it("test_sse_failure_degrades_to_poll: when EventSource errors, the run still resolves its terminal state off the poll loop", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValue(proto("ready"))
+
+    const onComplete = vi.fn()
+    const api = makeApiWithSse(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("remove the footer")
+      await Promise.resolve()
+      await Promise.resolve()
+      // Simulate EventSource transport failure.
+      MockEventSource.latest().error()
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    // Poll fallback resolved the run correctly.
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(onComplete.mock.calls[0][0].status).toBe("ready")
+    // No user-facing error from the SSE failure.
+    expect(result.current.error).toBeNull()
+    expect(result.current.running).toBe(false)
+  })
+
+  it("test_eventsource_closed_on_unmount: unmounting while a run is in flight closes the EventSource", async () => {
+    // Poll never resolves — the run stays in-flight until unmount.
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValue(proto("generating"))
+
+    const onComplete = vi.fn()
+    const api = makeApiWithSse(get)
+
+    const { result, unmount } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      result.current.runIterate("test unmount")
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const es = MockEventSource.latest()
+    unmount()
+
+    expect(es.close).toHaveBeenCalled()
+  })
+
+  it("test_activity_event_union_unchanged: ActivityEventInput has exactly the five expected member kinds (seam contract)", () => {
+    const user: ActivityEventInput = { kind: "user", text: "hi" }
+    const stepA: ActivityEventInput = { kind: "step", text: "working", state: "active" }
+    const stepD: ActivityEventInput = { kind: "step", text: "done", state: "done" }
+    const done: ActivityEventInput = { kind: "done", text: "Change applied" }
+    const question: ActivityEventInput = { kind: "question", question: "Which?" }
+    const error: ActivityEventInput = { kind: "error", text: "oops" }
+
+    const uniqueKinds = new Set([user, stepA, stepD, done, question, error].map((e) => e.kind))
+    expect(uniqueKinds.size).toBe(5)
+    expect(uniqueKinds).toContain("user")
+    expect(uniqueKinds).toContain("step")
+    expect(uniqueKinds).toContain("done")
+    expect(uniqueKinds).toContain("question")
+    expect(uniqueKinds).toContain("error")
   })
 })

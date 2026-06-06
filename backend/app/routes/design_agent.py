@@ -38,16 +38,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company  # company-scoped auth dep (P6-10)
+from app.auth import CompanyContext, require_company, require_company_from_query  # company-scoped auth dep
 from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
@@ -83,6 +84,7 @@ from app.design_agent.prompts import (
     DESIGN_AGENT_TEMPLATE_VERSION,
     render_scaffold_user,
 )
+from app.design_agent.event_stream import subscribe as _sse_subscribe
 from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.storage import (
@@ -2392,3 +2394,50 @@ async def _run_manual_edit_bg(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+# ── SSE event stream (two-segment GET, order-independent vs the catch-all) ───
+# Bearer auth via query param because EventSource cannot set headers. The token
+# is validated through require_company_from_query — same decode + company-
+# resolution path as require_company, identical trust. Never logged.
+# Nginx buffering disabled via X-Accel-Buffering so events reach the client
+# immediately rather than accumulating until the connection closes.
+
+@router.get("/{prototype_id}/events")
+async def stream_prototype_events(
+    prototype_id: int,
+    company: CompanyContext = Depends(require_company_from_query),
+    _flag: None = Depends(_require_feature_enabled),
+) -> StreamingResponse:
+    workspace_id = company.company_id
+    # Workspace-scoped existence check before opening the stream. Returns 404
+    # (not 401, not 403) on cross-tenant or missing prototype — the same
+    # invisibility posture as GET /{prototype_id}.
+    if get_prototype(prototype_id=prototype_id, workspace_id=workspace_id) is None:
+        raise HTTPException(404, "Prototype not found")
+
+    logger.info(
+        "design_agent.events_connect prototype_id=%s workspace_id=%s",
+        prototype_id,
+        workspace_id,
+    )
+
+    async def _gen():
+        try:
+            async for event in _sse_subscribe(prototype_id):
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            logger.info(
+                "design_agent.events_disconnect prototype_id=%s workspace_id=%s",
+                prototype_id,
+                workspace_id,
+            )
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

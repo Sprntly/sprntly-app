@@ -13,22 +13,22 @@
  *
  * BACKEND REALITY (confirmed): generation/iteration is async POST → poll-to-
  * completion. The POST `/iterate` returns immediately ({status, queue_position})
- * — that is a KICKOFF, not completion. There is no real step/token stream from
- * the backend, so the "agent working" steps shown in the activity are COSMETIC,
- * driven off the poll's status transitions.
+ * — that is a KICKOFF, not completion. Real per-step events now arrive over SSE;
+ * the poll loop remains the terminal-state resolver and the SSE fallback.
  *
- * FORWARD-COMPATIBLE SEAM: the activity is a modular event list mutated only via
- * `appendActivity(event)`. When a real backend SSE/step-event endpoint lands, its
- * events feed `appendActivity` directly and the cosmetic reveal below is deleted.
- *   // TODO: replace cosmetic step reveal with real backend SSE/step-event stream
+ * REAL BACKEND STREAM: real per-step events come from the backend agent loop over
+ * SSE (GET /{id}/events?token=). The poll loop below is the terminal-state resolver
+ * AND the SSE fallback — if EventSource never opens, the run still completes off the
+ * poll. SSE only enriches in-flight progress; it never gates completion.
  *
  * No CSS added to the hot globals.css; the activity markup uses component-scoped
  * class strings styled in design-agent.css.
  */
 
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
   designAgentApi,
+  getAccessToken,
   withAuthRetry,
   type PendingQuestion,
   type PrototypeRecord,
@@ -97,6 +97,16 @@ export function useIterateRun({
   // The agent's last question text, so a clarifying answer can be composed with
   // the question as context when it routes the continuation iterate.
   const lastQuestionRef = useRef<string | null>(null)
+  // Live EventSource for the current iterate run. Closed on terminal event,
+  // on onerror, in the finally block, and on component unmount.
+  const esRef = useRef<EventSource | null>(null)
+
+  useEffect(() => {
+    return () => {
+      esRef.current?.close()
+      esRef.current = null
+    }
+  }, [])
 
   /** The ONLY mutator of the activity list — the forward-compatible SSE seam. */
   const appendActivity = useCallback((event: ActivityEventInput) => {
@@ -139,11 +149,41 @@ export function useIterateRun({
 
       // 1) The user's request as a chat message.
       appendActivity({ kind: "user", text: prompt })
-      // 2) Kick off the cosmetic step reveal (first step active immediately).
-      //    TODO: replace cosmetic step reveal with real backend SSE/step-event stream —
-      //    these reveals are driven off the poll, not a real per-step backend signal.
-      let stepIdx = 0
+      // 2) Single "Working…" placeholder so the activity stream shows motion
+      //    even if SSE never connects (graceful degrade to poll-only).
       appendActivity({ kind: "step", text: COSMETIC_STEPS[0], state: "active" })
+
+      // 3) Open a real backend SSE stream for per-step events. Real backend
+      //    events feed appendActivity directly via the same ActivityEventInput
+      //    union. The poll loop below is the terminal-state resolver AND the
+      //    fallback when SSE is unavailable — if EventSource fails to open or
+      //    errors, the run still resolves off the poll with no user-visible error.
+      const token = await getAccessToken()
+      if (typeof EventSource !== "undefined" && token !== null) {
+        try {
+          const es = new EventSource(designAgentApi.eventsUrl(prototypeId, token))
+          esRef.current = es
+          es.onmessage = (e) => {
+            try {
+              const event = JSON.parse(e.data) as ActivityEventInput
+              appendActivity(event)
+              if (event.kind === "done" || event.kind === "error") {
+                es.close()
+                esRef.current = null
+              }
+            } catch {
+              // Malformed frame — ignore, poll resolves terminal state.
+            }
+          }
+          es.onerror = () => {
+            // Degrade silently to poll; the run resolves via polling.
+            es.close()
+            esRef.current = null
+          }
+        } catch {
+          // EventSource construction failure — degrade to poll.
+        }
+      }
 
       try {
         await api.iterate(prototypeId, {
@@ -152,7 +192,7 @@ export function useIterateRun({
           mode: "execute",
         })
 
-        // 3) Poll the prototype row to completion. The iterate runs in the
+        // 4) Poll the prototype row to completion. The iterate runs in the
         //    background; `status` returns to 'ready' when the new checkpoint is
         //    built (or `pending_question` is set if the agent paused to ask).
         const startedAt = Date.now()
@@ -168,21 +208,12 @@ export function useIterateRun({
           proto.pending_question == null &&
           Date.now() - startedAt < MAX_MS
         ) {
-          // Advance the cosmetic step on each tick (capped at the script length).
-          if (stepIdx < COSMETIC_STEPS.length - 1) {
-            markLastStepDone()
-            stepIdx += 1
-            appendActivity({
-              kind: "step",
-              text: COSMETIC_STEPS[stepIdx],
-              state: "active",
-            })
-          }
+          // Step events now come from SSE — no cosmetic advancement here.
           await new Promise((r) => setTimeout(r, TICK_MS))
           proto = await withAuthRetry(() => api.get(prototypeId))
         }
 
-        // 4a) Agent paused with a clarifying question → surface it in-stream.
+        // 5a) Agent paused with a clarifying question → surface it in-stream.
         if (proto.pending_question != null) {
           markLastStepDone()
           lastQuestionRef.current = proto.pending_question.question
@@ -196,11 +227,11 @@ export function useIterateRun({
           return
         }
 
-        // 4b) Resolve on the REAL poll outcome. The terminal "Change applied"
+        // 5b) Resolve on the REAL poll outcome. The terminal "Change applied"
         //     line is appended ONLY when the poll actually resolved to ready —
-        //     never on a timeout or a failure (those surface as an error), and
-        //     never from a cosmetic step tick mid-poll. That is what keeps the
-        //     stream honest: a "done" line means the backend run is really done.
+        //     never on a timeout or a failure (those surface as an error). That
+        //     is what keeps the stream honest: a "done" line means the backend
+        //     run is really done.
         markLastStepDone()
         if (proto.status === "ready") {
           appendActivity({ kind: "done", text: "Change applied" })
@@ -215,6 +246,8 @@ export function useIterateRun({
         setError(msg)
         appendActivity({ kind: "error", text: msg })
       } finally {
+        esRef.current?.close()
+        esRef.current = null
         setRunning(false)
         inFlightRef.current = false
       }

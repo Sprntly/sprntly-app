@@ -837,6 +837,12 @@ export const designAgentApi = {
    *  fabricated files; the modal renders that as "Couldn't load designs". */
   listFigmaFiles: () =>
     api.get<{ files: FigmaFile[] }>("/v1/design-agent/figma-files"),
+  /** Build the SSE URL for streaming step events during an iterate run.
+   *  The bearer token rides as ?token= because EventSource cannot set headers.
+   *  Single source of truth for this URL so the token-in-URL construction is
+   *  auditable in one place. */
+  eventsUrl: (prototypeId: number, token: string): string =>
+    `${API_URL}/v1/design-agent/${prototypeId}/events?token=${encodeURIComponent(token)}`,
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
@@ -897,6 +903,11 @@ export type ManualEditResponse = {
 // primitive owns no UI state and never swallows errors — callers wrap any authed
 // read that polls or auto-refreshes and decide for themselves what a persistent
 // failure means.
+
+/** Retrieve the current access token directly for non-fetch uses (e.g. EventSource URLs). */
+export async function getAccessToken(): Promise<string | null> {
+  return accessTokenProvider ? await accessTokenProvider() : null
+}
 
 export type WithAuthRetryOptions = {
   /** Backoff before the single retry, in milliseconds. Defaults to 250. Tests

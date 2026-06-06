@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import jwt
-from fastapi import APIRouter, Cookie, Header, HTTPException, Response
+from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from app.config import settings
@@ -354,3 +354,16 @@ def require_company(
     return CompanyContext(
         company_id=only["company_id"], role=only["role"], user_id=user_id
     )
+
+
+def require_company_from_query(
+    token: str | None = Query(default=None),
+) -> CompanyContext:
+    """SSE-only company gate. EventSource cannot send Authorization headers, so
+    the bearer rides as ?token=. Validated through the SAME Supabase-JWT decode
+    and company-membership resolution as require_company — identical trust. Never
+    logs the token.
+    """
+    if not token:
+        raise HTTPException(401, "Not signed in")
+    return require_company(authorization=f"Bearer {token}")

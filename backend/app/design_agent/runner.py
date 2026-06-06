@@ -51,6 +51,8 @@ from app.db.prototypes import get_prototype, set_pending_question
 from app.design_agent.autofixer import format_errors_for_agent
 from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
+from app.design_agent.event_stream import close as _sse_close
+from app.design_agent.event_stream import publish_step
 from app.design_agent.prompts import DESIGN_AGENT_ITERATE_SYSTEM
 from app.design_agent.storage import read_source_files_for_checkpoint
 from app.design_agent.tools import (
@@ -242,6 +244,20 @@ def _resolve_figma_access_token(figma_file_key: str | None) -> str | None:
         return None
 
 
+_STEP_LABELS = [
+    "Reading the change request",
+    "Analyzing the prototype",
+    "Applying the change",
+    "Rebuilding",
+]
+
+
+def _step_label(iters: int, mode: str) -> str:  # noqa: ARG001 — mode reserved for future
+    """Map iteration count to a human-readable step label for the activity stream."""
+    idx = min(iters - 1, len(_STEP_LABELS) - 1)
+    return _STEP_LABELS[idx]
+
+
 async def agent_loop(
     system_blocks: list[dict[str, Any]],
     user_message: dict[str, Any],
@@ -290,6 +306,14 @@ async def agent_loop(
     try:
         while iters < max_iters:
             iters += 1
+            # Real per-step signal for the SSE activity stream. Advisory and
+            # non-blocking: never raises, never alters loop behaviour. The
+            # frontend poll loop remains the source of truth for terminal state;
+            # these are progress breadcrumbs only.
+            publish_step(
+                ctx.prototype_id,
+                {"kind": "step", "text": _step_label(iters, mode), "state": "active"},
+            )
 
             # Graduated wrap-up pressure (per agent-build-research.md §4.2) with
             # the REAL remaining count — was a single hardcoded "2 remaining"
@@ -349,14 +373,14 @@ async def agent_loop(
                     ctx.prototype_id, mode, usage.est_cost_usd(MODEL),
                     HARD_CAP_USD, SOFT_CAP_USD, iters,
                 )
-                return _finish(usage, "aborted", iters, start, last_assistant_content)
+                return _finish(usage, "aborted", iters, start, last_assistant_content, ctx.prototype_id)
 
             if stop == "end_turn":
-                return _finish(usage, "complete", iters, start, content)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
 
             if stop == "max_tokens":
                 if max_tokens_retried:
-                    return _finish(usage, "max_tokens", iters, start, content)
+                    return _finish(usage, "max_tokens", iters, start, content, ctx.prototype_id)
                 max_tokens *= 2
                 max_tokens_retried = True
                 # The truncated assistant turn was appended above. When the cap
@@ -374,10 +398,10 @@ async def agent_loop(
                 continue
 
             if stop == "refusal":
-                return _finish(usage, "refused", iters, start, content)
+                return _finish(usage, "refused", iters, start, content, ctx.prototype_id)
 
             if stop != "tool_use":
-                return _finish(usage, "complete", iters, start, content)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
 
             # Collect tool_use blocks; dispatch concurrently per parallel-tool-use rule.
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
@@ -407,7 +431,7 @@ async def agent_loop(
             )
             if clar:
                 payload = clar.get("input") or {}
-                result = _finish(usage, "awaiting_clarification", iters, start, content)
+                result = _finish(usage, "awaiting_clarification", iters, start, content, ctx.prototype_id)
                 result.pending_question = {
                     "question": payload.get("question"),
                     "choices": payload.get("choices"),
@@ -438,7 +462,7 @@ async def agent_loop(
             )
             if patch:
                 await dispatch(patch["name"], patch.get("input") or {}, ctx, allowed_tool_names)
-                return _finish(usage, "complete", iters, start, content)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
 
             results = await asyncio.gather(*[
                 dispatch(tu["name"], tu.get("input") or {}, ctx, allowed_tool_names)
@@ -507,10 +531,10 @@ async def agent_loop(
         # Exited because iters == max_iters. Salvage the last assistant turn as
         # final_content (was discarded as []) — a build that ran out of turns
         # mid-flow is usually near-complete and worth staging, not throwing away.
-        return _finish(usage, "max_iters", iters, start, last_assistant_content)
+        return _finish(usage, "max_iters", iters, start, last_assistant_content, ctx.prototype_id)
 
     except Exception as exc:
-        result = _finish(usage, "error", iters, start, [])
+        result = _finish(usage, "error", iters, start, [], ctx.prototype_id)
         result.error_class = type(exc).__name__
         result.error_message = str(exc)
         return result
@@ -556,7 +580,20 @@ def _persist_pending_question_if_paused(
     )
 
 
-def _finish(usage: RunUsage, status: str, iters: int, start: float, final_content: list) -> RunResult:
+def _finish(
+    usage: RunUsage,
+    status: str,
+    iters: int,
+    start: float,
+    final_content: list,
+    prototype_id: int | None = None,
+) -> RunResult:
+    # Flush the SSE terminal event to all active subscribers so every open
+    # /events stream ends cleanly. Covers every exit path (complete / max_iters /
+    # aborted / error) in one place. awaiting_clarification is a pause, not a
+    # terminal — the stream stays open while the user composes an answer.
+    if prototype_id is not None and status != "awaiting_clarification":
+        _sse_close(prototype_id, kind="done" if status == "complete" else "error")
     duration_ms = int((time.perf_counter() - start) * 1000)
     return RunResult(
         status=status,
