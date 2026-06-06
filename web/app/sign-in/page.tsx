@@ -114,8 +114,8 @@ export default function SignInPage() {
   return (
     <AuthShell>
       <div className="ob-eyebrow">Welcome back</div>
-      <h1 className="ob-title">Sign in</h1>
-      <p className="ob-desc">Use your work email and password to open your workspace.</p>
+      <h1 className="ob-title">Welcome back.</h1>
+      <p className="ob-desc">Sign in to your workspace to pick up where you left off.</p>
 
       <form onSubmit={forgotMode ? onForgot : onSignIn}>
         <div className="field">

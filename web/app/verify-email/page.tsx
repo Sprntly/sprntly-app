@@ -29,6 +29,16 @@ function VerifyEmailContent() {
     return () => clearInterval(id)
   }, [resendCooldown])
 
+  async function onContinue() {
+    setMessage(null)
+    await auth.refresh()
+    if (auth.kind === "authed" && auth.isEmailVerified()) {
+      router.replace(await auth.postLoginPath())
+    } else {
+      setMessage("We haven't seen your verification yet. Click the link in your email, then try again.")
+    }
+  }
+
   async function onResend() {
     if (!email || resendCooldown > 0) return
     setMessage(null)
@@ -45,21 +55,30 @@ function VerifyEmailContent() {
     <div className="ob-shell">
       <div className="auth-card">
         <div className="ob-brand-mark">spr<span>ntly</span></div>
-        <div className="ob-eyebrow">Almost there</div>
-        <h1 className="ob-title">Verify your email</h1>
+        <div className="ob-eyebrow">Verify email</div>
+        <h1 className="ob-title">Check your inbox.</h1>
         <p className="ob-desc">
-          We sent a verification link to <strong>{email || "your email"}</strong>.
-          Click the link to start the Business Context Interview.
+          We sent a verification link to <strong>{email || "your work email"}</strong>.
+          Click it to continue.
         </p>
-        <p className="hint">Check your spam folder if you don&apos;t see it within a few minutes.</p>
+        <p className="hint">
+          Check your spam folder if it doesn&apos;t arrive. Link expires in 24 hours.
+        </p>
         {message && <div className="msg">{message}</div>}
         <button
           type="button"
           className="btn btn-primary btn-block btn-lg"
+          onClick={onContinue}
+        >
+          I&apos;ve verified — continue
+        </button>
+        <button
+          type="button"
+          className="btn btn-block btn-lg ob-resend"
           onClick={onResend}
           disabled={resendCooldown > 0 || !email}
         >
-          {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Resend email"}
+          {resendCooldown > 0 ? `Resend email (${resendCooldown}s)` : "Resend email"}
         </button>
         <p className="auth-switch">
           Wrong address? <Link href="/sign-up">Create a new account</Link>
@@ -73,6 +92,7 @@ function VerifyEmailContent() {
         .ob-brand-mark :global(span) { color: var(--accent); }
         .hint { font-size: 13px; color: var(--muted); margin: 0 0 20px; }
         .msg { font-size: 13px; color: var(--accent); margin-bottom: 12px; }
+        .ob-resend { margin-top: 10px; }
         .auth-switch { text-align: center; font-size: 13px; color: var(--ink-3); margin-top: 18px; }
         .auth-switch :global(a) { color: var(--ink); font-weight: 600; }
       `}</style>

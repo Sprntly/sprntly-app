@@ -215,10 +215,11 @@ CREATE TABLE datasets (
 -- (auth.py) reads company_members to resolve the active tenant from
 -- the Supabase JWT.
 CREATE TABLE companies (
-    id           TEXT PRIMARY KEY,
-    slug         TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    id             TEXT PRIMARY KEY,
+    slug           TEXT NOT NULL UNIQUE,
+    display_name   TEXT NOT NULL,
+    coworker_names TEXT NOT NULL DEFAULT '{}',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE company_members (
