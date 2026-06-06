@@ -311,6 +311,7 @@ class CompanyContext(BaseModel):
     company_id: str
     role: str
     user_id: str
+    user_email: str | None = None
 
 
 def require_company(
@@ -352,7 +353,8 @@ def require_company(
 
     only = memberships[0]
     return CompanyContext(
-        company_id=only["company_id"], role=only["role"], user_id=user_id
+        company_id=only["company_id"], role=only["role"], user_id=user_id,
+        user_email=session.get("email"),
     )
 
 

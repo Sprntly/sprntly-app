@@ -476,6 +476,10 @@ export type CommentsPanelProps = {
   onIterateComment?: (comment: CommentRecord) => void
   /** Disables Apply while the shared runner is mid-iterate to prevent overlapping runs. */
   iterateBusy?: boolean
+  /** When true, the composer is suppressed (no contextmenu listener, no write
+   *  affordance). Used on the public /p/<token> surface where comment create is
+   *  disabled (B9b/B9c). Read-only viewers can still read all comments. */
+  readOnly?: boolean
 }
 
 function toMessage(err: unknown, fallback: string): string {
@@ -491,6 +495,7 @@ export function CommentsPanel({
   onApply,
   onIterateComment,
   iterateBusy = false,
+  readOnly = false,
 }: CommentsPanelProps) {
   // (see handleApply / handleIgnore below for the CHANGE C resolve wiring)
   const [comments, setComments] = useState<CommentRecord[]>([])
@@ -517,9 +522,11 @@ export function CommentsPanel({
   }, [token])
 
   // Right-click anywhere with a reachable anchor id opens the composer for that
-  // anchor. For P3 MVP this captures same-origin DOM under the panel/parent
-  // document; the cross-iframe bridge is a follow-up (see scope note above).
+  // anchor. Suppressed in readOnly mode (public viewer — comment create disabled).
+  // For P3 MVP this captures same-origin DOM under the panel/parent document; the
+  // cross-iframe bridge is a follow-up (see scope note above).
   useEffect(() => {
+    if (readOnly) return
     function onContextMenu(e: MouseEvent) {
       const anchorId = captureAnchorId(e.target as Element | null)
       if (!anchorId) return
@@ -528,7 +535,7 @@ export function CommentsPanel({
     }
     document.addEventListener("contextmenu", onContextMenu)
     return () => document.removeEventListener("contextmenu", onContextMenu)
-  }, [])
+  }, [readOnly])
 
   async function handleSubmit() {
     if (!composer || !composer.body.trim()) return
@@ -601,7 +608,7 @@ export function CommentsPanel({
     <div ref={panelRef} className="comments-panel-mount">
       <CommentsPanelView
         comments={comments}
-        composer={composer}
+        composer={readOnly ? null : composer}
         busy={busy || iterateBusy}
         error={error}
         canResolve={prototypeId != null}

@@ -1399,7 +1399,7 @@ def post_comment(
         workspace_id=workspace_id,
         anchor_id=body.anchor_id,
         body=body.body,
-        author="demo",
+        author=company.user_email or company.user_id,
         pin_x_pct=body.pin_x_pct,
         pin_y_pct=body.pin_y_pct,
         resolved_anchor_id=body.resolved_anchor_id,
@@ -1462,6 +1462,7 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     prototype is private or not ready (404, matching get_by_token's posture).
     The comment is attributed to the anonymous external author label, and the
     workspace_id is taken from the resolved row — never a session claim."""
+    raise HTTPException(status_code=404, detail="Not found")
     _require_feature_enabled()
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":

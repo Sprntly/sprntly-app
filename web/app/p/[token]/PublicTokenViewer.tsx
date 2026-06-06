@@ -116,7 +116,7 @@ export function PublicTokenViewer() {
       chrome={
         <>
           <CompletionBar isComplete={state.isComplete} editable={false} />
-          <CommentsPanel token={token as string} />
+          <CommentsPanel token={token as string} readOnly />
           {/* F13 manual edit (P4-01) is INTERNAL-ONLY: it renders its toggle only
               when a prototypeId is supplied. The public resolver is minimum-
               disclosure and exposes no prototypeId / signed-in primitive on this
