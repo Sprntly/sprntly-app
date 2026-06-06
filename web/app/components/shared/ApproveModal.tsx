@@ -33,7 +33,7 @@ const MIN_VISIBLE_MS = 2500
 const SAFETY_MAX_MS = 6.5 * 60 * 1000
 
 export function ApproveModal() {
-  const { activeModal, openModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas } =
+  const { activeModal, openModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas, showToast } =
     useNavigation()
   const { content } = useContent()
   // The workspace hydration gate for the canvas resolver.
@@ -215,6 +215,9 @@ export function ApproveModal() {
     },
     [runCanvasIterate],
   )
+
+  // Guard for "View Prototype" re-verification: prevents opening a stale canvas.
+  const [viewBusy, setViewBusy] = useState(false)
 
   const prd = content.prd
 
@@ -401,17 +404,35 @@ export function ApproveModal() {
 
   if (activeModal !== "approve") return generateModal
 
-  // When the PRD already has a ready prototype, "View Prototype" opens the canvas
-  // directly with the existing prototype, skipping the loading sequence (no
-  // GenerationLoadingScreen). Otherwise "Generate Prototype" → GenerateModal →
-  // loading screen → canvas (unchanged).
-  const handleClaudeClick = () => {
+  // When the PRD already has a ready prototype, "View Prototype" re-verifies that
+  // the prototype still exists before opening the canvas (guard against stale
+  // `existing` after a delete). On null → switch the label back to "Generate
+  // Prototype" and surface a toast. Otherwise falls through to GenerateModal.
+  const handleClaudeClick = async () => {
     if (existing) {
-      closeModal()
-      setCanvasResult(existing)
-      // Push the refresh-stable canvas route for the existing prototype too, so
-      // "View Prototype" → refresh re-opens the canvas.
-      goToCanvas(existing.id)
+      const prdId = prd?.prd_id
+      if (prdId == null) return
+      setViewBusy(true)
+      try {
+        const fresh = await designAgentApi.getByPrd(prdId)
+        if (fresh && fresh.status === "ready" && fresh.bundle_url) {
+          closeModal()
+          setCanvasResult(fresh)
+          // Push the refresh-stable canvas route for the existing prototype too, so
+          // "View Prototype" → refresh re-opens the canvas.
+          goToCanvas(fresh.id)
+        } else {
+          // Prototype was deleted or is no longer ready — reset so the button
+          // switches back to "Generate Prototype".
+          setExisting(null)
+          showToast("Prototype unavailable", "The prototype was removed. Generate a new one.")
+        }
+      } catch {
+        setExisting(null)
+        showToast("Prototype unavailable", "The prototype was removed. Generate a new one.")
+      } finally {
+        setViewBusy(false)
+      }
       return
     }
     // Hand the generate modal's visibility to the navigation modal union; this
@@ -443,7 +464,10 @@ export function ApproveModal() {
           </p>
         </div>
         <div className="modal-options">
-          <div className="modal-option" onClick={handleClaudeClick}>
+          <div
+            className={`modal-option${viewBusy ? " opacity-50 pointer-events-none" : ""}`}
+            onClick={handleClaudeClick}
+          >
             <div className="modal-option-icon">
               <IconSparkle size={18} />
             </div>
