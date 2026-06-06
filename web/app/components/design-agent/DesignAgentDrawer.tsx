@@ -144,25 +144,37 @@ export function buildGenerateParams({
 }
 
 /**
- * P6-15 (UX-5, AC3) — connect-affordance redirect. The source IA's "Connect
- * Figma" / "Connect a repo" buttons reuse the EXACT entry points
- * `ConnectorsScreen` uses (`connectorsApi.figmaAuthorizeUrl` /
- * `connectorsApi.githubAuthorizeUrl`) via a plain `location.href` redirect —
- * NO OAuth handshake, NO token exchange inside this drawer. The connector flow
- * and its known prod bugs are Quokka's connectors lane; UX-5 only wires the
- * affordance to the existing authorize-URL redirect.
+ * P6-15 (UX-5, AC3) / P7 fix — connect-affordance redirect. The source IA's
+ * "Connect Figma" / "Connect a repo" buttons call `connectorsApi.startOauth`
+ * (POST with Bearer token) first, which returns the actual OAuth redirect URL
+ * from the server, then navigate to it. This matches the pattern used by
+ * `ConnectorConnectModal` and `ConnectorsSettings` — the auth check runs server-
+ * side before handing control to the browser's URL bar.
  *
+ * `startOauth` is injected (defaulting to `connectorsApi.startOauth`) and
  * `location` is injected (defaulting to `window.location`) so the wiring is
- * unit-testable in the repo's node vitest env — there is no DOM and no click, so
- * the test asserts the redirect target on an injected `location` seam. The
- * default is evaluated lazily (only on click), so SSR render never touches
- * `window`.
+ * unit-testable in the repo's node vitest env — there is no DOM and no click.
+ * On a network failure, falls back to `/settings/connectors` so the user is
+ * never stranded.
  */
-export function redirectToConnect(
-  authorizeUrl: () => string,
-  location: Pick<Location, "href"> = window.location,
-): void {
-  location.href = authorizeUrl()
+export async function redirectToConnect(
+  provider: "figma" | "github",
+  {
+    startOauth = connectorsApi.startOauth,
+    location: loc = window.location,
+  }: {
+    startOauth?: typeof connectorsApi.startOauth
+    location?: Pick<Location, "href">
+  } = {},
+): Promise<void> {
+  try {
+    const r = await startOauth(provider)
+    if (r.authorize_url) {
+      loc.href = r.authorize_url
+    }
+  } catch {
+    loc.href = "/settings/connectors"
+  }
 }
 
 /**
@@ -454,9 +466,7 @@ export function DesignAgentDrawerView({
                     <button
                       type="button"
                       className="src-connect-btn"
-                      onClick={() =>
-                        redirectToConnect(connectorsApi.figmaAuthorizeUrl)
-                      }
+                      onClick={() => void redirectToConnect("figma")}
                     >
                       Connect Figma
                     </button>
@@ -480,9 +490,7 @@ export function DesignAgentDrawerView({
                 <button
                   type="button"
                   className="src-connect-btn ghost"
-                  onClick={() =>
-                    redirectToConnect(connectorsApi.githubAuthorizeUrl)
-                  }
+                  onClick={() => void redirectToConnect("github")}
                 >
                   Connect a repo
                 </button>

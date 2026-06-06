@@ -352,9 +352,7 @@ export function GenerateModal({
                   <button
                     type="button"
                     className="src-connect-btn"
-                    onClick={() =>
-                      redirectToConnect(connectorsApi.figmaAuthorizeUrl)
-                    }
+                    onClick={() => void redirectToConnect("figma")}
                   >
                     Connect Figma →
                   </button>
@@ -412,9 +410,7 @@ export function GenerateModal({
                   <button
                     type="button"
                     className="src-connect-btn ghost"
-                    onClick={() =>
-                      redirectToConnect(connectorsApi.githubAuthorizeUrl)
-                    }
+                    onClick={() => void redirectToConnect("github")}
                   >
                     Connect a repo →
                   </button>
