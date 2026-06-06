@@ -282,7 +282,7 @@
   padding: 14px 16px;
 }
 
-/* UX-EXPLORE (throwaway — REVERT): clean, link-forward Share panel — modelled on
+/* clean, link-forward Share panel — modelled on
  * Claude / Lovable share dialogs (calm spacing, tidy visibility rows, prominent
  * link + Copy, progressive-disclosure passcode). App tokens only — forest-green
  * accent + off-white surfaces, no coral, no raw hex. Scoped to the DA surface so
@@ -606,7 +606,7 @@
   gap: 10px;
   flex-wrap: wrap;
 }
-/* UX-EXPLORE (throwaway — REVERT): per-source file/repo selector inside a
+/* per-source file/repo selector inside a
    .src-block. Reuses the global .input look; just full-width within the block.
    No new colors. */
 .design-agent-surface .src-select {
@@ -1093,7 +1093,7 @@
 }
 
 /* ===========================================================================
- * UX-EXPLORE (throwaway — REVERT): David's post-gen prototype-section layout.
+ * David's post-gen prototype-section layout.
  * Replaces the prior `.da-canvas` 3-equal-column grid. Replicates the MECHANICS
  * of David's `.proto-ready` block (sprntly.css :1374-1451 + :1935-1937):
  *   TOP control bar (`.da-controlbar`) — TOOLS ONLY (comments toggle, fullscreen,
@@ -1117,7 +1117,7 @@
  * surface but kept intact for the public viewer composition.
  * =========================================================================== */
 
-/* ── UX-EXPLORE (throwaway — REVERT, CHANGE 2): canvas breadcrumb ──────────────
+/* ── canvas breadcrumb ──────────────
    Subtle "PRDs / {PRD title} / Design" row above the control bar. Muted ink-3,
    small; the clickable crumbs (PRDs / PRD title) close the canvas. David's
    breadcrumb style. Token-only, no coral. */
@@ -1144,7 +1144,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-button.da-breadcrumb-link:hover {
+.design-agent-surface button.da-breadcrumb-link:hover {
   color: var(--ink);
   text-decoration: underline;
 }
@@ -1287,7 +1287,7 @@ button.da-breadcrumb-link:hover {
   background: transparent;
   padding: 0;
 }
-/* UX-EXPLORE (throwaway — REVERT): the restyled ShareMenu owns its own clean
+/* the restyled ShareMenu owns its own clean
    panel layout (title + tidy visibility rows + link-forward Copy). Inside the
    popover it just drops its outer frame (the panel IS the frame) — it keeps its
    own 14px rhythm + 320px comfortable width set on `.share-menu` above. The
@@ -1421,7 +1421,7 @@ button.da-breadcrumb-link:hover {
   flex-direction: column;
   overflow: hidden;
   background: var(--surface);
-  /* UX-EXPLORE (throwaway — REVERT, CHANGE 3): positioning context for the mark
+  /* positioning context for the mark
      overlay + the absolutely-placed pin layer. */
   position: relative;
 }
@@ -1505,7 +1505,7 @@ button.da-breadcrumb-link:hover {
   border-radius: 0;
   background: transparent;
 }
-/* UX-EXPLORE (throwaway — REVERT, Problem 2): unshared empty state shown inside
+/* unshared empty state shown inside
    the always-present right sidebar when no comments node exists yet. */
 .design-agent-surface .da-right-empty {
   padding: 24px 18px;
@@ -1710,7 +1710,7 @@ button.da-breadcrumb-link:hover {
 /* === generation loading overlay (end) ===================================== */
 
 /* =============================================================================
- * UX-EXPLORE (throwaway — REVERT): full-screen post-generation canvas overlay.
+ * full-screen post-generation canvas overlay.
  * Revealed by ApproveModal AFTER the "Building your prototype" loading screen
  * completes on a SUCCESSFUL generation (David's flow: loading takeover → reveals
  * the canvas). NOT embedded in the PRD screen — a fixed inset:0 overlay covering
@@ -1719,7 +1719,7 @@ button.da-breadcrumb-link:hover {
  * Hosts the reworked <PostGenerationResult> (control bar + `.da-ready` 3-section
  * body); the Done affordance now lives IN the control bar (no standalone button).
  * =========================================================================== */
-.da-canvas-fullscreen {
+.design-agent-surface.da-canvas-fullscreen {
   position: fixed;
   inset: 0;
   /* above app chrome incl. the sidebar (sidebar sits at z 20–30), matching the
@@ -1730,7 +1730,7 @@ button.da-breadcrumb-link:hover {
   background: var(--surface);
   animation: protoGenFadeIn 0.2s ease-out;
 }
-.da-canvas-fullscreen .da-canvas-fullscreen-body {
+.design-agent-surface.da-canvas-fullscreen .da-canvas-fullscreen-body {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1742,14 +1742,14 @@ button.da-breadcrumb-link:hover {
    body use the full viewport height (instead of an in-PRD intrinsic height).
    `.design-agent-result` is the `.design-agent-surface` flex-column whose second
    child (`.da-ready`) grows to fill (it has `flex:1`). */
-.da-canvas-fullscreen .design-agent-result {
+.design-agent-surface.da-canvas-fullscreen .design-agent-result {
   flex: 1;
   min-height: 0;
 }
 
 
 /* ===========================================================================
- * UX-EXPLORE (throwaway — REVERT, CHANGE 3): Mark-and-comment pin flow.
+ * Mark-and-comment pin flow.
  * Ported from David's mockup `.marking` / `.pc-pin` / `pinDrop` / `.proto-comment`
  * with David's hardcoded coral `--brand` REMAPPED to this app's forest-green
  * `--accent` token, and his hardcoded coral pin box-shadow swapped for a GREEN
@@ -1805,7 +1805,7 @@ button.da-breadcrumb-link:hover {
 }
 .design-agent-surface .pc-pin .pc-pin-num {
   transform: rotate(45deg);
-  color: #fff;
+  color: var(--surface-2);
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
@@ -1846,7 +1846,7 @@ button.da-breadcrumb-link:hover {
   align-items: center;
   justify-content: center;
   background: var(--accent);
-  color: #fff;
+  color: var(--surface-2);
   font-size: 11px;
   font-weight: 700;
   border-radius: 50%;
@@ -1894,7 +1894,7 @@ button.da-breadcrumb-link:hover {
 }
 
 /* ===========================================================================
- * UX-EXPLORE (throwaway — REVERT, CHANGES A/B/C/E): condensed PRD context panel,
+ * condensed PRD context panel,
  * comment author/avatar/time identity, Apply/Ignore actions + resolved state,
  * clarifying-question slot. Forest-green tokens only; NO coral.
  * =========================================================================== */
@@ -2029,7 +2029,7 @@ button.da-breadcrumb-link:hover {
 }
 
 /* ===========================================================================
- * UX-EXPLORE (throwaway — REVERT, CHANGE 3): PRD-screen prototype preview card.
+ * PRD-screen prototype preview card.
  * Modelled on a brief-insight card: a small scaled (non-interactive) thumbnail of
  * the bundle + title + sub-line + an open arrow. Clicking opens the full-screen
  * canvas (CHANGE 4). Forest-green / off-white app tokens only, NO coral.
@@ -2116,7 +2116,7 @@ button.da-breadcrumb-link:hover {
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
-   UX-EXPLORE (throwaway — REVERT, CHANGE A): LEFT-PANEL AGENT-FLOW ACTIVITY.
+   LEFT-PANEL AGENT-FLOW ACTIVITY.
    The live transcript shown while/after an iterate runs — the user's request,
    the "agent working" steps (cosmetic, poll-driven), the completion / clarifying
    question / error — in David's `.proto-msg` chat style. App tokens only (forest

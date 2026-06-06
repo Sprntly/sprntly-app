@@ -69,9 +69,9 @@ describe("PostGenerationResult internal mount — overlay reachable (AC1)", () =
     expect(html).not.toContain('class="da-prototype-iframe"')
     expect(html).not.toContain('data-testid="manual-edit-overlay"')
     // The always-shown View control is present and disabled (no bundle yet) — the
-    // never-dead invariant (P6-16 AC1). The old anchor is gone. UX-EXPLORE
-    // (throwaway — REVERT): the trigger is now the compact control-bar icon button
-    // `proto-fullscreen-trigger` (renamed from `view-fullscreen-trigger`).
+    // never-dead invariant (P6-16 AC1). The old anchor is gone. The trigger is now
+    // the compact control-bar icon button `proto-fullscreen-trigger` (renamed from
+    // `view-fullscreen-trigger`).
     expect(html).not.toContain('data-testid="view-prototype-link"')
     expect(html).toContain('data-testid="proto-fullscreen-trigger"')
     expect(html).toMatch(/data-testid="proto-fullscreen-trigger"[^>]*disabled/)
