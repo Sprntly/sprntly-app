@@ -20,10 +20,10 @@ import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 import { useIterateRun } from "../design-agent/useIterateRun"
 import { IconCheck, IconSparkle } from "./app-icons"
 
-// UX-EXPLORE (throwaway — REVERT): the loading overlay flashes if generation
-// dedup-returns an existing prototype almost instantly (e.g. prd 60 → ready in
-// ~1s). Keep it visible at least this long so it's actually seen, then dismiss
-// promptly once BOTH (generation resolved AND min elapsed).
+// Min-visible duration. If generation dedup-returns an existing prototype almost
+// instantly, the overlay would otherwise flash; keep it visible at least this
+// long so it actually registers, then dismiss promptly once BOTH conditions hold
+// (generation resolved AND this minimum elapsed).
 const MIN_VISIBLE_MS = 2500
 // Hard ceiling so the overlay can never hang if neither callback fires (e.g. a
 // swallowed kickoff failure). runGenerateFlow's own poll caps at 6 min; this is
@@ -36,18 +36,17 @@ export function ApproveModal() {
   const { content } = useContent()
   // The workspace hydration gate for the canvas resolver.
   const { loading: workspaceLoading } = useWorkspace()
-  // UX-EXPLORE (throwaway — REVERT): full-screen loading-overlay visibility.
+  // Full-screen loading-overlay visibility.
   const [genLoading, setGenLoading] = useState(false)
-  // UX-EXPLORE (throwaway — REVERT): the prototype to show in the FULL-SCREEN
-  // post-generation canvas (David's flow: loading takeover → reveals the canvas),
-  // or null when no canvas is shown. Set on a successful generation once the
-  // loading overlay dismisses; cleared by the canvas's Close/Done affordance
-  // (returns to the PRD). The canvas is a full-screen overlay — NOT embedded in
-  // the PRD screen.
+  // The prototype to show in the full-screen post-generation canvas (the loading
+  // takeover reveals the canvas), or null when no canvas is shown. Set on a
+  // successful generation once the loading overlay dismisses; cleared by the
+  // canvas's Close/Done affordance (returns to the PRD). The canvas is a
+  // full-screen overlay — NOT embedded in the PRD screen.
   const [canvasResult, setCanvasResult] = useState<PrototypeRecord | null>(null)
-  // UX-EXPLORE (throwaway — REVERT): minimal state to mount the canvas's
-  // comments/iterate slots the same way DesignAgentLauncher does. applyTarget is
-  // the comment lifted from CommentsPanel's Apply into IterateComposer's pre-fill.
+  // Minimal state to mount the canvas's comments/iterate slots the same way
+  // DesignAgentLauncher does. applyTarget is the comment lifted from
+  // CommentsPanel's Apply into IterateComposer's pre-fill.
   const [applyTarget, setApplyTarget] = useState<CommentRecord | null>(null)
   // The PRD's existing ready prototype (resolved read-only via getByPrd), or
   // null. When set, the modal's primary option becomes "View Prototype" and
@@ -62,10 +61,10 @@ export function ApproveModal() {
   const resolvedRef = useRef(false)
   const safetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const minTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // UX-EXPLORE (throwaway — REVERT): the prototype to reveal in the full-screen
-  // canvas once the loading overlay actually dismisses (after the min-visible
-  // delay). Held in a ref so the deferred dismissal closure reads the latest
-  // value without re-binding. Null on failure/timeout → no canvas revealed.
+  // The prototype to reveal in the full-screen canvas once the loading overlay
+  // actually dismisses (after the min-visible delay). Held in a ref so the
+  // deferred dismissal closure reads the latest value without re-binding. Null on
+  // failure/timeout → no canvas revealed.
   const pendingCanvasRef = useRef<PrototypeRecord | null>(null)
   // Live mirror of the generate modal's open state for the kickoff-failure
   // guard's deferred timeout (avoids a stale closure). Sourced from the shared
@@ -83,11 +82,11 @@ export function ApproveModal() {
   const hideLoading = useCallback(() => {
     clearTimers()
     setGenLoading(false)
-    // UX-EXPLORE (throwaway — REVERT): when the dismissal was triggered by a
-    // SUCCESSFUL generation, reveal the full-screen post-generation canvas as
-    // the loading overlay goes away (loading takeover → canvas). On failure/
-    // timeout pendingCanvasRef stays null → no canvas (failure surfacing is the
-    // existing flow's toast/banner, left untouched).
+    // When the dismissal was triggered by a SUCCESSFUL generation, reveal the
+    // full-screen post-generation canvas as the loading overlay goes away
+    // (loading takeover → canvas). On failure/timeout pendingCanvasRef stays null
+    // → no canvas (failure surfacing is the existing flow's toast/banner, left
+    // untouched).
     if (pendingCanvasRef.current) {
       const revealed = pendingCanvasRef.current
       setCanvasResult(revealed)
@@ -102,8 +101,8 @@ export function ApproveModal() {
   const handleGenStart = useCallback(() => {
     shownAtRef.current = Date.now()
     resolvedRef.current = false
-    // UX-EXPLORE (throwaway — REVERT): clear any canvas-to-reveal from a prior
-    // run before this generation resolves.
+    // Clear any canvas-to-reveal from a prior run before this generation
+    // resolves.
     pendingCanvasRef.current = null
     setGenLoading(true)
     if (safetyTimerRef.current) clearTimeout(safetyTimerRef.current)
@@ -120,11 +119,10 @@ export function ApproveModal() {
   }, [hideLoading])
 
   // Fired on the terminal generation outcome (ready/failed/timeout). Dismiss
-  // once the min-visible duration has also elapsed.
-  // UX-EXPLORE (throwaway — REVERT): now receives the terminal RESULT. On
-  // SUCCESS (`result.ok` with a ready prototype) we stash the prototype in
-  // pendingCanvasRef so hideLoading reveals the full-screen post-generation
-  // canvas as the loading overlay dismisses (David's flow: loading takeover →
+  // once the min-visible duration has also elapsed. Receives the terminal
+  // RESULT. On SUCCESS (`result.ok` with a ready prototype) we stash the
+  // prototype in pendingCanvasRef so hideLoading reveals the full-screen
+  // post-generation canvas as the loading overlay dismisses (loading takeover →
   // canvas). On FAILURE / no result we leave pendingCanvasRef null → the loading
   // overlay just dismisses and the existing failure surfacing (runGenerateFlow's
   // toast) stands; no canvas is shown.
@@ -145,8 +143,8 @@ export function ApproveModal() {
     [hideLoading],
   )
 
-  // UX-EXPLORE (throwaway — REVERT): Close/Done — clear the full-screen canvas
-  // (returns to the PRD) and drop any lifted apply target.
+  // Close/Done — clear the full-screen canvas (returns to the PRD) and drop any
+  // lifted apply target.
   const closeCanvas = useCallback(() => {
     setCanvasResult(null)
     setApplyTarget(null)

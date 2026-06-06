@@ -1535,20 +1535,16 @@ button.da-breadcrumb-link:hover {
 }
 
 
-/* ===========================================================================
- * UX-EXPLORE (throwaway — REVERT): full-screen "Building your prototype" loading
- * overlay. Ported from David's mockup `.proto-generating` block (sprntly.css),
- * with David's tokens REMAPPED to THIS app's design tokens:
- *   --brand  -> --accent (forest green)   --bg   -> --surface
- *   --bg2    -> --surface-2               --bg3  -> --surface-3
- *   --text2  -> --ink-2                   --text3-> --ink-3
- *   --border -> --line                    --r    -> --radius
- *   --ff     -> --font-serif              --fm   -> --font-mono
- *   --brand-b-> --accent-alpha-18         --green-d -> --accent-ink
- * NO coral, NO new palette. Orb/cursor/spinner/fill keyframes reproduced.
- * Scoped under .proto-gen-overlay so nothing leaks into the rest of the app.
+/* === generation loading overlay (start) ===================================
+ * Full-screen "Building your prototype" loading overlay. Reproduces the product
+ * mockup's generating block, remapped to this app's design tokens (forest-green
+ * --accent, off-white --surface family, --font-serif / --font-mono). No coral,
+ * no new palette. The orb / cursor / spinner / fill keyframes are reproduced
+ * here. Every rule is scoped under .design-agent-surface: the overlay root
+ * carries both the design-agent-surface and proto-gen-overlay classes, so the
+ * scope is a compound selector and nothing leaks into the rest of the app.
  * =========================================================================== */
-.proto-gen-overlay {
+.design-agent-surface.proto-gen-overlay {
   position: fixed;
   inset: 0;
   /* above app chrome incl. the sidebar (sidebar/app-main-chrome sit at z 20–30) */
@@ -1556,21 +1552,19 @@ button.da-breadcrumb-link:hover {
   display: flex;
   justify-content: center;
   align-items: center;
-  background:
-    radial-gradient(ellipse at center, var(--accent-alpha-06) 0%, transparent 60%),
-    var(--surface);
+  background: radial-gradient(ellipse at center, var(--accent-alpha-06) 0%, transparent 60%), var(--surface);
   animation: protoGenFadeIn 0.2s ease-out;
 }
 @keyframes protoGenFadeIn { from { opacity: 0; } to { opacity: 1; } }
 
-.proto-gen-overlay .proto-gen-inner {
+.design-agent-surface.proto-gen-overlay .proto-gen-inner {
   max-width: 520px;
   text-align: center;
   padding: 0 24px;
 }
 
 /* Orb — concentric pulsing rings + center dot */
-.proto-gen-overlay .proto-gen-orb {
+.design-agent-surface.proto-gen-overlay .proto-gen-orb {
   position: relative;
   width: 120px;
   height: 120px;
@@ -1579,18 +1573,18 @@ button.da-breadcrumb-link:hover {
   align-items: center;
   justify-content: center;
 }
-.proto-gen-overlay .proto-gen-orb .r1,
-.proto-gen-overlay .proto-gen-orb .r2,
-.proto-gen-overlay .proto-gen-orb .r3 {
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r1,
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r2,
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r3 {
   position: absolute;
   border-radius: 50%;
   border: 1.5px solid var(--accent);
   animation: protoGenOrb 2.4s ease-out infinite;
 }
-.proto-gen-overlay .proto-gen-orb .r1 { width: 120px; height: 120px; animation-delay: 0s; }
-.proto-gen-overlay .proto-gen-orb .r2 { width: 120px; height: 120px; animation-delay: 0.8s; }
-.proto-gen-overlay .proto-gen-orb .r3 { width: 120px; height: 120px; animation-delay: 1.6s; }
-.proto-gen-overlay .proto-gen-orb .d {
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r1 { width: 120px; height: 120px; animation-delay: 0s; }
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r2 { width: 120px; height: 120px; animation-delay: 0.8s; }
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r3 { width: 120px; height: 120px; animation-delay: 1.6s; }
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .d {
   width: 32px;
   height: 32px;
   border-radius: 50%;
@@ -1599,13 +1593,13 @@ button.da-breadcrumb-link:hover {
 }
 @keyframes protoGenOrb {
   0%   { transform: scale(0.4); opacity: 0.9; border-color: var(--accent-alpha-40); }
-  /* UX-EXPLORE (throwaway — REVERT): fully-transparent end colour — use the
-     `transparent` keyword (no literal rgb) so the CSS stays token/keyword-only. */
+  /* fully-transparent end colour — use the `transparent` keyword (no literal
+     rgb) so the CSS stays token/keyword-only */
   100% { transform: scale(1.6); opacity: 0;   border-color: transparent; }
 }
 
 /* Headline + blinking cursor */
-.proto-gen-overlay .proto-gen-h {
+.design-agent-surface.proto-gen-overlay .proto-gen-h {
   font-family: var(--font-serif);
   font-size: 30px;
   font-weight: 400;
@@ -1618,7 +1612,7 @@ button.da-breadcrumb-link:hover {
   gap: 2px;
   color: var(--ink);
 }
-.proto-gen-overlay .thinking-cursor {
+.design-agent-surface.proto-gen-overlay .thinking-cursor {
   display: inline-block;
   width: 7px;
   height: 22px;
@@ -1630,7 +1624,7 @@ button.da-breadcrumb-link:hover {
 @keyframes protoGenBlink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 
 /* Italic status line */
-.proto-gen-overlay .proto-gen-s {
+.design-agent-surface.proto-gen-overlay .proto-gen-s {
   font-size: 13.5px;
   color: var(--ink-2);
   margin-bottom: 22px;
@@ -1640,7 +1634,7 @@ button.da-breadcrumb-link:hover {
 }
 
 /* Progress bar + elapsed-time label */
-.proto-gen-overlay .proto-gen-progress {
+.design-agent-surface.proto-gen-overlay .proto-gen-progress {
   margin-top: 18px;
   margin-bottom: 18px;
   text-align: left;
@@ -1649,13 +1643,13 @@ button.da-breadcrumb-link:hover {
   border-radius: var(--radius);
   padding: 11px 14px;
 }
-.proto-gen-overlay .proto-gen-progress .bar {
+.design-agent-surface.proto-gen-overlay .proto-gen-progress .bar {
   height: 6px;
   background: var(--surface-3);
   border-radius: 6px;
   overflow: hidden;
 }
-.proto-gen-overlay .proto-gen-progress .bar .fill {
+.design-agent-surface.proto-gen-overlay .proto-gen-progress .bar .fill {
   height: 100%;
   width: 0%;
   background: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 100%);
@@ -1663,7 +1657,7 @@ button.da-breadcrumb-link:hover {
   transition: width 0.25s linear;
   box-shadow: 0 0 12px var(--accent-alpha-28);
 }
-.proto-gen-overlay .proto-gen-progress .lbl {
+.design-agent-surface.proto-gen-overlay .proto-gen-progress .lbl {
   font-size: 10.5px;
   color: var(--ink-3);
   font-family: var(--font-mono);
@@ -1671,7 +1665,7 @@ button.da-breadcrumb-link:hover {
 }
 
 /* Streamed steps checklist */
-.proto-gen-overlay .proto-gen-steps {
+.design-agent-surface.proto-gen-overlay .proto-gen-steps {
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1679,7 +1673,7 @@ button.da-breadcrumb-link:hover {
   text-align: left;
   box-shadow: var(--shadow-sm);
 }
-.proto-gen-overlay .proto-gen-step {
+.design-agent-surface.proto-gen-overlay .proto-gen-step {
   display: flex;
   align-items: center;
   gap: 11px;
@@ -1690,10 +1684,10 @@ button.da-breadcrumb-link:hover {
   border-bottom: 1px dashed var(--line);
   transition: opacity 0.3s, color 0.3s;
 }
-.proto-gen-overlay .proto-gen-step:last-child { border-bottom: none; }
-.proto-gen-overlay .proto-gen-step.done { color: var(--ink-3); }
-.proto-gen-overlay .proto-gen-step.done .spin { display: none; }
-.proto-gen-overlay .proto-gen-step.done::before {
+.design-agent-surface.proto-gen-overlay .proto-gen-step:last-child { border-bottom: none; }
+.design-agent-surface.proto-gen-overlay .proto-gen-step.done { color: var(--ink-3); }
+.design-agent-surface.proto-gen-overlay .proto-gen-step.done .spin { display: none; }
+.design-agent-surface.proto-gen-overlay .proto-gen-step.done::before {
   content: '✓';
   color: var(--accent-ink);
   font-size: 13px;
@@ -1701,7 +1695,7 @@ button.da-breadcrumb-link:hover {
   font-weight: 600;
   width: 14px;
 }
-.proto-gen-overlay .proto-gen-step .spin {
+.design-agent-surface.proto-gen-overlay .proto-gen-step .spin {
   width: 14px;
   height: 14px;
   border-radius: 50%;
@@ -1710,9 +1704,10 @@ button.da-breadcrumb-link:hover {
   animation: protoGenSpin 0.6s linear infinite;
   flex-shrink: 0;
 }
-.proto-gen-overlay .proto-gen-step:not(.done):not(.active) { display: none; }
-.proto-gen-overlay .proto-gen-step.active { color: var(--ink); }
+.design-agent-surface.proto-gen-overlay .proto-gen-step:not(.done):not(.active) { display: none; }
+.design-agent-surface.proto-gen-overlay .proto-gen-step.active { color: var(--ink); }
 @keyframes protoGenSpin { to { transform: rotate(360deg); } }
+/* === generation loading overlay (end) ===================================== */
 
 /* =============================================================================
  * UX-EXPLORE (throwaway — REVERT): full-screen post-generation canvas overlay.
