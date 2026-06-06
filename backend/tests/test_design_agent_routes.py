@@ -875,3 +875,163 @@ async def test_repo_does_not_change_scenario_label(env, monkeypatch):
         github_repo="org/repo",
     )
     assert calls[0]["scenario"] == "0"
+
+
+# ─── Figma file listing (Generate modal design selector) ──────────────────────
+#
+# A read-only authed proxy over the Figma REST API that backs the Generate
+# modal's design-source selector. The token resolver (decryption + 404-when-not-
+# connected) is reused from the connectors route; the REST helper lives in the
+# connectors lane. These tests patch those two boundaries so the route's gating,
+# workspace-scoping, route-ordering, and honest-degradation behaviour are
+# verified in isolation.
+
+_FIGMA_TOKEN_TARGET = "app.routes.connectors._figma_access_token"
+_FIGMA_FETCH_TARGET = "app.connectors.figma_oauth.fetch_files"
+
+
+def test_list_figma_files_returns_normalised_list(env, client, monkeypatch):
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, lambda company_id: "figd_tok")
+    monkeypatch.setattr(
+        _FIGMA_FETCH_TARGET,
+        lambda token, *a, **k: [
+            {"key": "k1", "name": "Home"},
+            {"key": "k2", "name": "Checkout"},
+        ],
+    )
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "files": [
+            {"key": "k1", "name": "Home"},
+            {"key": "k2", "name": "Checkout"},
+        ]
+    }
+
+
+def test_list_figma_files_404_when_flag_off(env, client, monkeypatch):
+    # Flag is checked FIRST — a probe with the flag off is indistinguishable from
+    # a missing route (404, never 401/403). No token resolution happens.
+    monkeypatch.delenv("DESIGN_AGENT_ENABLED", raising=False)
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, lambda company_id: "figd_tok")
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 404
+
+
+def test_list_figma_files_404_when_not_connected(env, client, monkeypatch):
+    # Flag on, no Figma connection: the reused token resolver raises 404, which
+    # the route propagates unchanged (it is outside the honest-degradation guard).
+    from fastapi import HTTPException
+
+    def _not_connected(company_id):
+        raise HTTPException(404, "Figma is not connected")
+
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, _not_connected)
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 404
+
+
+def test_list_figma_files_requires_company(env, unauth):
+    # No session bearer → require_company rejects before the handler body runs.
+    resp = unauth.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 401
+
+
+def test_list_figma_files_scoped_to_company(env, client, monkeypatch):
+    # Workspace isolation: the token lookup is scoped to the CALLER's company id,
+    # so a request can only ever resolve its own company's Figma connection.
+    seen: dict[str, str] = {}
+
+    def _capture(company_id):
+        seen["company_id"] = company_id
+        return "figd_tok"
+
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, _capture)
+    monkeypatch.setattr(_FIGMA_FETCH_TARGET, lambda token, *a, **k: [])
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 200, resp.text
+    assert seen["company_id"] == _TEST_COMPANY_ID
+
+
+def test_figma_files_route_not_shadowed_by_catch_all(env, client, monkeypatch):
+    # A real reachability call: GET /figma-files must hit the listing handler, NOT
+    # the single-segment GET /{prototype_id} catch-all (which would 422 trying to
+    # parse "figma-files" as an int). A 200 with a files body proves the static
+    # route is declared above the catch-all and wins.
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, lambda company_id: "figd_tok")
+    monkeypatch.setattr(
+        _FIGMA_FETCH_TARGET, lambda token, *a, **k: [{"key": "k1", "name": "Home"}]
+    )
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 200, resp.text
+    assert resp.status_code != 422
+    assert "files" in resp.json()
+
+
+def test_list_figma_files_upstream_failure_clean_error(env, client, monkeypatch):
+    # An upstream listing failure (the helper raising) maps to a clean empty list,
+    # NOT a 500 leaking the upstream body — the modal renders the honest empty
+    # state.
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, lambda company_id: "figd_tok")
+
+    def _boom(token, *a, **k):
+        raise RuntimeError("upstream 500 body that must not leak")
+
+    monkeypatch.setattr(_FIGMA_FETCH_TARGET, _boom)
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"files": []}
+
+
+class _FakeResp:
+    def __init__(self, ok, payload, status_code=200, text=""):
+        self.ok = ok
+        self._payload = payload
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+def test_fetch_files_empty_without_team_id():
+    # Honest degradation: the current OAuth grant captures no team_id and lacks a
+    # project-listing scope, so with no team_id the helper returns an empty list
+    # without making any upstream call (no fake files).
+    from app.connectors import figma_oauth
+
+    assert figma_oauth.fetch_files("figd_tok") == []
+
+
+def test_fetch_files_walks_team_projects(monkeypatch):
+    # When a team_id IS supplied, the helper walks teams -> projects -> files and
+    # returns a normalised [{key, name}] list.
+    from app.connectors import figma_oauth
+
+    def _fake_get(url, **kwargs):
+        if "/teams/" in url:
+            return _FakeResp(True, {"projects": [{"id": "p1"}]})
+        if "/projects/" in url:
+            return _FakeResp(
+                True,
+                {"files": [{"key": "k1", "name": "Home"}, {"key": "k2", "name": "App"}]},
+            )
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(figma_oauth.requests, "get", _fake_get)
+    assert figma_oauth.fetch_files("figd_tok", team_id="t1") == [
+        {"key": "k1", "name": "Home"},
+        {"key": "k2", "name": "App"},
+    ]
+
+
+def test_fetch_files_upstream_error_returns_empty(monkeypatch):
+    # A non-ok projects response logs + returns an empty list (never raises, never
+    # leaks the body to the caller).
+    from app.connectors import figma_oauth
+
+    def _fake_get(url, **kwargs):
+        return _FakeResp(False, {}, status_code=403, text="forbidden")
+
+    monkeypatch.setattr(figma_oauth.requests, "get", _fake_get)
+    assert figma_oauth.fetch_files("figd_tok", team_id="t1") == []

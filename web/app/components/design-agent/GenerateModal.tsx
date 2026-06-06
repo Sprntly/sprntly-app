@@ -5,15 +5,17 @@
  * "Approve & next step" modal's "Generate Prototype" option, which hands
  * visibility to the shared navigation modal union (`activeModal === "generate"`).
  * Connector rows are driven by REAL connector status (`connectorsApi.list()`);
- * the GitHub repo selector is wired to the real repo-listing endpoint; the Figma
- * file selector is an honest disabled placeholder until a Figma file-listing
- * endpoint exists. The Generate button reuses the same real generation flow as
- * the launcher drawer (`designAgentApi.generate` → the shared generate flow) —
- * no faked calls. Connector + repo fetches are wrapped in the shared auth-retry
- * helper so a transient token-refresh 401 holds the last-known rows (the modal
- * does not reflow and the Generate button does not move). Source selections are
- * not yet threaded into generation; the repo param and the Figma listing
- * endpoint are future enhancements.
+ * the GitHub repo selector is wired to the real repo-listing endpoint, and the
+ * Figma file selector is wired to the real file-listing endpoint
+ * (`designAgentApi.listFigmaFiles`), degrading to an honest "Couldn't load
+ * designs" empty state on failure (never fake files). The Generate button reuses
+ * the same real generation flow as the launcher drawer (`designAgentApi.generate`
+ * → the shared generate flow) — no faked calls. Connector + repo + Figma-file
+ * fetches are wrapped in the shared auth-retry helper so a transient
+ * token-refresh 401 holds the last-known rows (the modal does not reflow and the
+ * Generate button does not move). The selected Figma file (`figmaFileSel`) flows
+ * into generation via the existing `figmaFileSel || figmaFileKey` fallback; the
+ * selected GitHub repo threads in as prompt context (`github_repo`).
  */
 
 import { useEffect, useState } from "react"
@@ -24,6 +26,7 @@ import {
   withAuthRetry,
   ApiError,
   type ConnectionSummary,
+  type FigmaFile,
   type GitHubRepo,
 } from "../../lib/api"
 import {
@@ -45,6 +48,35 @@ const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "mobile", label: "Mobile" },
   { value: "both", label: "Both" },
 ]
+
+/**
+ * Build the Figma file `<select>` options from the fetched list. Pure so the
+ * mapping is unit-testable without driving the effect:
+ *  - `null`  → still loading ("Loading designs…").
+ *  - `[]`    → the honest empty state ("Couldn't load designs") — this is what a
+ *              non-401 fetch failure AND a successful-but-unprovisioned listing
+ *              both collapse to; NO fake files are ever rendered.
+ *  - files   → a "Pick design…" prompt + one `<option value={key}>{name}` per
+ *              file, so a selection feeds `figmaFileSel` (→ figma_file_key).
+ */
+export function figmaFileOptions(figmaFiles: FigmaFile[] | null) {
+  if (figmaFiles === null) {
+    return <option value="">Loading designs…</option>
+  }
+  if (figmaFiles.length === 0) {
+    return <option value="">Couldn&apos;t load designs</option>
+  }
+  return (
+    <>
+      <option value="">Pick design…</option>
+      {figmaFiles.map((f) => (
+        <option key={f.key} value={f.key}>
+          {f.name}
+        </option>
+      ))}
+    </>
+  )
+}
 
 /**
  * Visibility is driven by the shared navigation modal union: the parent threads
@@ -87,15 +119,17 @@ export function GenerateModal({
     connections?.find((c) => c.provider === provider)
 
   // Per-provider source selectors.
-  // Figma: no file-listing endpoint exists in api.ts/backend (only
-  //   getFigmaFile(key) fetches a SPECIFIC file by key — the Figma REST API has
-  //   no "list my files" without a team/project id, and none is wired). So the
-  //   Figma selector is an honest placeholder (disabled, empty-state) — no fake
-  //   files. The chosen key would feed `figmaFileKey` → figma_file_key once a
-  //   real listing exists; until then it falls back to the figmaFileKey prop.
+  // Figma: real endpoint — designAgentApi.listFigmaFiles() → GET
+  //   /v1/design-agent/figma-files. We fetch + populate the file <select>. The
+  //   chosen key feeds `figmaFileSel` → figma_file_key via the existing
+  //   `figmaFileSel || figmaFileKey` fallback. `figmaFiles === null` means "not
+  //   loaded yet"; an empty list is the honest "Couldn't load designs" state
+  //   (the listing scope/team-id is a connectors-lane dependency) — no fake
+  //   files are ever rendered.
   // GitHub: real endpoint — connectorsApi.listGithubRepos() → GET
   //   /v1/connectors/github/repos. We fetch + populate the repo <select>.
   const [figmaFileSel, setFigmaFileSel] = useState("")
+  const [figmaFiles, setFigmaFiles] = useState<FigmaFile[] | null>(null)
   const [repos, setRepos] = useState<GitHubRepo[] | null>(null)
   const [reposError, setReposError] = useState(false)
   const [repoSel, setRepoSel] = useState("")
@@ -148,13 +182,35 @@ export function GenerateModal({
     }
   }, [open, githubActive])
 
+  // Fetch the connected company's Figma files for the design selector — real
+  // endpoint. Runs only when Figma is active. Mirrors the GitHub repo fetch:
+  // withAuthRetry holds the last-known rows through a transient token-refresh
+  // 401; only a genuine non-auth failure clears to an empty list, which the
+  // <select> renders as the honest "Couldn't load designs" state (no fake files).
+  const figmaActive = getGenerateConnectorRowState(connFor("figma")).connected
+  useEffect(() => {
+    if (!open || !figmaActive) return
+    let cancelled = false
+    void withAuthRetry(() => designAgentApi.listFigmaFiles())
+      .then((r) => {
+        if (!cancelled) setFigmaFiles(r.files)
+      })
+      .catch((err) => {
+        if (!cancelled && !(err instanceof ApiError && err.status === 401)) {
+          setFigmaFiles([])
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, figmaActive])
+
   if (!open) return null
 
   // Figma + GitHub row state (connected vs not + account label) from the shared
   // row helper applied to each provider's live connection.
   const figmaRow = getGenerateConnectorRowState(connFor("figma"))
   const githubRow = getGenerateConnectorRowState(connFor("github"))
-  const figmaActive = figmaRow.connected
 
   const handleGenerate = () => {
     if (submitting || prdId == null) return
@@ -273,19 +329,21 @@ export function GenerateModal({
                     Connected
                     {figmaRow.accountLabel ? ` · ${figmaRow.accountLabel}` : ""}
                   </span>
-                  {/* Figma file selector. Honest placeholder — no Figma
-                      file-listing endpoint exists (api.ts only exposes
-                      getFigmaFile(key) for a specific key). Disabled empty-state;
-                      no fake files. A real selection would feed figmaFileKey →
-                      figma_file_key once a listing endpoint is wired. */}
+                  {/* Figma file selector. Wired to a real endpoint —
+                      designAgentApi.listFigmaFiles() → GET
+                      /v1/design-agent/figma-files. Enabled once files load; the
+                      chosen key (figmaFileSel) feeds figma_file_key via the
+                      existing figmaFileSel || figmaFileKey fallback. An empty
+                      list is the honest "Couldn't load designs" state — no fake
+                      files. */}
                   <select
                     className="input src-select-inline"
                     value={figmaFileSel}
                     onChange={(e) => setFigmaFileSel(e.target.value)}
-                    disabled
+                    disabled={!figmaFiles || figmaFiles.length === 0}
                     aria-label="Select a design"
                   >
-                    <option value="">Pick design — not wired yet</option>
+                    {figmaFileOptions(figmaFiles)}
                   </select>
                 </>
               ) : (

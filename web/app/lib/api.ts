@@ -629,6 +629,13 @@ export type PrdPatchRecord = {
   created_at: string
 }
 
+/** One listable Figma file for the Generate modal's design-source selector
+ *  (`designAgentApi.listFigmaFiles`). */
+export type FigmaFile = {
+  key: string
+  name: string
+}
+
 export const designAgentApi = {
   /** Kicks off prototype generation in the background; returns immediately
    *  with a prototype_id. Client should poll designAgentApi.get(id) (via
@@ -810,6 +817,13 @@ export const designAgentApi = {
       `/v1/design-agent/${prototypeId}/manual-edit`,
       body,
     ),
+  /** List the connected company's Figma files for the Generate modal's design
+   *  selector (`GET /v1/design-agent/figma-files`). DA-flag gated (404 when off)
+   *  and Figma-connection gated (404 when not connected). Returns an honest
+   *  empty `files` list when the upstream listing can't be produced -- never
+   *  fabricated files; the modal renders that as "Couldn't load designs". */
+  listFigmaFiles: () =>
+    api.get<{ files: FigmaFile[] }>("/v1/design-agent/figma-files"),
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
