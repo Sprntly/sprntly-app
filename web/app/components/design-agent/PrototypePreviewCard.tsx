@@ -1,25 +1,18 @@
 "use client"
 
 /**
- * UX-EXPLORE (throwaway — REVERT, CHANGE 3): PRD-screen prototype preview card.
+ * PRD-screen prototype preview card. Shown in the PRD's Design section when the
+ * PRD already has a ready prototype (resolved read-only via
+ * `designAgentApi.getByPrd`; degrades to nothing — never faking existence, never
+ * kicking a generation — when no record exists). The prototype row carries no
+ * screenshot today, so the thumbnail is a scaled, click-inert
+ * `<iframe src={bundle_url}>`; a real screenshot thumbnail is a future
+ * enhancement. `bundle_url=null` falls back to a neutral placeholder. Clicking
+ * the card opens the full-screen canvas for that prototype (pushing the
+ * refresh-stable canvas route), skipping the loading sequence.
  *
- * Shown in the PRD's Design section WHEN the PRD already has a ready prototype
- * (resolved via the read-only `designAgentApi.getByPrd` — see api.ts; degrades to
- * nothing when no read-only endpoint/record exists, never faking existence and
- * NEVER kicking a generation). Modelled on a brief-insight card: a small
- * thumbnail of the prototype + a title + a sub-line + an open affordance.
- *
- * THUMBNAIL: the prototype record carries no screenshot, so the thumbnail is a
- * scaled-down, NON-interactive `<iframe src={bundle_url}>` — `pointer-events:none`
- * + `transform: scale(...)` to a small box (a static screenshot would be ideal but
- * the backend doesn't store one — flagged in the RETURN). When `bundle_url` is
- * null (older/odd rows) the thumbnail falls back to a neutral placeholder.
- *
- * Clicking the card calls `onOpen()` — the launcher reveals the full-screen canvas
- * for that prototype (skipping the loading sequence, CHANGE 4).
- *
- * Pure leaf (no I/O) → the SSR-renderable view + a tiny container is unnecessary;
- * it takes the resolved record as a prop, so it renders under node-env vitest.
+ * Pure leaf (no I/O): it takes the resolved record as a prop, so it renders
+ * under node-env vitest without a container or context.
  */
 
 import type { PrototypeRecord } from "../../lib/api"
