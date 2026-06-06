@@ -49,11 +49,11 @@ export function ApproveModal() {
   // comments/iterate slots the same way DesignAgentLauncher does. applyTarget is
   // the comment lifted from CommentsPanel's Apply into IterateComposer's pre-fill.
   const [applyTarget, setApplyTarget] = useState<CommentRecord | null>(null)
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 4): the PRD's existing ready prototype
-  // (read-only getByPrd), or null. When set, the modal's primary option becomes
-  // "View Prototype" and opens the canvas DIRECTLY (no loading screen). Resolved
-  // read-only → NEVER kicks a generation; degrades to null (label stays "Generate
-  // Prototype") when no read-only endpoint/record exists.
+  // The PRD's existing ready prototype (resolved read-only via getByPrd), or
+  // null. When set, the modal's primary option becomes "View Prototype" and
+  // opens the canvas directly (no loading screen). The lookup is read-only — it
+  // never kicks a generation — and degrades to null (label stays "Generate
+  // Prototype") when no ready prototype exists for this PRD.
   const [existing, setExisting] = useState<PrototypeRecord | null>(null)
 
   // Min-duration bookkeeping: track when the overlay was shown and whether
@@ -215,10 +215,9 @@ export function ApproveModal() {
 
   const prd = content.prd
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 4): resolve the PRD's existing ready
-  // prototype read-only when the approve modal is open. `getByPrd` swallows the
-  // 404 (no read-only endpoint yet) → null, so this NEVER kicks a generation and
-  // the label simply stays "Generate Prototype" until the endpoint exists.
+  // Resolve the PRD's existing ready prototype read-only while the approve modal
+  // is open. `getByPrd` swallows a 404 → null, so this never kicks a generation;
+  // the label simply stays "Generate Prototype" when no ready prototype exists.
   useEffect(() => {
     const prdId = prd?.prd_id
     if (activeModal !== "approve" || prdId == null) {
@@ -385,10 +384,10 @@ export function ApproveModal() {
 
   if (activeModal !== "approve") return generateModal
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 4): if the PRD already has a ready
-  // prototype, "View Prototype" opens the canvas DIRECTLY with the existing
-  // prototype, SKIPPING the loading sequence (no GenerationLoadingScreen). Else
-  // "Generate Prototype" → GenerateModal → loading screen → canvas (unchanged).
+  // When the PRD already has a ready prototype, "View Prototype" opens the canvas
+  // directly with the existing prototype, skipping the loading sequence (no
+  // GenerationLoadingScreen). Otherwise "Generate Prototype" → GenerateModal →
+  // loading screen → canvas (unchanged).
   const handleClaudeClick = () => {
     if (existing) {
       closeModal()

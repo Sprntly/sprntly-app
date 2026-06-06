@@ -20,6 +20,7 @@
  */
 
 import { useEffect, useState, type ReactNode } from "react"
+import { useNavigation } from "../../context/NavigationContext"
 import { DesignAgentDrawer } from "./DesignAgentDrawer"
 import { PostGenerationResult } from "./PostGenerationResult"
 import { GenerationErrorBanner, reasonCopy } from "./GenerationErrorBanner"
@@ -36,9 +37,9 @@ import {
 export type DesignAgentLauncherProps = {
   prdId: number
   figmaFileKey?: string | null
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE 2/3): PRD title, threaded from
-   *  PrdScreen → PrdSections so the preview card + the canvas breadcrumb can label
-   *  the PRD. Optional so existing callers keep type-checking. */
+  /** PRD title, threaded from PrdScreen → PrdSections so the preview card + the
+   *  canvas breadcrumb can label the PRD. Optional so existing callers keep
+   *  type-checking. */
   prdTitle?: string | null
 }
 
@@ -168,26 +169,26 @@ export async function refreshShareTokenStep(
   }
 }
 
-// UX-EXPLORE (throwaway — REVERT): the `fetchExistingPrototypeStep` helper
-// (mount-time generate-dedup fetch that auto-seeded the PRD-screen canvas) has
-// been REMOVED along with its auto-mount effect. The post-gen canvas should not
-// auto-render on the PRD screen; `result` is now only populated by the
-// in-launcher drawer/iterate/share flows.
+// There is deliberately no mount-time fetch that auto-seeds the PRD-screen
+// canvas: the post-gen canvas must NOT auto-render on the PRD screen. `result`
+// is populated only by the in-launcher drawer/iterate/share flows. The existing
+// ready prototype (if any) surfaces as the preview card, not an auto-mounted
+// canvas — see the read-only `existing` lookup below.
 
 type LauncherViewProps = DesignAgentLauncherProps & {
   open: boolean
   setOpen: (open: boolean) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): the PRD's existing ready
-   *  prototype (resolved read-only via getByPrd), or null when none exists yet.
-   *  Drives the preview card + the "View Prototype" skip-loading open. */
+  /** The PRD's existing ready prototype (resolved read-only via getByPrd), or
+   *  null when none exists yet. Drives the preview card + the "View Prototype"
+   *  skip-loading open. */
   existing?: PrototypeRecord | null
   /** PRD title for the preview card label. */
   prdTitle?: string | null
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): open the full-screen canvas for
-   *  the existing prototype (skips the loading screen). */
+  /** Open the full-screen canvas for the existing prototype (skips the loading
+   *  screen). */
   onOpenExisting?: () => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): the prototype currently shown in
-   *  the launcher-owned full-screen canvas, or null. */
+  /** The prototype currently shown in the launcher-owned full-screen canvas, or
+   *  null. */
   canvasResult?: PrototypeRecord | null
   /** Close the launcher-owned full-screen canvas (returns to the PRD). */
   onCloseCanvas?: () => void
@@ -266,16 +267,15 @@ export function DesignAgentLauncherView({
 }: LauncherViewProps) {
   return (
     <div className="design-agent-surface prd-design-launcher" contentEditable={false}>
-      {/* UX-EXPLORE (throwaway): the "Generate Prototype" button is removed from
-          the PRD Design section per the redesign — the generation trigger moves to
-          the "Approve & next step" modal. Launcher state / drawer / result wiring
-          below is intentionally KEPT so functionality is preserved. */}
-      {/* UX-EXPLORE (throwaway — REVERT, CHANGE 3): when the PRD already has a ready
-          prototype (read-only getByPrd), show a preview card here. Clicking it opens
-          the full-screen canvas (CHANGE 4 — skips the loading screen). When none
-          exists this renders nothing (the Design section stays empty). Suppressed
-          while the launcher's own in-session `result` is mounted below to avoid a
-          duplicate surface. */}
+      {/* The PRD Design section no longer renders a "Generate Prototype" button:
+          the generation trigger lives in the "Approve & next step" modal. The
+          launcher's state / drawer / result wiring below is intentionally kept so
+          the drawer/iterate/share flows still work. */}
+      {/* When the PRD already has a ready prototype (read-only getByPrd), show a
+          preview card here. Clicking it opens the full-screen canvas directly,
+          skipping the loading screen. When none exists this renders nothing (the
+          Design section stays empty). Suppressed while the launcher's own
+          in-session `result` is mounted below to avoid a duplicate surface. */}
       {existing && !result && (
         <PrototypePreviewCard
           prototype={existing}
@@ -368,12 +368,22 @@ export function DesignAgentLauncherView({
         figmaFileKey,
         onGenerated,
       })}
-      {/* UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): launcher-owned full-screen
-          canvas for the EXISTING prototype, opened from the preview card. Mirrors
-          ApproveModal's `da-canvas-fullscreen` shell + PostGenerationResult
-          composition (Done in the control bar; comments gated on share_token;
-          IterateComposer reflecting real lock state with skipCostConfirm). Opened
-          DIRECTLY (no GenerationLoadingScreen) per CHANGE 4. */}
+      {/* Launcher-owned full-screen canvas for the existing prototype, opened
+          from the preview card. Mirrors ApproveModal's `da-canvas-fullscreen`
+          shell + PostGenerationResult composition (Done in the control bar;
+          comments gated on share_token; IterateComposer reflecting real lock
+          state with skipCostConfirm). Opened directly — no loading screen — since
+          the bundle already exists.
+
+          PRD sidebar content note: this canvas threads `prdTitle` but not
+          `prdSections`. The launcher only receives `prdId` / `figmaFileKey` /
+          `prdTitle` from the PRD section — it does not have the PRD's sections,
+          and threading them would mean editing the append-only PrdScreen /
+          PrdSections files this surface is scoped to leave alone. So the
+          condensed PRD sidebar on this open path falls back to
+          PostGenerationResult's own empty-state; the modal "View Prototype" path
+          (which does have the full PRD) renders the sidebar content. Populating
+          the sidebar on this path is left to the condensed-PRD-sidebar work. */}
       {canvasResult && (
         <div
           className="da-canvas-fullscreen design-agent-surface"
@@ -420,6 +430,23 @@ export function DesignAgentLauncherView({
 }
 
 /**
+ * Pushes the refresh-stable canvas route (`/design/{id}`) when the
+ * launcher-owned canvas opens, so a refresh re-resolves the canvas — parity with
+ * the modal "View Prototype" open path. Reads navigation from context, so it is
+ * mounted ONLY while a canvas is open: that keeps `DesignAgentLauncher` itself
+ * renderable without a NavigationProvider (its node-env tests render the bare
+ * container, where no canvas is open). The push runs once per opened prototype
+ * id (effect keyed on the id), so a same-id canvas refresh does not re-push.
+ */
+function CanvasRouteSync({ prototypeId }: { prototypeId: number }) {
+  const { goToCanvas } = useNavigation()
+  useEffect(() => {
+    goToCanvas(prototypeId)
+  }, [goToCanvas, prototypeId])
+  return null
+}
+
+/**
  * Public component. Owns the drawer open/close state locally and delegates
  * rendering to the pure view. `renderDrawer` is optional (defaults to the real
  * drawer) — production callers pass only `prdId` / `figmaFileKey`.
@@ -434,13 +461,13 @@ export function DesignAgentLauncher({
 }) {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState<PrototypeRecord | null>(null)
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): the PRD's existing ready prototype
-  // (read-only getByPrd), or null. Resolved once on mount; degrades to null when no
-  // read-only endpoint/record exists (getByPrd swallows the 404 → null) so the card
-  // simply does not render and NO generation is kicked.
+  // The PRD's existing ready prototype (resolved read-only via getByPrd), or
+  // null. Resolved once on mount; degrades to null when no ready prototype exists
+  // (getByPrd swallows the 404 → null) so the card simply does not render and no
+  // generation is kicked.
   const [existing, setExisting] = useState<PrototypeRecord | null>(null)
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): the prototype shown in the
-  // launcher-owned full-screen canvas (opened from the preview card), or null.
+  // The prototype shown in the launcher-owned full-screen canvas (opened from the
+  // preview card), or null.
   const [canvasResult, setCanvasResult] = useState<PrototypeRecord | null>(null)
   // P6-08 (Fix #11): the last generation attempt's failure, or null. A non-null
   // value renders the persistent GenerationErrorBanner (replacing the old silent
@@ -500,19 +527,18 @@ export function DesignAgentLauncher({
     if (fresh) setResult(fresh)
   }
 
-  // UX-EXPLORE (throwaway — REVERT): the path (a) auto-mount effect that
-  // fetched the PRD's existing prototype on Design-section load (via the
-  // generate-dedup) and seeded it as `result` has been REMOVED — the
-  // PostGenerationResult 3-region canvas should NOT auto-render on the PRD
-  // screen. `result` now starts null and is only set by the in-launcher
+  // There is deliberately no auto-mount effect seeding `result` from the PRD's
+  // existing prototype: the post-generation 3-region canvas must not auto-render
+  // on the PRD screen. `result` starts null and is set only by the in-launcher
   // drawer/iterate/share flows (handleGenerated / refreshResult /
-  // refreshShareToken), leaving the Design section empty on PRD load.
+  // refreshShareToken), so the Design section is empty on PRD load (an existing
+  // prototype surfaces as the preview card, not an auto-mounted canvas).
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 3/4): READ-ONLY existence check on
-  // mount. `getByPrd` hits the intended `GET /v1/design-agent/by-prd/{prd_id}` and
-  // (until that route ships) swallows the 404 → null, so this NEVER kicks a
-  // generation and degrades to "no card / no View label" gracefully. Only adopts a
-  // genuinely-ready prototype with a bundle_url for the preview card.
+  // Read-only existence check on mount. `getByPrd` hits
+  // `GET /v1/design-agent/by-prd/{prd_id}` and swallows a 404 → null, so this
+  // never kicks a generation and degrades to "no card / no View label"
+  // gracefully. Only a genuinely-ready prototype with a bundle_url is adopted for
+  // the preview card.
   useEffect(() => {
     let cancelled = false
     designAgentApi
@@ -531,8 +557,16 @@ export function DesignAgentLauncher({
     }
   }, [prdId])
 
-  // CHANGE 4: open the existing prototype DIRECTLY in the full-screen canvas —
-  // no loading screen (the bundle already exists).
+  // Open the existing prototype directly in the full-screen canvas — no loading
+  // screen, since the bundle already exists. Opening also pushes the
+  // refresh-stable canvas route (`/design/{id}`) so a refresh re-resolves the
+  // canvas, matching the modal "View Prototype" path. The route push is wired
+  // declaratively by `<CanvasRouteSync>` (mounted in the returned tree while a
+  // canvas is open) rather than called inline here: this container is rendered
+  // without a NavigationProvider in its node-env tests, so reading
+  // `useNavigation()` directly in the container would throw. Mounting the route
+  // sync only while the canvas is open keeps the container renderable in those
+  // tests (where no canvas is open) while still pushing the route in the app.
   const openExisting = () => {
     if (existing) setCanvasResult(existing)
   }
@@ -550,28 +584,34 @@ export function DesignAgentLauncher({
   }
 
   return (
-    <DesignAgentLauncherView
-      prdId={prdId}
-      figmaFileKey={figmaFileKey}
-      open={open}
-      setOpen={setOpen}
-      result={result}
-      onGenerated={handleGenerated}
-      failure={failure}
-      onRetry={handleRetry}
-      applyTarget={applyTarget}
-      setApplyTarget={setApplyTarget}
-      onIterated={refreshResult}
-      onAnswered={refreshResult}
-      onShared={refreshShareToken}
-      existing={existing}
-      prdTitle={prdTitle}
-      onOpenExisting={openExisting}
-      canvasResult={canvasResult}
-      onCloseCanvas={closeCanvas}
-      onPinApply={(comment) => setApplyTarget(comment)}
-      onCanvasRefresh={refreshCanvas}
-      renderDrawer={renderDrawer}
-    />
+    <>
+      <DesignAgentLauncherView
+        prdId={prdId}
+        figmaFileKey={figmaFileKey}
+        open={open}
+        setOpen={setOpen}
+        result={result}
+        onGenerated={handleGenerated}
+        failure={failure}
+        onRetry={handleRetry}
+        applyTarget={applyTarget}
+        setApplyTarget={setApplyTarget}
+        onIterated={refreshResult}
+        onAnswered={refreshResult}
+        onShared={refreshShareToken}
+        existing={existing}
+        prdTitle={prdTitle}
+        onOpenExisting={openExisting}
+        canvasResult={canvasResult}
+        onCloseCanvas={closeCanvas}
+        onPinApply={(comment) => setApplyTarget(comment)}
+        onCanvasRefresh={refreshCanvas}
+        renderDrawer={renderDrawer}
+      />
+      {/* When the launcher-owned canvas is open, push the refresh-stable canvas
+          route so a refresh re-resolves it (parity with the modal open path).
+          Mounted only while a canvas is open — see CanvasRouteSync. */}
+      {canvasResult && <CanvasRouteSync prototypeId={canvasResult.id} />}
+    </>
   )
 }
