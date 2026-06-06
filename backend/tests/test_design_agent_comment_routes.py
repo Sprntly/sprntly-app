@@ -91,6 +91,9 @@ CREATE TABLE prototype_comments (
     author        TEXT NOT NULL DEFAULT 'demo',
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
+    pin_x_pct          REAL,
+    pin_y_pct          REAL,
+    resolved_anchor_id TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
 );
@@ -429,3 +432,152 @@ def test_comment_routes_registered_and_existing_intact(env):
     assert "/v1/design-agent/{prototype_id}" in paths
     assert "/v1/design-agent/by-token/{token}" in paths
     assert "/v1/design-agent/by-token/{token}/passcode" in paths
+
+
+# ─── Durable comment position (route-level) ─────────────────────────────────
+
+
+def test_comment_out_projects_position_fields(env):
+    # _comment_to_out on a row WITH position → CommentOut carries the three values.
+    # On a row WITHOUT the keys → all three None (uses .get, safe for older rows).
+    from app.routes.design_agent import _comment_to_out, CommentOut
+
+    with_pos = _comment_to_out({
+        "id": 1,
+        "anchor_id": "pin-1",
+        "body": "hi",
+        "author": "demo",
+        "status": "open",
+        "created_at": "2026-01-01T00:00:00",
+        "resolved_at": None,
+        "pin_x_pct": 25.0,
+        "pin_y_pct": 50.0,
+        "resolved_anchor_id": "abc123",
+    })
+    out = CommentOut(**with_pos)
+    assert out.pin_x_pct == pytest.approx(25.0)
+    assert out.pin_y_pct == pytest.approx(50.0)
+    assert out.resolved_anchor_id == "abc123"
+
+    without_pos = _comment_to_out({
+        "id": 2,
+        "anchor_id": "anc1",
+        "body": "hi",
+        "author": "demo",
+        "status": "open",
+        "created_at": "2026-01-01T00:00:00",
+        "resolved_at": None,
+        # no position keys at all (older row)
+    })
+    out2 = CommentOut(**without_pos)
+    assert out2.pin_x_pct is None
+    assert out2.pin_y_pct is None
+    assert out2.resolved_anchor_id is None
+
+
+def test_comment_create_rejects_out_of_range_pct(client):
+    # CommentCreate ge=0 le=100 rejects out-of-range values with 422.
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
+    resp = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "pin-1", "body": "x", "pin_x_pct": 150},
+    )
+    assert resp.status_code == 422
+
+    resp2 = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "pin-1", "body": "x", "pin_y_pct": -1},
+    )
+    assert resp2.status_code == 422
+
+    # Omitted position is accepted.
+    resp3 = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "pin-1", "body": "x"},
+    )
+    assert resp3.status_code == 200
+
+
+def test_post_comment_authed_round_trips_position(client):
+    # Authed POST with position → CommentOut echoes all three; subsequent GET
+    # returns them as well.
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
+    resp = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={
+            "anchor_id": "pin-1",
+            "body": "make this bigger",
+            "pin_x_pct": 33.5,
+            "pin_y_pct": 66.0,
+            "resolved_anchor_id": "abcd1234",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pin_x_pct"] == pytest.approx(33.5)
+    assert body["pin_y_pct"] == pytest.approx(66.0)
+    assert body["resolved_anchor_id"] == "abcd1234"
+
+    get_resp = client.get(f"/v1/design-agent/{proto.id}/comments")
+    assert get_resp.status_code == 200
+    rows = get_resp.json()
+    assert len(rows) == 1
+    assert rows[0]["pin_x_pct"] == pytest.approx(33.5)
+    assert rows[0]["resolved_anchor_id"] == "abcd1234"
+
+
+def test_post_comment_public_round_trips_position(unauth):
+    # Public POST with position → persisted under the resolved prototype's workspace_id.
+    proto = _seed_prototype(workspace_id="tenant-pub", share_mode="public", status="ready")
+    resp = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={
+            "anchor_id": "pin-1",
+            "body": "nice layout",
+            "pin_x_pct": 10.0,
+            "pin_y_pct": 20.0,
+            "resolved_anchor_id": "ef567890",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pin_x_pct"] == pytest.approx(10.0)
+    assert body["pin_y_pct"] == pytest.approx(20.0)
+    assert body["resolved_anchor_id"] == "ef567890"
+
+    # Workspace written from the resolved row, not a session claim.
+    from tests import _fake_supabase
+    ws = _fake_supabase.get_fake_db().execute(
+        "SELECT workspace_id FROM prototype_comments WHERE id = ?", [body["id"]]
+    ).fetchone()[0]
+    assert ws == "tenant-pub"
+
+
+def test_post_comment_omitted_position_defaults_null(client):
+    # POST with only {anchor_id, body} → all three position fields null (back-compat).
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
+    resp = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "anc-legacy", "body": "right-click anchor comment"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("pin_x_pct") is None
+    assert body.get("pin_y_pct") is None
+    assert body.get("resolved_anchor_id") is None
+
+
+def test_position_not_leaked_cross_workspace(client):
+    # A comment with position written under workspace A is not returned when
+    # GET /{id}/comments is queried under workspace B — the prototype lookup
+    # returns 404 before any row is read (existing workspace filter).
+    proto_a = _seed_prototype(workspace_id=_OTHER_WS)
+    _seed_comment(
+        prototype_id=proto_a.id,
+        workspace_id=_OTHER_WS,
+        anchor_id="pin-1",
+        body="cross-ws check",
+    )
+    # The client's company is _TEST_COMPANY_ID, which is different from _OTHER_WS.
+    resp = client.get(f"/v1/design-agent/{proto_a.id}/comments")
+    assert resp.status_code == 404

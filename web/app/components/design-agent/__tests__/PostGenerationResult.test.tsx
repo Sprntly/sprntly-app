@@ -701,36 +701,31 @@ describe("Mark-and-comment pin flow — view layer", () => {
     expect(html).toContain('data-testid="da-pin-ignore-2"')
   })
 
-  it("test_pin_submit_uses_auth_retry_create_with_pin_anchor — handlePinSubmit sends anchor_id=pin-N and NO x/y", () => {
-    // Source-invariant check: assert the submit function sends { anchor_id: `pin-${n}`, body }
-    // with no x/y in the payload (the backend CommentCreate schema has no position field).
+  it("test_pin_submit_uses_auth_retry_create_with_pin_anchor — handlePinSubmit sends anchor_id=pin-N (synthetic marker) via auth-retry", () => {
+    // Source-invariant check: the submit function still uses the synthetic pin-<n>
+    // anchor_id marker and wraps the call in withAuthRetry. Position fields are
+    // now also sent (verified in the adjacent test).
     expect(RESULT_SRC).toContain("async function handlePinSubmit")
     const start = RESULT_SRC.indexOf("async function handlePinSubmit")
     const body = RESULT_SRC.slice(start, start + 1200)
-    // anchor_id is the synthetic pin marker
+    // anchor_id is the unchanged synthetic pin marker — back-compat with the list keying
     expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
-    // the request body shape contains ONLY anchor_id + body (no x/y/position)
-    expect(body).not.toMatch(/\bxPct\b.*createComment/)
-    expect(body).not.toMatch(/\byPct\b.*createComment/)
-    expect(body).not.toMatch(/position.*createComment/)
     // auth-retry wrapping still present
     expect(body).toMatch(/withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(/)
   })
 
-  it("test_create_comment_body_has_no_position_field — handlePinSubmit sends only anchor_id+body, no x/y/position", () => {
-    // Verify the ephemeral-position scope boundary: the create payload must be
-    // { anchor_id, body } only. We scan the handlePinSubmit source for the
-    // absence of position-related keys near the createComment call.
+  it("test_create_comment_body_sends_position_fields — handlePinSubmit includes pin_x_pct, pin_y_pct, resolved_anchor_id", () => {
+    // Verify that the submit function sends all three durable position fields
+    // alongside the unchanged synthetic anchor_id and body. Pin position is now
+    // persisted so every viewer sees the same pin location.
     const start = RESULT_SRC.indexOf("async function handlePinSubmit")
     const fnBody = RESULT_SRC.slice(start, start + 1400)
-    // anchor_id and body key are present
+    // anchor_id (synthetic pin marker) and body are still present — back-compat.
     expect(fnBody).toContain("anchor_id:")
     expect(fnBody).toContain("body:")
-    // No position-related fields in the payload
-    expect(fnBody).not.toContain("xPct:")
-    expect(fnBody).not.toContain("yPct:")
-    expect(fnBody).not.toContain("position:")
-    expect(fnBody).not.toContain("x_pct:")
-    expect(fnBody).not.toContain("y_pct:")
+    // Position fields are now included in the createComment payload.
+    expect(fnBody).toContain("pin_x_pct:")
+    expect(fnBody).toContain("pin_y_pct:")
+    expect(fnBody).toContain("resolved_anchor_id:")
   })
 })

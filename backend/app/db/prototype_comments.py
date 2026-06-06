@@ -51,6 +51,9 @@ def insert_comment(
     anchor_id: str,
     body: str,
     author: str = "demo",
+    pin_x_pct: float | None = None,        # viewport-relative x position (0..100), None for non-pin comments
+    pin_y_pct: float | None = None,        # viewport-relative y position (0..100), None for non-pin comments
+    resolved_anchor_id: str | None = None,  # stable JSX anchor at the pin point, None if unresolved
 ) -> dict[str, Any]:
     """Insert an open comment anchored to anchor_id. Returns the inserted row.
 
@@ -62,14 +65,23 @@ def insert_comment(
     if not body.strip():
         raise ValueError("insert_comment: body is empty")
     c = require_client()
-    resp = c.table(_TABLE).insert({
+    payload: dict[str, Any] = {
         "prototype_id": prototype_id,
         "workspace_id": workspace_id,
         "anchor_id": anchor_id,
         "body": body,
         "author": author,
         "status": "open",
-    }).execute()
+    }
+    # Write position keys only when supplied — keeps the right-click anchor path
+    # (no pin) inserting exactly the prior column set; null position is honest absence.
+    if pin_x_pct is not None:
+        payload["pin_x_pct"] = pin_x_pct
+    if pin_y_pct is not None:
+        payload["pin_y_pct"] = pin_y_pct
+    if resolved_anchor_id is not None:
+        payload["resolved_anchor_id"] = resolved_anchor_id
+    resp = c.table(_TABLE).insert(payload).execute()
     row = resp.data[0]
     # Identifiers only -- never log comment body (PII per Rule #24).
     logger.info(

@@ -1317,6 +1317,9 @@ from app.db.prototype_comments import insert_comment, list_comments, resolve_com
 class CommentCreate(BaseModel):
     anchor_id: str = Field(..., min_length=1, max_length=64)
     body: str = Field(..., min_length=1, max_length=4000)
+    pin_x_pct: float | None = Field(default=None, ge=0, le=100)
+    pin_y_pct: float | None = Field(default=None, ge=0, le=100)
+    resolved_anchor_id: str | None = Field(default=None, max_length=64)
 
 
 class CommentOut(BaseModel):
@@ -1327,6 +1330,9 @@ class CommentOut(BaseModel):
     status: str           # 'open' | 'resolved' | 'orphaned'
     created_at: str
     resolved_at: str | None = None
+    pin_x_pct: float | None = None
+    pin_y_pct: float | None = None
+    resolved_anchor_id: str | None = None
 
 
 def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
@@ -1343,6 +1349,9 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
         "status": row["status"],
         "created_at": str(row["created_at"]),
         "resolved_at": str(row["resolved_at"]) if row.get("resolved_at") else None,
+        "pin_x_pct": row.get("pin_x_pct"),
+        "pin_y_pct": row.get("pin_y_pct"),
+        "resolved_anchor_id": row.get("resolved_anchor_id"),
     }
 
 
@@ -1373,6 +1382,9 @@ def post_comment(
         anchor_id=body.anchor_id,
         body=body.body,
         author="demo",
+        pin_x_pct=body.pin_x_pct,
+        pin_y_pct=body.pin_y_pct,
+        resolved_anchor_id=body.resolved_anchor_id,
     )
     return CommentOut(**_comment_to_out(row))
 
@@ -1460,6 +1472,9 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
         anchor_id=body.anchor_id,
         body=body.body,
         author="external",
+        pin_x_pct=body.pin_x_pct,
+        pin_y_pct=body.pin_y_pct,
+        resolved_anchor_id=body.resolved_anchor_id,
     )
     # Token hashed, never raw (Rule #24 — the token is the access primitive); no
     # comment body in the log line (PII). insert_comment emits its own

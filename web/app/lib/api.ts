@@ -619,6 +619,9 @@ export type CommentRecord = {
   status: "open" | "resolved" | "orphaned"
   created_at: string
   resolved_at: string | null
+  pin_x_pct?: number | null
+  pin_y_pct?: number | null
+  resolved_anchor_id?: string | null
 }
 
 /** F11 (P3-09/P3-10) — a proposed PRD patch. Wire shape mirrors the backend
@@ -729,17 +732,22 @@ export const designAgentApi = {
   /** Public-route comment write (external viewer on `/p/<token>`): the token
    *  is the access primitive (F6), so no auth is required. Hits the P3-02
    *  public route; the backend attributes the comment to the `external` author. */
-  createCommentByToken: (token: string, body: { anchor_id: string; body: string }) =>
+  createCommentByToken: (token: string, body: {
+    anchor_id: string; body: string;
+    pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+  }) =>
     api.post<CommentRecord>(
       `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
       body,
     ),
   /** Authed comment create for the signed-in canvas (mark-and-comment pin flow).
    *  Hits the authed route `POST /v1/design-agent/{id}/comments` (same-origin/CSRF
-   *  gated). The backend `CommentCreate` schema accepts ONLY `{ anchor_id, body }`
-   *  — there is NO x/y/position field. Pin position is UI-local only; durable
-   *  pin-position storage is out of scope for this surface. */
-  createComment: (prototypeId: number, body: { anchor_id: string; body: string }) =>
+   *  gated). Position fields are optional — pin comments include x/y and the
+   *  resolved anchor; right-click anchor comments omit them. */
+  createComment: (prototypeId: number, body: {
+    anchor_id: string; body: string;
+    pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+  }) =>
     api.post<CommentRecord>(`/v1/design-agent/${prototypeId}/comments`, body),
   /** Public-route comment read: lists every comment for the token's prototype
    *  (all statuses). Same 404 posture as the resolver for missing/private. */
