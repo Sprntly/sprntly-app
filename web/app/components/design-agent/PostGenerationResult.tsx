@@ -823,7 +823,7 @@ function FullscreenOverlay({
         ×
       </button>
       <div className="proto-fullscreen-body">
-        <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} hideToggle />
+        <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} />
       </div>
     </div>
   )
