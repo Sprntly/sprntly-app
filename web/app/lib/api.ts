@@ -591,6 +591,13 @@ export type PrototypeRecord = {
   //    added — the existing GET poll surfaces it; the answer routes through the
   //    existing P3-14 `iterate`). Null/absent ⇒ no question pending.
   pending_question?: PendingQuestion | null
+  // ── (append-only): optional preview-thumbnail URL captured on generation-
+  //    complete. GET /{id} / by-prd both `select("*")`, so the column flows
+  //    through automatically — no api method change. Null/absent ⇒ no thumbnail
+  //    captured (the preview card falls back to its existing placeholder); typed
+  //    OPTIONAL/nullable to match the posture above so existing literals keep
+  //    typechecking.
+  preview_image_url?: string | null
 }
 
 /** 202 kickoff response from POST /v1/design-agent/generate. */
