@@ -349,9 +349,11 @@ export function CommentsPanelView({
   onApply,
   onIgnore,
 }: CommentsPanelViewProps) {
-  const open = comments.filter((c) => c.status === "open")
-  const resolved = comments.filter((c) => c.status === "resolved")
-  const orphaned = comments.filter((c) => c.status === "orphaned")
+  const byNewestFirst = (a: CommentRecord, b: CommentRecord) =>
+    new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  const open = comments.filter((c) => c.status === "open").sort(byNewestFirst)
+  const resolved = comments.filter((c) => c.status === "resolved").sort(byNewestFirst)
+  const orphaned = comments.filter((c) => c.status === "orphaned").sort(byNewestFirst)
 
   return (
     <aside className="comments-panel" data-testid="comments-panel">
