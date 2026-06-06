@@ -46,6 +46,8 @@ import {
   getElementAtIframePoint,
   getElementAnchor,
   getAnchorPosition,
+  getClickOffsetInElement,
+  getAnchorPositionWithOffset,
   parseStoredAnchor,
   serializeAnchor,
   setElementHighlight,
@@ -138,6 +140,9 @@ export type PinComment = {
   // null when the iframe is cross-origin or the click hit no anchored element.
   // Typed anchor object (anchor-id or xpath) replaces the old string field.
   anchor: { type: 'anchor-id' | 'xpath'; value: string } | null
+  /** click position within the anchor element (0–100). Null for DB-loaded pins. */
+  xPctInEl: number | null
+  yPctInEl: number | null
 }
 
 export type PostGenerationResultProps = {
@@ -1369,7 +1374,10 @@ export function PostGenerationResult({
     const updates: Record<number, { xPct: number; yPct: number }> = {}
     for (const pin of pins) {
       if (pin.anchor) {
-        const pos = getAnchorPosition(iframe, pin.anchor)
+        const pos =
+          pin.xPctInEl != null && pin.yPctInEl != null
+            ? getAnchorPositionWithOffset(iframe, pin.anchor, pin.xPctInEl, pin.yPctInEl)
+            : getAnchorPosition(iframe, pin.anchor)
         if (pos) updates[pin.n] = pos
       }
     }
@@ -1420,16 +1428,26 @@ export function PostGenerationResult({
   }
 
   // Drop a numbered pin at the clicked stage location + open its comment composer.
-  function handleStageClick(xPct: number, yPct: number, _viewportX: number, _viewportY: number, anchor: { type: 'anchor-id' | 'xpath'; value: string } | null) {
+  function handleStageClick(xPct: number, yPct: number, viewportX: number, viewportY: number, anchor: { type: 'anchor-id' | 'xpath'; value: string } | null) {
     const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
-    const resolvedPos = anchor ? getAnchorPosition(iframe, anchor) : null
-    const finalXPct = resolvedPos?.xPct ?? xPct
-    const finalYPct = resolvedPos?.yPct ?? yPct
+    let xPctInEl: number | null = null
+    let yPctInEl: number | null = null
+    let finalXPct = xPct
+    let finalYPct = yPct
+    if (anchor && iframe) {
+      const offset = getClickOffsetInElement(iframe, viewportX, viewportY, anchor)
+      if (offset) {
+        xPctInEl = offset.xPctInEl
+        yPctInEl = offset.yPctInEl
+        const pos = getAnchorPositionWithOffset(iframe, anchor, xPctInEl, yPctInEl)
+        if (pos) { finalXPct = pos.xPct; finalYPct = pos.yPct }
+      }
+    }
     pinCounter.current += 1
     const n = pinCounter.current
     setPins((prev) => [
       ...prev,
-      { n, xPct: finalXPct, yPct: finalYPct, anchor, draft: "", body: "", saved: false, busy: false, error: null },
+      { n, xPct: finalXPct, yPct: finalYPct, xPctInEl, yPctInEl, anchor, draft: "", body: "", saved: false, busy: false, error: null },
     ])
     setCommentsOpen(true)
     setMarkMode(false)

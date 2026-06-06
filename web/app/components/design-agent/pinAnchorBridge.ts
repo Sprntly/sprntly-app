@@ -73,6 +73,46 @@ export function getAnchorPosition(
   } catch { return null }
 }
 
+export function getClickOffsetInElement(
+  iframe: HTMLIFrameElement | null,
+  clientX: number,
+  clientY: number,
+  anchor: { type: 'anchor-id' | 'xpath'; value: string },
+): { xPctInEl: number; yPctInEl: number } | null {
+  const el = findByAnchor(iframe, anchor)
+  if (!el) return null
+  try {
+    const ir = iframe!.getBoundingClientRect()
+    const er = (el as HTMLElement).getBoundingClientRect()
+    const ix = clientX - ir.left
+    const iy = clientY - ir.top
+    return {
+      xPctInEl: Math.max(0, Math.min(100, ((ix - er.left) / er.width) * 100)),
+      yPctInEl: Math.max(0, Math.min(100, ((iy - er.top) / er.height) * 100)),
+    }
+  } catch { return null }
+}
+
+export function getAnchorPositionWithOffset(
+  iframe: HTMLIFrameElement | null,
+  anchor: { type: 'anchor-id' | 'xpath'; value: string },
+  xPctInEl: number,
+  yPctInEl: number,
+): { xPct: number; yPct: number } | null {
+  const el = findByAnchor(iframe, anchor)
+  if (!el) return null
+  try {
+    const ir = iframe!.getBoundingClientRect()
+    const er = (el as HTMLElement).getBoundingClientRect()
+    const xInFrame = er.left + (xPctInEl / 100) * er.width
+    const yInFrame = er.top + (yPctInEl / 100) * er.height
+    return {
+      xPct: Math.max(0, Math.min(100, (xInFrame / ir.width) * 100)),
+      yPct: Math.max(0, Math.min(100, (yInFrame / ir.height) * 100)),
+    }
+  } catch { return null }
+}
+
 /** Parse a stored resolved_anchor_id string into a typed anchor object. */
 export function parseStoredAnchor(
   raw: string | null | undefined,
