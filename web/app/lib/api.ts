@@ -734,13 +734,11 @@ export const designAgentApi = {
       `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
       body,
     ),
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3): authed comment CREATE for the
-   *  signed-in canvas (mark-and-comment pin flow). Hits the EXISTING authed route
-   *  `POST /v1/design-agent/{id}/comments` (backend `post_comment`,
-   *  same-origin/CSRF gated). NOTE: the backend `CommentCreate` schema accepts
-   *  ONLY { anchor_id, body } — there is NO x/y/position field, so the pin's
-   *  on-canvas coordinates are NOT persisted server-side (they live in local UI
-   *  state only). Persisting pin position needs a backend schema change. */
+  /** Authed comment create for the signed-in canvas (mark-and-comment pin flow).
+   *  Hits the authed route `POST /v1/design-agent/{id}/comments` (same-origin/CSRF
+   *  gated). The backend `CommentCreate` schema accepts ONLY `{ anchor_id, body }`
+   *  — there is NO x/y/position field. Pin position is UI-local only; durable
+   *  pin-position storage is out of scope for this surface. */
   createComment: (prototypeId: number, body: { anchor_id: string; body: string }) =>
     api.post<CommentRecord>(`/v1/design-agent/${prototypeId}/comments`, body),
   /** Public-route comment read: lists every comment for the token's prototype
