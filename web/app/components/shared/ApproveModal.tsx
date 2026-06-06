@@ -15,7 +15,9 @@ import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen
 import { PostGenerationResult } from "../design-agent/PostGenerationResult"
 import { CommentsPanel } from "../design-agent/CommentsPanel"
 import { IterateComposer } from "../design-agent/IterateComposer"
-import { designAgentApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
+import { designAgentApi, prdApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
+import { markdownToPrdState } from "../../lib/prd-adapter"
+import type { PrdSection } from "../../types/content"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 import { useIterateRun } from "../design-agent/useIterateRun"
 import { IconCheck, IconSparkle } from "./app-icons"
@@ -54,6 +56,8 @@ export function ApproveModal() {
   // never kicks a generation — and degrades to null (label stays "Generate
   // Prototype") when no ready prototype exists for this PRD.
   const [existing, setExisting] = useState<PrototypeRecord | null>(null)
+  const [urlPrdSections, setUrlPrdSections] = useState<PrdSection[] | undefined>(undefined)
+  const [urlPrdTitle, setUrlPrdTitle] = useState<string | null>(null)
 
   // Min-duration bookkeeping: track when the overlay was shown and whether
   // generation has resolved, so dismissal waits for the later of the two.
@@ -148,6 +152,8 @@ export function ApproveModal() {
   const closeCanvas = useCallback(() => {
     setCanvasResult(null)
     setApplyTarget(null)
+    setUrlPrdSections(undefined)
+    setUrlPrdTitle(null)
     // Leave the canvas route so the URL and view stay consistent and the
     // resolver does not immediately re-open the canvas. The canvas opens from
     // the approved PRD, so the PRD is its logical parent.
@@ -269,6 +275,18 @@ export function ApproveModal() {
     }
   }, [canvasPrototypeId, workspaceLoading, canvasResult?.id])
 
+  // When canvasResult is set by the URL resolver, fetch the PRD so the left
+  // panel has sections/title. Best-effort — swallows errors, no loading state.
+  const canvasResultPrdId = (canvasResult as (PrototypeRecord & { prd_id?: number }) | null)?.prd_id ?? null
+  useEffect(() => {
+    if (!canvasResultPrdId || urlPrdSections !== undefined) return
+    prdApi.get(canvasResultPrdId).then((prd) => {
+      const parsed = markdownToPrdState(prd.payload_md)
+      setUrlPrdSections(parsed.sections)
+      setUrlPrdTitle(prd.title ?? null)
+    }).catch(() => {/* best-effort */})
+  }, [canvasResultPrdId, urlPrdSections])
+
   // Render the generate-modal subtree regardless of which modal is active, so
   // the loading overlay (a top-level sibling) covers the whole viewport (incl.
   // the sidebar) regardless of modal state.
@@ -302,8 +320,8 @@ export function ApproveModal() {
               prev ? { ...prev, is_complete: state.isComplete } : prev,
             )
           }
-          prdSections={prd?.sections}
-          prdTitle={prd?.title ?? null}
+          prdSections={prd?.sections ?? urlPrdSections}
+          prdTitle={prd?.title ?? urlPrdTitle}
           // One-line PRD meta for the
           // condensed left context panel.
           prdMetaLine={prd?.metaLine ?? null}
