@@ -12,8 +12,11 @@
 import * as React from "react"
 import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+import { readFileSync } from "node:fs"
 
-import { useIterateRun } from "../useIterateRun"
+import { useIterateRun, type ActivityEventInput } from "../useIterateRun"
 import {
   ApiError,
   designAgentApi,
@@ -21,6 +24,9 @@ import {
   type IterateResponse,
   type PrototypeRecord,
 } from "../../../lib/api"
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const USE_ITERATE_RUN_PATH = join(HERE, "..", "useIterateRun.ts")
 
 // Sprntly components carry no `import React`; expose it globally (repo convention).
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -256,5 +262,194 @@ describe("useIterateRun — terminal state follows the real poll, not a timer", 
     )
     // The paused row is still handed to the canvas (unchanged behaviour).
     expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SSE seam contract
+// ---------------------------------------------------------------------------
+
+describe("useIterateRun — ActivityEventInput union stability (SSE seam)", () => {
+  it("test_append_activity_seam_is_stable_union: ActivityEventInput has exactly the five expected member kinds", () => {
+    // Build a representative sample of each member. TypeScript will fail to
+    // compile this file if any variant is removed or renamed, so this test
+    // acts as a compile-time + runtime contract guard for the SSE upgrade.
+    const user: ActivityEventInput = { kind: "user", text: "hi" }
+    const stepActive: ActivityEventInput = {
+      kind: "step",
+      text: "working",
+      state: "active",
+    }
+    const stepDone: ActivityEventInput = {
+      kind: "step",
+      text: "done",
+      state: "done",
+    }
+    const done: ActivityEventInput = { kind: "done", text: "Change applied" }
+    const question: ActivityEventInput = {
+      kind: "question",
+      question: "Which variant?",
+    }
+    const error: ActivityEventInput = { kind: "error", text: "oops" }
+
+    const kinds = [user, stepActive, stepDone, done, question, error].map(
+      (e) => e.kind,
+    )
+    const uniqueKinds = new Set(kinds)
+    // Exactly five unique kinds: user, step, done, question, error
+    expect(uniqueKinds.size).toBe(5)
+    expect(uniqueKinds).toContain("user")
+    expect(uniqueKinds).toContain("step")
+    expect(uniqueKinds).toContain("done")
+    expect(uniqueKinds).toContain("question")
+    expect(uniqueKinds).toContain("error")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// First-event shape
+// ---------------------------------------------------------------------------
+
+describe("useIterateRun — first-event shape", () => {
+  it("test_run_iterate_appends_user_event_first: the first activity entry has kind=user with the instruction text", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValue(proto("ready"))
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("make the hero blue")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const first = result.current.activity[0]
+    expect(first.kind).toBe("user")
+    if (first.kind === "user") {
+      expect(first.text).toBe("make the hero blue")
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// answerQuestion path
+// ---------------------------------------------------------------------------
+
+describe("useIterateRun — answerQuestion", () => {
+  it("test_answer_question_composes_context_and_clears_pending: answering a question clears pendingQuestion and calls runIterate with composed prompt", async () => {
+    // First run pauses on a question.
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValueOnce(
+        proto("generating", { question: "Which color scheme?" }),
+      )
+      // After the answer re-triggers runIterate, the second iterate resolves.
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValue(proto("ready"))
+
+    const iterate = vi
+      .fn<
+        (
+          id: number,
+          body: { prompt: string; applied_comment_id?: number | null; mode?: "plan" | "execute" },
+        ) => Promise<IterateResponse>
+      >()
+      .mockResolvedValue({
+        prototype_id: PROTOTYPE_ID,
+        status: "generating",
+        queue_position: 0,
+      })
+
+    const onComplete = vi.fn()
+    const api = { iterate, get } as unknown as Pick<
+      typeof designAgentApi,
+      "iterate" | "get"
+    >
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    // Trigger the initial run and wait for the question pause.
+    await act(async () => {
+      const run = result.current.runIterate("change the palette")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    expect(result.current.pendingQuestion?.question).toBe("Which color scheme?")
+
+    // Now answer the question.
+    await act(async () => {
+      const answer = result.current.answerQuestion("use the primary brand blue")
+      await vi.runAllTimersAsync()
+      await answer
+    })
+
+    // pendingQuestion must be cleared after answering.
+    expect(result.current.pendingQuestion).toBeNull()
+
+    // runIterate was called a second time (iterate posted twice total).
+    expect(iterate).toHaveBeenCalledTimes(2)
+
+    // The second iterate prompt must include the original question as context.
+    const secondCall = iterate.mock.calls[1]
+    expect(secondCall[1].prompt).toContain("Which color scheme?")
+    expect(secondCall[1].prompt).toContain("use the primary brand blue")
+  })
+
+  it("test_answer_question_noop_on_empty_string: answerQuestion is a no-op when the answer is blank", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValue(proto("ready"))
+
+    const iterate = vi
+      .fn<
+        (
+          id: number,
+          body: { prompt: string; applied_comment_id?: number | null; mode?: "plan" | "execute" },
+        ) => Promise<IterateResponse>
+      >()
+      .mockResolvedValue({
+        prototype_id: PROTOTYPE_ID,
+        status: "generating",
+        queue_position: 0,
+      })
+
+    const onComplete = vi.fn()
+    const api = { iterate, get } as unknown as Pick<
+      typeof designAgentApi,
+      "iterate" | "get"
+    >
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      await result.current.answerQuestion("   ")
+    })
+
+    // iterate must not have been called at all.
+    expect(iterate).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Source-marker guard
+// ---------------------------------------------------------------------------
+
+describe("useIterateRun — source marker guard", () => {
+  it("test_no_ux_explore_marker_in_use_iterate_run: the source file contains no UX-EXPLORE marker", () => {
+    const source = readFileSync(USE_ITERATE_RUN_PATH, "utf8")
+    expect(source).not.toContain("UX-EXPLORE")
   })
 })

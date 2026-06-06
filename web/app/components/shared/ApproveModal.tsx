@@ -177,12 +177,12 @@ export function ApproveModal() {
   // iframe reloads the rebuilt bundle even when the url string is identical.
   const [bundleReloadNonce, setBundleReloadNonce] = useState(0)
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE A): the SHARED iterate runner. Lives
-  // here (the level that owns canvasResult + constructs BOTH the IterateComposer
-  // and the CommentsPanel) so the left composer Submit, a comment's Apply, and a
-  // pin's Apply all drive ONE fixed iterate path: POST → poll-to-completion →
-  // left-panel activity → reload the canvas. onComplete swaps in the fresh row
-  // (the new bundle_url) AND bumps the reload nonce so the iframe reloads.
+  // Shared iterate runner. Lives here (the level that owns canvasResult +
+  // constructs both the IterateComposer and the CommentsPanel) so the left
+  // composer Submit, a comment's Apply, and a pin's Apply all drive one fixed
+  // iterate path: POST → poll-to-completion → left-panel activity → reload the
+  // canvas. onComplete swaps in the fresh row (the new bundle_url) and bumps
+  // the reload nonce so the iframe reloads.
   const iterateRun = useIterateRun({
     prototypeId: canvasResult?.id ?? -1,
     onComplete: (fresh) => {
@@ -191,8 +191,8 @@ export function ApproveModal() {
     },
   })
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE A/B): the single fixed entry the
-  // composer + both Apply paths call. No-ops if no canvas is mounted.
+  // The single fixed entry the composer and both Apply paths call.
+  // No-ops if no canvas is mounted.
   const runCanvasIterate = useCallback(
     (instruction: string, appliedCommentId?: number | null) => {
       if (canvasResult?.id == null) return
@@ -201,9 +201,8 @@ export function ApproveModal() {
     [canvasResult?.id, iterateRun],
   )
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE B): a comment's Apply → run its body
-  // through the iterate runner immediately, linking the comment id. The agent
-  // decides applicability (prompt-driven); the client fabricates no change.
+  // A comment's Apply → run its body through the iterate runner, linking
+  // the comment id. The agent decides applicability; the client fabricates no change.
   const runCommentIterate = useCallback(
     (comment: CommentRecord) => {
       runCanvasIterate(comment.body, comment.id)
@@ -313,17 +312,15 @@ export function ApproveModal() {
           // context as the instruction) instead of pre-filling the composer.
           onPinIterate={runCanvasIterate}
           onDone={closeCanvas}
-          // UX-EXPLORE (throwaway — REVERT, CHANGE A): live agent-flow activity +
-          // clarifying-question continuation for the LEFT panel, all driven by the
-          // shared runner (poll-only → cosmetic steps; SSE-ready seam inside it).
+          // Live agent-flow activity and clarifying-question continuation for
+          // the left panel, all driven by the shared runner.
           iterateActivity={iterateRun.activity}
           iterateRunning={iterateRun.running}
           iterateError={iterateRun.error}
           iteratePendingQuestion={iterateRun.pendingQuestion}
           onAnswerQuestion={iterateRun.answerQuestion}
-          // UX-EXPLORE (throwaway — REVERT, CHANGE A): bumped on each completed
-          // iterate so the center iframe reloads the rebuilt bundle even if the
-          // backend overwrites the bundle at the same url.
+          // Bumped on each completed iterate so the center iframe reloads the
+          // rebuilt bundle even if the backend overwrites at the same url.
           bundleReloadNonce={bundleReloadNonce}
           comments={
             canvasResult.share_token ? (
@@ -357,9 +354,8 @@ export function ApproveModal() {
               // default (`skipCostConfirm = false`) preserves the confirmation
               // modal for any non-iterate caller.
               skipCostConfirm
-              // UX-EXPLORE (throwaway — REVERT, CHANGE A): Submit DELEGATES to the
-              // shared runner (single fixed iterate path with left-panel activity
-              // + poll-to-completion + canvas reload).
+              // Submit delegates to the shared runner (fixed iterate path with
+              // left-panel activity, poll-to-completion, and canvas reload).
               runIterateExternal={runCanvasIterate}
               externalBusy={iterateRun.running}
             />

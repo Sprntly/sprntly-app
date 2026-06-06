@@ -316,19 +316,16 @@ export type IterateComposerProps = {
    * non-iterate caller.
    */
   skipCostConfirm?: boolean
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): when supplied (the reworked
-   *  canvas), Submit DELEGATES the run to the host's SHARED iterate runner
-   *  (useIterateRun.runIterate) instead of POSTing here. This is the single fixed
-   *  iterate path that drives the left-panel activity, polls to completion,
-   *  surfaces clarifying questions, and reloads the canvas. Only honoured together
-   *  with skipCostConfirm. When absent the composer keeps its own POST + the
-   *  onIterated notify (back-compat for the launcher / public callers). */
+  /** When supplied, Submit delegates the iterate run to the host's shared runner
+   *  (useIterateRun.runIterate) instead of posting inline. Only honoured together
+   *  with skipCostConfirm. When absent the composer keeps its own POST + onIterated
+   *  notify (back-compat for the launcher / public callers). */
   runIterateExternal?: (
     instruction: string,
     appliedCommentId?: number | null,
   ) => void | Promise<void>
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): when the host runner is busy the
-   *  composer disables Submit (the activity stream is the real progress surface). */
+  /** When the host runner is running, Submit is disabled (the activity stream is
+   *  the progress surface). */
   externalBusy?: boolean
 }
 
@@ -437,11 +434,10 @@ export function IterateComposer({
   async function handleSubmit() {
     if (locked) return // F14 defense in depth (the locked view has no Submit)
     if (!prompt.trim()) return
-    // UX-EXPLORE (throwaway — REVERT, CHANGE A): when the host supplies the shared
-    // runner, DELEGATE the run to it (single fixed iterate path: it POSTs, polls
-    // to completion, drives the left-panel activity, and reloads the canvas). The
-    // composer just clears its local prompt + apply target and hands off; it does
-    // NOT poll or render progress here (the activity stream owns that).
+    // When the host supplies the shared runner, delegate to it — it POSTs,
+    // polls to completion, drives the left-panel activity, and reloads the
+    // canvas. The composer just clears its local prompt + apply target and
+    // hands off; it does NOT poll or render progress here.
     if (skipCostConfirm && runIterateExternal) {
       const instruction = prompt
       const linkedComment = appliedCommentId

@@ -1,9 +1,8 @@
 "use client"
 
 /**
- * UX-EXPLORE (throwaway — REVERT, CHANGE A): the LEFT-PANEL agent-flow activity
- * transcript. Renders the modular `ActivityEvent[]` from `useIterateRun` in
- * David's `.proto-msg` chat style:
+ * Left-panel agent-flow activity transcript. Renders the modular `ActivityEvent[]`
+ * from `useIterateRun` in the `.proto-msg` chat style:
  *   - user request  → a right-aligned user message bubble,
  *   - working steps → an "agent working" card with an animated status + a
  *                     streamed-steps checklist (active spinner / done check),
