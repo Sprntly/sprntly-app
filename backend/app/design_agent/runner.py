@@ -249,6 +249,61 @@ def _resolve_figma_access_token(figma_file_key: str | None, workspace_id: str) -
         return None
 
 
+def _render_palette_css(palette: dict) -> str:
+    """Generate a minimal CSS file pre-seeding the design source palette.
+
+    Called ONCE before `generate_prototype`'s agent loop starts. The file is
+    written into `virtual_fs["src/index.css"]` so it is already on disk when
+    the agent's first `write` call fires. This guarantees the palette is the
+    starting point — the agent cannot start from stock Tailwind defaults and
+    then ignore a palette instruction it received only inside the tool result.
+
+    The agent prompt (§5 DESIGN SYSTEM) instructs the agent to `view`
+    `src/index.css` first and to use `var(--background)` etc. in all
+    components rather than hardcoded Tailwind palette classes.
+    """
+    bg = palette.get("background", "#ffffff")
+    accent = palette.get("accent", "#3b82f6")
+    is_dark = palette.get("is_dark", False)
+    swatches = palette.get("swatches", [])
+
+    # Derive foreground from is_dark (light text on dark bg, dark text on light bg)
+    fg = "#f4f1ea" if is_dark else "#1a1a1a"
+
+    # Find a surface color: second-most-common swatch, or bg
+    surface = swatches[1] if len(swatches) > 1 else bg
+
+    # muted: third swatch or similar
+    muted = swatches[2] if len(swatches) > 2 else surface
+
+    return f"""/* Design source palette — generated from Figma file */
+/* DO NOT replace the :root block; use var(--background) etc. in all components */
+:root {{
+  --background: {bg};
+  --foreground: {fg};
+  --card: {surface};
+  --card-foreground: {fg};
+  --primary: {accent};
+  --primary-foreground: {"#000000" if is_dark else "#ffffff"};
+  --secondary: {surface};
+  --secondary-foreground: {fg};
+  --muted: {muted};
+  --muted-foreground: {fg}aa;
+  --accent: {accent};
+  --accent-foreground: {"#000000" if is_dark else "#ffffff"};
+  --border: {fg}22;
+  --input: {fg}22;
+  --ring: {accent};
+}}
+
+body {{
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}}
+"""
+
+
 _STEP_LABELS = [
     "Reading the change request",
     "Analyzing the prototype",
@@ -670,12 +725,34 @@ async def generate_prototype(
     Figma data API. Resolution is best-effort: a prototype without a Figma
     connection runs fine, with fetch_figma reporting its own is_error.
     """
+    # Pre-seed virtual_fs with Figma palette CSS when a Figma source is present.
+    # This guarantees the palette is on disk before the agent's first write, so
+    # it cannot start from stock Tailwind defaults and then ignore a palette
+    # instruction embedded only in a tool result. Best-effort: a failure here
+    # never aborts generation — the agent runs with an empty virtual_fs instead.
+    figma_access_token = _resolve_figma_access_token(figma_file_key, workspace_id)
+    virtual_fs: dict[str, str] = {}
+    if figma_file_key and figma_access_token:
+        try:
+            from app.connectors.figma_oauth import fetch_file as _fetch_file
+            from app.design_agent.tools import _extract_palette_summary
+            _file_doc = await asyncio.to_thread(_fetch_file, figma_access_token, figma_file_key)
+            _palette = _extract_palette_summary(_file_doc)
+            if _palette and _palette.get("background"):
+                virtual_fs["src/index.css"] = _render_palette_css(_palette)
+                logger.info(
+                    "design_agent.palette_pre_seeded prototype_id=%s bg=%s accent=%s is_dark=%s",
+                    prototype_id, _palette.get("background"), _palette.get("accent"), _palette.get("is_dark"),
+                )
+        except Exception:
+            pass  # best-effort — generation continues without pre-seeded CSS
+
     ctx = ToolContext(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
-        virtual_fs={},
+        virtual_fs=virtual_fs,  # pre-seeded with palette CSS (may be {} if no Figma)
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key, workspace_id),
+        figma_access_token=figma_access_token,
     )
     result = await agent_loop(
         system_blocks=system_blocks,

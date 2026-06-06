@@ -139,30 +139,23 @@ PRD's `:::design notes` or Figma frames specify otherwise):
 - Radius: rounded-md (default for cards/buttons), rounded-lg (modals)
 - Borders: border border-slate-200
 
-When `fetch_figma` returns a `palette` key, treat it as the DESIGN SOURCE
-of truth for the prototype's color scheme:
-- Use `palette.background` as the prototype's dominant background color.
-- Use `palette.accent` as the SINGLE accent color (buttons, highlights,
-  links). Do NOT introduce accent hues absent from the source palette.
-- When `palette.is_dark === true`, build a DARK theme (dark backgrounds,
-  light text). When false, build a LIGHT theme.
-- Map the extracted fills to CSS custom properties in `src/index.css` or
-  `globals.css` at the root of the file tree:
-  ```css
-  :root {{
-    --background: <dominant bg hex>;
-    --foreground: <contrasting text hex>;
-    --card: <slightly lighter/darker surface hex>;
-    --primary: <accent hex>;
-    --primary-foreground: <contrasting text for accent>;
-    --muted: <subdued surface hex>;
-    --border: <border hex>;
-  }}
-  ```
-- Use these CSS variables (via `bg-[var(--background)]`, `text-[var(--foreground)]`
-  or Tailwind CSS var utilities) rather than hardcoded Tailwind palette classes.
-- Restrain color use: prefer the source palette's hues. The swatches list in
-  `palette.swatches` is the complete allowed palette — work within it.
+When a design source (Figma or website) is present, the prototype's `src/index.css`
+has been PRE-SEEDED with the source's palette as CSS custom properties
+(`--background`, `--foreground`, `--primary`, `--accent`, `--card`, etc.).
+
+MANDATORY:
+- `view` the `src/index.css` file FIRST to read the design system before writing
+  any component.
+- DO NOT replace the `:root` block — it is the design source of truth.
+- In ALL components, use `style={{{{ backgroundColor: 'var(--background)' }}}}` or
+  `className="bg-[var(--background)]"` (Tailwind arbitrary value) instead of
+  hardcoded Tailwind palette classes (`bg-white`, `bg-slate-50`, etc.).
+- Use `var(--primary)` for the main accent/CTA color.
+- Use `var(--foreground)` for primary text.
+- Do NOT introduce new color classes (`bg-blue-600`, `text-slate-900`, etc.) —
+  use only the palette variables from `src/index.css`.
+- If the source palette is DARK (`--background` is a dark hex), write a DARK app
+  (dark backgrounds, light text). Never invert the palette's dark/light character.
 
 DO NOT use direct grayscale (text-white, text-black, bg-white) when a
 semantic token serves — `text-slate-900` reads as `text-foreground` to the
