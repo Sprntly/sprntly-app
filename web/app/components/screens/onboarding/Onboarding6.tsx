@@ -6,7 +6,9 @@ import { useAuth } from "../../../lib/auth"
 import { InterviewLayout } from "../../onboarding/InterviewLayout"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
-import { connectorsApi } from "../../../lib/api"
+import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
+import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
+import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
 import {
   categoryTitle,
   hasRequiredConnector,
@@ -33,6 +35,8 @@ export function Onboarding6() {
   const categories = useMemo(() => wizardCategories(), [])
   const [catStep, setCatStep] = useState(0)
   const [connected, setConnected] = useState<Set<string>>(new Set())
+  const [connections, setConnections] = useState<ConnectionSummary[]>([])
+  const [modalProvider, setModalProvider] = useState<string | null>(null)
   const [planned, setPlanned] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
 
@@ -42,6 +46,7 @@ export function Onboarding6() {
       .list()
       .then((r) => {
         const ids = new Set<string>()
+        setConnections(r.connections)
         for (const c of r.connections) {
           if (c.status === "active") ids.add(c.provider)
         }
@@ -61,7 +66,22 @@ export function Onboarding6() {
 
   function toggle(id: string) {
     if (connected.has(id)) return // live connections aren't togglable here
+    if (CONNECTOR_IDS_CONNECTABLE.has(id)) {
+      setModalProvider(id) // real connect via the shared modal
+      return
+    }
     setPlanned((prev) => toggleSelection(prev, id))
+  }
+
+  function reloadConnections() {
+    void connectorsApi.list().then((r) => {
+      setConnections(r.connections)
+      const ids = new Set<string>()
+      for (const c of r.connections) {
+        if (c.status === "active") ids.add(c.provider)
+      }
+      setConnected(ids)
+    })
   }
 
   function advanceCategory() {
@@ -225,6 +245,23 @@ export function Onboarding6() {
           color: var(--muted);
         }
       `}</style>
+      <ConnectorConnectModal
+        providerId={modalProvider}
+        activeCompany={workspace.slug}
+        connection={
+          connections.find((c) => c.provider === modalProvider) ?? null
+        }
+        returnTo="/onboarding/6"
+        onClose={() => setModalProvider(null)}
+        onConnected={() => {
+          setModalProvider(null)
+          reloadConnections()
+        }}
+        onSkipForLater={() => {
+          if (modalProvider) setPlanned((prev) => toggleSelection(prev, modalProvider))
+          setModalProvider(null)
+        }}
+      />
     </InterviewLayout>
   )
 }
