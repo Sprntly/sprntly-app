@@ -1572,20 +1572,26 @@ def clarify_comment_route(
     if proto is None:
         raise HTTPException(status_code=404, detail="Prototype not found")
     client = get_design_agent_client()
-    msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=200,
-        messages=[{
-            "role": "user",
-            "content": (
-                f'You are reviewing a design feedback comment about to be applied to a UI prototype.\n'
-                f'Comment: "{body.comment_body}"\n'
-                f'Ask exactly ONE brief, specific clarifying question to understand the designer\'s intent before applying this change. '
-                f'Be concise (one sentence max). Do not explain yourself, just ask the question.'
-            ),
-        }],
-    )
-    question = msg.content[0].text.strip()
+    FALLBACK_QUESTION = "Looks good — any additional context to add?"
+    try:
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            timeout=10.0,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f'You are reviewing a design feedback comment about to be applied to a UI prototype.\n'
+                    f'Comment: "{body.comment_body}"\n'
+                    f'Ask exactly ONE brief, specific clarifying question to understand the designer\'s intent before applying this change. '
+                    f'Be concise (one sentence max). Do not explain yourself, just ask the question.'
+                ),
+            }],
+        )
+        text_blocks = [b for b in (msg.content or []) if hasattr(b, "text")]
+        question = text_blocks[0].text.strip() if text_blocks else FALLBACK_QUESTION
+    except Exception:
+        question = FALLBACK_QUESTION
     return ClarifyCommentResponse(question=question)
 
 
