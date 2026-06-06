@@ -144,11 +144,11 @@ export function buildGenerateParams({
 }
 
 /**
- * P6-15 (UX-5, AC3) — connect-affordance redirect. The source IA's
- * "Connect Figma" / "Connect a repo" buttons navigate to the Settings →
- * Connectors page so the user can wire up their integration there. Simple and
- * synchronous — no inline OAuth initiation, no server round-trip from the
- * drawer. The Settings page owns the full OAuth handshake.
+ * Connect-affordance redirect. The source IA's "Connect Figma" /
+ * "Connect a repo" buttons navigate to the Settings → Connectors page so
+ * the user can wire up their integration there. Simple and synchronous — no
+ * inline OAuth initiation, no server round-trip from the drawer. The
+ * Settings page owns the full OAuth handshake.
  */
 export function redirectToConnect(provider: "figma" | "github"): void {
   location.href = `/settings?section=connectors`

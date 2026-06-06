@@ -82,9 +82,9 @@ describe("Figma block connected state (AC2)", () => {
   })
 })
 
-// ─── AC3: connect affordances navigate to settings/connectors ────────────────
+// ─── connect affordances navigate to settings/connectors ─────────────────────
 
-describe("connect affordances navigate to Settings → Connectors (AC3)", () => {
+describe("connect affordances navigate to Settings → Connectors", () => {
   it("test_connect_figma_navigates_to_settings — sets location.href to /settings?section=connectors", () => {
     // Stub global location so the sync assignment is observable in node env.
     const original = globalThis.location
@@ -124,9 +124,9 @@ describe("connect affordances navigate to Settings → Connectors (AC3)", () => 
   })
 })
 
-// ─── AC5: drawer does not hand-roll OAuth state or connector internals ────────
+// ─── drawer does not hand-roll OAuth state or connector internals ─────────────
 
-describe("drawer does not hand-roll OAuth state or connector internals (AC5)", () => {
+describe("drawer does not hand-roll OAuth state or connector internals", () => {
   it("test_drawer_redirects_to_settings_not_static_urls — navigates to Settings → Connectors; no hand-rolled authorize URLs or connector-state primitives", () => {
     // The drawer redirects to the Settings → Connectors page (not inline OAuth).
     expect(drawerSource).toContain("/settings?section=connectors")

@@ -1534,14 +1534,14 @@ def get_comments_public(token: str) -> list[CommentOut]:
     ]
 
 
-# ─── Comment clarify (P7 — comment-clarify dialog) ──────────────────────────────
+# ─── Comment clarify ────────────────────────────────────────────────────────────
 #
 # POST /{prototype_id}/clarify-comment
 #
 # Lightweight LLM call (claude-haiku-4-5-20251001, max_tokens=200) that
 # generates a single clarifying question for a comment body before the Apply
 # flow commits an iterate. Backed by the shared `get_design_agent_client()`
-# factory (AD16 — spend attributed to DESIGN_AGENT_ANTHROPIC_API_KEY).
+# factory. Uses the design agent API key.
 # Not in the iterate queue — this is a synchronous pre-flight, fast enough
 # (<1s on Haiku) to sit in the request path without a background task.
 
@@ -1563,7 +1563,7 @@ def clarify_comment_route(
     """Return a single clarifying question for a comment before Apply is confirmed.
 
     Workspace-isolated (require_company) and feature-flag-gated. Uses the shared
-    Design Agent Anthropic client (AD16) with a lightweight Haiku call so the
+    Design Agent Anthropic client with a lightweight Haiku call so the
     dialog loads in <1s without touching the iterate queue.
     """
     _require_feature_enabled()

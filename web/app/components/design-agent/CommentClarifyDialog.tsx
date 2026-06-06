@@ -1,7 +1,7 @@
 "use client"
 
 /**
- * P7 — comment-clarify dialog.
+ * Comment clarify dialog.
  *
  * Intercepts the Apply flow on the signed-in CommentsPanel mount. When the
  * user clicks Apply on an open comment, this dialog fires a lightweight

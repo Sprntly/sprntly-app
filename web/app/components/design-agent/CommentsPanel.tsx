@@ -93,7 +93,7 @@ export function CommentAvatar({ author }: { author: string | null | undefined })
  * `data-anchor-id` (auto-applied by the Vite plugin, AD4 — the agent never
  * emits it manually). The iframe sandbox is `allow-scripts allow-same-origin`
  * (P2-05), so same-origin DOM is reachable. Returns null when no ancestor
- * carries an anchor id. For P3 MVP the cross-iframe contextmenu→postMessage
+ * carries an anchor id. Currently the cross-iframe contextmenu→postMessage
  * bridge is out of scope; capture uses `closest` on same-origin DOM (P3-13 e2e
  * will surface it if the sandbox blocks access in the real build).
  */
@@ -529,7 +529,7 @@ export function CommentsPanel({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
-  // P7 comment-clarify: the comment currently pending confirmation via the dialog.
+  // The comment currently pending confirmation via the dialog.
   const [clarifyTarget, setClarifyTarget] = useState<CommentRecord | null>(null)
 
   // Load existing comments on mount and after a freeform submit.
@@ -549,7 +549,7 @@ export function CommentsPanel({
 
   // Right-click anywhere with a reachable anchor id opens the composer for that
   // anchor. Suppressed in readOnly mode (public viewer — comment create disabled).
-  // For P3 MVP this captures same-origin DOM under the panel/parent document; the
+  // Currently this captures same-origin DOM under the panel/parent document; the
   // cross-iframe bridge is a follow-up (see scope note above).
   useEffect(() => {
     if (readOnly) return
@@ -609,7 +609,7 @@ export function CommentsPanel({
   // Apply renders only when the parent supplied `onApply` or `onIterateComment`
   // (signed-in mount) AND we can resolve (prototypeId).
   //
-  // P7 comment-clarify: Apply now opens the ClarifyDialog instead of immediately
+  // Apply now opens the ClarifyDialog instead of immediately
   // calling the parent. The dialog fires a lightweight Haiku LLM call to generate
   // a clarifying question, lets the user optionally add context, then calls back
   // with an enriched prompt. The actual parent call + resolve happen in

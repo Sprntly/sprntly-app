@@ -2437,7 +2437,7 @@
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
-   COMMENT-CLARIFY DIALOG (P7).
+   COMMENT-CLARIFY DIALOG.
    The "Confirm change" dialog that intercepts the Apply flow — shows the
    comment being applied, the LLM-generated clarifying question, and a
    textarea for the user's optional answer before Apply is committed.
