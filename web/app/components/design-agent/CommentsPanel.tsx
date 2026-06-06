@@ -35,12 +35,12 @@
 import { useEffect, useRef, useState } from "react"
 import { designAgentApi, type CommentRecord } from "../../lib/api"
 
-// ---- UX-EXPLORE (throwaway — REVERT, CHANGE B): author identity helpers -------
-// David's comment rows show WHO + WHEN + a small initials avatar. The backend
-// CommentRecord already carries `author` (the authed create attributes "demo")
-// + `created_at` (ISO). These pure helpers derive the display name, the avatar
-// initials, and a short relative timestamp. Exported so the pin-comment rows in
-// PostGenerationResult reuse the SAME identity rendering (one source of truth).
+// ---- Author identity helpers -------------------------------------------------
+// Comment rows show author label + avatar chip + relative timestamp. The backend
+// CommentRecord carries `author` (server-attributed) + `created_at` (ISO). These
+// pure helpers derive the display name, the avatar initials, and a short relative
+// timestamp. Exported so the pin-comment rows in PostGenerationResult reuse the
+// same identity rendering (one source of truth).
 
 /** Initials (1–2 chars, uppercase) from an author label. Falls back to "?". */
 export function authorInitials(author: string | null | undefined): string {
@@ -212,14 +212,12 @@ export type CommentsPanelViewProps = {
   onSubmit?: () => void
   onCancelComposer?: () => void
   onResolve?: (commentId: number) => void
-  /** P3-14 (F10): Apply hands a comment to the IterateComposer. Supplied only on
-   *  the signed-in mount; absent on the public viewer → no Apply button (AC9).
-   *  UX-EXPLORE (throwaway — REVERT, CHANGE C): Apply now ALSO resolves the
-   *  comment (the container's handler pre-fills the composer AND calls resolve). */
+  /** Apply hands a comment to the IterateComposer. Supplied only on the signed-in
+   *  mount; absent on the public viewer → no Apply button. Apply also resolves the
+   *  comment (the container handler calls the parent seam AND calls resolve). */
   onApply?: (comment: CommentRecord) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE C): Ignore — resolve the comment
-   *  WITHOUT pre-filling the composer. Supplied only on the signed-in mount
-   *  (alongside `onApply`). Absent → no Ignore button (public viewer). */
+  /** Ignore — resolve the comment WITHOUT pre-filling the composer. Supplied only
+   *  on the signed-in mount (alongside `onApply`). Absent → no Ignore button. */
   onIgnore?: (comment: CommentRecord) => void
 }
 
@@ -237,16 +235,14 @@ function CommentThread({
   withPin: boolean
   canResolve?: boolean
   pinExtra?: string | null
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE B): disables Apply/Ignore while a
-   *  run is in flight (no overlapping iterates). */
+  /** Disables Apply/Ignore while an iterate is in flight to prevent overlapping runs. */
   busy?: boolean
   onResolve?: (commentId: number) => void
-  /** P3-14 (F10): when supplied (signed-in mount only), an Apply action hands
-   *  the comment to the IterateComposer to pre-fill an iterate prompt. Absent on
-   *  the public mount → no Apply button renders (AC9 — behaves as before).
-   *  UX-EXPLORE (throwaway — REVERT, CHANGE C): Apply now also resolves. */
+  /** When supplied (signed-in mount only), an Apply action hands the comment to
+   *  the IterateComposer to pre-fill an iterate prompt. Absent on the public mount
+   *  → no Apply button renders. Apply also resolves the comment. */
   onApply?: (comment: CommentRecord) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE C): Ignore — resolve without pre-fill. */
+  /** Ignore — resolve without pre-fill. */
   onIgnore?: (comment: CommentRecord) => void
 }) {
   const resolved = comment.status === "resolved"
@@ -266,9 +262,7 @@ function CommentThread({
           {pinExtra && <span className="comment-pin-extra">{pinExtra}</span>}
         </span>
       )}
-      {/* UX-EXPLORE (throwaway — REVERT, CHANGE B): author + avatar + relative
-          timestamp header (David's `.proto-comment-au` / `.proto-comment-time` /
-          `.pc-av`). The avatar uses author initials, brand-tinted. */}
+      {/* Author + avatar + relative timestamp header. The avatar uses author initials, brand-tinted. */}
       <div className="comment-meta comment-meta-head">
         <CommentAvatar author={comment.author} />
         <span className="comment-author proto-comment-au">{comment.author}</span>
@@ -281,8 +275,8 @@ function CommentThread({
         </time>
       </div>
       <div className="comment-body">{comment.body}</div>
-      {/* UX-EXPLORE (throwaway — REVERT, CHANGE C): Apply / Ignore actions. Apply
-          pre-fills the composer AND resolves; Ignore resolves only. Both rendered
+      {/* Apply / Ignore actions. Apply calls the parent handler (pre-fill or
+          immediate-iterate) then resolves; Ignore resolves only. Both rendered
           only on the signed-in mount (onApply/onIgnore supplied) + open comments. */}
       {(onApply || onIgnore || (canResolve && !resolved)) && !resolved && (
         <div className="comment-actions" data-testid={`comment-actions-${comment.id}`}>
@@ -474,15 +468,13 @@ export type CommentsPanelProps = {
    *  pre-fill an iterate prompt. Absent on the public viewer → no Apply button
    *  (AC9 — the public mount behaves exactly as before P3-14). */
   onApply?: (comment: CommentRecord) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE B): when supplied, Apply runs the
-   *  comment through the canvas's SHARED iterate runner IMMEDIATELY (instead of
-   *  pre-filling the composer). The host passes the runner's `runIterate` here;
-   *  the comment body becomes the iterate instruction (+ its id is linked) and the
-   *  comment is resolved. Takes precedence over `onApply` when present. The agent
-   *  decides applicability — the client never fabricates a change. */
+  /** When supplied, Apply runs the comment through the canvas's shared iterate
+   *  runner immediately (instead of pre-filling the composer). The host passes the
+   *  runner's `runIterate` here; the comment body becomes the iterate instruction
+   *  and the comment is resolved. Takes precedence over `onApply` when present.
+   *  The agent decides applicability — the client never fabricates a change. */
   onIterateComment?: (comment: CommentRecord) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE B): disables Apply while the shared
-   *  runner is mid-iterate so a second comment can't kick off an overlapping run. */
+  /** Disables Apply while the shared runner is mid-iterate to prevent overlapping runs. */
   iterateBusy?: boolean
 }
 
@@ -579,17 +571,15 @@ export function CommentsPanel({
     }
   }
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE C): Apply = hand the comment to the
-  // parent (pre-fills the IterateComposer via setApplyTarget) AND resolve it (the
-  // existing authed resolve path → the row moves to the collapsed Resolved
-  // section). Ignore = resolve ONLY (no pre-fill). Apply renders only when the
-  // parent supplied `onApply` (signed-in mount) AND we can resolve (prototypeId).
+  // Apply = hand the comment to the parent (pre-fills the IterateComposer or runs
+  // the shared iterate runner) AND resolve it. Ignore = resolve ONLY (no pre-fill).
+  // Apply renders only when the parent supplied `onApply` or `onIterateComment`
+  // (signed-in mount) AND we can resolve (prototypeId).
   function handleApply(comment: CommentRecord) {
-    // UX-EXPLORE (throwaway — REVERT, CHANGE B): Apply now runs the IMMEDIATE
-    // iterate path when the host supplies it — the comment body is sent straight
-    // into the shared iterate runner (the agent decides applicability; the client
-    // fabricates nothing) and the comment is resolved. Falls back to the old
-    // pre-fill seam (onApply) only when no runner is supplied.
+    // When the host supplies `onIterateComment`, Apply runs the immediate iterate
+    // path — the comment body is sent into the shared runner (the agent decides
+    // applicability; the client fabricates nothing) and the comment is resolved.
+    // Falls back to the pre-fill seam (`onApply`) only when no runner is supplied.
     if (onIterateComment) {
       onIterateComment(comment)
     } else {

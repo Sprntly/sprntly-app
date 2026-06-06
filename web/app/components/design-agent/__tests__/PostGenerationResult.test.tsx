@@ -639,3 +639,98 @@ describe("pin-comment create stays wrapped in the auth-retry (preservation)", ()
     )
   })
 })
+
+// ─── Mark-and-comment pin flow ────────────────────────────────────────────────
+
+import type { PinComment } from "../PostGenerationResult"
+
+const BUNDLE = "https://cdn/p/42/index.html"
+
+function pinComment(over: Partial<PinComment> = {}): PinComment {
+  return {
+    n: 1,
+    xPct: 50,
+    yPct: 50,
+    draft: "",
+    body: "",
+    saved: false,
+    busy: false,
+    error: null,
+    ...over,
+  }
+}
+
+describe("Mark-and-comment pin flow — view layer", () => {
+  it("test_mark_mode_activates_overlay — markMode=true renders .da-mark-overlay.active", () => {
+    const html = renderView({ bundleUrl: BUNDLE, markMode: true })
+    // The overlay must carry the `active` class when in mark mode.
+    expect(html).toContain('class="da-mark-overlay active"')
+  })
+
+  it("test_stage_click_drops_numbered_pin_and_composer — a pin in the pins array renders its numbered badge and comment composer", () => {
+    const pin = pinComment({ n: 1, xPct: 40, yPct: 60, draft: "" })
+    const html = renderView({
+      bundleUrl: BUNDLE,
+      pins: [pin],
+    })
+    // The numbered pin badge in the pin layer
+    expect(html).toContain('data-testid="da-pin-1"')
+    // The composer form for the unsaved pin
+    expect(html).toContain('data-testid="da-pin-input-1"')
+    expect(html).toContain('data-testid="da-pin-submit-1"')
+  })
+
+  it("test_saved_pin_row_shows_author_avatar_time — a saved pin row renders author + avatar + relative-time + Apply/Ignore", () => {
+    const pin = pinComment({
+      n: 2,
+      saved: true,
+      body: "Looks great",
+      author: "Carol D",
+      createdAt: "2026-06-06T08:00:00Z",
+    })
+    const html = renderView({ bundleUrl: BUNDLE, pins: [pin] })
+    // author label
+    expect(html).toContain("Carol D")
+    // avatar chip
+    expect(html).toContain('data-testid="comment-avatar"')
+    // relative timestamp class present and ISO string in time element (title or dateTime attribute)
+    expect(html).toContain('class="proto-comment-time"')
+    expect(html).toContain("2026-06-06T08:00:00Z")
+    // Apply + Ignore buttons (saved + not resolved)
+    expect(html).toContain('data-testid="da-pin-apply-2"')
+    expect(html).toContain('data-testid="da-pin-ignore-2"')
+  })
+
+  it("test_pin_submit_uses_auth_retry_create_with_pin_anchor — handlePinSubmit sends anchor_id=pin-N and NO x/y", () => {
+    // Source-invariant check: assert the submit function sends { anchor_id: `pin-${n}`, body }
+    // with no x/y in the payload (the backend CommentCreate schema has no position field).
+    expect(RESULT_SRC).toContain("async function handlePinSubmit")
+    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
+    const body = RESULT_SRC.slice(start, start + 1200)
+    // anchor_id is the synthetic pin marker
+    expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
+    // the request body shape contains ONLY anchor_id + body (no x/y/position)
+    expect(body).not.toMatch(/\bxPct\b.*createComment/)
+    expect(body).not.toMatch(/\byPct\b.*createComment/)
+    expect(body).not.toMatch(/position.*createComment/)
+    // auth-retry wrapping still present
+    expect(body).toMatch(/withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(/)
+  })
+
+  it("test_create_comment_body_has_no_position_field — handlePinSubmit sends only anchor_id+body, no x/y/position", () => {
+    // Verify the ephemeral-position scope boundary: the create payload must be
+    // { anchor_id, body } only. We scan the handlePinSubmit source for the
+    // absence of position-related keys near the createComment call.
+    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
+    const fnBody = RESULT_SRC.slice(start, start + 1400)
+    // anchor_id and body key are present
+    expect(fnBody).toContain("anchor_id:")
+    expect(fnBody).toContain("body:")
+    // No position-related fields in the payload
+    expect(fnBody).not.toContain("xPct:")
+    expect(fnBody).not.toContain("yPct:")
+    expect(fnBody).not.toContain("position:")
+    expect(fnBody).not.toContain("x_pct:")
+    expect(fnBody).not.toContain("y_pct:")
+  })
+})
