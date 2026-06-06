@@ -148,7 +148,8 @@ CREATE TABLE prototype_comments (
     author       TEXT NOT NULL DEFAULT 'demo',
     status       TEXT NOT NULL DEFAULT 'open',
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at  TEXT
+    resolved_at  TEXT,
+    user_id        TEXT
 );
 """
 
@@ -271,7 +272,7 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
     # Figma token resolution is best-effort; stub it so the run is hermetic (the
     # mocked agent never calls fetch_figma and figma_file_key is None anyway).
     monkeypatch.setattr(
-        "app.design_agent.runner._resolve_figma_access_token", lambda k: None
+        "app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None
     )
 
     # ── Mock the build + bundle staging in the routes module so no real vite

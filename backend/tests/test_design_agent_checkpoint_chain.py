@@ -76,7 +76,8 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    user_id        TEXT
 );
 """
 

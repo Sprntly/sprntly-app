@@ -292,7 +292,7 @@ def test_manual_edit_prototype_threads_manual_mode_and_iter_cap(monkeypatch):
                                 duration_ms=1, final_content=[])
 
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
-    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: None)
+    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key, ws: None)
     _run(runner.manual_edit_prototype(
         prototype_id=1, workspace_id=_TEST_COMPANY_ID, system_blocks=_system(), user_message=_user(),
         current_source={"src/App.tsx": "x"}, figma_file_key=None,
@@ -449,7 +449,8 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    user_id        TEXT
 );
 """
 

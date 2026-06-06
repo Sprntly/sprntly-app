@@ -153,7 +153,8 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    user_id        TEXT
 );
 CREATE TABLE prototype_exports (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -392,7 +393,7 @@ def _install_generate_mock(monkeypatch, env, side_effect):
         "app.design_agent.runner.get_design_agent_client", lambda: client
     )
     monkeypatch.setattr(
-        "app.design_agent.runner._resolve_figma_access_token", lambda k: None
+        "app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None
     )
     monkeypatch.setattr(env.routes, "vite_build", _fake_vite_build)
     monkeypatch.setattr(env.routes, "vite_build_with_repair", _fake_vite_build_with_repair)
@@ -615,7 +616,7 @@ async def test_p4_e2e_no_network_passes_in_ci(env, monkeypatch):
         "app.design_agent.runner.get_design_agent_client", lambda: mock_client
     )
     monkeypatch.setattr(
-        "app.design_agent.runner._resolve_figma_access_token", lambda k: None
+        "app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None
     )
     monkeypatch.setattr(env.routes, "vite_build", _fake_vite_build)
     monkeypatch.setattr(env.routes, "vite_build_with_repair", _fake_vite_build_with_repair)

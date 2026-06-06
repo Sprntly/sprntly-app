@@ -95,7 +95,8 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    user_id        TEXT
 );
 """
 
@@ -221,44 +222,25 @@ def test_token_view_keys_independent(unauth):
 
 
 def test_public_comment_first_10_admitted(unauth):
-    # AC3: the first 10 in-window comment POSTs from one IP are admitted (200).
+    # Public comment creation is disabled — all POSTs return 404.
     token = _seed(share_mode="public")
     url = f"/v1/design-agent/by-token/{token}/comments"
-    for i in range(10):
-        resp = unauth.post(url, json=_comment_body())
-        assert resp.status_code == 200, f"comment {i} unexpectedly {resp.status_code}: {resp.text}"
+    resp = unauth.post(url, json=_comment_body())
+    assert resp.status_code == 404
 
 
 def test_public_comment_11th_429(unauth):
-    # AC3: the 11th comment POST from the same IP within the hour returns 429 with
-    # the {error, retry_after_seconds} shape.
+    # Public comment creation is disabled — endpoint returns 404, not 429.
     token = _seed(share_mode="public")
     url = f"/v1/design-agent/by-token/{token}/comments"
-    for _ in range(10):
-        assert unauth.post(url, json=_comment_body()).status_code == 200
-    eleventh = unauth.post(url, json=_comment_body())
-    assert eleventh.status_code == 429
-    detail = eleventh.json()["detail"]
-    assert detail["error"] == "rate_limit"
-    assert isinstance(detail["retry_after_seconds"], int)
-    assert detail["retry_after_seconds"] >= 1
+    assert unauth.post(url, json=_comment_body()).status_code == 404
 
 
 def test_public_comment_ip_keys_independent(unauth, env):
-    # AC4: two distinct client IPs are independent. The TestClient host is the
-    # constant "testclient", so we saturate a DIFFERENT IP key directly on the
-    # route's singleton (the iterate-limiter test's established approach) and prove a
-    # real POST (keyed "testclient") is still admitted, i.e. IP A's saturation does
-    # not block IP B.
-    other_ip = "198.51.100.5"
-    for _ in range(10):
-        env.routes.PUBLIC_COMMENT_LIMITER.register(other_ip)
-    assert env.routes.PUBLIC_COMMENT_LIMITER.check(other_ip) is False  # A saturated
-
+    # Public comment creation is disabled — returns 404 regardless of IP.
     token = _seed(share_mode="public")
     resp = unauth.post(f"/v1/design-agent/by-token/{token}/comments", json=_comment_body())
-    assert resp.status_code == 200, resp.text                          # B (testclient) admitted
-    assert env.routes.PUBLIC_COMMENT_LIMITER.check("testclient") is True
+    assert resp.status_code == 404
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -339,22 +321,7 @@ def test_429_logs_hashed_token_and_ip_bool(unauth, env, caplog):
     assert "retry_after_seconds=" in tok_msg
     assert token not in tok_msg                       # raw token never logged
 
-    caplog.clear()
-
-    # Comment 429.
-    for _ in range(10):
-        env.routes.PUBLIC_COMMENT_LIMITER.register("testclient")
-    with caplog.at_level(logging.INFO, logger="app.routes.design_agent"):
-        resp = unauth.post(
-            f"/v1/design-agent/by-token/{token}/comments", json=_comment_body()
-        )
-    assert resp.status_code == 429
-    com_recs = [r for r in caplog.records if "public_comment_rate_limited" in r.getMessage()]
-    assert len(com_recs) == 1
-    com_msg = com_recs[0].getMessage()
-    assert "ip_present=True" in com_msg               # boolean, not the raw IP
-    assert "retry_after_seconds=" in com_msg
-    assert "testclient" not in com_msg                # raw IP never logged
+    # Public comment creation is disabled — comment 429 path is unreachable.
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -416,13 +383,11 @@ def test_public_comment_request_client_none_no_crash(unauth, env):
     req = StarletteRequest(scope)
     body = env.routes.CommentCreate(anchor_id="deadbeef", body="from a clientless request")
 
-    # Must NOT raise (no NPE on None.host); the comment is written normally.
-    out = env.routes.post_comment_public(token=token, body=body, request=req)
-    assert out.author == "external"
-    assert out.status == "open"
-    # The guard fell back to the "0.0.0.0" sentinel key, so exactly one event landed
-    # there (proving the None path keyed the sentinel rather than crashing).
-    assert len(env.routes.PUBLIC_COMMENT_LIMITER._events.get("0.0.0.0", [])) == 1
+    # Public comment creation is disabled — endpoint raises HTTPException(404).
+    import fastapi
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        env.routes.post_comment_public(token=token, body=body, request=req)
+    assert exc_info.value.status_code == 404
 
 
 def test_token_view_429_existence_neutral_bogus_vs_real(unauth):

@@ -134,7 +134,8 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    user_id        TEXT
 );
 CREATE TABLE prototype_pending_iterations (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -295,7 +296,7 @@ def _stub_build_and_source(monkeypatch, env, *, dist: dict):
     monkeypatch.setattr(env.routes, "stage_bundle", _fake_stage_bundle)
     monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", _fake_read_source)
     monkeypatch.setattr(
-        "app.design_agent.runner._resolve_figma_access_token", lambda k: None
+        "app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None
     )
 
 
@@ -380,14 +381,12 @@ async def test_p3_full_loop_comment_apply_iterate_orphan_patch_checkpoint(env, m
         token = share.json()["share_token"]
         uuid.UUID(str(token))  # opaque UUID (F6)
 
-        # ── AC3: public comment on bbbb2222 (no auth) ──
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as pub:
-            c_pub = await pub.post(
-                f"/v1/design-agent/by-token/{token}/comments",
-                json={"anchor_id": _ANCHOR_KEPT, "body": "love the hero"},
-            )
-            assert c_pub.status_code == 200, c_pub.text
-            assert c_pub.json()["author"] == "external"
+        # ── AC3: create second comment via authed route (public creation disabled) ──
+        c2 = await ac.post(
+            f"/v1/design-agent/{proto_id}/comments",
+            json={"anchor_id": _ANCHOR_KEPT, "body": "love the hero"},
+        )
+        assert c2.status_code == 200, c2.text
 
         both = await ac.get(f"/v1/design-agent/{proto_id}/comments")
         assert both.status_code == 200, both.text

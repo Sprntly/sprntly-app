@@ -190,7 +190,8 @@ CREATE TABLE prototype_comments (
     body          TEXT NOT NULL,
     author        TEXT NOT NULL DEFAULT 'demo',
     status        TEXT NOT NULL DEFAULT 'open',
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    user_id        TEXT
 );
 """
 

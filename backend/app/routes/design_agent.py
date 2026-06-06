@@ -428,7 +428,7 @@ def get_one(
     return row
 
 
-@router.delete("/{prototype_id}", status_code=204)
+@router.delete("/{prototype_id}", status_code=204, dependencies=[Depends(require_same_origin)])
 def delete_prototype_route(
     prototype_id: int,
     company: CompanyContext = Depends(require_company),
@@ -1450,7 +1450,7 @@ def patch_resolve_comment(
     return CommentOut(**_comment_to_out(row))
 
 
-@router.delete("/{prototype_id}/comments/{cid}", status_code=204)
+@router.delete("/{prototype_id}/comments/{cid}", status_code=204, dependencies=[Depends(require_same_origin)])
 def delete_comment_route(
     prototype_id: int,
     cid: int,
@@ -1554,7 +1554,7 @@ class ClarifyCommentResponse(BaseModel):
     question: str
 
 
-@router.post("/{prototype_id}/clarify-comment", response_model=ClarifyCommentResponse)
+@router.post("/{prototype_id}/clarify-comment", response_model=ClarifyCommentResponse, dependencies=[Depends(require_same_origin)])
 def clarify_comment_route(
     prototype_id: int,
     body: ClarifyCommentRequest,
