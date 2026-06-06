@@ -68,7 +68,7 @@ export function CommentClarifyDialog({ open, comment, prototypeId, onConfirm, on
           <div className="modal-title">Confirm change</div>
         </div>
         <div className="modal-body">
-          <blockquote className="clarify-comment-quote">{comment.body}</blockquote>
+          <blockquote className="clarify-comment-quote">{comment.body.split('\n').filter(l => !l.startsWith('[ref:')).join('\n').trim()}</blockquote>
           <div className="clarify-question">
             {loading ? (
               <span className="clarify-loading">Analyzing…</span>

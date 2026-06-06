@@ -593,7 +593,7 @@ export function CommentsPanel({
   // with an enriched prompt. The actual parent call + resolve happen in
   // `handleClarifyConfirm` below.
   function handleApply(comment: CommentRecord) {
-    let enrichedBody = comment.body
+    let technicalRef = ''
     if (comment.resolved_anchor_id) {
       try {
         const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
@@ -601,11 +601,11 @@ export function CommentsPanel({
         if (anchor && iframe) {
           const el = findByAnchor(iframe, anchor)
           const desc = getElementDescription(el)
-          if (desc) enrichedBody = `[Element: ${desc}]\n${comment.body}`
+          if (desc) technicalRef = `\n[ref: ${desc.technical}]`
         }
       } catch {}
     }
-    setClarifyTarget({ ...comment, body: enrichedBody })
+    setClarifyTarget({ ...comment, body: `${comment.body}${technicalRef}` })
   }
 
   // Called by ClarifyDialog's "Apply change" button with the (optionally enriched)

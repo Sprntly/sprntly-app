@@ -152,20 +152,31 @@ export function setElementHighlight(el: Element | null): void {
 
 export function clearElementHighlight(): void { setElementHighlight(null) }
 
-export function getElementDescription(el: Element | null): string | null {
+export function getElementDescription(
+  el: Element | null,
+): { friendly: string; technical: string } | null {
   if (!el) return null
   try {
     const tag = el.tagName.toLowerCase()
-    const anchorId = el.getAttribute('data-anchor-id')
     const text = el.textContent?.trim().replace(/\s+/g, ' ').slice(0, 60) ?? ''
     const ariaLabel = el.getAttribute('aria-label') ?? ''
     const placeholder = el.getAttribute('placeholder') ?? ''
-    const cls = Array.from(el.classList).slice(0, 2).join('.')
+    const anchorId = el.getAttribute('data-anchor-id') ?? ''
+    const tagNoun: Record<string, string> = {
+      button: 'button', a: 'link', input: 'input', textarea: 'text area',
+      img: 'image', h1: 'heading', h2: 'heading', h3: 'heading',
+      p: 'paragraph', li: 'list item', nav: 'nav', header: 'header',
+      footer: 'footer', section: 'section', form: 'form',
+    }
+    const noun = tagNoun[tag] ?? tag
+    const label = text || ariaLabel || placeholder || anchorId
+    const friendly = label ? `"${label.slice(0, 40)}" ${noun}` : noun
+    const cls = Array.from(el.classList).slice(0, 3).join('.')
     const parts: string[] = [`<${tag}${cls ? '.' + cls : ''}>`]
     if (anchorId) parts.push(`[data-anchor-id="${anchorId}"]`)
     if (text) parts.push(`"${text}"`)
     else if (ariaLabel) parts.push(`aria-label="${ariaLabel}"`)
     else if (placeholder) parts.push(`placeholder="${placeholder}"`)
-    return parts.join(' ')
+    return { friendly, technical: parts.join(' ') }
   } catch { return null }
 }
