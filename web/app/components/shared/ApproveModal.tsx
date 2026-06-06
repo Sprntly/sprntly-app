@@ -298,6 +298,11 @@ export function ApproveModal() {
         <PostGenerationResult
           key={canvasResult.id}
           prototype={canvasResult}
+          onStateChange={(state) =>
+            setCanvasResult((prev) =>
+              prev ? { ...prev, is_complete: state.isComplete } : prev,
+            )
+          }
           prdSections={prd?.sections}
           prdTitle={prd?.title ?? null}
           // UX-EXPLORE (throwaway — REVERT, CHANGE A): one-line PRD meta for the

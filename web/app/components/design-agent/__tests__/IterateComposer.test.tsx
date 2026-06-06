@@ -486,6 +486,123 @@ describe("helpers — runEstimate / runIterate body shaping", () => {
   })
 })
 
+// ---- lock / unlock state threading -------------------------------------------
+
+describe("Lock/Unlock state threading (regression + state)", () => {
+  it("isComplete=false renders the active form; isComplete=true renders the locked surface (test_b4_is_complete_reaches_iterate_composer_after_mark_complete)", () => {
+    const unlocked = renderToStaticMarkup(
+      React.createElement(IterateComposer, { prototypeId: 7, isComplete: false }),
+    )
+    expect(unlocked).toContain('data-testid="iterate-composer"')
+    expect(unlocked).not.toContain('data-testid="iterate-composer-locked"')
+
+    const locked = renderToStaticMarkup(
+      React.createElement(IterateComposer, { prototypeId: 7, isComplete: true }),
+    )
+    expect(locked).toContain('data-testid="iterate-composer-locked"')
+    expect(locked).not.toContain('data-testid="iterate-composer-form"')
+  })
+
+  it("the Unlock button is present when locked (test_b4_unlock_button_shows_when_locked)", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(IterateComposer, { prototypeId: 7, isComplete: true }),
+    )
+    expect(html).toContain('data-testid="iterate-composer-unlock"')
+  })
+
+  it("Unlock calls designAgentApi.resume and the view renders the active form when unlocked (test_lock_state_local_unlock_optimistic)", async () => {
+    const resume = vi
+      .spyOn(designAgentApi, "resume")
+      .mockResolvedValue({ prototype_id: 7, is_complete: false, handoffs_flagged_stale: 0 })
+
+    // Locked container exposes onUnlock
+    const viewProps = driveContainer({ prototypeId: 7, isComplete: true })
+    expect(viewProps.isComplete).toBe(true)
+    expect(typeof viewProps.onUnlock).toBe("function")
+
+    await viewProps.onUnlock!()
+    expect(resume).toHaveBeenCalledWith(7)
+
+    // After the local unlocked flag flips, the composer shows the active form.
+    // Verified via the pure view (node-env cannot drive useState changes post-render).
+    const activeHtml = renderView({
+      prompt: "",
+      isComplete: false,
+      mode: "reprompt",
+      showModal: false,
+    })
+    expect(activeHtml).toContain('data-testid="iterate-composer-form"')
+  })
+
+  it("a fresh render with isComplete=true shows locked regardless of prior unlock (test_lock_state_re_locks_on_prop_flip)", () => {
+    // Simulates re-completing after a prior session: new render, state starts fresh.
+    const html = renderToStaticMarkup(
+      React.createElement(IterateComposer, { prototypeId: 7, isComplete: true }),
+    )
+    expect(html).toContain('data-testid="iterate-composer-locked"')
+    expect(html).not.toContain('data-testid="iterate-composer-form"')
+  })
+
+  it("Unlock calls designAgentApi.resume exactly once (test_unlock_calls_resume_api_once)", async () => {
+    const resume = vi
+      .spyOn(designAgentApi, "resume")
+      .mockResolvedValue({ prototype_id: 7, is_complete: false, handoffs_flagged_stale: 0 })
+
+    const viewProps = driveContainer({ prototypeId: 7, isComplete: true })
+    await viewProps.onUnlock!()
+    expect(resume).toHaveBeenCalledTimes(1)
+    expect(resume).toHaveBeenCalledWith(7)
+  })
+
+  it("the unlock-error element renders when resume fails (test_unlock_error_shown_on_resume_failure)", () => {
+    const html = renderView({
+      prompt: "",
+      isComplete: true,
+      mode: "reprompt",
+      showModal: false,
+      unlockError: "Could not unlock the prototype",
+    })
+    expect(html).toContain('data-testid="iterate-composer-unlock-error"')
+    expect(html).toContain("Could not unlock the prototype")
+  })
+
+  it("no UX-EXPLORE marker remains on the lock-state or handleUnlock lines (test_no_ux_explore_marker_on_lock_state_path)", () => {
+    const src = readFileSync(
+      join(process.cwd(), "app", "components", "design-agent", "IterateComposer.tsx"),
+      "utf8",
+    )
+    const lines = src.split("\n")
+    // The lock-state comment should be the plain-English version — no UX-EXPLORE.
+    const lockCommentIdx = lines.findIndex((l) =>
+      l.includes("Local unlock state") && l.includes("isComplete"),
+    )
+    expect(lockCommentIdx).toBeGreaterThan(-1)
+
+    // The handleUnlock comment should be the plain-English version — no UX-EXPLORE.
+    const unlockCommentIdx = lines.findIndex((l) =>
+      l.includes("The Unlock action:") && l.includes("resumes"),
+    )
+    expect(unlockCommentIdx).toBeGreaterThan(-1)
+
+    // Neither of those comment lines contains UX-EXPLORE.
+    expect(lines[lockCommentIdx]).not.toContain("UX-EXPLORE")
+    expect(lines[unlockCommentIdx]).not.toContain("UX-EXPLORE")
+  })
+
+  it("the Unlock button is disabled while unlocking is in progress (test_unlock_busy_state_disables_unlock_button)", () => {
+    const html = renderView({
+      prompt: "",
+      isComplete: true,
+      mode: "reprompt",
+      showModal: false,
+      unlockBusy: true,
+    })
+    expect(html).toContain('data-testid="iterate-composer-unlock"')
+    // unlockBusy=true changes the button label to "Unlocking…"
+    expect(html).toContain("Unlocking…")
+  })
+})
+
 // ---- iterate cost-confirm skip (skipCostConfirm) -----------------------------
 // The iterate path may run Submit directly, skipping the pre-flight cost-estimate
 // confirmation modal. The default (skipCostConfirm = false) keeps the modal for
