@@ -42,7 +42,15 @@ import { CommentAvatar, shortRelativeTime } from "./CommentsPanel"
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
-import { resolveAnchorAtPoint, getAnchorPosition, setIframeHighlight, clearIframeHighlight } from "./pinAnchorBridge"
+import {
+  getElementAtIframePoint,
+  getElementAnchor,
+  getAnchorPosition,
+  parseStoredAnchor,
+  serializeAnchor,
+  setElementHighlight,
+  clearElementHighlight,
+} from "./pinAnchorBridge"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
@@ -128,7 +136,8 @@ export type PinComment = {
   resolved?: boolean
   // stable JSX anchor resolved at the click point inside the bundle iframe;
   // null when the iframe is cross-origin or the click hit no anchored element.
-  resolvedAnchorId?: string | null
+  // Typed anchor object (anchor-id or xpath) replaces the old string field.
+  anchor: { type: 'anchor-id' | 'xpath'; value: string } | null
 }
 
 export type PostGenerationResultProps = {
@@ -253,7 +262,7 @@ export type PostGenerationResultViewProps = {
    *  edit/submit/remove a pin's comment. */
   markMode?: boolean
   onToggleMark?: () => void
-  onStageClick?: (xPct: number, yPct: number, viewportX: number, viewportY: number) => void
+  onStageClick?: (xPct: number, yPct: number, viewportX: number, viewportY: number, anchor: { type: 'anchor-id' | 'xpath'; value: string } | null) => void
   pins?: PinComment[]
   onPinDraftChange?: (n: number, value: string) => void
   onPinSubmit?: (n: number) => void
@@ -1094,23 +1103,23 @@ export function PostGenerationResultView({
               aria-hidden={markMode ? "false" : "true"}
               onClick={(e) => {
                 if (!markMode) return
-                const rect = e.currentTarget.getBoundingClientRect()
-                const xPct = ((e.clientX - rect.left) / rect.width) * 100
-                const yPct = ((e.clientY - rect.top) / rect.height) * 100
-                onStageClick?.(
-                  Math.max(0, Math.min(100, xPct)),
-                  Math.max(0, Math.min(100, yPct)),
-                  e.clientX,
-                  e.clientY,
-                )
+                const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+                const ir = iframe?.getBoundingClientRect()
+                if (!ir) return
+                const el = getElementAtIframePoint(iframe, e.clientX, e.clientY)
+                const anchor = el ? getElementAnchor(el) : null
+                const xPct = Math.max(0, Math.min(100, ((e.clientX - ir.left) / ir.width) * 100))
+                const yPct = Math.max(0, Math.min(100, ((e.clientY - ir.top) / ir.height) * 100))
+                clearElementHighlight()
+                onStageClick?.(xPct, yPct, e.clientX, e.clientY, anchor)
               }}
               onMouseMove={(e) => {
                 if (!markMode) return
                 const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
-                const anchorId = resolveAnchorAtPoint(iframe, e.clientX, e.clientY)
-                setIframeHighlight(iframe, anchorId)
+                const el = getElementAtIframePoint(iframe, e.clientX, e.clientY)
+                setElementHighlight(el)
               }}
-              onMouseLeave={() => clearIframeHighlight()}
+              onMouseLeave={() => clearElementHighlight()}
             />
           )}
           {/* Pin layer — numbered teardrops positioned absolutely over the canvas.
@@ -1357,8 +1366,8 @@ export function PostGenerationResult({
     const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
     const updates: Record<number, { xPct: number; yPct: number }> = {}
     for (const pin of pins) {
-      if (pin.resolvedAnchorId) {
-        const pos = getAnchorPosition(iframe, pin.resolvedAnchorId)
+      if (pin.anchor) {
+        const pos = getAnchorPosition(iframe, pin.anchor)
         if (pos) updates[pin.n] = pos
       }
     }
@@ -1395,9 +1404,9 @@ export function PostGenerationResult({
     return () => document.removeEventListener("keydown", onKey)
   }, [fullscreenOpen])
 
-  // Clear any active iframe highlight whenever mark mode is exited.
+  // Clear any active element highlight whenever mark mode is exited.
   useEffect(() => {
-    if (!markMode) clearIframeHighlight()
+    if (!markMode) clearElementHighlight()
   }, [markMode])
 
   function toggleMark() {
@@ -1409,18 +1418,16 @@ export function PostGenerationResult({
   }
 
   // Drop a numbered pin at the clicked stage location + open its comment composer.
-  function handleStageClick(xPct: number, yPct: number, viewportX: number, viewportY: number) {
+  function handleStageClick(xPct: number, yPct: number, _viewportX: number, _viewportY: number, anchor: { type: 'anchor-id' | 'xpath'; value: string } | null) {
     pinCounter.current += 1
     const n = pinCounter.current
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    const resolvedAnchorId = resolveAnchorAtPoint(iframe, viewportX, viewportY)
     setPins((prev) => [
       ...prev,
-      { n, xPct, yPct, draft: "", body: "", saved: false, busy: false, error: null, resolvedAnchorId },
+      { n, xPct, yPct, anchor, draft: "", body: "", saved: false, busy: false, error: null },
     ])
     setCommentsOpen(true)
     setMarkMode(false) // David exits mark mode per pin
-    clearIframeHighlight()
+    clearElementHighlight()
   }
 
   function handlePinDraftChange(n: number, value: string) {
@@ -1454,7 +1461,7 @@ export function PostGenerationResult({
           body: pin.draft.trim(),
           pin_x_pct: pin.xPct,
           pin_y_pct: pin.yPct,
-          resolved_anchor_id: pin.resolvedAnchorId ?? null,
+          resolved_anchor_id: serializeAnchor(pin.anchor),
         }),
       )
       setPins((prev) =>

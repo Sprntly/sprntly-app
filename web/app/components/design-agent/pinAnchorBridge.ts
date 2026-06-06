@@ -1,79 +1,111 @@
-/** Resolve the stable JSX anchor at a viewport point inside the prototype bundle
- *  iframe. The bundle is served same-origin, so contentDocument is reachable.
- *  Returns the deepest enclosing element's data-anchor-id at (viewportX, viewportY)
- *  translated into the iframe's own coordinate space, or null when: the iframe is
- *  cross-origin (contentDocument throws or is null), the point hits no anchored
- *  element, or no ancestor carries data-anchor-id. Never throws — a null result
- *  degrades to position-only persistence (pin_x_pct / pin_y_pct still saved).
- *
- *  Mirrors the captureAnchorId primitive in CommentsPanel.tsx (which uses
- *  closest("[data-anchor-id]") on click targets inside the same document); this
- *  bridge extends the same pattern across the iframe boundary so the mark overlay
- *  — which sits above the iframe in the parent document — can resolve anchors
- *  inside the bundle's contentDocument. */
-export function resolveAnchorAtPoint(
+/** Resolve the specific element at a viewport point inside the prototype iframe.
+ *  Returns null for cross-origin iframes or out-of-bounds points. */
+export function getElementAtIframePoint(
   iframe: HTMLIFrameElement | null,
-  viewportX: number,
-  viewportY: number,
-): string | null {
+  clientX: number,
+  clientY: number,
+): Element | null {
   try {
     const doc = iframe?.contentDocument
     if (!doc) return null
-    const rect = iframe!.getBoundingClientRect()
-    const innerX = viewportX - rect.left
-    const innerY = viewportY - rect.top
-    const el = doc.elementFromPoint(innerX, innerY)
-    return el?.closest("[data-anchor-id]")?.getAttribute("data-anchor-id") ?? null
-  } catch {
-    // cross-origin SecurityError, detached document, or any other DOM exception
-    return null
-  }
+    const r = iframe!.getBoundingClientRect()
+    const ix = clientX - r.left
+    const iy = clientY - r.top
+    if (ix < 0 || iy < 0 || ix > r.width || iy > r.height) return null
+    return doc.elementFromPoint(ix, iy)
+  } catch { return null }
 }
 
+/** Generate a stable anchor for an element: prefers data-anchor-id, falls back to XPath. */
+export function getElementAnchor(
+  el: Element,
+): { type: 'anchor-id' | 'xpath'; value: string } | null {
+  const withId = el.closest('[data-anchor-id]')
+  if (withId) return { type: 'anchor-id', value: withId.getAttribute('data-anchor-id')! }
+  const xpath = buildXPath(el)
+  return xpath ? { type: 'xpath', value: xpath } : null
+}
+
+function buildXPath(el: Element): string {
+  const parts: string[] = []
+  let node: Element | null = el
+  // 1 === Node.ELEMENT_NODE — use literal so this is safe in node-env tests.
+  while (node && node.nodeType === 1) {
+    let idx = 1
+    let sib = node.previousElementSibling
+    while (sib) { if (sib.tagName === node.tagName) idx++; sib = sib.previousElementSibling }
+    parts.unshift(idx > 1 ? `${node.tagName.toLowerCase()}[${idx}]` : node.tagName.toLowerCase())
+    node = node.parentElement
+  }
+  return parts.length ? '/' + parts.join('/') : ''
+}
+
+/** Find an element in the iframe by anchor (anchor-id or xpath). */
+export function findByAnchor(
+  iframe: HTMLIFrameElement | null,
+  anchor: { type: 'anchor-id' | 'xpath'; value: string },
+): Element | null {
+  try {
+    const doc = iframe?.contentDocument
+    if (!doc) return null
+    if (anchor.type === 'anchor-id') {
+      return doc.querySelector(`[data-anchor-id="${CSS.escape(anchor.value)}"]`)
+    }
+    return document.evaluate(anchor.value, doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
+      .singleNodeValue as Element | null
+  } catch { return null }
+}
+
+/** Get pin position as iframe percentages from an anchor. */
 export function getAnchorPosition(
   iframe: HTMLIFrameElement | null,
-  anchorId: string,
+  anchor: { type: 'anchor-id' | 'xpath'; value: string },
 ): { xPct: number; yPct: number } | null {
+  const el = findByAnchor(iframe, anchor)
+  if (!el) return null
   try {
-    const doc = iframe?.contentDocument
-    if (!doc) return null
-    const el = doc.querySelector(`[data-anchor-id="${CSS.escape(anchorId)}"]`)
-    if (!el) return null
-    const elRect = el.getBoundingClientRect()
-    const iRect = iframe.getBoundingClientRect()
-    const x = ((elRect.left - iRect.left + elRect.width / 2) / iRect.width) * 100
-    const y = ((elRect.top - iRect.top + elRect.height / 2) / iRect.height) * 100
-    return { xPct: Math.max(0, Math.min(100, x)), yPct: Math.max(0, Math.min(100, y)) }
-  } catch {
-    return null
-  }
-}
-
-let _activeHighlight: HTMLElement | null = null
-
-export function setIframeHighlight(
-  iframe: HTMLIFrameElement | null,
-  anchorId: string | null,
-): void {
-  try {
-    if (_activeHighlight) {
-      _activeHighlight.style.outline = ''
-      _activeHighlight.style.outlineOffset = ''
-      _activeHighlight.style.borderRadius = ''
-      _activeHighlight = null
+    const ir = iframe!.getBoundingClientRect()
+    const er = el.getBoundingClientRect()
+    return {
+      xPct: Math.max(0, Math.min(100, ((er.left - ir.left + er.width / 2) / ir.width) * 100)),
+      yPct: Math.max(0, Math.min(100, ((er.top - ir.top + er.height / 2) / ir.height) * 100)),
     }
-    if (!anchorId || !iframe?.contentDocument) return
-    const el = iframe.contentDocument.querySelector<HTMLElement>(
-      `[data-anchor-id="${CSS.escape(anchorId)}"]`
-    )
-    if (!el) return
-    el.style.outline = '2px solid var(--accent, #4a7c6b)'
-    el.style.outlineOffset = '3px'
-    el.style.borderRadius = '3px'
-    _activeHighlight = el
-  } catch { /* cross-origin — no-op */ }
+  } catch { return null }
 }
 
-export function clearIframeHighlight(): void {
-  setIframeHighlight(null, null)
+/** Parse a stored resolved_anchor_id string into a typed anchor object. */
+export function parseStoredAnchor(
+  raw: string | null | undefined,
+): { type: 'anchor-id' | 'xpath'; value: string } | null {
+  if (!raw) return null
+  if (raw.startsWith('xpath:')) return { type: 'xpath', value: raw.slice(6) }
+  return { type: 'anchor-id', value: raw }
 }
+
+/** Serialize an anchor to a stored resolved_anchor_id string. */
+export function serializeAnchor(
+  anchor: { type: 'anchor-id' | 'xpath'; value: string } | null,
+): string | null {
+  if (!anchor) return null
+  return anchor.type === 'xpath' ? `xpath:${anchor.value}` : anchor.value
+}
+
+let _highlighted: HTMLElement | null = null
+
+/** Highlight the specific element (not an ancestor) with an outline. */
+export function setElementHighlight(el: Element | null): void {
+  try {
+    if (_highlighted && _highlighted !== el) {
+      _highlighted.style.outline = ''
+      _highlighted.style.outlineOffset = ''
+      _highlighted = null
+    }
+    if (el && el !== _highlighted) {
+      ;(el as HTMLElement).style.outline = '2px solid var(--accent, #4a7c6b)'
+      ;(el as HTMLElement).style.outlineOffset = '2px'
+      _highlighted = el as HTMLElement
+    }
+  } catch {}
+}
+
+export function clearElementHighlight(): void { setElementHighlight(null) }
