@@ -98,11 +98,13 @@ export function setElementHighlight(el: Element | null): void {
     if (_highlighted && _highlighted !== el) {
       _highlighted.style.outline = ''
       _highlighted.style.outlineOffset = ''
+      _highlighted.style.boxShadow = ''
       _highlighted = null
     }
     if (el && el !== _highlighted) {
-      ;(el as HTMLElement).style.outline = '2px solid var(--accent, #4a7c6b)'
-      ;(el as HTMLElement).style.outlineOffset = '2px'
+      ;(el as HTMLElement).style.outline = '2px solid #ff6b35'
+      ;(el as HTMLElement).style.outlineOffset = '-2px'
+      ;(el as HTMLElement).style.boxShadow = '0 0 0 3px rgba(255, 107, 53, 0.35)'
       _highlighted = el as HTMLElement
     }
   } catch {}

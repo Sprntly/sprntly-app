@@ -1106,6 +1106,8 @@ export function PostGenerationResultView({
                 const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
                 const ir = iframe?.getBoundingClientRect()
                 if (!ir) return
+                if (e.clientX < ir.left || e.clientX > ir.left + ir.width ||
+                    e.clientY < ir.top || e.clientY > ir.top + ir.height) return
                 const el = getElementAtIframePoint(iframe, e.clientX, e.clientY)
                 const anchor = el ? getElementAnchor(el) : null
                 const xPct = Math.max(0, Math.min(100, ((e.clientX - ir.left) / ir.width) * 100))
