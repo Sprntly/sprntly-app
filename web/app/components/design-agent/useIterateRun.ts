@@ -1,27 +1,26 @@
 "use client"
 
 /**
- * UX-EXPLORE (throwaway — REVERT, CHANGE A/B): the SHARED iterate runner for the
- * post-generation canvas.
+ * Shared iterate runner for the post-generation canvas.
  *
  * WHY THIS EXISTS
- * The canvas has THREE places that want to run an iterate — the left
+ * The canvas has three places that want to run an iterate — the left
  * IterateComposer ("Describe a change…"), a comment's Apply (CommentsPanel), and
- * a pin-comment's Apply — and ALL of them must drive the SAME live left-panel
+ * a pin-comment's Apply — and all of them must drive the same live left-panel
  * activity, surface clarifying questions inline, poll the async run to
  * completion, and reload the center canvas to the new bundle. Centralising that
  * here gives one fixed iterate path instead of three.
  *
  * BACKEND REALITY (confirmed): generation/iteration is async POST → poll-to-
  * completion. The POST `/iterate` returns immediately ({status, queue_position})
- * — that is a KICKOFF, not completion. There is NO real step/token stream from
+ * — that is a KICKOFF, not completion. There is no real step/token stream from
  * the backend, so the "agent working" steps shown in the activity are COSMETIC,
  * driven off the poll's status transitions.
  *
  * FORWARD-COMPATIBLE SEAM: the activity is a modular event list mutated only via
  * `appendActivity(event)`. When a real backend SSE/step-event endpoint lands, its
  * events feed `appendActivity` directly and the cosmetic reveal below is deleted.
- *   // TODO(ticket): replace cosmetic step reveal with real backend SSE/step-event stream
+ *   // TODO: replace cosmetic step reveal with real backend SSE/step-event stream
  *
  * No CSS added to the hot globals.css; the activity markup uses component-scoped
  * class strings styled in design-agent.css.
@@ -141,9 +140,8 @@ export function useIterateRun({
       // 1) The user's request as a chat message.
       appendActivity({ kind: "user", text: prompt })
       // 2) Kick off the cosmetic step reveal (first step active immediately).
-      //    TODO(ticket): replace cosmetic step reveal with real backend SSE/step
-      //    -event stream — these reveals are driven off the poll, not a real
-      //    per-step backend signal.
+      //    TODO: replace cosmetic step reveal with real backend SSE/step-event stream —
+      //    these reveals are driven off the poll, not a real per-step backend signal.
       let stepIdx = 0
       appendActivity({ kind: "step", text: COSMETIC_STEPS[0], state: "active" })
 
