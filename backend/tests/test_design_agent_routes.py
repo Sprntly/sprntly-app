@@ -738,3 +738,140 @@ def test_by_prd_two_segment_resolves(env, client):
     # And a PRD with no ready prototype resolves to the handler's 404, not a
     # 422 path-validation error from the single-segment catch-all.
     assert client.get("/v1/design-agent/by-prd/76").status_code == 404
+
+
+# ─── Connected-repo identifier threaded into generation ─────────────────────
+#
+# The Generate modal lets a user pick one of their connected GitHub repos. That
+# repo full_name ("org/repo") threads through the request body → the background
+# generation task → the scaffold prompt as a single "existing codebase to match"
+# context line. It is prompt context ONLY: no file fetch, no clone, and NO new
+# agent tool (the action-tool registry stays at the fixed six).
+
+
+def _scaffold_user_text(calls: list[dict]) -> str:
+    """Pull the rendered scaffold user text out of the captured generate kwargs."""
+    return calls[0]["user_message"]["content"][0]["text"]
+
+
+def test_generate_accepts_github_repo(env, client, monkeypatch):
+    # A request carrying a repo identifier succeeds with the unchanged response
+    # shape — the field is additive and optional.
+    _stub_generate(monkeypatch, env.routes)
+    _seed_prd(env.db)
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": 1, "github_repo": "org/repo"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "generating"
+    assert isinstance(body["prototype_id"], int)
+
+
+def test_scaffold_user_renders_codebase_block_when_repo_present():
+    from app.design_agent.prompts import render_scaffold_user
+
+    rendered = render_scaffold_user(
+        prd_md="# prd",
+        target_platform="both",
+        instructions="",
+        figma_frames="(no Figma source detected)",
+        codebase_repo="org/repo",
+    )
+    assert "Existing codebase to match: org/repo" in rendered
+    assert "(no codebase source)" not in rendered
+
+
+def test_scaffold_user_renders_no_codebase_line_when_absent():
+    from app.design_agent.prompts import render_scaffold_user
+
+    # Both the omitted and the explicit-empty cases render the no-source line and
+    # never leak a repo name.
+    for missing in (None, "", "   "):
+        rendered = render_scaffold_user(
+            prd_md="# prd",
+            target_platform="both",
+            instructions="",
+            figma_frames="(no Figma source detected)",
+            codebase_repo=missing,
+        )
+        assert "(no codebase source)" in rendered
+        assert "Existing codebase to match" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_github_repo_threads_to_generate_prototype(env, monkeypatch):
+    # The repo identifier reaches generate_prototype AND lands in the rendered
+    # scaffold prompt as the "existing codebase to match" line.
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo",
+    )
+    assert calls[0]["github_repo"] == "org/repo"
+    assert "Existing codebase to match: org/repo" in _scaffold_user_text(calls)
+
+
+@pytest.mark.asyncio
+async def test_empty_github_repo_treated_as_absent(env, monkeypatch):
+    # A whitespace-only repo renders the no-source line, and the request-model
+    # normaliser collapses empty / whitespace to None (same as omitted).
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="   ",
+    )
+    assert "(no codebase source)" in _scaffold_user_text(calls)
+
+    req = env.routes.GenerateRequest(prd_id=1, github_repo="   ")
+    assert req.normalised_github_repo() is None
+    assert env.routes.GenerateRequest(prd_id=1).normalised_github_repo() is None
+    assert (
+        env.routes.GenerateRequest(prd_id=1, github_repo="org/repo")
+        .normalised_github_repo()
+        == "org/repo"
+    )
+
+
+def test_tool_registry_unchanged_by_repo_threading():
+    # Threading a repo identifier into the prompt adds NO agent tool: the action
+    # registry stays exactly the fixed six, and the exit-sentinel set is unchanged.
+    from app.design_agent.tools import ACTION_TOOLS, SENTINEL_TOOLS
+
+    assert [t.name for t in ACTION_TOOLS] == [
+        "view", "write", "line_replace", "search", "fetch_figma", "read_console",
+    ]
+    assert all(t.category == "action" for t in ACTION_TOOLS)
+    assert {t.name for t in SENTINEL_TOOLS} == {
+        "clarifying_question", "propose_prd_patch",
+    }
+    assert len(SENTINEL_TOOLS) <= 4
+
+
+@pytest.mark.asyncio
+async def test_repo_does_not_change_scenario_label(env, monkeypatch):
+    # A repo-only generate (no Figma, no website) yields the same scenario label
+    # as the baseline no-source case — the existing detector owns scenario
+    # inference; a repo string alone does not flip it.
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo",
+    )
+    assert calls[0]["scenario"] == "0"

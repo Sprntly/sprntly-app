@@ -77,6 +77,9 @@ type GenerateFlowDeps = {
     website_url?: string | null
     /** P5-02: manual color/font floor (shown only when no Figma). */
     manual_design?: { primary_color: string; font_family: string } | null
+    /** Connected-repo full_name ("org/repo") the prototype should match.
+     *  Prompt context only — no file fetch, no clone, no agent tool. */
+    github_repo?: string | null
   }
   generate: typeof designAgentApi.generate
   runGeneration: typeof runDesignAgentGeneration
@@ -114,6 +117,7 @@ export function buildGenerateParams({
   websiteUrl,
   manualColor,
   manualFont,
+  githubRepo,
 }: {
   prdId: number
   platform: TargetPlatform
@@ -122,6 +126,8 @@ export function buildGenerateParams({
   websiteUrl: string
   manualColor: string
   manualFont: string
+  /** Connected-repo full_name ("org/repo") to match; blank/whitespace -> null. */
+  githubRepo?: string
 }): GenerateFlowDeps["params"] {
   return {
     prd_id: prdId,
@@ -133,6 +139,7 @@ export function buildGenerateParams({
       manualColor && manualFont
         ? { primary_color: manualColor, font_family: manualFont }
         : null,
+    github_repo: githubRepo?.trim() || null,
   }
 }
 

@@ -147,9 +147,19 @@ class GenerateRequest(BaseModel):
     #                                       connector lookup lands in a later phase.
     website_url: str | None = None        # P5-02: Scenario B fallback source
     manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
+    github_repo: str | None = None        # connected-repo full_name ("org/repo");
+    #                                       prompt context only — no fetch, no clone,
+    #                                       no agent tool. The repo identifier travels
+    #                                       into the scaffold prompt so generation can
+    #                                       be told which existing codebase to match.
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
+
+    def normalised_github_repo(self) -> str | None:
+        """Treat an explicit empty / whitespace-only repo the same as absent."""
+        v = (self.github_repo or "").strip()
+        return v or None
 
 
 class GenerateResponse(BaseModel):
@@ -211,6 +221,14 @@ async def generate(
                 urlsplit(fallback_url).hostname or "",
             )
 
+    # Connected-repo identifier the user chose as the existing codebase to match.
+    # Prompt context only (no fetch, no clone, no agent tool). NO-PERSIST decision:
+    # `start_prototype` exposes no repo/codebase text column and this ticket adds
+    # no migration (NO `ALTER` on prds/briefs/evidences), so the repo is NOT
+    # snapshotted on the prototype row — it travels as a request-only field into
+    # the background generation task (prompt context + cost-summary identifier).
+    repo = body.normalised_github_repo()
+
     # Insert the generating row. Scenario inputs (figma_file_key, etc.) are
     # stored as snapshots; the A/B/C/0 label is DERIVED at read time
     # (infer_scenario), never persisted — see db/prototypes.py.
@@ -236,6 +254,7 @@ async def generate(
             figma_file_key=body.figma_file_key,
             website_url=effective_website_url,  # resolved value incl. onboarding fallback
             manual_design=body.manual_design,
+            github_repo=repo,  # normalised connected-repo full_name; prompt context only
         )
     )
     _inflight_tasks.add(task)
@@ -377,6 +396,7 @@ async def _run_generation_bg(
     figma_file_key: str | None,
     website_url: str | None = None,
     manual_design: ManualDesignInput | None = None,
+    github_repo: str | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -414,6 +434,7 @@ async def _run_generation_bg(
             target_platform=target_platform,
             instructions=instructions,
             figma_frames=source_block,
+            codebase_repo=github_repo,  # one-line "match this codebase" context; None -> "(no codebase source)"
         )
         user_message = {
             "role": "user",
@@ -440,6 +461,7 @@ async def _run_generation_bg(
             user_message=user_message,
             figma_file_key=figma_file_key,
             scenario=scenario_label,
+            github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
         )
         # Success path (P1-08): a complete run that emitted files gets built +
         # staged + marked ready. A complete run with no files, or any non-complete

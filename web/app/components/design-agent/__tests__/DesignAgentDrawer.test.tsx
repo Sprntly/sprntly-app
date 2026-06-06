@@ -537,3 +537,34 @@ describe("notification persistence (P5-09)", () => {
     expect(html).toContain("Generate Prototype")
   })
 })
+
+describe("buildGenerateParams github_repo threading", () => {
+  const base = {
+    prdId: 9,
+    platform: "both" as const,
+    instructions: "",
+    figmaFileKey: null,
+    websiteUrl: "",
+    manualColor: "",
+    manualFont: "",
+  }
+
+  it("emits github_repo when a repo is supplied; other keys unchanged", () => {
+    const params = buildGenerateParams({ ...base, githubRepo: "org/repo" })
+    expect(params.github_repo).toBe("org/repo")
+    // Every existing key is unchanged by the new repo arg.
+    expect(params.prd_id).toBe(9)
+    expect(params.target_platform).toBe("both")
+    expect(params.instructions).toBe("")
+    expect(params.figma_file_key).toBeNull()
+    expect(params.website_url).toBeNull()
+    expect(params.manual_design).toBeNull()
+  })
+
+  it("nulls github_repo when the repo arg is blank or whitespace", () => {
+    expect(buildGenerateParams({ ...base, githubRepo: "   " }).github_repo).toBeNull()
+    expect(buildGenerateParams({ ...base, githubRepo: "" }).github_repo).toBeNull()
+    // Omitted entirely → still null.
+    expect(buildGenerateParams({ ...base }).github_repo).toBeNull()
+  })
+})
