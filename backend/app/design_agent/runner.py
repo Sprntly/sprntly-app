@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -72,7 +73,7 @@ logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"  # AD2; NEVER claude-sonnet-4-7
 DEFAULT_MAX_ITERS = 40
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_TOKENS = int(os.environ.get("DESIGN_AGENT_MAX_TOKENS", "4096"))
 TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
 
 # ── Pre-flight cost estimate (AD14 / AD15, P3-11) ────────────────────────────
