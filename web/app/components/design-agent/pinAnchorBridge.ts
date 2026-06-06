@@ -151,3 +151,21 @@ export function setElementHighlight(el: Element | null): void {
 }
 
 export function clearElementHighlight(): void { setElementHighlight(null) }
+
+export function getElementDescription(el: Element | null): string | null {
+  if (!el) return null
+  try {
+    const tag = el.tagName.toLowerCase()
+    const anchorId = el.getAttribute('data-anchor-id')
+    const text = el.textContent?.trim().replace(/\s+/g, ' ').slice(0, 60) ?? ''
+    const ariaLabel = el.getAttribute('aria-label') ?? ''
+    const placeholder = el.getAttribute('placeholder') ?? ''
+    const cls = Array.from(el.classList).slice(0, 2).join('.')
+    const parts: string[] = [`<${tag}${cls ? '.' + cls : ''}>`]
+    if (anchorId) parts.push(`[data-anchor-id="${anchorId}"]`)
+    if (text) parts.push(`"${text}"`)
+    else if (ariaLabel) parts.push(`aria-label="${ariaLabel}"`)
+    else if (placeholder) parts.push(`placeholder="${placeholder}"`)
+    return parts.join(' ')
+  } catch { return null }
+}

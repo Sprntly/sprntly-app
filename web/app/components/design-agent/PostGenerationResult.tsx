@@ -48,6 +48,8 @@ import {
   getAnchorPosition,
   getClickOffsetInElement,
   getAnchorPositionWithOffset,
+  findByAnchor,
+  getElementDescription,
   parseStoredAnchor,
   serializeAnchor,
   setElementHighlight,
@@ -143,6 +145,8 @@ export type PinComment = {
   /** click position within the anchor element (0–100). Null for DB-loaded pins. */
   xPctInEl: number | null
   yPctInEl: number | null
+  /** human-readable element description for agent instructions */
+  elementLabel: string | null
 }
 
 export type PostGenerationResultProps = {
@@ -1434,6 +1438,7 @@ export function PostGenerationResult({
     let yPctInEl: number | null = null
     let finalXPct = xPct
     let finalYPct = yPct
+    let elementLabel: string | null = null
     if (anchor && iframe) {
       const offset = getClickOffsetInElement(iframe, viewportX, viewportY, anchor)
       if (offset) {
@@ -1442,12 +1447,14 @@ export function PostGenerationResult({
         const pos = getAnchorPositionWithOffset(iframe, anchor, xPctInEl, yPctInEl)
         if (pos) { finalXPct = pos.xPct; finalYPct = pos.yPct }
       }
+      const anchorEl = findByAnchor(iframe, anchor)
+      elementLabel = getElementDescription(anchorEl)
     }
     pinCounter.current += 1
     const n = pinCounter.current
     setPins((prev) => [
       ...prev,
-      { n, xPct: finalXPct, yPct: finalYPct, xPctInEl, yPctInEl, anchor, draft: "", body: "", saved: false, busy: false, error: null },
+      { n, xPct: finalXPct, yPct: finalYPct, xPctInEl, yPctInEl, anchor, elementLabel, draft: "", body: "", saved: false, busy: false, error: null },
     ])
     setCommentsOpen(true)
     setMarkMode(false)
@@ -1541,9 +1548,8 @@ export function PostGenerationResult({
     const pin = pins.find((p) => p.n === n)
     if (!pin || !pin.saved) return
     const region = pinRegionHint(pin.xPct, pin.yPct)
-    const instruction = `Re: pin #${pin.n} (near the ${region} of the prototype, at ~${Math.round(
-      pin.xPct,
-    )}%,${Math.round(pin.yPct)}%): ${pin.body}`
+    const elPart = pin.elementLabel ? ` on element ${pin.elementLabel}` : ''
+    const instruction = `Re: pin #${pin.n}${elPart} (${region} of the prototype): ${pin.body}`
     // pin Apply now runs the iterate
     // IMMEDIATELY through the shared runner (pin context + body as the
     // instruction) when `onPinIterate` is supplied — same fixed path as the

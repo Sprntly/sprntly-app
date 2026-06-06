@@ -35,6 +35,7 @@
 import { useEffect, useRef, useState } from "react"
 import { designAgentApi, type CommentRecord } from "../../lib/api"
 import { CommentClarifyDialog } from "./CommentClarifyDialog"
+import { findByAnchor, parseStoredAnchor, getElementDescription } from "./pinAnchorBridge"
 
 // ---- Author identity helpers -------------------------------------------------
 // Comment rows show author label + avatar chip + relative timestamp. The backend
@@ -592,8 +593,19 @@ export function CommentsPanel({
   // with an enriched prompt. The actual parent call + resolve happen in
   // `handleClarifyConfirm` below.
   function handleApply(comment: CommentRecord) {
-    // Intercept: open the clarify dialog rather than applying immediately.
-    setClarifyTarget(comment)
+    let enrichedBody = comment.body
+    if (comment.resolved_anchor_id) {
+      try {
+        const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+        const anchor = parseStoredAnchor(comment.resolved_anchor_id)
+        if (anchor && iframe) {
+          const el = findByAnchor(iframe, anchor)
+          const desc = getElementDescription(el)
+          if (desc) enrichedBody = `[Element: ${desc}]\n${comment.body}`
+        }
+      } catch {}
+    }
+    setClarifyTarget({ ...comment, body: enrichedBody })
   }
 
   // Called by ClarifyDialog's "Apply change" button with the (optionally enriched)
