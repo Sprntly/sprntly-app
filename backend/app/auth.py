@@ -312,6 +312,7 @@ class CompanyContext(BaseModel):
     role: str
     user_id: str
     user_email: str | None = None
+    user_name: str | None = None
 
 
 def require_company(
@@ -352,9 +353,14 @@ def require_company(
         raise HTTPException(500, "Membership data integrity error — contact support")
 
     only = memberships[0]
+    meta = session.get("user_metadata") or {}
+    user_name = meta.get("full_name") or meta.get("name") or (
+        f"{meta.get('first_name', '')} {meta.get('last_name', '')}".strip() or None
+    )
     return CompanyContext(
         company_id=only["company_id"], role=only["role"], user_id=user_id,
         user_email=session.get("email"),
+        user_name=user_name,
     )
 
 
