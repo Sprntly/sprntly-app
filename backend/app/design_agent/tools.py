@@ -556,6 +556,66 @@ def _extract_top_level_frames(file_doc: dict, frame_ids: list[str]) -> list[dict
     return out
 
 
+def _extract_palette_summary(file_doc: dict) -> dict:
+    """Walk the Figma document tree and extract the dominant fill palette.
+
+    Returns a dict with:
+      - background: hex of the most common large-area dark/light fill
+      - accent: hex of the least-common (likely interactive/highlight) fill
+      - is_dark: True when the dominant background is dark
+      - swatches: list of all unique hex colors found (up to 12, deduplicated)
+    Falls back gracefully to empty on any structure error.
+    """
+    from collections import Counter
+
+    fills: list[str] = []
+
+    def _walk(node: object) -> None:
+        if not isinstance(node, dict):
+            return
+        for fill in (node.get("fills") or []):
+            if not isinstance(fill, dict):
+                continue
+            if fill.get("type") != "SOLID":
+                continue
+            c = fill.get("color", {})
+            r = int((c.get("r", 0) or 0) * 255)
+            g = int((c.get("g", 0) or 0) * 255)
+            b = int((c.get("b", 0) or 0) * 255)
+            fills.append(f"#{r:02x}{g:02x}{b:02x}")
+        for child in (node.get("children") or []):
+            _walk(child)
+
+    try:
+        _walk(file_doc.get("document", {}))
+    except Exception:
+        return {}
+
+    if not fills:
+        return {}
+
+    counter = Counter(fills)
+    ordered = [c for c, _ in counter.most_common()]
+
+    # Most common fill = dominant background; least common = likely accent
+    background = ordered[0] if ordered else None
+    accent = ordered[-1] if len(ordered) > 1 else None
+
+    # Determine dark/light from luminance of the background
+    is_dark = False
+    if background:
+        r, g, b = int(background[1:3], 16), int(background[3:5], 16), int(background[5:7], 16)
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        is_dark = luminance < 128
+
+    return {
+        "background": background,
+        "accent": accent,
+        "is_dark": is_dark,
+        "swatches": ordered[:12],
+    }
+
+
 async def _exec_fetch_figma(inp: dict, ctx: ToolContext) -> dict:
     if not ctx.figma_file_key:
         return {"is_error": True, "content": "No Figma file key configured for this prototype.", "tool_name": "fetch_figma"}
@@ -578,7 +638,7 @@ async def _exec_fetch_figma(inp: dict, ctx: ToolContext) -> dict:
     file_doc = await asyncio.to_thread(fetch_file, ctx.figma_access_token, ctx.figma_file_key)
     styles = await asyncio.to_thread(fetch_file_styles, ctx.figma_access_token, ctx.figma_file_key)
     frames = _extract_top_level_frames(file_doc, frame_ids)[:5]
-    return {"frames": frames, "styles": styles}
+    return {"frames": frames, "styles": styles, "palette": _extract_palette_summary(file_doc)}
 
 
 async def _exec_read_console(inp: dict, ctx: ToolContext) -> dict:

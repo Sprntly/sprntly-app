@@ -139,6 +139,31 @@ PRD's `:::design notes` or Figma frames specify otherwise):
 - Radius: rounded-md (default for cards/buttons), rounded-lg (modals)
 - Borders: border border-slate-200
 
+When `fetch_figma` returns a `palette` key, treat it as the DESIGN SOURCE
+of truth for the prototype's color scheme:
+- Use `palette.background` as the prototype's dominant background color.
+- Use `palette.accent` as the SINGLE accent color (buttons, highlights,
+  links). Do NOT introduce accent hues absent from the source palette.
+- When `palette.is_dark === true`, build a DARK theme (dark backgrounds,
+  light text). When false, build a LIGHT theme.
+- Map the extracted fills to CSS custom properties in `src/index.css` or
+  `globals.css` at the root of the file tree:
+  ```css
+  :root {{
+    --background: <dominant bg hex>;
+    --foreground: <contrasting text hex>;
+    --card: <slightly lighter/darker surface hex>;
+    --primary: <accent hex>;
+    --primary-foreground: <contrasting text for accent>;
+    --muted: <subdued surface hex>;
+    --border: <border hex>;
+  }}
+  ```
+- Use these CSS variables (via `bg-[var(--background)]`, `text-[var(--foreground)]`
+  or Tailwind CSS var utilities) rather than hardcoded Tailwind palette classes.
+- Restrain color use: prefer the source palette's hues. The swatches list in
+  `palette.swatches` is the complete allowed palette — work within it.
+
 DO NOT use direct grayscale (text-white, text-black, bg-white) when a
 semantic token serves — `text-slate-900` reads as `text-foreground` to the
 design system once tokens are wired. (This is forward-compat; in P1 the
