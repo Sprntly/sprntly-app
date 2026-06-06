@@ -154,12 +154,20 @@ def test_shadcn_inventory_present_in_system_prompt():
 
 # ---- user template ----------------------------------------------------------
 
-def test_user_template_has_four_placeholders():
+def test_user_template_has_five_placeholders():
     template = p.DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE
     found = set(re.findall(r"\{(\w+)\}", template))
-    assert found == {"prd_md", "target_platform", "instructions", "figma_frames"}
-    # .format(...) with exactly those four kwargs must not raise.
-    template.format(prd_md="a", target_platform="b", instructions="c", figma_frames="d")
+    # `codebase_repo` was added as an additive context block (existing
+    # placeholders unchanged) — the optional connected-repo "match this
+    # codebase" line, rendered by render_scaffold_user.
+    assert found == {
+        "prd_md", "target_platform", "instructions", "figma_frames", "codebase_repo",
+    }
+    # .format(...) with exactly those five kwargs must not raise.
+    template.format(
+        prd_md="a", target_platform="b", instructions="c",
+        figma_frames="d", codebase_repo="e",
+    )
 
 
 def test_render_scaffold_user_substitutes_values():

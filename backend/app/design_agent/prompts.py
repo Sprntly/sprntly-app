@@ -202,6 +202,8 @@ This means:
 #   {target_platform} — "desktop" | "mobile" | "both"
 #   {instructions}   — optional free-text from the Generate popup
 #   {figma_frames}   — pre-pulled Figma context block, or "(no Figma source detected)"
+#   {codebase_repo}  — one-line "match this existing codebase" context naming the
+#                      connected repo full_name, or "(no codebase source)" when absent
 DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE = """\
 PRD:
 {prd_md}
@@ -214,6 +216,8 @@ Additional instructions from the user:
 Figma context:
 {figma_frames}
 
+{codebase_repo}
+
 Generate the interactive prototype now. Use `write` to create each file.
 End your turn with a 1-2 sentence summary when the prototype is complete.
 """
@@ -224,18 +228,31 @@ def render_scaffold_user(
     target_platform: str,
     instructions: str,
     figma_frames: str,
+    codebase_repo: str | None = None,
 ) -> str:
     """Render the scaffold user template with the supplied context.
 
-    Caller (P1-07) is responsible for fetching the PRD body, normalising
+    Caller is responsible for fetching the PRD body, normalising
     target_platform, defaulting empty instructions, and assembling the
     figma_frames block (or '(no Figma source detected)' when absent).
+
+    `codebase_repo` is the connected repo full_name (e.g. "org/repo") the user
+    chose as the existing codebase the prototype should visually/structurally
+    resemble — prompt context ONLY (no file fetch, no clone, no agent tool). When
+    a non-empty repo is supplied it renders a one-line "Existing codebase to
+    match: {repo}" block; when absent or blank/whitespace it renders
+    "(no codebase source)" with no repo name.
     """
+    repo = (codebase_repo or "").strip()
+    codebase_block = (
+        f"Existing codebase to match: {repo}" if repo else "(no codebase source)"
+    )
     return DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE.format(
         prd_md=prd_md.strip() or "(PRD is empty)",
         target_platform=target_platform or "both",
         instructions=(instructions.strip() or "(none)"),
         figma_frames=figma_frames.strip() or "(no Figma source detected)",
+        codebase_repo=codebase_block,
     )
 
 

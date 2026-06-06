@@ -574,6 +574,7 @@ async def generate_prototype(
     user_message: dict[str, Any],
     figma_file_key: str | None,
     scenario: str = "A",
+    github_repo: str | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
     """Public entrypoint: run agent_loop with a fresh ToolContext, emit the
     cost-summary log line, and return `(result, virtual_fs)` for P1-07 + P1-08
@@ -615,13 +616,20 @@ async def generate_prototype(
     # emitted via the shared llm_telemetry.log_llm_run primitive so the
     # log shape stays identical across every LLM call site in the repo
     # (and future PRD/Evidence/Ask/Brief runners can adopt with one call).
+    # The connected repo full_name (e.g. "org/repo") is a non-secret identifier;
+    # carry it into the cost-summary identifier so a codebase-grounded run is
+    # observable in the telemetry. Included only when present — never a token,
+    # PRD body, or comment content. Prompt context only; no fetch.
+    run_identifier: dict[str, Any] = {
+        "prototype_id": prototype_id,
+        "scenario": scenario,
+        "mode": "scaffold",
+    }
+    if github_repo:
+        run_identifier["codebase_repo"] = github_repo
     log_llm_run(
         operation="design_agent.run.complete",
-        identifier={
-            "prototype_id": prototype_id,
-            "scenario": scenario,
-            "mode": "scaffold",
-        },
+        identifier=run_identifier,
         usage=result.usage,
         duration_ms=result.duration_ms,
         status=result.status,

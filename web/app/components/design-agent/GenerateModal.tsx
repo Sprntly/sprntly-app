@@ -168,14 +168,15 @@ export function GenerateModal({
         platform,
         instructions,
         // A real Figma-file selection (once a listing endpoint exists) overrides
-        // the figmaFileKey prop fallback. GitHub repo selection (repoSel) has no
-        // generation param to thread into today — buildGenerateParams /
-        // GenerateFlowDeps["params"] expose only figma_file_key / website_url /
-        // manual_design (see DesignAgentDrawer).
+        // the figmaFileKey prop fallback. The selected GitHub repo now threads
+        // into generation as prompt context (github_repo) — only when GitHub is
+        // the active connected source; otherwise blank -> null. It tells the
+        // agent which existing codebase to match; no file fetch / clone / tool.
         figmaFileKey: figmaFileSel || figmaFileKey,
         websiteUrl: "",
         manualColor: "",
         manualFont: "",
+        githubRepo: githubActive ? repoSel : "",
       }),
       generate: designAgentApi.generate,
       runGeneration: runDesignAgentGeneration,
@@ -317,9 +318,9 @@ export function GenerateModal({
                   {/* GitHub repo selector. Wired to a real endpoint —
                       connectorsApi.listGithubRepos() → GET
                       /v1/connectors/github/repos. Empty/placeholder is the honest
-                      result when the token can't list. No generation param for the
-                      repo yet, so selection is captured but not threaded into
-                      buildGenerateParams. */}
+                      result when the token can't list. The chosen repo full_name
+                      (repoSel) now threads into generation as prompt context via
+                      buildGenerateParams (github_repo) — identifier only, no fetch. */}
                   <select
                     className="input src-select-inline"
                     value={repoSel}
