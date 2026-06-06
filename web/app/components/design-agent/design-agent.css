@@ -255,15 +255,22 @@
   line-height: 1.4;
 }
 
-/*
- * `.share-menu` COLLISION OVERRIDE (AC4).
- * globals.css:1412 defines `.share-menu` as an absolutely-positioned,
- * opacity:0 / pointer-events:none popover for PrdScreen's footer dropdown.
- * The DA `ShareMenu` reuses the same class for an INLINE fieldset, so it
- * inherits the hidden-popover treatment. Scoped under `.design-agent-surface`,
- * this override renders it as a normal inline block WITHOUT touching globals —
- * PrdScreen's dropdown (not inside a `.design-agent-surface` root) keeps the
- * global rule.
+/* === share panel: dedupe + native-radio visual (start) ====================
+ * One home for the signed-in ShareMenu panel. Merges what used to be two scoped
+ * `.share-menu` rules (a globals collision-override + a separate visual block)
+ * into ONE block carrying BOTH the override props (so the inline fieldset
+ * escapes the globals hidden-popover treatment) AND the calm, link-forward
+ * visual layout. The visibility selector stays the shipped native
+ * `<input type="radio">` group — styled as tidy option rows via CSS only, the
+ * radios untouched so the browser keeps arrow-key traversal + roving focus. App
+ * tokens only; PrdScreen's global `.share-menu` popover in globals.css is not
+ * touched.
+ *
+ * globals.css defines `.share-menu` as an absolutely-positioned, opacity:0 /
+ * pointer-events:none popover for PrdScreen's footer dropdown. The signed-in
+ * ShareMenu reuses the same class for an INLINE fieldset, so the scoped override
+ * below restores normal inline flow without editing globals — PrdScreen's
+ * dropdown, not inside a `.design-agent-surface` root, keeps the global rule.
  */
 .design-agent-surface .share-menu {
   position: static;
@@ -277,111 +284,65 @@
   min-width: 0;
   z-index: auto;
   background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-}
-
-/* clean, link-forward Share panel — modelled on
- * Claude / Lovable share dialogs (calm spacing, tidy visibility rows, prominent
- * link + Copy, progressive-disclosure passcode). App tokens only — forest-green
- * accent + off-white surfaces, no coral, no raw hex. Scoped to the DA surface so
- * PrdScreen's global `.share-menu` dropdown is untouched. */
-.design-agent-surface .share-menu {
   display: flex;
   flex-direction: column;
   gap: 14px;
   width: 320px;
   max-width: 320px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
 }
-.design-agent-surface .share-title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--ink);
-  letter-spacing: -0.01em;
-}
-.design-agent-surface .share-visibility {
+/* Visibility options — the native radio group rendered as tidy rows. */
+.design-agent-surface .share-mode-fieldset {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
 }
-.design-agent-surface .share-vis-row {
+.design-agent-surface .share-mode-fieldset .field-label {
+  margin-bottom: 2px;
+}
+.design-agent-surface .share-mode-option {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  text-align: left;
+  gap: 10px;
   padding: 10px 12px;
+  font-size: 13px;
+  color: var(--ink);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  color: var(--ink);
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
-.design-agent-surface .share-vis-row:hover:not(:disabled) {
+.design-agent-surface .share-mode-option:hover {
   border-color: var(--line-strong);
 }
-.design-agent-surface .share-vis-row:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-.design-agent-surface .share-vis-row:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-.design-agent-surface .share-vis-row.selected {
+/* Selected row card — driven by the native radio's :checked state (no JS, no
+   role/tabindex hand-rolling). */
+.design-agent-surface .share-mode-option:has(input[type="radio"]:checked) {
   border-color: var(--accent);
   background: var(--accent-soft);
 }
-.design-agent-surface .share-vis-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+.design-agent-surface .share-mode-option input[type="radio"] {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
 }
-.design-agent-surface .share-vis-label {
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.3;
-  white-space: nowrap;
+.design-agent-surface .share-mode-option label {
+  cursor: pointer;
+  line-height: 1.4;
 }
-.design-agent-surface .share-vis-sub {
-  font-size: 11.5px;
-  line-height: 1.3;
-  color: var(--ink-3);
-  white-space: nowrap;
-}
-.design-agent-surface .share-vis-row.selected .share-vis-sub {
-  color: var(--accent-ink);
-}
-/* Selected mark — a check inside a brand pill; the empty (unselected) state
-   keeps a hollow radio-dot ring so every row reads as selectable. */
-.design-agent-surface .share-vis-mark {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: 1.5px solid var(--line-strong);
-  color: transparent;
-}
-.design-agent-surface .share-vis-row.selected .share-vis-mark {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--surface);
-}
-
 /* Progressive-disclosure passcode field — only mounted when Passcode selected. */
-.design-agent-surface .share-passcode {
+.design-agent-surface .share-passcode-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  margin-top: 2px;
 }
 .design-agent-surface .share-passcode-label {
   font-size: 11px;
@@ -390,10 +351,6 @@
   letter-spacing: 0.04em;
   color: var(--ink-3);
 }
-.design-agent-surface .share-passcode-input {
-  width: 100%;
-}
-
 /* Primary action — the share URL field + Copy button (prominent, link-forward). */
 .design-agent-surface .share-link {
   display: flex;
@@ -404,7 +361,7 @@
   border-radius: var(--radius-sm);
   background: var(--surface-3);
 }
-.design-agent-surface .share-link-url {
+.design-agent-surface .share-link code {
   flex: 1;
   min-width: 0;
   align-self: center;
@@ -415,21 +372,10 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.design-agent-surface .share-copy-btn {
+.design-agent-surface .share-link .btn {
   flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
 }
-.design-agent-surface .share-copy-btn.copied {
-  border-color: var(--accent);
-  color: var(--accent-ink);
-}
-.design-agent-surface .share-error {
-  margin: 0;
-  font-size: 12px;
-}
+/* === share panel: dedupe + native-radio visual (end) ====================== */
 
 /* ── Generation error banner (GenerationErrorBanner) ──────────────────── */
 .design-agent-surface .generation-error-banner {
@@ -983,50 +929,6 @@
   cursor: not-allowed;
 }
 
-/* ── Share-mode radio group (P6-22) ───────────────────────────────────────
- * The passcode text field was lifted OUT of the passcode radio's <label> so the
- * three native radios form a contiguous group (restores keyboard arrow
- * traversal). These rules give the restructured option rows + the lifted field
- * block layout. Scoped under .design-agent-surface; colours via tokens only; no
- * globals.css touch.
- */
-.design-agent-surface .share-mode-fieldset {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  min-inline-size: 0;
-}
-.design-agent-surface .share-mode-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--ink-2);
-}
-.design-agent-surface .share-mode-option input[type="radio"] {
-  margin-top: 2px;
-  flex: none;
-}
-.design-agent-surface .share-mode-option label {
-  cursor: pointer;
-  line-height: 1.4;
-}
-.design-agent-surface .share-passcode-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
-}
-.design-agent-surface .share-passcode-label {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--ink-2);
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-}
 /* ── Generate-prototype modal — inner styles ───────────────────────────────
  * Scoped additions for GenerateModal.tsx. The modal shell reuses the global
  * .modal* classes; these add the modal-only inner styles + reset the base
@@ -1288,11 +1190,11 @@
   padding: 0;
 }
 /* the restyled ShareMenu owns its own clean
-   panel layout (title + tidy visibility rows + link-forward Copy). Inside the
-   popover it just drops its outer frame (the panel IS the frame) — it keeps its
-   own 14px rhythm + 320px comfortable width set on `.share-menu` above. The
-   popover renders no `.da-popover-title` for Share (the panel has `.share-title`
-   inside), so there is no duplicate heading. */
+   panel layout (the fieldset legend + tidy visibility rows + link-forward Copy).
+   Inside the popover it just drops its outer frame (the panel IS the frame) — it
+   keeps its own 14px rhythm + 320px comfortable width set on `.share-menu`
+   above. The popover renders no `.da-popover-title` for Share (the panel has its
+   own legend heading inside), so there is no duplicate heading. */
 .design-agent-surface .da-popover-panel .share-menu {
   border: none;
   background: transparent;
