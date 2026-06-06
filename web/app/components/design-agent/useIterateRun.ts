@@ -198,10 +198,14 @@ export function useIterateRun({
           return
         }
 
-        // 4b) Done → flip remaining steps done, append completion, update canvas.
+        // 4b) Resolve on the REAL poll outcome. The terminal "Change applied"
+        //     line is appended ONLY when the poll actually resolved to ready —
+        //     never on a timeout or a failure (those surface as an error), and
+        //     never from a cosmetic step tick mid-poll. That is what keeps the
+        //     stream honest: a "done" line means the backend run is really done.
         markLastStepDone()
-        appendActivity({ kind: "done", text: "Change applied" })
         if (proto.status === "ready") {
+          appendActivity({ kind: "done", text: "Change applied" })
           onComplete(proto)
         } else if (proto.status === "failed") {
           throw new Error(proto.error || "Iteration failed")

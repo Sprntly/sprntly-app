@@ -151,3 +151,110 @@ describe("useIterateRun — transient-401 resilience", () => {
     expect(result.current.running).toBe(false)
   })
 })
+
+// Does the activity stream carry the terminal "Change applied" line?
+function hasChangeApplied(activity: { kind: string; text?: string }[]) {
+  return activity.some((e) => e.kind === "done" && e.text === "Change applied")
+}
+
+describe("useIterateRun — terminal state follows the real poll, not a timer", () => {
+  it("test_done_not_appended_before_poll_ready: a run that never reaches ready never emits the 'Change applied' done line", async () => {
+    // The background run never completes — the poll keeps returning 'generating'
+    // until the run hits its max-duration cap and times out. The terminal done
+    // line must NOT appear: it is gated on a real `ready`, not on the timer that
+    // drives the cosmetic step reveal. (Pre-fix, the done line was appended
+    // unconditionally just before the timeout threw, so this would go red.)
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValue(proto("generating"))
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("make it pop")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    // No premature completion: the run timed out, so it surfaces an error and
+    // never claims the change was applied.
+    expect(hasChangeApplied(result.current.activity)).toBe(false)
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(result.current.error).not.toBeNull()
+    expect(result.current.running).toBe(false)
+  })
+
+  it("test_long_poll_keeps_active_state: the stream stays active through a long poll and only marks done on the real ready", async () => {
+    // Stay 'generating' well past the cosmetic-step count, then resolve to ready.
+    const get = vi.fn<(id: number) => Promise<PrototypeRecord>>()
+    for (let i = 0; i < 8; i++) get.mockResolvedValueOnce(proto("generating"))
+    get.mockResolvedValue(proto("ready"))
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("polish the layout")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const { activity } = result.current
+    // Exactly one terminal done line, appended only after the real ready.
+    expect(
+      activity.filter((e) => e.kind === "done" && e.text === "Change applied"),
+    ).toHaveLength(1)
+    // And it is the LAST thing in the stream — it follows the cosmetic steps,
+    // never precedes the resolution.
+    expect(activity[activity.length - 1].kind).toBe("done")
+    // The cosmetic steps still advanced while polling (no in-progress regression).
+    expect(activity.filter((e) => e.kind === "step").length).toBeGreaterThan(1)
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(onComplete.mock.calls[0][0].status).toBe("ready")
+  })
+
+  it("test_pending_question_surfaces_not_done: a clarifying-question resolution shows the question, not a done line", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValueOnce(
+        proto("generating", { question: "Which header variant?" }),
+      )
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("update the header")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const { activity } = result.current
+    // The agent paused to ask — surface the question, never a "Change applied".
+    expect(
+      activity.some(
+        (e) => e.kind === "question" && e.question === "Which header variant?",
+      ),
+    ).toBe(true)
+    expect(hasChangeApplied(activity)).toBe(false)
+    expect(result.current.pendingQuestion?.question).toBe(
+      "Which header variant?",
+    )
+    // The paused row is still handed to the canvas (unchanged behaviour).
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+})

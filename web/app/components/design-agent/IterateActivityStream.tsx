@@ -13,8 +13,11 @@
  *   - error         → an error line.
  *
  * Pure presentational (no hooks/I/O) → SSR-renderable. The activity is DRIVEN by
- * the poll in useIterateRun (the backend has no real step stream — cosmetic). A
- * real backend SSE/step stream would feed the same event list via appendActivity.
+ * the poll in useIterateRun: the intermediate working steps are cosmetic (no real
+ * backend step stream yet), but the terminal "done" line is emitted only on the
+ * poll's real completion — this component holds no timer of its own and renders
+ * "done" purely from the event it is handed. A real backend SSE/step stream would
+ * feed the same event list via appendActivity.
  */
 
 import type { ActivityEvent } from "./useIterateRun"
