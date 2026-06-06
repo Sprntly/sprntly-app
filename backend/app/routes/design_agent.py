@@ -80,6 +80,7 @@ from app.db.prototypes import (
     start_prototype,
     verify_share_passcode,
 )
+from app.design_agent.client import get_design_agent_client
 from app.design_agent.prompts import (
     DESIGN_AGENT_SCAFFOLD_SYSTEM,
     DESIGN_AGENT_TEMPLATE_VERSION,
@@ -1518,6 +1519,61 @@ def get_comments_public(token: str) -> list[CommentOut]:
         CommentOut(**_comment_to_out(r))
         for r in list_comments(prototype_id=proto["id"], workspace_id=proto["workspace_id"])
     ]
+
+
+# ─── Comment clarify (P7 — comment-clarify dialog) ──────────────────────────────
+#
+# POST /{prototype_id}/clarify-comment
+#
+# Lightweight LLM call (claude-haiku-4-5-20251001, max_tokens=200) that
+# generates a single clarifying question for a comment body before the Apply
+# flow commits an iterate. Backed by the shared `get_design_agent_client()`
+# factory (AD16 — spend attributed to DESIGN_AGENT_ANTHROPIC_API_KEY).
+# Not in the iterate queue — this is a synchronous pre-flight, fast enough
+# (<1s on Haiku) to sit in the request path without a background task.
+
+
+class ClarifyCommentRequest(BaseModel):
+    comment_body: str = Field(..., min_length=1, max_length=4000)
+
+
+class ClarifyCommentResponse(BaseModel):
+    question: str
+
+
+@router.post("/{prototype_id}/clarify-comment", response_model=ClarifyCommentResponse)
+def clarify_comment_route(
+    prototype_id: int,
+    body: ClarifyCommentRequest,
+    company: CompanyContext = Depends(require_company),
+) -> ClarifyCommentResponse:
+    """Return a single clarifying question for a comment before Apply is confirmed.
+
+    Workspace-isolated (require_company) and feature-flag-gated. Uses the shared
+    Design Agent Anthropic client (AD16) with a lightweight Haiku call so the
+    dialog loads in <1s without touching the iterate queue.
+    """
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if proto is None:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    client = get_design_agent_client()
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        messages=[{
+            "role": "user",
+            "content": (
+                f'You are reviewing a design feedback comment about to be applied to a UI prototype.\n'
+                f'Comment: "{body.comment_body}"\n'
+                f'Ask exactly ONE brief, specific clarifying question to understand the designer\'s intent before applying this change. '
+                f'Be concise (one sentence max). Do not explain yourself, just ask the question.'
+            ),
+        }],
+    )
+    question = msg.content[0].text.strip()
+    return ClarifyCommentResponse(question=question)
 
 
 # ─── Iterate: re-prompt + Apply-driven edits (P3-05) ───────────────────────────

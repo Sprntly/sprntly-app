@@ -34,6 +34,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { designAgentApi, type CommentRecord } from "../../lib/api"
+import { CommentClarifyDialog } from "./CommentClarifyDialog"
 
 // ---- Author identity helpers -------------------------------------------------
 // Comment rows show author label + avatar chip + relative timestamp. The backend
@@ -505,6 +506,8 @@ export function CommentsPanel({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+  // P7 comment-clarify: the comment currently pending confirmation via the dialog.
+  const [clarifyTarget, setClarifyTarget] = useState<CommentRecord | null>(null)
 
   // Load existing comments once on mount.
   useEffect(() => {
@@ -582,17 +585,33 @@ export function CommentsPanel({
   // the shared iterate runner) AND resolve it. Ignore = resolve ONLY (no pre-fill).
   // Apply renders only when the parent supplied `onApply` or `onIterateComment`
   // (signed-in mount) AND we can resolve (prototypeId).
+  //
+  // P7 comment-clarify: Apply now opens the ClarifyDialog instead of immediately
+  // calling the parent. The dialog fires a lightweight Haiku LLM call to generate
+  // a clarifying question, lets the user optionally add context, then calls back
+  // with an enriched prompt. The actual parent call + resolve happen in
+  // `handleClarifyConfirm` below.
   function handleApply(comment: CommentRecord) {
-    // When the host supplies `onIterateComment`, Apply runs the immediate iterate
-    // path — the comment body is sent into the shared runner (the agent decides
-    // applicability; the client fabricates nothing) and the comment is resolved.
-    // Falls back to the pre-fill seam (`onApply`) only when no runner is supplied.
+    // Intercept: open the clarify dialog rather than applying immediately.
+    setClarifyTarget(comment)
+  }
+
+  // Called by ClarifyDialog's "Apply change" button with the (optionally enriched)
+  // prompt. Routes the enriched comment to the parent seam and resolves the original.
+  function handleClarifyConfirm(enrichedPrompt: string) {
+    if (!clarifyTarget) return
+    const enriched: CommentRecord = { ...clarifyTarget, body: enrichedPrompt }
     if (onIterateComment) {
-      onIterateComment(comment)
+      onIterateComment(enriched)
     } else {
-      onApply?.(comment)
+      onApply?.(enriched)
     }
-    void handleResolve(comment.id)
+    void handleResolve(clarifyTarget.id)
+    setClarifyTarget(null)
+  }
+
+  function handleClarifyCancel() {
+    setClarifyTarget(null)
   }
 
   function handleIgnore(comment: CommentRecord) {
@@ -621,6 +640,15 @@ export function CommentsPanel({
         onApply={canApply ? handleApply : undefined}
         onIgnore={canApply ? handleIgnore : undefined}
       />
+      {prototypeId != null && (
+        <CommentClarifyDialog
+          open={clarifyTarget !== null}
+          comment={clarifyTarget}
+          prototypeId={prototypeId}
+          onConfirm={handleClarifyConfirm}
+          onCancel={handleClarifyCancel}
+        />
+      )}
     </div>
   )
 }

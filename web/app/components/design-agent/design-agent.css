@@ -2279,3 +2279,61 @@
   display: flex;
   justify-content: flex-end;
 }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   COMMENT-CLARIFY DIALOG (P7).
+   The "Confirm change" dialog that intercepts the Apply flow — shows the
+   comment being applied, the LLM-generated clarifying question, and a
+   textarea for the user's optional answer before Apply is committed.
+   Modal chrome (`modal-box`, `modal-overlay`, `modal-cancel`) is shared;
+   only the clarify-specific parts live here.
+   ─────────────────────────────────────────────────────────────────────────── */
+.design-agent-surface .clarify-comment-quote {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.design-agent-surface .clarify-question {
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.design-agent-surface .clarify-loading { opacity: 0.5; }
+.design-agent-surface .clarify-textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--ink);
+  resize: vertical;
+}
+.design-agent-surface .clarify-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* modal-confirm: primary-action variant (non-destructive, accent-coloured).
+   Companion to the existing modal-confirm-danger. */
+.design-agent-surface .modal-confirm {
+  margin-left: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--surface);
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+.design-agent-surface .modal-confirm:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.design-agent-surface .modal-confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
