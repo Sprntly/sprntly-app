@@ -664,25 +664,26 @@
   font-size: 10.5px;
 }
 
-/* UX-EXPLORE (throwaway — REVERT): COMPACT single-column Generate modal.
+/* ── Generate-prototype modal — compact single-column layout ───────────────
    Tightens vertical rhythm so all sections fit at ~720px viewport height
-   without scrolling. Token-only; scoped under the modal's .design-agent-surface
+   without scrolling. Token-only. Scoped to the modal root, which carries both
+   the surface and modal classes, via the compound `.design-agent-surface.modal`
    so nothing leaks to the drawer's .src-block layout above. */
-.modal.design-agent-surface .modal-body { padding-top: 10px; padding-bottom: 12px; }
+.design-agent-surface.modal .modal-body { padding-top: 10px; padding-bottom: 12px; }
 /* tighter field spacing inside the compact modal only */
-.modal.design-agent-surface .field { margin-bottom: 12px; }
-.modal.design-agent-surface .field:last-child { margin-bottom: 0; }
+.design-agent-surface.modal .field { margin-bottom: 12px; }
+.design-agent-surface.modal .field:last-child { margin-bottom: 0; }
 /* platform: label left, pills inline right on one row */
-.modal.design-agent-surface .gen-inline-field {
+.design-agent-surface.modal .gen-inline-field {
   display: flex;
   align-items: center;
   gap: 14px;
 }
-.modal.design-agent-surface .gen-inline-field .field-label { margin-bottom: 0; }
-.modal.design-agent-surface .gen-inline-field .radio-group { flex: 1; }
-.modal.design-agent-surface .gen-inline-field .radio-pill { padding: 6px 14px; }
+.design-agent-surface.modal .gen-inline-field .field-label { margin-bottom: 0; }
+.design-agent-surface.modal .gen-inline-field .radio-group { flex: 1; }
+.design-agent-surface.modal .gen-inline-field .radio-pill { padding: 6px 14px; }
 /* each design source collapses to ONE tight row */
-.modal.design-agent-surface .src-row-compact {
+.design-agent-surface.modal .src-row-compact {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -691,36 +692,36 @@
   font-size: 12.5px;
   border-top: 1px solid var(--line);
 }
-.modal.design-agent-surface .src-row-compact:first-of-type { border-top: none; }
-.modal.design-agent-surface .src-bullet {
+.design-agent-surface.modal .src-row-compact:first-of-type { border-top: none; }
+.design-agent-surface.modal .src-bullet {
   width: 6px;
   height: 6px;
   border-radius: 999px;
   background: var(--ink-3);
   flex-shrink: 0;
 }
-.modal.design-agent-surface .src-name {
+.design-agent-surface.modal .src-name {
   font-weight: 600;
   color: var(--ink-2);
 }
-.modal.design-agent-surface .src-row-compact .src-connected,
-.modal.design-agent-surface .src-row-compact .src-not-connected { margin-left: auto; }
+.design-agent-surface.modal .src-row-compact .src-connected,
+.design-agent-surface.modal .src-row-compact .src-not-connected { margin-left: auto; }
 /* inline selector sits at the row's far right, compact width */
-.modal.design-agent-surface .src-select-inline {
+.design-agent-surface.modal .src-select-inline {
   flex-basis: 100%;
   margin-top: 4px;
   padding-top: 5px;
   padding-bottom: 5px;
 }
 /* fallback as one muted helper line (replaces the full-width note block) */
-.modal.design-agent-surface .src-fallback-line {
+.design-agent-surface.modal .src-fallback-line {
   margin: 8px 0 0;
   font-size: 11.5px;
   color: var(--muted);
   line-height: 1.4;
 }
 /* short instructions textarea */
-.modal.design-agent-surface .textarea-compact { min-height: 48px; }
+.design-agent-surface.modal .textarea-compact { min-height: 48px; }
 
 /* ── Device frame (UX-2/P6-12) ────────────────────────────────────────────
  * APPENDED below P6-11's seed (which owns `.da-prototype-viewer` /
@@ -1026,38 +1027,40 @@
   text-transform: uppercase;
   letter-spacing: 0.09em;
 }
-/* ── UX-EXPLORE (throwaway — REVERT): Generate-prototype modal (v3 mockup) ──
+/* ── Generate-prototype modal — inner styles ───────────────────────────────
  * Scoped additions for GenerateModal.tsx. The modal shell reuses the global
- * .modal* classes; these add the v3-only inner styles + reset the base
+ * .modal* classes; these add the modal-only inner styles + reset the base
  * `.design-agent-surface` flex/gap when it sits on the .modal element (so the
- * modal keeps its block head/body/foot layout, not the column-flex surface). */
-.modal.design-agent-surface {
+ * modal keeps its block head/body/foot layout, not the column-flex surface).
+ * Scoped via the compound `.design-agent-surface.modal` (the root carries both
+ * classes). */
+.design-agent-surface.modal {
   display: block;
   gap: 0;
   position: relative;
 }
-.modal.design-agent-surface .modal-head {
+.design-agent-surface.modal .modal-head {
   position: relative;
 }
-.modal.design-agent-surface .gen-breadcrumb {
+.design-agent-surface.modal .gen-breadcrumb {
   font-size: 11.5px;
   color: var(--muted);
   font-family: var(--font-mono);
   margin: 0 0 10px;
   letter-spacing: 0.01em;
 }
-.modal.design-agent-surface .gen-breadcrumb-sep {
+.design-agent-surface.modal .gen-breadcrumb-sep {
   color: var(--line-strong);
   margin: 0 3px;
 }
-.modal.design-agent-surface .gen-breadcrumb-cur {
+.design-agent-surface.modal .gen-breadcrumb-cur {
   color: var(--ink-3);
 }
-.modal.design-agent-surface .radio-group {
+.design-agent-surface.modal .radio-group {
   display: flex;
   gap: 8px;
 }
-.modal.design-agent-surface .radio-pill {
+.design-agent-surface.modal .radio-pill {
   padding: 8px 16px;
   border: 1px solid var(--line);
   background: var(--surface);
@@ -1069,21 +1072,21 @@
   transition: all 0.12s ease;
   font-family: var(--font-body);
 }
-.modal.design-agent-surface .radio-pill:hover {
+.design-agent-surface.modal .radio-pill:hover {
   border-color: var(--ink-3);
 }
-.modal.design-agent-surface .radio-pill.selected {
+.design-agent-surface.modal .radio-pill.selected {
   border-color: var(--ink);
   background: var(--ink);
   color: var(--surface);
 }
 /* v3 foot: async note left, buttons right (global .modal-foot is flex-end). */
-.modal.design-agent-surface .modal-foot {
+.design-agent-surface.modal .modal-foot {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
 }
-.modal.design-agent-surface .modal-foot-r {
+.design-agent-surface.modal .modal-foot-r {
   display: flex;
   gap: 8px;
   flex-shrink: 0;
