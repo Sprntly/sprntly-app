@@ -253,6 +253,28 @@ CREATE TABLE connections (
 );
 CREATE INDEX connections_company_id_idx ON connections (company_id);
 
+-- Onboarding's per-company product rows (mirrors
+-- supabase/migrations/20260525150300_products.sql, SQLite-ized). The Design
+-- Agent reads it via app.db.products.get_company_website (called from
+-- app.routes.design_agent) to fall back to the company's primary-product
+-- website when no Figma source is connected. Seeded here so every Design Agent
+-- route/db test finds the table regardless of run order — previously only the
+-- ad-hoc fake in test_market_research_agent.py knew about it, so the shared
+-- fake raised `no such table: products`. Read-only in tests; FK target
+-- companies(id) is defined above. uuid PK / timestamptz are TEXT under SQLite,
+-- matching the other seeded tables.
+CREATE TABLE products (
+    id          TEXT PRIMARY KEY,
+    company_id  TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    website     TEXT,
+    description TEXT,
+    is_primary  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX products_company_id_idx ON products (company_id);
+
 CREATE TABLE github_installations (
     installation_id      INTEGER PRIMARY KEY,
     account_id           INTEGER NOT NULL,
@@ -470,6 +492,33 @@ def _reset_iterate_limiter():
         ITERATE_LIMITER._events.clear()
         PUBLIC_TOKEN_LIMITER._events.clear()
         PUBLIC_COMMENT_LIMITER._events.clear()
+    except Exception:
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser_in_preview_capture(monkeypatch):
+    """Keep real Chromium out of the test session.
+
+    The generation-complete hook captures a preview screenshot of the staged
+    bundle by rendering it in headless Chromium. Every completion-path test would
+    otherwise launch a real browser (the host has Chromium installed), which is
+    slow and non-deterministic. Patch the screenshot module's lazy Playwright seam
+    to raise ImportError so `capture_bundle_screenshot` honest-degrades to None
+    without ever launching a browser — the documented test posture for that module.
+
+    Tests that genuinely exercise capture override this: the screenshot unit tests
+    re-patch this same seam to inject a fake Playwright graph, and completion-path
+    success tests mock the route's `capture_bundle_screenshot` to return fake bytes.
+    Both run after this autouse fixture, so their patch wins for that test."""
+    try:
+        import app.design_agent.screenshot as _screenshot
+
+        def _no_playwright():
+            raise ImportError("playwright disabled in tests")
+
+        monkeypatch.setattr(_screenshot, "_resolve_async_playwright", _no_playwright, raising=False)
     except Exception:
         pass
     yield

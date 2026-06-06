@@ -35,6 +35,55 @@
 import { useEffect, useRef, useState } from "react"
 import { designAgentApi, type CommentRecord } from "../../lib/api"
 
+// ---- Author identity helpers -------------------------------------------------
+// Comment rows show author label + avatar chip + relative timestamp. The backend
+// CommentRecord carries `author` (server-attributed) + `created_at` (ISO). These
+// pure helpers derive the display name, the avatar initials, and a short relative
+// timestamp. Exported so the pin-comment rows in PostGenerationResult reuse the
+// same identity rendering (one source of truth).
+
+/** Initials (1–2 chars, uppercase) from an author label. Falls back to "?". */
+export function authorInitials(author: string | null | undefined): string {
+  const a = (author ?? "").trim()
+  if (!a) return "?"
+  const parts = a.split(/[\s._-]+/).filter(Boolean)
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+  return a.slice(0, 2).toUpperCase()
+}
+
+/** Short relative timestamp ("just now", "5m", "3h", "2d") from an ISO string.
+ *  Falls back to the raw string when it can't be parsed (SSR-safe — uses a
+ *  caller-supplied `now` so the pure view stays deterministic in tests). */
+export function shortRelativeTime(
+  iso: string | null | undefined,
+  now: number = Date.now(),
+): string {
+  if (!iso) return ""
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  const sec = Math.max(0, Math.round((now - t) / 1000))
+  if (sec < 45) return "just now"
+  const min = Math.round(sec / 60)
+  if (min < 60) return `${min}m`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr}h`
+  const day = Math.round(hr / 24)
+  if (day < 7) return `${day}d`
+  const wk = Math.round(day / 7)
+  if (wk < 5) return `${wk}w`
+  return new Date(t).toLocaleDateString()
+}
+
+/** A small brand-tinted initials avatar (David's `.pc-av`). Shared by the
+ *  CommentsPanel rows and the PostGenerationResult pin-comment rows. */
+export function CommentAvatar({ author }: { author: string | null | undefined }) {
+  return (
+    <span className="pc-av" data-testid="comment-avatar" aria-hidden="true">
+      {authorInitials(author)}
+    </span>
+  )
+}
+
 // ---- anchor-id capture (AD4 primitive) --------------------------------------
 
 /**
@@ -163,9 +212,13 @@ export type CommentsPanelViewProps = {
   onSubmit?: () => void
   onCancelComposer?: () => void
   onResolve?: (commentId: number) => void
-  /** P3-14 (F10): Apply hands a comment to the IterateComposer. Supplied only on
-   *  the signed-in mount; absent on the public viewer → no Apply button (AC9). */
+  /** Apply hands a comment to the IterateComposer. Supplied only on the signed-in
+   *  mount; absent on the public viewer → no Apply button. Apply also resolves the
+   *  comment (the container handler calls the parent seam AND calls resolve). */
   onApply?: (comment: CommentRecord) => void
+  /** Ignore — resolve the comment WITHOUT pre-filling the composer. Supplied only
+   *  on the signed-in mount (alongside `onApply`). Absent → no Ignore button. */
+  onIgnore?: (comment: CommentRecord) => void
 }
 
 function CommentThread({
@@ -173,23 +226,29 @@ function CommentThread({
   withPin,
   canResolve,
   pinExtra,
+  busy = false,
   onResolve,
   onApply,
+  onIgnore,
 }: {
   comment: CommentRecord
   withPin: boolean
   canResolve?: boolean
   pinExtra?: string | null
+  /** Disables Apply/Ignore while an iterate is in flight to prevent overlapping runs. */
+  busy?: boolean
   onResolve?: (commentId: number) => void
-  /** P3-14 (F10): when supplied (signed-in mount only), an Apply action hands
-   *  the comment to the IterateComposer to pre-fill an iterate prompt. Absent on
-   *  the public mount → no Apply button renders (AC9 — behaves as before). */
+  /** When supplied (signed-in mount only), an Apply action hands the comment to
+   *  the IterateComposer to pre-fill an iterate prompt. Absent on the public mount
+   *  → no Apply button renders. Apply also resolves the comment. */
   onApply?: (comment: CommentRecord) => void
+  /** Ignore — resolve without pre-fill. */
+  onIgnore?: (comment: CommentRecord) => void
 }) {
   const resolved = comment.status === "resolved"
   return (
     <li
-      className={`comment-thread${resolved ? " comment--resolved" : ""}`}
+      className={`comment-thread${resolved ? " comment--resolved resolved" : ""}`}
       data-testid={`comment-thread-${comment.id}`}
       data-status={comment.status}
     >
@@ -203,32 +262,58 @@ function CommentThread({
           {pinExtra && <span className="comment-pin-extra">{pinExtra}</span>}
         </span>
       )}
-      <div className="comment-body">{comment.body}</div>
-      <div className="comment-meta">
-        <span className="comment-author">{comment.author}</span>
-        <time className="comment-timestamp" dateTime={comment.created_at}>
-          {comment.created_at}
+      {/* Author + avatar + relative timestamp header. The avatar uses author initials, brand-tinted. */}
+      <div className="comment-meta comment-meta-head">
+        <CommentAvatar author={comment.author} />
+        <span className="comment-author proto-comment-au">{comment.author}</span>
+        <time
+          className="comment-timestamp proto-comment-time"
+          dateTime={comment.created_at}
+          title={comment.created_at}
+        >
+          {shortRelativeTime(comment.created_at)}
         </time>
       </div>
-      {canResolve && !resolved && (
-        <button
-          type="button"
-          className="btn comment-resolve-btn"
-          data-testid={`comment-resolve-${comment.id}`}
-          onClick={() => onResolve?.(comment.id)}
-        >
-          Resolve
-        </button>
-      )}
-      {onApply && !resolved && (
-        <button
-          type="button"
-          className="btn comment-apply-btn"
-          data-testid={`comment-apply-${comment.id}`}
-          onClick={() => onApply(comment)}
-        >
-          Apply
-        </button>
+      <div className="comment-body">{comment.body}</div>
+      {/* Apply / Ignore actions. Apply calls the parent handler (pre-fill or
+          immediate-iterate) then resolves; Ignore resolves only. Both rendered
+          only on the signed-in mount (onApply/onIgnore supplied) + open comments. */}
+      {(onApply || onIgnore || (canResolve && !resolved)) && !resolved && (
+        <div className="comment-actions" data-testid={`comment-actions-${comment.id}`}>
+          {onApply && (
+            <button
+              type="button"
+              className="btn btn-accent comment-apply-btn"
+              data-testid={`comment-apply-${comment.id}`}
+              disabled={busy}
+              onClick={() => onApply(comment)}
+            >
+              Apply
+            </button>
+          )}
+          {onIgnore && (
+            <button
+              type="button"
+              className="btn comment-ignore-btn"
+              data-testid={`comment-ignore-${comment.id}`}
+              disabled={busy}
+              onClick={() => onIgnore(comment)}
+            >
+              Ignore
+            </button>
+          )}
+          {/* Keep the original explicit Resolve for non-Apply/Ignore mounts. */}
+          {!onApply && !onIgnore && canResolve && (
+            <button
+              type="button"
+              className="btn comment-resolve-btn"
+              data-testid={`comment-resolve-${comment.id}`}
+              onClick={() => onResolve?.(comment.id)}
+            >
+              Resolve
+            </button>
+          )}
+        </div>
       )}
     </li>
   )
@@ -248,6 +333,7 @@ export function CommentsPanelView({
   onCancelComposer,
   onResolve,
   onApply,
+  onIgnore,
 }: CommentsPanelViewProps) {
   const open = comments.filter((c) => c.status === "open")
   const resolved = comments.filter((c) => c.status === "resolved")
@@ -313,8 +399,10 @@ export function CommentsPanelView({
                 withPin
                 canResolve={canResolve}
                 pinExtra={pinExtra?.[c.anchor_id] ?? null}
+                busy={busy}
                 onResolve={onResolve}
                 onApply={onApply}
+                onIgnore={onIgnore}
               />
             ))}
           </ul>
@@ -380,6 +468,14 @@ export type CommentsPanelProps = {
    *  pre-fill an iterate prompt. Absent on the public viewer → no Apply button
    *  (AC9 — the public mount behaves exactly as before P3-14). */
   onApply?: (comment: CommentRecord) => void
+  /** When supplied, Apply runs the comment through the canvas's shared iterate
+   *  runner immediately (instead of pre-filling the composer). The host passes the
+   *  runner's `runIterate` here; the comment body becomes the iterate instruction
+   *  and the comment is resolved. Takes precedence over `onApply` when present.
+   *  The agent decides applicability — the client never fabricates a change. */
+  onIterateComment?: (comment: CommentRecord) => void
+  /** Disables Apply while the shared runner is mid-iterate to prevent overlapping runs. */
+  iterateBusy?: boolean
 }
 
 function toMessage(err: unknown, fallback: string): string {
@@ -389,7 +485,14 @@ function toMessage(err: unknown, fallback: string): string {
 /** Public component. Loads comments on mount, listens for right-clicks to open
  *  an anchored composer, and wires submit/resolve to the orchestration helpers
  *  and the canonical `designAgentApi`. Delegates rendering to the pure view. */
-export function CommentsPanel({ token, prototypeId, onApply }: CommentsPanelProps) {
+export function CommentsPanel({
+  token,
+  prototypeId,
+  onApply,
+  onIterateComment,
+  iterateBusy = false,
+}: CommentsPanelProps) {
+  // (see handleApply / handleIgnore below for the CHANGE C resolve wiring)
   const [comments, setComments] = useState<CommentRecord[]>([])
   const [composer, setComposer] = useState<{ anchorId: string; body: string } | null>(
     null,
@@ -468,12 +571,38 @@ export function CommentsPanel({ token, prototypeId, onApply }: CommentsPanelProp
     }
   }
 
+  // Apply = hand the comment to the parent (pre-fills the IterateComposer or runs
+  // the shared iterate runner) AND resolve it. Ignore = resolve ONLY (no pre-fill).
+  // Apply renders only when the parent supplied `onApply` or `onIterateComment`
+  // (signed-in mount) AND we can resolve (prototypeId).
+  function handleApply(comment: CommentRecord) {
+    // When the host supplies `onIterateComment`, Apply runs the immediate iterate
+    // path — the comment body is sent into the shared runner (the agent decides
+    // applicability; the client fabricates nothing) and the comment is resolved.
+    // Falls back to the pre-fill seam (`onApply`) only when no runner is supplied.
+    if (onIterateComment) {
+      onIterateComment(comment)
+    } else {
+      onApply?.(comment)
+    }
+    void handleResolve(comment.id)
+  }
+
+  function handleIgnore(comment: CommentRecord) {
+    void handleResolve(comment.id)
+  }
+
+  // Apply/Ignore are only meaningful when the parent wants the comment (either
+  // the pre-fill seam OR the immediate-iterate seam) AND we can resolve (authed
+  // mount). Public viewer → neither.
+  const canApply = (onApply != null || onIterateComment != null) && prototypeId != null
+
   return (
     <div ref={panelRef} className="comments-panel-mount">
       <CommentsPanelView
         comments={comments}
         composer={composer}
-        busy={busy}
+        busy={busy || iterateBusy}
         error={error}
         canResolve={prototypeId != null}
         onBodyChange={(body) =>
@@ -482,7 +611,8 @@ export function CommentsPanel({ token, prototypeId, onApply }: CommentsPanelProp
         onSubmit={handleSubmit}
         onCancelComposer={() => setComposer(null)}
         onResolve={handleResolve}
-        onApply={onApply}
+        onApply={canApply ? handleApply : undefined}
+        onIgnore={canApply ? handleIgnore : undefined}
       />
     </div>
   )

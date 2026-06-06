@@ -149,6 +149,13 @@ export type IterateComposerViewProps = {
   onSubmit?: () => void
   onContinue?: () => void
   onCancel?: () => void
+  /** When the prototype is locked the composer renders a disabled textarea and an
+   *  "Unlock" button instead of the active form. Clicking Unlock fires `onUnlock`
+   *  (wired to the resume path) which re-enables iteration. `unlockBusy` disables
+   *  the button during the request; `unlockError` surfaces failure. */
+  onUnlock?: () => void
+  unlockBusy?: boolean
+  unlockError?: string | null
 }
 
 /** Pure presentational view — no hooks, no I/O → SSR-renderable in node-env
@@ -171,14 +178,47 @@ export function IterateComposerView({
   onSubmit,
   onContinue,
   onCancel,
+  onUnlock,
+  unlockBusy = false,
+  unlockError = null,
 }: IterateComposerViewProps) {
   if (isComplete) {
+    // Locked state: disabled textarea and Unlock button instead of the active form.
     return (
       <div
         className="iterate-composer iterate-composer--locked"
         data-testid="iterate-composer-locked"
       >
+        <textarea
+          className="iterate-composer-input"
+          data-testid="iterate-composer-input-locked"
+          value=""
+          placeholder="Prototype locked — unlock to make changes…"
+          disabled
+          aria-disabled="true"
+          readOnly
+        />
         <p className="iterate-composer-locked-note">{LOCKED_AFFORDANCE}</p>
+        <div className="iterate-composer-actions">
+          <button
+            type="button"
+            className="btn btn-accent"
+            data-testid="iterate-composer-unlock"
+            disabled={unlockBusy}
+            onClick={() => onUnlock?.()}
+          >
+            {unlockBusy ? "Unlocking…" : "Unlock"}
+          </button>
+        </div>
+        {unlockError && (
+          <p
+            className="iterate-composer-error error"
+            role="alert"
+            data-testid="iterate-composer-unlock-error"
+          >
+            {unlockError}
+          </p>
+        )}
       </div>
     )
   }
@@ -268,6 +308,25 @@ export type IterateComposerProps = {
    *  Optional/defaulted so existing callers keep type-checking; the AD14
    *  estimate→Continue→iterate flow is otherwise unchanged. */
   onIterated?: () => void
+  /**
+   * The iterate path intentionally skips the pre-flight cost-estimate
+   * confirmation modal. The per-generation soft/hard spend caps remain the
+   * guardrail, and the generate-path estimate is unchanged. The default
+   * (`skipCostConfirm = false`) preserves the confirmation modal for any
+   * non-iterate caller.
+   */
+  skipCostConfirm?: boolean
+  /** When supplied, Submit delegates the iterate run to the host's shared runner
+   *  (useIterateRun.runIterate) instead of posting inline. Only honoured together
+   *  with skipCostConfirm. When absent the composer keeps its own POST + onIterated
+   *  notify (back-compat for the launcher / public callers). */
+  runIterateExternal?: (
+    instruction: string,
+    appliedCommentId?: number | null,
+  ) => void | Promise<void>
+  /** When the host runner is running, Submit is disabled (the activity stream is
+   *  the progress surface). */
+  externalBusy?: boolean
 }
 
 /**
@@ -281,6 +340,9 @@ export function IterateComposer({
   applyTarget = null,
   onClearApply,
   onIterated,
+  skipCostConfirm = false,
+  runIterateExternal,
+  externalBusy = false,
 }: IterateComposerProps) {
   const init = initialComposerState(applyTarget)
   const [prompt, setPrompt] = useState<string>(init.prompt)
@@ -294,6 +356,37 @@ export function IterateComposer({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [queueLine, setQueueLine] = useState<string | null>(null)
+  // Local unlock state. When the prototype is locked (isComplete) the composer
+  // shows an Unlock button; clicking it calls designAgentApi.resume + flips unlocked
+  // so the active form renders before the host refetches. Effective lock = isComplete && !unlocked.
+  const [unlocked, setUnlocked] = useState(false)
+  const [unlockBusy, setUnlockBusy] = useState(false)
+  const [unlockError, setUnlockError] = useState<string | null>(null)
+  const locked = isComplete && !unlocked
+
+  // If the prop flips back to locked (e.g. a fresh prototype id / a re-complete),
+  // drop the local unlock so the box re-locks to match the real state.
+  useEffect(() => {
+    if (!isComplete) setUnlocked(false)
+  }, [isComplete])
+
+  // The Unlock action: resumes the prototype via the API and flips the local
+  // unlocked flag so the active form renders immediately without waiting for a prop refetch.
+  async function handleUnlock() {
+    setUnlockBusy(true)
+    setUnlockError(null)
+    try {
+      await designAgentApi.resume(prototypeId)
+      setUnlocked(true)
+      // Surface the unlock to the host so it can re-poll the record if it wants
+      // the lock chrome elsewhere to follow (no-op when unused).
+      onIterated?.()
+    } catch (e) {
+      setUnlockError(toMessage(e, "Could not unlock the prototype"))
+    } finally {
+      setUnlockBusy(false)
+    }
+  }
 
   // F10: when the Apply target changes (a comment's Apply was clicked), re-seed
   // the editable prompt + applied_comment_id from it.
@@ -305,31 +398,11 @@ export function IterateComposer({
 
   const mode: "reprompt" | "apply" = appliedCommentId != null ? "apply" : "reprompt"
 
-  // AD14: Submit fetches the estimate and opens the modal — never calls iterate.
-  async function handleSubmit() {
-    if (isComplete) return // F14 defense in depth (the locked view has no Submit)
-    if (!prompt.trim()) return
-    setShowModal(true)
-    setEstimateLoading(true)
-    setEstimateError(null)
-    setEstimate(null)
-    try {
-      const est = await runEstimate(designAgentApi.estimateIterate, {
-        prototypeId,
-        prompt,
-        appliedCommentId,
-      })
-      setEstimate(est)
-    } catch (e) {
-      setEstimateError(toMessage(e, "Could not estimate cost"))
-    } finally {
-      setEstimateLoading(false)
-    }
-  }
-
-  // Modal Continue: the ONLY path that calls iterate. On success, reset and hand
-  // off to the launcher's existing status/poll surface (AC5 — no self-poll).
-  async function handleContinue() {
+  // The shared iterate run, used by both the cost-confirm modal's Continue path
+  // and the direct (skipCostConfirm) Submit path. On success it resets the
+  // composer and hands off to the launcher's existing status/poll surface — the
+  // composer does not poll itself.
+  async function runIterateNow() {
     setBusy(true)
     setError(null)
     try {
@@ -353,6 +426,55 @@ export function IterateComposer({
     }
   }
 
+  // Submit. When `skipCostConfirm` is set, Submit runs the iteration directly,
+  // intentionally skipping the pre-flight cost-estimate confirmation modal; the
+  // per-generation soft/hard spend caps remain the guardrail. Otherwise the
+  // default path stands: fetch the estimate and open the confirmation modal —
+  // Submit never calls iterate from here.
+  async function handleSubmit() {
+    if (locked) return // F14 defense in depth (the locked view has no Submit)
+    if (!prompt.trim()) return
+    // When the host supplies the shared runner, delegate to it — it POSTs,
+    // polls to completion, drives the left-panel activity, and reloads the
+    // canvas. The composer just clears its local prompt + apply target and
+    // hands off; it does NOT poll or render progress here.
+    if (skipCostConfirm && runIterateExternal) {
+      const instruction = prompt
+      const linkedComment = appliedCommentId
+      setPrompt("")
+      setAppliedCommentId(null)
+      onClearApply?.()
+      void runIterateExternal(instruction, linkedComment)
+      return
+    }
+    if (skipCostConfirm) {
+      await runIterateNow()
+      return
+    }
+    setShowModal(true)
+    setEstimateLoading(true)
+    setEstimateError(null)
+    setEstimate(null)
+    try {
+      const est = await runEstimate(designAgentApi.estimateIterate, {
+        prototypeId,
+        prompt,
+        appliedCommentId,
+      })
+      setEstimate(est)
+    } catch (e) {
+      setEstimateError(toMessage(e, "Could not estimate cost"))
+    } finally {
+      setEstimateLoading(false)
+    }
+  }
+
+  // Modal Continue: the AD14 path that calls iterate (only reached when the cost
+  // modal is shown, i.e. `skipCostConfirm` is false).
+  async function handleContinue() {
+    await runIterateNow()
+  }
+
   // Cancel: close the modal, make NO API call.
   function handleCancel() {
     setShowModal(false)
@@ -360,13 +482,16 @@ export function IterateComposer({
     setEstimateError(null)
   }
 
-  if (isComplete) {
+  if (locked) {
     return (
       <IterateComposerView
         prompt=""
         isComplete
         mode={mode}
         showModal={false}
+        onUnlock={handleUnlock}
+        unlockBusy={unlockBusy}
+        unlockError={unlockError}
       />
     )
   }
@@ -377,7 +502,7 @@ export function IterateComposer({
       isComplete={false}
       mode={mode}
       showModal={showModal}
-      busy={busy}
+      busy={busy || externalBusy}
       error={error}
       queueLine={queueLine}
       estimate={estimate}

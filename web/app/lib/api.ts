@@ -603,6 +603,13 @@ export type PrototypeRecord = {
   //    added — the existing GET poll surfaces it; the answer routes through the
   //    existing P3-14 `iterate`). Null/absent ⇒ no question pending.
   pending_question?: PendingQuestion | null
+  // ── (append-only): optional preview-thumbnail URL captured on generation-
+  //    complete. GET /{id} / by-prd both `select("*")`, so the column flows
+  //    through automatically — no api method change. Null/absent ⇒ no thumbnail
+  //    captured (the preview card falls back to its existing placeholder); typed
+  //    OPTIONAL/nullable to match the posture above so existing literals keep
+  //    typechecking.
+  preview_image_url?: string | null
 }
 
 /** 202 kickoff response from POST /v1/design-agent/generate. */
@@ -624,6 +631,9 @@ export type CommentRecord = {
   status: "open" | "resolved" | "orphaned"
   created_at: string
   resolved_at: string | null
+  pin_x_pct?: number | null
+  pin_y_pct?: number | null
+  resolved_anchor_id?: string | null
 }
 
 /** F11 (P3-09/P3-10) — a proposed PRD patch. Wire shape mirrors the backend
@@ -641,6 +651,13 @@ export type PrdPatchRecord = {
   created_at: string
 }
 
+/** One listable Figma file for the Generate modal's design-source selector
+ *  (`designAgentApi.listFigmaFiles`). */
+export type FigmaFile = {
+  key: string
+  name: string
+}
+
 export const designAgentApi = {
   /** Kicks off prototype generation in the background; returns immediately
    *  with a prototype_id. Client should poll designAgentApi.get(id) (via
@@ -652,10 +669,34 @@ export const designAgentApi = {
     figma_file_key?: string | null
     website_url?: string | null  // P5-02: Scenario B fallback source
     manual_design?: { primary_color: string; font_family: string } | null  // P5-02: manual floor
+    github_repo?: string | null  // connected-repo full_name ("org/repo"); prompt context only
   }) => api.post<PrototypeStartResponse>("/v1/design-agent/generate", body),
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
     api.get<PrototypeRecord>(`/v1/design-agent/${prototypeId}`),
+  /**
+   * READ-ONLY "does this PRD have a ready prototype?" lookup, by PRD id. Powers
+   * the PRD-screen preview card and the "View Prototype" vs "Generate Prototype"
+   * label / skip-loading decision WITHOUT side effects.
+   *
+   * Calls `GET /v1/design-agent/by-prd/{prd_id}`, which returns the most-recent
+   * ready prototype row for the PRD under the caller's workspace, or 404 when
+   * none — a pure read that never kicks off a generation (unlike the dedup
+   * short-circuit inside `POST /v1/design-agent/generate`). On any error (404 /
+   * not found / transient) the caller swallows it → null → no preview card,
+   * label stays "Generate Prototype" (graceful degrade, NEVER faking existence /
+   * NEVER kicking a generation). */
+  getByPrd: async (prdId: number): Promise<PrototypeRecord | null> => {
+    try {
+      return await api.get<PrototypeRecord>(
+        `/v1/design-agent/by-prd/${encodeURIComponent(String(prdId))}`,
+      )
+    } catch {
+      // 404 (no ready prototype) / not found / transient → degrade to "no
+      // existing prototype" so the card hides and the label stays Generate.
+      return null
+    }
+  },
   /** F14 — mark a prototype complete. Empty body. */
   complete: (prototypeId: number) =>
     api.post<{
@@ -703,11 +744,23 @@ export const designAgentApi = {
   /** Public-route comment write (external viewer on `/p/<token>`): the token
    *  is the access primitive (F6), so no auth is required. Hits the P3-02
    *  public route; the backend attributes the comment to the `external` author. */
-  createCommentByToken: (token: string, body: { anchor_id: string; body: string }) =>
+  createCommentByToken: (token: string, body: {
+    anchor_id: string; body: string;
+    pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+  }) =>
     api.post<CommentRecord>(
       `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
       body,
     ),
+  /** Authed comment create for the signed-in canvas (mark-and-comment pin flow).
+   *  Hits the authed route `POST /v1/design-agent/{id}/comments` (same-origin/CSRF
+   *  gated). Position fields are optional — pin comments include x/y and the
+   *  resolved anchor; right-click anchor comments omit them. */
+  createComment: (prototypeId: number, body: {
+    anchor_id: string; body: string;
+    pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+  }) =>
+    api.post<CommentRecord>(`/v1/design-agent/${prototypeId}/comments`, body),
   /** Public-route comment read: lists every comment for the token's prototype
    *  (all statuses). Same 404 posture as the resolver for missing/private. */
   listCommentsByToken: (token: string) =>
@@ -789,6 +842,19 @@ export const designAgentApi = {
       `/v1/design-agent/${prototypeId}/manual-edit`,
       body,
     ),
+  /** List the connected company's Figma files for the Generate modal's design
+   *  selector (`GET /v1/design-agent/figma-files`). DA-flag gated (404 when off)
+   *  and Figma-connection gated (404 when not connected). Returns an honest
+   *  empty `files` list when the upstream listing can't be produced -- never
+   *  fabricated files; the modal renders that as "Couldn't load designs". */
+  listFigmaFiles: () =>
+    api.get<{ files: FigmaFile[] }>("/v1/design-agent/figma-files"),
+  /** Build the SSE URL for streaming step events during an iterate run.
+   *  The bearer token rides as ?token= because EventSource cannot set headers.
+   *  Single source of truth for this URL so the token-in-URL construction is
+   *  auditable in one place. */
+  eventsUrl: (prototypeId: number, token: string): string =>
+    `${API_URL}/v1/design-agent/${prototypeId}/events?token=${encodeURIComponent(token)}`,
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
@@ -832,4 +898,57 @@ export type ManualEditResponse = {
   prototype_id: number
   status: string
   queue_position: number
+}
+
+// ---- transient-auth resilience (shared primitive) ---------------------------
+// Supabase issues short-lived bearer tokens; `accessTokenProvider` refreshes
+// them in the background. A request that lands DURING a refresh can come back
+// 401 even though the session is healthy — a transient failure, not a real auth
+// loss. Today every authed poll / status fetch treats a 401 as terminal, so a
+// single mid-refresh blip aborts the work or flips connected rows to "off".
+//
+// `withAuthRetry` is the one place that handles this: it runs the wrapped call,
+// and on a 401 it re-acquires the token (forcing the in-flight refresh to
+// settle) and retries the call exactly once after a short backoff. Non-401
+// errors propagate untouched, and a 401 that survives the retry is re-thrown so
+// a genuine auth failure still surfaces to the caller's own error handling. The
+// primitive owns no UI state and never swallows errors — callers wrap any authed
+// read that polls or auto-refreshes and decide for themselves what a persistent
+// failure means.
+
+/** Retrieve the current access token directly for non-fetch uses (e.g. EventSource URLs). */
+export async function getAccessToken(): Promise<string | null> {
+  return accessTokenProvider ? await accessTokenProvider() : null
+}
+
+export type WithAuthRetryOptions = {
+  /** Backoff before the single retry, in milliseconds. Defaults to 250. Tests
+   *  pass 0 to keep the retry path instant. */
+  backoffMs?: number
+}
+
+export async function withAuthRetry<T>(
+  fn: () => Promise<T>,
+  opts: WithAuthRetryOptions = {},
+): Promise<T> {
+  try {
+    return await fn()
+  } catch (err) {
+    // Only a 401 is treated as a transient token-refresh race; everything else
+    // (including a non-ApiError throw) propagates immediately, no retry.
+    if (!(err instanceof ApiError) || err.status !== 401) {
+      throw err
+    }
+    // Re-acquire the token so the retry carries the refreshed bearer, wait out
+    // the refresh window, then retry once. A 401 that persists re-throws from
+    // this second attempt.
+    if (accessTokenProvider) {
+      await accessTokenProvider()
+    }
+    const backoffMs = opts.backoffMs ?? 250
+    if (backoffMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, backoffMs))
+    }
+    return await fn()
+  }
 }

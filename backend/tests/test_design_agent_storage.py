@@ -1072,3 +1072,81 @@ async def test_iterate_path_routes_typecheck_error_to_precise_fail(env, monkeypa
               if r.getMessage().startswith("iterate_vite_build_failed")]
     assert failed and "error_class=TypeCheckError" in failed[0]
     assert stage_mock.call_count == 0          # iterate never staged a runtime-broken bundle
+
+
+# ─── Preview-image staging (BINARY sibling of stage_bundle) ──────────────────
+#
+# A PNG cannot ride stage_bundle (text-only, content.encode). stage_preview_image
+# is the binary sibling; these prove the dual-path (filesystem / Supabase), the
+# byte-identical round-trip, idempotent re-stage, and identifier-only logging.
+
+_FAKE_PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4  # PNG signature + binary payload
+
+
+async def test_stage_preview_image_filesystem_writes_png(monkeypatch, tmp_path):
+    _fs_settings(monkeypatch, tmp_path)
+    await storage.stage_preview_image(prototype_id=3, checkpoint_id=9, png_bytes=_FAKE_PNG)
+    png = tmp_path / "prototypes" / "3" / "9" / "_preview" / "preview.png"
+    assert png.exists()
+    assert png.read_bytes() == _FAKE_PNG  # byte-identical round-trip
+
+
+async def test_stage_preview_image_filesystem_returns_file_uri(monkeypatch, tmp_path):
+    _fs_settings(monkeypatch, tmp_path, public_url="")
+    url = await storage.stage_preview_image(prototype_id=1, checkpoint_id=2, png_bytes=_FAKE_PNG)
+    assert url.startswith("file://")
+    assert url.endswith("/prototypes/1/2/_preview/preview.png")
+
+
+async def test_stage_preview_image_filesystem_returns_public_url(monkeypatch, tmp_path):
+    _fs_settings(monkeypatch, tmp_path, public_url="https://cdn.example/")
+    url = await storage.stage_preview_image(prototype_id=4, checkpoint_id=5, png_bytes=_FAKE_PNG)
+    assert url == "https://cdn.example/prototypes/4/5/_preview/preview.png"
+
+
+async def test_stage_preview_image_idempotent_restage(monkeypatch, tmp_path):
+    _fs_settings(monkeypatch, tmp_path)
+    await storage.stage_preview_image(prototype_id=7, checkpoint_id=8, png_bytes=_FAKE_PNG)
+    second = b"\x89PNG\r\n\x1a\nDIFFERENT"
+    await storage.stage_preview_image(prototype_id=7, checkpoint_id=8, png_bytes=second)
+    preview_dir = tmp_path / "prototypes" / "7" / "8" / "_preview"
+    pngs = list(preview_dir.glob("*.png"))
+    assert len(pngs) == 1                      # single artefact (overwrite, not duplicate)
+    assert pngs[0].read_bytes() == second      # last write wins
+
+
+async def test_stage_preview_image_supabase_uploads_raw_png_bytes(monkeypatch):
+    sb = _mock_supabase(monkeypatch)
+    await storage.stage_preview_image(prototype_id=4, checkpoint_id=2, png_bytes=_FAKE_PNG)
+    assert sb.upload.call_count == 1
+    kwargs = sb.upload.call_args.kwargs
+    assert kwargs["path"] == "prototypes/4/2/_preview/preview.png"
+    assert kwargs["file"] == _FAKE_PNG         # raw bytes, not .encode()'d text
+    assert kwargs["file_options"]["content-type"] == "image/png"
+    assert kwargs["file_options"]["upsert"] == "true"  # idempotent re-stage
+
+
+async def test_stage_preview_image_supabase_returns_signed_url(monkeypatch):
+    _mock_supabase(monkeypatch, signed={"signedURL": "https://signed.example/preview"})
+    url = await storage.stage_preview_image(prototype_id=4, checkpoint_id=2, png_bytes=_FAKE_PNG)
+    assert url == "https://signed.example/preview"
+
+
+async def test_stage_preview_image_supabase_uses_24h_ttl(monkeypatch):
+    sb = _mock_supabase(monkeypatch)
+    await storage.stage_preview_image(prototype_id=4, checkpoint_id=2, png_bytes=_FAKE_PNG)
+    assert sb.create_signed_url.call_args.kwargs["expires_in"] == 86400
+
+
+async def test_preview_image_staged_log_identifiers_only(monkeypatch, tmp_path, caplog):
+    _fs_settings(monkeypatch, tmp_path)
+    with caplog.at_level(logging.INFO):
+        await storage.stage_preview_image(prototype_id=11, checkpoint_id=22, png_bytes=_FAKE_PNG)
+    recs = [r for r in caplog.records if r.getMessage().startswith("preview_image_staged")]
+    assert len(recs) == 1
+    msg = recs[0].getMessage()
+    for token in ("prototype_id=11", "checkpoint_id=22", "backend=filesystem"):
+        assert token in msg, f"missing {token!r}"
+    # The raw PNG bytes never appear in the log line.
+    assert "PNG" not in msg
+    assert _FAKE_PNG.decode("latin-1") not in msg

@@ -231,7 +231,7 @@ describe("sandbox allow-forms regression (P6-17 / UX-7)", () => {
 
 // ── AC5: both call sites mount the viewer with their chrome ────────────────
 describe("call-site propagation (AC5)", () => {
-  it("test_post_generation_mounts_viewer_with_chrome — signed-in mounts proto-frame + ManualEditOverlay", () => {
+  it("test_post_generation_mounts_viewer_with_chrome — signed-in mounts proto-frame + inline iframe", () => {
     const html = renderToStaticMarkup(
       React.createElement(PostGenerationResultView, {
         prototypeId: 42,
@@ -243,8 +243,8 @@ describe("call-site propagation (AC5)", () => {
     )
     expect(html).toContain('class="proto-frame"')
     expect(html).toContain('class="da-prototype-iframe"')
-    // the editable overlay (numeric prototypeId) mounts in the chrome slot
-    expect(html).toContain('data-testid="manual-edit-overlay"')
+    // ManualEditOverlay trigger not rendered on the canvas — mark-and-comment is the path.
+    expect(html).not.toContain('data-testid="manual-edit-overlay"')
     // default slug fills (signed-in call site passes no urlSlug)
     expect(html).toContain(`>${DEFAULT_URL_SLUG}</span>`)
   })

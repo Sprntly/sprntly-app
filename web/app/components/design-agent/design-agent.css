@@ -255,26 +255,22 @@
   line-height: 1.4;
 }
 
-/* ── Share link (ShareMenu — `.share-link` has no global rule) ─────────── */
-.design-agent-surface .share-link {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--ink-2);
-}
-
-/*
- * `.share-menu` COLLISION OVERRIDE (AC4).
- * globals.css:1412 defines `.share-menu` as an absolutely-positioned,
- * opacity:0 / pointer-events:none popover for PrdScreen's footer dropdown.
- * The DA `ShareMenu` reuses the same class for an INLINE fieldset, so it
- * inherits the hidden-popover treatment. Scoped under `.design-agent-surface`,
- * this override renders it as a normal inline block WITHOUT touching globals —
- * PrdScreen's dropdown (not inside a `.design-agent-surface` root) keeps the
- * global rule.
+/* === share panel: dedupe + native-radio visual (start) ====================
+ * One home for the signed-in ShareMenu panel. Merges what used to be two scoped
+ * `.share-menu` rules (a globals collision-override + a separate visual block)
+ * into ONE block carrying BOTH the override props (so the inline fieldset
+ * escapes the globals hidden-popover treatment) AND the calm, link-forward
+ * visual layout. The visibility selector stays the shipped native
+ * `<input type="radio">` group — styled as tidy option rows via CSS only, the
+ * radios untouched so the browser keeps arrow-key traversal + roving focus. App
+ * tokens only; PrdScreen's global `.share-menu` popover in globals.css is not
+ * touched.
+ *
+ * globals.css defines `.share-menu` as an absolutely-positioned, opacity:0 /
+ * pointer-events:none popover for PrdScreen's footer dropdown. The signed-in
+ * ShareMenu reuses the same class for an INLINE fieldset, so the scoped override
+ * below restores normal inline flow without editing globals — PrdScreen's
+ * dropdown, not inside a `.design-agent-surface` root, keeps the global rule.
  */
 .design-agent-surface .share-menu {
   position: static;
@@ -288,10 +284,98 @@
   min-width: 0;
   z-index: auto;
   background: transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 320px;
+  max-width: 320px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 14px 16px;
 }
+/* Visibility options — the native radio group rendered as tidy rows. */
+.design-agent-surface .share-mode-fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
+}
+.design-agent-surface .share-mode-fieldset .field-label {
+  margin-bottom: 2px;
+}
+.design-agent-surface .share-mode-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.design-agent-surface .share-mode-option:hover {
+  border-color: var(--line-strong);
+}
+/* Selected row card — driven by the native radio's :checked state (no JS, no
+   role/tabindex hand-rolling). */
+.design-agent-surface .share-mode-option:has(input[type="radio"]:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.design-agent-surface .share-mode-option input[type="radio"] {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.design-agent-surface .share-mode-option label {
+  cursor: pointer;
+  line-height: 1.4;
+}
+/* Progressive-disclosure passcode field — only mounted when Passcode selected. */
+.design-agent-surface .share-passcode-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+.design-agent-surface .share-passcode-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+/* Primary action — the share URL field + Copy button (prominent, link-forward). */
+.design-agent-surface .share-link {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+}
+.design-agent-surface .share-link code {
+  flex: 1;
+  min-width: 0;
+  align-self: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.design-agent-surface .share-link .btn {
+  flex-shrink: 0;
+}
+/* === share panel: dedupe + native-radio visual (end) ====================== */
 
 /* ── Generation error banner (GenerationErrorBanner) ──────────────────── */
 .design-agent-surface .generation-error-banner {
@@ -468,6 +552,13 @@
   gap: 10px;
   flex-wrap: wrap;
 }
+/* per-source file/repo selector inside a
+   .src-block. Reuses the global .input look; just full-width within the block.
+   No new colors. */
+.design-agent-surface .src-select {
+  width: 100%;
+  margin-top: 2px;
+}
 .design-agent-surface .src-not-connected {
   display: flex;
   align-items: center;
@@ -518,6 +609,65 @@
   font-family: var(--font-mono);
   font-size: 10.5px;
 }
+
+/* ── Generate-prototype modal — compact single-column layout ───────────────
+   Tightens vertical rhythm so all sections fit at ~720px viewport height
+   without scrolling. Token-only. Scoped to the modal root, which carries both
+   the surface and modal classes, via the compound `.design-agent-surface.modal`
+   so nothing leaks to the drawer's .src-block layout above. */
+.design-agent-surface.modal .modal-body { padding-top: 10px; padding-bottom: 12px; }
+/* tighter field spacing inside the compact modal only */
+.design-agent-surface.modal .field { margin-bottom: 12px; }
+.design-agent-surface.modal .field:last-child { margin-bottom: 0; }
+/* platform: label left, pills inline right on one row */
+.design-agent-surface.modal .gen-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.design-agent-surface.modal .gen-inline-field .field-label { margin-bottom: 0; }
+.design-agent-surface.modal .gen-inline-field .radio-group { flex: 1; }
+.design-agent-surface.modal .gen-inline-field .radio-pill { padding: 6px 14px; }
+/* each design source collapses to ONE tight row */
+.design-agent-surface.modal .src-row-compact {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 7px 0;
+  font-size: 12.5px;
+  border-top: 1px solid var(--line);
+}
+.design-agent-surface.modal .src-row-compact:first-of-type { border-top: none; }
+.design-agent-surface.modal .src-bullet {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ink-3);
+  flex-shrink: 0;
+}
+.design-agent-surface.modal .src-name {
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.design-agent-surface.modal .src-row-compact .src-connected,
+.design-agent-surface.modal .src-row-compact .src-not-connected { margin-left: auto; }
+/* inline selector sits at the row's far right, compact width */
+.design-agent-surface.modal .src-select-inline {
+  flex-basis: 100%;
+  margin-top: 4px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+/* fallback as one muted helper line (replaces the full-width note block) */
+.design-agent-surface.modal .src-fallback-line {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+/* short instructions textarea */
+.design-agent-surface.modal .textarea-compact { min-height: 48px; }
 
 /* ── Device frame (UX-2/P6-12) ────────────────────────────────────────────
  * APPENDED below P6-11's seed (which owns `.da-prototype-viewer` /
@@ -779,47 +929,1246 @@
   cursor: not-allowed;
 }
 
-/* ── Share-mode radio group (P6-22) ───────────────────────────────────────
- * The passcode text field was lifted OUT of the passcode radio's <label> so the
- * three native radios form a contiguous group (restores keyboard arrow
- * traversal). These rules give the restructured option rows + the lifted field
- * block layout. Scoped under .design-agent-surface; colours via tokens only; no
- * globals.css touch.
- */
-.design-agent-surface .share-mode-fieldset {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  min-inline-size: 0;
+/* ── Generate-prototype modal — inner styles ───────────────────────────────
+ * Scoped additions for GenerateModal.tsx. The modal shell reuses the global
+ * .modal* classes; these add the modal-only inner styles + reset the base
+ * `.design-agent-surface` flex/gap when it sits on the .modal element (so the
+ * modal keeps its block head/body/foot layout, not the column-flex surface).
+ * Scoped via the compound `.design-agent-surface.modal` (the root carries both
+ * classes). */
+.design-agent-surface.modal {
+  display: block;
+  gap: 0;
+  position: relative;
 }
-.design-agent-surface .share-mode-option {
+.design-agent-surface.modal .modal-head {
+  position: relative;
+}
+.design-agent-surface.modal .gen-breadcrumb {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  margin: 0 0 10px;
+  letter-spacing: 0.01em;
+}
+.design-agent-surface.modal .gen-breadcrumb-sep {
+  color: var(--line-strong);
+  margin: 0 3px;
+}
+.design-agent-surface.modal .gen-breadcrumb-cur {
+  color: var(--ink-3);
+}
+.design-agent-surface.modal .radio-group {
   display: flex;
-  align-items: flex-start;
   gap: 8px;
-  font-size: 13px;
+}
+.design-agent-surface.modal .radio-pill {
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  background: var(--surface);
   color: var(--ink-2);
-}
-.design-agent-surface .share-mode-option input[type="radio"] {
-  margin-top: 2px;
-  flex: none;
-}
-.design-agent-surface .share-mode-option label {
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
-  line-height: 1.4;
+  transition: all 0.12s ease;
+  font-family: var(--font-body);
 }
-.design-agent-surface .share-passcode-field {
+.design-agent-surface.modal .radio-pill:hover {
+  border-color: var(--ink-3);
+}
+.design-agent-surface.modal .radio-pill.selected {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--surface);
+}
+/* v3 foot: async note left, buttons right (global .modal-foot is flex-end). */
+.design-agent-surface.modal .modal-foot {
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.design-agent-surface.modal .modal-foot-r {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
+  gap: 8px;
+  flex-shrink: 0;
 }
-.design-agent-surface .share-passcode-label {
-  font-size: 11px;
+
+/* ===========================================================================
+ * David's post-gen prototype-section layout.
+ * Replaces the prior `.da-canvas` 3-equal-column grid. Replicates the MECHANICS
+ * of David's `.proto-ready` block (sprntly.css :1374-1451 + :1935-1937):
+ *   TOP control bar (`.da-controlbar`) — TOOLS ONLY (comments toggle, fullscreen,
+ *     share, done, Desktop/Mobile toggle). NO Code/Preview/Spec tabs, NO version
+ *     stepper (David's `.proto-canvas-tabs` / `.proto-ver-step` are excluded per
+ *     spec).
+ *   BODY (`.da-ready`, flex-row) — three sections:
+ *     LEFT  `.da-left`  collapsible sidebar, OPEN by default: PRD (scrollable) +
+ *       iterate/reprompt composer pinned at the bottom. Collapses via its own
+ *       handle by sliding out (`margin-left:-WIDTH`, David's `.proto-chat.hidden`);
+ *       a `.da-left-reopen` rail appears when collapsed (David's `.proto-chat-handle`).
+ *     CENTER `.da-stage` full-area canvas — the PrototypeViewer fills it
+ *       (David's `.proto-frame-full`: full width/height, no max-width).
+ *     RIGHT `.da-right` collapsible comments sidebar, COLLAPSED by default
+ *       (`width:0` → `width:340px` on `.open`, David's `.proto-comments-panel`),
+ *       toggled from the control bar's comments tool.
+ * Token-only — every colour is a var(--…); scoped under `.design-agent-surface`,
+ * forest-green/off-white app tokens, NO coral. David's coral `--brand` is mapped
+ * to the app's neutral surfaces (active state uses `--surface-3`/`--ink`).
+ * The prior P6-13 `.design-pane` 2-column rules above are unused on the signed-in
+ * surface but kept intact for the public viewer composition.
+ * =========================================================================== */
+
+/* ── canvas breadcrumb ──────────────
+   Subtle "PRDs / {PRD title} / Design" row above the control bar. Muted ink-3,
+   small; the clickable crumbs (PRDs / PRD title) close the canvas. David's
+   breadcrumb style. Token-only, no coral. */
+.design-agent-surface .da-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 2px 2px 6px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.design-agent-surface .da-breadcrumb-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-3);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.design-agent-surface button.da-breadcrumb-link:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+.design-agent-surface .da-breadcrumb-sep {
+  color: var(--line-strong);
+}
+.design-agent-surface .da-breadcrumb-cur {
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+/* ── TOP control bar — COMPACT single row (≈54px), tools only ─────────────────
+   Modelled on David's `.proto-canvas-top`: one horizontal row, vertically
+   centred, NO wrap (so it can never bloat to ~180px). LEFT = platform toggle;
+   RIGHT = comments-toggle + Share (dropdown) + Actions (dropdown) + Fullscreen +
+   Done. The full CompletionBar / full ShareMenu are NOT rendered in the row —
+   they live inside `.da-popover-panel` dropdowns. Forest-green tokens, no coral. */
+.design-agent-surface .da-controlbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  height: 54px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.design-agent-surface .da-controlbar-l {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+.design-agent-surface .da-controlbar-r {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+/* The lifted Desktop/Mobile toggle: reuse the `.platform-toggle` look but slightly
+   more compact for the bar. */
+.design-agent-surface .da-controlbar-platform button {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+/* Tool icon-buttons (comments toggle, Share, Actions, Fullscreen) — David's
+   `.pct-icon`, mapped to neutral tokens. ~30px tall, hover bg, active `.on`. */
+.design-agent-surface .da-ctl-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  font-size: 12.5px;
   font-weight: 500;
   color: var(--ink-2);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+/* Square icon-only tool (Actions ⋯ / Fullscreen) — ~30×30. */
+.design-agent-surface .da-ctl-icon--square {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+.design-agent-surface .da-ctl-icon:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+/* Active state (David's `.pct-icon.on` coral → neutral forest-green-tinted). */
+.design-agent-surface .da-ctl-icon.on {
+  background: var(--surface-3);
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+.design-agent-surface .da-ctl-icon:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.design-agent-surface .da-ctl-done {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 14px;
+  font-size: 12.5px;
+}
+/* The fullscreen trigger now rides in the control bar — drop the legacy
+   flex-start self-align so it sits centred among the bar tools. */
+.design-agent-surface .da-controlbar-r .proto-fullscreen-trigger {
+  align-self: center;
+}
+
+/* ── Compact dropdown popovers (Share / Actions) — David's `.pct-export-menu` ──
+   A trigger + an absolutely-positioned panel anchored under the bar. The full
+   ShareMenu / CompletionBar render INSIDE the panel, so the bar row stays ~54px.
+   Forest-green tokens, no coral. */
+.design-agent-surface .da-popover {
+  position: relative;
+  display: inline-flex;
+}
+.design-agent-surface .da-popover-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  z-index: 60;
+  min-width: 280px;
+  max-width: 360px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+}
+.design-agent-surface .da-popover-panel--right { right: 0; }
+.design-agent-surface .da-popover-panel--left { left: 0; }
+.design-agent-surface .da-popover-title {
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.09em;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  margin-bottom: 8px;
+}
+/* Inside the popover, the reused ShareMenu / CompletionBar drop their own frame
+   (the panel IS the frame) and stack their controls vertically + compactly. */
+.design-agent-surface .da-popover-panel .completion-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+/* the restyled ShareMenu owns its own clean
+   panel layout (the fieldset legend + tidy visibility rows + link-forward Copy).
+   Inside the popover it just drops its outer frame (the panel IS the frame) — it
+   keeps its own 14px rhythm + 320px comfortable width set on `.share-menu`
+   above. The popover renders no `.da-popover-title` for Share (the panel has its
+   own legend heading inside), so there is no duplicate heading. */
+.design-agent-surface .da-popover-panel .share-menu {
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+.design-agent-surface .da-popover-panel .completion-bar .btn,
+.design-agent-surface .da-popover-panel .completion-bar .btn-export {
+  width: 100%;
+  justify-content: center;
+}
+
+/* ── BODY: left sidebar | center canvas | right sidebar ───────────────────── */
+.design-agent-surface .da-ready {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+/* LEFT collapsible sidebar (OPEN by default). Collapses by sliding out, David's
+   `.proto-chat.hidden { margin-left:-300px }`. */
+.design-agent-surface .da-left {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  transition: margin-left 0.3s ease;
+}
+.design-agent-surface .da-left.collapsed {
+  margin-left: -320px;
+}
+.design-agent-surface .da-left-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+  padding: 0 12px 0 16px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--line);
+}
+.design-agent-surface .da-left-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.design-agent-surface .da-left-handle {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.design-agent-surface .da-left-handle:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+/* PRD content, scrollable. */
+.design-agent-surface .da-left-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
+.design-agent-surface .da-left-prd-empty {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+/* Reprompt / comment composer pinned at the BOTTOM (David's `.proto-comp`). */
+.design-agent-surface .da-left-compose {
+  flex-shrink: 0;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.design-agent-surface .da-left-compose .iterate-composer {
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+/* Collapsed-left reopen rail (David's `.proto-chat-handle`, shown only when the
+   sidebar is collapsed; in this layout it's a sibling rendered conditionally). */
+.design-agent-surface .da-left-reopen {
+  width: 42px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
+  background: var(--surface);
+  border: none;
+  border-right: 1px solid var(--line);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.design-agent-surface .da-left-reopen:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+/* CENTER full-area canvas (David's `.proto-canvas` + `.proto-frame-full`). The
+   PrototypeViewer fills it edge-to-edge. */
+.design-agent-surface .da-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface);
+  /* positioning context for the mark
+     overlay + the absolutely-placed pin layer. */
+  position: relative;
+}
+.design-agent-surface .da-stage .da-prototype-viewer {
+  flex: 1;
+  min-height: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.design-agent-surface .da-stage .proto-frame {
+  flex: 1;
+  min-height: 0;
+}
+.design-agent-surface .da-stage .proto-stage {
+  flex: 1;
+  min-height: 0;
+}
+
+/* RIGHT collapsible comments sidebar (COLLAPSED by default). David's
+   `.proto-comments-panel { width:0 } / .open { width:340px }`. */
+.design-agent-surface .da-right {
+  width: 0;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+  border-left: 1px solid transparent;
+  transition: width 0.3s ease, border-color 0.3s;
+}
+.design-agent-surface .da-right.open {
+  width: 340px;
+  border-left-color: var(--line);
+}
+.design-agent-surface .da-right-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+  padding: 0 12px 0 16px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+}
+.design-agent-surface .da-right-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.design-agent-surface .da-right-close {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.design-agent-surface .da-right-close:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.design-agent-surface .da-right-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* width pinned to the open width so the panel content doesn't reflow while the
+     parent width animates from 0 → 340px. */
+  width: 340px;
+}
+/* The comments panel inside the right sidebar drops its own outer frame (the
+   sidebar IS the frame now). */
+.design-agent-surface .da-right-body .comments-panel {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+/* unshared empty state shown inside
+   the always-present right sidebar when no comments node exists yet. */
+.design-agent-surface .da-right-empty {
+  padding: 24px 18px;
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+.design-agent-surface .da-right-empty .da-right-empty-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.design-agent-surface .da-right-empty strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Responsive: below 1100px the left sidebar narrows; below 860px both sidebars
+   become overlays so the canvas keeps the full width on small screens. */
+@media (max-width: 1100px) {
+  .design-agent-surface .da-left {
+    width: 280px;
+  }
+  .design-agent-surface .da-left.collapsed {
+    margin-left: -280px;
+  }
+}
+
+
+/* === generation loading overlay (start) ===================================
+ * Full-screen "Building your prototype" loading overlay. Reproduces the product
+ * mockup's generating block, remapped to this app's design tokens (forest-green
+ * --accent, off-white --surface family, --font-serif / --font-mono). No coral,
+ * no new palette. The orb / cursor / spinner / fill keyframes are reproduced
+ * here. Every rule is scoped under .design-agent-surface: the overlay root
+ * carries both the design-agent-surface and proto-gen-overlay classes, so the
+ * scope is a compound selector and nothing leaks into the rest of the app.
+ * =========================================================================== */
+.design-agent-surface.proto-gen-overlay {
+  position: fixed;
+  inset: 0;
+  /* above app chrome incl. the sidebar (sidebar/app-main-chrome sit at z 20–30) */
+  z-index: 1000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: radial-gradient(ellipse at center, var(--accent-alpha-06) 0%, transparent 60%), var(--surface);
+  animation: protoGenFadeIn 0.2s ease-out;
+}
+@keyframes protoGenFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.design-agent-surface.proto-gen-overlay .proto-gen-inner {
+  max-width: 520px;
+  text-align: center;
+  padding: 0 24px;
+}
+
+/* Orb — concentric pulsing rings + center dot */
+.design-agent-surface.proto-gen-overlay .proto-gen-orb {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  margin: 0 auto 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r1,
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r2,
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r3 {
+  position: absolute;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  animation: protoGenOrb 2.4s ease-out infinite;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r1 { width: 120px; height: 120px; animation-delay: 0s; }
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r2 { width: 120px; height: 120px; animation-delay: 0.8s; }
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .r3 { width: 120px; height: 120px; animation-delay: 1.6s; }
+.design-agent-surface.proto-gen-overlay .proto-gen-orb .d {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 30px var(--accent-alpha-40);
+}
+@keyframes protoGenOrb {
+  0%   { transform: scale(0.4); opacity: 0.9; border-color: var(--accent-alpha-40); }
+  /* fully-transparent end colour — use the `transparent` keyword (no literal
+     rgb) so the CSS stays token/keyword-only */
+  100% { transform: scale(1.6); opacity: 0;   border-color: transparent; }
+}
+
+/* Headline + blinking cursor */
+.design-agent-surface.proto-gen-overlay .proto-gen-h {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: -0.012em;
+  line-height: 1.1;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--ink);
+}
+.design-agent-surface.proto-gen-overlay .thinking-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 22px;
+  background: var(--accent);
+  margin-left: 3px;
+  animation: protoGenBlink 1s infinite;
+  vertical-align: middle;
+}
+@keyframes protoGenBlink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+/* Italic status line */
+.design-agent-surface.proto-gen-overlay .proto-gen-s {
+  font-size: 13.5px;
+  color: var(--ink-2);
+  margin-bottom: 22px;
+  font-style: italic;
+  font-family: var(--font-serif);
+  min-height: 22px;
+}
+
+/* Progress bar + elapsed-time label */
+.design-agent-surface.proto-gen-overlay .proto-gen-progress {
+  margin-top: 18px;
+  margin-bottom: 18px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 11px 14px;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-progress .bar {
+  height: 6px;
+  background: var(--surface-3);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-progress .bar .fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 100%);
+  border-radius: 6px;
+  transition: width 0.25s linear;
+  box-shadow: 0 0 12px var(--accent-alpha-28);
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-progress .lbl {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  margin-top: 5px;
+}
+
+/* Streamed steps checklist */
+.design-agent-surface.proto-gen-overlay .proto-gen-steps {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  text-align: left;
+  box-shadow: var(--shadow-sm);
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-step {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 7px 0;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  border-bottom: 1px dashed var(--line);
+  transition: opacity 0.3s, color 0.3s;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-step:last-child { border-bottom: none; }
+.design-agent-surface.proto-gen-overlay .proto-gen-step.done { color: var(--ink-3); }
+.design-agent-surface.proto-gen-overlay .proto-gen-step.done .spin { display: none; }
+.design-agent-surface.proto-gen-overlay .proto-gen-step.done::before {
+  content: '✓';
+  color: var(--accent-ink);
+  font-size: 13px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  width: 14px;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-step .spin {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-alpha-18);
+  border-top-color: var(--accent);
+  animation: protoGenSpin 0.6s linear infinite;
+  flex-shrink: 0;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-step:not(.done):not(.active) { display: none; }
+.design-agent-surface.proto-gen-overlay .proto-gen-step.active { color: var(--ink); }
+@keyframes protoGenSpin { to { transform: rotate(360deg); } }
+/* === generation loading overlay (end) ===================================== */
+
+/* =============================================================================
+ * full-screen post-generation canvas overlay.
+ * Revealed by ApproveModal AFTER the "Building your prototype" loading screen
+ * completes on a SUCCESSFUL generation (David's flow: loading takeover → reveals
+ * the canvas). NOT embedded in the PRD screen — a fixed inset:0 overlay covering
+ * the whole app incl. the sidebar (same footprint + z-index as .proto-gen-overlay
+ * and .proto-fullscreen). Forest-green / off-white app tokens only, NO coral.
+ * Hosts the reworked <PostGenerationResult> (control bar + `.da-ready` 3-section
+ * body); the Done affordance now lives IN the control bar (no standalone button).
+ * =========================================================================== */
+.design-agent-surface.da-canvas-fullscreen {
+  position: fixed;
+  inset: 0;
+  /* above app chrome incl. the sidebar (sidebar sits at z 20–30), matching the
+     loading overlay so the reveal swaps in at the same plane */
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  animation: protoGenFadeIn 0.2s ease-out;
+}
+.design-agent-surface.da-canvas-fullscreen .da-canvas-fullscreen-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 16px;
+}
+/* The hosted result surface fills the overlay body so the control bar + `.da-ready`
+   body use the full viewport height (instead of an in-PRD intrinsic height).
+   `.design-agent-result` is the `.design-agent-surface` flex-column whose second
+   child (`.da-ready`) grows to fill (it has `flex:1`). */
+.design-agent-surface.da-canvas-fullscreen .design-agent-result {
+  flex: 1;
+  min-height: 0;
+}
+
+
+/* ===========================================================================
+ * Mark-and-comment pin flow.
+ * Ported from David's mockup `.marking` / `.pc-pin` / `pinDrop` / `.proto-comment`
+ * with David's hardcoded coral `--brand` REMAPPED to this app's forest-green
+ * `--accent` token, and his hardcoded coral pin box-shadow swapped for a GREEN
+ * shadow (`--accent-alpha-40`). NO coral, NO new palette.
+ * =========================================================================== */
+
+/* Mark mode on the stage: crosshair cursor + a subtle brand outline ring on the
+   canvas (David's `.marking`). The ring is an inset box-shadow so it doesn't
+   shift layout. */
+.design-agent-surface .da-stage.marking {
+  cursor: crosshair;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* Transparent overlay above the iframe (IFRAME NUANCE): inert by default, click-
+   active only in mark mode. Sits above the viewer; the pin layer sits above it. */
+.design-agent-surface .da-mark-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+.design-agent-surface .da-mark-overlay.active {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+/* Pin layer — above the overlay; the pins themselves are non-interactive markers
+   (the comment composer lives in the right sidebar). */
+.design-agent-surface .da-pin-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+}
+
+/* Pin teardrop (David's `.pc-pin`): 26×26, rotated -45deg so the point sits at
+   bottom-left; the number is counter-rotated +45deg to read upright. Positioned
+   by its top-left at the click point, then nudged so the point lands on it. */
+.design-agent-surface .pc-pin {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  margin-left: -13px;
+  margin-top: -26px;
+  background: var(--accent);
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  box-shadow: 0 2px 8px var(--accent-alpha-40);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.design-agent-surface .pc-pin .pc-pin-num {
+  transform: rotate(45deg);
+  color: var(--surface-2);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+/* Drop animation (David's `pinDrop`): scale in from the anchored point. */
+.design-agent-surface .pc-pin.placed {
+  animation: pinDrop 0.3s ease;
+}
+@keyframes pinDrop {
+  from { transform: rotate(-45deg) scale(0); }
+  to   { transform: rotate(-45deg) scale(1); }
+}
+
+/* Right-sidebar pin comment rows (David's `.proto-comment`). Each row pairs the
+   pin number with a composer (or the saved body). Forest-green tokens only. */
+.design-agent-surface .proto-comment-list {
+  list-style: none;
+  margin: 0;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.design-agent-surface .proto-comment {
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.design-agent-surface .proto-comment-pin {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: var(--surface-2);
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 50%;
+}
+.design-agent-surface .proto-comment-main {
+  flex: 1;
+  min-width: 0;
+}
+.design-agent-surface .proto-comment-body {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.design-agent-surface .proto-comment-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.design-agent-surface .proto-comment-input {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.design-agent-surface .proto-comment-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-alpha-18);
+}
+.design-agent-surface .proto-comment-actions {
+  display: flex;
+  gap: 8px;
+}
+.design-agent-surface .proto-comment-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+/* ===========================================================================
+ * condensed PRD context panel,
+ * comment author/avatar/time identity, Apply/Ignore actions + resolved state,
+ * clarifying-question slot. Forest-green tokens only; NO coral.
+ * =========================================================================== */
+
+/* CHANGE A — condensed left-sidebar PRD context (David's `.proto-ctx-panel` /
+   `.pcx`): one-line meta + small uppercase-labelled Problem/Fix/Impact cards. */
+.design-agent-surface .proto-ctx-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.design-agent-surface .proto-ctx-meta {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.design-agent-surface .proto-ctx-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.design-agent-surface .pcx {
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.design-agent-surface .pcx-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+.design-agent-surface .pcx-body {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+/* "View full PRD" expander — keeps the long body out of the default light view. */
+.design-agent-surface .proto-ctx-full {
+  margin-top: 2px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.design-agent-surface .proto-ctx-full-summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+  list-style: none;
+}
+.design-agent-surface .proto-ctx-full-summary:hover { color: var(--ink); }
+.design-agent-surface .proto-ctx-full-body { margin-top: 10px; }
+
+/* CHANGE E — clarifying-question slot, just above the composer. */
+.design-agent-surface .da-left-clarify {
+  flex-shrink: 0;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--accent-soft);
+}
+
+/* CHANGE B — initials avatar (David's `.pc-av`), brand-tinted. Shared by the
+   CommentsPanel rows and the pin-comment rows. */
+.design-agent-surface .pc-av {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent-alpha-18);
+  border-radius: 50%;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* CHANGE B — author/time header row in CommentsPanel comment threads. */
+.design-agent-surface .comment-meta-head {
+  margin-bottom: 2px;
+}
+.design-agent-surface .proto-comment-au {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.design-agent-surface .proto-comment-time {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+/* CHANGE C — Apply / Ignore action row in CommentsPanel threads. */
+.design-agent-surface .comment-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.design-agent-surface .comment-ignore-btn,
+.design-agent-surface .comment-apply-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* CHANGE B/C — pin-comment author row + resolved state (David's `.resolved`). */
+.design-agent-surface .proto-comment-au-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+}
+.design-agent-surface .proto-comment.resolved {
+  opacity: 0.6;
+}
+.design-agent-surface .proto-comment.resolved .proto-comment-pin {
+  background: var(--ink-3);
+}
+.design-agent-surface .proto-comment-resolved-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* ===========================================================================
+ * PRD-screen prototype preview card.
+ * Modelled on a brief-insight card: a small scaled (non-interactive) thumbnail of
+ * the bundle + title + sub-line + an open arrow. Clicking opens the full-screen
+ * canvas (CHANGE 4). Forest-green / off-white app tokens only, NO coral.
+ * =========================================================================== */
+.design-agent-surface .da-preview-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.design-agent-surface .da-preview-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+  background: var(--surface-2);
+}
+.design-agent-surface .da-preview-card:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* Thumbnail box — clips a scaled-down live iframe of the bundle. */
+.design-agent-surface .da-preview-thumb {
+  position: relative;
+  flex-shrink: 0;
+  width: 132px;
+  height: 84px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--surface-3);
+}
+/* The live preview iframe is rendered at desktop width then scaled DOWN into the
+   thumbnail box. `pointer-events:none` makes it inert (the card owns the click). */
+.design-agent-surface .da-preview-iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1200px;
+  height: 765px;
+  border: 0;
+  transform: scale(0.11);
+  transform-origin: top left;
+  pointer-events: none;
+  background: var(--surface);
+}
+.design-agent-surface .da-preview-thumb-empty {
+  width: 100%;
+  height: 100%;
+  background: var(--surface-3);
+}
+.design-agent-surface .da-preview-meta {
+  flex: 1;
+  min-width: 0;
+}
+.design-agent-surface .da-preview-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.design-agent-surface .da-preview-sub {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.design-agent-surface .da-preview-open {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
+}
+.design-agent-surface .da-preview-card:hover .da-preview-open {
+  color: var(--accent);
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   LEFT-PANEL AGENT-FLOW ACTIVITY.
+   The live transcript shown while/after an iterate runs — the user's request,
+   the "agent working" steps (cosmetic, poll-driven), the completion / clarifying
+   question / error — in David's `.proto-msg` chat style. App tokens only (forest
+   `--accent` + off-white surfaces + ink); no coral, no raw hex.
+   ─────────────────────────────────────────────────────────────────────────── */
+.design-agent-surface .da-left-activity {
+  flex-shrink: 0;
+  max-height: 38%;
+  overflow-y: auto;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.design-agent-surface .da-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* user request bubble (right-aligned, brand-tinted). */
+.design-agent-surface .proto-msg {
+  max-width: 92%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.design-agent-surface .proto-msg-body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.design-agent-surface .proto-msg--user {
+  align-self: flex-end;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border: 1px solid var(--accent-alpha-18);
+}
+.design-agent-surface .proto-msg--agent {
+  align-self: flex-start;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+.design-agent-surface .da-activity-agent-label {
+  margin: 0 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+/* working-step row: icon (spinner / check) + label. */
+.design-agent-surface .da-activity-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.design-agent-surface .da-activity-step.is-done {
+  color: var(--ink-3);
+}
+.design-agent-surface .da-activity-step-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--accent);
+}
+.design-agent-surface .da-activity-step.is-done .da-activity-step-icon {
+  color: var(--accent);
+}
+.design-agent-surface .da-activity-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--accent-alpha-18);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: da-activity-spin 0.7s linear infinite;
+}
+@keyframes da-activity-spin {
+  to { transform: rotate(360deg); }
+}
+.design-agent-surface .da-activity-done {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-ink);
+}
+.design-agent-surface .da-activity-done-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 50%;
+  font-size: 10px;
+}
+.design-agent-surface .da-activity-error {
+  font-size: 12px;
+}
+.design-agent-surface .da-activity-running {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+/* inline clarifying-answer surface, rendered IN the activity stream. */
+.design-agent-surface .da-activity-answer {
+  margin-top: 4px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--accent-alpha-18);
+  border-radius: var(--radius-sm);
+}
+.design-agent-surface .da-activity-answer-context {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.design-agent-surface .da-activity-answer-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.design-agent-surface .da-activity-answer-input {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+  padding: 8px;
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.design-agent-surface .da-activity-answer-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.design-agent-surface .da-activity-answer-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
 }

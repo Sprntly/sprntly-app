@@ -553,13 +553,24 @@ def test_authed_route_resolves_under_company(env, client):
 
 
 def test_no_require_app_session_dep_remains():
-    """AC4 — static migration-completeness: no live `Depends(require_app_session)`
-    remains in the route module and exactly 16 handlers depend on require_company."""
+    """Migration-completeness guard: no live `Depends(require_app_session)` remains
+    in the route module. Every Design Agent route gates on session/company auth via
+    `require_company`; none bypasses back to the old `require_app_session`.
+
+    The load-bearing assertion is that the `require_app_session` dependency count is
+    0. The count of `require_company` deps is intentionally NOT pinned to an exact
+    number — that figure grows by one at every newly-added authenticated route, so an
+    exact-equality check is brittle by design and re-breaks on legitimate route
+    additions. A floor guards against the company gate being dropped wholesale
+    without coupling the test to the exact route count."""
     import app.routes.design_agent as da
 
     src = Path(da.__file__).read_text()
+    # Load-bearing: zero routes still depend on the OLD require_app_session.
     assert "Depends(require_app_session)" not in src
-    assert src.count("Depends(require_company)") == 16
+    # Floor only (not an exact count) — the company gate is present on the migrated
+    # routes; the exact number is deliberately unpinned to survive new routes.
+    assert src.count("Depends(require_company)") >= 16
 
 
 # ─── LLM-calling surface: system block + cache_control (AC #8) ─────────────
@@ -633,3 +644,394 @@ def test_main_py_calls_lifespan_invalidation_helpers():
     src = _MAIN_PY.read_text()
     assert "invalidate_orphan_generating_prototypes" in src
     assert "invalidate_stale_prototypes" in src
+
+
+# ─── GET /by-prd/{prd_id} — read-only PRD→ready-prototype lookup ────────────
+
+
+def _seed_ready_prototype(env, *, prd_id: int, workspace_id: str) -> int:
+    """Seed a READY prototype row for a PRD under a workspace; return its id.
+
+    Mirrors the ready-row seeding used by the generate short-circuit test:
+    start a generating row, then mark it complete (status='ready', bundle_url
+    populated)."""
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id=workspace_id, template_version=1
+    )
+    env.proto.complete_prototype(
+        prototype_id=pid, workspace_id=workspace_id, bundle_url="https://x"
+    )
+    return pid
+
+
+def test_by_prd_returns_ready_prototype(env, client):
+    # A ready prototype for the PRD in the caller's workspace resolves to 200
+    # with the prototype row.
+    pid = _seed_ready_prototype(env, prd_id=70, workspace_id=_TEST_COMPANY_ID)
+    resp = client.get("/v1/design-agent/by-prd/70")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == pid
+    assert body["prd_id"] == 70
+    assert body["status"] == "ready"
+
+
+def test_by_prd_returns_404_when_none(env, client):
+    # No ready prototype for the PRD → 404 (the frontend swallows 404→null).
+    resp = client.get("/v1/design-agent/by-prd/71")
+    assert resp.status_code == 404
+
+
+def test_by_prd_no_generate_side_effect(env, client):
+    # The lookup is a pure read: calling it for a PRD with no prototype must NOT
+    # insert a prototypes row (count stays 0), unlike POST /generate.
+    from tests import _fake_supabase
+
+    resp = client.get("/v1/design-agent/by-prd/72")
+    assert resp.status_code == 404
+    rows = _fake_supabase.get_fake_db().execute(
+        "SELECT id FROM prototypes WHERE prd_id = ? AND workspace_id = ?",
+        (72, _TEST_COMPANY_ID),
+    ).fetchall()
+    assert rows == []
+
+
+def test_by_prd_cross_workspace_returns_404(env, client):
+    # A ready prototype under a FOREIGN workspace ('demo') is invisible to the
+    # company caller (filtered by its resolved company_id) → 404, not 403, not
+    # 200: cross-tenant existence is never disclosed.
+    _seed_ready_prototype(env, prd_id=73, workspace_id="demo")
+    resp = client.get("/v1/design-agent/by-prd/73")
+    assert resp.status_code == 404
+
+
+def test_by_prd_returns_404_when_flag_off(env, client, monkeypatch):
+    # Seed a real ready row; with the flag ON the lookup resolves it (200), with
+    # the flag cleared the same PRD is invisible (404) — proves the gate, not a
+    # missing row.
+    _seed_ready_prototype(env, prd_id=74, workspace_id=_TEST_COMPANY_ID)
+    assert client.get("/v1/design-agent/by-prd/74").status_code == 200
+    monkeypatch.delenv("DESIGN_AGENT_ENABLED", raising=False)
+    assert client.get("/v1/design-agent/by-prd/74").status_code == 404
+
+
+def test_by_prd_without_app_session_returns_401(env, unauth):
+    # No signed-in session → 401 (require_company runs before the handler body,
+    # so the auth rejection precedes the feature-flag check).
+    resp = unauth.get("/v1/design-agent/by-prd/70")
+    assert resp.status_code == 401
+
+
+def test_by_prd_two_segment_resolves(env, client):
+    # The two-segment path /by-prd/{prd_id} resolves to get_by_prd and is NOT
+    # consumed by the single-segment GET /{prototype_id} catch-all. A one-segment
+    # route pattern can only match one-segment paths, so /by-prd/<id> can never
+    # be coerced into the int prototype_id param (a 422 never occurs here),
+    # regardless of declaration order. A ready row → 200 with the by-prd result
+    # (keyed by prd_id, not prototype_id) confirms reachability; no row → 404.
+    pid = _seed_ready_prototype(env, prd_id=75, workspace_id=_TEST_COMPANY_ID)
+    resp = client.get("/v1/design-agent/by-prd/75")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == pid
+    assert body["prd_id"] == 75
+    # And a PRD with no ready prototype resolves to the handler's 404, not a
+    # 422 path-validation error from the single-segment catch-all.
+    assert client.get("/v1/design-agent/by-prd/76").status_code == 404
+
+
+# ─── Connected-repo identifier threaded into generation ─────────────────────
+#
+# The Generate modal lets a user pick one of their connected GitHub repos. That
+# repo full_name ("org/repo") threads through the request body → the background
+# generation task → the scaffold prompt as a single "existing codebase to match"
+# context line. It is prompt context ONLY: no file fetch, no clone, and NO new
+# agent tool (the action-tool registry stays at the fixed six).
+
+
+def _scaffold_user_text(calls: list[dict]) -> str:
+    """Pull the rendered scaffold user text out of the captured generate kwargs."""
+    return calls[0]["user_message"]["content"][0]["text"]
+
+
+def test_generate_accepts_github_repo(env, client, monkeypatch):
+    # A request carrying a repo identifier succeeds with the unchanged response
+    # shape — the field is additive and optional.
+    _stub_generate(monkeypatch, env.routes)
+    _seed_prd(env.db)
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": 1, "github_repo": "org/repo"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "generating"
+    assert isinstance(body["prototype_id"], int)
+
+
+def test_scaffold_user_renders_codebase_block_when_repo_present():
+    from app.design_agent.prompts import render_scaffold_user
+
+    rendered = render_scaffold_user(
+        prd_md="# prd",
+        target_platform="both",
+        instructions="",
+        figma_frames="(no Figma source detected)",
+        codebase_repo="org/repo",
+    )
+    assert "Existing codebase to match: org/repo" in rendered
+    assert "(no codebase source)" not in rendered
+
+
+def test_scaffold_user_renders_no_codebase_line_when_absent():
+    from app.design_agent.prompts import render_scaffold_user
+
+    # Both the omitted and the explicit-empty cases render the no-source line and
+    # never leak a repo name.
+    for missing in (None, "", "   "):
+        rendered = render_scaffold_user(
+            prd_md="# prd",
+            target_platform="both",
+            instructions="",
+            figma_frames="(no Figma source detected)",
+            codebase_repo=missing,
+        )
+        assert "(no codebase source)" in rendered
+        assert "Existing codebase to match" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_github_repo_threads_to_generate_prototype(env, monkeypatch):
+    # The repo identifier reaches generate_prototype AND lands in the rendered
+    # scaffold prompt as the "existing codebase to match" line.
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo",
+    )
+    assert calls[0]["github_repo"] == "org/repo"
+    assert "Existing codebase to match: org/repo" in _scaffold_user_text(calls)
+
+
+@pytest.mark.asyncio
+async def test_empty_github_repo_treated_as_absent(env, monkeypatch):
+    # A whitespace-only repo renders the no-source line, and the request-model
+    # normaliser collapses empty / whitespace to None (same as omitted).
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="   ",
+    )
+    assert "(no codebase source)" in _scaffold_user_text(calls)
+
+    req = env.routes.GenerateRequest(prd_id=1, github_repo="   ")
+    assert req.normalised_github_repo() is None
+    assert env.routes.GenerateRequest(prd_id=1).normalised_github_repo() is None
+    assert (
+        env.routes.GenerateRequest(prd_id=1, github_repo="org/repo")
+        .normalised_github_repo()
+        == "org/repo"
+    )
+
+
+def test_tool_registry_unchanged_by_repo_threading():
+    # Threading a repo identifier into the prompt adds NO agent tool: the action
+    # registry stays exactly the fixed six, and the exit-sentinel set is unchanged.
+    from app.design_agent.tools import ACTION_TOOLS, SENTINEL_TOOLS
+
+    assert [t.name for t in ACTION_TOOLS] == [
+        "view", "write", "line_replace", "search", "fetch_figma", "read_console",
+    ]
+    assert all(t.category == "action" for t in ACTION_TOOLS)
+    assert {t.name for t in SENTINEL_TOOLS} == {
+        "clarifying_question", "propose_prd_patch",
+    }
+    assert len(SENTINEL_TOOLS) <= 4
+
+
+@pytest.mark.asyncio
+async def test_repo_does_not_change_scenario_label(env, monkeypatch):
+    # A repo-only generate (no Figma, no website) yields the same scenario label
+    # as the baseline no-source case — the existing detector owns scenario
+    # inference; a repo string alone does not flip it.
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo",
+    )
+    assert calls[0]["scenario"] == "0"
+
+
+# ─── Figma file listing (Generate modal design selector) ──────────────────────
+#
+# A read-only authed proxy over the Figma REST API that backs the Generate
+# modal's design-source selector. The token resolver (decryption + 404-when-not-
+# connected) is reused from the connectors route; the REST helper lives in the
+# connectors lane. These tests patch those two boundaries so the route's gating,
+# workspace-scoping, route-ordering, and honest-degradation behaviour are
+# verified in isolation.
+
+_FIGMA_TOKEN_TARGET = "app.routes.connectors._figma_access_token"
+_FIGMA_FETCH_TARGET = "app.connectors.figma_oauth.fetch_files"
+
+
+def test_list_figma_files_returns_normalised_list(env, client, monkeypatch):
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, lambda company_id: "figd_tok")
+    monkeypatch.setattr(
+        _FIGMA_FETCH_TARGET,
+        lambda token, *a, **k: [
+            {"key": "k1", "name": "Home"},
+            {"key": "k2", "name": "Checkout"},
+        ],
+    )
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "files": [
+            {"key": "k1", "name": "Home"},
+            {"key": "k2", "name": "Checkout"},
+        ]
+    }
+
+
+def test_list_figma_files_404_when_flag_off(env, client, monkeypatch):
+    # Flag is checked FIRST — a probe with the flag off is indistinguishable from
+    # a missing route (404, never 401/403). No token resolution happens.
+    monkeypatch.delenv("DESIGN_AGENT_ENABLED", raising=False)
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, lambda company_id: "figd_tok")
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 404
+
+
+def test_list_figma_files_404_when_not_connected(env, client, monkeypatch):
+    # Flag on, no Figma connection: the reused token resolver raises 404, which
+    # the route propagates unchanged (it is outside the honest-degradation guard).
+    from fastapi import HTTPException
+
+    def _not_connected(company_id):
+        raise HTTPException(404, "Figma is not connected")
+
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, _not_connected)
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 404
+
+
+def test_list_figma_files_requires_company(env, unauth):
+    # No session bearer → require_company rejects before the handler body runs.
+    resp = unauth.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 401
+
+
+def test_list_figma_files_scoped_to_company(env, client, monkeypatch):
+    # Workspace isolation: the token lookup is scoped to the CALLER's company id,
+    # so a request can only ever resolve its own company's Figma connection.
+    seen: dict[str, str] = {}
+
+    def _capture(company_id):
+        seen["company_id"] = company_id
+        return "figd_tok"
+
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, _capture)
+    monkeypatch.setattr(_FIGMA_FETCH_TARGET, lambda token, *a, **k: [])
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 200, resp.text
+    assert seen["company_id"] == _TEST_COMPANY_ID
+
+
+def test_figma_files_route_not_shadowed_by_catch_all(env, client, monkeypatch):
+    # A real reachability call: GET /figma-files must hit the listing handler, NOT
+    # the single-segment GET /{prototype_id} catch-all (which would 422 trying to
+    # parse "figma-files" as an int). A 200 with a files body proves the static
+    # route is declared above the catch-all and wins.
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, lambda company_id: "figd_tok")
+    monkeypatch.setattr(
+        _FIGMA_FETCH_TARGET, lambda token, *a, **k: [{"key": "k1", "name": "Home"}]
+    )
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 200, resp.text
+    assert resp.status_code != 422
+    assert "files" in resp.json()
+
+
+def test_list_figma_files_upstream_failure_clean_error(env, client, monkeypatch):
+    # An upstream listing failure (the helper raising) maps to a clean empty list,
+    # NOT a 500 leaking the upstream body — the modal renders the honest empty
+    # state.
+    monkeypatch.setattr(_FIGMA_TOKEN_TARGET, lambda company_id: "figd_tok")
+
+    def _boom(token, *a, **k):
+        raise RuntimeError("upstream 500 body that must not leak")
+
+    monkeypatch.setattr(_FIGMA_FETCH_TARGET, _boom)
+    resp = client.get("/v1/design-agent/figma-files")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"files": []}
+
+
+class _FakeResp:
+    def __init__(self, ok, payload, status_code=200, text=""):
+        self.ok = ok
+        self._payload = payload
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+def test_fetch_files_empty_without_team_id():
+    # Honest degradation: the current OAuth grant captures no team_id and lacks a
+    # project-listing scope, so with no team_id the helper returns an empty list
+    # without making any upstream call (no fake files).
+    from app.connectors import figma_oauth
+
+    assert figma_oauth.fetch_files("figd_tok") == []
+
+
+def test_fetch_files_walks_team_projects(monkeypatch):
+    # When a team_id IS supplied, the helper walks teams -> projects -> files and
+    # returns a normalised [{key, name}] list.
+    from app.connectors import figma_oauth
+
+    def _fake_get(url, **kwargs):
+        if "/teams/" in url:
+            return _FakeResp(True, {"projects": [{"id": "p1"}]})
+        if "/projects/" in url:
+            return _FakeResp(
+                True,
+                {"files": [{"key": "k1", "name": "Home"}, {"key": "k2", "name": "App"}]},
+            )
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(figma_oauth.requests, "get", _fake_get)
+    assert figma_oauth.fetch_files("figd_tok", team_id="t1") == [
+        {"key": "k1", "name": "Home"},
+        {"key": "k2", "name": "App"},
+    ]
+
+
+def test_fetch_files_upstream_error_returns_empty(monkeypatch):
+    # A non-ok projects response logs + returns an empty list (never raises, never
+    # leaks the body to the caller).
+    from app.connectors import figma_oauth
+
+    def _fake_get(url, **kwargs):
+        return _FakeResp(False, {}, status_code=403, text="forbidden")
+
+    monkeypatch.setattr(figma_oauth.requests, "get", _fake_get)
+    assert figma_oauth.fetch_files("figd_tok", team_id="t1") == []

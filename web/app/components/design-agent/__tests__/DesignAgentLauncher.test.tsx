@@ -16,8 +16,10 @@ import { ClarifyingQuestionSurface } from "../ClarifyingQuestionSurface"
 import { CommentsPanel } from "../CommentsPanel"
 import { PostGenerationResult } from "../PostGenerationResult"
 import { GenerationErrorBanner } from "../GenerationErrorBanner"
+import { PrototypePreviewCard } from "../PrototypePreviewCard"
 import type { PrototypeRecord } from "../../../lib/api"
 import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
+import type { PrdSection } from "../../../types/content"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
 // esbuild transform defaults to the classic runtime, so expose React globally
@@ -42,8 +44,8 @@ function makeDrawerSpy() {
   return { calls, renderDrawer }
 }
 
-describe("DesignAgentLauncher — button + wrapper markup", () => {
-  it("renders a 'Generate Prototype' button (test_launcher_renders_button_with_label)", () => {
+describe("DesignAgentLauncher — surface wrapper markup", () => {
+  it("renders the design-agent-surface wrapper without a direct Generate button (test_launcher_renders_surface_wrapper)", () => {
     const { renderDrawer } = makeDrawerSpy()
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncher, {
@@ -52,11 +54,13 @@ describe("DesignAgentLauncher — button + wrapper markup", () => {
         renderDrawer,
       }),
     )
-    expect(html).toContain("Generate Prototype")
-    expect(html).toMatch(/<button[^>]*type="button"/)
+    expect(html).toContain('class="design-agent-surface prd-design-launcher"')
+    expect(html).toMatch(/contenteditable="false"/i)
+    // The generation trigger moved to the Approve modal — no direct button here.
+    expect(html).not.toContain("Generate Prototype")
   })
 
-  it("wraps the button in a contentEditable={false} div (test_launcher_button_wrapped_in_content_editable_false)", () => {
+  it("the surface wrapper has contentEditable={false} — clickable inside the PRD editable region (test_launcher_content_editable_wrapper)", () => {
     const { renderDrawer } = makeDrawerSpy()
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncher, {
@@ -65,11 +69,10 @@ describe("DesignAgentLauncher — button + wrapper markup", () => {
         renderDrawer,
       }),
     )
-    // The wrapper div carries contentEditable="false" and the button is nested
-    // inside it — load-bearing so the button is clickable inside the PRD's
-    // contentEditable region. Case-insensitive: HTML attributes are
-    // case-insensitive and react-dom/server emits the camelCase form here.
-    expect(html).toMatch(/<div[^>]*contenteditable="false"[^>]*>\s*<button/i)
+    // The wrapper div carries contentEditable="false" — load-bearing for
+    // Sprntly's PRD editable region. Generation lives in the Approve modal now.
+    expect(html).toMatch(/contenteditable="false"/i)
+    expect(html).not.toContain("Generate Prototype")
   })
 })
 
@@ -124,24 +127,25 @@ describe("DesignAgentLauncher — drawer state + prop forwarding", () => {
 })
 
 describe("DesignAgentLauncher — open interaction (DI)", () => {
-  it("the button's onClick opens the drawer via setOpen(true) (test_launcher_click_opens_drawer)", () => {
-    const setOpen = vi.fn()
-    // The view is pure (no hooks), so calling it directly yields its element
-    // tree; we extract the button and invoke its handler — no DOM needed.
+  it("the preview card's onOpen calls onOpenExisting — existing-prototype open path (test_launcher_preview_card_opens_canvas)", () => {
+    const onOpenExisting = vi.fn()
+    // The view is pure (no hooks); call it directly to inspect the element tree.
     const tree = DesignAgentLauncherView({
       prdId: 1,
       figmaFileKey: null,
       open: false,
-      setOpen,
+      setOpen: vi.fn(),
+      existing: { id: 7, status: "ready", bundle_url: "https://cdn/x/bundle/index.html", error: null },
+      onOpenExisting,
       renderDrawer: () => null,
     }) as React.ReactElement
     const children = React.Children.toArray(
       (tree.props as { children: React.ReactNode }).children,
     ) as React.ReactElement[]
-    const button = children.find((c) => c.type === "button")
-    expect(button).toBeTruthy()
-    ;(button!.props as { onClick: () => void }).onClick()
-    expect(setOpen).toHaveBeenCalledWith(true)
+    const card = children.find((c) => c.type === PrototypePreviewCard)
+    expect(card).toBeTruthy()
+    ;(card!.props as { onOpen: () => void }).onOpen()
+    expect(onOpenExisting).toHaveBeenCalledTimes(1)
   })
 
   it("forwards onOpenChange === setOpen so the drawer can close itself", () => {
@@ -184,12 +188,12 @@ describe("DesignAgentLauncher — post-generation result (P2-12)", () => {
       }),
     )
     expect(html).toContain('data-testid="post-generation-result"')
-    // The editable chrome (not the public read-only badge) is mounted.
-    expect(html).toContain('data-testid="mark-complete-btn"')
+    // The editable control bar (not the public read-only badge) is mounted.
+    expect(html).toContain('data-testid="da-controlbar"')
     expect(html).not.toContain('data-testid="completion-bar-readonly"')
   })
 
-  it("renders no result view when generation has not succeeded (test_launcher_renders_error_on_generation_failure)", () => {
+  it("renders no result view when generation has not succeeded (test_launcher_renders_no_result_on_generation_failure)", () => {
     const { renderDrawer } = makeDrawerSpy()
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncherView, {
@@ -202,8 +206,8 @@ describe("DesignAgentLauncher — post-generation result (P2-12)", () => {
       }),
     )
     expect(html).not.toContain('data-testid="post-generation-result"')
-    // The Generate affordance remains; the error surfaces via the drawer toast.
-    expect(html).toContain("Generate Prototype")
+    // No Generate button — the generation trigger moved to the Approve modal.
+    expect(html).not.toContain("Generate Prototype")
   })
 
   it("forwards onGenerated to the drawer so a success can populate the result", () => {
@@ -398,10 +402,16 @@ describe("post-iterate / clarify callback threading (AC4/AC5 wiring)", () => {
   }
 
   it("forwards onIterated to the IterateComposer mount", () => {
+    // UX-EXPLORE (throwaway — REVERT): IterateComposer now lives in
+    // PostGenerationResult's `iterate` slot (the LEFT region of the 3-region
+    // canvas), not as a direct launcher child — read it off the slot.
     const onIterated = vi.fn()
     const children = viewChildren({ result: base, onIterated })
-    const iterate = children.find((c) => c.type === IterateComposer)
+    const pgr = children.find((c) => c.type === PostGenerationResult)
+    expect(pgr).toBeTruthy()
+    const iterate = (pgr!.props as { iterate?: React.ReactElement }).iterate
     expect(iterate).toBeTruthy()
+    expect(iterate!.type).toBe(IterateComposer)
     expect((iterate!.props as { onIterated?: () => void }).onIterated).toBe(
       onIterated,
     )
@@ -477,10 +487,12 @@ describe("CommentsPanel relocated into PostGenerationResult's `comments` prop (A
   })
 })
 
-describe("IterateComposer + ClarifyingQuestionSurface stay full-width below the pane (AC6b)", () => {
-  // P6-13 relocates ONLY CommentsPanel. IterateComposer + ClarifyingQuestionSurface
-  // remain launcher-level siblings rendered AFTER <PostGenerationResult> (below the
-  // two-column design-pane), full-width — NOT folded into the comments column.
+describe("IterateComposer is the canvas LEFT region; ClarifyingQuestionSurface stays a sibling (UX-EXPLORE)", () => {
+  // UX-EXPLORE (throwaway — REVERT): the 3-region canvas relocates IterateComposer
+  // INTO PostGenerationResult's `iterate` slot (the LEFT region) and CommentsPanel
+  // INTO its `comments` slot (the RIGHT region). ClarifyingQuestionSurface remains a
+  // launcher-level sibling rendered AFTER <PostGenerationResult> (the clarify flow
+  // is outside the approved 3-region scope, so it is left where it was).
   const base: PrototypeRecord = {
     id: 7,
     status: "ready",
@@ -492,25 +504,27 @@ describe("IterateComposer + ClarifyingQuestionSurface stay full-width below the 
     pending_question: { question: "Mobile or desktop first?" },
   }
 
-  it("renders both as launcher siblings positioned after PostGenerationResult, with wiring unchanged (test_iterate_and_clarify_stay_below_pane)", () => {
+  it("mounts IterateComposer in the iterate slot, CommentsPanel in the comments slot, and Clarify as a trailing sibling, wiring unchanged", () => {
     const children = viewChildren({ result: base, applyTarget: null })
     const pgrIdx = children.findIndex((c) => c.type === PostGenerationResult)
-    const iterateIdx = children.findIndex((c) => c.type === IterateComposer)
     const clarifyIdx = children.findIndex(
       (c) => c.type === ClarifyingQuestionSurface,
     )
     expect(pgrIdx).toBeGreaterThanOrEqual(0)
-    expect(iterateIdx).toBeGreaterThan(pgrIdx)
     expect(clarifyIdx).toBeGreaterThan(pgrIdx)
-    // They are NOT folded into PostGenerationResult's comments slot — the slot
-    // holds ONLY the relocated CommentsPanel.
-    const slot = (children[pgrIdx].props as { comments?: React.ReactElement | null })
-      .comments
-    expect(slot?.type).toBe(CommentsPanel)
-    // IterateComposer wiring byte-unchanged.
-    const iterate = children[iterateIdx]
-    expect((iterate.props as { prototypeId: number }).prototypeId).toBe(7)
-    expect((iterate.props as { isComplete: boolean }).isComplete).toBe(false)
+    const pgrProps = children[pgrIdx].props as {
+      comments?: React.ReactElement | null
+      iterate?: React.ReactElement | null
+    }
+    // RIGHT region: CommentsPanel.
+    expect(pgrProps.comments?.type).toBe(CommentsPanel)
+    // LEFT region: IterateComposer, wiring byte-unchanged.
+    const iterate = pgrProps.iterate
+    expect(iterate?.type).toBe(IterateComposer)
+    expect((iterate!.props as { prototypeId: number }).prototypeId).toBe(7)
+    expect((iterate!.props as { isComplete: boolean }).isComplete).toBe(false)
+    // IterateComposer is NOT also a direct launcher child anymore.
+    expect(children.find((c) => c.type === IterateComposer)).toBeFalsy()
   })
 })
 
@@ -599,10 +613,15 @@ describe("share-success → launcher refresh mounts CommentsPanel (AC3/AC4, #14 
 
   it("does NOT alter the iterate/clarify re-poll wiring (AC5: onIterated/onAnswered still threaded)", () => {
     // P6-20 adds a parallel share caller; the iterate/clarify forwarding is untouched.
+    // UX-EXPLORE (throwaway — REVERT): IterateComposer now lives in
+    // PostGenerationResult's `iterate` slot, so read onIterated off the slot.
     const onIterated = vi.fn()
     const children = viewChildren({ result: base, onIterated })
-    const iterate = children.find((c) => c.type === IterateComposer)
+    const pgr = children.find((c) => c.type === PostGenerationResult)
+    expect(pgr).toBeTruthy()
+    const iterate = (pgr!.props as { iterate?: React.ReactElement }).iterate
     expect(iterate).toBeTruthy()
+    expect(iterate!.type).toBe(IterateComposer)
     expect((iterate!.props as { onIterated?: () => void }).onIterated).toBe(onIterated)
   })
 })
@@ -775,5 +794,98 @@ describe("DesignAgentLauncher — exported signatures unchanged (test_launcher_s
   it("DesignAgentLauncher / DesignAgentLauncherView remain exported components", () => {
     expect(typeof DesignAgentLauncher).toBe("function")
     expect(typeof DesignAgentLauncherView).toBe("function")
+  })
+})
+
+// ─── Condensed PRD panel threading on the launcher open paths ─────────────────
+
+describe("condensed PRD panel is forwarded on both launcher open paths", () => {
+  const sampleResult: PrototypeRecord = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/x/bundle/index.html",
+    error: null,
+    is_complete: false,
+    share_mode: "private",
+    share_token: null,
+  }
+
+  // One tl;dr block: provides Problem/Fix/Impact cards without triggering the
+  // "View full PRD" expander (which would recursively render PrdSections).
+  const sampleSections = [
+    {
+      type: "prd-tldr",
+      problem: "Users drop off at the checkout step",
+      fix: "Streamline to a single-page flow",
+      impact: "Estimated 15 percent conversion lift",
+    },
+  ] as unknown as PrdSection[]
+
+  function panelHtml(
+    over: Partial<Parameters<typeof DesignAgentLauncherView>[0]> = {},
+  ): string {
+    return renderToStaticMarkup(
+      React.createElement(DesignAgentLauncherView, {
+        prdId: 1,
+        figmaFileKey: null,
+        open: false,
+        setOpen: noop,
+        renderDrawer: () => null,
+        ...over,
+      }),
+    )
+  }
+
+  it("renders the condensed panel on the in-session result path when sections are provided (test_launcher_in_session_mount_renders_condensed_panel)", () => {
+    const html = panelHtml({ result: sampleResult, prdSections: sampleSections })
+    expect(html).toContain('data-testid="da-prd-condensed"')
+    expect(html).toContain('data-testid="da-prd-pcx-problem"')
+    expect(html).toContain('data-testid="da-prd-pcx-fix"')
+    expect(html).toContain('data-testid="da-prd-pcx-impact"')
+    expect(html).not.toContain("PRD content unavailable.")
+  })
+
+  it("renders the condensed panel on the existing-prototype canvas path when sections are provided (test_launcher_existing_canvas_mount_renders_condensed_panel)", () => {
+    const html = panelHtml({ canvasResult: sampleResult, prdSections: sampleSections })
+    expect(html).toContain('data-testid="da-launcher-canvas-fullscreen"')
+    expect(html).toContain('data-testid="da-prd-condensed"')
+    expect(html).toContain('data-testid="da-prd-pcx-problem"')
+    expect(html).not.toContain("PRD content unavailable.")
+  })
+
+  it("threads prdMetaLine into the panel subtitle on both paths (test_meta_line_threads_into_panel_subtitle)", () => {
+    const metaLine = "Redesign initiative, Sprint 5"
+    const inSessionHtml = panelHtml({
+      result: sampleResult,
+      prdSections: sampleSections,
+      prdMetaLine: metaLine,
+    })
+    const canvasHtml = panelHtml({
+      canvasResult: sampleResult,
+      prdSections: sampleSections,
+      prdMetaLine: metaLine,
+    })
+    expect(inSessionHtml).toContain(metaLine)
+    expect(canvasHtml).toContain(metaLine)
+  })
+
+  it("falls back to the empty-state on the in-session path when sections are absent (test_launcher_no_sections_renders_empty_state)", () => {
+    const html = panelHtml({ result: sampleResult })
+    expect(html).toContain("PRD content unavailable.")
+    expect(html).not.toContain('data-testid="da-prd-condensed"')
+  })
+
+  it("falls back to the empty-state on the canvas path when sections are absent", () => {
+    const html = panelHtml({ canvasResult: sampleResult })
+    expect(html).toContain('data-testid="da-launcher-canvas-fullscreen"')
+    expect(html).toContain("PRD content unavailable.")
+    expect(html).not.toContain('data-testid="da-prd-condensed"')
+  })
+
+  it("renders without error and shows the empty-state when the new props are omitted (test_optional_props_keep_callers_type_safe)", () => {
+    // All new props are optional — omitting them renders the empty-state, no throw.
+    const html = panelHtml({ result: sampleResult })
+    expect(html).toContain('data-testid="post-generation-result"')
+    expect(html).toContain("PRD content unavailable.")
   })
 })

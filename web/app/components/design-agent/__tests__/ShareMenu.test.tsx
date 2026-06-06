@@ -1,6 +1,9 @@
 // P2-10 — ShareMenu tests. Node-env vitest (no DOM, no testing-library), so we
 // SSR-render the pure view via renderToStaticMarkup and unit-test the extracted
 // orchestration helpers with injected deps — same convention as CompletionBar.
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -25,38 +28,43 @@ function render(props: React.ComponentProps<typeof ShareMenuView>): string {
   return renderToStaticMarkup(React.createElement(ShareMenuView, props))
 }
 
-describe("ShareMenuView — rendering (AC8)", () => {
-  it("renders three radio buttons", () => {
+describe("ShareMenuView — rendering", () => {
+  // The visibility selector is the shipped native <input type="radio"> group
+  // (kept so the browser provides arrow-key traversal + roving focus). Each row
+  // container carries a data-testid; the passcode field is progressive-disclosure
+  // — mounted only when mode === "passcode". These presentation assertions match
+  // that markup; the wired-behaviour tests below (runApplyShareMode /
+  // runSelectMode / runCopyShareLink) are unchanged and still prove the share API
+  // plumbing.
+  it("renders three native radio visibility rows", () => {
     const html = render({ mode: "private", passcode: "" })
     const radios = html.match(/type="radio"/g) ?? []
     expect(radios).toHaveLength(3)
-    expect(html).toContain('value="private"')
-    expect(html).toContain('value="public"')
-    expect(html).toContain('value="passcode"')
+    expect(html).toContain('data-testid="share-mode-private"')
+    expect(html).toContain('data-testid="share-mode-public"')
+    expect(html).toContain('data-testid="share-mode-passcode"')
   })
 
-  it("checks the radio matching the current mode", () => {
-    // Attribute order is React's concern; assert the checked input is the one
-    // carrying the active mode's value (order-independent).
-    expect(render({ mode: "private", passcode: "" })).toMatch(
-      /<input[^>]*checked[^>]*value="private"[^>]*>/,
-    )
-    expect(render({ mode: "public", passcode: "" })).toMatch(
-      /<input[^>]*checked[^>]*value="public"[^>]*>/,
-    )
-    // ...and the non-active radios are not checked.
-    expect(render({ mode: "private", passcode: "" })).not.toMatch(
-      /<input[^>]*checked[^>]*value="public"[^>]*>/,
-    )
+  it("marks the radio matching the current mode as checked", () => {
+    // renderToStaticMarkup emits `checked=""` on a checked native radio and
+    // nothing on an unchecked one (there is no literal role="radio" attribute on
+    // native inputs). The active row's radio is checked; the others are not.
+    const priv = render({ mode: "private", passcode: "" })
+    expect(priv).toMatch(/id="share-mode-private"[^>]*checked/)
+    expect(priv).not.toMatch(/id="share-mode-public"[^>]*checked/)
+    const pub = render({ mode: "public", passcode: "" })
+    expect(pub).toMatch(/id="share-mode-public"[^>]*checked/)
+    expect(pub).not.toMatch(/id="share-mode-private"[^>]*checked/)
   })
 
-  it("disables the passcode input when mode is not passcode", () => {
+  it("hides the passcode input unless mode is passcode (progressive disclosure)", () => {
     const html = render({ mode: "private", passcode: "" })
-    expect(html).toMatch(/data-testid="passcode-input"[^>]*disabled/)
+    expect(html).not.toContain('data-testid="passcode-input"')
   })
 
-  it("enables the passcode input when mode is passcode", () => {
+  it("shows an enabled passcode input when mode is passcode", () => {
     const html = render({ mode: "passcode", passcode: "" })
+    expect(html).toContain('data-testid="passcode-input"')
     expect(html).not.toMatch(/data-testid="passcode-input"[^>]*disabled/)
   })
 })
@@ -365,5 +373,43 @@ describe("ShareMenu — non-breakage with the optional onShared prop (P6-20 AC7/
     const b = render({ mode: "public", passcode: "", shareUrl: "https://app/p/t" })
     expect(a).toBe(b)
     expect(a).toContain('data-testid="share-menu"')
+  })
+})
+
+// ─── share-panel CSS dedupe (guards the scoped sheet) ────────────────────────
+// The scoped sheet had two `.share-menu` blocks (a globals collision-override +
+// a separate visual block) and an orphaned `.share-vis-*` / `.share-title` /
+// `.share-link-url` vocabulary that no markup uses. These read design-agent.css
+// from disk and assert the merge + orphan removal, so the dedupe cannot silently
+// regress back into a duplicate rule or a dead selector.
+const SHARE_CSS = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "..", "design-agent.css"),
+  "utf8",
+)
+
+describe("design-agent.css — share-panel dedupe", () => {
+  it("test_single_scoped_share_menu_block_with_override — exactly one scoped .share-menu block, carrying the override props", () => {
+    const blocks =
+      SHARE_CSS.match(/\.design-agent-surface\s+\.share-menu\s*\{[^}]*\}/g) ?? []
+    expect(blocks).toHaveLength(1)
+    const body = blocks[0]
+    expect(body).toMatch(/position:\s*static/)
+    expect(body).toMatch(/opacity:\s*1/)
+    expect(body).toMatch(/pointer-events:\s*auto/)
+    expect(body).toMatch(/transform:\s*none/)
+    // ...and the visual layout the merged block also carries.
+    expect(body).toMatch(/display:\s*flex/)
+  })
+
+  it("test_no_orphaned_share_vis_selectors — no dead share-vis / share-title / share-link-url selectors remain", () => {
+    expect(SHARE_CSS).not.toMatch(/\.share-vis-/)
+    expect(SHARE_CSS).not.toMatch(/\.share-title\b/)
+    expect(SHARE_CSS).not.toMatch(/\.share-link-url\b/)
+  })
+
+  it("keeps exactly one scoped .share-passcode-label block", () => {
+    const labels =
+      SHARE_CSS.match(/\.design-agent-surface\s+\.share-passcode-label\s*\{/g) ?? []
+    expect(labels).toHaveLength(1)
   })
 })

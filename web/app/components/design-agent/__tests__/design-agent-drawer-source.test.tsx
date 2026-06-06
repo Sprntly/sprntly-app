@@ -165,6 +165,9 @@ describe("website fallback retained + buildGenerateParams parity (AC4)", () => {
       figma_file_key: null,
       website_url: "https://acme.com",
       manual_design: { primary_color: "#3b82f6", font_family: "Inter" },
+      // Additive connected-repo context key; the documented fallback shape above
+      // is otherwise unchanged. Blank/absent repo arg here → null.
+      github_repo: null,
     })
 
     // Floor-absent shape: blank URL + missing font → both null.

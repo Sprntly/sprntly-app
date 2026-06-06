@@ -19,6 +19,7 @@ import {
   markPending,
   pendingCompleted,
 } from "../notificationStore"
+import { figmaFileOptions } from "../GenerateModal"
 import { designAgentApi } from "../../../lib/api"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
@@ -441,20 +442,20 @@ describe("notification persistence (P5-09)", () => {
   // the only existing P5-09 test whose behaviour changes by design.
   it("replay shows a completed entry once per page-load and does NOT auto-ack it (P6-05 AC3)", () => {
     installStorage()
-    markCompleted(7, "Open the PRD's Design section to view it.")
+    markCompleted(7, "Your prototype finished generating.")
 
     const showToast = vi.fn()
     replayCompletedNotifications(showToast) // simulates the shell replay on mount
     expect(showToast).toHaveBeenCalledTimes(1)
     expect(showToast).toHaveBeenCalledWith(
       "Prototype ready",
-      "Open the PRD's Design section to view it.",
+      "Your prototype finished generating.",
     )
 
     // P6-05: the entry is NOT acknowledged on show — it survives in sessionStorage
     // so a subsequent hard reload re-shows it (acked-until-user-acks).
     expect(pendingCompleted()).toEqual([
-      { prototypeId: 7, sub: "Open the PRD's Design section to view it." },
+      { prototypeId: 7, sub: "Your prototype finished generating." },
     ])
 
     // A second replay within the SAME page-load does NOT re-show (per-load guard).
@@ -504,7 +505,7 @@ describe("notification persistence (P5-09)", () => {
     expect(showToast).toHaveBeenCalledWith("Prototype ready", expect.any(String))
     // …AND the completion is persisted so a reload can re-show it.
     expect(pendingCompleted()).toEqual([
-      { prototypeId: 7, sub: "Open the PRD's Design section to view it." },
+      { prototypeId: 7, sub: "Your prototype finished generating." },
     ])
   })
 
@@ -535,5 +536,154 @@ describe("notification persistence (P5-09)", () => {
       }),
     )
     expect(html).toContain("Generate Prototype")
+  })
+
+  it("retargets the ready-toast sub off the removed Design section", async () => {
+    installStorage()
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 11,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 11, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: true,
+    })
+    await genResult
+    await Promise.resolve()
+
+    const readyCall = showToast.mock.calls.find((c) => c[0] === "Prototype ready")
+    expect(readyCall).toBeTruthy()
+    const sub = readyCall![1] as string
+    // Fails on the prior constant, which pointed at the now-removed Design section.
+    expect(sub).not.toContain("Design section")
+    expect(sub).toBe("Your prototype finished generating.")
+  })
+
+  it("re-shows the persisted sub byte-identical to the live toast on reload", async () => {
+    installStorage()
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+    const liveToast = vi.fn()
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 12,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 12, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast: liveToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: true,
+    })
+    await genResult
+    await Promise.resolve()
+
+    const liveSub = liveToast.mock.calls.find((c) => c[0] === "Prototype ready")![1]
+    // The live toast's sub is what gets persisted…
+    expect(pendingCompleted()).toEqual([{ prototypeId: 12, sub: liveSub }])
+    // …and the post-reload replay re-shows that exact persisted sub.
+    const replayToast = vi.fn()
+    replayCompletedNotifications(replayToast)
+    expect(replayToast).toHaveBeenCalledWith("Prototype ready", liveSub)
+  })
+})
+
+describe("buildGenerateParams github_repo threading", () => {
+  const base = {
+    prdId: 9,
+    platform: "both" as const,
+    instructions: "",
+    figmaFileKey: null,
+    websiteUrl: "",
+    manualColor: "",
+    manualFont: "",
+  }
+
+  it("emits github_repo when a repo is supplied; other keys unchanged", () => {
+    const params = buildGenerateParams({ ...base, githubRepo: "org/repo" })
+    expect(params.github_repo).toBe("org/repo")
+    // Every existing key is unchanged by the new repo arg.
+    expect(params.prd_id).toBe(9)
+    expect(params.target_platform).toBe("both")
+    expect(params.instructions).toBe("")
+    expect(params.figma_file_key).toBeNull()
+    expect(params.website_url).toBeNull()
+    expect(params.manual_design).toBeNull()
+  })
+
+  it("nulls github_repo when the repo arg is blank or whitespace", () => {
+    expect(buildGenerateParams({ ...base, githubRepo: "   " }).github_repo).toBeNull()
+    expect(buildGenerateParams({ ...base, githubRepo: "" }).github_repo).toBeNull()
+    // Omitted entirely → still null.
+    expect(buildGenerateParams({ ...base }).github_repo).toBeNull()
+  })
+})
+
+describe("GenerateModal Figma file selector (file listing)", () => {
+  it("maps a fetched file list to value=key options the user can pick", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(
+        "select",
+        {},
+        figmaFileOptions([
+          { key: "k1", name: "Home" },
+          { key: "k2", name: "Checkout" },
+        ]),
+      ),
+    )
+    // Each file is an <option value={key}>{name}> the selection feeds into
+    // figmaFileSel → figma_file_key.
+    expect(html).toContain('value="k1"')
+    expect(html).toContain("Home")
+    expect(html).toContain('value="k2"')
+    expect(html).toContain("Checkout")
+    expect(html).toContain("Pick design")
+  })
+
+  it("renders the honest empty state and NO fake files on empty/error", () => {
+    const html = renderToStaticMarkup(
+      React.createElement("select", {}, figmaFileOptions([])),
+    )
+    // The empty list is what both a non-401 fetch failure and an unprovisioned
+    // listing collapse to — honest "Couldn't load designs", never fabricated.
+    expect(html).toContain("load designs")
+    expect(html).not.toContain('value="k1"')
+    expect(html).not.toContain("Pick design")
+  })
+
+  it("shows a loading option before the list resolves", () => {
+    const html = renderToStaticMarkup(
+      React.createElement("select", {}, figmaFileOptions(null)),
+    )
+    expect(html).toContain("Loading designs")
+  })
+
+  it("listFigmaFiles requests the figma-files route and returns the files", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ files: [{ key: "k1", name: "Home" }] }),
+    }))
+    vi.stubGlobal("fetch", fetchMock)
+    try {
+      const r = await designAgentApi.listFigmaFiles()
+      expect(r.files).toEqual([{ key: "k1", name: "Home" }])
+      const calledUrl = String(fetchMock.mock.calls[0][0])
+      expect(calledUrl).toContain("/v1/design-agent/figma-files")
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

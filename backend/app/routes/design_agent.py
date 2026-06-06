@@ -38,22 +38,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company  # company-scoped auth dep (P6-10)
+from app.auth import CompanyContext, require_company, require_company_from_query  # company-scoped auth dep
 from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
 from app.db.prds import get_prd_rendered
+from app.db.products import get_company_website  # onboarding-website fallback source
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
     advance_current_checkpoint,
@@ -62,6 +64,7 @@ from app.db.prototypes import (
     fail_prototype,
     find_existing_prototype,
     find_prototype_by_share_token,
+    find_ready_prototype_by_prd,
     flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
@@ -81,11 +84,14 @@ from app.design_agent.prompts import (
     DESIGN_AGENT_TEMPLATE_VERSION,
     render_scaffold_user,
 )
+from app.design_agent.event_stream import subscribe as _sse_subscribe
 from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
+from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.storage import (
     TypeCheckError,
     ViteBuildError,
     stage_bundle,
+    stage_preview_image,
     vite_build,
     vite_build_with_repair,
 )
@@ -145,9 +151,19 @@ class GenerateRequest(BaseModel):
     #                                       connector lookup lands in a later phase.
     website_url: str | None = None        # P5-02: Scenario B fallback source
     manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
+    github_repo: str | None = None        # connected-repo full_name ("org/repo");
+    #                                       prompt context only — no fetch, no clone,
+    #                                       no agent tool. The repo identifier travels
+    #                                       into the scaffold prompt so generation can
+    #                                       be told which existing codebase to match.
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
+
+    def normalised_github_repo(self) -> str | None:
+        """Treat an explicit empty / whitespace-only repo the same as absent."""
+        v = (self.github_repo or "").strip()
+        return v or None
 
 
 class GenerateResponse(BaseModel):
@@ -186,6 +202,37 @@ async def generate(
     if existing:
         return GenerateResponse(prototype_id=existing["id"], status=existing["status"])
 
+    # Onboarding website as the automatic design source fallback.
+    # Design-source precedence: Figma → website → manual → none. When the user
+    # connected NO Figma file AND typed NO website URL AND supplied no manual
+    # design hints, fall back to the company's onboarding website
+    # (products.website) so it becomes the automatic design source. We never
+    # override an explicit Figma file or a user-typed website_url, and we only
+    # consult the helper for the genuinely-empty case so Figma runs skip the DB
+    # read entirely. The resolved value is threaded into BOTH the prototype
+    # snapshot (below) and the background generation task, so it's observable on
+    # the prototype row's website_url column.
+    effective_website_url = body.website_url
+    typed = (body.website_url or "").strip()
+    if not body.figma_file_key and not typed and body.manual_design is None:
+        fallback_url = get_company_website(workspace_id)
+        if fallback_url:
+            effective_website_url = fallback_url
+            logger.info(
+                "design_agent_website_fallback company_id=%s prd_id=%s host=%s",
+                workspace_id,
+                body.prd_id,
+                urlsplit(fallback_url).hostname or "",
+            )
+
+    # Connected-repo identifier the user chose as the existing codebase to match.
+    # Prompt context only (no fetch, no clone, no agent tool). NO-PERSIST decision:
+    # `start_prototype` exposes no repo/codebase text column and this ticket adds
+    # no migration (NO `ALTER` on prds/briefs/evidences), so the repo is NOT
+    # snapshotted on the prototype row — it travels as a request-only field into
+    # the background generation task (prompt context + cost-summary identifier).
+    repo = body.normalised_github_repo()
+
     # Insert the generating row. Scenario inputs (figma_file_key, etc.) are
     # stored as snapshots; the A/B/C/0 label is DERIVED at read time
     # (infer_scenario), never persisted — see db/prototypes.py.
@@ -197,7 +244,7 @@ async def generate(
         instructions=body.instructions,
         target_platform=body.normalised_platform(),
         figma_file_key=body.figma_file_key,
-        website_url=body.website_url,  # P5-02: Scenario B source snapshot
+        website_url=effective_website_url,  # snapshot; resolved value incl. onboarding fallback
         github_installation_id=None,  # populated in P4-05 (Scenario C)
     )
 
@@ -209,8 +256,9 @@ async def generate(
             target_platform=body.normalised_platform(),
             instructions=body.instructions,
             figma_file_key=body.figma_file_key,
-            website_url=body.website_url,
+            website_url=effective_website_url,  # resolved value incl. onboarding fallback
             manual_design=body.manual_design,
+            github_repo=repo,  # normalised connected-repo full_name; prompt context only
         )
     )
     _inflight_tasks.add(task)
@@ -292,6 +340,71 @@ def get_pending_patches(
     ]
 
 
+# ─── Figma file listing (Generate modal design-source selector) ──────────────
+
+
+class FigmaFileItem(BaseModel):
+    """One listable Figma file for the Generate modal's design selector."""
+
+    key: str
+    name: str
+
+
+class FigmaFilesResponse(BaseModel):
+    files: list[FigmaFileItem]
+
+
+@router.get("/figma-files", response_model=FigmaFilesResponse)
+def list_figma_files(
+    company: CompanyContext = Depends(require_company),
+) -> FigmaFilesResponse:
+    """List the caller's Figma files for the Generate modal's design selector.
+
+    A read-only proxy over the Figma REST API using the company's stored Figma
+    OAuth token. Single-segment static path declared ABOVE the
+    `GET /{prototype_id}` catch-all so a request here is never shadowed into it.
+
+    Gating order matters: the feature flag is checked FIRST, so a probe with the
+    flag off returns 404 (never 401/403) and cannot tell this route from a
+    missing one -- matching every other Design Agent route's posture. Then the
+    Figma token is resolved scoped to the CALLER's company only
+    (`company.company_id`): a company never resolves another company's files, and
+    an unconnected company gets the same 404 the by-key route returns.
+
+    Honest degradation: the current Figma OAuth grant has no project/team-listing
+    scope and no stored team id, and the Figma REST API has no flat "list my
+    files" endpoint, so `fetch_files` returns an empty list until that upstream
+    provisioning lands (a connectors-lane dependency). Any upstream listing
+    failure is mapped to an empty list here -- never a 500 leaking the upstream
+    body -- so the modal renders an honest empty state rather than fake files.
+    """
+    _require_feature_enabled()
+    # Lazy imports mirror runner.py's `_resolve_figma_access_token`: they keep
+    # this module importable without the connector/db stack at import time (which
+    # the route-test module-reload env depends on) and let tests patch the token
+    # resolver + the REST helper. routes/connectors.py owns the token decryption
+    # (reused, not reimplemented); connectors/figma_oauth.py owns the REST call.
+    from app.connectors import figma_oauth
+    from app.routes.connectors import _figma_access_token
+
+    token = _figma_access_token(company.company_id)  # 404 when Figma not connected
+    try:
+        files = figma_oauth.fetch_files(token)
+    except Exception:  # upstream listing failure -> honest empty state, never 500
+        logger.warning(
+            "design_agent.figma_files_list_failed company_id=%s", company.company_id
+        )
+        files = []
+    logger.info(
+        "design_agent.figma_files_listed company_id=%s count=%d",
+        company.company_id,
+        len(files),
+    )
+    return FigmaFilesResponse(
+        files=[FigmaFileItem(key=f["key"], name=f["name"]) for f in files]
+    )
+
+
 @router.get("/{prototype_id}")
 def get_one(
     prototype_id: int,
@@ -312,6 +425,33 @@ def get_one(
     return row
 
 
+@router.get("/by-prd/{prd_id}")
+def get_by_prd(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> dict[str, Any]:
+    """Return the most-recent READY prototype for a PRD (read-only lookup).
+
+    A pure read with NO generate side-effect — unlike the dedup inside
+    POST /generate, which kicks off a generation when none exists. That makes
+    it safe to call on PRD-screen load so the frontend can render a preview
+    card / flip Approve to "View Prototype". Returns 404 when no ready
+    prototype exists (the frontend swallows 404→null). Workspace-filtered: a
+    prototype in another workspace returns 404, not 403, so cross-tenant
+    existence is not disclosed. The path is two-segment (`/by-prd/{prd_id}`),
+    so it can never be shadowed by the single-segment `GET /{prototype_id}`
+    catch-all above regardless of declaration order — a one-segment route
+    pattern only ever matches one-segment paths.
+    """
+    _require_feature_enabled()
+    row = find_ready_prototype_by_prd(
+        prd_id=prd_id, workspace_id=company.company_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
+    return row
+
+
 # ─── Background generation ────────────────────────────────────────────────
 
 
@@ -325,6 +465,7 @@ async def _run_generation_bg(
     figma_file_key: str | None,
     website_url: str | None = None,
     manual_design: ManualDesignInput | None = None,
+    github_repo: str | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -362,6 +503,7 @@ async def _run_generation_bg(
             target_platform=target_platform,
             instructions=instructions,
             figma_frames=source_block,
+            codebase_repo=github_repo,  # one-line "match this codebase" context; None -> "(no codebase source)"
         )
         user_message = {
             "role": "user",
@@ -388,6 +530,7 @@ async def _run_generation_bg(
             user_message=user_message,
             figma_file_key=figma_file_key,
             scenario=scenario_label,
+            github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
         )
         # Success path (P1-08): a complete run that emitted files gets built +
         # staged + marked ready. A complete run with no files, or any non-complete
@@ -573,12 +716,45 @@ async def _stage_complete_run(
             prototype_id, type(exc).__name__,
         )
 
+    # Step 3.7 — best-effort preview screenshot of the staged bundle. HONEST-DEGRADE:
+    # a capture that returns no image (no browser runtime / nav error / timeout), or
+    # raises, leaves preview_image_url None and the prototype STILL completes ready.
+    # No fake/placeholder image is ever stored. Runs on the success path only — a
+    # build failure returned above before reaching here. When a Chromium runtime is
+    # provisioned on the host the thumbnail just works; until then it degrades to null.
+    preview_image_url = None
+    try:
+        png = await capture_bundle_screenshot(bundle_url)
+        if png is not None:
+            preview_image_url = await stage_preview_image(
+                prototype_id=prototype_id,
+                checkpoint_id=checkpoint_id,
+                png_bytes=png,
+            )
+            logger.info(
+                "preview_captured prototype_id=%s checkpoint_id=%s",
+                prototype_id, checkpoint_id,
+            )
+        else:
+            # Capture degraded internally (no browser / nav / timeout) — the
+            # specific class was handled inside the capture helper.
+            logger.warning(
+                "preview_capture_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+                prototype_id, checkpoint_id, "unavailable",
+            )
+    except Exception as exc:  # noqa: BLE001 — capture is best-effort; never fail completion.
+        logger.warning(
+            "preview_capture_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
     # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
     complete_prototype(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
         bundle_url=bundle_url,
         current_checkpoint_id=checkpoint_id,
+        preview_image_url=preview_image_url,
     )
 
 
@@ -1143,6 +1319,9 @@ from app.db.prototype_comments import insert_comment, list_comments, resolve_com
 class CommentCreate(BaseModel):
     anchor_id: str = Field(..., min_length=1, max_length=64)
     body: str = Field(..., min_length=1, max_length=4000)
+    pin_x_pct: float | None = Field(default=None, ge=0, le=100)
+    pin_y_pct: float | None = Field(default=None, ge=0, le=100)
+    resolved_anchor_id: str | None = Field(default=None, max_length=64)
 
 
 class CommentOut(BaseModel):
@@ -1153,6 +1332,9 @@ class CommentOut(BaseModel):
     status: str           # 'open' | 'resolved' | 'orphaned'
     created_at: str
     resolved_at: str | None = None
+    pin_x_pct: float | None = None
+    pin_y_pct: float | None = None
+    resolved_anchor_id: str | None = None
 
 
 def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
@@ -1169,6 +1351,9 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
         "status": row["status"],
         "created_at": str(row["created_at"]),
         "resolved_at": str(row["resolved_at"]) if row.get("resolved_at") else None,
+        "pin_x_pct": row.get("pin_x_pct"),
+        "pin_y_pct": row.get("pin_y_pct"),
+        "resolved_anchor_id": row.get("resolved_anchor_id"),
     }
 
 
@@ -1199,6 +1384,9 @@ def post_comment(
         anchor_id=body.anchor_id,
         body=body.body,
         author="demo",
+        pin_x_pct=body.pin_x_pct,
+        pin_y_pct=body.pin_y_pct,
+        resolved_anchor_id=body.resolved_anchor_id,
     )
     return CommentOut(**_comment_to_out(row))
 
@@ -1286,6 +1474,9 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
         anchor_id=body.anchor_id,
         body=body.body,
         author="external",
+        pin_x_pct=body.pin_x_pct,
+        pin_y_pct=body.pin_y_pct,
+        resolved_anchor_id=body.resolved_anchor_id,
     )
     # Token hashed, never raw (Rule #24 — the token is the access primitive); no
     # comment body in the log line (PII). insert_comment emits its own
@@ -2203,3 +2394,50 @@ async def _run_manual_edit_bg(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+# ── SSE event stream (two-segment GET, order-independent vs the catch-all) ───
+# Bearer auth via query param because EventSource cannot set headers. The token
+# is validated through require_company_from_query — same decode + company-
+# resolution path as require_company, identical trust. Never logged.
+# Nginx buffering disabled via X-Accel-Buffering so events reach the client
+# immediately rather than accumulating until the connection closes.
+
+@router.get("/{prototype_id}/events")
+async def stream_prototype_events(
+    prototype_id: int,
+    company: CompanyContext = Depends(require_company_from_query),
+    _flag: None = Depends(_require_feature_enabled),
+) -> StreamingResponse:
+    workspace_id = company.company_id
+    # Workspace-scoped existence check before opening the stream. Returns 404
+    # (not 401, not 403) on cross-tenant or missing prototype — the same
+    # invisibility posture as GET /{prototype_id}.
+    if get_prototype(prototype_id=prototype_id, workspace_id=workspace_id) is None:
+        raise HTTPException(404, "Prototype not found")
+
+    logger.info(
+        "design_agent.events_connect prototype_id=%s workspace_id=%s",
+        prototype_id,
+        workspace_id,
+    )
+
+    async def _gen():
+        try:
+            async for event in _sse_subscribe(prototype_id):
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            logger.info(
+                "design_agent.events_disconnect prototype_id=%s workspace_id=%s",
+                prototype_id,
+                workspace_id,
+            )
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

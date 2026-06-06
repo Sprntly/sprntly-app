@@ -170,8 +170,14 @@ def complete_prototype(
     workspace_id: str,                # explicit filter (Rule #22)
     bundle_url: str,
     current_checkpoint_id: int | None = None,
+    preview_image_url: str | None = None,
 ) -> None:
-    """Mark ready + populate bundle_url. State transition: prototype_completed."""
+    """Mark ready + populate bundle_url. State transition: prototype_completed.
+
+    `preview_image_url` is the optional thumbnail URL captured on completion; it is
+    included in the patch ONLY when non-None, so existing callers that omit it
+    produce a byte-for-byte identical UPDATE (the column simply stays null).
+    """
     c = require_client()
     patch: dict[str, Any] = {
         "status": "ready",
@@ -181,6 +187,8 @@ def complete_prototype(
     }
     if current_checkpoint_id is not None:
         patch["current_checkpoint_id"] = current_checkpoint_id
+    if preview_image_url is not None:
+        patch["preview_image_url"] = preview_image_url
     (
         c.table(_TABLE)
         .update(patch)
@@ -256,6 +264,33 @@ def find_existing_prototype(
         .eq("template_version", template_version)
         .eq("variant", variant)
         .in_("status", ["ready", "generating"])
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def find_ready_prototype_by_prd(
+    *,
+    prd_id: int,
+    workspace_id: str,
+) -> dict[str, Any] | None:
+    """Return the most-recent READY prototype for a PRD, or None.
+
+    Read-only sibling of find_existing_prototype WITHOUT the generate dedup's
+    side-effect — backs GET /by-prd/{prd_id} so the PRD screen can show a
+    preview card / flip Approve to "View Prototype" on load. Matches READY
+    prototypes only (not 'generating'), filtered to the caller's workspace,
+    newest by id.
+    """
+    c = require_client()
+    resp = (
+        c.table(_TABLE)
+        .select("*")
+        .eq("prd_id", prd_id)
+        .eq("workspace_id", workspace_id)
+        .eq("status", "ready")
         .order("id", desc=True)
         .limit(1)
         .execute()
