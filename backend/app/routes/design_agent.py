@@ -84,10 +84,12 @@ from app.design_agent.prompts import (
     render_scaffold_user,
 )
 from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
+from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.storage import (
     TypeCheckError,
     ViteBuildError,
     stage_bundle,
+    stage_preview_image,
     vite_build,
     vite_build_with_repair,
 )
@@ -712,12 +714,45 @@ async def _stage_complete_run(
             prototype_id, type(exc).__name__,
         )
 
+    # Step 3.7 — best-effort preview screenshot of the staged bundle. HONEST-DEGRADE:
+    # a capture that returns no image (no browser runtime / nav error / timeout), or
+    # raises, leaves preview_image_url None and the prototype STILL completes ready.
+    # No fake/placeholder image is ever stored. Runs on the success path only — a
+    # build failure returned above before reaching here. When a Chromium runtime is
+    # provisioned on the host the thumbnail just works; until then it degrades to null.
+    preview_image_url = None
+    try:
+        png = await capture_bundle_screenshot(bundle_url)
+        if png is not None:
+            preview_image_url = await stage_preview_image(
+                prototype_id=prototype_id,
+                checkpoint_id=checkpoint_id,
+                png_bytes=png,
+            )
+            logger.info(
+                "preview_captured prototype_id=%s checkpoint_id=%s",
+                prototype_id, checkpoint_id,
+            )
+        else:
+            # Capture degraded internally (no browser / nav / timeout) — the
+            # specific class was handled inside the capture helper.
+            logger.warning(
+                "preview_capture_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+                prototype_id, checkpoint_id, "unavailable",
+            )
+    except Exception as exc:  # noqa: BLE001 — capture is best-effort; never fail completion.
+        logger.warning(
+            "preview_capture_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
     # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
     complete_prototype(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
         bundle_url=bundle_url,
         current_checkpoint_id=checkpoint_id,
+        preview_image_url=preview_image_url,
     )
 
 

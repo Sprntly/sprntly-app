@@ -496,6 +496,33 @@ def _reset_iterate_limiter():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_real_browser_in_preview_capture(monkeypatch):
+    """Keep real Chromium out of the test session.
+
+    The generation-complete hook captures a preview screenshot of the staged
+    bundle by rendering it in headless Chromium. Every completion-path test would
+    otherwise launch a real browser (the host has Chromium installed), which is
+    slow and non-deterministic. Patch the screenshot module's lazy Playwright seam
+    to raise ImportError so `capture_bundle_screenshot` honest-degrades to None
+    without ever launching a browser — the documented test posture for that module.
+
+    Tests that genuinely exercise capture override this: the screenshot unit tests
+    re-patch this same seam to inject a fake Playwright graph, and completion-path
+    success tests mock the route's `capture_bundle_screenshot` to return fake bytes.
+    Both run after this autouse fixture, so their patch wins for that test."""
+    try:
+        import app.design_agent.screenshot as _screenshot
+
+        def _no_playwright():
+            raise ImportError("playwright disabled in tests")
+
+        monkeypatch.setattr(_screenshot, "_resolve_async_playwright", _no_playwright, raising=False)
+    except Exception:
+        pass
+    yield
+
+
 @pytest.fixture
 def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
     """Patch every imported reference to `call_json` so no test ever hits Anthropic."""

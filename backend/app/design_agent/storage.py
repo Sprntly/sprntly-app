@@ -633,3 +633,84 @@ def _read_source_filesystem_sync(sub_prefix: str) -> dict[str, str]:
         except UnicodeDecodeError:
             continue
     return out
+
+
+# ─── Preview-image staging (BINARY — sibling to stage_bundle) ─────────────────
+#
+# stage_bundle is text-only: it does content.encode("utf-8") / write_text and so
+# cannot carry a PNG. stage_preview_image is the binary sibling — it writes raw
+# bytes under a `_preview/preview.png` object alongside the bundle, reusing the
+# same Supabase-primary / filesystem-fallback dual path and the same 24h signed
+# URL. The text staging path (stage_bundle and its helpers) is untouched.
+
+_PREVIEW_OBJECT = "_preview/preview.png"
+_PREVIEW_CONTENT_TYPE = "image/png"
+
+
+async def stage_preview_image(
+    *,
+    prototype_id: int,
+    checkpoint_id: int,
+    png_bytes: bytes,
+) -> str:
+    """Write the preview PNG to storage; return the served URL.
+
+    The PNG is stored at `prototypes/<pid>/<cid>/_preview/preview.png` with
+    content-type `image/png`. Supabase Storage is the primary destination (signed
+    URL, same 24h TTL as the bundle); the filesystem is the dev/test fallback when
+    no bucket is configured (returns the public URL, or a `file://` URI when no
+    public base is set). `upsert` makes a re-stage of the same checkpoint
+    idempotent rather than a 409.
+    """
+    prefix = _bundle_prefix(prototype_id, checkpoint_id)
+    object_path = f"{prefix}/{_PREVIEW_OBJECT}"
+
+    bucket = _bucket_name()
+    if bucket:
+        url = await asyncio.to_thread(_stage_preview_supabase_sync, bucket, object_path, png_bytes)
+        backend = "supabase"
+    else:
+        url = await asyncio.to_thread(_stage_preview_filesystem_sync, object_path, png_bytes)
+        backend = "filesystem"
+    # Identifiers only — never the PNG bytes or the signed URL value (Rule #24).
+    logger.info(
+        "preview_image_staged prototype_id=%s checkpoint_id=%s backend=%s byte_count=%s",
+        prototype_id, checkpoint_id, backend, len(png_bytes),
+    )
+    return url
+
+
+def _stage_preview_supabase_sync(bucket: str, object_path: str, png_bytes: bytes) -> str:
+    """Upload the raw PNG bytes via the Supabase Storage client; return signed URL.
+
+    Mirrors `_stage_supabase_sync` but for a single binary object: `file=` takes
+    raw bytes (no `.encode`), the content-type is the PNG literal, and `upsert`
+    keeps a re-stage of the same checkpoint idempotent. Reuses the same
+    `require_client()` service-role client and the same `create_signed_url` /
+    `_extract_signed_url` 24h-URL path as the bundle.
+    """
+    from app.db.client import require_client
+
+    storage = require_client().storage.from_(bucket)
+    storage.upload(
+        path=object_path,
+        file=png_bytes,
+        file_options={"content-type": _PREVIEW_CONTENT_TYPE, "upsert": "true"},
+    )
+    signed = storage.create_signed_url(path=object_path, expires_in=_SIGNED_URL_TTL_SECONDS)
+    return _extract_signed_url(signed)
+
+
+def _stage_preview_filesystem_sync(object_path: str, png_bytes: bytes) -> str:
+    """Write the PNG bytes under settings.storage_dir; return the public/file URL.
+
+    Mirrors `_stage_filesystem_sync` but writes raw bytes (`write_bytes`) for the
+    binary asset. Returns the configured public URL, or a `file://` URI when no
+    public base is set (test-only / dev fallback)."""
+    target = Path(settings.storage_dir).resolve() / object_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(png_bytes)
+    public_base = (settings.storage_public_url or "").rstrip("/")
+    if not public_base:
+        return target.as_uri()
+    return f"{public_base}/{object_path}"

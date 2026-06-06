@@ -170,8 +170,14 @@ def complete_prototype(
     workspace_id: str,                # explicit filter (Rule #22)
     bundle_url: str,
     current_checkpoint_id: int | None = None,
+    preview_image_url: str | None = None,
 ) -> None:
-    """Mark ready + populate bundle_url. State transition: prototype_completed."""
+    """Mark ready + populate bundle_url. State transition: prototype_completed.
+
+    `preview_image_url` is the optional thumbnail URL captured on completion; it is
+    included in the patch ONLY when non-None, so existing callers that omit it
+    produce a byte-for-byte identical UPDATE (the column simply stays null).
+    """
     c = require_client()
     patch: dict[str, Any] = {
         "status": "ready",
@@ -181,6 +187,8 @@ def complete_prototype(
     }
     if current_checkpoint_id is not None:
         patch["current_checkpoint_id"] = current_checkpoint_id
+    if preview_image_url is not None:
+        patch["preview_image_url"] = preview_image_url
     (
         c.table(_TABLE)
         .update(patch)
