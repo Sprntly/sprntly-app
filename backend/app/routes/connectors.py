@@ -112,8 +112,55 @@ def list_connections(
 # variant for Supabase-only sessions. Both routes remain available.
 
 
+def _is_safe_return_to(value: str | None) -> bool:
+    """True iff value is a safe relative path to redirect to after OAuth.
+
+    Defends against open-redirect by requiring a relative path with no
+    scheme and no host. Specifically rejects:
+      - protocol-relative URLs (`//evil.com/...`)
+      - absolute URLs (`https://evil.com`, `javascript:alert(1)`, etc.)
+      - backslash tricks (browsers normalize `\\` to `/`)
+      - anything `urlparse` thinks has a scheme or netloc
+      - excessively long values (path-bomb DoS guard)
+    None means "no return_to, use the default" — caller treats as safe.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, str) or len(value) > 1024:
+        return False
+    if not value.startswith("/") or value.startswith("//"):
+        return False
+    if "\\" in value:
+        return False
+    from urllib.parse import urlparse
+    parsed = urlparse(value)
+    if parsed.scheme or parsed.netloc:
+        return False
+    return True
+
+
+def _build_post_oauth_redirect(payload: dict, provider: str) -> RedirectResponse:
+    """Construct the post-callback redirect URL using state.return_to if
+    present, else the default settings URL. Both forms get
+    `?connected=<provider>` appended (or `&connected=` if return_to
+    already has a query string)."""
+    return_to = payload.get("return_to")
+    frontend = settings.frontend_url.rstrip("/")
+    if return_to and _is_safe_return_to(return_to):
+        sep = "&" if "?" in return_to else "?"
+        target = f"{frontend}{return_to}{sep}connected={provider}"
+    else:
+        q = urlencode({"section": "connectors", "connected": provider})
+        target = f"{frontend}/settings?{q}"
+    return RedirectResponse(target)
+
+
 class StartOauthIn(BaseModel):
     dataset: str | None = None
+    # Optional relative path the callback redirects to instead of the
+    # default /settings?section=connectors. Validated as a safe path
+    # before being signed into state (open-redirect guard).
+    return_to: str | None = None
 
 
 @router.post("/{provider}/start-oauth")
@@ -123,10 +170,15 @@ def start_oauth(
     company: CompanyContext = Depends(require_company),
 ):
     payload = body or StartOauthIn()
+    if not _is_safe_return_to(payload.return_to):
+        raise HTTPException(422, "return_to must be a safe relative path")
+    return_to = payload.return_to
 
     if provider == google_oauth.GOOGLE_DRIVE_PROVIDER:
         state = google_oauth.sign_oauth_state(
-            company_id=company.company_id, dataset=payload.dataset
+            company_id=company.company_id,
+            dataset=payload.dataset,
+            return_to=return_to,
         )
         flow = google_oauth.build_flow()
         url, _ = flow.authorization_url(
@@ -141,7 +193,9 @@ def start_oauth(
         if not figma_oauth.figma_configured():
             raise HTTPException(500, "Figma OAuth is not configured on the server")
         url = figma_oauth.authorize_url(
-            state=figma_oauth.sign_oauth_state(company_id=company.company_id)
+            state=figma_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
         )
         return {"authorize_url": url}
 
@@ -149,7 +203,9 @@ def start_oauth(
         if not github_app.github_oauth_configured():
             raise HTTPException(500, "GitHub OAuth is not configured on the server")
         url = github_app.authorize_url(
-            state=github_app.sign_oauth_state(company_id=company.company_id)
+            state=github_app.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
         )
         return {"authorize_url": url}
 
@@ -157,7 +213,9 @@ def start_oauth(
         if not clickup_oauth.clickup_configured():
             raise HTTPException(500, "ClickUp OAuth is not configured on the server")
         url = clickup_oauth.authorize_url(
-            state=clickup_oauth.sign_oauth_state(company_id=company.company_id)
+            state=clickup_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
         )
         return {"authorize_url": url}
 
@@ -165,7 +223,9 @@ def start_oauth(
         if not hubspot_oauth.hubspot_configured():
             raise HTTPException(500, "HubSpot OAuth is not configured on the server")
         url = hubspot_oauth.authorize_url(
-            state=hubspot_oauth.sign_oauth_state(company_id=company.company_id)
+            state=hubspot_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
         )
         return {"authorize_url": url}
 
@@ -173,7 +233,9 @@ def start_oauth(
         if not slack_oauth.slack_configured():
             raise HTTPException(500, "Slack OAuth is not configured on the server")
         url = slack_oauth.authorize_url(
-            state=slack_oauth.sign_oauth_state(company_id=company.company_id)
+            state=slack_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
         )
         return {"authorize_url": url}
 
@@ -330,8 +392,7 @@ def google_drive_callback(code: str, state: str):
         config_json=json.dumps(config),
     )
 
-    q = urlencode({"section": "connectors", "connected": google_oauth.GOOGLE_DRIVE_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+    return _build_post_oauth_redirect(payload, google_oauth.GOOGLE_DRIVE_PROVIDER)
 
 
 class GoogleDriveConfigIn(BaseModel):
@@ -458,8 +519,7 @@ def figma_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
-    q = urlencode({"section": "connectors", "connected": figma_oauth.FIGMA_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+    return _build_post_oauth_redirect(payload, figma_oauth.FIGMA_PROVIDER)
 
 
 @router.delete("/figma")
@@ -558,8 +618,7 @@ def github_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
-    q = urlencode({"section": "connectors", "connected": github_app.GITHUB_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+    return _build_post_oauth_redirect(payload, github_app.GITHUB_PROVIDER)
 
 
 @router.delete("/github")
@@ -647,8 +706,7 @@ def clickup_callback(code: str, state: str):
         config_json=json.dumps({"user": user}) if user else "{}",
     )
 
-    q = urlencode({"section": "connectors", "connected": clickup_oauth.CLICKUP_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+    return _build_post_oauth_redirect(payload, clickup_oauth.CLICKUP_PROVIDER)
 
 
 @router.delete("/clickup")
@@ -697,8 +755,7 @@ def hubspot_callback(code: str, state: str):
         config_json=json.dumps({"info": info}) if info else "{}",
     )
 
-    q = urlencode({"section": "connectors", "connected": hubspot_oauth.HUBSPOT_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+    return _build_post_oauth_redirect(payload, hubspot_oauth.HUBSPOT_PROVIDER)
 
 
 @router.delete("/hubspot")
@@ -750,8 +807,7 @@ def slack_callback(code: str, state: str):
         config_json=json.dumps({"team": team}) if team else "{}",
     )
 
-    q = urlencode({"section": "connectors", "connected": slack_oauth.SLACK_PROVIDER})
-    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/settings?{q}")
+    return _build_post_oauth_redirect(payload, slack_oauth.SLACK_PROVIDER)
 
 
 @router.delete("/slack")

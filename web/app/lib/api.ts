@@ -519,12 +519,23 @@ export const connectorsApi = {
    * navigation can't attach the Supabase Bearer token. This endpoint
    * runs the auth check via fetch + Bearer, then hands back the URL the
    * browser should navigate to next.
+   *
+   * `returnTo` is an optional relative path (e.g. `/onboarding/4`) the
+   * backend signs into the OAuth state JWT; the callback then redirects
+   * there with `?connected=<provider>` appended. Used by the onboarding
+   * connector modal to bounce the user back to the same step instead of
+   * the default `/settings?section=connectors`. Backend validates it as
+   * a safe relative path (open-redirect guard).
    */
-  startOauth: (provider: string, dataset?: string) =>
-    api.post<{ authorize_url: string }>(
+  startOauth: (provider: string, dataset?: string, returnTo?: string) => {
+    const body: Record<string, string> = {}
+    if (dataset) body.dataset = dataset
+    if (returnTo) body.return_to = returnTo
+    return api.post<{ authorize_url: string }>(
       `/v1/connectors/${encodeURIComponent(provider)}/start-oauth`,
-      dataset ? { dataset } : {},
-    ),
+      body,
+    )
+  },
 }
 
 export const sourcesApi = {
