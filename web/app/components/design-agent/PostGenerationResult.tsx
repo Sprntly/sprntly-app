@@ -3,7 +3,7 @@
 /**
  * P2-12 — post-generation result surface for the SIGNED-IN app.
  *
- * After the F2 launcher's drawer reports a successful generation
+ * After the launcher's drawer reports a successful generation
  * (`{ ok: true, prototype }`), the launcher mounts this inside its existing
  * `contentEditable={false}` boundary. It mounts the EDITABLE flavour of the
  * P2-10 chrome — `CompletionBar` (Mark Complete / Resume / Download / Copy) +
@@ -28,21 +28,21 @@ import { useEffect, useRef, useState, type ReactNode } from "react"
 import { CompletionBar } from "./CompletionBar"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
 import { PrototypeViewer, type Platform } from "./PrototypeViewer"
-// UX-EXPLORE (throwaway — REVERT, CHANGE 2): ManualEditOverlay import dropped —
+// ManualEditOverlay import dropped —
 // its trigger is no longer mounted on the canvas (the component file is kept).
-// UX-EXPLORE (throwaway — REVERT, CHANGE A): PrdSections no longer dumped in the
+// PrdSections no longer dumped in the
 // left sidebar — replaced by a CONDENSED context panel built from the PRD's
 // title + meta + the prd-tldr (Problem/Fix/Impact) block. PrdSections import is
 // kept only for the optional "View full PRD" expander.
 import { PrdSections } from "../shared/PrdSections"
-// UX-EXPLORE (throwaway — REVERT, CHANGE B/C): reuse the comment identity helpers
+// reuse the comment identity helpers
 // (avatar + relative time) so pin-comment rows render WHO + WHEN like David's.
 import { CommentAvatar, shortRelativeTime } from "./CommentsPanel"
-// UX-EXPLORE (throwaway — REVERT, CHANGE E): the F12 clarifying-question answer
+// the clarifying-question answer
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
-// UX-EXPLORE (throwaway — REVERT, CHANGE A): the live agent-flow activity stream
+// the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
 import { IterateActivityStream } from "./IterateActivityStream"
@@ -58,7 +58,7 @@ import {
   IconMore,
   IconPin,
 } from "../shared/app-icons"
-// UX-EXPLORE (throwaway — REVERT, CHANGE 2): subtle breadcrumb at the top of the
+// subtle breadcrumb at the top of the
 // canvas ("PRDs / {PRD title} / Design"). Clicking a crumb closes the canvas and
 // returns to the PRD (reuses onDone / closeCanvas). Pure leaf → SSR-renderable.
 function DaBreadcrumb({
@@ -99,7 +99,7 @@ import {
 } from "../../lib/api"
 import type { PrdSection } from "../../types/content"
 
-// UX-EXPLORE (throwaway — REVERT, CHANGE 3): a pin-anchored comment created via
+// a pin-anchored comment created via
 // the mark-and-comment flow. `xPct`/`yPct` are the pin's position over the canvas
 // stage (0–100, relative to the stage box) — UI-only, NOT persisted (the backend
 // CommentCreate schema has no position field; see api.createComment note + RETURN).
@@ -114,14 +114,14 @@ export type PinComment = {
   saved: boolean
   busy: boolean
   error: string | null
-  // UX-EXPLORE (throwaway — REVERT, CHANGE B): author + timestamp captured at
+  // author + timestamp captured at
   // create time so the saved row can show WHO + WHEN + an avatar (David's
   // `.proto-comment-au` / `.proto-comment-time` / `.pc-av`). The authed create
   // attributes the author server-side ("demo"); we mirror the returned record's
   // author/created_at onto the pin so the optimistic row shows real identity.
   author?: string | null
   createdAt?: string | null
-  // UX-EXPLORE (throwaway — REVERT, CHANGE C): a saved pin comment can be
+  // a saved pin comment can be
   // Applied (pre-fill composer + resolve) or Ignored (resolve only). `resolved`
   // moves the row to the muted/collapsed state (David's `.resolved`).
   resolved?: boolean
@@ -135,7 +135,7 @@ export type PostGenerationResultProps = {
    *  use this component (it composes its own chrome) → it passes nothing and the
    *  comments column is omitted. Null-by-default keeps the public shape intact. */
   comments?: ReactNode
-  /** UX-EXPLORE (throwaway — REVERT): the iterate/change-request column node
+  /** the iterate/change-request column node
    *  (the launcher's `<IterateComposer>`). Placed in the LEFT region of the
    *  3-region canvas. Optional → when absent (e.g. the public viewer) the left
    *  region is omitted and the canvas degrades to canvas + comments. */
@@ -145,49 +145,49 @@ export type PostGenerationResultProps = {
    *  share-gated comments column on without a re-mount). Optional/defaulted so the
    *  public-viewer composition and existing direct calls keep type-checking. */
   onShared?: (token: string | null) => void
-  /** UX-EXPLORE (throwaway — REVERT): the PRD's parsed semantic sections, threaded
+  /** the PRD's parsed semantic sections, threaded
    *  from ApproveModal (which reads them off `useContent().content.prd`). Rendered
    *  read-only at the TOP of the new LEFT sidebar (above the iterate composer). */
   prdSections?: PrdSection[]
-  /** UX-EXPLORE (throwaway — REVERT): the PRD title for the left-sidebar header. */
+  /** the PRD title for the left-sidebar header. */
   prdTitle?: string | null
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): the PRD's one-line meta/description
+  /** the PRD's one-line meta/description
    *  (PrdContent.metaLine) — rendered as the subtitle in the condensed context panel. */
   prdMetaLine?: string | null
-  /** UX-EXPLORE (throwaway — REVERT): the PRD's DB id, threaded to PrdSections so
+  /** the PRD's DB id, threaded to PrdSections so
    *  the read-only render does NOT mount a second DesignAgentLauncher (prd-design
    *  block) — passing undefined makes that block fall back to its inert empty
    *  state inside the sidebar. (We pass undefined deliberately.) */
-  /** UX-EXPLORE (throwaway — REVERT): the control-bar "Done" affordance — closes
+  /** the control-bar "Done" affordance — closes
    *  the full-screen canvas back to the PRD (ApproveModal.closeCanvas). */
   onDone?: () => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE C/D): Apply a pin comment — pre-fill
+  /** Apply a pin comment — pre-fill
    *  the LEFT IterateComposer with a pin-context edit instruction. Threaded from
    *  ApproveModal (sets `applyTarget`, the same seam CommentsPanel's Apply uses).
    *  The synthetic CommentRecord carries the composed instruction as its `body`.
    *  Kept for back-compat; superseded by `onPinIterate` when that is supplied. */
   onPinApply?: (comment: CommentRecord) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE B): Apply a pin comment by running it
+  /** Apply a pin comment by running it
    *  through the canvas's SHARED iterate runner IMMEDIATELY (pin-context string +
    *  comment body as the instruction) instead of pre-filling the composer. When
    *  supplied it takes precedence over `onPinApply`. */
   onPinIterate?: (instruction: string, appliedCommentId?: number | null) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): the live agent-flow activity for
+  /** the live agent-flow activity for
    *  the LEFT panel — the user request, working steps, completion / clarifying
    *  question / error — driven by the shared runner (useIterateRun). */
   iterateActivity?: import("./useIterateRun").ActivityEvent[]
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): true while an iterate is running. */
+  /** true while an iterate is running. */
   iterateRunning?: boolean
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): a run-level error (also appended
+  /** a run-level error (also appended
    *  to the activity stream). */
   iterateError?: string | null
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): the agent's clarifying question
+  /** the agent's clarifying question
    *  when the run paused — surfaced INLINE in the left-panel flow. */
   iteratePendingQuestion?: import("../../lib/api").PendingQuestion | null
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): answer the clarifying question →
+  /** answer the clarifying question →
    *  continues the iterate via the shared runner. */
   onAnswerQuestion?: (answer: string) => void | Promise<void>
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): bumped on each completed iterate
+  /** bumped on each completed iterate
    *  to force the center iframe to reload the rebuilt bundle (cache-bust). */
   bundleReloadNonce?: number
 }
@@ -202,7 +202,7 @@ export type PostGenerationResultViewProps = {
   /** P6-13 (UX-3): comments node for the right cell of the `design-pane` grid.
    *  When absent, the viewer renders full-width (no comments cell, no grid). */
   comments?: ReactNode
-  /** UX-EXPLORE (throwaway — REVERT): iterate/change-request column node for the
+  /** iterate/change-request column node for the
    *  LEFT region of the 3-region canvas. When absent, the left region is omitted. */
   iterate?: ReactNode
   /** P6-20 (#14): forwarded to `<ShareMenu onShared>` so a successful Share
@@ -219,14 +219,14 @@ export type PostGenerationResultViewProps = {
   fullscreenOpen?: boolean
   onOpenFullscreen?: () => void
   onCloseFullscreen?: () => void
-  /** UX-EXPLORE (throwaway — REVERT): PRD content for the LEFT sidebar (read-only)
+  /** PRD content for the LEFT sidebar (read-only)
    *  + the control-bar Done affordance. See PostGenerationResultProps. */
   prdSections?: PrdSection[]
   prdTitle?: string | null
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): PRD one-line meta for the condensed panel. */
+  /** PRD one-line meta for the condensed panel. */
   prdMetaLine?: string | null
   onDone?: () => void
-  /** UX-EXPLORE (throwaway — REVERT): collapsible-panel + control-bar state, owned
+  /** collapsible-panel + control-bar state, owned
    *  by the container and threaded into the SSR-renderable pure view (matching the
    *  `fullscreenOpen` threading pattern). LEFT sidebar (PRD + iterate) is OPEN by
    *  default; RIGHT comments sidebar is COLLAPSED by default; the Desktop/Mobile
@@ -237,7 +237,7 @@ export type PostGenerationResultViewProps = {
   onToggleComments?: () => void
   platform?: Platform
   onPlatformChange?: (platform: Platform) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3): mark-and-comment pin flow state,
+  /** mark-and-comment pin flow state,
    *  owned by the container and threaded into the SSR-renderable view (same
    *  pattern as `fullscreenOpen`). `markMode` toggles the crosshair overlay; the
    *  overlay click reports stage-relative x/y via `onStageClick`; `pins` render
@@ -250,23 +250,23 @@ export type PostGenerationResultViewProps = {
   onPinDraftChange?: (n: number, value: string) => void
   onPinSubmit?: (n: number) => void
   onPinRemove?: (n: number) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE C/D): Apply a saved pin comment
+  /** Apply a saved pin comment
    *  (pre-fill composer w/ pin context + resolve) / Ignore (resolve only). */
   onPinApply?: (n: number) => void
   onPinIgnore?: (n: number) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE E): the F12 clarifying-question
+  /** the clarifying-question
    *  surface node (the container's <ClarifyingQuestionSurface>). Mounted in the
    *  LEFT sidebar just above the IterateComposer; when null nothing renders. */
   clarifying?: ReactNode
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): the live agent-flow activity for
+  /** the live agent-flow activity for
    *  the LEFT panel, plus the run-paused clarifying answer surface. */
   iterateActivity?: import("./useIterateRun").ActivityEvent[]
   iterateRunning?: boolean
   iteratePendingQuestion?: import("../../lib/api").PendingQuestion | null
   onAnswerQuestion?: (answer: string) => void | Promise<void>
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): pin Apply → immediate iterate. */
+  /** pin Apply → immediate iterate. */
   onPinIterate?: (instruction: string, appliedCommentId?: number | null) => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE A): cache-bust nonce → forces the
+  /** cache-bust nonce → forces the
    *  iframe to reload the rebuilt bundle on each completed iterate. */
   bundleReloadNonce?: number
 }
@@ -359,7 +359,7 @@ export function viewerRemountKey(
 }
 
 /**
- * UX-EXPLORE (throwaway — REVERT, CHANGE A): the condensed PRD context model.
+ * the condensed PRD context model.
  * David's left panel is LIGHTWEIGHT context, not the full document. We pull the
  * TL;DR triptych (Problem / Fix / Impact) from the `prd-tldr` block if present;
  * the long body sections (Context / Requirements / AC / etc.) are dropped from
@@ -394,7 +394,7 @@ export function condensePrd(sections: PrdSection[] | undefined): CondensedPrd {
 }
 
 /**
- * UX-EXPLORE (throwaway — REVERT, CHANGE A): the condensed left-sidebar context
+ * the condensed left-sidebar context
  * panel — PRD title + one-line meta + Problem/Fix/Impact cards (David's
  * `.proto-ctx-panel` `.pcx` style: small uppercase header + short body). The
  * long PRD body is dropped to a "View full PRD" expander (kept cheap — a native
@@ -444,7 +444,7 @@ function CondensedPrdPanel({
 }
 
 /**
- * UX-EXPLORE (throwaway — REVERT): a tiny click-outside-dismiss popover used by
+ * a tiny click-outside-dismiss popover used by
  * the compact control bar (Share + Actions). Models David's `.pct-export-menu`
  * dropdown: a trigger button + an absolutely-positioned panel that closes on an
  * outside click or Escape. Self-contained (own `useState`/`useEffect`) so it
@@ -496,7 +496,7 @@ function DaPopover({
 }
 
 /**
- * UX-EXPLORE (throwaway — REVERT): the COMPACT top control bar (≈54px), modelled
+ * the COMPACT top control bar (≈54px), modelled
  * on David's `.proto-canvas-top` toolbar. A single horizontal row, vertically
  * centred:
  *   LEFT cluster  — the Desktop/Mobile platform toggle (segmented control,
@@ -541,7 +541,7 @@ export function DaControlBar({
   onPlatformChange?: (platform: Platform) => void
   commentsOpen: boolean
   onToggleComments?: () => void
-  /** UX-EXPLORE (throwaway — REVERT, CHANGE 3): mark-and-comment tool state. */
+  /** mark-and-comment tool state. */
   markMode: boolean
   onToggleMark?: () => void
   canOpen: boolean
@@ -578,7 +578,7 @@ export function DaControlBar({
 
       {/* RIGHT cluster — compact icon/button tools. */}
       <div className="da-controlbar-r">
-        {/* UX-EXPLORE (throwaway — REVERT, CHANGE 3): Mark & comment tool
+        {/* Mark & comment tool
             (David's `#markToggle`, `ti-pin`). Enters mark mode → crosshair +
             brand ring on the stage; clicking the prototype drops a numbered pin
             and opens a comment composer. `.on` reflects active mark mode. */}
@@ -626,7 +626,7 @@ export function DaControlBar({
             </button>
           )}
         >
-          {/* UX-EXPLORE (throwaway — REVERT): the restyled ShareMenu renders its
+          {/* the restyled ShareMenu renders its
               own `.share-title` ("Share prototype") + clean panel, so the generic
               `.da-popover-title` is dropped here to avoid a duplicate heading. */}
           <ShareMenu
@@ -692,7 +692,7 @@ export function DaControlBar({
 }
 
 /**
- * UX-EXPLORE (throwaway — REVERT, CHANGE A): the INLINE clarifying-answer surface
+ * the INLINE clarifying-answer surface
  * for the left-panel flow. When the shared iterate runner pauses on a
  * `pending_question`, this renders RIGHT IN THE ACTIVITY STREAM (not as a
  * detached surface): the question is already shown as an agent message above; this
@@ -814,7 +814,7 @@ export function PostGenerationResultView({
   onPinIterate,
   bundleReloadNonce = 0,
 }: PostGenerationResultViewProps) {
-  // UX-EXPLORE (throwaway — REVERT, CHANGE A): cache-bust the iframe src so a
+  // cache-bust the iframe src so a
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
   // Only appends when the nonce has advanced (keeps the initial load url clean +
   // SSR output stable when no iterate has run). Preserves any existing query.
@@ -829,7 +829,7 @@ export function PostGenerationResultView({
   // P4-10 — the EDITABLE viewer, rendered only when a built bundle exists. This
   // surface only renders inside (app)/AuthGate, so it is internal by
   // construction; passing the real numeric `prototypeId` into the overlay IS the
-  // internal mount that makes F13 manual-edit reachable (AD13). The overlay
+  // internal mount that makes manual-edit reachable. The overlay
   // reaches the same-origin iframe (`da-prototype-iframe`) for click→select. The
   // public `/p/<token>` mount keeps passing no `prototypeId` → the overlay
   // renders nothing (AC10 preserved, untouched here). Extracted into a const so
@@ -848,19 +848,19 @@ export function PostGenerationResultView({
   // active edit target. The overlay viewer is view-only (no `chrome` → no second
   // editor). The live selector behaviour is tester-verified (AC8) — the node-env
   // unit cannot exercise the real global query.
-  // UX-EXPLORE (throwaway — REVERT): the CENTER full-area canvas. The
+  // the CENTER full-area canvas. The
   // Desktop/Mobile toggle is now LIFTED into the top control bar, so the viewer
   // runs CONTROLLED (`platform` from props, `onPlatformChange` reports clicks) and
   // hides its own in-frame toggle (`hideToggle`). The stage class still tracks
   // `platform` so the canvas width still switches. The viewer fills the full
   // center region (David's `.proto-frame-full`) via the `.da-canvas-stage` wrap.
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 2): the "Edit" button (ManualEditOverlay
+  // the "Edit" button (ManualEditOverlay
   // trigger) is NO LONGER rendered on the canvas — the `chrome` slot is left empty.
   // The ManualEditOverlay component file is kept intact; we just don't mount its
   // trigger here. Mark-and-comment (CHANGE 3) is the canvas annotation path now.
   const viewer = bundleUrl && !fullscreenOpen ? (
     <PrototypeViewer
-      // UX-EXPLORE (throwaway — REVERT, CHANGE A): cache-busted url so a completed
+      // cache-busted url so a completed
       // iterate reloads the rebuilt bundle (the iframe src changes → reload). The
       // `key` follows BOTH the bundle path and the nonce, so React mounts a fresh
       // iframe when the build advances to a new path AND when a same-path rebuild
@@ -874,7 +874,7 @@ export function PostGenerationResultView({
     />
   ) : null
 
-  // UX-EXPLORE (throwaway — REVERT): the TOP control bar is now a COMPACT single
+  // the TOP control bar is now a COMPACT single
   // row (≈54px) — see <DaControlBar> below. The full CompletionBar + full ShareMenu
   // are NO LONGER rendered inline; they are consolidated into compact dropdown
   // popovers (Actions / Share) inside the bar, so it never bloats to ~180px.
@@ -900,7 +900,7 @@ export function PostGenerationResultView({
 
   return (
     <div className="design-agent-surface design-agent-result" data-testid="post-generation-result">
-      {/* UX-EXPLORE (throwaway — REVERT): David's `.proto-ready` post-gen layout —
+      {/* David's `.proto-ready` post-gen layout —
           a TOP control bar + a 3-section body:
             LEFT  = collapsible sidebar (OPEN by default): PRD content (read-only)
                     at top + the iterate/reprompt composer pinned at the bottom.
@@ -910,7 +910,7 @@ export function PostGenerationResultView({
                     from the control bar's comments tool.
           Excluded per spec: Code/Preview/Spec tabs + version stepper. The
           collapse/expand model + control-bar affordances live in design-agent.css. */}
-      {/* UX-EXPLORE (throwaway — REVERT, CHANGE 2): breadcrumb row at the very top
+      {/* breadcrumb row at the very top
           of the canvas — "PRDs / {PRD title} / Design". The PRDs / PRD crumbs close
           the canvas (onDone → ApproveModal.closeCanvas / launcher close) and return
           to the PRD screen. */}
@@ -943,7 +943,7 @@ export function PostGenerationResultView({
             </button>
           </div>
           <div className="da-left-scroll" data-testid="da-left-prd">
-            {/* UX-EXPLORE (throwaway — REVERT, CHANGE A): CONDENSED context — PRD
+            {/* CONDENSED context — PRD
                 meta + the TL;DR (Problem/Fix/Impact) cards (David's `.pcx`), with
                 the long body tucked behind a "View full PRD" expander. NOT the
                 full document dump. */}
@@ -957,7 +957,7 @@ export function PostGenerationResultView({
               <p className="da-left-prd-empty">PRD content unavailable.</p>
             )}
           </div>
-          {/* UX-EXPLORE (throwaway — REVERT, CHANGE A): the LIVE agent-flow
+          {/* the LIVE agent-flow
               activity stream — the user's request, the "agent working" steps, and
               the completion / clarifying question / error — rendered IN the left
               flow (David's `.proto-msg` chat style). Driven by the shared runner's
@@ -979,7 +979,7 @@ export function PostGenerationResultView({
               )}
             </div>
           )}
-          {/* UX-EXPLORE (throwaway — REVERT, CHANGE E): the prop-driven F12
+          {/* the prop-driven
               clarifying surface (from a prototype row that already carried a
               `pending_question` BEFORE this session's run). Suppressed while the
               runner is driving its own inline question to avoid a double surface. */}
@@ -1009,7 +1009,7 @@ export function PostGenerationResultView({
           </button>
         )}
 
-        {/* CENTER full-area canvas. UX-EXPLORE (throwaway — REVERT, CHANGE 3):
+        {/* CENTER full-area canvas. 
             the stage wraps the viewer + a transparent mark overlay + the pin
             layer. `.marking` (David's class) adds the crosshair cursor + brand
             outline ring when mark mode is on. */}
@@ -1061,12 +1061,11 @@ export function PostGenerationResultView({
         </div>
 
         {/* RIGHT collapsible comments sidebar — COLLAPSED by default; width is
-            driven by `.da-right.open` (control-bar comments-toggle). UX-EXPLORE
-            (throwaway — REVERT, Problem 2): the shell now ALWAYS renders so the
-            control-bar comments-toggle can reveal it regardless of share state.
-            When a `comments` node exists (shared / `comments` node present) it
-            renders <CommentsPanel> inside; when NOT shared it shows a small empty
-            state pointing at the Share dropdown. */}
+            driven by `.da-right.open` (control-bar comments-toggle). The shell
+            now ALWAYS renders so the control-bar comments-toggle can reveal it
+            regardless of share state. When a `comments` node exists (shared /
+            `comments` node present) it renders <CommentsPanel> inside; when NOT
+            shared it shows a small empty state pointing at the Share dropdown. */}
         <aside
           className={`da-right${commentsOpen ? " open" : ""}`}
           data-testid="da-canvas-comments"
@@ -1086,7 +1085,7 @@ export function PostGenerationResultView({
             </button>
           </div>
           <div className="da-right-body">
-            {/* UX-EXPLORE (throwaway — REVERT, CHANGE 3): the mark-and-comment pin
+            {/* the mark-and-comment pin
                 rows. Each pin dropped on the canvas appears here with its number +
                 a composer (auto-focused) to type the comment. Submit wires to the
                 authed create endpoint (api.createComment); the row stays optimistic
@@ -1105,7 +1104,7 @@ export function PostGenerationResultView({
                     <div className="proto-comment-main">
                       {pin.saved ? (
                         <>
-                          {/* UX-EXPLORE (throwaway — REVERT, CHANGE B): author +
+                          {/* author +
                               avatar + relative time on the saved pin comment. */}
                           <div className="proto-comment-au-row">
                             <CommentAvatar author={pin.author ?? "demo"} />
@@ -1119,7 +1118,7 @@ export function PostGenerationResultView({
                             </time>
                           </div>
                           <p className="proto-comment-body">{pin.body}</p>
-                          {/* UX-EXPLORE (throwaway — REVERT, CHANGE C): Apply /
+                          {/* Apply /
                               Ignore on a saved, unresolved pin comment. Apply
                               pre-fills the composer with the pin context (CHANGE D)
                               + marks resolved; Ignore marks resolved only. */}
@@ -1276,7 +1275,7 @@ export function PostGenerationResult({
   // matching the existing `onStateChange` threading pattern.
   const [fullscreenOpen, setFullscreenOpen] = useState<boolean>(false)
 
-  // UX-EXPLORE (throwaway — REVERT): collapsible-panel + control-bar state, owned
+  // collapsible-panel + control-bar state, owned
   // by the container (same threading pattern as `fullscreenOpen`). LEFT sidebar
   // (PRD + iterate) OPEN by default; RIGHT comments sidebar COLLAPSED by default;
   // the Desktop/Mobile toggle lifted out of PrototypeViewer lives here too.
@@ -1284,7 +1283,7 @@ export function PostGenerationResult({
   const [commentsOpen, setCommentsOpen] = useState<boolean>(false)
   const [platform, setPlatform] = useState<Platform>("desktop")
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 3): mark-and-comment pin flow state.
+  // mark-and-comment pin flow state.
   // `markMode` toggles the crosshair overlay; `pins` holds the dropped pins +
   // their (optimistic) comment drafts. Entering mark mode force-opens the right
   // comments sidebar (David's behaviour) so the new comment row is visible.
@@ -1292,7 +1291,7 @@ export function PostGenerationResult({
   const [pins, setPins] = useState<PinComment[]>([])
   const pinCounter = useRef<number>(0)
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE 4): Escape closes the full-screen
+  // Escape closes the full-screen
   // overlay (in addition to the visible × close button). Bound only while open.
   useEffect(() => {
     if (!fullscreenOpen) return
@@ -1343,7 +1342,7 @@ export function PostGenerationResult({
       prev.map((p) => (p.n === n ? { ...p, busy: true, error: null } : p)),
     )
     try {
-      // UX-EXPLORE (throwaway — REVERT, CHANGE B): the authed create returns the
+      // the authed create returns the
       // CommentRecord with the server-attributed author + created_at — mirror them
       // onto the pin so the saved row shows real identity + a relative timestamp.
       // A bearer token can expire mid-interaction; retry once through the
@@ -1385,7 +1384,7 @@ export function PostGenerationResult({
     }
   }
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE D): describe WHERE a pin sits on the
+  // describe WHERE a pin sits on the
   // canvas so the agent knows where the comment applies. The backend doesn't
   // persist x/y (UI-only — see api.createComment note), so we compose it from the
   // LOCAL pin state: pin number + a human region hint + the raw x/y %.
@@ -1395,7 +1394,7 @@ export function PostGenerationResult({
     return `${v} ${h}`
   }
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE C/D): Apply a saved pin comment —
+  // Apply a saved pin comment —
   // pre-fill the LEFT IterateComposer (via the SAME applyTarget seam CommentsPanel
   // uses; ApproveModal threads `onPinApply → setApplyTarget`) with an instruction
   // that includes the pin number + on-canvas position + the comment text, THEN
@@ -1410,7 +1409,7 @@ export function PostGenerationResult({
     const instruction = `Re: pin #${pin.n} (near the ${region} of the prototype, at ~${Math.round(
       pin.xPct,
     )}%,${Math.round(pin.yPct)}%): ${pin.body}`
-    // UX-EXPLORE (throwaway — REVERT, CHANGE B): pin Apply now runs the iterate
+    // pin Apply now runs the iterate
     // IMMEDIATELY through the shared runner (pin context + body as the
     // instruction) when `onPinIterate` is supplied — same fixed path as the
     // composer + comment Apply. Falls back to the old applyTarget pre-fill
@@ -1433,7 +1432,7 @@ export function PostGenerationResult({
     setPins((prev) => prev.map((p) => (p.n === n ? { ...p, resolved: true } : p)))
   }
 
-  // UX-EXPLORE (throwaway — REVERT, CHANGE C): Ignore — mark the pin resolved
+  // Ignore — mark the pin resolved
   // WITHOUT pre-filling the composer.
   function handlePinIgnore(n: number) {
     setPins((prev) => prev.map((p) => (p.n === n ? { ...p, resolved: true } : p)))
@@ -1493,7 +1492,7 @@ export function PostGenerationResult({
       onPinRemove={handlePinRemove}
       onPinApply={handlePinApply}
       onPinIgnore={handlePinIgnore}
-      // UX-EXPLORE (throwaway — REVERT, CHANGE E): mount the F12 clarifying-
+      // mount the clarifying-
       // question surface. It self-gates on `prototype.pending_question` (renders
       // null when none/locked), so it's safe to always pass. When the launcher's
       // refetch (onIterated → ApproveModal.refreshCanvas) advances the prototype
@@ -1501,7 +1500,7 @@ export function PostGenerationResult({
       // answering routes a NEW iterate (continues the loop) via the reused
       // designAgentApi.iterate.
       clarifying={<ClarifyingQuestionSurface prototype={prototype} />}
-      // UX-EXPLORE (throwaway — REVERT, CHANGE A/B): the live agent-flow activity
+      // the live agent-flow activity
       // + inline clarifying answer + pin-Apply immediate-iterate + the iframe
       // reload nonce, all sourced from the shared runner threaded by ApproveModal.
       iterateActivity={iterateActivity}

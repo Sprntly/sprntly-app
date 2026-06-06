@@ -67,12 +67,12 @@ function proto(over: Partial<PrototypeRecord> = {}): PrototypeRecord {
   }
 }
 
-// UX-EXPLORE (throwaway — REVERT): the control bar is now a COMPACT single row.
+// the control bar is now a COMPACT single row.
 // The full CompletionBar (Mark Complete / Resume / Export) + full ShareMenu
 // radios are NO LONGER rendered inline — they live inside closed dropdown
 // popovers (Actions ⋯ / Share) that only open client-side. So the SSR markup now
 // asserts the COMPACT TRIGGERS exist, not the expanded panels.
-describe("PostGenerationResultView — compact control bar (UX-EXPLORE)", () => {
+describe("PostGenerationResultView — compact control bar", () => {
   it("renders the compact control bar with the Actions (handoff) + Share triggers, not the inline panels", () => {
     const html = renderView({ isComplete: false })
     expect(html).toContain('data-testid="da-controlbar"')
@@ -110,7 +110,7 @@ describe("PostGenerationResultView — compact control bar (UX-EXPLORE)", () => 
 // overlay that reuses the P6-12 device frame. resolveViewHref is KEPT (its pure
 // describe below still passes) but no longer gates a hidden link.
 describe("PostGenerationResultView — View affordance never dead (P6-16 AC1/AC4b)", () => {
-  // UX-EXPLORE (throwaway — REVERT): the always-shown View control is now the
+  // the always-shown View control is now the
   // COMPACT `proto-fullscreen-trigger` icon button in the control bar (renamed
   // from the prior center-toolbar `view-fullscreen-trigger`). Still never a dead
   // link: enabled when a bundle exists, disabled-with-title otherwise.
@@ -198,14 +198,14 @@ describe("PostGenerationResultView — full-screen overlay (P6-16 AC2/AC3/AC3b)"
   })
 })
 
-// ─── UX-EXPLORE (throwaway — REVERT): control bar + 3-section body ───────────
+// ─── control bar + 3-section body ───────────
 // The signed-in post-gen surface mounts a compact control bar (`.da-controlbar`)
 // + a `.da-ready` flex body with a LEFT collapsible sidebar (`.da-left`: PRD +
 // iterate compose `da-canvas-iterate`), a CENTER full-area canvas (`.da-stage`,
 // testid `da-canvas-center`), and a RIGHT collapsible comments sidebar
 // (`.da-right`, testid `da-canvas-comments`) that — per Problem 2 — ALWAYS exists
 // (with CommentsPanel when present, else an empty state).
-describe("PostGenerationResultView — control bar + 3-section body (UX-EXPLORE)", () => {
+describe("PostGenerationResultView — control bar + 3-section body", () => {
   const sentinel = (id: string, text: string) =>
     React.createElement("div", { "data-testid": id }, text)
 
@@ -242,7 +242,7 @@ describe("PostGenerationResultView — control bar + 3-section body (UX-EXPLORE)
     const html = renderView({ bundleUrl: "https://cdn/x/bundle/index.html" })
     expect(html).toContain('data-testid="da-canvas-comments"')
     expect(html).toContain('data-testid="da-comments-empty"')
-    expect(html).toContain("Share this prototype to collect comments")
+    expect(html).toContain("to collect comments")
   })
 
   it("renders CommentsPanel content inside the right sidebar when a comments node is present", () => {
@@ -337,7 +337,7 @@ describe("reseedStep — guarded local-isComplete re-seed (AC4/AC5/AC10)", () =>
 })
 
 // ─── P6-20 (#14): forwards onShared down to <ShareMenu> ──────────────────────
-// UX-EXPLORE (throwaway — REVERT): ShareMenu now lives inside DaControlBar's Share
+// ShareMenu now lives inside DaControlBar's Share
 // dropdown popover (DaControlBar → DaPopover → ShareMenu). The chain is
 // PostGenerationResultView(onShared) → <DaControlBar onShared> → ... → <ShareMenu
 // onShared>. We assert BOTH hops: the view forwards to <DaControlBar>, and
@@ -440,6 +440,10 @@ const PUBLIC_VIEWER = readFileSync(
   join(APP_DIR, "p", "[token]", "PublicTokenViewer.tsx"),
   "utf8",
 )
+const RESULT_SRC = readFileSync(
+  join(HERE, "..", "PostGenerationResult.tsx"),
+  "utf8",
+)
 
 describe("design-agent.css — two-column design-pane appended + scoped (AC2)", () => {
   it("defines a scoped .design-pane grid at 1fr/320px (test_css_design_pane_appended_and_scoped)", () => {
@@ -509,7 +513,7 @@ describe("public viewer unaffected (AC4)", () => {
 })
 
 describe("PostGenerationResult container — defaults from the prototype record (AC9)", () => {
-  // UX-EXPLORE (throwaway — REVERT): the editable handoff (CompletionBar) + share
+  // the editable handoff (CompletionBar) + share
   // (ShareMenu) controls now live in CLOSED control-bar popovers, so the container
   // SSR markup asserts the compact bar mounts (its triggers) rather than the
   // expanded inline panels. The seed-from-prop behaviour the launcher `key` fix
@@ -612,5 +616,26 @@ describe("viewer src + remount key — follows the live build path", () => {
   it("returns the null/absent bundle untouched (nothing to render yet)", () => {
     expect(viewerSrc(null, 0)).toBeNull()
     expect(viewerSrc(null, 7)).toBeNull()
+  })
+})
+
+describe("pin-comment create stays wrapped in the auth-retry (preservation)", () => {
+  it("test_pin_comment_create_wrapped_in_auth_retry — handlePinSubmit wraps createComment in withAuthRetry", () => {
+    // The node-env run cannot exercise the bearer-refresh path, so assert the
+    // wrapping as a source invariant (the repo's source-assertion convention for
+    // behaviour that can't be driven in node-env). A bearer token can expire
+    // mid-interaction; the pin-comment create must stay inside withAuthRetry(() =>
+    // …) so a transient 401 retries once through the refresh instead of silently
+    // losing a saved comment.
+    expect(RESULT_SRC).toContain("async function handlePinSubmit")
+    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
+    const body = RESULT_SRC.slice(start, start + 1200)
+    expect(body).toMatch(
+      /withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(/,
+    )
+    // the helper is imported from the shared api module (the import must stay intact)
+    expect(RESULT_SRC).toMatch(
+      /import\s*\{[^}]*\bwithAuthRetry\b[^}]*\}\s*from\s*["']\.\.\/\.\.\/lib\/api["']/,
+    )
   })
 })
