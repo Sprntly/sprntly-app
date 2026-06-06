@@ -578,6 +578,8 @@ def _extract_palette_summary(file_doc: dict) -> dict:
                 continue
             if fill.get("type") != "SOLID":
                 continue
+            if fill.get("visible") is False:
+                continue
             c = fill.get("color", {})
             r = int((c.get("r", 0) or 0) * 255)
             g = int((c.get("g", 0) or 0) * 255)
@@ -597,16 +599,33 @@ def _extract_palette_summary(file_doc: dict) -> dict:
     counter = Counter(fills)
     ordered = [c for c, _ in counter.most_common()]
 
-    # Most common fill = dominant background; least common = likely accent
-    background = ordered[0] if ordered else None
-    accent = ordered[-1] if len(ordered) > 1 else None
+    def _luminance(hex_color: str) -> float:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        return 0.299 * r + 0.587 * g + 0.114 * b
 
-    # Determine dark/light from luminance of the background
-    is_dark = False
-    if background:
-        r, g, b = int(background[1:3], 16), int(background[3:5], 16), int(background[5:7], 16)
-        luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        is_dark = luminance < 128
+    # Background: most common fill among the dark ones (luminance < 80).
+    # Falls back to most common fill if none are dark.
+    dark_fills = [c for c in ordered if _luminance(c) < 80]
+    background = dark_fills[0] if dark_fills else ordered[0] if ordered else None
+
+    is_dark = bool(background and _luminance(background) < 128)
+
+    # Accent: most SATURATED fill in the mid-luminance range (60–220).
+    # Saturation = (max_channel - min_channel) / max_channel.
+    # This picks the "pop" color (e.g. gold, coral) over neutral grays that
+    # happen to land in the same luminance band but have low saturation.
+    def _saturation(hex_color: str) -> float:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        mx = max(r, g, b)
+        return (mx - min(r, g, b)) / mx if mx else 0.0
+
+    mid_fills = [c for c in ordered if 60 <= _luminance(c) <= 220]
+    saturated = sorted(mid_fills, key=_saturation, reverse=True)
+    accent = saturated[0] if saturated else (ordered[-1] if len(ordered) > 1 else None)
 
     return {
         "background": background,

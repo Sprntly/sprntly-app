@@ -736,7 +736,7 @@ async def generate_prototype(
         try:
             from app.connectors.figma_oauth import fetch_file as _fetch_file
             from app.design_agent.tools import _extract_palette_summary
-            _file_doc = await asyncio.to_thread(_fetch_file, figma_access_token, figma_file_key)
+            _file_doc = await asyncio.to_thread(_fetch_file, figma_access_token, figma_file_key, 10)
             _palette = _extract_palette_summary(_file_doc)
             if _palette and _palette.get("background"):
                 virtual_fs["src/index.css"] = _render_palette_css(_palette)
