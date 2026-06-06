@@ -258,6 +258,29 @@ def _step_label(iters: int, mode: str) -> str:  # noqa: ARG001 — mode reserved
     return _STEP_LABELS[idx]
 
 
+# Per-tool step labels emitted BEFORE each tool dispatch so the frontend sees
+# what the agent is doing at the granularity of individual tool calls. Each
+# entry is a callable receiving the tool's `input` dict and returning a string.
+# Tools not listed fall back to "Running <name>". These labels appear in the
+# left-panel activity stream (SSE `kind:"step"` events).
+_TOOL_LABEL: dict[str, object] = {
+    "write": lambda args: f"Writing {args.get('path', 'file')}",
+    "line_replace": lambda args: f"Editing {args.get('path', 'file')}",
+    "read": lambda args: f"Reading {args.get('path', 'file')}",
+    "search": lambda args: "Searching codebase",
+    "fetch_figma": lambda args: "Fetching Figma assets",
+    "clarifying_question": lambda args: "Pausing — agent has a question",
+    "propose_prd_patch": lambda args: "Proposing PRD update",
+    "read_console": lambda args: "Reading console output",
+}
+
+
+def _tool_step_label(name: str, args: dict) -> str:
+    """Return a human-readable label for a tool call, for the SSE activity stream."""
+    fn = _TOOL_LABEL.get(name)
+    return fn(args) if callable(fn) else f"Running {name}"
+
+
 async def agent_loop(
     system_blocks: list[dict[str, Any]],
     user_message: dict[str, Any],
@@ -463,6 +486,20 @@ async def agent_loop(
             if patch:
                 await dispatch(patch["name"], patch.get("input") or {}, ctx, allowed_tool_names)
                 return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
+
+            # Emit a per-tool step event BEFORE dispatch so the frontend
+            # activity stream shows what the agent is about to do at tool
+            # granularity (not just the coarse per-iteration label above).
+            # Advisory/non-blocking — a publish failure never alters loop behaviour.
+            for tu in tool_uses:
+                publish_step(
+                    ctx.prototype_id,
+                    {
+                        "kind": "step",
+                        "text": _tool_step_label(tu.get("name", ""), tu.get("input") or {}),
+                        "state": "active",
+                    },
+                )
 
             results = await asyncio.gather(*[
                 dispatch(tu["name"], tu.get("input") or {}, ctx, allowed_tool_names)

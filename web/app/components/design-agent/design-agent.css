@@ -2449,3 +2449,26 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ── Iterate-running sidebar indicators (visible agent streaming) ────────────
+ * "Working…" pill in the left-sidebar header while an iterate is live.
+ * `.is-running` on `.da-left` grows the activity section and compresses the
+ * PRD scroll so both are comfortably visible during a run.
+ * Token-only — no hex literals. */
+.design-agent-surface .da-left-running-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 500;
+  opacity: 0.85;
+}
+.design-agent-surface .da-left.is-running .da-left-scroll {
+  flex: 1 1 0;
+  max-height: 55%;
+}
+.design-agent-surface .da-left.is-running .da-left-activity {
+  flex-shrink: 0;
+  min-height: 120px;
+}

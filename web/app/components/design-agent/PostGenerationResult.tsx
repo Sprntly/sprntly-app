@@ -24,7 +24,7 @@
  * introduced.
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { CompletionBar } from "./CompletionBar"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
 import { PrototypeViewer, type Platform } from "./PrototypeViewer"
@@ -301,6 +301,11 @@ export type PostGenerationResultViewProps = {
    *  Keyed by pin.n; when present overrides the static xPct/yPct so pins track
    *  the DOM element they were placed on across scroll and resize events. */
   computedPinPositions?: Record<number, { xPct: number; yPct: number }>
+  /** Ref forwarded from the container so the activity-scroll useEffect (which
+   *  can only live in a client component) can scrollIntoView the activity section
+   *  when the first SSE event arrives. Threaded through the pure view without a
+   *  hook so the view stays SSR-renderable. */
+  leftPanelRef?: RefObject<HTMLDivElement | null>
 }
 
 /**
@@ -939,6 +944,7 @@ export function PostGenerationResultView({
   onPinIterate,
   bundleReloadNonce = 0,
   computedPinPositions = {},
+  leftPanelRef,
 }: PostGenerationResultViewProps) {
   // cache-bust the iframe src so a
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
@@ -1050,13 +1056,20 @@ export function PostGenerationResultView({
       >
         {/* LEFT collapsible sidebar — PRD (top, scrollable) + iterate (bottom). */}
         <aside
-          className={`da-left${leftOpen ? "" : " collapsed"}`}
+          ref={leftPanelRef}
+          className={`da-left${leftOpen ? "" : " collapsed"}${iterateRunning ? " is-running" : ""}`}
           data-testid="da-left"
         >
           <div className="da-left-top">
             <span className="da-left-title">
               {prdTitle || "PRD"}
             </span>
+            {iterateRunning && (
+              <span className="da-left-running-pill" aria-live="polite">
+                <span className="da-activity-spinner" aria-hidden="true" />
+                Working…
+              </span>
+            )}
             <button
               type="button"
               className="da-left-handle"
@@ -1410,6 +1423,7 @@ export function PostGenerationResult({
   const [pins, setPins] = useState<PinComment[]>([])
   const pinCounter = useRef<number>(0)
   const [computedPinPositions, setComputedPinPositions] = useState<Record<number, { xPct: number; yPct: number }>>({})
+  const leftPanelRef = useRef<HTMLDivElement>(null)
 
   const recomputePinPositions = useCallback(() => {
     const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
@@ -1460,6 +1474,18 @@ export function PostGenerationResult({
   useEffect(() => {
     if (!markMode) clearElementHighlight()
   }, [markMode])
+
+  // Scroll to the activity section when the FIRST SSE event arrives so the
+  // user sees the stream without having to scroll. Only fires on the transition
+  // from 0 → 1 events (length === 1). The leftPanelRef is attached to the
+  // `.da-left` aside via the pure view; the activityEl query finds `.da-left-activity`
+  // within it, matching the ActivityPanel mount point.
+  useEffect(() => {
+    if ((iterateActivity?.length ?? 0) === 1) {
+      const activityEl = leftPanelRef.current?.querySelector('.da-left-activity')
+      activityEl?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [iterateActivity?.length])
 
   function toggleMark() {
     setMarkMode((on) => {
@@ -1697,6 +1723,7 @@ export function PostGenerationResult({
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
       computedPinPositions={computedPinPositions}
+      leftPanelRef={leftPanelRef}
     />
   )
 }

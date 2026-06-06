@@ -164,6 +164,12 @@ export function useIterateRun({
           es.onmessage = (e) => {
             try {
               const event = JSON.parse(e.data) as ActivityEventInput
+              // Dedup: when a new step arrives while the previous one is still
+              // "active", flip it to "done" first so the activity list never
+              // accumulates two concurrent spinners (rapid backend step events).
+              if (event.kind === "step" && event.state === "active") {
+                markLastStepDone()
+              }
               appendActivity(event)
               if (event.kind === "done" || event.kind === "error") {
                 es.close()
