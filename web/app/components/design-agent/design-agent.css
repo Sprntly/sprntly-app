@@ -107,33 +107,20 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  padding: 12px 13px;
+  padding: 10px 12px;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .design-agent-surface .comment-thread:hover { border-color: var(--line-strong); }
 .design-agent-surface .comment--resolved { opacity: 0.72; }
 .design-agent-surface .comment--orphaned { border-style: dashed; border-color: var(--warn); }
-.design-agent-surface .comment-pin {
-  width: 20px;
-  height: 20px;
-  background: var(--accent);
-  color: var(--surface-2);
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  font-weight: 700;
-  font-family: var(--font-mono);
-  flex-shrink: 0;
-}
+.design-agent-surface .comment-pin { display: none; }
 .design-agent-surface .comment-pin--resolved { background: var(--ink-3); }
 .design-agent-surface .comment-pin-extra { font-size: 10.5px; color: var(--muted); margin-left: 6px; }
 .design-agent-surface .comment-body {
   font-size: 13px;
   color: var(--ink-2);
   line-height: 1.55;
-  margin: 6px 0 9px;
+  margin: 4px 0 6px;
 }
 .design-agent-surface .comment-meta {
   display: flex;
@@ -145,7 +132,6 @@
 .design-agent-surface .comment-author { color: var(--ink); font-weight: 600; }
 .design-agent-surface .comment-timestamp { color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; }
 .design-agent-surface .comment-resolve-btn { padding: 4px 10px; font-size: 12px; }
-.design-agent-surface .comment-apply-btn { padding: 4px 10px; font-size: 12px; }
 
 /* ── Comment composer (CommentsPanel) ─────────────────────────────────── */
 .design-agent-surface .comment-composer {
@@ -1998,15 +1984,42 @@
 }
 
 /* CHANGE C — Apply / Ignore action row in CommentsPanel threads. */
+.design-agent-surface .comment-apply-btn,
+.design-agent-surface .comment-ignore-btn {
+  all: unset;
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid transparent;
+  line-height: 1.4;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.design-agent-surface .comment-apply-btn {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border-color: var(--accent-alpha-18);
+}
+.design-agent-surface .comment-apply-btn:hover {
+  background: var(--accent);
+  color: var(--surface);
+  border-color: var(--accent);
+}
+.design-agent-surface .comment-ignore-btn {
+  background: transparent;
+  color: var(--ink-3);
+  border-color: var(--line-strong);
+}
+.design-agent-surface .comment-ignore-btn:hover {
+  color: var(--ink);
+  border-color: var(--ink-3);
+}
 .design-agent-surface .comment-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
-}
-.design-agent-surface .comment-ignore-btn,
-.design-agent-surface .comment-apply-btn {
-  padding: 4px 10px;
-  font-size: 12px;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
 }
 
 /* CHANGE B/C — pin-comment author row + resolved state (David's `.resolved`). */

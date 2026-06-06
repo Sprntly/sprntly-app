@@ -154,6 +154,7 @@ export function ApproveModal() {
     setApplyTarget(null)
     setUrlPrdSections(undefined)
     setUrlPrdTitle(null)
+    urlResolvedIdRef.current = null
     // Leave the canvas route so the URL and view stay consistent and the
     // resolver does not immediately re-open the canvas. The canvas opens from
     // the approved PRD, so the PRD is its logical parent.

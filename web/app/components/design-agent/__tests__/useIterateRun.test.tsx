@@ -222,10 +222,10 @@ describe("useIterateRun — terminal state follows the real poll, not a timer", 
     // And it is the LAST thing in the stream — it follows the working step,
     // never precedes the resolution.
     expect(activity[activity.length - 1].kind).toBe("done")
-    // At least one step is present (the fallback "Working…" placeholder).
-    // When SSE is unavailable (token=null in this test), no additional steps
-    // arrive from the backend — the poll fallback still resolves correctly.
-    expect(activity.filter((e) => e.kind === "step").length).toBeGreaterThanOrEqual(1)
+    // No pre-appended step when SSE is unavailable (token=null in this test);
+    // the first step comes from the backend SSE stream, not a client placeholder.
+    // When SSE is unavailable the activity has user + done only.
+    expect(activity.filter((e) => e.kind === "step").length).toBe(0)
     expect(onComplete).toHaveBeenCalledTimes(1)
     expect(onComplete.mock.calls[0][0].status).toBe("ready")
   })

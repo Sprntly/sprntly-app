@@ -857,6 +857,45 @@ function FullscreenOverlay({
   )
 }
 
+/**
+ * Client-only wrapper for the `.da-left-activity` panel. Owns the scroll
+ * sentinel ref so the pure `PostGenerationResultView` stays SSR-renderable
+ * (no hooks in the pure view itself). Scrolls the sentinel into view whenever
+ * `iterateActivity` grows so the latest step is always visible.
+ */
+function ActivityPanel({
+  iterateActivity,
+  iterateRunning,
+  iteratePendingQuestion,
+  onAnswerQuestion,
+}: {
+  iterateActivity: import("./useIterateRun").ActivityEvent[]
+  iterateRunning: boolean
+  iteratePendingQuestion: import("../../lib/api").PendingQuestion | null
+  onAnswerQuestion?: (answer: string) => void | Promise<void>
+}) {
+  const activityEndRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    activityEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [iterateActivity])
+  return (
+    <div className="da-left-activity" data-testid="da-canvas-activity">
+      <IterateActivityStream
+        activity={iterateActivity}
+        running={iterateRunning}
+      />
+      {iteratePendingQuestion && onAnswerQuestion && (
+        <InlineClarifyAnswer
+          question={iteratePendingQuestion}
+          busy={iterateRunning}
+          onAnswer={onAnswerQuestion}
+        />
+      )}
+      <div ref={activityEndRef} />
+    </div>
+  )
+}
+
 /** Pure presentational view — no I/O of its own → SSR-renderable in node-env
  *  vitest. The container threads live `isComplete` + the `onStateChange`
  *  handler into it. */
@@ -1052,19 +1091,12 @@ export function PostGenerationResultView({
               pauses on a clarifying question, the INLINE answer surface renders
               right here in the stream (not detached) and continues the iterate. */}
           {(iterateActivity.length > 0 || iteratePendingQuestion) && (
-            <div className="da-left-activity" data-testid="da-canvas-activity">
-              <IterateActivityStream
-                activity={iterateActivity}
-                running={iterateRunning}
-              />
-              {iteratePendingQuestion && onAnswerQuestion && (
-                <InlineClarifyAnswer
-                  question={iteratePendingQuestion}
-                  busy={iterateRunning}
-                  onAnswer={onAnswerQuestion}
-                />
-              )}
-            </div>
+            <ActivityPanel
+              iterateActivity={iterateActivity}
+              iterateRunning={iterateRunning}
+              iteratePendingQuestion={iteratePendingQuestion}
+              onAnswerQuestion={onAnswerQuestion}
+            />
           )}
           {/* the prop-driven
               clarifying surface (from a prototype row that already carried a

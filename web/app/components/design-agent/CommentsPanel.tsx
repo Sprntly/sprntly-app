@@ -271,16 +271,6 @@ function CommentThread({
     >
       {/* Author + avatar + relative timestamp header. The avatar uses author initials, brand-tinted. */}
       <div className="comment-meta comment-meta-head">
-        {withPin && (
-          <span
-            className={`comment-pin${resolved ? " comment-pin--resolved" : ""}`}
-            data-testid={`comment-pin-${comment.id}`}
-            aria-hidden="true"
-          >
-            {resolved ? "✓" : "●"}
-            {pinExtra && <span className="comment-pin-extra">{pinExtra}</span>}
-          </span>
-        )}
         <CommentAvatar author={comment.author} />
         <span className="comment-author proto-comment-au">{comment.author}</span>
         <time
