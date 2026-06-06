@@ -627,11 +627,39 @@ def _extract_palette_summary(file_doc: dict) -> dict:
     saturated = sorted(mid_fills, key=_saturation, reverse=True)
     accent = saturated[0] if saturated else (ordered[-1] if len(ordered) > 1 else None)
 
+    # After collecting fills, also collect typography from TEXT nodes
+    fonts: dict[str, set[int]] = {}  # fontFamily → set of fontWeights
+
+    def _walk_text(node: object) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "TEXT":
+            style = node.get("style", {})
+            family = style.get("fontFamily")
+            weight = style.get("fontWeight")
+            if family:
+                fonts.setdefault(family, set())
+                if isinstance(weight, (int, float)):
+                    fonts[family].add(int(weight))
+        for child in (node.get("children") or []):
+            _walk_text(child)
+
+    try:
+        _walk_text(file_doc.get("document", {}))
+    except Exception:
+        pass
+
+    # Dominant font = most-used family; collect its weights sorted
+    dominant_font = max(fonts, key=lambda f: len(fonts[f])) if fonts else None
+    dominant_weights = sorted(fonts.get(dominant_font, set())) if dominant_font else []
+
     return {
         "background": background,
         "accent": accent,
         "is_dark": is_dark,
         "swatches": ordered[:12],
+        "font_family": dominant_font,        # e.g. "Inter"
+        "font_weights": dominant_weights,    # e.g. [400, 700]
     }
 
 

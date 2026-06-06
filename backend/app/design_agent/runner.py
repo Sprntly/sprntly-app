@@ -276,7 +276,28 @@ def _render_palette_css(palette: dict) -> str:
     # muted: third swatch or similar
     muted = swatches[2] if len(swatches) > 2 else surface
 
-    return f"""/* Design source palette — generated from Figma file */
+    font_family = palette.get("font_family")
+    font_weights = palette.get("font_weights") or [400, 700]
+
+    # Generate Google Fonts import for web-safe fonts
+    # Only for common Google Fonts — fall back to system stack for others
+    GOOGLE_FONTS = {
+        "Inter", "Roboto", "Open Sans", "Lato", "Montserrat", "Poppins",
+        "Source Sans Pro", "Nunito", "Raleway", "Playfair Display",
+        "Merriweather", "PT Sans", "Ubuntu", "DM Sans", "Plus Jakarta Sans",
+    }
+
+    font_import = ""
+    font_stack = "ui-sans-serif, system-ui, sans-serif"
+    if font_family and font_family in GOOGLE_FONTS:
+        weights_str = ";".join(str(w) for w in sorted(set(font_weights or [400, 700])))
+        font_import = f'@import url("https://fonts.googleapis.com/css2?family={font_family.replace(" ", "+")}:wght@{weights_str}&display=swap");\n'
+        font_stack = f'"{font_family}", ui-sans-serif, system-ui, sans-serif'
+    elif font_family:
+        # Non-Google font — use it optimistically in the stack (may fall through)
+        font_stack = f'"{font_family}", ui-sans-serif, system-ui, sans-serif'
+
+    return f"""{font_import}/* Design source palette — generated from Figma file */
 /* DO NOT replace the :root block; use var(--background) etc. in all components */
 :root {{
   --background: {bg};
@@ -294,12 +315,13 @@ def _render_palette_css(palette: dict) -> str:
   --border: {fg}22;
   --input: {fg}22;
   --ring: {accent};
+  --font-sans: {font_stack};
 }}
 
 body {{
   background-color: var(--background);
   color: var(--foreground);
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
 }}
 """
 

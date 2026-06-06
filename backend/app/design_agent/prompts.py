@@ -156,6 +156,8 @@ MANDATORY:
   use only the palette variables from `src/index.css`.
 - If the source palette is DARK (`--background` is a dark hex), write a DARK app
   (dark backgrounds, light text). Never invert the palette's dark/light character.
+- Use `var(--font-sans)` (defined in `src/index.css`) as the body and heading
+  font-family. Do NOT hardcode font-family or load additional fonts.
 
 DO NOT use direct grayscale (text-white, text-black, bg-white) when a
 semantic token serves — `text-slate-900` reads as `text-foreground` to the
