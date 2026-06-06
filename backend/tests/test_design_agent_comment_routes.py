@@ -94,6 +94,7 @@ CREATE TABLE prototype_comments (
     pin_x_pct          REAL,
     pin_y_pct          REAL,
     resolved_anchor_id TEXT,
+    user_id            TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
 );

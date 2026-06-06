@@ -1400,6 +1400,7 @@ def post_comment(
         anchor_id=body.anchor_id,
         body=body.body,
         author=company.user_name or company.user_email or company.user_id,
+        user_id=company.user_id,
         pin_x_pct=body.pin_x_pct,
         pin_y_pct=body.pin_y_pct,
         resolved_anchor_id=body.resolved_anchor_id,

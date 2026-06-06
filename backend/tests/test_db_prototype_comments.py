@@ -44,7 +44,8 @@ CREATE TABLE prototype_comments (
     resolved_at   TEXT,
     pin_x_pct          REAL,
     pin_y_pct          REAL,
-    resolved_anchor_id TEXT
+    resolved_anchor_id TEXT,
+    user_id            TEXT
 );
 """
 
