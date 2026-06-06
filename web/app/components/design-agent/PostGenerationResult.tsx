@@ -1421,14 +1421,18 @@ export function PostGenerationResult({
 
   // Drop a numbered pin at the clicked stage location + open its comment composer.
   function handleStageClick(xPct: number, yPct: number, _viewportX: number, _viewportY: number, anchor: { type: 'anchor-id' | 'xpath'; value: string } | null) {
+    const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+    const resolvedPos = anchor ? getAnchorPosition(iframe, anchor) : null
+    const finalXPct = resolvedPos?.xPct ?? xPct
+    const finalYPct = resolvedPos?.yPct ?? yPct
     pinCounter.current += 1
     const n = pinCounter.current
     setPins((prev) => [
       ...prev,
-      { n, xPct, yPct, anchor, draft: "", body: "", saved: false, busy: false, error: null },
+      { n, xPct: finalXPct, yPct: finalYPct, anchor, draft: "", body: "", saved: false, busy: false, error: null },
     ])
     setCommentsOpen(true)
-    setMarkMode(false) // David exits mark mode per pin
+    setMarkMode(false)
     clearElementHighlight()
   }
 

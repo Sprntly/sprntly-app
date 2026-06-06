@@ -67,8 +67,8 @@ export function getAnchorPosition(
     const ir = iframe!.getBoundingClientRect()
     const er = el.getBoundingClientRect()
     return {
-      xPct: Math.max(0, Math.min(100, ((er.left - ir.left + er.width / 2) / ir.width) * 100)),
-      yPct: Math.max(0, Math.min(100, ((er.top - ir.top + er.height / 2) / ir.height) * 100)),
+      xPct: Math.max(0, Math.min(100, ((er.left + er.width / 2) / ir.width) * 100)),
+      yPct: Math.max(0, Math.min(100, ((er.top + er.height / 2) / ir.height) * 100)),
     }
   } catch { return null }
 }
