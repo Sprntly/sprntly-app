@@ -109,6 +109,11 @@ def test_state_omits_return_to_when_not_provided(name, mod, _, isolated_settings
 
 def _env_for_provider(name: str, monkeypatch):
     """Set the env vars each provider checks via `*_configured()`."""
+    # Callback paths encrypt the token before storing — a Fernet key must be
+    # present (every other connector test file sets one; relying on leakage
+    # from earlier tests breaks under reordering).
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     common = {
         "CLICKUP_CLIENT_ID": "x",
         "CLICKUP_CLIENT_SECRET": "x",
@@ -140,7 +145,7 @@ def test_start_oauth_accepts_safe_return_to_and_signs_into_state(
 ):
     _env_for_provider("figma", monkeypatch)
     import importlib, sys
-    for name in ("app.config", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
+    for name in ("app.config", "app.connectors.tokens", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
         if name in sys.modules:
             importlib.reload(sys.modules[name])
 
@@ -163,7 +168,7 @@ def test_start_oauth_accepts_safe_return_to_and_signs_into_state(
 def test_start_oauth_rejects_unsafe_return_to(isolated_settings, monkeypatch):
     _env_for_provider("figma", monkeypatch)
     import importlib, sys
-    for name in ("app.config", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
+    for name in ("app.config", "app.connectors.tokens", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
         if name in sys.modules:
             importlib.reload(sys.modules[name])
 
@@ -179,7 +184,7 @@ def test_start_oauth_works_without_return_to(isolated_settings, monkeypatch):
     """Back-compat — Settings page calls don't pass return_to, must still work."""
     _env_for_provider("figma", monkeypatch)
     import importlib, sys
-    for name in ("app.config", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
+    for name in ("app.config", "app.connectors.tokens", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
         if name in sys.modules:
             importlib.reload(sys.modules[name])
 
@@ -198,7 +203,7 @@ def test_callback_redirects_to_return_to_when_state_carries_it(
     the page they came from (not always /settings)."""
     _env_for_provider("figma", monkeypatch)
     import importlib, sys
-    for name in ("app.config", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
+    for name in ("app.config", "app.connectors.tokens", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
         if name in sys.modules:
             importlib.reload(sys.modules[name])
 
@@ -221,7 +226,7 @@ def test_callback_redirects_to_return_to_when_state_carries_it(
             params={"code": "abc", "state": state},
             follow_redirects=False,
         )
-    assert r.status_code == 307
+    assert r.status_code == 307, r.text
     location = r.headers["location"]
     assert "/onboarding/4" in location
     assert "connected=figma" in location
@@ -234,7 +239,7 @@ def test_callback_falls_back_to_settings_when_state_has_no_return_to(
     return_to means "go to /settings"."""
     _env_for_provider("figma", monkeypatch)
     import importlib, sys
-    for name in ("app.config", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
+    for name in ("app.config", "app.connectors.tokens", "app.connectors.figma_oauth", "app.routes.connectors", "app.main"):
         if name in sys.modules:
             importlib.reload(sys.modules[name])
 
@@ -255,7 +260,7 @@ def test_callback_falls_back_to_settings_when_state_has_no_return_to(
             params={"code": "abc", "state": state},
             follow_redirects=False,
         )
-    assert r.status_code == 307
+    assert r.status_code == 307, r.text
     location = r.headers["location"]
     assert "section=connectors" in location
     assert "connected=figma" in location
