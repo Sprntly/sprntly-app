@@ -855,6 +855,7 @@
 .design-agent-surface .proto-fullscreen-close:hover {
   background: var(--surface-3);
 }
+.design-agent-surface .proto-fullscreen:fullscreen .proto-frame-head { display: none; }
 
 
 /* ── Passcode gate states (PasscodeGate / UX-8 / P6-18) ───────────────────

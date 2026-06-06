@@ -779,6 +779,56 @@ function InlineClarifyAnswer({
   )
 }
 
+function FullscreenOverlay({
+  bundleUrl,
+  isComplete,
+  onCloseFullscreen,
+}: {
+  bundleUrl: string
+  isComplete: boolean
+  onCloseFullscreen?: () => void
+}) {
+  const fullscreenRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (fullscreenRef.current) {
+      fullscreenRef.current.requestFullscreen().catch(() => {})
+    }
+  }, [])
+
+  useEffect(() => {
+    const handler = () => {
+      if (!document.fullscreenElement) onCloseFullscreen?.()
+    }
+    document.addEventListener('fullscreenchange', handler)
+    return () => document.removeEventListener('fullscreenchange', handler)
+  }, [onCloseFullscreen])
+
+  return (
+    <div
+      ref={fullscreenRef}
+      className="proto-fullscreen"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Prototype full screen"
+      data-testid="proto-fullscreen"
+    >
+      <button
+        type="button"
+        className="proto-fullscreen-close"
+        aria-label="Close full screen"
+        data-testid="proto-fullscreen-close"
+        onClick={() => { document.exitFullscreen().catch(() => {}); onCloseFullscreen?.() }}
+      >
+        ×
+      </button>
+      <div className="proto-fullscreen-body">
+        <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} hideToggle />
+      </div>
+    </div>
+  )
+}
+
 /** Pure presentational view — no I/O of its own → SSR-renderable in node-env
  *  vitest. The container threads live `isComplete` + the `onStateChange`
  *  handler into it. */
@@ -1225,26 +1275,11 @@ export function PostGenerationResultView({
           only while open AND a bundle exists; the inline viewer is unmounted while
           it is open (selector-collision guard above). */}
       {fullscreenOpen && bundleUrl && (
-        <div
-          className="proto-fullscreen"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Prototype full screen"
-          data-testid="proto-fullscreen"
-        >
-          <button
-            type="button"
-            className="proto-fullscreen-close"
-            aria-label="Close full screen"
-            data-testid="proto-fullscreen-close"
-            onClick={() => onCloseFullscreen?.()}
-          >
-            ×
-          </button>
-          <div className="proto-fullscreen-body">
-            <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} />
-          </div>
-        </div>
+        <FullscreenOverlay
+          bundleUrl={bundleUrl}
+          isComplete={isComplete}
+          onCloseFullscreen={onCloseFullscreen}
+        />
       )}
     </div>
   )
