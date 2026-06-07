@@ -75,10 +75,10 @@ logger = logging.getLogger(__name__)
 MODEL = "claude-sonnet-4-6"  # AD2; NEVER claude-sonnet-4-7
 DEFAULT_MAX_ITERS = 40
 try:
-    DEFAULT_MAX_TOKENS = int(os.environ.get("DESIGN_AGENT_MAX_TOKENS", "4096"))
+    DEFAULT_MAX_TOKENS = int(os.environ.get("DESIGN_AGENT_MAX_TOKENS", "12000"))
 except ValueError:
-    logger.warning("DESIGN_AGENT_MAX_TOKENS is not a valid integer; falling back to 4096")
-    DEFAULT_MAX_TOKENS = 4096
+    logger.warning("DESIGN_AGENT_MAX_TOKENS is not a valid integer; falling back to 12000")
+    DEFAULT_MAX_TOKENS = 12000
 TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
 
 # ── Pre-flight cost estimate (AD14 / AD15, P3-11) ────────────────────────────
