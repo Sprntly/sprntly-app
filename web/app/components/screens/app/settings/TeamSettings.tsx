@@ -375,7 +375,7 @@ function Avatar({
   }
   const palette = avatarPalette(seed)
   const style = muted
-    ? { background: "var(--surface-2, #F0F2F0)", color: "#828D87" }
+    ? { background: "var(--surface-3)", color: "var(--ink-3)" }
     : { background: palette.bg, color: palette.fg, border: `1px solid ${palette.border}` }
   return (
     <span className="set-team-row-av" style={style}>
@@ -450,21 +450,26 @@ function initialsFor(
 
 /** Deterministic per-user color pick from a small palette. Matches the
  *  mockup's color vocabulary (brand/green/purple/blue/amber). */
+/** Maps a stable hash of a seed (user_id / email) to one of the 5 design-kit
+ *  semantic colour families. Returns CSS `var()` strings — the actual hexes
+ *  resolve from :root in globals.css, so the avatar honours any future
+ *  token tweaks without code change. Family mapping mirrors the design
+ *  system's agent colour pattern (brand / purple / blue / amber / red). */
 function avatarPalette(seed: string): {
   bg: string
   fg: string
   border: string
 } {
-  const palettes = [
-    { bg: "#DBF1E7", fg: "#0E6E49", border: "#9BDCC1" }, // brand/green
-    { bg: "#EAE4F5", fg: "#634AB0", border: "#C8B8E5" }, // purple
-    { bg: "#E4EEFB", fg: "#1F5AB6", border: "#B8CFEF" }, // blue
-    { bg: "#F9EBD3", fg: "#C16A0B", border: "#F0BF73" }, // amber
-    { bg: "#FBE0E0", fg: "#B0314A", border: "#EFB8C0" }, // rose
+  const families = [
+    { bg: "var(--accent-soft)", fg: "var(--accent-ink)", border: "var(--accent-2)" },
+    { bg: "var(--purple-soft)", fg: "var(--purple)", border: "var(--purple-border)" },
+    { bg: "var(--info-soft)", fg: "var(--info)", border: "var(--info-border)" },
+    { bg: "var(--warn-soft)", fg: "var(--warn)", border: "var(--warn-border)" },
+    { bg: "var(--danger-soft)", fg: "var(--danger)", border: "var(--danger-border)" },
   ]
   let hash = 0
   for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) | 0
-  return palettes[Math.abs(hash) % palettes.length]
+  return families[Math.abs(hash) % families.length]
 }
 
 function formatSent(iso: string | null): string {
