@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import Link from "next/link"
 import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
 import {
@@ -12,6 +11,8 @@ import {
   validateWorkEmail,
 } from "../lib/auth-validation"
 import { publicPath } from "../lib/public-path"
+import { AuthShell } from "../components/auth/AuthShell"
+import { SignInView } from "../components/auth/SignInView"
 
 export default function SignInPage() {
   const auth = useAuth()
@@ -83,28 +84,48 @@ export default function SignInPage() {
     }
   }
 
+  async function onGoogle() {
+    setError(null)
+    try {
+      await auth.signInWithGoogle()
+    } catch {
+      setError("Couldn't start Google sign-in. Try again.")
+    }
+  }
+
   if (auth.kind === "loading" || auth.kind === "authed") {
-    return <AuthShell>Loading…</AuthShell>
+    return (
+      <AuthShell tag="Sign in">
+        <div className="auth-sub">Loading…</div>
+      </AuthShell>
+    )
   }
 
   if (auth.kind === "unconfigured") {
     return (
-      <AuthShell>
-        <h1 className="ob-title">Sign-in not configured</h1>
-        <p className="ob-desc">Set Supabase env vars in web/.env.local</p>
+      <AuthShell tag="Sign in">
+        <div className="auth-h">Sign-in <em>not configured.</em></div>
+        <div className="auth-sub">Set Supabase env vars in web/.env.local</div>
       </AuthShell>
     )
   }
 
   if (forgotSent) {
     return (
-      <AuthShell>
-        <h1 className="ob-title">Check your email</h1>
-        <p className="ob-desc">
-          If an account exists for <strong>{email}</strong>, you&apos;ll receive a reset
-          link shortly.
-        </p>
-        <button type="button" className="btn btn-primary btn-block btn-lg" onClick={() => { setForgotMode(false); setForgotSent(false) }}>
+      <AuthShell tag="Reset password">
+        <div className="auth-h">Check your <em>email.</em></div>
+        <div className="auth-sub">
+          If an account exists for <strong>{email}</strong>, you&apos;ll receive a reset link
+          shortly.
+        </div>
+        <button
+          type="button"
+          className="btn btn-brand btn-block"
+          onClick={() => {
+            setForgotMode(false)
+            setForgotSent(false)
+          }}
+        >
           Back to sign in
         </button>
       </AuthShell>
@@ -112,105 +133,23 @@ export default function SignInPage() {
   }
 
   return (
-    <AuthShell>
-      <div className="ob-eyebrow">Welcome back</div>
-      <h1 className="ob-title">Welcome back.</h1>
-      <p className="ob-desc">Sign in to your workspace to pick up where you left off.</p>
-
-      <form onSubmit={forgotMode ? onForgot : onSignIn}>
-        <div className="field">
-          <label className="field-label" htmlFor="email">Work email</label>
-          <input
-            id="email"
-            type="email"
-            className="input"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-            required
-          />
-        </div>
-        {!forgotMode && (
-          <div className="field">
-            <label className="field-label" htmlFor="password">Password</label>
-            <div className="pw-row">
-              <input
-                id="password"
-                type={showPassword ? "text" : "password"}
-                className="input"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-              />
-              <button type="button" className="btn btn-ghost btn-sm pw-toggle" onClick={() => setShowPassword((v) => !v)}>
-                {showPassword ? "Hide" : "Show"}
-              </button>
-            </div>
-          </div>
-        )}
-        {lockoutMs > 0 && (
-          <div className="auth-error">
-            Too many attempts. Try again in {Math.ceil(lockoutMs / 60000)} min.
-          </div>
-        )}
-        {error && <div className="auth-error">{error}</div>}
-        <button
-          type="submit"
-          className="btn btn-primary btn-block btn-lg"
-          disabled={submitting || lockoutMs > 0}
-        >
-          {submitting ? "…" : forgotMode ? "Send reset link" : "Sign in"}
-        </button>
-      </form>
-
-      {!forgotMode ? (
-        <p className="auth-switch">
-          <button type="button" className="link-btn" onClick={() => setForgotMode(true)}>
-            Forgot password?
-          </button>
-          {" · "}
-          <Link href="/sign-up">Create account</Link>
-        </p>
-      ) : (
-        <p className="auth-switch">
-          <button type="button" className="link-btn" onClick={() => setForgotMode(false)}>
-            Back to sign in
-          </button>
-        </p>
-      )}
-
-      <p className="auth-legal">
-        <Link href={publicPath("/terms")}>Terms</Link> · <Link href={publicPath("/privacy")}>Privacy</Link>
-      </p>
-
-      <style jsx>{`
-        .pw-row { display: flex; gap: 8px; align-items: center; }
-        .pw-row :global(.input) { flex: 1; }
-        .pw-toggle { flex-shrink: 0; }
-        .auth-error { color: #c0392b; font-size: 13px; padding: 8px 12px; background: rgba(192,57,43,0.08); border-radius: 8px; margin-bottom: 12px; }
-        .auth-switch { text-align: center; font-size: 13px; color: var(--ink-3); margin-top: 18px; }
-        .auth-switch :global(a), .link-btn { color: var(--accent-hover); font-weight: 600; background: none; border: none; cursor: pointer; font: inherit; text-decoration: none; padding: 0; }
-        .auth-switch :global(a:hover), .link-btn:hover { text-decoration: underline; }
-        .auth-legal { text-align: center; font-size: 11.5px; color: var(--muted); margin-top: 16px; }
-        .auth-legal :global(a) { color: var(--ink-3); }
-      `}</style>
-    </AuthShell>
-  )
-}
-
-function AuthShell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="ob-shell">
-      <div className="auth-card">
-        <div className="ob-brand-mark">spr<span>ntly</span></div>
-        {children}
-      </div>
-      <style jsx>{`
-        .auth-card { width: 100%; max-width: 480px; }
-        .ob-brand-mark { font-family: var(--font-body); font-weight: 500; font-size: 22px; letter-spacing: -0.015em; margin-bottom: 48px; text-align: center; color: var(--ink); }
-        .ob-brand-mark :global(span) { color: var(--accent); }
-      `}</style>
-    </div>
+    <SignInView
+      email={email}
+      password={password}
+      showPassword={showPassword}
+      submitting={submitting}
+      error={error}
+      forgotMode={forgotMode}
+      lockoutMs={lockoutMs}
+      termsHref={publicPath("/terms")}
+      privacyHref={publicPath("/privacy")}
+      onEmailChange={setEmail}
+      onPasswordChange={setPassword}
+      onToggleShowPassword={() => setShowPassword((v) => !v)}
+      onSubmit={forgotMode ? onForgot : onSignIn}
+      onGoogle={onGoogle}
+      onEnterForgot={() => setForgotMode(true)}
+      onExitForgot={() => setForgotMode(false)}
+    />
   )
 }

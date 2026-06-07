@@ -2,34 +2,22 @@
 
 import { Suspense, useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import Link from "next/link"
 import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
-import { PasswordStrengthBar } from "../components/auth/PasswordStrengthBar"
-import {
-  validatePassword,
-  validateWorkEmail,
-} from "../lib/auth-validation"
+import { validatePassword, validateWorkEmail } from "../lib/auth-validation"
 import { publicPath } from "../lib/public-path"
-
-// Roles from design-v4 page 03 ("Who are you?"). Captured at sign-up so
-// the workspace can tailor itself to how the PM works.
-const V4_ROLES = [
-  "Founder / CEO",
-  "Product Manager",
-  "Head of Product / CPO",
-  "Engineering",
-  "Data / Analytics",
-  "Design / UX",
-  "Customer Success",
-  "Marketing",
-  "Operations",
-  "Other",
-] as const
+import { AuthShell } from "../components/auth/AuthShell"
+import { SignUpStep1View, SignUpStep2View } from "../components/auth/SignUpView"
 
 export default function SignUpPage() {
   return (
-    <Suspense fallback={<div className="ob-shell">Loading…</div>}>
+    <Suspense
+      fallback={
+        <AuthShell tag="Create account">
+          <div className="auth-sub">Loading…</div>
+        </AuthShell>
+      }
+    >
       <SignUpForm />
     </Suspense>
   )
@@ -41,11 +29,17 @@ function SignUpForm() {
   const searchParams = useSearchParams()
   const prefillEmail = searchParams.get("email") ?? ""
 
+  // Two-step sign-up matching v4 pages 02 (credentials) + 03 (about you).
+  // Everything is collected in React state across both steps; the single
+  // signUpWithPassword call happens only at the end of step 2 — preserving
+  // the existing API contract (and interpretSignUpResponse handling).
+  const [step, setStep] = useState<1 | 2>(1)
+
   const [email, setEmail] = useState(prefillEmail)
   const [password, setPassword] = useState("")
   const [firstName, setFirstName] = useState("")
   const [lastName, setLastName] = useState("")
-  const [role, setRole] = useState("")
+  const [role, setRole] = useState("Product Manager")
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -56,13 +50,34 @@ function SignUpForm() {
     }
   }, [auth, router])
 
-  async function onSubmit(e: React.FormEvent) {
+  function onStep1(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
     const emailErr = validateWorkEmail(email)
-    if (emailErr) { setError(emailErr); return }
+    if (emailErr) {
+      setError(emailErr)
+      return
+    }
     const pwErr = validatePassword(password)
-    if (pwErr) { setError(pwErr); return }
+    if (pwErr) {
+      setError(pwErr)
+      return
+    }
+    setStep(2)
+  }
+
+  async function onGoogle() {
+    setError(null)
+    try {
+      await auth.signInWithGoogle()
+    } catch {
+      setError("Couldn't start Google sign-up. Try again.")
+    }
+  }
+
+  async function onCreate(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
     if (!firstName.trim() || !lastName.trim()) {
       setError("First and last name are required.")
       return
@@ -82,6 +97,7 @@ function SignUpForm() {
       })
       if (result === "already_registered") {
         setError("An account with this email already exists. Try signing in.")
+        setStep(1)
         return
       }
       if (result === "confirm_email") {
@@ -92,6 +108,7 @@ function SignUpForm() {
     } catch (e) {
       if (e instanceof AuthApiError && e.message.toLowerCase().includes("registered")) {
         setError("An account with this email already exists. Try signing in.")
+        setStep(1)
       } else {
         setError("Couldn't create your account. Try again in a moment.")
       }
@@ -101,94 +118,47 @@ function SignUpForm() {
   }
 
   if (auth.kind === "loading" || auth.kind === "authed") {
-    return <div className="ob-shell">Loading…</div>
+    return (
+      <AuthShell tag="Create account">
+        <div className="auth-sub">Loading…</div>
+      </AuthShell>
+    )
+  }
+
+  if (step === 2) {
+    return (
+      <SignUpStep2View
+        email={email}
+        firstName={firstName}
+        lastName={lastName}
+        role={role}
+        submitting={submitting}
+        error={error}
+        onFirstNameChange={setFirstName}
+        onLastNameChange={setLastName}
+        onRoleChange={setRole}
+        onSubmit={onCreate}
+        onBack={() => {
+          setError(null)
+          setStep(1)
+        }}
+      />
+    )
   }
 
   return (
-    <div className="ob-shell">
-      <div className="auth-card">
-        <div className="ob-brand-mark">spr<span>ntly</span></div>
-        <div className="ob-eyebrow">Create account</div>
-        <h1 className="ob-title">Create your account.</h1>
-        <p className="ob-desc">Start with the basics. We&apos;ll personalize the rest next.</p>
-
-        <form onSubmit={onSubmit}>
-          <div className="field-row">
-            <div className="field">
-              <label className="field-label">First name</label>
-              <input className="input" value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Sarah" maxLength={50} required />
-            </div>
-            <div className="field">
-              <label className="field-label">Last name</label>
-              <input className="input" value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Chen" maxLength={50} required />
-            </div>
-          </div>
-          <div className="field">
-            <label className="field-label">Work email</label>
-            <input type="email" className="input" value={email} onChange={(e) => setEmail(e.target.value)} required />
-          </div>
-          <div className="field">
-            <label className="field-label">Password</label>
-            <div className="pw-row">
-              <input
-                type={showPassword ? "text" : "password"}
-                className="input"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="new-password"
-                required
-              />
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowPassword((v) => !v)}>
-                {showPassword ? "Hide" : "Show"}
-              </button>
-            </div>
-            <PasswordStrengthBar password={password} />
-          </div>
-          <div className="field">
-            <label className="field-label">Your role</label>
-            <select
-              className="input"
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              required
-            >
-              <option value="" disabled>
-                Select your role
-              </option>
-              {V4_ROLES.map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
-              ))}
-            </select>
-          </div>
-          {error && <div className="auth-error">{error}</div>}
-          <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={submitting}>
-            {submitting ? "Creating account…" : "Create account"}
-          </button>
-        </form>
-
-        <p className="auth-switch">
-          Already have an account? <Link href="/sign-in">Sign in</Link>
-        </p>
-        <p className="auth-legal">
-          <Link href={publicPath("/terms")}>Terms</Link> · <Link href={publicPath("/privacy")}>Privacy</Link>
-        </p>
-      </div>
-
-      <style jsx>{`
-        .auth-card { width: 100%; max-width: 480px; }
-        .ob-brand-mark { font-family: var(--font-body); font-weight: 500; font-size: 22px; text-align: center; margin-bottom: 48px; }
-        .ob-brand-mark :global(span) { color: var(--accent); }
-        .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-        .pw-row { display: flex; gap: 8px; align-items: center; }
-        .pw-row :global(.input) { flex: 1; }
-        .auth-error { color: #c0392b; font-size: 13px; padding: 8px 12px; background: rgba(192,57,43,0.08); border-radius: 8px; margin-bottom: 12px; }
-        .auth-switch { text-align: center; font-size: 13px; color: var(--ink-3); margin-top: 18px; }
-        .auth-switch :global(a) { color: var(--ink); font-weight: 600; }
-        .auth-legal { text-align: center; font-size: 11.5px; color: var(--muted); margin-top: 16px; }
-        .auth-legal :global(a) { color: var(--ink-3); }
-      `}</style>
-    </div>
+    <SignUpStep1View
+      email={email}
+      password={password}
+      showPassword={showPassword}
+      error={error}
+      termsHref={publicPath("/terms")}
+      privacyHref={publicPath("/privacy")}
+      onEmailChange={setEmail}
+      onPasswordChange={setPassword}
+      onToggleShowPassword={() => setShowPassword((v) => !v)}
+      onSubmit={onStep1}
+      onGoogle={onGoogle}
+    />
   )
 }
