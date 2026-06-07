@@ -19,6 +19,8 @@ Figma file) fall back to the neutral baseline `DesignSystem` rather than raising
 """
 from __future__ import annotations
 
+import time
+
 from app.design_agent.design_system.extractors import RawSignals, registry
 from app.design_agent.design_system.models import (
     Colors,
@@ -245,12 +247,40 @@ class WebExtractor:
     category = "website"
     provider = "web"
 
-    def current_version(self, ref: str) -> str:
-        """Cheap staleness marker for a website. Not implemented in this pass —
-        an ETag / last-modified probe lands with the staleness logic."""
-        raise NotImplementedError(
-            "Website version probing is not implemented yet."
-        )
+    def current_version(self, ref: str) -> str | None:
+        """Return a cheap staleness marker for a website without rendering it."""
+        url = (ref or "").strip()
+        if not url:
+            return None
+
+        try:
+            from app.connectors import figma_oauth
+
+            resp = figma_oauth.requests.head(
+                url,
+                timeout=10,
+                allow_redirects=True,
+            )
+            if not resp.ok:
+                return None
+            headers = getattr(resp, "headers", {}) or {}
+
+            for header_name in ("ETag", "Last-Modified"):
+                marker = headers.get(header_name)
+                if isinstance(marker, str) and marker:
+                    return marker
+                if hasattr(headers, "items"):
+                    for key, value in headers.items():
+                        if (
+                            str(key).lower() == header_name.lower()
+                            and isinstance(value, str)
+                            and value
+                        ):
+                            return value
+        except Exception:
+            return None
+
+        return f"ttl-{int(time.time() // (30 * 86400))}"
 
     def extract_raw_signals(self, ref: str, sample: dict | None = None) -> RawSignals:
         """Capture a website's sampled design system into a `RawSignals` bag.

@@ -15,6 +15,7 @@ test_design_system_cache_flow.py.
 """
 from __future__ import annotations
 
+from app.connectors import figma_oauth
 from app.design_agent.design_system.adapters import FigmaExtractor, WebExtractor
 from app.design_agent.design_system.extractors import RawSignals, normalize, registry
 from app.design_agent.design_system.models import DesignSystem
@@ -150,11 +151,75 @@ def test_website_none_sample_falls_back_to_baseline():
     assert ds.confidence == "low"
 
 
-def test_website_current_version_not_implemented_yet():
-    import pytest
+class _FakeWebResp:
+    def __init__(self, headers: dict[str, str] | None = None, ok: bool = True):
+        self.ok = ok
+        self.headers = headers or {}
 
-    with pytest.raises(NotImplementedError):
+
+def test_website_current_version_returns_etag(monkeypatch):
+    calls: list[str] = []
+
+    def _fake_head(url, **kwargs):
+        calls.append(url)
+        assert kwargs["timeout"] == 10
+        assert kwargs["allow_redirects"] is True
+        return _FakeWebResp(
+            {"ETag": '"site-v1"', "Last-Modified": "Sun, 07 Jun 2026 12:00:00 GMT"}
+        )
+
+    monkeypatch.setattr(figma_oauth.requests, "head", _fake_head)
+
+    assert WebExtractor().current_version("https://acme.com") == '"site-v1"'
+    assert calls == ["https://acme.com"]
+
+
+def test_website_current_version_returns_last_modified_without_etag(monkeypatch):
+    def _fake_head(url, **kwargs):
+        return _FakeWebResp({"Last-Modified": "Sun, 07 Jun 2026 12:00:00 GMT"})
+
+    monkeypatch.setattr(figma_oauth.requests, "head", _fake_head)
+
+    assert (
         WebExtractor().current_version("https://acme.com")
+        == "Sun, 07 Jun 2026 12:00:00 GMT"
+    )
+
+
+def test_website_current_version_returns_stable_ttl_marker_without_headers(monkeypatch):
+    def _fake_head(url, **kwargs):
+        return _FakeWebResp({})
+
+    monkeypatch.setattr(figma_oauth.requests, "head", _fake_head)
+
+    first = WebExtractor().current_version("https://acme.com")
+    second = WebExtractor().current_version("https://acme.com")
+
+    assert first is not None
+    assert first.startswith("ttl-")
+    assert second == first
+
+
+def test_website_current_version_blank_ref_returns_none_without_http(monkeypatch):
+    calls: list[str] = []
+
+    def _fake_head(url, **kwargs):
+        calls.append(url)
+        return _FakeWebResp({"ETag": '"site-v1"'})
+
+    monkeypatch.setattr(figma_oauth.requests, "head", _fake_head)
+
+    assert WebExtractor().current_version("   ") is None
+    assert calls == []
+
+
+def test_website_current_version_returns_none_when_http_raises(monkeypatch):
+    def _fake_head(url, **kwargs):
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr(figma_oauth.requests, "head", _fake_head)
+
+    assert WebExtractor().current_version("https://acme.com") is None
 
 
 # ─── Unified pre-seed equivalence ────────────────────────────────────────
