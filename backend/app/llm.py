@@ -231,6 +231,8 @@ def call_with_web_search(
     max_tokens: int = 8000,
     max_searches: int = 5,
     meta_out: dict | None = None,
+    skill: str | None = None,
+    skill_module: str | None = None,
 ) -> str:
     """Call Claude with the server-side web_search tool enabled.
 
@@ -238,7 +240,23 @@ def call_with_web_search(
     `max_searches` times). Used by the outward research agents
     (competitor / market). Web content is untrusted input — callers'
     system prompts must treat it as data, never instructions.
+
+    When `skill` is set, the bound skill's method text (and the named
+    `skill_module`, if any) is PREPENDED to the system prompt under a
+    "## METHOD (skill: <id> @<hash>)" delimiter — the caller's own system
+    prompt stays as the agent-specific layer after it. The web-search path has
+    no cacheable-prefix mechanism, so the method rides the system prompt here.
     """
+    if skill is not None:
+        # Imported lazily to avoid a module-load cycle (loader -> config -> ...).
+        from app.skills.loader import get_skill
+
+        spec = get_skill(skill)
+        method = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n{spec.method}"
+        if skill_module:
+            module_text = spec.modules[skill_module]
+            method += f"\n\n### MODULE: {skill_module}\n{module_text}"
+        system = f"{method}\n{system}"
     msg = _create_with_retries(
         get_client(),
         model=model,

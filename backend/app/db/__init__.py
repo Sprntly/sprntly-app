@@ -89,6 +89,13 @@ from app.db.connections import (
     upsert_connection,
 )
 
+# Metric points (DS rolling aggregates)
+from app.db.metric_points import (
+    distinct_metrics,
+    list_metric_points,
+    upsert_metric_point,
+)
+
 # GitHub App (webhook-driven)
 from app.db.github import (
     delete_github_installation,
@@ -153,6 +160,10 @@ __all__ = [
     "update_connection_sync",
     "update_connection_tokens",
     "upsert_connection",
+    # metric points (DS rolling aggregates)
+    "distinct_metrics",
+    "list_metric_points",
+    "upsert_metric_point",
     # github (webhook-driven)
     "delete_github_installation",
     "get_github_installation",

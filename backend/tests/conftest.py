@@ -219,6 +219,7 @@ CREATE TABLE companies (
     slug           TEXT NOT NULL UNIQUE,
     display_name   TEXT NOT NULL,
     coworker_names TEXT NOT NULL DEFAULT '{}',
+    kpi_tree       TEXT NOT NULL DEFAULT '{}',
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -440,6 +441,21 @@ CREATE TABLE enterprise_config (
     overrides     TEXT NOT NULL DEFAULT '{}',
     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ---- DS metrics (tiny rolling aggregates — mirrors
+-- 20260607000000_metric_points.sql) ----
+CREATE TABLE metric_points (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    enterprise_id TEXT NOT NULL,
+    metric        TEXT NOT NULL,
+    period_start  TEXT NOT NULL,
+    value         REAL NOT NULL,
+    source        TEXT NOT NULL,
+    computed_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (enterprise_id, metric, period_start, source)
+);
+CREATE INDEX metric_points_series_idx
+    ON metric_points (enterprise_id, metric, period_start DESC);
 
 CREATE TABLE agent_decision_log (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,

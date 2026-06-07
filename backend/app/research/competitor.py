@@ -101,6 +101,9 @@ def run_competitor_research(
                 user=(f"Competitor: {name}. Today is {today}. "
                       "Report concrete moves from roughly the last 90 days."),
                 meta_out=meta,
+                # Method only for now; staging the CIR sub-modules (arena,
+                # position/share, momentum, VoC, etc.) is a follow-up.
+                skill="competitive-intelligence-review",
             )
             _ensure_competitor_entity(facade, enterprise_id, name, tau_high)
             if "NO_FINDINGS" in summary[:2000] and len(summary) < 400:

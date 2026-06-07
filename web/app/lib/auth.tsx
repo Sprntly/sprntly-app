@@ -24,7 +24,21 @@ type AuthState =
   | { kind: "anonymous" }
   | { kind: "unconfigured" }
 
-export type SignUpResult = "session" | "confirm_email"
+export type SignUpResult = "session" | "confirm_email" | "already_registered"
+
+/** Map a successful supabase.auth.signUp response to what the UI should do.
+ *  Confirm-email mode returns "success" with an obfuscated user carrying NO
+ *  identities when the address is already registered — and sends no email.
+ *  Surface that instead of a false "check your inbox". */
+export function interpretSignUpResponse(data: {
+  user: { identities?: unknown[] | null } | null
+  session: unknown | null
+}): SignUpResult {
+  if (data.user && (data.user.identities?.length ?? 0) === 0) {
+    return "already_registered"
+  }
+  return data.session ? "session" : "confirm_email"
+}
 
 export type SignUpInput = {
   email: string
@@ -37,6 +51,7 @@ export type SignUpInput = {
 
 type AuthCtx = AuthState & {
   signInWithPassword: (email: string, password: string) => Promise<void>
+  signInWithGoogle: () => Promise<void>
   signUpWithPassword: (input: SignUpInput) => Promise<SignUpResult>
   resetPassword: (email: string) => Promise<void>
   resendVerificationEmail: (email: string) => Promise<void>
@@ -107,6 +122,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) throw error
   }, [])
 
+  const signInWithGoogle = useCallback(async () => {
+    const supabase = getSupabase()
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: authCallbackUrl() },
+    })
+    if (error) throw error
+  }, [])
+
   const signUpWithPassword = useCallback(
     async (input: SignUpInput): Promise<SignUpResult> => {
       const supabase = getSupabase()
@@ -123,7 +147,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         },
       })
       if (error) throw error
-      return data.session ? "session" : "confirm_email"
+      return interpretSignUpResponse(data)
     },
     [],
   )
@@ -168,6 +192,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       ...state,
       signInWithPassword,
+      signInWithGoogle,
       signUpWithPassword,
       resetPassword,
       resendVerificationEmail,
@@ -179,6 +204,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [
       state,
       signInWithPassword,
+      signInWithGoogle,
       signUpWithPassword,
       resetPassword,
       resendVerificationEmail,

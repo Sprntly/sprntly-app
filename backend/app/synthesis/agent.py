@@ -132,6 +132,7 @@ def run_synthesis(
         enterprise_id=enterprise_id, agent=agent, purpose="rank_brief_insights",
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
         input=strategic + _candidates_payload(cands), json_schema=_BRIEF_SCHEMA,
+        skill="prioritize",
     )
     payload = result.output
     insights = payload.get("insights", [])[:MAX_INSIGHTS]
