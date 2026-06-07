@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from app.graph.facade import GraphFacade
 from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal
+from app.synthesis.scoring import voc_score
 
 
 @dataclass
@@ -27,6 +28,7 @@ class ThemeConvergence:
     effective_weight: float = 0.0
     revenue_at_stake_usd: float = 0.0
     competitor_pressure: int = 0
+    base_score: float = 0.0  # VoC Volume & Severity base (prioritize skill)
     evidence: list[dict] = field(default_factory=list)  # top signals for the LLM pass
 
     @property
@@ -84,6 +86,16 @@ def compute_convergence(
         scored_evidence.sort(key=lambda t: -t[0])
         tc.evidence = [e for _, e in scored_evidence[:max_evidence_per_theme]]
         if tc.signal_count:
+            # VoC Volume & Severity base score (prioritize skill), additive over
+            # the computed dimensions: breadth of agreeing source types = volume,
+            # mean per-signal evidence weight = severity × data-quality, with a
+            # competitor-pressure trend bump. All factors land in 0..1 except the
+            # trend modifier.
+            tc.base_score = voc_score(
+                impact=min(1.0, tc.breadth / 5.0),
+                severity=min(1.0, tc.effective_weight / max(tc.signal_count, 1)),
+                trend=1.0 + 0.1 * tc.competitor_pressure,
+            )
             out.append(tc)
 
     out.sort(key=lambda t: (-t.breadth, -t.effective_weight))

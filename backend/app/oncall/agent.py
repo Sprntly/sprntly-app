@@ -264,6 +264,7 @@ def investigate_incident(
         enterprise_id=enterprise_id, agent=AGENT, purpose="investigate_incident",
         prompt_version=PROMPT_VERSION, system=_SYSTEM, input=user,
         json_schema=_ASSESSMENT_SCHEMA,
+        skill="incident-runbook",
     )
     assessment = dict(result.output or {})
 
