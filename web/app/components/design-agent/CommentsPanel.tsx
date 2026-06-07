@@ -76,11 +76,27 @@ export function shortRelativeTime(
   return new Date(t).toLocaleDateString()
 }
 
+/** Avatar tint index (0–4) derived by summing char codes of the author string
+ *  modulo 5. Deterministic, no state, SSR-safe. */
+const AVATAR_TINTS = ["blue", "green", "purple", "amber", "teal"] as const
+function avatarTint(author: string | null | undefined): typeof AVATAR_TINTS[number] {
+  const a = (author ?? "").trim()
+  if (!a) return "green"
+  let sum = 0
+  for (let i = 0; i < a.length; i++) sum += a.charCodeAt(i)
+  return AVATAR_TINTS[sum % 5]
+}
+
 /** A small brand-tinted initials avatar (David's `.pc-av`). Shared by the
  *  CommentsPanel rows and the PostGenerationResult pin-comment rows. */
 export function CommentAvatar({ author }: { author: string | null | undefined }) {
+  const tint = avatarTint(author)
   return (
-    <span className="pc-av" data-testid="comment-avatar" aria-hidden="true">
+    <span
+      className={`pc-av pc-av--${tint}`}
+      data-testid="comment-avatar"
+      aria-hidden="true"
+    >
       {authorInitials(author)}
     </span>
   )
@@ -227,6 +243,7 @@ export type CommentsPanelViewProps = {
 function CommentThread({
   comment,
   withPin,
+  stepNumber,
   canResolve,
   pinExtra,
   busy = false,
@@ -237,6 +254,9 @@ function CommentThread({
 }: {
   comment: CommentRecord
   withPin: boolean
+  /** 1-based position in the open-comment list; renders a "Step N" chip when
+   *  supplied and withPin is true. Omitted for resolved/orphaned sections. */
+  stepNumber?: number
   canResolve?: boolean
   pinExtra?: string | null
   /** Disables Apply/Ignore while an iterate is in flight to prevent overlapping runs. */
@@ -280,7 +300,35 @@ function CommentThread({
         >
           {shortRelativeTime(comment.created_at)}
         </time>
+        {/* Change 4 — resolve-check indicator: visual state only, no click handler */}
+        <span
+          className={`comment-resolve-indicator${resolved ? " comment-resolve-indicator--resolved" : ""}`}
+          aria-hidden="true"
+        >
+          {resolved ? (
+            /* Filled green circle-check when resolved */
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="8" cy="8" r="8" fill="currentColor"/>
+              <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          ) : (
+            /* Outline gray circle-check when open */
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/>
+              <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          )}
+        </span>
       </div>
+      {/* Change 3 — "Step N" pin chip: shown for open comments with a pin */}
+      {withPin && stepNumber != null && (
+        <div className="comment-step-chip">
+          <svg width="10" height="12" viewBox="0 0 10 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M5 0C2.79 0 1 1.79 1 4c0 3 4 8 4 8s4-5 4-8c0-2.21-1.79-4-4-4zm0 5.5A1.5 1.5 0 1 1 5 2.5a1.5 1.5 0 0 1 0 3z" fill="currentColor"/>
+          </svg>
+          Step {stepNumber}
+        </div>
+      )}
       <div className="comment-body">{comment.body}</div>
       {/* Apply / Ignore actions. Apply calls the parent handler (pre-fill or
           immediate-iterate) then resolves; Ignore resolves only. Both rendered
@@ -362,7 +410,15 @@ export function CommentsPanelView({
   return (
     <aside className="comments-panel" data-testid="comments-panel">
       <header className="comments-panel-header">
-        <h2 className="comments-panel-title">Comments</h2>
+        <h2 className="comments-panel-title">
+          Comments
+          {/* Change 1 — count badge: only shows when there are open (non-resolved, non-orphaned) comments */}
+          {open.length > 0 && (
+            <span className="comments-count-badge" aria-label={`${open.length} open comments`}>
+              {open.length}
+            </span>
+          )}
+        </h2>
       </header>
 
       {composer && (
@@ -412,11 +468,12 @@ export function CommentsPanelView({
       ) : (
         <>
           <ul className="comment-list" data-testid="comments-open">
-            {open.map((c) => (
+            {open.map((c, idx) => (
               <CommentThread
                 key={c.id}
                 comment={c}
                 withPin
+                stepNumber={idx + 1}
                 canResolve={canResolve}
                 pinExtra={pinExtra?.[c.anchor_id] ?? null}
                 busy={busy}
@@ -681,22 +738,39 @@ export function CommentsPanel({
     <div ref={panelRef} className="comments-panel-mount">
       {!readOnly && prototypeId != null && (
         <div className="da-comment-compose" data-testid="da-comment-compose">
-          <textarea
-            className="proto-comment-input"
-            placeholder="Add a comment…"
-            value={freeformDraft}
-            onChange={(e) => setFreeformDraft(e.target.value)}
-            rows={2}
-          />
-          <button
-            type="button"
-            className="btn btn-accent"
-            disabled={!freeformDraft.trim() || freeformBusy}
-            onClick={() => void handleFreeformSubmit()}
-            data-testid="da-comment-submit"
-          >
-            {freeformBusy ? 'Posting…' : 'Comment'}
-          </button>
+          {/* Change 5 — restyled composer: input + green circular send button */}
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+            <textarea
+              className="proto-comment-input"
+              placeholder="Add a comment, or click a pin on the canvas…"
+              value={freeformDraft}
+              onChange={(e) => setFreeformDraft(e.target.value)}
+              rows={2}
+              style={{ flex: 1 }}
+            />
+            <button
+              type="button"
+              className="comment-composer-send-btn"
+              disabled={!freeformDraft.trim() || freeformBusy}
+              onClick={() => void handleFreeformSubmit()}
+              data-testid="da-comment-submit"
+              aria-label={freeformBusy ? "Posting…" : "Send comment"}
+            >
+              {/* Up-arrow SVG */}
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M8 13V3M8 3L3.5 7.5M8 3L12.5 7.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          {/* Change 5 — helper line below composer */}
+          <div className="comment-composer-helper">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <circle cx="6" cy="6" r="5.25" stroke="currentColor" strokeWidth="1.2"/>
+              <path d="M6 5.5v3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+              <circle cx="6" cy="3.75" r="0.6" fill="currentColor"/>
+            </svg>
+            <span>Click anywhere on the canvas to pin a comment</span>
+          </div>
         </div>
       )}
       <CommentsPanelView

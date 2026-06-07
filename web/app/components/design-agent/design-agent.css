@@ -2516,3 +2516,126 @@
   flex-shrink: 0;
   min-height: 120px;
 }
+
+/* ── CommentsPanel visual polish (P7 design-kit) ────────────────────────────
+ * Changes 1–6 from David's mockup alignment: count badge, avatar tints, step
+ * chip, resolve indicator, footer send button + helper, card styling.
+ * Append-only; no existing rules above are modified.
+ * Token-only — no hex except #fff for the white card (change 6 permit).
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/* Change 1 — header count badge */
+.design-agent-surface .comments-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--surface);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  margin-left: 7px;
+}
+
+/* Change 2 — avatar tint variants (cycle by author hash) */
+.design-agent-surface .pc-av--blue {
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-color: rgba(29, 78, 216, 0.18);
+}
+.design-agent-surface .pc-av--green {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent-alpha-18);
+}
+.design-agent-surface .pc-av--purple {
+  background: #ede9fe;
+  color: #7c3aed;
+  border-color: rgba(124, 58, 237, 0.18);
+}
+.design-agent-surface .pc-av--amber {
+  background: #fef3c7;
+  color: #b45309;
+  border-color: rgba(180, 83, 9, 0.18);
+}
+.design-agent-surface .pc-av--teal {
+  background: #ccfbf1;
+  color: #0f766e;
+  border-color: rgba(15, 118, 110, 0.18);
+}
+
+/* Change 3 — "Step N" pin chip */
+.design-agent-surface .comment-step-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 20px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--ink-2);
+  margin-bottom: 4px;
+}
+
+/* Change 4 — resolve-check indicator */
+.design-agent-surface .comment-resolve-indicator {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--line-strong);
+}
+.design-agent-surface .comment-resolve-indicator--resolved {
+  color: var(--accent);
+}
+
+/* Change 5 — footer send button + helper */
+.design-agent-surface .comment-composer-send-btn {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.12s;
+}
+.design-agent-surface .comment-composer-send-btn:hover:not(:disabled) {
+  opacity: 0.85;
+}
+.design-agent-surface .comment-composer-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.design-agent-surface .comment-composer-helper {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+/* Change 6 — card styling polish (overrides for .comment-thread and .comment-list gap) */
+.design-agent-surface .comment-list {
+  gap: 10px;
+}
+.design-agent-surface .comment-thread {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+/* ── end CommentsPanel visual polish ─────────────────────────────────────── */
