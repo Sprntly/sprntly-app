@@ -1,4 +1,14 @@
-/** Work-email and password rules from Onboarding Flow Spec v1. */
+/** Email and password rules.
+ *
+ * Pre-launch (CEO 2026-06-06): consumer-domain emails (gmail, outlook,
+ * yahoo, etc.) are accepted on signup. Once billing ships, signups from
+ * a personal domain will gate on an active Sprntly subscription — see
+ * isPersonalDomain() for the helper that flags those addresses so the
+ * UI can show subscription-required copy at that time.
+ *
+ * For now this module only validates the *shape* of the email (plus a
+ * basic regex). The old work-only block is gone.
+ */
 
 const CONSUMER_DOMAINS = new Set([
   "gmail.com",
@@ -46,20 +56,32 @@ export function isAllowlistedEmail(email: string): boolean {
   return authEmailAllowlist().has(email.trim().toLowerCase())
 }
 
-export function isWorkEmail(email: string): boolean {
-  if (isAllowlistedEmail(email)) return true
+/** True iff this email is on a known consumer/personal-email domain.
+ * Used by the UI (post-billing) to flag the "personal email — subscription
+ * required" copy. Does NOT block signup on its own. */
+export function isPersonalDomain(email: string): boolean {
+  if (isAllowlistedEmail(email)) return false
   const domain = emailDomain(email)
   if (!domain) return false
-  return !CONSUMER_DOMAINS.has(domain)
+  return CONSUMER_DOMAINS.has(domain)
 }
 
+/** Kept for compatibility (callers from before the 2026-06-06 unblock).
+ * Now returns true for any well-formed email (no consumer-domain block).
+ * Use isPersonalDomain() when you specifically need the "personal email"
+ * signal. */
+export function isWorkEmail(email: string): boolean {
+  return validateWorkEmail(email) === null
+}
+
+/** Validate the email used at signup. Returns null on success, or an
+ * error message string. Today only the shape is checked. Once billing
+ * ships, callers should additionally gate personal-domain signups on
+ * an active subscription (see isPersonalDomain). */
 export function validateWorkEmail(email: string): string | null {
   const trimmed = email.trim()
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
     return "Enter a valid email address."
-  }
-  if (!isWorkEmail(trimmed)) {
-    return "Use your work email (e.g. you@company.com). Personal Gmail and similar addresses are not supported."
   }
   return null
 }
