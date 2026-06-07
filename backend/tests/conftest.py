@@ -238,6 +238,15 @@ CREATE TABLE connections (
     id                   TEXT PRIMARY KEY,
     company_id           TEXT NOT NULL
                           REFERENCES companies (id) ON DELETE CASCADE,
+    -- Workspace/product scoping (added 2026-06-06, see migration
+    -- 20260606120000_workspaces_and_connection_scope.sql). Nullable
+    -- today because the application route layer hasn't moved off
+    -- company_id yet — both columns coexist until the migration to
+    -- workspace-scoped routes lands.
+    workspace_id         TEXT,
+    product_id           TEXT,
+    company_name         TEXT,
+    product_name         TEXT,
     provider             TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'active',
     google_email         TEXT,
@@ -252,6 +261,8 @@ CREATE TABLE connections (
     UNIQUE (company_id, provider)
 );
 CREATE INDEX connections_company_id_idx ON connections (company_id);
+CREATE INDEX connections_workspace_id_idx ON connections (workspace_id);
+CREATE INDEX connections_product_id_idx   ON connections (product_id);
 
 -- Onboarding's per-company product rows (mirrors
 -- supabase/migrations/20260525150300_products.sql, SQLite-ized). The Design
@@ -274,6 +285,22 @@ CREATE TABLE products (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX products_company_id_idx ON products (company_id);
+
+-- Workspaces (1 company → N products → N workspaces; 1 product → N workspaces).
+-- Mirrors supabase/migrations/20260606120000_workspaces_and_connection_scope.sql.
+CREATE TABLE workspaces (
+    id          TEXT PRIMARY KEY,
+    company_id  TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    product_id  TEXT REFERENCES products (id) ON DELETE SET NULL,
+    name        TEXT NOT NULL,
+    slug        TEXT NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, slug)
+);
+CREATE INDEX workspaces_company_id_idx ON workspaces (company_id);
+CREATE INDEX workspaces_product_id_idx ON workspaces (product_id);
 
 -- Mirrors supabase/migrations/20260525150000_onboarding_workspace.sql.
 -- Used by the Settings → Team route suite (test_team_*.py).
