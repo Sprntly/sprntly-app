@@ -372,6 +372,118 @@ def test_cache_miss_version_factory_none_upserts_with_source_version_none(monkey
     assert call_kwargs["source_version"] is None
 
 
+def test_force_re_extracts_without_lookup_and_upserts_with_current_version(monkeypatch):
+    """Force refresh bypasses lookup, extracts once, and stores the fresh result
+    with the probed source version."""
+    fresh_ds = _make_ds("#abcdef")
+    fake_raw = RawSignals(provider="figma", ref="file-key", signals={"background": "#abcdef"})
+
+    raw_calls = []
+    version_calls = []
+
+    def raw_factory():
+        raw_calls.append(1)
+        return fake_raw
+
+    def version_factory():
+        version_calls.append(1)
+        return "v-force"
+
+    with _patched_internals(
+        monkeypatch,
+        cached_row=_cached_row(_make_ds("#111111"), stored_version="v-old"),
+        upsert_return={},
+        normalize_return=fresh_ds,
+    ) as fakes:
+        result = _resolve_design_system(
+            company_id="co-1",
+            provider="figma",
+            source_ref="file-key",
+            raw_signals_factory=raw_factory,
+            version_factory=version_factory,
+            force=True,
+        )
+
+    assert result is not None
+    assert result.tokens.colors.background == "#abcdef"
+    assert len(version_calls) == 1
+    assert len(raw_calls) == 1
+    assert fakes.lookup.call_count == 0
+    assert fakes.upsert.call_count == 1
+    call_kwargs = fakes.upsert.call_args.kwargs
+    assert call_kwargs["company_id"] == "co-1"
+    assert call_kwargs["source_category"] == "design_tool"
+    assert call_kwargs["source_provider"] == "figma"
+    assert call_kwargs["source_ref"] == "file-key"
+    assert call_kwargs["source_version"] == "v-force"
+    assert call_kwargs["data"] == fresh_ds.model_dump()
+    assert call_kwargs["has_explicit_system"] == fresh_ds.has_explicit_system
+    assert call_kwargs["confidence"] == fresh_ds.confidence
+    assert call_kwargs["extracted_at"] is None
+
+
+def test_force_returns_none_without_upsert_when_raw_signals_are_missing(monkeypatch):
+    """Force refresh leaves cache untouched when there is nothing to extract."""
+    raw_calls = []
+    version_calls = []
+
+    def raw_factory():
+        raw_calls.append(1)
+        return None
+
+    def version_factory():
+        version_calls.append(1)
+        return "v-force"
+
+    with _patched_internals(
+        monkeypatch,
+        cached_row=_cached_row(_make_ds("#111111"), stored_version="v-old"),
+        upsert_return={},
+        normalize_return=_make_ds("#abcdef"),
+    ) as fakes:
+        result = _resolve_design_system(
+            company_id="co-1",
+            provider="figma",
+            source_ref="file-key",
+            raw_signals_factory=raw_factory,
+            version_factory=version_factory,
+            force=True,
+        )
+
+    assert result is None
+    assert len(version_calls) == 1
+    assert len(raw_calls) == 1
+    assert fakes.lookup.call_count == 0
+    assert fakes.upsert.call_count == 0
+
+
+def test_force_does_not_bypass_missing_source_guard(monkeypatch):
+    """Force refresh still requires a company, provider, and source reference."""
+    raw_calls = []
+    version_calls = []
+
+    with _patched_internals(
+        monkeypatch,
+        cached_row=None,
+        upsert_return={},
+        normalize_return=_make_ds(),
+    ) as fakes:
+        result = _resolve_design_system(
+            company_id=None,
+            provider="figma",
+            source_ref="file-key",
+            raw_signals_factory=lambda: raw_calls.append(1) or None,
+            version_factory=lambda: version_calls.append(1) or "v1",
+            force=True,
+        )
+
+    assert result is None
+    assert len(raw_calls) == 0
+    assert len(version_calls) == 0
+    assert fakes.lookup.call_count == 0
+    assert fakes.upsert.call_count == 0
+
+
 # ─── Test 7: no provider → returns None early (no DB / factory calls) ─────────
 
 

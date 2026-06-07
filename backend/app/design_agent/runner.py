@@ -375,6 +375,7 @@ def _resolve_design_system(
     source_ref: str | None,
     raw_signals_factory,
     version_factory=None,
+    force: bool = False,
 ) -> "DesignSystem | None":
     """Resolve the unified design system for one source via the company-scoped cache.
 
@@ -396,6 +397,12 @@ def _resolve_design_system(
       3. Cache MISS: extract via `raw_signals_factory()`, normalize, upsert with
          `source_version=current` (None when undeterminable), and return the
          freshly-normalized design system.
+
+    When `force` is true, the version probe still runs first, but the cache is
+    bypassed entirely: the source is re-pulled, normalized, and upserted with the
+    latest marker. This is the manual refresh affordance for sources whose cheap
+    version probe may not see a change, such as a website that returns no ETag
+    within its cache window.
 
     Returns the design system, or None when there is no source to resolve (no
     provider/ref) so the caller leaves the virtual filesystem un-seeded exactly
@@ -423,6 +430,25 @@ def _resolve_design_system(
                 current = version_factory()
             except Exception:
                 current = None
+
+        if force:
+            raw = raw_signals_factory()
+            if raw is None:
+                return None
+            ds = normalize(raw)
+            adapter = registry.get(provider)
+            upsert_design_system(
+                company_id=company_id,
+                source_category=getattr(adapter, "category", provider),
+                source_provider=provider,
+                source_ref=source_ref,
+                source_version=current,
+                data=ds.model_dump(),
+                has_explicit_system=ds.has_explicit_system,
+                confidence=ds.confidence,
+                extracted_at=None,
+            )
+            return ds
 
         cached = lookup_design_system(company_id, provider, source_ref)
         if cached is not None:
