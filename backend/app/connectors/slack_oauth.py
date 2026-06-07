@@ -9,6 +9,10 @@ Flow:
     5. We exchange the code at slack.com/api/oauth.v2.access and store
        an encrypted JSON blob under provider="slack"
 
+Message delivery:
+    - post_message(channel, text) posts markdown to a Slack channel
+    - post_brief(channel, brief_payload) formats and posts a weekly brief
+
 Slack v2 specifics worth knowing:
     - The exchange response separates bot creds from user creds:
         access_token       — the bot token (xoxb-...)  ← what we store + post with
@@ -48,7 +52,9 @@ SLACK_AUTH_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 SLACK_TEAM_INFO_URL = "https://slack.com/api/team.info"
 SLACK_CONVERSATIONS_LIST_URL = "https://slack.com/api/conversations.list"
+SLACK_CONVERSATIONS_URL = "https://slack.com/api/conversations.list"
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
 # Channel-listing cap. Slack supports up to 1000 per page; 200 is a
@@ -115,7 +121,20 @@ def verify_oauth_state(state: str) -> dict:
 
 
 def exchange_code_for_token(code: str) -> dict[str, Any]:
-    """Trade an authorization code for a bot token.
+    """Exchange an authorization code for a Slack bot token.
+
+    Slack's oauth.v2.access returns:
+    {
+      "ok": true,
+      "access_token": "xoxb-...",
+      "token_type": "bot",
+      "scope": "chat:write,channels:read,...",
+      "bot_user_id": "U...",
+      "app_id": "A...",
+      "team": {"id": "T...", "name": "Workspace Name"},
+      "authed_user": {"id": "U..."},
+      ...
+    }
 
     Slack's `oauth.v2.access` is unusual: it returns 200 even on
     failure, with `ok: false` + `error: "..."` in the body. We translate
@@ -149,6 +168,19 @@ def exchange_code_for_token(code: str) -> dict[str, Any]:
     return body
 
 
+def fetch_auth_test(access_token: str) -> dict[str, Any]:
+    """Call auth.test to verify the token and get workspace info."""
+    resp = requests.post(
+        SLACK_AUTH_TEST_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=10,
+    )
+    if not resp.ok:
+        return {}
+    data = resp.json()
+    return data if data.get("ok") else {}
+
+
 def fetch_team_info(bot_access_token: str) -> dict[str, Any]:
     """Return Slack's team.info payload — {id, name, domain, ...}.
 
@@ -170,6 +202,81 @@ def fetch_team_info(bot_access_token: str) -> dict[str, Any]:
         logger.warning("Slack team.info returned ok=false: %s", body.get("error"))
         return {}
     return body.get("team") or {}
+
+
+def token_payload_to_store(token_json: dict[str, Any]) -> str:
+    """Pack the parts of Slack's oauth.v2.access response that we actually
+    need into a compact JSON blob for Fernet encryption.
+
+    Storing the whole response would also work, but it includes the
+    installing user's token (when user scopes are requested) plus other
+    pieces we'd rather not carry around. Bot token is what we post with;
+    bot_user_id is useful for filtering; team {id, name} backs the
+    account_label and the channel-picker UI."""
+    team = token_json.get("team") or {}
+    payload = {
+        "access_token": token_json.get("access_token"),
+        "token_type": token_json.get("token_type", "bot"),
+        "scope": token_json.get("scope") or "",
+        "bot_user_id": token_json.get("bot_user_id"),
+        "app_id": token_json.get("app_id"),
+        "team_id": team.get("id"),
+        "team_name": team.get("name"),
+        "authed_user_id": (token_json.get("authed_user") or {}).get("id"),
+        "obtained_at": int(time.time()),
+    }
+    return json.dumps(payload)
+
+
+# ───── Message delivery ─────
+
+
+def post_message(
+    bot_access_token: str,
+    *,
+    channel: str,
+    text: str,
+    blocks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Post a single message to a Slack channel. Used by the Comms Agent
+    (briefs, asks, alerts) — anywhere Sprntly needs to surface output in
+    Slack.
+
+    `channel` is the channel id (e.g. "C0123456789"), not the name.
+    `text` is the plain-text fallback that always renders even when
+    `blocks` is set (Slack requires it for accessibility + notifications).
+
+    On Slack-side rejection (ok:false), raises HTTPException(400) so the
+    caller surfaces a real error instead of silently dropping the message."""
+    body: dict[str, Any] = {"channel": channel, "text": text}
+    if blocks:
+        body["blocks"] = blocks
+    resp = requests.post(
+        SLACK_POST_MESSAGE_URL,
+        headers={
+            "Authorization": f"Bearer {bot_access_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json=body,
+        timeout=15,
+    )
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = resp.json() or {}
+    except ValueError:
+        parsed = {}
+    if not resp.ok or not parsed.get("ok"):
+        logger.warning(
+            "Slack chat.postMessage failed: http=%s ok=%s err=%s",
+            resp.status_code,
+            parsed.get("ok"),
+            parsed.get("error"),
+        )
+        raise HTTPException(
+            400,
+            f"Slack rejected the message: {parsed.get('error') or 'unknown error'}",
+        )
+    return parsed
 
 
 def list_channels(bot_access_token: str) -> list[dict[str, Any]]:
@@ -225,70 +332,24 @@ def list_channels(bot_access_token: str) -> list[dict[str, Any]]:
     return out
 
 
-def post_message(
-    bot_access_token: str,
-    *,
-    channel: str,
-    text: str,
-    blocks: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Post a single message to a Slack channel. Used by the Comms Agent
-    (briefs, asks, alerts) — anywhere Sprntly needs to surface output in
-    Slack.
+def format_brief_message(brief_payload: dict[str, Any]) -> str:
+    """Format a weekly brief payload into Slack mrkdwn."""
+    headline = brief_payload.get("summary_headline", "Weekly Brief")
+    week = brief_payload.get("week_label", "")
+    insights = brief_payload.get("insights", [])
 
-    `channel` is the channel id (e.g. "C0123456789"), not the name.
-    `text` is the plain-text fallback that always renders even when
-    `blocks` is set (Slack requires it for accessibility + notifications).
+    lines = [f"*{headline}*"]
+    if week:
+        lines.append(f"_{week}_\n")
 
-    On Slack-side rejection (ok:false), raises HTTPException(400) so the
-    caller surfaces a real error instead of silently dropping the message."""
-    body: dict[str, Any] = {"channel": channel, "text": text}
-    if blocks:
-        body["blocks"] = blocks
-    resp = requests.post(
-        SLACK_POST_MESSAGE_URL,
-        headers={
-            "Authorization": f"Bearer {bot_access_token}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        json=body,
-        timeout=15,
-    )
-    parsed: dict[str, Any] = {}
-    try:
-        parsed = resp.json() or {}
-    except ValueError:
-        parsed = {}
-    if not resp.ok or not parsed.get("ok"):
-        logger.warning(
-            "Slack chat.postMessage failed: http=%s ok=%s err=%s",
-            resp.status_code,
-            parsed.get("ok"),
-            parsed.get("error"),
-        )
-        raise HTTPException(
-            400,
-            f"Slack rejected the message: {parsed.get('error') or 'unknown error'}",
-        )
-    return parsed
+    for i, insight in enumerate(insights, 1):
+        tag = insight.get("tag", "")
+        title = insight.get("title", "")
+        summary = insight.get("summary") or insight.get("headline", "")
+        emoji = {"something_new": ":sparkles:", "something_better": ":chart_with_upwards_trend:", "something_broken": ":warning:"}.get(tag, ":bulb:")
+        lines.append(f"{emoji} *{i}. {title}*")
+        if summary:
+            lines.append(f"  {summary}")
+        lines.append("")
 
-
-def token_payload_to_store(token_json: dict[str, Any]) -> str:
-    """Pack the parts of Slack's oauth.v2.access response that we actually
-    need into a compact JSON blob for Fernet encryption.
-
-    Storing the whole response would also work, but it includes the
-    installing user's token (when user scopes are requested) plus other
-    pieces we'd rather not carry around. Bot token is what we post with;
-    bot_user_id is useful for filtering; team {id, name} backs the
-    account_label and the channel-picker UI."""
-    team = token_json.get("team") or {}
-    payload = {
-        "access_token": token_json.get("access_token"),
-        "bot_user_id": token_json.get("bot_user_id"),
-        "team_id": team.get("id"),
-        "team_name": team.get("name"),
-        "scope": token_json.get("scope") or "",
-        "obtained_at": int(time.time()),
-    }
-    return json.dumps(payload)
+    return "\n".join(lines)

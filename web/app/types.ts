@@ -18,6 +18,7 @@ export type ScreenId =
   | "team"
   | "connectors"
   | "sources"
+  | "tickets"
   // The post-generation Design Agent canvas — the one refresh-stable deep-URL
   // screen (`/design/{prototype_id}`). Layered on top of the existing no-deep-URL
   // nav; see lib/routes.ts canvasPath / prototypeIdFromCanvasPath.
@@ -48,6 +49,7 @@ export const APP_SCREENS: ScreenId[] = [
   // Connectors is the sole surface. ScreenId kept in the type union for
   // the dormant ConnectorsScreen.tsx (salvaged in commit D).
   "sources",
+  "tickets",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
@@ -71,6 +73,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   team: "Team",
   connectors: "Connectors",
   sources: "Sources",
+  tickets: "Tickets",
   // The canvas renders as a full-screen overlay (its own breadcrumb), so this
   // chrome title is never actually shown; present only for Record<ScreenId>
   // completeness.
@@ -161,6 +164,13 @@ export const AI_CONTEXTS: Record<
     suggest: [
       "Which source contributed the most to last week's brief?",
       "Are any sources stale or duplicated?",
+    ],
+  },
+  tickets: {
+    path: "/tickets",
+    suggest: [
+      "Which ticket has the highest impact?",
+      "Show me all high priority tickets",
     ],
   },
 }

@@ -15,6 +15,10 @@
   GET    /v1/connectors/figma/files/{key}       -> file structure (Design Agent input)
   GET    /v1/connectors/figma/files/{key}/styles -> design tokens (Design Agent input)
 
+  GET    /v1/connectors/slack/callback           -> OAuth callback
+  DELETE /v1/connectors/slack                   -> disconnect
+  POST   /v1/connectors/slack/sync-to-corpus    -> sync messages into corpus
+
   GET    /v1/connectors/github/authorize        -> redirect to GitHub
   GET    /v1/connectors/github/callback         -> OAuth callback
   DELETE /v1/connectors/github                  -> disconnect
@@ -36,8 +40,8 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from pydantic import BaseModel
 
 from app import db
-from app.auth import require_company, require_session
-from app.auth import CompanyContext
+from app import datasets as datasets_service
+from app.auth import CompanyContext, require_company, require_session
 from app.config import settings
 from app.connectors import (
     clickup_oauth,
@@ -304,16 +308,12 @@ def test_connection(
     elif provider == hubspot_oauth.HUBSPOT_PROVIDER:
         access_token = token_json.get("access_token") or ""
         user_obj = hubspot_oauth.fetch_token_info(access_token) or {}
+    elif provider == slack_oauth.SLACK_PROVIDER:
+        access_token = token_json.get("access_token") or ""
+        user_obj = slack_oauth.fetch_auth_test(access_token) or {}
     elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
         api_key = token_json.get("api_key") or ""
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
-    elif provider == slack_oauth.SLACK_PROVIDER:
-        access_token = token_json.get("access_token") or ""
-        team = slack_oauth.fetch_team_info(access_token) or {}
-        # The display label for Slack is the team name ("Acme"), not the
-        # domain ("acme"). Leave the email slot empty so the
-        # label-extraction below falls through to `name`.
-        user_obj = {"name": team.get("name")} if team else {}
     else:
         raise HTTPException(
             404, f"Test connection not supported for provider {provider!r}"
@@ -453,6 +453,26 @@ def google_drive_sync(
         )
     except SyncConfigError as e:
         raise HTTPException(400, str(e)) from e
+
+    # Auto-enable the Google Drive input source for this dataset.
+    dataset_slug = payload.dataset
+    if not dataset_slug:
+        row = db.get_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
+        if row and row.get("config_json"):
+            try:
+                cfg = json.loads(row["config_json"])
+                dataset_slug = cfg.get("dataset")
+            except (TypeError, ValueError):
+                pass
+    if dataset_slug:
+        try:
+            db.upsert_input_source(
+                dataset_slug, "google_drive", enabled=True,
+                config={"last_sync_at": db.utc_now()},
+            )
+        except Exception:
+            logger.warning("Failed to auto-enable google_drive input source", exc_info=True)
+
     return result.to_dict()
 
 
@@ -574,6 +594,72 @@ def figma_get_file_styles(
     return figma_oauth.fetch_file_styles(token, key)
 
 
+class FigmaSyncCorpusIn(BaseModel):
+    file_key: str
+    dataset: str
+
+
+@router.post("/figma/sync-to-corpus")
+def figma_sync_to_corpus(
+    body: FigmaSyncCorpusIn,
+    _session: dict = Depends(require_session),
+):
+    """Sync Figma file structure and design tokens into the corpus.
+
+    Fetches file tree + published styles and writes a markdown summary
+    into DATA_DIR/{dataset}/figma_design_context.md.
+    """
+    token = _figma_access_token()
+
+    # Fetch file structure + styles
+    file_data = figma_oauth.fetch_file(token, body.file_key, depth=2)
+    styles_data = figma_oauth.fetch_file_styles(token, body.file_key)
+
+    # Build markdown
+    lines: list[str] = ["# Figma Design Context\n"]
+    lines.append(f"**File:** {file_data.get('name', body.file_key)}")
+    lines.append(f"**Last Modified:** {file_data.get('lastModified', 'unknown')}\n")
+
+    # Pages and frames
+    doc = file_data.get("document", {})
+    for page in doc.get("children", []):
+        lines.append(f"## Page: {page.get('name', 'Untitled')}")
+        for frame in page.get("children", []):
+            fname = frame.get("name", "Untitled")
+            ftype = frame.get("type", "")
+            lines.append(f"- **{fname}** ({ftype})")
+
+    # Design tokens
+    styles_meta = styles_data.get("meta", {})
+    styles_list = styles_meta.get("styles", [])
+    if styles_list:
+        lines.append("\n## Design Tokens\n")
+        for style in styles_list:
+            sname = style.get("name", "")
+            stype = style.get("style_type", "")
+            desc = style.get("description", "")
+            entry = f"- **{sname}** ({stype})"
+            if desc:
+                entry += f" — {desc}"
+            lines.append(entry)
+
+    md_text = "\n".join(lines) + "\n"
+    target = settings.data_path / body.dataset / "figma_design_context.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(md_text, encoding="utf-8")
+
+    # Auto-enable figma input source
+    try:
+        db.upsert_input_source(
+            body.dataset, "figma", enabled=True,
+            config={"file_key": body.file_key, "last_sync_at": db.utc_now()},
+        )
+    except Exception:
+        logger.warning("Failed to auto-enable figma input source", exc_info=True)
+
+    return {"ok": True, "chars": len(md_text), "path": str(target)}
+
+
 # ─────────────────────── GitHub (App, user-OAuth half) ───────────────────────
 
 
@@ -672,6 +758,113 @@ def github_list_repos(
     return {"repositories": github_app.fetch_user_repos(token, per_page=per_page)}
 
 
+class GitHubSyncCorpusIn(BaseModel):
+    dataset: str
+    installation_id: int | None = None
+
+
+@router.post("/github/sync-to-corpus")
+def github_sync_to_corpus(
+    body: GitHubSyncCorpusIn,
+    _session: dict = Depends(require_session),
+):
+    """Sync tracked GitHub PRs into the corpus as a markdown file.
+
+    Reads open PRs from the github_pull_requests table and writes
+    a summary into DATA_DIR/{dataset}/github_active_prs.md.
+    """
+    prs = db.list_open_pull_requests(body.installation_id)
+
+    lines: list[str] = ["# GitHub Active Pull Requests\n"]
+    if not prs:
+        lines.append("_No open pull requests tracked._\n")
+    else:
+        lines.append(f"**Total open PRs:** {len(prs)}\n")
+        for pr in prs:
+            title = pr.get("title", "Untitled")
+            repo = pr.get("repo_full_name", "")
+            number = pr.get("pr_number", "")
+            author = pr.get("author_login", "unknown")
+            state = pr.get("state", "open")
+            draft = " (DRAFT)" if pr.get("is_draft") else ""
+            head = pr.get("head_ref", "")
+            base = pr.get("base_ref", "")
+            body_text = pr.get("body_excerpt") or ""
+
+            lines.append(f"## PR #{number}: {title}{draft}")
+            lines.append(f"- **Repo:** {repo}")
+            lines.append(f"- **Author:** @{author}")
+            lines.append(f"- **State:** {state}")
+            lines.append(f"- **Branch:** {head} → {base}")
+            if body_text:
+                lines.append(f"- **Description:** {body_text[:200]}")
+            lines.append("")
+
+    md_text = "\n".join(lines) + "\n"
+    target = settings.data_path / body.dataset / "github_active_prs.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(md_text, encoding="utf-8")
+
+    # Auto-enable github input source
+    try:
+        db.upsert_input_source(
+            body.dataset, "github", enabled=True,
+            config={"last_sync_at": db.utc_now()},
+        )
+    except Exception:
+        logger.warning("Failed to auto-enable github input source", exc_info=True)
+
+    return {"ok": True, "chars": len(md_text), "pr_count": len(prs), "path": str(target)}
+
+
+# ─────────────────────── Connector sync status ───────────────────────
+
+
+@router.get("/sync-status")
+def connector_sync_status(_session: dict = Depends(require_session)):
+    """Summary of all connector sync states + corpus stats.
+
+    Returns per-connector status and per-dataset corpus size.
+    Used for demo dashboards to verify data capture.
+    """
+    connections = db.list_connections()
+    connectors_out = []
+    for row in connections:
+        config = {}
+        if row.get("config_json"):
+            try:
+                config = json.loads(row["config_json"])
+            except (TypeError, ValueError):
+                pass
+        connectors_out.append({
+            "provider": row["provider"],
+            "status": row["status"],
+            "account_label": row.get("account_label") or row.get("google_email"),
+            "last_sync_at": row.get("last_sync_at"),
+            "last_sync_error": row.get("last_sync_error"),
+            "dataset": config.get("dataset"),
+        })
+
+    # Corpus stats per dataset
+    datasets_out = []
+    for ds in db.list_datasets():
+        slug = ds["slug"]
+        base = settings.data_path / slug
+        md_count = 0
+        total_chars = 0
+        if base.exists():
+            for p in base.glob("*.md"):
+                if not p.name.startswith("_"):
+                    md_count += 1
+                    total_chars += p.stat().st_size
+        datasets_out.append({
+            "slug": slug,
+            "display_name": ds.get("display_name", slug),
+            "md_file_count": md_count,
+            "total_chars": total_chars,
+        })
+
+    return {"connectors": connectors_out, "datasets": datasets_out}
 # ─────────────────────── ClickUp ───────────────────────
 #
 # Commit H. OAuth-only — no data sync into the corpus yet. Follow-on
@@ -769,12 +962,51 @@ def hubspot_disconnect(
     return {"deleted": True, "provider": hubspot_oauth.HUBSPOT_PROVIDER}
 
 
+class HubSpotSyncCorpusIn(BaseModel):
+    dataset: str
+
+
+@router.post("/hubspot/sync")
+def hubspot_sync(
+    body: HubSpotSyncCorpusIn,
+    _session: dict = Depends(require_session),
+):
+    """Sync HubSpot CRM data (contacts, companies, deals) into the corpus.
+
+    Fetches data from HubSpot API, converts to markdown, and writes
+    into DATA_DIR/{dataset}/ so it enters the knowledge base.
+    """
+    from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
+
+    try:
+        result = sync_hubspot(body.dataset)
+    except HubSpotSyncError as e:
+        raise HTTPException(400, str(e)) from e
+    return result.to_dict()
+
+
+@router.post("/hubspot/sync-to-corpus")
+def hubspot_sync_to_corpus(
+    body: HubSpotSyncCorpusIn,
+    _session: dict = Depends(require_session),
+):
+    """Alias for /hubspot/sync — matches Figma/GitHub sync-to-corpus pattern."""
+    from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
+
+    try:
+        result = sync_hubspot(body.dataset)
+    except HubSpotSyncError as e:
+        raise HTTPException(400, str(e)) from e
+    return result.to_dict()
+
+
 # ─────────────────────── Slack ───────────────────────
 #
 # Slack v2 bot install: token is the bot token (xoxb-...), stored
-# encrypted. The "Slack as notification target" use case posts into a
-# user-chosen channel using `chat.postMessage` — that lives in
-# slack_oauth.post_message (added in commit 2).
+# encrypted. OAuth callback + disconnect. start-oauth is handled by the
+# generic POST /{provider}/start-oauth above; helpers live in slack_oauth.py.
+# The "Slack as notification target" use case posts into a user-chosen
+# channel using `chat.postMessage` — that lives in slack_oauth.post_message.
 
 
 @router.get("/slack/callback")
@@ -787,9 +1019,16 @@ def slack_callback(code: str, state: str):
     if not access_token:
         raise HTTPException(400, "Slack did not return a bot access_token")
 
+    auth_info = slack_oauth.fetch_auth_test(access_token)
     team = token_json.get("team") or {}
     # Display "Acme (acme.slack.com)" when domain is present, else just team name.
-    label = team.get("name") or team.get("id") or "Slack"
+    label = (
+        auth_info.get("user")
+        or team.get("name")
+        or team.get("id")
+        or str(token_json.get("bot_user_id") or "")
+        or "Slack"
+    )
 
     try:
         token_encrypted = encrypt_token_json(
@@ -804,7 +1043,10 @@ def slack_callback(code: str, state: str):
         token_encrypted=token_encrypted,
         scopes=token_json.get("scope") or "",
         account_label=str(label),
-        config_json=json.dumps({"team": team}) if team else "{}",
+        config_json=json.dumps({
+            "team": team,
+            "bot_user_id": token_json.get("bot_user_id"),
+        }),
     )
 
     return _build_post_oauth_redirect(payload, slack_oauth.SLACK_PROVIDER)
@@ -835,6 +1077,68 @@ def _slack_bot_token(company_id: str) -> tuple[str, dict]:
     if not bot_token:
         raise HTTPException(500, "Slack token has no bot access_token")
     return bot_token, row
+
+
+class SlackBotTokenIn(BaseModel):
+    api_key: str
+
+    def model_post_init(self, _context) -> None:
+        if not self.api_key or not self.api_key.strip():
+            raise ValueError("api_key cannot be empty")
+
+
+@router.post("/slack/apikey")
+def slack_connect_bot_token(
+    body: SlackBotTokenIn,
+    _session: dict = Depends(require_session),
+):
+    """Connect Slack using a Bot User OAuth Token (xoxb-...).
+
+    Alternative to the full OAuth flow — useful when the Slack app is not
+    distributed. The user copies the token from api.slack.com/apps →
+    Install App → Bot User OAuth Token.
+    """
+    token = body.api_key.strip()
+    auth_info = slack_oauth.fetch_auth_test(token)
+    if not auth_info:
+        raise HTTPException(
+            400,
+            "Slack rejected this token — verify the Bot User OAuth Token "
+            "at api.slack.com/apps → Install App.",
+        )
+
+    label = (
+        auth_info.get("user")
+        or auth_info.get("team")
+        or "Slack workspace"
+    )
+
+    payload = json.dumps({
+        "access_token": token,
+        "token_type": "bot",
+        "team_id": auth_info.get("team_id"),
+        "team_name": auth_info.get("team"),
+        "bot_user_id": auth_info.get("user_id"),
+        "obtained_at": int(__import__("time").time()),
+    })
+
+    try:
+        token_encrypted = encrypt_token_json(payload)
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        provider=slack_oauth.SLACK_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=settings.slack_scopes.replace(",", " "),
+        account_label=label,
+        config_json=json.dumps({"auth_info": auth_info}) if auth_info else "{}",
+    )
+    return {
+        "ok": True,
+        "provider": slack_oauth.SLACK_PROVIDER,
+        "account_label": label,
+    }
 
 
 @router.get("/slack/channels")
@@ -880,6 +1184,30 @@ def slack_save_config(
         except (TypeError, ValueError):
             config = {}
     return {"ok": True, "config": config}
+
+
+class SlackSyncCorpusIn(BaseModel):
+    dataset: str
+    history_days: int = 90
+
+
+@router.post("/slack/sync-to-corpus")
+def slack_sync_to_corpus(
+    body: SlackSyncCorpusIn,
+    _session: dict = Depends(require_session),
+):
+    """Sync Slack channels, messages, and threads into the corpus.
+
+    Fetches data from the Slack API, converts to markdown, and writes
+    into DATA_DIR/{dataset}/ so it enters the knowledge base.
+    """
+    from app.connectors.slack_sync import SlackSyncError, sync_slack
+
+    try:
+        result = sync_slack(body.dataset, history_days=body.history_days)
+    except SlackSyncError as e:
+        raise HTTPException(400, str(e)) from e
+    return result.to_dict()
 
 
 # ─────────────────────── Fireflies (API key) ───────────────────────

@@ -50,6 +50,8 @@ class Settings(BaseSettings):
 
     db_path: str = str(REPO_ROOT / "data" / "sprintly.db")
 
+    # Internal service-to-service API (DS Agent → Backend)
+    internal_api_key: str = ""
     # Design Agent bundle staging (P1-08). Supabase Storage is the PRIMARY
     # destination (bucket named by the SUPABASE_STORAGE_BUCKET env var, read
     # directly in design_agent/storage.py). These two settings drive the
@@ -103,15 +105,21 @@ class Settings(BaseSettings):
     # backward-compat with older legacy apps still active in production.
     hubspot_oauth_version: str = "v3"
 
-    # Slack connector (OAuth v2, bot install)
+    # Slack connector (OAuth 2.0 — bot token for message delivery + sync)
     slack_client_id: str = ""
     slack_client_secret: str = ""
     slack_oauth_redirect_uri: str = ""
-    # Comma-separated bot scopes. Defaults cover "list channels + post
-    # messages" — enough for the brief/Ask notification target. Add
-    # `groups:read` if posting into private channels matters; add
-    # `chat:write.public` to post into channels the bot hasn't joined.
+    slack_scopes: str = (
+        "chat:write,channels:read,channels:history,"
+        "groups:read,groups:history,users:read"
+    )
     slack_bot_scopes: str = "chat:write,channels:read"
+
+    # Pipeline scheduler
+    scheduler_enabled: bool = False
+    pipeline_interval_hours: int = 6
+    scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
+    ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)
     github_app_id: str = ""
@@ -128,6 +136,10 @@ class Settings(BaseSettings):
     # for FUTURE HMAC-based share_token rotation (P2-06 stores the column + ships
     # the helpers; it does not yet consume this secret). No JWT_SECRET fallback.
     design_agent_token_secret: str = ""
+
+    # Feature flag: set to true in .env to enable Design Agent routes.
+    # Routes return 404 when false so the feature is invisible when off.
+    design_agent_enabled: bool = False
 
     @property
     def github_app_private_key_pem(self) -> str:

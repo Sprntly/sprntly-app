@@ -49,6 +49,9 @@ export type DesignAgentDrawerProps = {
    *  host launcher can mount the post-generation result view. Optional — the
    *  existing toast flow is unchanged when absent. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** Fires immediately after a successful kickoff (before polling) so the host
+   *  launcher can show a persistent in-page "generating…" tracker. */
+  onKickoff?: (prototypeId: number) => void
 }
 
 /** Initial target-platform selection (AC2). */
@@ -311,6 +314,7 @@ export function DesignAgentDrawerView({
   figmaFileKey,
   showToast,
   onGenerated,
+  onKickoff,
 }: ViewProps) {
   const [platform, setPlatform] = useState<TargetPlatform>(DEFAULT_PLATFORM)
   const [instructions, setInstructions] = useState("")
@@ -352,6 +356,7 @@ export function DesignAgentDrawerView({
       setSubmitting,
       notifyOnReady,
       onGenerated,
+      onKickoff,
     })
   }
 

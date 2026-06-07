@@ -474,8 +474,22 @@ export const connectorsApi = {
   // ---- HubSpot -------------------------------------------------------------
   disconnectHubspot: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/hubspot`),
+  syncHubspot: (dataset: string) =>
+    api.post<{
+      dataset: string;
+      contacts_count: number;
+      companies_count: number;
+      deals_count: number;
+      total_synced: number;
+      errors: string[];
+    }>("/v1/connectors/hubspot/sync-to-corpus", { dataset }),
 
   // ---- Slack ---------------------------------------------------------------
+  connectSlackWithBotToken: (apiKey: string) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      `/v1/connectors/slack/apikey`,
+      { api_key: apiKey },
+    ),
   disconnectSlack: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/slack`),
   listSlackChannels: () =>
@@ -485,6 +499,18 @@ export const connectorsApi = {
       `/v1/connectors/slack/config`,
       { channel_id: channelId, channel_name: channelName },
     ),
+  syncSlack: (dataset: string, historyDays = 90) =>
+    api.post<{
+      dataset: string
+      channels_count: number
+      messages_count: number
+      threads_count: number
+      total_synced: number
+      errors: string[]
+    }>("/v1/connectors/slack/sync-to-corpus", {
+      dataset,
+      history_days: historyDays,
+    }),
 
   // ---- Fireflies (API key, not OAuth) --------------------------------------
   connectFirefliesWithApiKey: (apiKey: string) =>
@@ -551,6 +577,37 @@ export const sourcesApi = {
   // upload/regen reuse companiesApi.uploadFiles + companiesApi.generate.
 }
 
+// ---- pipeline ---------------------------------------------------------------
+
+export type PipelineStageResult = {
+  status: "completed" | "failed" | "skipped"
+  duration_ms?: number
+  error?: string
+  [key: string]: unknown
+}
+
+export type PipelineRunStatus = {
+  id: string
+  dataset: string
+  trigger: string
+  status: "running" | "completed" | "failed"
+  stages: Record<string, PipelineStageResult>
+  started_at: string
+  completed_at: string | null
+  error: string | null
+}
+
+export const pipelineApi = {
+  run: (company: string) =>
+    api.post<{ started: boolean; dataset: string; message: string }>(
+      `/v1/pipeline/${encodeURIComponent(company)}/run`,
+    ),
+  status: (company: string) =>
+    api.get<PipelineRunStatus>(
+      `/v1/pipeline/${encodeURIComponent(company)}/status`,
+    ),
+}
+
 export const prdApi = {
   /** Kicks off PRD generation in the background. Returns immediately with a
    *  prd_id; client should poll prdApi.get(id) until status === 'ready'.
@@ -565,6 +622,15 @@ export const prdApi = {
   get: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
   /** Old name retained for compatibility. */
   byId: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
+  /** Save PRD edits (title + markdown). Auto-creates a version snapshot. */
+  update: (id: number, body: { title: string; payload_md: string }) =>
+    api.put<PrdRecord>(`/v1/prd/${id}`, body),
+  /** List all versions of a PRD, newest first. */
+  listVersions: (id: number) =>
+    api.get<{ id: number; prd_id: number; version_number: number; title: string; payload_md: string; saved_by: string; saved_at: string }[]>(`/v1/prd/${id}/versions`),
+  /** Restore a PRD to a specific version. */
+  restoreVersion: (prdId: number, versionId: number) =>
+    api.post<PrdRecord>(`/v1/prd/${prdId}/versions/${versionId}/restore`, {}),
 }
 
 // ---- Design Agent (P1-09) ---------------------------------------------------

@@ -26,7 +26,14 @@ def cmd_generate_brief(args):
     corpus = load_corpus(args.dataset)
     print(f"Loaded {len(corpus.docs)} corpus docs ({corpus.total_chars()} chars).")
     print(f"Calling Claude to generate brief for {args.dataset}...")
-    user = BRIEF_USER_TEMPLATE.format(dataset=args.dataset, corpus=corpus.joined())
+    try:
+        from app.signal_fusion import fuse_signals
+        signal_context = fuse_signals(args.dataset)
+    except Exception:
+        signal_context = ""
+    user = BRIEF_USER_TEMPLATE.format(
+        dataset=args.dataset, signal_context=signal_context, corpus=corpus.joined(),
+    )
     payload = call_json(system=BRIEF_SYSTEM, user=user)
     week_label = payload.get("week_label", "")
     insights = payload.get("insights") or []

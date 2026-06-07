@@ -23,7 +23,7 @@
 #      fallback was being emitted verbatim by the model when no dollar
 #      figure could be grounded; v5 removes that escape hatch and tells
 #      the model to drop the `$` and use a qualitative label instead.
-BRIEF_SCHEMA_VERSION = 5
+BRIEF_SCHEMA_VERSION = 6
 
 
 # Bumped whenever the EVIDENCE prompt or template changes meaningfully.
@@ -209,6 +209,8 @@ qualitative label (e.g. `ARR upside · TBD`) instead.
 - `is_headline`: mark exactly ONE insight `true` — the one with the clearest \
 dollar impact AND highest confidence (the card a senior reader should read \
 first). Omit the field on the others. Never mark two.
+
+{signal_context}
 
 Corpus:
 

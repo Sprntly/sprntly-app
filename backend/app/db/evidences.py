@@ -3,9 +3,10 @@
 Kept as a separate table because the two have different lifecycles
 (evidence regenerates more often) and different templates.
 """
-from app.db.client import require_client
+from app.db.client import require_client, retry_on_disconnect
 
 
+@retry_on_disconnect
 def start_evidence(
     brief_id: int,
     insight_index: int,
@@ -72,12 +73,14 @@ def fail_evidence(evidence_id: int, error: str) -> None:
     }).eq("id", evidence_id).execute()
 
 
+@retry_on_disconnect
 def get_evidence(evidence_id: int) -> dict | None:
     c = require_client()
     resp = c.table("evidences").select("*").eq("id", evidence_id).limit(1).execute()
     return resp.data[0] if resp.data else None
 
 
+@retry_on_disconnect
 def find_existing_evidence(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:

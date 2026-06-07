@@ -62,6 +62,52 @@ export type LauncherDrawerProps = {
   /** P2-12: drawer reports the terminal generation outcome here so the
    *  container can mount the post-generation result view. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** Fires immediately after kickoff (before polling) so the host can show the
+   *  in-page "Generating prototype…" status card. */
+  onKickoff?: (prototypeId: number) => void
+}
+
+/** Persistent in-page status card shown from kickoff until the terminal result
+ *  mounts. Gives users a clear "still running" signal without requiring them to
+ *  opt in to the toast notification or wait for the drawer to reopen. */
+function PrototypeGeneratingCard() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 12,
+        padding: "12px 14px",
+        marginTop: 12,
+        borderRadius: 10,
+        border: "1px solid var(--accent-alpha-14)",
+        background: "var(--accent-muted)",
+      }}
+    >
+      {/* Spinner */}
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 16 16"
+        fill="none"
+        aria-hidden
+        style={{ flexShrink: 0, marginTop: 1, animation: "da-spin 0.9s linear infinite" }}
+      >
+        <style>{`@keyframes da-spin { to { transform: rotate(360deg); } }`}</style>
+        <circle cx="8" cy="8" r="6" stroke="var(--accent-alpha-28)" strokeWidth="2" />
+        <path d="M8 2a6 6 0 0 1 6 6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+      </svg>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--accent-ink)" }}>
+          Generating prototype…
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 3, lineHeight: 1.45 }}>
+          This usually takes 1–2 minutes. You can navigate away — check "Notify me
+          when ready" next time to get a toast when it's done.
+        </div>
+      </div>
+    </div>
+  )
 }
 
 /** P2-12: maps a generation outcome to launcher result state — the prototype
@@ -217,6 +263,10 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   result?: PrototypeRecord | null
   /** P2-12: handed to the drawer so a successful generation populates `result`. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** In-page status card: prototype_id being generated, null when idle. */
+  generatingId?: number | null
+  /** Fires immediately after kickoff so the container sets `generatingId`. */
+  onKickoff?: (prototypeId: number) => void
   /** P6-08 (Fix #11): the last generation attempt's failure, or null. When set,
    *  the view renders `<GenerationErrorBanner/>` (replacing the old silent
    *  revert-to-Generate-button). Independent of `result`: a failed retry after a
@@ -263,6 +313,8 @@ export function DesignAgentLauncherView({
   setOpen,
   result = null,
   onGenerated,
+  generatingId = null,
+  onKickoff,
   failure = null,
   onRetry = () => {},
   applyTarget = null,
@@ -285,10 +337,20 @@ export function DesignAgentLauncherView({
 }: LauncherViewProps) {
   return (
     <div className="design-agent-surface prd-design-launcher" contentEditable={false}>
-      {/* The PRD Design section no longer renders a "Generate Prototype" button:
-          the generation trigger lives in the "Approve & next step" modal. The
-          launcher's state / drawer / result wiring below is intentionally kept so
-          the drawer/iterate/share flows still work. */}
+      <button
+        type="button"
+        className="btn btn-accent"
+        onClick={() => setOpen(true)}
+        disabled={generatingId !== null && result === null}
+      >
+        Generate Prototype
+      </button>
+      {/* In-page generating status card — visible from kickoff until the
+          terminal result mounts. Keeps the user informed without relying on
+          the transient toast or the "Notify me" opt-in. */}
+      {generatingId !== null && result === null && (
+        <PrototypeGeneratingCard />
+      )}
       {/* When the PRD already has a ready prototype (read-only getByPrd), show a
           preview card here. Clicking it opens the full-screen canvas directly,
           skipping the loading screen. When none exists this renders nothing (the
@@ -387,6 +449,7 @@ export function DesignAgentLauncherView({
         prdId,
         figmaFileKey,
         onGenerated,
+        onKickoff,
       })}
       {/* Launcher-owned full-screen canvas for the existing prototype, opened
           from the preview card. Mirrors ApproveModal's `da-canvas-fullscreen`
@@ -479,6 +542,7 @@ export function DesignAgentLauncher({
 }) {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState<PrototypeRecord | null>(null)
+  const [generatingId, setGeneratingId] = useState<number | null>(null)
   // The PRD's existing ready prototype (resolved read-only via getByPrd), or
   // null. Resolved once on mount; degrades to null when no ready prototype exists
   // (getByPrd swallows the 404 → null) so the card simply does not render and no
@@ -504,6 +568,7 @@ export function DesignAgentLauncher({
   // success-path mapping; `failureFromGeneration` owns the failure-path mapping.
   const handleGenerated = (outcome: DesignAgentGenResult) => {
     const next = resultFromGeneration(outcome)
+    setGeneratingId(null)
     if (next) setResult(next)
     setFailure(failureFromGeneration(outcome))
   }
@@ -624,6 +689,8 @@ export function DesignAgentLauncher({
         setOpen={setOpen}
         result={result}
         onGenerated={handleGenerated}
+        generatingId={generatingId}
+        onKickoff={setGeneratingId}
         failure={failure}
         onRetry={handleRetry}
         applyTarget={applyTarget}
