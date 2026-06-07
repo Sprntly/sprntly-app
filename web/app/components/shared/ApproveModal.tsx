@@ -20,7 +20,7 @@ import { markdownToPrdState } from "../../lib/prd-adapter"
 import type { PrdSection } from "../../types/content"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 import { useIterateRun } from "../design-agent/useIterateRun"
-import { IconCheck, IconSparkle } from "./app-icons"
+import { IconSparkle } from "./app-icons"
 
 // Min-visible duration. If generation dedup-returns an existing prototype almost
 // instantly, the overlay would otherwise flash; keep it visible at least this
@@ -465,10 +465,6 @@ export function ApproveModal() {
     >
       <div className="modal">
         <div className="modal-head">
-          <div className="modal-badge">
-            <IconCheck size={12} />
-            PRD Approved
-          </div>
           <h2 className="modal-title">Where should this go next?</h2>
           <p className="modal-sub">
             Pick how you want to move from spec to code. You can change your mind
