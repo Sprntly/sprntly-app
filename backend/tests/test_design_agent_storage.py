@@ -268,6 +268,7 @@ def _fake_vite_run(*, dist_files=None, returncode=0, stderr="", capture=None):
     return _run
 
 
+@pytest.mark.integration
 async def test_vite_build_reads_dist_after_successful_build(monkeypatch):
     monkeypatch.setattr(
         storage.subprocess, "run",
@@ -279,6 +280,7 @@ async def test_vite_build_reads_dist_after_successful_build(monkeypatch):
     assert out["assets/index.js"] == "console.log(1)"
 
 
+@pytest.mark.integration
 async def test_vite_build_symlinks_node_modules_not_install(monkeypatch):
     capture: dict = {}
     monkeypatch.setattr(storage.subprocess, "run", _fake_vite_run(capture=capture))
@@ -291,6 +293,7 @@ async def test_vite_build_symlinks_node_modules_not_install(monkeypatch):
     assert capture["cmd"][:3] == ["npx", "vite", "build"]
 
 
+@pytest.mark.integration
 async def test_vite_build_raises_on_nonzero_exit(monkeypatch):
     monkeypatch.setattr(
         storage.subprocess, "run",
@@ -302,6 +305,7 @@ async def test_vite_build_raises_on_nonzero_exit(monkeypatch):
     assert "SyntaxError" in str(ei.value)
 
 
+@pytest.mark.integration
 async def test_vite_build_raises_on_timeout(monkeypatch):
     def _timeout(cmd, cwd=None, **kwargs):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 60))
@@ -314,6 +318,7 @@ async def test_vite_build_raises_on_timeout(monkeypatch):
 # ─── P6-21: env-configurable Vite build budget (read at call-time) ────────────
 
 
+@pytest.mark.integration
 async def test_build_timeout_reads_configured_value(monkeypatch):
     """AC1 (regression — FAILS on unfixed code): the timeout passed to
     subprocess.run is sourced from settings.design_agent_vite_build_timeout_seconds
@@ -341,6 +346,7 @@ def test_env_override_build_timeout(monkeypatch):
     assert fresh.design_agent_vite_build_timeout_seconds == 200
 
 
+@pytest.mark.integration
 async def test_timeout_raises_vite_build_error_with_configured_value(monkeypatch):
     """AC4: on TimeoutExpired the ViteBuildError message names the LIVE configured
     budget (not a hardcoded 60), keeping the timeout class distinguishable."""
@@ -359,6 +365,7 @@ async def test_timeout_raises_vite_build_error_with_configured_value(monkeypatch
     assert "exit=" not in str(ei.value)
 
 
+@pytest.mark.integration
 async def test_timeout_propagates_through_repair_loop(monkeypatch):
     """AC5: vite_build_with_repair re-raises a timeout ViteBuildError UNCHANGED
     (a timeout is not a 'could not resolve' class), with no repair re-attempt —
@@ -380,6 +387,7 @@ async def test_timeout_propagates_through_repair_loop(monkeypatch):
     assert calls["n"] == 1
 
 
+@pytest.mark.integration
 async def test_build_under_limit_succeeds(monkeypatch):
     """AC3: raising the budget does not change the success path — a build that
     completes (returncode=0) returns dist files normally regardless of the budget."""
@@ -394,6 +402,7 @@ async def test_build_under_limit_succeeds(monkeypatch):
     assert out["index.html"] == "<html>ok</html>"
 
 
+@pytest.mark.integration
 async def test_no_hardcoded_timeout_constant_used(monkeypatch):
     """AC6: the call-time read tracks the setting — changing the setting changes
     the subprocess.run timeout, so no stale 60 constant shadows it."""
@@ -416,6 +425,7 @@ def test_settings_field_additive():
     assert val == 120
 
 
+@pytest.mark.integration
 async def test_vite_build_raises_when_dist_not_produced(monkeypatch):
     def _no_dist(cmd, cwd=None, **kwargs):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -425,6 +435,7 @@ async def test_vite_build_raises_when_dist_not_produced(monkeypatch):
     assert "dist/ was not produced" in str(ei.value)
 
 
+@pytest.mark.integration
 async def test_vite_build_raises_when_prototype_runtime_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(storage, "_RUNTIME_ROOT", tmp_path / "nonexistent-runtime")
     with pytest.raises(FileNotFoundError):
@@ -491,6 +502,7 @@ def _fake_tsc(*, stdout="", stderr="", returncode=0, raises=None):
     return _run
 
 
+@pytest.mark.integration
 def test_typecheck_blocks_missing_hook_import(monkeypatch, tmp_path):
     """AC #1 (parse/raise): TS2304 (useState used, not imported — the #20 bug)."""
     monkeypatch.setattr(
@@ -503,6 +515,7 @@ def test_typecheck_blocks_missing_hook_import(monkeypatch, tmp_path):
     assert "TS2304" in str(ei.value)
 
 
+@pytest.mark.integration
 def test_typecheck_blocks_bad_module_import(monkeypatch, tmp_path):
     """AC #2 (parse/raise): TS2307 (bad import path)."""
     monkeypatch.setattr(
@@ -515,6 +528,7 @@ def test_typecheck_blocks_bad_module_import(monkeypatch, tmp_path):
     assert "TS2307" in str(ei.value)
 
 
+@pytest.mark.integration
 def test_typecheck_allows_cosmetic_type_error(monkeypatch, tmp_path):
     """AC #3: implicit-any (TS7006) + scaffold TS2339/TS2353 noise → NO raise.
 
@@ -534,12 +548,14 @@ def test_typecheck_allows_cosmetic_type_error(monkeypatch, tmp_path):
     storage._typecheck_runtime_break(tmp_path)  # no raise
 
 
+@pytest.mark.integration
 def test_typecheck_clean_bundle_unaffected(monkeypatch, tmp_path):
     """AC #4 (parse): a clean build (rc=0, no diagnostics) → no raise."""
     monkeypatch.setattr(storage.subprocess, "run", _fake_tsc(stdout="", returncode=0))
     storage._typecheck_runtime_break(tmp_path)  # no raise
 
 
+@pytest.mark.integration
 def test_typecheck_fail_open_when_tsc_binary_missing(monkeypatch, tmp_path, caplog):
     """AC #5 / #8: tsc binary missing (FileNotFoundError) → fail-open, WARNING, no raise."""
     monkeypatch.setattr(
@@ -551,6 +567,7 @@ def test_typecheck_fail_open_when_tsc_binary_missing(monkeypatch, tmp_path, capl
     assert any("typecheck_tool_failed" in m and "FileNotFoundError" in m for m in msgs)
 
 
+@pytest.mark.integration
 def test_typecheck_fail_open_on_timeout(monkeypatch, tmp_path):
     """AC #5: tsc timeout → fail-open, no raise (a tooling hang must not block staging)."""
     monkeypatch.setattr(
@@ -560,6 +577,7 @@ def test_typecheck_fail_open_on_timeout(monkeypatch, tmp_path):
     storage._typecheck_runtime_break(tmp_path)  # no raise
 
 
+@pytest.mark.integration
 def test_typecheck_fail_open_nonzero_no_fatal_codes(monkeypatch, tmp_path):
     """AC #5: non-zero exit carrying only a config/tooling diagnostic (TS5057, not in
     the fatal set) → no raise. Only a curated fatal code blocks."""
@@ -571,6 +589,7 @@ def test_typecheck_fail_open_nonzero_no_fatal_codes(monkeypatch, tmp_path):
     storage._typecheck_runtime_break(tmp_path)  # no raise
 
 
+@pytest.mark.integration
 def test_fatal_codes_keyed_on_code_not_message(monkeypatch, tmp_path):
     """AC #6: a reworded/localized TS2304 message still triggers — keyed on the code."""
     monkeypatch.setattr(
@@ -582,6 +601,7 @@ def test_fatal_codes_keyed_on_code_not_message(monkeypatch, tmp_path):
         storage._typecheck_runtime_break(tmp_path)
 
 
+@pytest.mark.integration
 def test_typecheck_scans_stderr_for_fatal_code(monkeypatch, tmp_path):
     """Defensive: a fatal code surfacing on stderr is still caught (TS2552 variant)."""
     monkeypatch.setattr(
@@ -602,6 +622,7 @@ def test_fatal_codes_is_curated_frozenset():
     assert {"TS2304", "TS2307"} <= storage._FATAL_TS_CODES
 
 
+@pytest.mark.integration
 def test_typecheck_blocked_generation_logs_codes_only(monkeypatch, tmp_path):
     """AC #8: the raised diagnostic carries codes + truncated message (≤5 lines),
     not a full source dump (Rule #24)."""
@@ -614,6 +635,7 @@ def test_typecheck_blocked_generation_logs_codes_only(monkeypatch, tmp_path):
     assert msg.count("error TS2304") <= 5  # truncated to first 5 hits
 
 
+@pytest.mark.integration
 async def test_vite_build_sync_propagates_typecheck_error(monkeypatch):
     """The shared build path runs vite build (success) THEN tsc; a fatal tsc code
     propagates out of vite_build() as TypeCheckError (so the route's widened except
@@ -635,6 +657,7 @@ async def test_vite_build_sync_propagates_typecheck_error(monkeypatch):
         await storage.vite_build({"src/App.tsx": "useState"})
 
 
+@pytest.mark.integration
 async def test_vite_build_sync_returns_dist_when_only_cosmetic(monkeypatch):
     """Non-regression: vite build success + tsc reporting only cosmetic codes →
     vite_build returns the dist normally (no raise)."""
