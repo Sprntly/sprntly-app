@@ -9,6 +9,7 @@ in this repo.
 Tests substitute a `FakeSupabaseClient` (see tests/_fake_supabase.py)
 by monkey-patching `supabase_client` to return it.
 """
+import functools
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -60,6 +61,44 @@ def _reset_supabase_client_for_tests() -> None:
     """Drop the memoized client so tests can swap in a fake."""
     global _supabase_client
     _supabase_client = None
+
+
+def reset_client() -> None:
+    """Drop the memoised client, forcing reconnection on the next call.
+
+    Called by `retry_on_disconnect` after an HTTP/2 idle-timeout error so
+    the next `supabase_client()` call gets a fresh TCP connection.
+    """
+    global _supabase_client
+    _supabase_client = None
+
+
+def retry_on_disconnect(fn):
+    """Decorator: retry a db helper once on HTTP/2 idle-timeout disconnect.
+
+    Supabase's PostgREST client uses httpx with HTTP/2. After a long idle
+    period Supabase closes the server-side connection; the next request
+    receives an `httpx.RemoteProtocolError: Server disconnected`. httpx
+    reconnects automatically on the *second* attempt, so one retry is
+    sufficient.  We reset `_supabase_client` between attempts so the new
+    call gets a fresh supabase-py Client with a clean httpx session.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            exc_type = type(exc).__name__
+            exc_msg = str(exc)
+            if "RemoteProtocolError" in exc_type or "Server disconnected" in exc_msg:
+                logger.warning(
+                    "Supabase HTTP/2 disconnect in %s — resetting client and retrying once",
+                    fn.__qualname__,
+                )
+                reset_client()
+                return fn(*args, **kwargs)
+            raise
+    return wrapper
 
 
 def require_client() -> Any:

@@ -95,49 +95,44 @@ async def run(file_path: str, content: str, virtual_fs: dict[str, str]) -> dict[
         "data": payload_data(),
     })
 
+    # Run via asyncio.to_thread + synchronous subprocess.run so the autofixer
+    # works under uvicorn's WindowsSelectorEventLoopPolicy, which does not support
+    # asyncio.create_subprocess_exec (raises NotImplementedError). Mirrors the
+    # approach used by storage.vite_build (same constraint, same fix).
     try:
-        proc = await asyncio.create_subprocess_exec(
-            _NODE_BIN, str(_AUTOFIXER_JS),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        import subprocess as _subprocess
+        result = await asyncio.to_thread(
+            _subprocess.run,
+            [_NODE_BIN, str(_AUTOFIXER_JS)],
+            input=payload.encode("utf-8"),
+            capture_output=True,
+            timeout=_SUBPROCESS_TIMEOUT_S,
             env=_subprocess_env(),
         )
-    except (FileNotFoundError, NotADirectoryError):
+    except FileNotFoundError:
         logger.warning("autofixer_node_missing bin=%s", _NODE_BIN)
         return {"ok": True}
-
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=payload.encode("utf-8")),
-            timeout=_SUBPROCESS_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
-        _kill(proc)
+    except _subprocess.TimeoutExpired:
         logger.warning("autofixer_timeout file_path=%s", file_path)
         return {"ok": True}
+    except Exception as exc:
+        logger.warning("autofixer_subprocess_error file_path=%s error_class=%s", file_path, type(exc).__name__)
+        return {"ok": True}
 
-    if proc.returncode != 0:
+    if result.returncode != 0:
         logger.warning(
             "autofixer_subprocess_failed file_path=%s rc=%s stderr=%s",
-            file_path, proc.returncode,
-            stderr.decode("utf-8", errors="replace")[:200],
+            file_path, result.returncode,
+            result.stderr.decode("utf-8", errors="replace")[:200],
         )
         return {"ok": True}
 
     try:
-        return json.loads(stdout.decode("utf-8"))
+        return json.loads(result.stdout.decode("utf-8"))
     except json.JSONDecodeError:
         logger.warning("autofixer_invalid_json file_path=%s", file_path)
         return {"ok": True}
 
-
-def _kill(proc: asyncio.subprocess.Process) -> None:
-    """Best-effort terminate a timed-out subprocess so it doesn't linger."""
-    try:
-        proc.kill()
-    except ProcessLookupError:
-        pass
 
 
 def format_errors_for_agent(result: dict[str, Any]) -> str:

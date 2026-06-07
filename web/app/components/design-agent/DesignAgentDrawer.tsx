@@ -47,6 +47,9 @@ export type DesignAgentDrawerProps = {
    *  host launcher can mount the post-generation result view. Optional — the
    *  existing toast flow is unchanged when absent. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** Fires immediately after a successful kickoff (before polling) so the host
+   *  launcher can show a persistent in-page "generating…" tracker. */
+  onKickoff?: (prototypeId: number) => void
 }
 
 /** Initial target-platform selection (AC2). */
@@ -86,6 +89,9 @@ type GenerateFlowDeps = {
   /** P2-12: receives the terminal poll outcome so the host can render the
    *  post-generation result view. Optional — absent in the pre-P2-12 flow. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** Fires immediately after a successful kickoff with the new prototype_id so
+   *  the host launcher can show an in-page "generating…" card while polling runs. */
+  onKickoff?: (prototypeId: number) => void
 }
 
 /**
@@ -146,6 +152,7 @@ export async function runGenerateFlow({
   setSubmitting,
   notifyOnReady,
   onGenerated,
+  onKickoff,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
   try {
@@ -153,6 +160,8 @@ export async function runGenerateFlow({
     // P5-09: persist a `pending` entry so a reload mid-generation that then
     // completes still captures the ready notification.
     markPending(kickoff.prototype_id)
+    // Notify host immediately so it can show an in-page status card.
+    onKickoff?.(kickoff.prototype_id)
     onOpenChange(false)
     showToast(
       "Design Agent generating",
@@ -251,6 +260,7 @@ export function DesignAgentDrawerView({
   figmaFileKey,
   showToast,
   onGenerated,
+  onKickoff,
 }: ViewProps) {
   const [platform, setPlatform] = useState<TargetPlatform>(DEFAULT_PLATFORM)
   const [instructions, setInstructions] = useState("")
@@ -293,6 +303,7 @@ export function DesignAgentDrawerView({
       setSubmitting,
       notifyOnReady,
       onGenerated,
+      onKickoff,
     })
   }
 

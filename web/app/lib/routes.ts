@@ -24,6 +24,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // the dormant ConnectorsScreen.tsx (see commit A note in that file).
   connectors: "/settings?section=connectors",
   sources: "/sources",
+  tickets: "/tickets",
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -36,6 +37,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/settings": "settings",
   "/team": "team",
   "/sources": "sources",
+  "/tickets": "tickets",
 }
 
 for (let step = 1; step <= 8; step++) {

@@ -237,11 +237,30 @@ def _symlink_node_modules(runtime_root: Path, build_path: Path) -> None:
     working dir, so a symlink is sufficient and ~free. No-op when the scaffold
     has no node_modules (the build then fails loudly via ViteBuildError, which is
     the correct signal that the deploy step never installed prototype-runtime).
+
+    Falls back to junction (Windows) when os.symlink requires Developer Mode /
+    admin privileges that aren't available.
     """
     nm = build_path / "node_modules"
     rt_nm = runtime_root / "node_modules"
     if rt_nm.exists() and not nm.exists():
-        os.symlink(rt_nm, nm, target_is_directory=True)
+        try:
+            os.symlink(rt_nm, nm, target_is_directory=True)
+        except OSError:
+            # Windows without Developer Mode: symlink fails. Use a junction
+            # (no privilege needed) via subprocess, or copy as last resort.
+            if os.name == "nt":
+                import subprocess as _sp
+                try:
+                    _sp.run(
+                        ["cmd", "/c", "mklink", "/J", str(nm), str(rt_nm)],
+                        check=True, capture_output=True,
+                    )
+                except Exception:
+                    # Last resort: copy (slow but works everywhere).
+                    shutil.copytree(rt_nm, nm, symlinks=True)
+            else:
+                raise
 
 
 def _read_dist(dist_dir: Path) -> dict[str, str]:

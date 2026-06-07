@@ -3,7 +3,9 @@
 import { useCallback, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
+import { useCompany } from "../../../context/CompanyContext"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
+import { usePipelineStatus } from "../../../lib/usePipelineStatus"
 import type {
   BriefV2CompactFinding,
   BriefV2HeroFinding,
@@ -11,11 +13,14 @@ import type {
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { BriefV2Render } from "../../shared/BriefV2Sections"
+import { PipelineStatusBanner } from "../../shared/PipelineStatusBanner"
 
 export function BriefScreen() {
   const { goTo, setAIBarValue, expandAiPanel, showToast } = useNavigation()
   const { content, setContent } = useContent()
+  const { activeCompany } = useCompany()
   const { briefV2, briefDetails } = content
+  const pipeline = usePipelineStatus(activeCompany)
 
   const [prdBusyKey, setPrdBusyKey] = useState<string | null>(null)
 
@@ -81,6 +86,12 @@ export function BriefScreen() {
 
   return (
     <AppLayout mainClassName="main--reading main--brief">
+      <PipelineStatusBanner
+        runStatus={pipeline.runStatus}
+        isTriggering={pipeline.isTriggering}
+        showCompleted={pipeline.showCompleted}
+        triggerRun={pipeline.triggerRun}
+      />
       {empty ? (
         <EmptyPane
           title="No findings in this brief"

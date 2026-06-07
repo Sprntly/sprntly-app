@@ -120,6 +120,10 @@ class Settings(BaseSettings):
     # the helpers; it does not yet consume this secret). No JWT_SECRET fallback.
     design_agent_token_secret: str = ""
 
+    # Feature flag: set to true in .env to enable Design Agent routes.
+    # Routes return 404 when false so the feature is invisible when off.
+    design_agent_enabled: bool = False
+
     @property
     def github_app_private_key_pem(self) -> str:
         """Normalize the PEM: turn literal `\\n` sequences into real newlines."""

@@ -18,6 +18,7 @@ export type ScreenId =
   | "team"
   | "connectors"
   | "sources"
+  | "tickets"
 
 export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-1",
@@ -44,6 +45,7 @@ export const APP_SCREENS: ScreenId[] = [
   // Connectors is the sole surface. ScreenId kept in the type union for
   // the dormant ConnectorsScreen.tsx (salvaged in commit D).
   "sources",
+  "tickets",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
@@ -67,6 +69,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   team: "Team",
   connectors: "Connectors",
   sources: "Sources",
+  tickets: "Tickets",
 }
 
 export function getMainChromeTitle(screen: ScreenId): string {
@@ -153,6 +156,13 @@ export const AI_CONTEXTS: Record<
     suggest: [
       "Which source contributed the most to last week's brief?",
       "Are any sources stale or duplicated?",
+    ],
+  },
+  tickets: {
+    path: "/tickets",
+    suggest: [
+      "Which ticket has the highest impact?",
+      "Show me all high priority tickets",
     ],
   },
 }

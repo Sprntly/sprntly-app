@@ -45,7 +45,7 @@ from typing import Any
 
 from argon2 import PasswordHasher
 
-from app.db.client import require_client, utc_now
+from app.db.client import require_client, retry_on_disconnect, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +111,7 @@ def infer_scenario(prototype: dict[str, Any], prd: dict[str, Any] | None) -> fro
 # ─── Async-task triad (mirrors db/prds.py) ───────────────────────────────
 
 
+@retry_on_disconnect
 def start_prototype(
     *,
     prd_id: int,
@@ -216,6 +217,7 @@ def fail_prototype(
     )
 
 
+@retry_on_disconnect
 def get_prototype(
     *,
     prototype_id: int,
@@ -234,6 +236,7 @@ def get_prototype(
     return resp.data[0] if resp.data else None
 
 
+@retry_on_disconnect
 def find_existing_prototype(
     *,
     prd_id: int,
@@ -451,6 +454,7 @@ def set_share_config(
     return get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
 
 
+@retry_on_disconnect
 def find_prototype_by_share_token(token: str) -> dict[str, Any] | None:
     """Public-route lookup — deliberately does NOT filter by workspace_id.
 

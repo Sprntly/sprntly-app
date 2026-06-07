@@ -536,7 +536,7 @@ def _update_sync_status(result: SyncResult) -> None:
     """Update connection sync timestamp and enable input source."""
     try:
         error_msg = "; ".join(result.errors) if result.errors else None
-        db.update_connection_sync(SLACK_PROVIDER, error=error_msg)
+        db.update_connection_sync(SLACK_PROVIDER, last_sync_error=error_msg)
     except Exception:
         logger.warning("Failed to update Slack sync status", exc_info=True)
 

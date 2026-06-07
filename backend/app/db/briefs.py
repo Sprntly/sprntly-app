@@ -6,7 +6,7 @@ so callers (routes, runners) don't have to change: `payload_json` was
 exploded into the top-level dict before; we do the same for `payload`
 (jsonb) now.
 """
-from app.db.client import require_client
+from app.db.client import require_client, retry_on_disconnect
 
 
 def _explode(row: dict) -> dict:
@@ -21,6 +21,7 @@ def _explode(row: dict) -> dict:
     }
 
 
+@retry_on_disconnect
 def get_current_brief(dataset: str = "asurion") -> dict | None:
     c = require_client()
     resp = (
@@ -37,6 +38,7 @@ def get_current_brief(dataset: str = "asurion") -> dict | None:
     return _explode(resp.data[0])
 
 
+@retry_on_disconnect
 def get_brief_by_id(brief_id: int) -> dict | None:
     c = require_client()
     resp = c.table("briefs").select("*").eq("id", brief_id).limit(1).execute()
@@ -45,6 +47,7 @@ def get_brief_by_id(brief_id: int) -> dict | None:
     return _explode(resp.data[0])
 
 
+@retry_on_disconnect
 def save_brief(
     dataset: str,
     week_label: str,

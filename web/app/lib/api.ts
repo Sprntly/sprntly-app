@@ -666,6 +666,14 @@ export const designAgentApi = {
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
     api.get<PrototypeRecord>(`/v1/design-agent/${prototypeId}`),
+  /** Find the most recent ready/generating prototype for a PRD. Returns null on 404. */
+  getByPrd: async (prdId: number): Promise<PrototypeRecord | null> => {
+    try {
+      return await api.get<PrototypeRecord>(`/v1/design-agent/by-prd/${prdId}`)
+    } catch {
+      return null
+    }
+  },
   /** F14 — mark a prototype complete. Empty body. */
   complete: (prototypeId: number) =>
     api.post<{

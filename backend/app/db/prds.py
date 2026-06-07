@@ -3,7 +3,7 @@
 One row per generation attempt for a (brief_id, insight_index, variant).
 `status` walks generating → ready (or failed/invalidated).
 """
-from app.db.client import require_client
+from app.db.client import require_client, retry_on_disconnect
 
 
 def save_prd(brief_id: int, insight_index: int, title: str, md: str) -> int:
@@ -97,6 +97,7 @@ def fail_prd(prd_id: int, error: str) -> None:
     }).eq("id", prd_id).execute()
 
 
+@retry_on_disconnect
 def get_prd(prd_id: int) -> dict | None:
     c = require_client()
     resp = c.table("prds").select("*").eq("id", prd_id).limit(1).execute()
@@ -132,6 +133,7 @@ def get_prd_rendered(prd_id: int) -> dict | None:
     return rendered
 
 
+@retry_on_disconnect
 def find_existing_prd(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:

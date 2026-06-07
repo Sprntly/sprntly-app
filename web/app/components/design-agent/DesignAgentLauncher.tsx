@@ -43,6 +43,52 @@ export type LauncherDrawerProps = {
   /** P2-12: drawer reports the terminal generation outcome here so the
    *  container can mount the post-generation result view. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** Fires immediately after kickoff (before polling) so the host can show the
+   *  in-page "Generating prototype…" status card. */
+  onKickoff?: (prototypeId: number) => void
+}
+
+/** Persistent in-page status card shown from kickoff until the terminal result
+ *  mounts. Gives users a clear "still running" signal without requiring them to
+ *  opt in to the toast notification or wait for the drawer to reopen. */
+function PrototypeGeneratingCard() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 12,
+        padding: "12px 14px",
+        marginTop: 12,
+        borderRadius: 10,
+        border: "1px solid var(--accent-alpha-14)",
+        background: "var(--accent-muted)",
+      }}
+    >
+      {/* Spinner */}
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 16 16"
+        fill="none"
+        aria-hidden
+        style={{ flexShrink: 0, marginTop: 1, animation: "da-spin 0.9s linear infinite" }}
+      >
+        <style>{`@keyframes da-spin { to { transform: rotate(360deg); } }`}</style>
+        <circle cx="8" cy="8" r="6" stroke="var(--accent-alpha-28)" strokeWidth="2" />
+        <path d="M8 2a6 6 0 0 1 6 6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+      </svg>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--accent-ink)" }}>
+          Generating prototype…
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 3, lineHeight: 1.45 }}>
+          This usually takes 1–2 minutes. You can navigate away — check "Notify me
+          when ready" next time to get a toast when it's done.
+        </div>
+      </div>
+    </div>
+  )
 }
 
 /** P2-12: maps a generation outcome to launcher result state — the prototype
@@ -68,6 +114,10 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   result?: PrototypeRecord | null
   /** P2-12: handed to the drawer so a successful generation populates `result`. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** In-page status card: prototype_id being generated, null when idle. */
+  generatingId?: number | null
+  /** Fires immediately after kickoff so the container sets `generatingId`. */
+  onKickoff?: (prototypeId: number) => void
   /** P3-14 (F10): the comment selected for Apply, lifted to the container so
    *  CommentsPanel's Apply action sets it and IterateComposer reads it. Optional
    *  so existing direct-view test calls keep typechecking. */
@@ -93,6 +143,8 @@ export function DesignAgentLauncherView({
   setOpen,
   result = null,
   onGenerated,
+  generatingId = null,
+  onKickoff,
   applyTarget = null,
   setApplyTarget,
   renderDrawer = defaultRenderDrawer,
@@ -103,9 +155,16 @@ export function DesignAgentLauncherView({
         type="button"
         className="btn btn-accent"
         onClick={() => setOpen(true)}
+        disabled={generatingId !== null && result === null}
       >
         Generate Prototype
       </button>
+      {/* In-page generating status card — visible from kickoff until the
+          terminal result mounts. Keeps the user informed without relying on
+          the transient toast or the "Notify me" opt-in. */}
+      {generatingId !== null && result === null && (
+        <PrototypeGeneratingCard />
+      )}
       {/* `key` forces a clean remount per prototype id: PostGenerationResult
           (and the CompletionBar it mounts) seed state from props at mount only,
           so regenerating a second prototype in the same launcher instance must
@@ -154,6 +213,7 @@ export function DesignAgentLauncherView({
         prdId,
         figmaFileKey,
         onGenerated,
+        onKickoff,
       })}
     </div>
   )
@@ -173,6 +233,7 @@ export function DesignAgentLauncher({
 }) {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState<PrototypeRecord | null>(null)
+  const [generatingId, setGeneratingId] = useState<number | null>(null)
   // P3-14 (F10): lifted so CommentsPanel's Apply sets it and IterateComposer
   // reads it as its pre-fill.
   const [applyTarget, setApplyTarget] = useState<CommentRecord | null>(null)
@@ -182,6 +243,7 @@ export function DesignAgentLauncher({
   // no result view renders (AC5).
   const handleGenerated = (outcome: DesignAgentGenResult) => {
     const next = resultFromGeneration(outcome)
+    setGeneratingId(null)
     if (next) setResult(next)
   }
 
@@ -193,6 +255,8 @@ export function DesignAgentLauncher({
       setOpen={setOpen}
       result={result}
       onGenerated={handleGenerated}
+      generatingId={generatingId}
+      onKickoff={setGeneratingId}
       applyTarget={applyTarget}
       setApplyTarget={setApplyTarget}
       renderDrawer={renderDrawer}

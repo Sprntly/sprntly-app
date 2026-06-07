@@ -48,6 +48,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
+from app.config import settings
 from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
@@ -99,17 +100,15 @@ _inflight_tasks: set[asyncio.Task] = set()
 
 
 def _feature_enabled() -> bool:
-    """Read DESIGN_AGENT_ENABLED at REQUEST TIME (never import time).
+    """Read DESIGN_AGENT_ENABLED via pydantic-settings (never os.environ directly).
 
-    Per skill-config Rule #27: default-off; never default-1 in any commit.
-    Request-time read means flipping the env var takes effect without a code
-    deploy or process restart, and keeps the gate honest under module reload in
-    tests. The frontend uses a *separate* var, `NEXT_PUBLIC_DESIGN_AGENT_ENABLED`
-    (the `NEXT_PUBLIC_` prefix is mandatory for Next.js client-bundle exposure);
-    the two gate independently — this one is the security boundary.
+    pydantic-settings loads .env into the settings object but does NOT populate
+    os.environ, so os.environ.get("DESIGN_AGENT_ENABLED") always returns None
+    when the value comes from .env. Using settings.design_agent_enabled fixes this.
+    The frontend uses a separate var, `NEXT_PUBLIC_DESIGN_AGENT_ENABLED`; the two
+    gate independently — this one is the security boundary.
     """
-    val = (os.environ.get("DESIGN_AGENT_ENABLED") or "").strip().lower()
-    return val in {"1", "true", "yes"}
+    return settings.design_agent_enabled
 
 
 def _require_feature_enabled() -> None:
@@ -288,6 +287,33 @@ def get_pending_patches(
         PrdPatchOut(**_patch_to_out(p))
         for p in list_pending_patches(prd_id=prd_id, workspace_id=workspace_id)
     ]
+
+
+@router.get("/by-prd/{prd_id}")
+def get_by_prd(
+    prd_id: int,
+    session: dict = Depends(require_app_session),
+) -> dict[str, Any]:
+    """Return the most recent ready/generating prototype for a PRD, or 404.
+
+    Used by the frontend to load an existing prototype on mount so generated
+    prototypes survive page reloads. Declared BEFORE the /{prototype_id}
+    catch-all (route order is load-bearing — same reason as /prd-patches).
+    """
+    _require_feature_enabled()
+    workspace_id = (session.get("aud") or "").strip()
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="No workspace claim")
+    from app.design_agent.prompts import DESIGN_AGENT_TEMPLATE_VERSION
+    existing = find_existing_prototype(
+        prd_id=prd_id,
+        workspace_id=workspace_id,
+        template_version=DESIGN_AGENT_TEMPLATE_VERSION,
+        variant=_VARIANT,
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="No prototype for this PRD")
+    return existing
 
 
 @router.get("/{prototype_id}")

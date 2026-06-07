@@ -28,7 +28,6 @@ import type {
 } from "../../types/content"
 import { renderInline } from "../../lib/inline-md"
 import { InlineChart } from "./InlineChart"
-import { DesignAgentLauncher } from "../design-agent/DesignAgentLauncher"
 
 export function PrdSections({
   sections,
@@ -115,13 +114,9 @@ function RenderBlock({
       // EvidenceSections).
       return <div className="evv2-context-chip">{renderInline(block.text)}</div>
     case "prd-tldr":
-      return (
-        <TldrTriptych
-          problem={block.problem}
-          fix={block.fix}
-          impact={block.impact}
-        />
-      )
+      // Suppressed here — PrdSummaryStrip in PrdScreen renders it above the
+      // body so it shows once at the top regardless of where the LLM placed it.
+      return null
     case "prd-problem":
       return <ProblemBlock userStory={block.userStory} impact={block.impact} />
     case "prd-hypothesis":
@@ -152,7 +147,7 @@ function RenderBlock({
     case "prd-dod":
       return <DodChecklist items={block.items} />
     case "prd-design":
-      return <DesignSection prdId={prdId} figmaFileKey={figmaFileKey} />
+      return null
     default:
       // Evidence variants and any unknown future blocks render as no-op
       // in the PRD renderer; the dedicated EvidenceSections covers them.
@@ -162,37 +157,6 @@ function RenderBlock({
 
 /* ---------- subcomponents ---------- */
 
-/**
- * F1/F2 Design section. Renders the header, then — when a `prdId` is in scope
- * (PrdScreen passes `prd.prd_id`) — the F2 `DesignAgentLauncher` ("Generate
- * Prototype" button + drawer). Without a `prdId` (non-PRD callers, the
- * empty/demo states) it falls back to the original empty-state entry point.
- * The `data-design-agent-slot` div is retained as P1-09's forward-compat mount
- * target. Parsed `platformHint` / `notes` hints stay on the PrdState block
- * (for P1-05's scaffold prompt); the P1 renderer intentionally does not surface
- * them.
- */
-function DesignSection({
-  prdId,
-  figmaFileKey,
-}: {
-  prdId?: number
-  figmaFileKey?: string | null
-}) {
-  return (
-    <section className="prd-design">
-      <h2 className="prd-h2">Design</h2>
-      {prdId !== undefined ? (
-        <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} />
-      ) : (
-        <p className="prd-design-empty">
-          No prototype yet — use the Design Agent to generate one
-        </p>
-      )}
-      <div className="prd-design-slot" data-design-agent-slot />
-    </section>
-  )
-}
 
 function TldrTriptych({
   problem,

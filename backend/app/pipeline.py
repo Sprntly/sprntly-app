@@ -137,7 +137,8 @@ async def _stage_sync_connectors(dataset: str) -> dict[str, Any]:
 
 async def _sync_slack(dataset: str) -> dict[str, Any]:
     from app.connectors.slack_sync import sync_slack
-    return await asyncio.to_thread(sync_slack, dataset)
+    result = await asyncio.to_thread(sync_slack, dataset)
+    return result.to_dict()
 
 
 async def _sync_hubspot(dataset: str) -> dict[str, Any]:

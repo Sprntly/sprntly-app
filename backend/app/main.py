@@ -1,9 +1,11 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app import auth, db, datasets as datasets_service
 from app.brief_runner import auto_generate_all
@@ -186,3 +188,9 @@ app.include_router(internal.router)
 app.include_router(design_agent.router)
 app.include_router(pipeline.router)
 app.include_router(synthesis.router)
+
+# Serve prototype bundles in dev (filesystem fallback when no Supabase Storage bucket).
+_proto_dir = Path(settings.storage_dir)
+if _proto_dir.exists() or settings.env == "development":
+    _proto_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/static/prototypes", StaticFiles(directory=str(_proto_dir)), name="prototypes")
