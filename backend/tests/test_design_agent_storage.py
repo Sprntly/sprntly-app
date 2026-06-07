@@ -365,7 +365,6 @@ async def test_timeout_raises_vite_build_error_with_configured_value(monkeypatch
     assert "exit=" not in str(ei.value)
 
 
-@pytest.mark.integration
 async def test_timeout_propagates_through_repair_loop(monkeypatch):
     """AC5: vite_build_with_repair re-raises a timeout ViteBuildError UNCHANGED
     (a timeout is not a 'could not resolve' class), with no repair re-attempt —
@@ -502,7 +501,6 @@ def _fake_tsc(*, stdout="", stderr="", returncode=0, raises=None):
     return _run
 
 
-@pytest.mark.integration
 def test_typecheck_blocks_missing_hook_import(monkeypatch, tmp_path):
     """AC #1 (parse/raise): TS2304 (useState used, not imported — the #20 bug)."""
     monkeypatch.setattr(
@@ -515,7 +513,6 @@ def test_typecheck_blocks_missing_hook_import(monkeypatch, tmp_path):
     assert "TS2304" in str(ei.value)
 
 
-@pytest.mark.integration
 def test_typecheck_blocks_bad_module_import(monkeypatch, tmp_path):
     """AC #2 (parse/raise): TS2307 (bad import path)."""
     monkeypatch.setattr(
@@ -528,7 +525,6 @@ def test_typecheck_blocks_bad_module_import(monkeypatch, tmp_path):
     assert "TS2307" in str(ei.value)
 
 
-@pytest.mark.integration
 def test_typecheck_allows_cosmetic_type_error(monkeypatch, tmp_path):
     """AC #3: implicit-any (TS7006) + scaffold TS2339/TS2353 noise → NO raise.
 
@@ -548,14 +544,12 @@ def test_typecheck_allows_cosmetic_type_error(monkeypatch, tmp_path):
     storage._typecheck_runtime_break(tmp_path)  # no raise
 
 
-@pytest.mark.integration
 def test_typecheck_clean_bundle_unaffected(monkeypatch, tmp_path):
     """AC #4 (parse): a clean build (rc=0, no diagnostics) → no raise."""
     monkeypatch.setattr(storage.subprocess, "run", _fake_tsc(stdout="", returncode=0))
     storage._typecheck_runtime_break(tmp_path)  # no raise
 
 
-@pytest.mark.integration
 def test_typecheck_fail_open_when_tsc_binary_missing(monkeypatch, tmp_path, caplog):
     """AC #5 / #8: tsc binary missing (FileNotFoundError) → fail-open, WARNING, no raise."""
     monkeypatch.setattr(
@@ -567,7 +561,6 @@ def test_typecheck_fail_open_when_tsc_binary_missing(monkeypatch, tmp_path, capl
     assert any("typecheck_tool_failed" in m and "FileNotFoundError" in m for m in msgs)
 
 
-@pytest.mark.integration
 def test_typecheck_fail_open_on_timeout(monkeypatch, tmp_path):
     """AC #5: tsc timeout → fail-open, no raise (a tooling hang must not block staging)."""
     monkeypatch.setattr(
@@ -577,7 +570,6 @@ def test_typecheck_fail_open_on_timeout(monkeypatch, tmp_path):
     storage._typecheck_runtime_break(tmp_path)  # no raise
 
 
-@pytest.mark.integration
 def test_typecheck_fail_open_nonzero_no_fatal_codes(monkeypatch, tmp_path):
     """AC #5: non-zero exit carrying only a config/tooling diagnostic (TS5057, not in
     the fatal set) → no raise. Only a curated fatal code blocks."""
@@ -589,7 +581,6 @@ def test_typecheck_fail_open_nonzero_no_fatal_codes(monkeypatch, tmp_path):
     storage._typecheck_runtime_break(tmp_path)  # no raise
 
 
-@pytest.mark.integration
 def test_fatal_codes_keyed_on_code_not_message(monkeypatch, tmp_path):
     """AC #6: a reworded/localized TS2304 message still triggers — keyed on the code."""
     monkeypatch.setattr(
@@ -601,7 +592,6 @@ def test_fatal_codes_keyed_on_code_not_message(monkeypatch, tmp_path):
         storage._typecheck_runtime_break(tmp_path)
 
 
-@pytest.mark.integration
 def test_typecheck_scans_stderr_for_fatal_code(monkeypatch, tmp_path):
     """Defensive: a fatal code surfacing on stderr is still caught (TS2552 variant)."""
     monkeypatch.setattr(
@@ -622,7 +612,6 @@ def test_fatal_codes_is_curated_frozenset():
     assert {"TS2304", "TS2307"} <= storage._FATAL_TS_CODES
 
 
-@pytest.mark.integration
 def test_typecheck_blocked_generation_logs_codes_only(monkeypatch, tmp_path):
     """AC #8: the raised diagnostic carries codes + truncated message (≤5 lines),
     not a full source dump (Rule #24)."""
@@ -698,7 +687,6 @@ def _assemble_build_dir(build_path: Path, virtual_fs: dict[str, str]) -> None:
         target.write_text(content, encoding="utf-8")
 
 
-@pytest.mark.integration
 @_skip_no_toolchain
 def test_typecheck_real_tsc_blocks_missing_hook_import(tmp_path):
     """AC #1 (real tsc): the #20 repro — useState without import → TS2304."""
@@ -711,7 +699,6 @@ def test_typecheck_real_tsc_blocks_missing_hook_import(tmp_path):
     assert "TS2304" in str(ei.value)
 
 
-@pytest.mark.integration
 @_skip_no_toolchain
 def test_typecheck_real_tsc_blocks_bad_module_import(tmp_path):
     """AC #2 (real tsc): a bad import path → TS2307."""
@@ -724,7 +711,6 @@ def test_typecheck_real_tsc_blocks_bad_module_import(tmp_path):
     assert "TS2307" in str(ei.value)
 
 
-@pytest.mark.integration
 @_skip_no_toolchain
 def test_typecheck_real_tsc_allows_cosmetic_error(tmp_path):
     """AC #3 (real tsc): implicit-any param + scaffold's own non-fatal noise → no raise."""
@@ -734,7 +720,6 @@ def test_typecheck_real_tsc_allows_cosmetic_error(tmp_path):
     storage._typecheck_runtime_break(tmp_path)  # no raise — cosmetic still renders
 
 
-@pytest.mark.integration
 @_skip_no_toolchain
 def test_typecheck_real_tsc_clean_bundle_passes(tmp_path):
     """AC #4 (real tsc): a clean bundle → no raise (non-regression)."""

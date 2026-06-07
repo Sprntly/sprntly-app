@@ -292,7 +292,6 @@ async def test_exhaustion_raises_distinct_class(monkeypatch):
     assert "ScheduleBuilderScreen" in str(ei.value)
 
 
-@pytest.mark.integration
 def test_vite_build_signature_unchanged():
     """AC9: vite_build's public signature is unchanged (one positional param)."""
     import inspect

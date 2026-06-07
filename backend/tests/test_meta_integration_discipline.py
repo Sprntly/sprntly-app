@@ -19,12 +19,22 @@ _HEAVY_PATTERNS = frozenset({
 })
 
 
-def _calls_heavy_io(node: ast.AST) -> bool:
-    """Return True if the AST node contains a Name or Attribute matching a heavy pattern."""
-    for child in ast.walk(node):
-        if isinstance(child, ast.Name) and child.id in _HEAVY_PATTERNS:
+def _calls_heavy_io(func_node: ast.AST) -> bool:
+    """Return True if the test function directly CALLS subprocess/vite_build.
+
+    Excludes references that appear only as arguments to other calls
+    (e.g. monkeypatch.setattr, inspect.signature) — those are mocked,
+    not real subprocess invocations.
+    """
+    for node in ast.walk(func_node):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        # Direct call: subprocess.run(...), asyncio.create_subprocess_exec(...)
+        if isinstance(func, ast.Attribute) and func.attr in _HEAVY_PATTERNS:
             return True
-        if isinstance(child, ast.Attribute) and child.attr in _HEAVY_PATTERNS:
+        # Direct call: vite_build(...) or subprocess(...)
+        if isinstance(func, ast.Name) and func.id in _HEAVY_PATTERNS:
             return True
     return False
 
