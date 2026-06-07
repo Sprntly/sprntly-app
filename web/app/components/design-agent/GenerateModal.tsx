@@ -26,7 +26,6 @@ import {
   withAuthRetry,
   ApiError,
   type ConnectionSummary,
-  type FigmaFile,
   type GitHubRepo,
 } from "../../lib/api"
 import {
@@ -50,35 +49,6 @@ const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
 ]
 
 /**
- * Build the Figma file `<select>` options from the fetched list. Pure so the
- * mapping is unit-testable without driving the effect:
- *  - `null`  → still loading ("Loading designs…").
- *  - `[]`    → the honest empty state ("Couldn't load designs") — this is what a
- *              non-401 fetch failure AND a successful-but-unprovisioned listing
- *              both collapse to; NO fake files are ever rendered.
- *  - files   → a "Pick design…" prompt + one `<option value={key}>{name}` per
- *              file, so a selection feeds `figmaFileSel` (→ figma_file_key).
- */
-export function figmaFileOptions(figmaFiles: FigmaFile[] | null) {
-  if (figmaFiles === null) {
-    return <option value="">Loading designs…</option>
-  }
-  if (figmaFiles.length === 0) {
-    return <option value="">Couldn&apos;t load designs</option>
-  }
-  return (
-    <>
-      <option value="">Pick design…</option>
-      {figmaFiles.map((f) => (
-        <option key={f.key} value={f.key}>
-          {f.name}
-        </option>
-      ))}
-    </>
-  )
-}
-
-/**
  * Visibility is driven by the shared navigation modal union: the parent threads
  * `open={activeModal === "generate"}` and `onClose={closeModal}` in via these
  * props. `open` toggles render; `prdId`/`figmaFileKey` come from the current PRD
@@ -90,17 +60,21 @@ export function GenerateModal({
   prdId,
   figmaFileKey,
   // Full-screen loading-screen hooks. onGenStart fires the instant the kickoff
-  // is requested (so the parent can show the overlay); onGenDone fires on the
-  // terminal generation outcome (ready/failed/timeout) so the parent can dismiss
-  // it.
+  // is requested (so the parent can show the overlay); onKickoff fires once the
+  // generate POST returns with the prototype_id (so the loading screen can subscribe
+  // to the SSE stream); onGenDone fires on the terminal generation outcome
+  // (ready/failed/timeout) so the parent can dismiss it.
   onGenStart,
+  onKickoff,
   onGenDone,
 }: {
   open: boolean
   onClose: () => void
   prdId: number | null
   figmaFileKey: string | null
-  onGenStart?: () => void
+  onGenStart?: (ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => void
+  /** Fires immediately after generate POST returns with the new prototype_id. */
+  onKickoff?: (prototypeId: number) => void
   // onGenDone receives the terminal generation RESULT (DesignAgentGenResult) so
   // the parent can reveal the full-screen post-generation canvas on success. May
   // be undefined if the flow rejects before producing a result.
@@ -112,46 +86,87 @@ export function GenerateModal({
   const [instructions, setInstructions] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
-  // Figma URL paste state — URL input, extracted key, resolved label, and
-  // validating flag. When figmaUrlKey is set it is preferred over figmaFileSel
-  // (the dropdown) as the figma_file_key for generation.
+  // Figma URL paste state — URL input, extracted key, extracted node-id,
+  // resolved label, and validating flag. When figmaUrlKey is set it is
+  // preferred over figmaFileSel (the dropdown) as the figma_file_key for
+  // generation. figmaNodeId carries the node-id from the URL query string so
+  // generation can target that specific frame.
   const [figmaUrlInput, setFigmaUrlInput] = useState("")
   const [figmaUrlKey, setFigmaUrlKey] = useState<string | null>(null)
+  const [figmaNodeId, setFigmaNodeId] = useState<string | null>(null)
   const [figmaUrlLabel, setFigmaUrlLabel] = useState<string | null>(null)
   const [figmaUrlValidating, setFigmaUrlValidating] = useState(false)
   const figmaDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  /** Extract the Figma file key from a pasted design/file URL. */
-  function extractFigmaKey(url: string): string | null {
+  /**
+   * Extract the Figma file key and optional node-id from a pasted design/file
+   * URL. node-id is encoded with hyphens in the URL but the Figma API expects
+   * colons; this converts automatically.
+   */
+  function extractFigmaKey(url: string): { key: string; nodeId: string | null } | null {
     const m = url.match(/(?:file|design)\/([A-Za-z0-9]+)/)
-    return m ? m[1] : null
+    if (!m) return null
+    const key = m[1]
+    // Extract node-id from query string; convert hyphen → colon (Figma URL
+    // encodes as "-", API expects ":").
+    const nodeMatch = url.match(/[?&]node-id=([A-Za-z0-9%:-]+)/)
+    const nodeId = nodeMatch ? decodeURIComponent(nodeMatch[1]).replace(/-/g, ":") : null
+    return { key, nodeId }
+  }
+
+  /** Walk a Figma document tree to find a node name by id. Returns null when
+   *  not found (caller falls back to showing the file name alone). */
+  function findNodeName(doc: unknown, targetId: string): string | null {
+    if (!doc || typeof doc !== "object") return null
+    const node = doc as Record<string, unknown>
+    if (node["id"] === targetId && typeof node["name"] === "string") return node["name"]
+    const children = node["children"]
+    if (Array.isArray(children)) {
+      for (const child of children) {
+        const found = findNodeName(child, targetId)
+        if (found) return found
+      }
+    }
+    return null
   }
 
   /**
-   * Fired on every change to the Figma URL input. Parses the key immediately;
-   * if a key is found, hits GET /v1/connectors/figma/files/{key} to resolve the
-   * file name as a confirmation label. Falls back to showing the raw key on
-   * error so the user at least sees _something_ was parsed.
+   * Fired on every change to the Figma URL input. Parses the key and node-id
+   * immediately; if a key is found, hits GET /v1/connectors/figma/files/{key}
+   * to resolve the file name (and frame name when a node-id is present) as a
+   * confirmation label. Falls back to showing the raw key on error so the user
+   * at least sees _something_ was parsed.
    */
   function handleFigmaUrlChange(raw: string) {
     setFigmaUrlInput(raw)
-    const key = extractFigmaKey(raw)
-    if (!key) {
+    const parsed = extractFigmaKey(raw)
+    if (!parsed) {
       setFigmaUrlKey(null)
+      setFigmaNodeId(null)
       setFigmaUrlLabel(null)
       return
     }
+    const { key, nodeId } = parsed
     setFigmaUrlKey(key)
+    setFigmaNodeId(nodeId)
     setFigmaUrlLabel(null)
     if (figmaDebounceRef.current) clearTimeout(figmaDebounceRef.current)
     figmaDebounceRef.current = setTimeout(async () => {
       setFigmaUrlValidating(true)
       try {
         const file = await connectorsApi.getFigmaFile(key)
-        const name = file && typeof file === "object" && "name" in file
+        const fileName = file && typeof file === "object" && "name" in file
           ? String((file as { name: string }).name)
           : null
-        setFigmaUrlLabel(name ?? key)
+        // When a node-id is present, try to surface the frame name alongside
+        // the file name ("✓ MyFile · MyFrame"). Falls back to the file name
+        // alone when the node is not found in the returned document tree.
+        let label = fileName ?? key
+        if (nodeId && file && typeof file === "object" && "document" in file) {
+          const frameName = findNodeName((file as { document: unknown }).document, nodeId)
+          if (frameName) label = `${label} · ${frameName}`
+        }
+        setFigmaUrlLabel(label)
       } catch {
         setFigmaUrlLabel(key)
       }
@@ -166,17 +181,8 @@ export function GenerateModal({
     connections?.find((c) => c.provider === provider)
 
   // Per-provider source selectors.
-  // Figma: real endpoint — designAgentApi.listFigmaFiles() → GET
-  //   /v1/design-agent/figma-files. We fetch + populate the file <select>. The
-  //   chosen key feeds `figmaFileSel` → figma_file_key via the existing
-  //   `figmaFileSel || figmaFileKey` fallback. `figmaFiles === null` means "not
-  //   loaded yet"; an empty list is the honest "Couldn't load designs" state
-  //   (the listing scope/team-id is a connectors-lane dependency) — no fake
-  //   files are ever rendered.
   // GitHub: real endpoint — connectorsApi.listGithubRepos() → GET
   //   /v1/connectors/github/repos. We fetch + populate the repo <select>.
-  const [figmaFileSel, setFigmaFileSel] = useState("")
-  const [figmaFiles, setFigmaFiles] = useState<FigmaFile[] | null>(null)
   const [repos, setRepos] = useState<GitHubRepo[] | null>(null)
   const [reposError, setReposError] = useState(false)
   const [repoSel, setRepoSel] = useState("")
@@ -229,28 +235,7 @@ export function GenerateModal({
     }
   }, [open, githubActive])
 
-  // Fetch the connected company's Figma files for the design selector — real
-  // endpoint. Runs only when Figma is active. Mirrors the GitHub repo fetch:
-  // withAuthRetry holds the last-known rows through a transient token-refresh
-  // 401; only a genuine non-auth failure clears to an empty list, which the
-  // <select> renders as the honest "Couldn't load designs" state (no fake files).
   const figmaActive = getGenerateConnectorRowState(connFor("figma")).connected
-  useEffect(() => {
-    if (!open || !figmaActive) return
-    let cancelled = false
-    void withAuthRetry(() => designAgentApi.listFigmaFiles())
-      .then((r) => {
-        if (!cancelled) setFigmaFiles(r.files)
-      })
-      .catch((err) => {
-        if (!cancelled && !(err instanceof ApiError && err.status === 401)) {
-          setFigmaFiles([])
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [open, figmaActive])
 
   if (!open) return null
 
@@ -261,10 +246,14 @@ export function GenerateModal({
 
   const handleGenerate = () => {
     if (submitting || prdId == null) return
-    // Show the full-screen loading overlay the moment generation kicks off. The
-    // modal then closes (runGenerateFlow's onOpenChange(false)) but the overlay
+    // Show the full-screen loading overlay the moment generation kicks off. Pass
+    // the selected source context so the loading screen can show source-aware steps.
+    // The modal then closes (runGenerateFlow's onOpenChange(false)) but the overlay
     // lives in ApproveModal so it survives.
-    onGenStart?.()
+    onGenStart?.({
+      figmaFileKey: figmaUrlKey || figmaFileKey,
+      githubRepo: githubActive ? repoSel : null,
+    })
     void runGenerateFlow({
       params: buildGenerateParams({
         prdId,
@@ -272,9 +261,12 @@ export function GenerateModal({
         instructions,
         // Priority order for figma_file_key:
         //   1. figmaUrlKey — pasted URL (preferred: user explicitly targeted a file)
-        //   2. figmaFileSel — dropdown selection (once listing endpoint works)
-        //   3. figmaFileKey — prop fallback (pre-selected key from PRD context)
-        figmaFileKey: figmaUrlKey || figmaFileSel || figmaFileKey,
+        //   2. figmaFileKey — prop fallback (pre-selected key from PRD context)
+        figmaFileKey: figmaUrlKey || figmaFileKey,
+        // figmaNodeId is set when the pasted URL includes a node-id query param;
+        // it targets generation at that specific frame. Only applies when a URL
+        // was pasted (figmaUrlKey set) — the prop-level figmaFileKey has no frame.
+        figmaNodeId: figmaUrlKey ? figmaNodeId : null,
         websiteUrl: "",
         manualColor: "",
         manualFont: "",
@@ -295,6 +287,7 @@ export function GenerateModal({
       // runGenerateFlow still toasts "Generation failed" / "Generate failed".
       notifyOnReady: false,
       notifyOnKickoff: false,
+      onKickoff,
       // runGenerateFlow fires onGenerated on the terminal poll outcome (ready OR
       // failed/timeout) — that's the dismissal signal for the loading overlay.
       // Separate from the toasts above: suppressing the toasts does not touch
@@ -319,9 +312,8 @@ export function GenerateModal({
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div className="modal design-agent-surface">
-        {/* Compact header — badge + title + close only. */}
+        {/* Compact header — title + close only. */}
         <div className="modal-head">
-          <div className="modal-badge">Step 1 of 4 · Generate</div>
           <h3 className="modal-title">Generate prototype</h3>
           <button
             type="button"
@@ -375,22 +367,6 @@ export function GenerateModal({
                     Connected
                     {figmaRow.accountLabel ? ` · ${figmaRow.accountLabel}` : ""}
                   </span>
-                  {/* Figma file selector. Wired to a real endpoint —
-                      designAgentApi.listFigmaFiles() → GET
-                      /v1/design-agent/figma-files. Enabled once files load; the
-                      chosen key (figmaFileSel) feeds figma_file_key via the
-                      existing figmaFileSel || figmaFileKey fallback. An empty
-                      list is the honest "Couldn't load designs" state — no fake
-                      files. */}
-                  <select
-                    className="input src-select-inline"
-                    value={figmaFileSel}
-                    onChange={(e) => setFigmaFileSel(e.target.value)}
-                    disabled={!figmaFiles || figmaFiles.length === 0}
-                    aria-label="Select a design"
-                  >
-                    {figmaFileOptions(figmaFiles)}
-                  </select>
                 </>
               ) : (
                 <>
@@ -473,7 +449,7 @@ export function GenerateModal({
                     ) : (
                       <>
                         <option value="">Pick repo…</option>
-                        {repos.map((r) => (
+                        {[...repos].sort((a, b) => a.full_name.localeCompare(b.full_name)).map((r) => (
                           <option key={r.full_name} value={r.full_name}>
                             {r.full_name}
                           </option>

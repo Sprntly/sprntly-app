@@ -64,6 +64,7 @@ import httpx
 import pytest
 
 from app.auth import CompanyContext
+from tests._fake_anthropic import _FakeStream
 from tests.conftest import _TEST_COMPANY_ID, _TEST_USER_ID
 
 # ─── Generated source under test ─────────────────────────────────────────────
@@ -229,6 +230,7 @@ def _end_msg(text: str = "Done."):
 def _mock(side_effect: list) -> MagicMock:
     client = MagicMock()
     client.messages.create.side_effect = side_effect
+    client.messages.stream.side_effect = lambda **kw: _FakeStream(client.messages.create(**kw))
     return client
 
 

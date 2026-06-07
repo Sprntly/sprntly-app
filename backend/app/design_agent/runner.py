@@ -54,6 +54,7 @@ from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
 from app.design_agent.event_stream import close as _sse_close
 from app.design_agent.event_stream import publish_step
+from app.design_agent.progress import friendly_step
 from app.design_agent.prompts import DESIGN_AGENT_ITERATE_SYSTEM
 from app.design_agent.storage import read_source_files_for_checkpoint
 from app.design_agent.tools import (
@@ -340,27 +341,13 @@ def _step_label(iters: int, mode: str) -> str:  # noqa: ARG001 — mode reserved
     return _STEP_LABELS[idx]
 
 
-# Per-tool step labels emitted BEFORE each tool dispatch so the frontend sees
-# what the agent is doing at the granularity of individual tool calls. Each
-# entry is a callable receiving the tool's `input` dict and returning a string.
-# Tools not listed fall back to "Running <name>". These labels appear in the
-# left-panel activity stream (SSE `kind:"step"` events).
-_TOOL_LABEL: dict[str, object] = {
-    "write": lambda args: f"Writing {args.get('path', 'file')}",
-    "line_replace": lambda args: f"Editing {args.get('path', 'file')}",
-    "read": lambda args: f"Reading {args.get('path', 'file')}",
-    "search": lambda args: "Searching codebase",
-    "fetch_figma": lambda args: "Fetching Figma assets",
-    "clarifying_question": lambda args: "Pausing — agent has a question",
-    "propose_prd_patch": lambda args: "Proposing PRD update",
-    "read_console": lambda args: "Reading console output",
-}
-
-
 def _tool_step_label(name: str, args: dict) -> str:
-    """Return a human-readable label for a tool call, for the SSE activity stream."""
-    fn = _TOOL_LABEL.get(name)
-    return fn(args) if callable(fn) else f"Running {name}"
+    """Return a plain-English label for a tool call, for the SSE activity stream.
+
+    Delegates to progress.friendly_step so no paths, tool names, or technical
+    text ever reach the activity stream.
+    """
+    return friendly_step(name, args)
 
 
 async def agent_loop(
@@ -433,14 +420,33 @@ async def agent_loop(
             if remaining in {max_iters // 2, max(2, max_iters // 4), 1}:
                 _append_text_block(messages[-1], _wrap_up_nudge(remaining))
 
-            resp = await asyncio.to_thread(
-                client.messages.create,
-                model=MODEL,
-                max_tokens=max_tokens,
-                system=system_blocks,
-                tools=tools_payload,
-                messages=messages,
-            )
+            loop = asyncio.get_running_loop()
+            _last_step: list[str] = [""]  # mutable container for dedup
+
+            def _stream() -> object:
+                with client.messages.stream(
+                    model=MODEL,
+                    max_tokens=max_tokens,
+                    system=system_blocks,
+                    tools=tools_payload,
+                    messages=messages,
+                ) as stream:
+                    for event in stream:
+                        etype = type(event).__name__
+                        if etype == "RawContentBlockStartEvent":
+                            block = getattr(event, "content_block", None)
+                            if block and getattr(block, "type", None) == "tool_use":
+                                label = friendly_step(getattr(block, "name", ""), None)
+                                if label != _last_step[0]:
+                                    _last_step[0] = label
+                                    loop.call_soon_threadsafe(
+                                        publish_step,
+                                        ctx.prototype_id,
+                                        {"kind": "step", "text": label, "state": "active"},
+                                    )
+                    return stream.get_final_message()
+
+            resp = await asyncio.to_thread(_stream)
             usage.add(resp.usage)
             # AD15 cost guard: when the projected next-iteration spend would
             # cross the soft cap, inject the EXISTING wrap-up nudge ONCE so the
@@ -459,7 +465,13 @@ async def agent_loop(
                 )
 
             stop = resp.stop_reason
-            content = [b.model_dump() for b in resp.content]
+            # Reconstruct blocks using only API-legal input fields.
+            # model_dump() on streamed response objects includes SDK-added keys
+            # (e.g. parsed_output on text blocks) that the API rejects when
+            # sent back in conversation history. Whitelist only: text→{type,text},
+            # tool_use→{type,id,name,input}; any other block type falls back to
+            # model_dump() stripped of SDK-only keys via exclude_none/unset.
+            content = [_to_api_block(b) for b in resp.content]
             messages.append({"role": "assistant", "content": content})
             last_assistant_content = content
 
@@ -673,6 +685,22 @@ def _append_text_block(message: dict[str, Any], text: str) -> None:
         message["content"] = [block]
 
 
+def _to_api_block(block: Any) -> dict[str, Any]:
+    """Reconstruct a content block using only API-legal input fields.
+
+    Sources all values from model_dump() so SDK-added extras (e.g.
+    parsed_output on TextBlock) never leak into conversation history.
+    Works with both real SDK objects and test fakes that implement
+    model_dump().
+    """
+    d = block.model_dump()
+    if d.get("type") == "text":
+        return {"type": "text", "text": d["text"]}
+    if d.get("type") == "tool_use":
+        return {"type": "tool_use", "id": d["id"], "name": d["name"], "input": d["input"]}
+    return {k: v for k, v in d.items() if v is not None}
+
+
 def _serialise_tool_result(result: dict[str, Any]) -> str:
     """Compress a tool result dict to a JSON string for the Anthropic API."""
     safe = {k: v for k, v in result.items() if k != "is_error"}
@@ -729,6 +757,7 @@ async def generate_prototype(
     system_blocks: list[dict[str, Any]],
     user_message: dict[str, Any],
     figma_file_key: str | None,
+    figma_node_id: str | None = None,
     scenario: str = "A",
     github_repo: str | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
@@ -774,6 +803,7 @@ async def generate_prototype(
         workspace_id=workspace_id,
         virtual_fs=virtual_fs,  # pre-seeded with palette CSS (may be {} if no Figma)
         figma_file_key=figma_file_key,
+        figma_node_id=figma_node_id,  # frame-level targeting; None when absent
         figma_access_token=figma_access_token,
     )
     result = await agent_loop(

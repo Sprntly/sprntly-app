@@ -73,6 +73,8 @@ type GenerateFlowDeps = {
     target_platform: TargetPlatform
     instructions: string
     figma_file_key?: string | null
+    /** Optional Figma node-id (frame-level targeting) parsed from a pasted URL. */
+    figma_node_id?: string | null
     /** P5-02: Scenario B fallback source (shown only when no Figma). */
     website_url?: string | null
     /** P5-02: manual color/font floor (shown only when no Figma). */
@@ -97,6 +99,9 @@ type GenerateFlowDeps = {
   /** P2-12: receives the terminal poll outcome so the host can render the
    *  post-generation result view. Optional — absent in the pre-P2-12 flow. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** Fires immediately after the generate POST returns with the new prototype_id.
+   *  Lets the loading screen subscribe to the SSE stream as soon as the agent starts. */
+  onKickoff?: (prototypeId: number) => void
 }
 
 /**
@@ -114,6 +119,7 @@ export function buildGenerateParams({
   platform,
   instructions,
   figmaFileKey,
+  figmaNodeId,
   websiteUrl,
   manualColor,
   manualFont,
@@ -123,6 +129,10 @@ export function buildGenerateParams({
   platform: TargetPlatform
   instructions: string
   figmaFileKey?: string | null
+  /** Optional node-id extracted from a pasted Figma URL; targets generation at
+   *  a specific frame rather than the file's default top-5. Null when the URL
+   *  has no node-id or when figmaFileKey came from the PRD context (not a paste). */
+  figmaNodeId?: string | null
   websiteUrl: string
   manualColor: string
   manualFont: string
@@ -134,6 +144,7 @@ export function buildGenerateParams({
     target_platform: platform,
     instructions,
     figma_file_key: figmaFileKey ?? null,
+    figma_node_id: figmaNodeId ?? null,
     website_url: websiteUrl || null,
     manual_design:
       manualColor && manualFont
@@ -173,6 +184,7 @@ export async function runGenerateFlow({
   notifyOnReady,
   notifyOnKickoff = true,
   onGenerated,
+  onKickoff,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
   try {
@@ -180,6 +192,7 @@ export async function runGenerateFlow({
     // P5-09: persist a `pending` entry so a reload mid-generation that then
     // completes still captures the ready notification.
     markPending(kickoff.prototype_id)
+    onKickoff?.(kickoff.prototype_id)
     onOpenChange(false)
     // UX-EXPLORE (throwaway — REVERT): the kickoff "Design Agent generating"
     // toast is gated on `notifyOnKickoff` (default true → legacy drawer

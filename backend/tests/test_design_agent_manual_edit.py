@@ -50,6 +50,7 @@ from app.design_agent.prompts import (
 
 from app.auth import CompanyContext
 from tests.conftest import _TEST_COMPANY_ID, _TEST_USER_ID
+from tests._fake_anthropic import _FakeStream
 
 TELEMETRY_LOGGER = "app.llm_telemetry"
 
@@ -215,7 +216,7 @@ class _RecordingClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls: list[dict] = []
-        self.messages = types.SimpleNamespace(create=self._create)
+        self.messages = types.SimpleNamespace(create=self._create, stream=self._stream)
 
     def _create(self, **kwargs):
         self.calls.append({
@@ -230,6 +231,9 @@ class _RecordingClient:
         if isinstance(resp, BaseException):
             raise resp
         return resp
+
+    def _stream(self, **kwargs):
+        return _FakeStream(self._create(**kwargs))
 
 
 def _usage(cache_creation=0, cache_read=0, inp=0, out=0):

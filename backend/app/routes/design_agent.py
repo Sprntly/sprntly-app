@@ -87,7 +87,8 @@ from app.design_agent.prompts import (
     DESIGN_AGENT_TEMPLATE_VERSION,
     render_scaffold_user,
 )
-from app.design_agent.event_stream import subscribe as _sse_subscribe
+from app.design_agent.event_stream import publish_step, subscribe as _sse_subscribe
+from app.design_agent.progress import VITE_PHASE_STEP
 from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.storage import (
@@ -152,6 +153,11 @@ class GenerateRequest(BaseModel):
     instructions: str = Field("")
     figma_file_key: str | None = None     # explicit; auto-detection via the
     #                                       connector lookup lands in a later phase.
+    figma_node_id: str | None = None      # optional frame-level node-id extracted
+    #                                       from a pasted Figma URL (node-id query
+    #                                       param, hyphen→colon converted client-side).
+    #                                       When set, the fetch_figma tool targets this
+    #                                       specific frame instead of the file's top-5.
     website_url: str | None = None        # P5-02: Scenario B fallback source
     manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
     github_repo: str | None = None        # connected-repo full_name ("org/repo");
@@ -259,6 +265,7 @@ async def generate(
             target_platform=body.normalised_platform(),
             instructions=body.instructions,
             figma_file_key=body.figma_file_key,
+            figma_node_id=body.figma_node_id,  # frame-level targeting; None when absent
             website_url=effective_website_url,  # resolved value incl. onboarding fallback
             manual_design=body.manual_design,
             github_repo=repo,  # normalised connected-repo full_name; prompt context only
@@ -481,6 +488,7 @@ async def _run_generation_bg(
     target_platform: str,
     instructions: str,
     figma_file_key: str | None,
+    figma_node_id: str | None = None,
     website_url: str | None = None,
     manual_design: ManualDesignInput | None = None,
     github_repo: str | None = None,
@@ -547,6 +555,7 @@ async def _run_generation_bg(
             system_blocks=system_blocks,
             user_message=user_message,
             figma_file_key=figma_file_key,
+            figma_node_id=figma_node_id,  # frame-level targeting; None when absent
             scenario=scenario_label,
             github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
         )
@@ -634,6 +643,7 @@ async def _stage_complete_run(
     # vite_build_with_repair returns the (possibly) REPAIRED virtual_fs as its
     # second element; we REBIND `virtual_fs` here, BEFORE the `_source/` staging
     # step below, so the staged source matches the built dist.
+    publish_step(prototype_id, VITE_PHASE_STEP)
     try:
         dist_files, repaired_virtual_fs = await vite_build_with_repair(virtual_fs)
     except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:

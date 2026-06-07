@@ -37,12 +37,19 @@ class ToolContext:
     decrypts tokens itself, which keeps this module importable without the
     backend connector/db stack (only the no-key / no-token branches are
     exercised in unit tests).
+
+    `figma_node_id`: optional frame-level node-id extracted from a pasted
+    Figma URL's `node-id` query parameter (hyphen→colon converted by the
+    frontend). When set, `_exec_fetch_figma` uses it as the default
+    `frame_ids` so the agent reads that specific frame instead of the
+    file's top-5 frames, enabling frame-targeted generation.
     """
 
     prototype_id: int
     workspace_id: str            # from require_session().aud
     virtual_fs: dict[str, str] = field(default_factory=dict)  # populated by write/line_replace
     figma_file_key: str | None = None
+    figma_node_id: str | None = None   # frame-level targeting; None → top-5 default
     figma_access_token: str | None = None  # runner-injected; None until the connector is authorised
 
 
@@ -681,7 +688,11 @@ async def _exec_fetch_figma(inp: dict, ctx: ToolContext) -> dict:
     # NOTE: the connector helpers take (access_token, file_key) — the runner
     # (P1-04) resolves the token onto ctx; this executor never decrypts tokens.
     from app.connectors.figma_oauth import fetch_file, fetch_file_styles
-    frame_ids = (inp.get("frame_ids") or [])[:5]
+    # Frame targeting: the agent may pass explicit frame_ids; when it doesn't,
+    # fall back to ctx.figma_node_id (set when the user pasted a frame-level
+    # Figma URL) so the first fetch targets that specific frame rather than the
+    # file's default top-5. The [:5] cap applies in both cases.
+    frame_ids = (inp.get("frame_ids") or ([ctx.figma_node_id] if ctx.figma_node_id else []))[:5]
     file_doc = await asyncio.to_thread(fetch_file, ctx.figma_access_token, ctx.figma_file_key)
     styles = await asyncio.to_thread(fetch_file_styles, ctx.figma_access_token, ctx.figma_file_key)
     frames = _extract_top_level_frames(file_doc, frame_ids)[:5]

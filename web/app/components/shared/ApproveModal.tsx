@@ -6,6 +6,7 @@
 // ApproveModal closing. Its open/close state lives in the shared navigation
 // modal union (`activeModal === "generate"`), not local component state.
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useWorkspace } from "../../context/WorkspaceContext"
@@ -20,7 +21,7 @@ import { markdownToPrdState } from "../../lib/prd-adapter"
 import type { PrdSection } from "../../types/content"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 import { useIterateRun } from "../design-agent/useIterateRun"
-import { IconCheck, IconSparkle } from "./app-icons"
+import { IconSparkle } from "./app-icons"
 
 // Min-visible duration. If generation dedup-returns an existing prototype almost
 // instantly, the overlay would otherwise flash; keep it visible at least this
@@ -33,6 +34,7 @@ const MIN_VISIBLE_MS = 2500
 const SAFETY_MAX_MS = 6.5 * 60 * 1000
 
 export function ApproveModal() {
+  const router = useRouter()
   const { activeModal, openModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas, showToast } =
     useNavigation()
   const { content } = useContent()
@@ -40,6 +42,12 @@ export function ApproveModal() {
   const { loading: workspaceLoading } = useWorkspace()
   // Full-screen loading-overlay visibility.
   const [genLoading, setGenLoading] = useState(false)
+  // Context captured at generation-start for the loading screen's source-aware steps.
+  const [genFigmaKey, setGenFigmaKey] = useState<string | null>(null)
+  const [genGithubRepo, setGenGithubRepo] = useState<string | null>(null)
+  // Prototype id known once the generate POST returns — lets the loading screen
+  // subscribe to the real SSE step stream immediately after kickoff.
+  const [genProtoId, setGenProtoId] = useState<number | null>(null)
   // The prototype to show in the full-screen post-generation canvas (the loading
   // takeover reveals the canvas), or null when no canvas is shown. Set on a
   // successful generation once the loading overlay dismisses; cleared by the
@@ -102,7 +110,12 @@ export function ApproveModal() {
   }, [clearTimers, goToCanvas])
 
   // Fired when Generate is clicked: show the overlay and arm the safety ceiling.
-  const handleGenStart = useCallback(() => {
+  // Receives optional figmaFileKey and githubRepo so the loading screen can show
+  // source-aware step labels.
+  const handleGenStart = useCallback((ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => {
+    setGenFigmaKey(ctx?.figmaFileKey ?? null)
+    setGenGithubRepo(ctx?.githubRepo ?? null)
+    setGenProtoId(null)
     shownAtRef.current = Date.now()
     resolvedRef.current = false
     // Clear any canvas-to-reveal from a prior run before this generation
@@ -154,12 +167,22 @@ export function ApproveModal() {
     setApplyTarget(null)
     setUrlPrdSections(undefined)
     setUrlPrdTitle(null)
-    urlResolvedIdRef.current = null
+    // Keep the resolved-id sentinel at its current value (the URL prototype id)
+    // rather than clearing it to null. Clearing it caused a re-resolution race:
+    // canvasResult → null triggered the resolver effect which, seeing
+    // urlResolvedIdRef.current = null while canvasPrototypeId was still the old
+    // id (Next.js router.push is async), would re-fetch and re-open the canvas
+    // before the /prd navigation completed, making the breadcrumb appear to do
+    // nothing on the standalone /design/[id] route.
+    urlResolvedIdRef.current = canvasPrototypeId
     // Leave the canvas route so the URL and view stay consistent and the
     // resolver does not immediately re-open the canvas. The canvas opens from
     // the approved PRD, so the PRD is its logical parent.
-    if (canvasPrototypeId != null) goTo("prd")
-  }, [canvasPrototypeId, goTo])
+    if (canvasPrototypeId != null) {
+      goTo("prd")
+      router.push("/prd")
+    }
+  }, [canvasPrototypeId, goTo, router])
 
   // After a Share or an iterate advances the
   // SAME prototype, re-fetch the record so the in-canvas share-gated CommentsPanel
@@ -396,9 +419,15 @@ export function ApproveModal() {
         prdId={prd?.prd_id ?? null}
         figmaFileKey={prd?.figma_file_key ?? null}
         onGenStart={handleGenStart}
+        onKickoff={(id) => setGenProtoId(id)}
         onGenDone={handleGenDone}
       />
-      <GenerationLoadingScreen open={genLoading} />
+      <GenerationLoadingScreen
+        open={genLoading}
+        figmaFileKey={genFigmaKey}
+        githubRepo={genGithubRepo}
+        prototypeId={genProtoId}
+      />
       {canvasOverlay}
     </>
   )
@@ -454,10 +483,6 @@ export function ApproveModal() {
     >
       <div className="modal">
         <div className="modal-head">
-          <div className="modal-badge">
-            <IconCheck size={12} />
-            PRD Approved
-          </div>
           <h2 className="modal-title">Where should this go next?</h2>
           <p className="modal-sub">
             Pick how you want to move from spec to code. You can change your mind

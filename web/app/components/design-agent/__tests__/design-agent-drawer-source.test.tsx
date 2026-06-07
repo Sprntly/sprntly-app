@@ -179,6 +179,7 @@ describe("website fallback retained + buildGenerateParams parity (AC4)", () => {
       target_platform: "both",
       instructions: "go dark",
       figma_file_key: null,
+      figma_node_id: null,   // frame-level targeting; null when no URL-pasted node-id
       website_url: "https://acme.com",
       manual_design: { primary_color: "#3b82f6", font_family: "Inter" },
       // Additive connected-repo context key; the documented fallback shape above
