@@ -63,19 +63,38 @@ const REFRESH_STEP_MS = 800
 export function GenerationLoadingScreen({
   open,
   onDone,
+  figmaFileKey,
+  githubRepo,
   mode = "generate",
 }: {
   open: boolean
   /** Optional: fired once the exit fade completes (cosmetic hook). */
   onDone?: () => void
+  /** When set, shows Figma-specific first steps. */
+  figmaFileKey?: string | null
+  /** When set, shows GitHub-specific first step. */
+  githubRepo?: string | null
   /** "generate" (default) = full generation flow; "refresh" = canvas reload. */
   mode?: "generate" | "refresh"
 }) {
-  // Derive active arrays and timings from mode.
+  // Derive base arrays and timings from mode.
   const steps = mode === "refresh" ? REFRESH_STEPS : STEPS
   const statuses = mode === "refresh" ? REFRESH_STATUSES : STATUSES
   const estimateMs = mode === "refresh" ? REFRESH_ESTIMATE_MS : ESTIMATE_MS
   const stepMs = mode === "refresh" ? REFRESH_STEP_MS : STEP_MS
+
+  // Derive source-aware first two steps (generate mode only).
+  const firstStep = figmaFileKey
+    ? "Reading your Figma file…"
+    : githubRepo
+    ? "Reading repository…"
+    : steps[0]
+  const secondStep = figmaFileKey
+    ? "Analyzing the design system…"
+    : steps[1]
+  const activeSteps = mode === "generate"
+    ? [firstStep, secondStep, ...steps.slice(2)]
+    : steps
 
   // Number of steps marked done (0..steps.length). The "active" step is `done`.
   const [doneCount, setDoneCount] = useState(0)
@@ -103,14 +122,14 @@ export function GenerationLoadingScreen({
     // LAST step done while we're still waiting (so the final spinner keeps
     // spinning until the parent dismisses on real completion).
     const stepTimer = window.setInterval(() => {
-      setDoneCount((c) => (c < steps.length - 1 ? c + 1 : c))
+      setDoneCount((c) => (c < activeSteps.length - 1 ? c + 1 : c))
     }, stepMs)
 
     return () => {
       window.clearInterval(tick)
       window.clearInterval(stepTimer)
     }
-  }, [open, steps.length, stepMs])
+  }, [open, activeSteps.length, stepMs])
 
   // Fire onDone after the overlay is removed.
   const prevOpen = useRef(open)
@@ -121,10 +140,11 @@ export function GenerationLoadingScreen({
 
   if (!open) return null
 
-  const elapsedS = elapsedMs / 1000
-  // Cap the cosmetic fill at 96% until real completion dismisses the screen.
-  const pct = Math.min(96, Math.round((elapsedMs / estimateMs) * 100))
-  const activeIndex = Math.min(doneCount, steps.length - 1)
+  // Cap at 85% for generate (never completes prematurely); refresh keeps 96%.
+  const pct = mode === "refresh"
+    ? Math.min(96, Math.round((elapsedMs / estimateMs) * 100))
+    : Math.min(85, Math.round((elapsedMs / estimateMs) * 85))
+  const activeIndex = Math.min(doneCount, activeSteps.length - 1)
   const status = statuses[activeIndex] ?? statuses[statuses.length - 1]
 
   const headline =
@@ -153,14 +173,9 @@ export function GenerationLoadingScreen({
           <div className="bar">
             <div className="fill" style={{ width: `${pct}%` }} />
           </div>
-          {mode !== "refresh" && (
-            <div className="lbl">
-              {elapsedS.toFixed(1)}s · est. ~{Math.round(estimateMs / 1000)}s
-            </div>
-          )}
         </div>
         <div className="proto-gen-steps">
-          {steps.map((label, i) => {
+          {activeSteps.map((label, i) => {
             const isDone = i < doneCount
             const isActive = i === activeIndex && !isDone ? true : i === doneCount
             const cls =

@@ -40,6 +40,9 @@ export function ApproveModal() {
   const { loading: workspaceLoading } = useWorkspace()
   // Full-screen loading-overlay visibility.
   const [genLoading, setGenLoading] = useState(false)
+  // Context captured at generation-start for the loading screen's source-aware steps.
+  const [genFigmaKey, setGenFigmaKey] = useState<string | null>(null)
+  const [genGithubRepo, setGenGithubRepo] = useState<string | null>(null)
   // The prototype to show in the full-screen post-generation canvas (the loading
   // takeover reveals the canvas), or null when no canvas is shown. Set on a
   // successful generation once the loading overlay dismisses; cleared by the
@@ -102,7 +105,11 @@ export function ApproveModal() {
   }, [clearTimers, goToCanvas])
 
   // Fired when Generate is clicked: show the overlay and arm the safety ceiling.
-  const handleGenStart = useCallback(() => {
+  // Receives optional figmaFileKey and githubRepo so the loading screen can show
+  // source-aware step labels.
+  const handleGenStart = useCallback((ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => {
+    setGenFigmaKey(ctx?.figmaFileKey ?? null)
+    setGenGithubRepo(ctx?.githubRepo ?? null)
     shownAtRef.current = Date.now()
     resolvedRef.current = false
     // Clear any canvas-to-reveal from a prior run before this generation
@@ -398,7 +405,11 @@ export function ApproveModal() {
         onGenStart={handleGenStart}
         onGenDone={handleGenDone}
       />
-      <GenerationLoadingScreen open={genLoading} />
+      <GenerationLoadingScreen
+        open={genLoading}
+        figmaFileKey={genFigmaKey}
+        githubRepo={genGithubRepo}
+      />
       {canvasOverlay}
     </>
   )

@@ -100,7 +100,7 @@ export function GenerateModal({
   onClose: () => void
   prdId: number | null
   figmaFileKey: string | null
-  onGenStart?: () => void
+  onGenStart?: (ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => void
   // onGenDone receives the terminal generation RESULT (DesignAgentGenResult) so
   // the parent can reveal the full-screen post-generation canvas on success. May
   // be undefined if the flow rejects before producing a result.
@@ -261,10 +261,14 @@ export function GenerateModal({
 
   const handleGenerate = () => {
     if (submitting || prdId == null) return
-    // Show the full-screen loading overlay the moment generation kicks off. The
-    // modal then closes (runGenerateFlow's onOpenChange(false)) but the overlay
+    // Show the full-screen loading overlay the moment generation kicks off. Pass
+    // the selected source context so the loading screen can show source-aware steps.
+    // The modal then closes (runGenerateFlow's onOpenChange(false)) but the overlay
     // lives in ApproveModal so it survives.
-    onGenStart?.()
+    onGenStart?.({
+      figmaFileKey: figmaUrlKey || figmaFileSel || figmaFileKey,
+      githubRepo: githubActive ? repoSel : null,
+    })
     void runGenerateFlow({
       params: buildGenerateParams({
         prdId,
@@ -319,9 +323,8 @@ export function GenerateModal({
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div className="modal design-agent-surface">
-        {/* Compact header — badge + title + close only. */}
+        {/* Compact header — title + close only. */}
         <div className="modal-head">
-          <div className="modal-badge">Step 1 of 4 · Generate</div>
           <h3 className="modal-title">Generate prototype</h3>
           <button
             type="button"
@@ -473,7 +476,7 @@ export function GenerateModal({
                     ) : (
                       <>
                         <option value="">Pick repo…</option>
-                        {repos.map((r) => (
+                        {[...repos].sort((a, b) => a.full_name.localeCompare(b.full_name)).map((r) => (
                           <option key={r.full_name} value={r.full_name}>
                             {r.full_name}
                           </option>
