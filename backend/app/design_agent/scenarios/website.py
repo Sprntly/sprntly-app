@@ -164,6 +164,17 @@ def _resolve_async_playwright():
     return async_playwright
 
 
+def _is_timeout(exc: Exception) -> bool:
+    """Name-based classification of a Playwright navigation timeout.
+
+    Playwright raises ``playwright.async_api.TimeoutError`` on nav timeout. We
+    classify it by class name rather than importing the symbol so this module
+    stays importable on hosts where Playwright is absent (the whole point of the
+    ``_resolve_async_playwright`` lazy seam — no top-level playwright import).
+    """
+    return type(exc).__name__ == "TimeoutError"
+
+
 async def _dismiss_cookie_banner(page) -> None:
     """Best-effort: click the first matching cookie-consent control, then stop.
 
@@ -192,20 +203,33 @@ async def extract_website_design_system(url: str) -> WebsiteDesignSystem | None:
     host = urlsplit(url).hostname or ""
     logger.info("website_extract_started url_host=%s", host)
 
-    async_playwright = _resolve_async_playwright()
     confident = False
     error_class = ""
+    reason = "ok"
     try:
+        # MOVED INSIDE the try (P6-09; was before the try): a missing/broken
+        # Playwright now raises ImportError HERE, caught below + routed through
+        # the finally so the floor is OBSERVABLE. Before: the ImportError escaped
+        # to the caller's `except ImportError` -> silent neutral floor with NO
+        # website_extract_complete line. The floor OUTPUT (return None) is
+        # unchanged — only the observability is.
+        async_playwright = _resolve_async_playwright()
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=_CHROMIUM_ARGS)
             context = await browser.new_context()
             try:
                 page = await context.new_page()
-                await page.goto(url, wait_until="networkidle", timeout=_NAV_TIMEOUT_MS)
+                # K1 fix: `wait_until="load"` (not `networkidle`). Real sites with
+                # persistent connections (analytics/sockets/streaming) never reach
+                # networkidle → 100% TimeoutError even at 8s/20s; `load` succeeds in
+                # ~0.85s and pulls richer HTML. Paired with the `_is_timeout`/`reason=`
+                # observability so the floor is debuggable from logs.
+                await page.goto(url, wait_until="load", timeout=_NAV_TIMEOUT_MS)
                 await _dismiss_cookie_banner(page)
                 raw = await page.evaluate(_SAMPLER_JS)
                 ds = _map_sample(raw)
                 if _below_confidence(ds):
+                    reason = "low_confidence"
                     return None
                 confident = True
                 return ds
@@ -213,11 +237,19 @@ async def extract_website_design_system(url: str) -> WebsiteDesignSystem | None:
                 # Dispose per request even on the error path (no browser pool).
                 await context.close()
                 await browser.close()
+    except ImportError as exc:
+        # Narrow clause MUST precede `except Exception` (ImportError is an
+        # Exception subclass; Python evaluates except clauses top-down). A
+        # missing/broken Playwright dependency floors loudly here.
+        error_class = type(exc).__name__
+        reason = "import_unavailable"
+        return None
     except Exception as exc:  # noqa: BLE001 — a flaky site must never propagate.
         error_class = type(exc).__name__
+        reason = "timeout" if _is_timeout(exc) else "error"
         return None
     finally:
         logger.info(
-            "website_extract_complete url_host=%s confident=%s error_class=%s",
-            host, confident, error_class,
+            "website_extract_complete url_host=%s confident=%s reason=%s error_class=%s",
+            host, confident, reason, error_class,
         )

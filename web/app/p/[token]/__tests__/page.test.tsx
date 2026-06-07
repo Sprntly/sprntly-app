@@ -87,7 +87,12 @@ describe("nextViewerState branch logic", () => {
     )
     expect(html).toContain("<iframe")
     expect(html).toContain('src="https://cdn.example/p/abc/index.html"')
-    expect(html).toContain('sandbox="allow-scripts allow-same-origin"')
+    // P6-17 (UX-7): the public /p/<token> viewer shares the single iframe, so it
+    // also gains allow-forms (form-centric prototypes must submit on the shared
+    // link too); parent-nav / popup tokens stay deliberately omitted.
+    expect(html).toContain(
+      'sandbox="allow-scripts allow-same-origin allow-forms"',
+    )
   })
 
   it("passcode mode with null bundle_url → passcode gate", () => {

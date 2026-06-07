@@ -33,6 +33,8 @@ from fastapi.testclient import TestClient
 
 from app.design_agent import runner
 
+from tests.conftest import _TEST_COMPANY_ID
+
 
 _MIGRATION = (
     pathlib.Path(__file__).resolve().parents[2]
@@ -110,18 +112,15 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 
-def _seed_ready(env, *, workspace_id: str = "app", current_checkpoint_id=None) -> int:
+def _seed_ready(env, *, workspace_id: str = _TEST_COMPANY_ID, current_checkpoint_id=None) -> int:
     """Insert a ready, unlocked prototype (status='ready', is_complete=0)."""
     pid = env.proto.start_prototype(prd_id=1, workspace_id=workspace_id, template_version=1)
     env.proto.complete_prototype(
@@ -142,7 +141,7 @@ def _all_rows(pid: int) -> list[dict]:
     return [dict(r) for r in cur.fetchall()]
 
 
-async def _drain_to_completion(env, pid: int, workspace_id: str = "app") -> None:
+async def _drain_to_completion(env, pid: int, workspace_id: str = _TEST_COMPANY_ID) -> None:
     """Kick the drain like the route does, then await chained drains until idle."""
     inflight = env.routes._inflight_tasks
     t = asyncio.create_task(
@@ -200,7 +199,7 @@ def test_enqueue_inserts_pending_row(env):
     # AC2: enqueue inserts a 'pending' row and returns it with a derived position.
     pid = _seed_ready(env)
     row = env.queue.enqueue_iteration(
-        prototype_id=pid, workspace_id="app", prompt="make it blue",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="make it blue",
         applied_comment_id=None, mode="execute",
     )
     assert row["status"] == "pending"
@@ -216,17 +215,17 @@ def test_enqueue_sixth_raises_queue_full(env):
     # never lands a row.
     pid = _seed_ready(env)
     for i in range(5):
-        env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt=f"p{i}")
+        env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt=f"p{i}")
     with pytest.raises(env.queue.QueueFullError):
-        env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="sixth")
-    assert env.queue.count_pending(prototype_id=pid, workspace_id="app") == 5
+        env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="sixth")
+    assert env.queue.count_pending(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == 5
 
 
 def test_post_iterate_queue_full_returns_429(env, client):
     # AC3: POST /iterate against a full queue → 429 with the queue_full detail.
     pid = _seed_ready(env)
     for i in range(5):
-        env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt=f"p{i}")
+        env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt=f"p{i}")
     resp = client.post(f"/v1/design-agent/{pid}/iterate", json={"prompt": "sixth"})
     assert resp.status_code == 429
     assert resp.json()["detail"] == {"error": "queue_full", "max": 5}
@@ -257,17 +256,17 @@ def test_dequeue_marks_oldest_running(env):
     # AC4: dequeue marks the OLDEST pending row 'running' and returns it; a second
     # dequeue advances to the next-oldest pending.
     pid = _seed_ready(env)
-    a = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="a")["id"]
-    b = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="b")["id"]
-    first = env.queue.dequeue_next(prototype_id=pid, workspace_id="app")
+    a = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="a")["id"]
+    b = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="b")["id"]
+    first = env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert first["id"] == a
     assert first["status"] == "running"
     by_id = {r["id"]: r for r in _all_rows(pid)}
     assert by_id[a]["status"] == "running"
     assert by_id[a]["started_at"]
-    second = env.queue.dequeue_next(prototype_id=pid, workspace_id="app")
+    second = env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert second["id"] == b               # advanced to the next-oldest pending
-    assert env.queue.dequeue_next(prototype_id=pid, workspace_id="app") is None
+    assert env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) is None
 
 
 @pytest.mark.asyncio
@@ -276,7 +275,7 @@ async def test_drain_runs_all_serially_no_concurrency(env, monkeypatch):
     # at once (mocked _run_one_iteration records the concurrent-running count).
     pid = _seed_ready(env)
     for p in ("a", "b", "c"):
-        env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt=p)
+        env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt=p)
 
     running = 0
     max_running = 0
@@ -300,7 +299,7 @@ async def test_drain_continues_after_failed_iteration(env, monkeypatch):
     # AC6: the 2nd of 3 raises → row 1 done, row 2 failed (with error), row 3 done.
     pid = _seed_ready(env)
     ids = [
-        env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt=p)["id"]
+        env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt=p)["id"]
         for p in ("a", "b", "c")
     ]
 
@@ -323,8 +322,8 @@ async def test_drain_marks_done_and_failed_correctly(env, monkeypatch):
     # AC5/AC6: done + failed both stamp finished_at; the failed row carries the
     # error class.
     pid = _seed_ready(env)
-    ok = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="ok")["id"]
-    bad = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="bad")["id"]
+    ok = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="ok")["id"]
+    bad = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="bad")["id"]
 
     async def fake_one(row):
         if row["prompt"] == "bad":
@@ -345,7 +344,7 @@ async def test_drain_task_held_in_inflight_set(env, monkeypatch):
     # while it runs, and discarded via add_done_callback on completion.
     pid = _seed_ready(env)
     for p in ("a", "b"):
-        env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt=p)
+        env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt=p)
 
     held: list[bool] = []
 
@@ -368,29 +367,29 @@ async def test_drain_task_held_in_inflight_set(env, monkeypatch):
 def test_queue_position_derived_from_earlier_pending(env):
     # AC7: A=1, B=2, C=3 (1-based rank among the active set, id-ordered).
     pid = _seed_ready(env)
-    a = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="a")
-    b = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="b")
-    c = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="c")
+    a = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="a")
+    b = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="b")
+    c = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="c")
     assert (a["queue_position"], b["queue_position"], c["queue_position"]) == (1, 2, 3)
     # Re-derived via the standalone helper (proves it is computed, not stored).
-    assert env.queue.queue_position(prototype_id=pid, iteration_id=a["id"], workspace_id="app") == 1
-    assert env.queue.queue_position(prototype_id=pid, iteration_id=c["id"], workspace_id="app") == 3
+    assert env.queue.queue_position(prototype_id=pid, iteration_id=a["id"], workspace_id=_TEST_COMPANY_ID) == 1
+    assert env.queue.queue_position(prototype_id=pid, iteration_id=c["id"], workspace_id=_TEST_COMPANY_ID) == 3
 
 
 def test_queue_position_decreases_after_head_finishes(env):
     # AC7: a running head is 0; rows behind it keep their slot until it FINISHES,
     # then move up.
     pid = _seed_ready(env)
-    a = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="a")
-    b = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="b")
-    assert env.queue.queue_position(prototype_id=pid, iteration_id=b["id"], workspace_id="app") == 2
+    a = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="a")
+    b = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="b")
+    assert env.queue.queue_position(prototype_id=pid, iteration_id=b["id"], workspace_id=_TEST_COMPANY_ID) == 2
 
-    env.queue.dequeue_next(prototype_id=pid, workspace_id="app")  # A → running
-    assert env.queue.queue_position(prototype_id=pid, iteration_id=a["id"], workspace_id="app") == 0
-    assert env.queue.queue_position(prototype_id=pid, iteration_id=b["id"], workspace_id="app") == 2
+    env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)  # A → running
+    assert env.queue.queue_position(prototype_id=pid, iteration_id=a["id"], workspace_id=_TEST_COMPANY_ID) == 0
+    assert env.queue.queue_position(prototype_id=pid, iteration_id=b["id"], workspace_id=_TEST_COMPANY_ID) == 2
 
-    env.queue.mark_iteration_done(iteration_id=a["id"], workspace_id="app")  # A leaves active set
-    assert env.queue.queue_position(prototype_id=pid, iteration_id=b["id"], workspace_id="app") == 1
+    env.queue.mark_iteration_done(iteration_id=a["id"], workspace_id=_TEST_COMPANY_ID)  # A leaves active set
+    assert env.queue.queue_position(prototype_id=pid, iteration_id=b["id"], workspace_id=_TEST_COMPANY_ID) == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -401,8 +400,8 @@ def test_queue_position_decreases_after_head_finishes(env):
 def test_invalidate_orphan_running_flips_to_failed(env):
     # AC8: a stuck 'running' row → 'failed'; returns the count.
     pid = _seed_ready(env)
-    row = env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="x")
-    env.queue.dequeue_next(prototype_id=pid, workspace_id="app")  # → running
+    row = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="x")
+    env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)  # → running
     n = env.queue.invalidate_orphan_running_iterations()
     assert n == 1
     by_id = {r["id"]: r for r in _all_rows(pid)}
@@ -413,10 +412,10 @@ def test_invalidate_orphan_running_flips_to_failed(env):
 def test_invalidate_orphan_running_crosses_workspaces(env):
     # AC8: the sweep is system-wide (Rule #23) — no workspace filter; running rows
     # in BOTH workspaces are flipped.
-    p_app = _seed_ready(env, workspace_id="app")
+    p_app = _seed_ready(env, workspace_id=_TEST_COMPANY_ID)
     p_demo = _seed_ready(env, workspace_id="demo")
-    env.queue.enqueue_iteration(prototype_id=p_app, workspace_id="app", prompt="a")
-    env.queue.dequeue_next(prototype_id=p_app, workspace_id="app")
+    env.queue.enqueue_iteration(prototype_id=p_app, workspace_id=_TEST_COMPANY_ID, prompt="a")
+    env.queue.dequeue_next(prototype_id=p_app, workspace_id=_TEST_COMPANY_ID)
     env.queue.enqueue_iteration(prototype_id=p_demo, workspace_id="demo", prompt="b")
     env.queue.dequeue_next(prototype_id=p_demo, workspace_id="demo")
     assert env.queue.invalidate_orphan_running_iterations() == 2
@@ -444,7 +443,7 @@ def test_main_lifespan_wires_orphan_iteration_clear(env):
 
 def test_count_pending_workspace_filtered(env):
     # AC10: enqueue under 'app' → count_pending for 'demo' is 0.
-    pid = _seed_ready(env, workspace_id="app")
-    env.queue.enqueue_iteration(prototype_id=pid, workspace_id="app", prompt="x")
-    assert env.queue.count_pending(prototype_id=pid, workspace_id="app") == 1
+    pid = _seed_ready(env, workspace_id=_TEST_COMPANY_ID)
+    env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="x")
+    assert env.queue.count_pending(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == 1
     assert env.queue.count_pending(prototype_id=pid, workspace_id="demo") == 0

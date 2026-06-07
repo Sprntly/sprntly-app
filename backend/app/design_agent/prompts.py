@@ -139,6 +139,35 @@ PRD's `:::design notes` or Figma frames specify otherwise):
 - Radius: rounded-md (default for cards/buttons), rounded-lg (modals)
 - Borders: border border-slate-200
 
+When a design source (Figma or website) is present, the prototype's `src/index.css`
+has been PRE-SEEDED with the source's palette as CSS custom properties
+(`--background`, `--foreground`, `--primary`, `--accent`, `--card`, etc.).
+
+MANDATORY:
+- `view` the `src/index.css` file FIRST to read the design system before writing
+  any component.
+- DO NOT replace the `:root` block — it is the design source of truth.
+- In ALL components, use `style={{{{ backgroundColor: 'var(--background)' }}}}` or
+  `className="bg-[var(--background)]"` (Tailwind arbitrary value) instead of
+  hardcoded Tailwind palette classes (`bg-white`, `bg-slate-50`, etc.).
+- Use `var(--primary)` for the main accent/CTA color.
+- Use `var(--foreground)` for primary text.
+- Do NOT introduce new color classes (`bg-blue-600`, `text-slate-900`, etc.) —
+  use only the palette variables from `src/index.css`.
+- ZERO hardcoded colors anywhere: no `rgb(...)`, no `rgba(...)`, no `#hex`,
+  no `hsl(...)`, no `bg-green-500`, no `text-red-600` — every color reference
+  MUST resolve through a `var(--*)` token. This applies to `style={{}}` props,
+  Tailwind classes, and CSS-in-JS alike. Status/semantic colors must use a token
+  too — add `--success`, `--error`, `--warning` to `:root` if needed rather than
+  hardcoding `green`/`red`.
+- Build a coherent reusable component set (Button, Card, Input, Badge, etc.)
+  that ALL consume the same tokens. Every screen must compose from these shared
+  components — never re-implement a UI element with one-off inline styles.
+- If the source palette is DARK (`--background` is a dark hex), write a DARK app
+  (dark backgrounds, light text). Never invert the palette's dark/light character.
+- Use `var(--font-sans)` (defined in `src/index.css`) as the body and heading
+  font-family. Do NOT hardcode font-family or load additional fonts.
+
 DO NOT use direct grayscale (text-white, text-black, bg-white) when a
 semantic token serves — `text-slate-900` reads as `text-foreground` to the
 design system once tokens are wired. (This is forward-compat; in P1 the
@@ -202,6 +231,8 @@ This means:
 #   {target_platform} — "desktop" | "mobile" | "both"
 #   {instructions}   — optional free-text from the Generate popup
 #   {figma_frames}   — pre-pulled Figma context block, or "(no Figma source detected)"
+#   {codebase_repo}  — one-line "match this existing codebase" context naming the
+#                      connected repo full_name, or "(no codebase source)" when absent
 DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE = """\
 PRD:
 {prd_md}
@@ -214,6 +245,8 @@ Additional instructions from the user:
 Figma context:
 {figma_frames}
 
+{codebase_repo}
+
 Generate the interactive prototype now. Use `write` to create each file.
 End your turn with a 1-2 sentence summary when the prototype is complete.
 """
@@ -224,18 +257,31 @@ def render_scaffold_user(
     target_platform: str,
     instructions: str,
     figma_frames: str,
+    codebase_repo: str | None = None,
 ) -> str:
     """Render the scaffold user template with the supplied context.
 
-    Caller (P1-07) is responsible for fetching the PRD body, normalising
+    Caller is responsible for fetching the PRD body, normalising
     target_platform, defaulting empty instructions, and assembling the
     figma_frames block (or '(no Figma source detected)' when absent).
+
+    `codebase_repo` is the connected repo full_name (e.g. "org/repo") the user
+    chose as the existing codebase the prototype should visually/structurally
+    resemble — prompt context ONLY (no file fetch, no clone, no agent tool). When
+    a non-empty repo is supplied it renders a one-line "Existing codebase to
+    match: {repo}" block; when absent or blank/whitespace it renders
+    "(no codebase source)" with no repo name.
     """
+    repo = (codebase_repo or "").strip()
+    codebase_block = (
+        f"Existing codebase to match: {repo}" if repo else "(no codebase source)"
+    )
     return DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE.format(
         prd_md=prd_md.strip() or "(PRD is empty)",
         target_platform=target_platform or "both",
         instructions=(instructions.strip() or "(none)"),
         figma_frames=figma_frames.strip() or "(no Figma source detected)",
+        codebase_repo=codebase_block,
     )
 
 
@@ -321,6 +367,12 @@ Call `clarifying_question` (an exit-sentinel — P3-08) ONLY for GENUINE product
 ambiguity in the iterate request (e.g. "should this CTA open a modal or
 navigate?"). For anything the current source + design-system defaults already
 answer, just execute. Do NOT pause for stylistic micro-choices.
+
+When offering choices in a clarifying_question, use plain human-readable labels
+only — no CSS class names, hex codes, Tailwind utilities, or other implementation
+details in the choice text. Keep choices short (1–4 words). Technical
+implementation context belongs in the agent's internal reasoning, not in choice
+labels.
 
 [9] STABLE JSX IDs (AD4 — load-bearing for comment anchoring)
 `data-anchor-id` attributes are applied AUTOMATICALLY by the prototype-runtime's

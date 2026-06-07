@@ -25,10 +25,16 @@ from app.prompts import (
 from app.routes import (
     ask,
     brief,
+    company,
     connectors,
     datasets as datasets_routes,
     design_agent,
+    ingest,
+    metrics,
+    oncall,
+    research,
     synthesis,
+    team,
     evidence,
     health,
     internal,
@@ -188,6 +194,13 @@ app.include_router(internal.router)
 app.include_router(design_agent.router)
 app.include_router(pipeline.router)
 app.include_router(synthesis.router)
+app.include_router(ingest.router)
+app.include_router(metrics.router)
+app.include_router(research.router)
+app.include_router(oncall.router)
+app.include_router(company.router)
+app.include_router(team.router)
+app.include_router(team.accept_router)
 
 # Serve prototype bundles in dev (filesystem fallback when no Supabase Storage bucket).
 _proto_dir = Path(settings.storage_dir)

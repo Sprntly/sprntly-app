@@ -52,7 +52,7 @@ export function setAccessTokenProvider(fn: () => Promise<string | null>) {
 }
 
 async function request<T>(
-  method: "GET" | "POST" | "DELETE" | "PATCH",
+  method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH",
   path: string,
   body?: unknown,
 ): Promise<T> {
@@ -96,6 +96,7 @@ async function request<T>(
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
+  put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body),
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   delete: <T>(path: string) => request<T>("DELETE", path),
 }
@@ -362,7 +363,15 @@ export type ConnectionSummary = {
   google_email: string | null
   account_label?: string | null
   scopes: string
-  config: { dataset?: string; folder_id?: string; folder_name?: string }
+  config: {
+    // Google Drive
+    dataset?: string
+    folder_id?: string
+    folder_name?: string
+    // Slack
+    channel_id?: string
+    channel_name?: string
+  }
   last_sync_at: string | null
   last_sync_error: string | null
   created_at: string
@@ -394,21 +403,41 @@ export type DriveFolderBrowse = {
   folders: { id: string; name: string }[]
 }
 
+export type SlackChannel = {
+  id: string
+  name: string
+  is_private: boolean
+  is_member: boolean
+  is_archived: boolean
+}
+
+// Multitenant: connector routes resolve the active company entirely
+// from the JWT (`Depends(require_company)`) — no client-side workspace
+// or company id is sent. Methods below therefore take only the inputs
+// that aren't derivable server-side (folder ids, channel ids, etc.).
+
 export const connectorsApi = {
-  list: () => api.get<{ connections: ConnectionSummary[] }>("/v1/connectors"),
+  list: () =>
+    api.get<{ connections: ConnectionSummary[] }>(`/v1/connectors`),
   disconnectGoogleDrive: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/google-drive"),
+    api.delete<{ deleted: true; provider: string }>(
+      `/v1/connectors/google-drive`,
+    ),
   browseGoogleDriveFolders: (parentId = "root") =>
     api.get<DriveFolderBrowse>(
       `/v1/connectors/google-drive/folders?parent_id=${encodeURIComponent(parentId)}`,
     ),
-  setGoogleDriveConfig: (folderId: string, dataset?: string, folderName?: string) =>
+  setGoogleDriveConfig: (
+    folderId: string,
+    dataset?: string,
+    folderName?: string,
+  ) =>
     api.post<{ ok: true; config: ConnectionSummary["config"] }>(
-      "/v1/connectors/google-drive/config",
+      `/v1/connectors/google-drive/config`,
       { folder_id: folderId, folder_name: folderName, dataset },
     ),
   syncGoogleDrive: (dataset?: string, folderId?: string) =>
-    api.post<GoogleDriveSyncResult>("/v1/connectors/google-drive/sync", {
+    api.post<GoogleDriveSyncResult>(`/v1/connectors/google-drive/sync`, {
       dataset,
       folder_id: folderId,
     }),
@@ -419,7 +448,7 @@ export const connectorsApi = {
   // ---- Figma ---------------------------------------------------------------
   figmaAuthorizeUrl: () => `${API_URL}/v1/connectors/figma/authorize`,
   disconnectFigma: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/figma"),
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/figma`),
   getFigmaFile: (key: string, depth = 2) =>
     api.get<Record<string, unknown>>(
       `/v1/connectors/figma/files/${encodeURIComponent(key)}?depth=${encodeURIComponent(String(depth))}`,
@@ -432,15 +461,19 @@ export const connectorsApi = {
   // ---- GitHub --------------------------------------------------------------
   githubAuthorizeUrl: () => `${API_URL}/v1/connectors/github/authorize`,
   disconnectGithub: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/github"),
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/github`),
+  listGithubRepos: (perPage = 50) =>
+    api.get<{ repositories: GitHubRepo[] }>(
+      `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
+    ),
 
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/clickup"),
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/clickup`),
 
   // ---- HubSpot -------------------------------------------------------------
   disconnectHubspot: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/hubspot"),
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/hubspot`),
   syncHubspot: (dataset: string) =>
     api.post<{
       dataset: string;
@@ -454,11 +487,18 @@ export const connectorsApi = {
   // ---- Slack ---------------------------------------------------------------
   connectSlackWithBotToken: (apiKey: string) =>
     api.post<{ ok: true; provider: string; account_label: string }>(
-      "/v1/connectors/slack/apikey",
+      `/v1/connectors/slack/apikey`,
       { api_key: apiKey },
     ),
   disconnectSlack: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/slack"),
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/slack`),
+  listSlackChannels: () =>
+    api.get<{ channels: SlackChannel[] }>(`/v1/connectors/slack/channels`),
+  setSlackConfig: (channelId: string, channelName?: string) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+      `/v1/connectors/slack/config`,
+      { channel_id: channelId, channel_name: channelName },
+    ),
   syncSlack: (dataset: string, historyDays = 90) =>
     api.post<{
       dataset: string
@@ -475,17 +515,13 @@ export const connectorsApi = {
   // ---- Fireflies (API key, not OAuth) --------------------------------------
   connectFirefliesWithApiKey: (apiKey: string) =>
     api.post<{ ok: true; provider: string; account_label: string }>(
-      "/v1/connectors/fireflies/apikey",
+      `/v1/connectors/fireflies/apikey`,
       { api_key: apiKey },
     ),
   disconnectFireflies: () =>
-    api.delete<{ deleted: true; provider: string }>("/v1/connectors/fireflies"),
-  listGithubRepos: (perPage = 50) =>
-    api.get<{ repositories: GitHubRepo[] }>(
-      `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
-    ),
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
 
-  // ---- Generic test-connection (commit K) ---------------------------------
+  // ---- Generic test-connection --------------------------------------------
   /**
    * Re-validate a stored connection by re-running the provider's
    * identity lookup with the decrypted token. Backs the "Test
@@ -500,7 +536,7 @@ export const connectorsApi = {
       {},
     ),
 
-  // ---- Generic start-OAuth (commit F) -------------------------------------
+  // ---- Generic start-OAuth ------------------------------------------------
   /**
    * Returns the provider's OAuth authorize URL as JSON. The caller is
    * expected to navigate the browser to it (`window.location.href = url`).
@@ -510,12 +546,23 @@ export const connectorsApi = {
    * navigation can't attach the Supabase Bearer token. This endpoint
    * runs the auth check via fetch + Bearer, then hands back the URL the
    * browser should navigate to next.
+   *
+   * `returnTo` is an optional relative path (e.g. `/onboarding/4`) the
+   * backend signs into the OAuth state JWT; the callback then redirects
+   * there with `?connected=<provider>` appended. Used by the onboarding
+   * connector modal to bounce the user back to the same step instead of
+   * the default `/settings?section=connectors`. Backend validates it as
+   * a safe relative path (open-redirect guard).
    */
-  startOauth: (provider: string, dataset?: string) =>
-    api.post<{ authorize_url: string }>(
+  startOauth: (provider: string, dataset?: string, returnTo?: string) => {
+    const body: Record<string, string> = {}
+    if (dataset) body.dataset = dataset
+    if (returnTo) body.return_to = returnTo
+    return api.post<{ authorize_url: string }>(
       `/v1/connectors/${encodeURIComponent(provider)}/start-oauth`,
-      dataset ? { dataset } : {},
-    ),
+      body,
+    )
+  },
 }
 
 export const sourcesApi = {
@@ -613,6 +660,13 @@ export type PrototypeRecord = {
   //    added — the existing GET poll surfaces it; the answer routes through the
   //    existing P3-14 `iterate`). Null/absent ⇒ no question pending.
   pending_question?: PendingQuestion | null
+  // ── (append-only): optional preview-thumbnail URL captured on generation-
+  //    complete. GET /{id} / by-prd both `select("*")`, so the column flows
+  //    through automatically — no api method change. Null/absent ⇒ no thumbnail
+  //    captured (the preview card falls back to its existing placeholder); typed
+  //    OPTIONAL/nullable to match the posture above so existing literals keep
+  //    typechecking.
+  preview_image_url?: string | null
 }
 
 /** 202 kickoff response from POST /v1/design-agent/generate. */
@@ -634,6 +688,9 @@ export type CommentRecord = {
   status: "open" | "resolved" | "orphaned"
   created_at: string
   resolved_at: string | null
+  pin_x_pct?: number | null
+  pin_y_pct?: number | null
+  resolved_anchor_id?: string | null
 }
 
 /** F11 (P3-09/P3-10) — a proposed PRD patch. Wire shape mirrors the backend
@@ -651,6 +708,13 @@ export type PrdPatchRecord = {
   created_at: string
 }
 
+/** One listable Figma file for the Generate modal's design-source selector
+ *  (`designAgentApi.listFigmaFiles`). */
+export type FigmaFile = {
+  key: string
+  name: string
+}
+
 export const designAgentApi = {
   /** Kicks off prototype generation in the background; returns immediately
    *  with a prototype_id. Client should poll designAgentApi.get(id) (via
@@ -660,17 +724,39 @@ export const designAgentApi = {
     target_platform: "desktop" | "mobile" | "both"
     instructions: string
     figma_file_key?: string | null
+    /** Optional Figma node-id (frame-level targeting); extracted from a pasted
+     *  URL's node-id query param. Passed through to the backend so the agent
+     *  loop fetches only that specific frame instead of the file's top-5. */
+    figma_node_id?: string | null
     website_url?: string | null  // P5-02: Scenario B fallback source
     manual_design?: { primary_color: string; font_family: string } | null  // P5-02: manual floor
+    github_repo?: string | null  // connected-repo full_name ("org/repo"); prompt context only
   }) => api.post<PrototypeStartResponse>("/v1/design-agent/generate", body),
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
     api.get<PrototypeRecord>(`/v1/design-agent/${prototypeId}`),
-  /** Find the most recent ready/generating prototype for a PRD. Returns null on 404. */
+  delete: (prototypeId: number) =>
+    api.delete<void>(`/v1/design-agent/${prototypeId}`),
+  /**
+   * READ-ONLY "does this PRD have a ready prototype?" lookup, by PRD id. Powers
+   * the PRD-screen preview card and the "View Prototype" vs "Generate Prototype"
+   * label / skip-loading decision WITHOUT side effects.
+   *
+   * Calls `GET /v1/design-agent/by-prd/{prd_id}`, which returns the most-recent
+   * ready prototype row for the PRD under the caller's workspace, or 404 when
+   * none — a pure read that never kicks off a generation (unlike the dedup
+   * short-circuit inside `POST /v1/design-agent/generate`). On any error (404 /
+   * not found / transient) the caller swallows it → null → no preview card,
+   * label stays "Generate Prototype" (graceful degrade, NEVER faking existence /
+   * NEVER kicking a generation). */
   getByPrd: async (prdId: number): Promise<PrototypeRecord | null> => {
     try {
-      return await api.get<PrototypeRecord>(`/v1/design-agent/by-prd/${prdId}`)
+      return await api.get<PrototypeRecord>(
+        `/v1/design-agent/by-prd/${encodeURIComponent(String(prdId))}`,
+      )
     } catch {
+      // 404 (no ready prototype) / not found / transient → degrade to "no
+      // existing prototype" so the card hides and the label stays Generate.
       return null
     }
   },
@@ -721,11 +807,23 @@ export const designAgentApi = {
   /** Public-route comment write (external viewer on `/p/<token>`): the token
    *  is the access primitive (F6), so no auth is required. Hits the P3-02
    *  public route; the backend attributes the comment to the `external` author. */
-  createCommentByToken: (token: string, body: { anchor_id: string; body: string }) =>
+  createCommentByToken: (token: string, body: {
+    anchor_id: string; body: string;
+    pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+  }) =>
     api.post<CommentRecord>(
       `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
       body,
     ),
+  /** Authed comment create for the signed-in canvas (mark-and-comment pin flow).
+   *  Hits the authed route `POST /v1/design-agent/{id}/comments` (same-origin/CSRF
+   *  gated). Position fields are optional — pin comments include x/y and the
+   *  resolved anchor; right-click anchor comments omit them. */
+  createComment: (prototypeId: number, body: {
+    anchor_id: string; body: string;
+    pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+  }) =>
+    api.post<CommentRecord>(`/v1/design-agent/${prototypeId}/comments`, body),
   /** Public-route comment read: lists every comment for the token's prototype
    *  (all statuses). Same 404 posture as the resolver for missing/private. */
   listCommentsByToken: (token: string) =>
@@ -739,6 +837,8 @@ export const designAgentApi = {
     api.patch<CommentRecord>(
       `/v1/design-agent/${prototypeId}/comments/${commentId}/resolve`,
     ),
+  deleteComment: (prototypeId: number, commentId: number) =>
+    api.delete<void>(`/v1/design-agent/${prototypeId}/comments/${commentId}`),
   // ── F11 PRD patches (P3-10) ───────────────────────────────────────────────
   /** List the PENDING PRD patches for a PRD (workspace-filtered server-side).
    *  The PrdPatchBanner calls this on mount to decide whether to surface. */
@@ -807,6 +907,24 @@ export const designAgentApi = {
       `/v1/design-agent/${prototypeId}/manual-edit`,
       body,
     ),
+  /** List the connected company's Figma files for the Generate modal's design
+   *  selector (`GET /v1/design-agent/figma-files`). DA-flag gated (404 when off)
+   *  and Figma-connection gated (404 when not connected). Returns an honest
+   *  empty `files` list when the upstream listing can't be produced -- never
+   *  fabricated files; the modal renders that as "Couldn't load designs". */
+  listFigmaFiles: () =>
+    api.get<{ files: FigmaFile[] }>("/v1/design-agent/figma-files"),
+  /** Build the SSE URL for streaming step events during an iterate run.
+   *  The bearer token rides as ?token= because EventSource cannot set headers.
+   *  Single source of truth for this URL so the token-in-URL construction is
+   *  auditable in one place. */
+  eventsUrl: (prototypeId: number, token: string): string =>
+    `${API_URL}/v1/design-agent/${prototypeId}/events?token=${encodeURIComponent(token)}`,
+  /** Ask the LLM for a single clarifying question about a comment body before
+   *  the Apply flow commits an iterate. Lightweight Haiku call — resolves in
+   *  <1s. Returns { question }. */
+  clarifyComment: (prototypeId: number, commentBody: string) =>
+    api.post<{ question: string }>(`/v1/design-agent/${prototypeId}/clarify-comment`, { comment_body: commentBody }),
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
@@ -850,4 +968,57 @@ export type ManualEditResponse = {
   prototype_id: number
   status: string
   queue_position: number
+}
+
+// ---- transient-auth resilience (shared primitive) ---------------------------
+// Supabase issues short-lived bearer tokens; `accessTokenProvider` refreshes
+// them in the background. A request that lands DURING a refresh can come back
+// 401 even though the session is healthy — a transient failure, not a real auth
+// loss. Today every authed poll / status fetch treats a 401 as terminal, so a
+// single mid-refresh blip aborts the work or flips connected rows to "off".
+//
+// `withAuthRetry` is the one place that handles this: it runs the wrapped call,
+// and on a 401 it re-acquires the token (forcing the in-flight refresh to
+// settle) and retries the call exactly once after a short backoff. Non-401
+// errors propagate untouched, and a 401 that survives the retry is re-thrown so
+// a genuine auth failure still surfaces to the caller's own error handling. The
+// primitive owns no UI state and never swallows errors — callers wrap any authed
+// read that polls or auto-refreshes and decide for themselves what a persistent
+// failure means.
+
+/** Retrieve the current access token directly for non-fetch uses (e.g. EventSource URLs). */
+export async function getAccessToken(): Promise<string | null> {
+  return accessTokenProvider ? await accessTokenProvider() : null
+}
+
+export type WithAuthRetryOptions = {
+  /** Backoff before the single retry, in milliseconds. Defaults to 250. Tests
+   *  pass 0 to keep the retry path instant. */
+  backoffMs?: number
+}
+
+export async function withAuthRetry<T>(
+  fn: () => Promise<T>,
+  opts: WithAuthRetryOptions = {},
+): Promise<T> {
+  try {
+    return await fn()
+  } catch (err) {
+    // Only a 401 is treated as a transient token-refresh race; everything else
+    // (including a non-ApiError throw) propagates immediately, no retry.
+    if (!(err instanceof ApiError) || err.status !== 401) {
+      throw err
+    }
+    // Re-acquire the token so the retry carries the refreshed bearer, wait out
+    // the refresh window, then retry once. A 401 that persists re-throws from
+    // this second attempt.
+    if (accessTokenProvider) {
+      await accessTokenProvider()
+    }
+    const backoffMs = opts.backoffMs ?? 250
+    if (backoffMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, backoffMs))
+    }
+    return await fn()
+  }
 }

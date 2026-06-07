@@ -184,6 +184,9 @@ export function ConnectorsSettings() {
   const [apiKeyConnectingItem, setApiKeyConnectingItem] =
     useState<ConnectorItemRow | null>(null)
 
+  // Connector routes resolve the active company entirely from the
+  // Supabase JWT (require_company), so the frontend doesn't need to
+  // hold a tenant id — just call and let 401/403 surface as errors.
   const reload = useCallback(async () => {
     setLoadError(null)
     try {
@@ -227,11 +230,9 @@ export function ConnectorsSettings() {
       }
 
       if (!CONNECTOR_IDS_WITH_OAUTH.has(providerId)) return
-      // Go through the fetch-then-navigate path (commit F) so the auth
-      // check runs with the Supabase Bearer header before we hand
-      // control to the browser's URL bar. Direct navigation to the
-      // legacy GET /authorize routes fails with "Not signed in" in the
-      // Supabase-only auth world.
+      // Go through the fetch-then-navigate path so the auth check runs
+      // with the Supabase Bearer header before we hand control to the
+      // browser's URL bar.
       try {
         const dataset =
           providerId === "google_drive" ? activeCompany : undefined
@@ -240,7 +241,6 @@ export function ConnectorsSettings() {
           window.location.href = r.authorize_url
         }
       } catch (e) {
-        // Surface the auth/connect error in-place; no toast system yet.
         const msg = e instanceof Error ? e.message : String(e)
         setLoadError(`Could not start ${providerId} connect: ${msg}`)
       }

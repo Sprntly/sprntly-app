@@ -16,6 +16,7 @@ import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
 import { useAuth } from "../lib/auth"
 import { connectorsApi } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
+import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const auth = useAuth()
@@ -51,6 +52,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [workspace, setContent])
 
   useEffect(() => {
+    // Skip until we have a signed-in session; the connectors route 401s
+    // without a Bearer token (require_company → require_session).
+    if (!workspace?.id) return
     void connectorsApi
       .list()
       .then((r) => {
@@ -61,7 +65,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         })
       })
       .catch(() => {})
-  }, [setContent])
+  }, [setContent, workspace?.id])
 
   const { closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } = useNavigation()
 
@@ -97,6 +101,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {children}
       <AIBar />
       <Toast />
+      {/* P6-05 (#8): replay an unacknowledged completion toast on EVERY authed
+          page (not only the Design section) after a same-session reload. Renders
+          null; sits beside <Toast/> inside NavigationProvider. */}
+      <DesignAgentNotificationReplay />
       <ApproveModal />
       <InviteModal />
       <ClaudeDrawer />

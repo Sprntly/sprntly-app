@@ -51,6 +51,10 @@ def insert_comment(
     anchor_id: str,
     body: str,
     author: str = "demo",
+    user_id: str | None = None,             # Supabase auth UUID; stored for display-name resolution at read time
+    pin_x_pct: float | None = None,        # viewport-relative x position (0..100), None for non-pin comments
+    pin_y_pct: float | None = None,        # viewport-relative y position (0..100), None for non-pin comments
+    resolved_anchor_id: str | None = None,  # stable JSX anchor at the pin point, None if unresolved
 ) -> dict[str, Any]:
     """Insert an open comment anchored to anchor_id. Returns the inserted row.
 
@@ -62,14 +66,27 @@ def insert_comment(
     if not body.strip():
         raise ValueError("insert_comment: body is empty")
     c = require_client()
-    resp = c.table(_TABLE).insert({
+    payload: dict[str, Any] = {
         "prototype_id": prototype_id,
         "workspace_id": workspace_id,
         "anchor_id": anchor_id,
         "body": body,
         "author": author,
         "status": "open",
-    }).execute()
+    }
+    # Write user_id only when supplied — keeps anonymous/public rows free of the
+    # column so the null stands as a genuine "no authenticated user" signal.
+    if user_id is not None:
+        payload["user_id"] = user_id
+    # Write position keys only when supplied — keeps the right-click anchor path
+    # (no pin) inserting exactly the prior column set; null position is honest absence.
+    if pin_x_pct is not None:
+        payload["pin_x_pct"] = pin_x_pct
+    if pin_y_pct is not None:
+        payload["pin_y_pct"] = pin_y_pct
+    if resolved_anchor_id is not None:
+        payload["resolved_anchor_id"] = resolved_anchor_id
+    resp = c.table(_TABLE).insert(payload).execute()
     row = resp.data[0]
     # Identifiers only -- never log comment body (PII per Rule #24).
     logger.info(
@@ -79,19 +96,67 @@ def insert_comment(
     return row
 
 
+def _resolve_display_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Resolve `author` from `profiles` for any row that carries a `user_id`.
+
+    Collects distinct non-null user_ids, fetches full_name / first_name /
+    last_name from `profiles` in a single query, and overrides `author` with
+    the current display name when one is found. Falls back to the stored author
+    string when the profile has no name data, so old/anonymous rows are
+    unaffected. All in-memory after the initial DB fetch — no extra round-trip
+    per comment.
+    """
+    user_ids = list({r["user_id"] for r in rows if r.get("user_id")})
+    if not user_ids:
+        return rows
+
+    c = require_client()
+    try:
+        profile_resp = (
+            c.table("profiles")
+            .select("id, full_name, first_name, last_name")
+            .in_("id", user_ids)
+            .execute()
+        )
+        profiles = profile_resp.data or []
+    except Exception:  # noqa: BLE001 — name resolution is best-effort; never fail reads
+        logger.warning("prototype_comments.resolve_display_names_failed")
+        return rows
+
+    name_by_id: dict[str, str] = {}
+    for p in profiles:
+        display = (p.get("full_name") or "").strip()
+        if not display:
+            first = (p.get("first_name") or "").strip()
+            last = (p.get("last_name") or "").strip()
+            display = f"{first} {last}".strip()
+        if display:
+            name_by_id[p["id"]] = display
+
+    result = []
+    for row in rows:
+        uid = row.get("user_id")
+        if uid and uid in name_by_id:
+            row = {**row, "author": name_by_id[uid]}
+        result.append(row)
+    return result
+
+
 def list_comments(
     *,
     prototype_id: int,
     workspace_id: str,
 ) -> list[dict[str, Any]]:
     """Return all comments for a prototype (any status), ordered by created_at
-    ascending. Workspace-filtered (Rule #22)."""
+    ascending. Workspace-filtered (Rule #22). Author is resolved from profiles
+    at read time for rows that carry a user_id — name changes propagate."""
     c = require_client()
     resp = (c.table(_TABLE).select("*")
             .eq("prototype_id", prototype_id)
             .eq("workspace_id", workspace_id)
             .order("created_at", desc=False).execute())
-    return resp.data or []
+    rows = resp.data or []
+    return _resolve_display_names(rows)
 
 
 def resolve_comment(
@@ -113,6 +178,15 @@ def resolve_comment(
         return None
     logger.info("comment_resolved comment_id=%s", comment_id)
     return resp.data[0]
+
+
+def delete_comment(*, comment_id: int, workspace_id: str) -> bool:
+    """Hard-delete a comment. Workspace-filtered. Returns True when deleted, False when not found."""
+    c = require_client()
+    (c.table(_TABLE).delete()
+     .eq("id", comment_id).eq("workspace_id", workspace_id).execute())
+    logger.info("comment_deleted comment_id=%s", comment_id)
+    return True
 
 
 def list_open_comment_anchor_ids(

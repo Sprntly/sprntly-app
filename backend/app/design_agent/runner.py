@@ -35,11 +35,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.config import settings
 from app.db.prototype_comments import list_comments, mark_comments_orphaned
 from app.db.prototype_pending_iterations import (
     dequeue_next,
@@ -50,6 +52,9 @@ from app.db.prototypes import get_prototype, set_pending_question
 from app.design_agent.autofixer import format_errors_for_agent
 from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
+from app.design_agent.event_stream import close as _sse_close
+from app.design_agent.event_stream import publish_step
+from app.design_agent.progress import FINISHING_LABEL, friendly_step
 from app.design_agent.prompts import DESIGN_AGENT_ITERATE_SYSTEM
 from app.design_agent.storage import read_source_files_for_checkpoint
 from app.design_agent.tools import (
@@ -57,17 +62,35 @@ from app.design_agent.tools import (
     dispatch,
     tool_definitions_for_mode,
 )
-from app.llm_telemetry import MODEL_PRICING, RunUsage, log_llm_run, should_wrap_up
+from app.llm_telemetry import (
+    MODEL_PRICING,
+    RunUsage,
+    log_llm_run,
+    should_abort,
+    should_wrap_up,
+)
 
 logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"  # AD2; NEVER claude-sonnet-4-7
 DEFAULT_MAX_ITERS = 40
-DEFAULT_MAX_TOKENS = 4096
+try:
+    DEFAULT_MAX_TOKENS = int(os.environ.get("DESIGN_AGENT_MAX_TOKENS", "4096"))
+except ValueError:
+    logger.warning("DESIGN_AGENT_MAX_TOKENS is not a valid integer; falling back to 4096")
+    DEFAULT_MAX_TOKENS = 4096
 TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
 
 # ── Pre-flight cost estimate (AD14 / AD15, P3-11) ────────────────────────────
 SOFT_CAP_USD = 0.50  # AD15 per-generation soft cap (trust primitive, not a hard gate)
+# AD15 BACKSTOP (P6-06): a fail-closed HARD ceiling ABOVE SOFT_CAP_USD. When a
+# run's projected next-iteration spend reaches this, agent_loop ABORTS (clean
+# terminal "aborted" status, partial bundle salvaged) rather than degrade-and-
+# continue. The soft-cap nudge stays the primary AD15 mechanism; this only
+# catches pathological runs it failed to converge. Env-overridable so Apurva can
+# tighten/loosen in prod without a code change. See config.py for the headroom
+# justification on the 2.00 default.
+HARD_CAP_USD = settings.design_agent_hard_cap_usd
 # Deterministic token heuristic: chars/4 (agent-build-research.md §3.3). No network,
 # no SDK token-counter dependency, ±20% accuracy band — the estimate is a "~$" guide,
 # not a billing figure (the REAL cost is the post-flight cost-log emitted by P3-05).
@@ -161,7 +184,7 @@ def reconcile_comments_on_checkpoint(
 
 @dataclass
 class RunResult:
-    status: str  # "complete" | "max_iters" | "refused" | "max_tokens" | "error" | "awaiting_clarification"
+    status: str  # "complete" | "max_iters" | "aborted" | "refused" | "max_tokens" | "error" | "awaiting_clarification"
     iters: int
     usage: RunUsage
     duration_ms: int
@@ -184,19 +207,24 @@ def _hash_tool_call(name: str, input: dict[str, Any]) -> str:
 def _wrap_up_nudge(iters_remaining: int) -> str:
     if iters_remaining <= 2:
         return (
-            f"You have {iters_remaining} tool-call turn(s) left. STOP now: finish "
-            f"the current file, do NOT start new ones, then end your turn with a "
-            f"1-2 sentence summary. A cut-off build is lost."
+            f"You have {iters_remaining} tool-call turn(s) left. FIRST, if you "
+            f"imported any file you have not written yet, remove that import now — a "
+            f"build cannot resolve a missing file and the whole prototype will fail "
+            f"to load. THEN STOP now: finish the current file, do NOT start new "
+            f"ones, and end your turn with a 1-2 sentence summary. A cut-off build "
+            f"is lost."
         )
     return (
-        f"You have ~{iters_remaining} tool-call turns left. Start converging: make "
-        f"the core flow navigable, batch any remaining writes, prefer finishing the "
-        f"primary flow over adding screens. End your turn (no tool calls) as soon as "
-        f"the core flow works."
+        f"You have ~{iters_remaining} tool-call turns left. FIRST, if you imported "
+        f"any file you have not written yet, remove that import now — a build cannot "
+        f"resolve a missing file. Start converging: make the core flow navigable, "
+        f"batch any remaining writes, and prefer finishing the primary flow over "
+        f"adding screens. End your turn (no tool calls) as soon as the core flow "
+        f"works."
     )
 
 
-def _resolve_figma_access_token(figma_file_key: str | None) -> str | None:
+def _resolve_figma_access_token(figma_file_key: str | None, workspace_id: str) -> str | None:
     """Best-effort Figma access-token resolution for the `fetch_figma` tool.
 
     The tool executor never decrypts tokens itself (keeps tools.py importable
@@ -214,7 +242,7 @@ def _resolve_figma_access_token(figma_file_key: str | None) -> str | None:
         # FastAPI connector/db stack, and lets tests monkeypatch this resolver.
         from app.routes.connectors import _figma_access_token
 
-        return _figma_access_token()
+        return _figma_access_token(workspace_id)
     except Exception as exc:  # not-connected (HTTPException 404), decrypt errors, etc.
         logger.info(
             "design_agent.figma_token_unresolved figma_file_key=%s error_class=%s",
@@ -222,6 +250,106 @@ def _resolve_figma_access_token(figma_file_key: str | None) -> str | None:
             type(exc).__name__,
         )
         return None
+
+
+def _render_palette_css(palette: dict) -> str:
+    """Generate a minimal CSS file pre-seeding the design source palette.
+
+    Called ONCE before `generate_prototype`'s agent loop starts. The file is
+    written into `virtual_fs["src/index.css"]` so it is already on disk when
+    the agent's first `write` call fires. This guarantees the palette is the
+    starting point — the agent cannot start from stock Tailwind defaults and
+    then ignore a palette instruction it received only inside the tool result.
+
+    The agent prompt (§5 DESIGN SYSTEM) instructs the agent to `view`
+    `src/index.css` first and to use `var(--background)` etc. in all
+    components rather than hardcoded Tailwind palette classes.
+    """
+    bg = palette.get("background", "#ffffff")
+    accent = palette.get("accent", "#3b82f6")
+    is_dark = palette.get("is_dark", False)
+    swatches = palette.get("swatches", [])
+
+    # Derive foreground from is_dark (light text on dark bg, dark text on light bg)
+    fg = "#f4f1ea" if is_dark else "#1a1a1a"
+
+    # Find a surface color: second-most-common swatch, or bg
+    surface = swatches[1] if len(swatches) > 1 else bg
+
+    # muted: third swatch or similar
+    muted = swatches[2] if len(swatches) > 2 else surface
+
+    font_family = palette.get("font_family")
+    font_weights = palette.get("font_weights") or [400, 700]
+
+    # Generate Google Fonts import for web-safe fonts
+    # Only for common Google Fonts — fall back to system stack for others
+    GOOGLE_FONTS = {
+        "Inter", "Roboto", "Open Sans", "Lato", "Montserrat", "Poppins",
+        "Source Sans Pro", "Nunito", "Raleway", "Playfair Display",
+        "Merriweather", "PT Sans", "Ubuntu", "DM Sans", "Plus Jakarta Sans",
+    }
+
+    font_import = ""
+    font_stack = "ui-sans-serif, system-ui, sans-serif"
+    if font_family and font_family in GOOGLE_FONTS:
+        weights_str = ";".join(str(w) for w in sorted(set(font_weights or [400, 700])))
+        font_import = f'@import url("https://fonts.googleapis.com/css2?family={font_family.replace(" ", "+")}:wght@{weights_str}&display=swap");\n'
+        font_stack = f'"{font_family}", ui-sans-serif, system-ui, sans-serif'
+    elif font_family:
+        # Non-Google font — use it optimistically in the stack (may fall through)
+        font_stack = f'"{font_family}", ui-sans-serif, system-ui, sans-serif'
+
+    return f"""{font_import}/* Design source palette — generated from Figma file */
+/* DO NOT replace the :root block; use var(--background) etc. in all components */
+:root {{
+  --background: {bg};
+  --foreground: {fg};
+  --card: {surface};
+  --card-foreground: {fg};
+  --primary: {accent};
+  --primary-foreground: {"#000000" if is_dark else "#ffffff"};
+  --secondary: {surface};
+  --secondary-foreground: {fg};
+  --muted: {muted};
+  --muted-foreground: {fg}aa;
+  --accent: {accent};
+  --accent-foreground: {"#000000" if is_dark else "#ffffff"};
+  --border: {fg}22;
+  --input: {fg}22;
+  --ring: {accent};
+  --font-sans: {font_stack};
+}}
+
+body {{
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}}
+"""
+
+
+_STEP_LABELS = [
+    "Reading the change request",
+    "Analyzing the prototype",
+    "Applying the change",
+    "Rebuilding",
+]
+
+
+def _step_label(iters: int, mode: str) -> str:  # noqa: ARG001 — mode reserved for future
+    """Map iteration count to a human-readable step label for the activity stream."""
+    idx = min(iters - 1, len(_STEP_LABELS) - 1)
+    return _STEP_LABELS[idx]
+
+
+def _tool_step_label(name: str, args: dict) -> str:
+    """Return a plain-English label for a tool call, for the SSE activity stream.
+
+    Delegates to progress.friendly_step so no paths, tool names, or technical
+    text ever reach the activity stream.
+    """
+    return friendly_step(name, args)
 
 
 async def agent_loop(
@@ -232,6 +360,7 @@ async def agent_loop(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     scenario: str = "A",
     mode: str = "scaffold",
+    progress_label: str | None = None,
 ) -> RunResult:
     """Run the agent's tool-use loop until end_turn / max_iters.
 
@@ -272,6 +401,22 @@ async def agent_loop(
     try:
         while iters < max_iters:
             iters += 1
+            # Real per-step signal for the SSE activity stream. Advisory and
+            # non-blocking: never raises, never alters loop behaviour. The
+            # frontend poll loop remains the source of truth for terminal state;
+            # these are progress breadcrumbs only.
+            # When the caller pins a generic label (the post-build typecheck-repair
+            # loop does this), use it for every step so the compiler diagnostics fed
+            # to the agent can never surface in a user-facing step; otherwise use the
+            # normal per-iteration build label.
+            publish_step(
+                ctx.prototype_id,
+                {
+                    "kind": "step",
+                    "text": progress_label or _step_label(iters, mode),
+                    "state": "active",
+                },
+            )
 
             # Graduated wrap-up pressure (per agent-build-research.md §4.2) with
             # the REAL remaining count — was a single hardcoded "2 remaining"
@@ -286,14 +431,33 @@ async def agent_loop(
             if remaining in {max_iters // 2, max(2, max_iters // 4), 1}:
                 _append_text_block(messages[-1], _wrap_up_nudge(remaining))
 
-            resp = await asyncio.to_thread(
-                client.messages.create,
-                model=MODEL,
-                max_tokens=max_tokens,
-                system=system_blocks,
-                tools=tools_payload,
-                messages=messages,
-            )
+            loop = asyncio.get_running_loop()
+            _last_step: list[str] = [""]  # mutable container for dedup
+
+            def _stream() -> object:
+                with client.messages.stream(
+                    model=MODEL,
+                    max_tokens=max_tokens,
+                    system=system_blocks,
+                    tools=tools_payload,
+                    messages=messages,
+                ) as stream:
+                    for event in stream:
+                        etype = type(event).__name__
+                        if etype == "RawContentBlockStartEvent":
+                            block = getattr(event, "content_block", None)
+                            if block and getattr(block, "type", None) == "tool_use":
+                                label = progress_label or friendly_step(getattr(block, "name", ""), None)
+                                if label != _last_step[0]:
+                                    _last_step[0] = label
+                                    loop.call_soon_threadsafe(
+                                        publish_step,
+                                        ctx.prototype_id,
+                                        {"kind": "step", "text": label, "state": "active"},
+                                    )
+                    return stream.get_final_message()
+
+            resp = await asyncio.to_thread(_stream)
             usage.add(resp.usage)
             # AD15 cost guard: when the projected next-iteration spend would
             # cross the soft cap, inject the EXISTING wrap-up nudge ONCE so the
@@ -312,16 +476,39 @@ async def agent_loop(
                 )
 
             stop = resp.stop_reason
-            content = [b.model_dump() for b in resp.content]
+            # Reconstruct blocks using only API-legal input fields.
+            # model_dump() on streamed response objects includes SDK-added keys
+            # (e.g. parsed_output on text blocks) that the API rejects when
+            # sent back in conversation history. Whitelist only: text→{type,text},
+            # tool_use→{type,id,name,input}; any other block type falls back to
+            # model_dump() stripped of SDK-only keys via exclude_none/unset.
+            content = [_to_api_block(b) for b in resp.content]
             messages.append({"role": "assistant", "content": content})
             last_assistant_content = content
 
+            # AD15 BACKSTOP (P6-06): the soft nudge above is advisory; if projected
+            # spend crosses the HARD cap the run is pathological — abort with a
+            # clean terminal status (not an exception) so the route's existing
+            # terminal handling persists the partial work + the cost log fires.
+            # Salvage the CURRENT iteration's assistant turn (just assigned to
+            # last_assistant_content above), exactly as the max_iters exit does.
+            # Placed AFTER the assignment so the salvaged content is this turn's,
+            # not the prior iteration's (or the initial [] on iteration 1).
+            if should_abort(usage, MODEL, HARD_CAP_USD):
+                logger.warning(
+                    "cost_guard.aborted prototype_id=%s mode=%s reason=hard_cap_projection "
+                    "est_cost_usd=%.4f hard_cap=%.2f soft_cap=%.2f iters=%d",
+                    ctx.prototype_id, mode, usage.est_cost_usd(MODEL),
+                    HARD_CAP_USD, SOFT_CAP_USD, iters,
+                )
+                return _finish(usage, "aborted", iters, start, last_assistant_content, ctx.prototype_id)
+
             if stop == "end_turn":
-                return _finish(usage, "complete", iters, start, content)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
 
             if stop == "max_tokens":
                 if max_tokens_retried:
-                    return _finish(usage, "max_tokens", iters, start, content)
+                    return _finish(usage, "max_tokens", iters, start, content, ctx.prototype_id)
                 max_tokens *= 2
                 max_tokens_retried = True
                 # The truncated assistant turn was appended above. When the cap
@@ -339,10 +526,10 @@ async def agent_loop(
                 continue
 
             if stop == "refusal":
-                return _finish(usage, "refused", iters, start, content)
+                return _finish(usage, "refused", iters, start, content, ctx.prototype_id)
 
             if stop != "tool_use":
-                return _finish(usage, "complete", iters, start, content)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
 
             # Collect tool_use blocks; dispatch concurrently per parallel-tool-use rule.
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
@@ -372,7 +559,7 @@ async def agent_loop(
             )
             if clar:
                 payload = clar.get("input") or {}
-                result = _finish(usage, "awaiting_clarification", iters, start, content)
+                result = _finish(usage, "awaiting_clarification", iters, start, content, ctx.prototype_id)
                 result.pending_question = {
                     "question": payload.get("question"),
                     "choices": payload.get("choices"),
@@ -403,7 +590,21 @@ async def agent_loop(
             )
             if patch:
                 await dispatch(patch["name"], patch.get("input") or {}, ctx, allowed_tool_names)
-                return _finish(usage, "complete", iters, start, content)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
+
+            # Emit a per-tool step event BEFORE dispatch so the frontend
+            # activity stream shows what the agent is about to do at tool
+            # granularity (not just the coarse per-iteration label above).
+            # Advisory/non-blocking — a publish failure never alters loop behaviour.
+            for tu in tool_uses:
+                publish_step(
+                    ctx.prototype_id,
+                    {
+                        "kind": "step",
+                        "text": _tool_step_label(tu.get("name", ""), tu.get("input") or {}),
+                        "state": "active",
+                    },
+                )
 
             results = await asyncio.gather(*[
                 dispatch(tu["name"], tu.get("input") or {}, ctx, allowed_tool_names)
@@ -472,10 +673,10 @@ async def agent_loop(
         # Exited because iters == max_iters. Salvage the last assistant turn as
         # final_content (was discarded as []) — a build that ran out of turns
         # mid-flow is usually near-complete and worth staging, not throwing away.
-        return _finish(usage, "max_iters", iters, start, last_assistant_content)
+        return _finish(usage, "max_iters", iters, start, last_assistant_content, ctx.prototype_id)
 
     except Exception as exc:
-        result = _finish(usage, "error", iters, start, [])
+        result = _finish(usage, "error", iters, start, [], ctx.prototype_id)
         result.error_class = type(exc).__name__
         result.error_message = str(exc)
         return result
@@ -493,6 +694,22 @@ def _append_text_block(message: dict[str, Any], text: str) -> None:
         message["content"] = [{"type": "text", "text": content}, block]
     else:
         message["content"] = [block]
+
+
+def _to_api_block(block: Any) -> dict[str, Any]:
+    """Reconstruct a content block using only API-legal input fields.
+
+    Sources all values from model_dump() so SDK-added extras (e.g.
+    parsed_output on TextBlock) never leak into conversation history.
+    Works with both real SDK objects and test fakes that implement
+    model_dump().
+    """
+    d = block.model_dump()
+    if d.get("type") == "text":
+        return {"type": "text", "text": d["text"]}
+    if d.get("type") == "tool_use":
+        return {"type": "tool_use", "id": d["id"], "name": d["name"], "input": d["input"]}
+    return {k: v for k, v in d.items() if v is not None}
 
 
 def _serialise_tool_result(result: dict[str, Any]) -> str:
@@ -521,7 +738,20 @@ def _persist_pending_question_if_paused(
     )
 
 
-def _finish(usage: RunUsage, status: str, iters: int, start: float, final_content: list) -> RunResult:
+def _finish(
+    usage: RunUsage,
+    status: str,
+    iters: int,
+    start: float,
+    final_content: list,
+    prototype_id: int | None = None,
+) -> RunResult:
+    # Flush the SSE terminal event to all active subscribers so every open
+    # /events stream ends cleanly. Covers every exit path (complete / max_iters /
+    # aborted / error) in one place. awaiting_clarification is a pause, not a
+    # terminal — the stream stays open while the user composes an answer.
+    if prototype_id is not None and status != "awaiting_clarification":
+        _sse_close(prototype_id, kind="done" if status == "complete" else "error")
     duration_ms = int((time.perf_counter() - start) * 1000)
     return RunResult(
         status=status,
@@ -538,7 +768,9 @@ async def generate_prototype(
     system_blocks: list[dict[str, Any]],
     user_message: dict[str, Any],
     figma_file_key: str | None,
+    figma_node_id: str | None = None,
     scenario: str = "A",
+    github_repo: str | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
     """Public entrypoint: run agent_loop with a fresh ToolContext, emit the
     cost-summary log line, and return `(result, virtual_fs)` for P1-07 + P1-08
@@ -555,12 +787,35 @@ async def generate_prototype(
     Figma data API. Resolution is best-effort: a prototype without a Figma
     connection runs fine, with fetch_figma reporting its own is_error.
     """
+    # Pre-seed virtual_fs with Figma palette CSS when a Figma source is present.
+    # This guarantees the palette is on disk before the agent's first write, so
+    # it cannot start from stock Tailwind defaults and then ignore a palette
+    # instruction embedded only in a tool result. Best-effort: a failure here
+    # never aborts generation — the agent runs with an empty virtual_fs instead.
+    figma_access_token = _resolve_figma_access_token(figma_file_key, workspace_id)
+    virtual_fs: dict[str, str] = {}
+    if figma_file_key and figma_access_token:
+        try:
+            from app.connectors.figma_oauth import fetch_file as _fetch_file
+            from app.design_agent.tools import _extract_palette_summary
+            _file_doc = await asyncio.to_thread(_fetch_file, figma_access_token, figma_file_key, 10)
+            _palette = _extract_palette_summary(_file_doc)
+            if _palette and _palette.get("background"):
+                virtual_fs["src/index.css"] = _render_palette_css(_palette)
+                logger.info(
+                    "design_agent.palette_pre_seeded prototype_id=%s bg=%s accent=%s is_dark=%s",
+                    prototype_id, _palette.get("background"), _palette.get("accent"), _palette.get("is_dark"),
+                )
+        except Exception:
+            pass  # best-effort — generation continues without pre-seeded CSS
+
     ctx = ToolContext(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
-        virtual_fs={},
+        virtual_fs=virtual_fs,  # pre-seeded with palette CSS (may be {} if no Figma)
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key),
+        figma_node_id=figma_node_id,  # frame-level targeting; None when absent
+        figma_access_token=figma_access_token,
     )
     result = await agent_loop(
         system_blocks=system_blocks,
@@ -580,13 +835,95 @@ async def generate_prototype(
     # emitted via the shared llm_telemetry.log_llm_run primitive so the
     # log shape stays identical across every LLM call site in the repo
     # (and future PRD/Evidence/Ask/Brief runners can adopt with one call).
+    # The connected repo full_name (e.g. "org/repo") is a non-secret identifier;
+    # carry it into the cost-summary identifier so a codebase-grounded run is
+    # observable in the telemetry. Included only when present — never a token,
+    # PRD body, or comment content. Prompt context only; no fetch.
+    run_identifier: dict[str, Any] = {
+        "prototype_id": prototype_id,
+        "scenario": scenario,
+        "mode": "scaffold",
+    }
+    if github_repo:
+        run_identifier["codebase_repo"] = github_repo
     log_llm_run(
         operation="design_agent.run.complete",
-        identifier={
-            "prototype_id": prototype_id,
-            "scenario": scenario,
-            "mode": "scaffold",
-        },
+        identifier=run_identifier,
+        usage=result.usage,
+        duration_ms=result.duration_ms,
+        status=result.status,
+        model=MODEL,
+        error_class=result.error_class,
+        iters=result.iters,
+    )
+    return result, ctx.virtual_fs
+
+
+def _render_typecheck_repair_user(diagnostics: str) -> str:
+    """Build the user turn for a repair re-entry. Plain English; the diagnostics
+    are the build's own message (real file and symbol names), never internal IDs."""
+    return (
+        "The prototype was built, but it will not run yet. The compiler found "
+        "references to things that do not exist:\n\n"
+        f"{diagnostics}\n\n"
+        "Fix this so the app runs. For each problem, either write the missing file "
+        "or, if the reference is left over and no longer needed, remove the import "
+        "that points at it. Prefer writing the missing screen so the flow stays "
+        "complete. Make the smallest set of changes that resolves every problem, "
+        "then end your turn with a one-sentence summary. Do not start unrelated work."
+    )
+
+
+async def repair_typecheck_run(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    system_blocks: list[dict[str, Any]],
+    virtual_fs: dict[str, str],
+    diagnostics: str,
+    figma_file_key: str | None = None,
+    figma_node_id: str | None = None,
+    scenario: str = "A",
+    max_iters: int = 6,
+) -> tuple[RunResult, dict[str, str]]:
+    """Re-enter the agent once to repair a runtime-breaking type diagnostic.
+
+    Used by the route's post-build typecheck-repair loop: the agent is handed the
+    files it already built plus the compiler diagnostics and asked to write the
+    missing file(s) or drop the dangling import so the bundle resolves. Returns
+    `(result, virtual_fs)` — the second element is the (possibly) updated source.
+
+    Runs with the same scaffold tools as the first pass, but pins a generic
+    progress label so the diagnostics handed to it here never reach a user-facing
+    step event. The Figma token is re-resolved best-effort so a repair turn can
+    still read the design if it needs to. The caller's `virtual_fs` is copied, not
+    mutated in place.
+    """
+    figma_access_token = _resolve_figma_access_token(figma_file_key, workspace_id)
+    ctx = ToolContext(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        virtual_fs=dict(virtual_fs),
+        figma_file_key=figma_file_key,
+        figma_node_id=figma_node_id,
+        figma_access_token=figma_access_token,
+    )
+    user_message = {
+        "role": "user",
+        "content": [{"type": "text", "text": _render_typecheck_repair_user(diagnostics)}],
+    }
+    result = await agent_loop(
+        system_blocks=system_blocks,
+        user_message=user_message,
+        ctx=ctx,
+        max_iters=max_iters,
+        scenario=scenario,
+        mode="scaffold",
+        progress_label=FINISHING_LABEL,
+    )
+    log_llm_run(
+        operation="design_agent.run.typecheck_repair",
+        identifier={"prototype_id": prototype_id, "scenario": scenario, "mode": "scaffold"},
         usage=result.usage,
         duration_ms=result.duration_ms,
         status=result.status,
@@ -661,7 +998,7 @@ async def iterate_prototype(
         # source dict; `view` returns real content because the seed is present.
         virtual_fs=dict(current_source),
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key),
+        figma_access_token=_resolve_figma_access_token(figma_file_key, workspace_id),
     )
     effective_system_blocks = (
         prepend_plan_addendum(system_blocks, approved_plan)
@@ -750,7 +1087,7 @@ async def manual_edit_prototype(
         # source dict; `view` returns real content because the seed is present.
         virtual_fs=dict(current_source),
         figma_file_key=figma_file_key,
-        figma_access_token=_resolve_figma_access_token(figma_file_key),
+        figma_access_token=_resolve_figma_access_token(figma_file_key, workspace_id),
     )
     result = await agent_loop(
         system_blocks=system_blocks,

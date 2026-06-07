@@ -24,6 +24,7 @@ import types
 import pytest
 
 from app.design_agent import autofixer, runner
+from tests._fake_anthropic import _FakeStream
 
 AUTOFIXER_LOGGER = "app.design_agent.autofixer"
 
@@ -58,6 +59,7 @@ def _vfs(*paths: str) -> dict[str, str]:
 # ─── Fixer (a): clean + hallucinated imports ─────────────────────────────────
 
 
+@pytest.mark.integration
 @requires_babel
 def test_clean_tsx_returns_ok():
     content = (
@@ -71,6 +73,7 @@ def test_clean_tsx_returns_ok():
     assert result == {"ok": True}
 
 
+@pytest.mark.integration
 @requires_babel
 def test_hallucinated_relative_import_flagged():
     content = "import x from './missing';\nexport const a = 1;\n"
@@ -79,6 +82,7 @@ def test_hallucinated_relative_import_flagged():
     assert result["errors"][0]["fixer"] == "hallucinated-import"
 
 
+@pytest.mark.integration
 @requires_babel
 def test_hallucinated_at_alias_flagged():
     content = "import x from '@/lib/nonexistent';\nexport const a = 1;\n"
@@ -87,6 +91,7 @@ def test_hallucinated_at_alias_flagged():
     assert result["errors"][0]["fixer"] == "hallucinated-import"
 
 
+@pytest.mark.integration
 @requires_babel
 def test_hallucinated_package_flagged():
     content = "import x from 'react-magic';\nexport const a = 1;\n"
@@ -96,6 +101,7 @@ def test_hallucinated_package_flagged():
     assert "react-magic" in result["errors"][0]["message"]
 
 
+@pytest.mark.integration
 @requires_babel
 def test_resolved_relative_import_passes():
     content = "import { Button } from './Button';\nexport const a = 1;\n"
@@ -105,6 +111,7 @@ def test_resolved_relative_import_passes():
     assert result == {"ok": True}
 
 
+@pytest.mark.integration
 @requires_babel
 def test_radix_ui_subpackages_pass():
     content = "import * as Slot from '@radix-ui/react-slot';\nexport const a = 1;\n"
@@ -115,6 +122,7 @@ def test_radix_ui_subpackages_pass():
 # ─── Fixer (c): shadcn component validation ──────────────────────────────────
 
 
+@pytest.mark.integration
 @requires_babel
 def test_unknown_shadcn_component_flagged():
     content = "import { Foo } from '@/components/ui/foo';\nexport const a = 1;\n"
@@ -127,6 +135,7 @@ def test_unknown_shadcn_component_flagged():
     assert len([n for n in names if n.strip() and "…" not in n]) == 8
 
 
+@pytest.mark.integration
 @requires_babel
 def test_known_shadcn_component_passes():
     content = "import { Button } from '@/components/ui/button';\nexport const a = 1;\n"
@@ -137,6 +146,7 @@ def test_known_shadcn_component_passes():
 # ─── Fixer (b): Tailwind class validation ────────────────────────────────────
 
 
+@pytest.mark.integration
 @requires_babel
 def test_unknown_semantic_token_flagged():
     content = "export default function A() { return <div className=\"bg-foreground\" />; }\n"
@@ -145,6 +155,7 @@ def test_unknown_semantic_token_flagged():
     assert any(e["fixer"] == "tailwind-class" for e in result["errors"])
 
 
+@pytest.mark.integration
 @requires_babel
 def test_arbitrary_value_passes():
     content = "export default function A() { return <div className=\"bg-[#abc] p-[14px]\" />; }\n"
@@ -152,6 +163,7 @@ def test_arbitrary_value_passes():
     assert result == {"ok": True}
 
 
+@pytest.mark.integration
 @requires_babel
 def test_valid_classes_pass():
     content = "export default function A() { return <div className=\"flex items-center gap-4 p-2 bg-slate-50\" />; }\n"
@@ -159,6 +171,7 @@ def test_valid_classes_pass():
     assert result == {"ok": True}
 
 
+@pytest.mark.integration
 @requires_babel
 def test_variant_prefix_passes():
     content = "export default function A() { return <div className=\"md:flex hover:bg-slate-100\" />; }\n"
@@ -169,6 +182,7 @@ def test_variant_prefix_passes():
 # ─── Fixer (d): JSX / TS syntax soundness ────────────────────────────────────
 
 
+@pytest.mark.integration
 @requires_babel
 def test_unbalanced_tag_flagged():
     content = "export default function A() { return <div><span></div>; }\n"
@@ -179,6 +193,7 @@ def test_unbalanced_tag_flagged():
     assert err["line"] is not None
 
 
+@pytest.mark.integration
 @requires_babel
 def test_invalid_ts_syntax_flagged():
     content = "const x: = 1;\n"
@@ -314,12 +329,15 @@ class _RecordingClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = []
-        self.messages = types.SimpleNamespace(create=self._create)
+        self.messages = types.SimpleNamespace(create=self._create, stream=self._stream)
 
     def _create(self, **kwargs):
         self.calls.append({"messages": copy.deepcopy(kwargs.get("messages"))})
         i = len(self.calls) - 1
         return self._responses[i] if i < len(self._responses) else self._responses[-1]
+
+    def _stream(self, **kwargs):
+        return _FakeStream(self._create(**kwargs))
 
 
 def _tool_use(tid, name, inp):

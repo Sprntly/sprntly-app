@@ -13,7 +13,12 @@ import {
   runGenerateFlow,
   sourceDetectedLabel,
 } from "../DesignAgentDrawer"
-import { markCompleted, markPending, pendingCompleted } from "../notificationStore"
+import {
+  __resetPageLoadGuards,
+  markCompleted,
+  markPending,
+  pendingCompleted,
+} from "../notificationStore"
 import { designAgentApi } from "../../../lib/api"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
@@ -425,24 +430,43 @@ describe("notification persistence (P5-09)", () => {
 
   afterEach(() => {
     removeWindow()
+    // P6-05: the replay now uses module-level per-page-load guards; reset them
+    // between cases so a simulated reload re-shows (browser reload re-evaluates
+    // the module).
+    __resetPageLoadGuards()
   })
 
-  it("mount re-shows a completed entry once, then acknowledges it (AC2)", () => {
+  // P6-05 (Decision-D(b)) — the replay was hoisted to the shell AND no longer
+  // auto-acks on first show. This is the "moved-replay assertion" AC6 calls out:
+  // the only existing P5-09 test whose behaviour changes by design.
+  it("replay shows a completed entry once per page-load and does NOT auto-ack it (P6-05 AC3)", () => {
     installStorage()
-    markCompleted(7, "Open the PRD's Design section to view it.")
+    markCompleted(7, "Your prototype finished generating.")
 
     const showToast = vi.fn()
-    replayCompletedNotifications(showToast) // simulates the mount effect
+    replayCompletedNotifications(showToast) // simulates the shell replay on mount
     expect(showToast).toHaveBeenCalledTimes(1)
     expect(showToast).toHaveBeenCalledWith(
       "Prototype ready",
-      "Open the PRD's Design section to view it.",
+      "Your prototype finished generating.",
     )
 
-    // A second mount (still same session) must NOT re-show — it was acknowledged.
+    // P6-05: the entry is NOT acknowledged on show — it survives in sessionStorage
+    // so a subsequent hard reload re-shows it (acked-until-user-acks).
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 7, sub: "Your prototype finished generating." },
+    ])
+
+    // A second replay within the SAME page-load does NOT re-show (per-load guard).
     const showToast2 = vi.fn()
     replayCompletedNotifications(showToast2)
     expect(showToast2).not.toHaveBeenCalled()
+
+    // …but after a simulated hard reload (guards reset) it re-shows again.
+    __resetPageLoadGuards()
+    const showToast3 = vi.fn()
+    replayCompletedNotifications(showToast3)
+    expect(showToast3).toHaveBeenCalledTimes(1)
   })
 
   it("does NOT re-show a pending (not-yet-complete) entry on mount (AC3)", () => {
@@ -480,7 +504,7 @@ describe("notification persistence (P5-09)", () => {
     expect(showToast).toHaveBeenCalledWith("Prototype ready", expect.any(String))
     // …AND the completion is persisted so a reload can re-show it.
     expect(pendingCompleted()).toEqual([
-      { prototypeId: 7, sub: "Open the PRD's Design section to view it." },
+      { prototypeId: 7, sub: "Your prototype finished generating." },
     ])
   })
 
@@ -512,4 +536,97 @@ describe("notification persistence (P5-09)", () => {
     )
     expect(html).toContain("Generate Prototype")
   })
+
+  it("retargets the ready-toast sub off the removed Design section", async () => {
+    installStorage()
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 11,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 11, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: true,
+    })
+    await genResult
+    await Promise.resolve()
+
+    const readyCall = showToast.mock.calls.find((c) => c[0] === "Prototype ready")
+    expect(readyCall).toBeTruthy()
+    const sub = readyCall![1] as string
+    // Fails on the prior constant, which pointed at the now-removed Design section.
+    expect(sub).not.toContain("Design section")
+    expect(sub).toBe("Your prototype finished generating.")
+  })
+
+  it("re-shows the persisted sub byte-identical to the live toast on reload", async () => {
+    installStorage()
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+    const liveToast = vi.fn()
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 12,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 12, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast: liveToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: true,
+    })
+    await genResult
+    await Promise.resolve()
+
+    const liveSub = liveToast.mock.calls.find((c) => c[0] === "Prototype ready")![1]
+    // The live toast's sub is what gets persisted…
+    expect(pendingCompleted()).toEqual([{ prototypeId: 12, sub: liveSub }])
+    // …and the post-reload replay re-shows that exact persisted sub.
+    const replayToast = vi.fn()
+    replayCompletedNotifications(replayToast)
+    expect(replayToast).toHaveBeenCalledWith("Prototype ready", liveSub)
+  })
 })
+
+describe("buildGenerateParams github_repo threading", () => {
+  const base = {
+    prdId: 9,
+    platform: "both" as const,
+    instructions: "",
+    figmaFileKey: null,
+    websiteUrl: "",
+    manualColor: "",
+    manualFont: "",
+  }
+
+  it("emits github_repo when a repo is supplied; other keys unchanged", () => {
+    const params = buildGenerateParams({ ...base, githubRepo: "org/repo" })
+    expect(params.github_repo).toBe("org/repo")
+    // Every existing key is unchanged by the new repo arg.
+    expect(params.prd_id).toBe(9)
+    expect(params.target_platform).toBe("both")
+    expect(params.instructions).toBe("")
+    expect(params.figma_file_key).toBeNull()
+    expect(params.website_url).toBeNull()
+    expect(params.manual_design).toBeNull()
+  })
+
+  it("nulls github_repo when the repo arg is blank or whitespace", () => {
+    expect(buildGenerateParams({ ...base, githubRepo: "   " }).github_repo).toBeNull()
+    expect(buildGenerateParams({ ...base, githubRepo: "" }).github_repo).toBeNull()
+    // Omitted entirely → still null.
+    expect(buildGenerateParams({ ...base }).github_repo).toBeNull()
+  })
+})
+

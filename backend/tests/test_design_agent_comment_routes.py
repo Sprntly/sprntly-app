@@ -7,7 +7,7 @@
     GET   /v1/design-agent/by-token/{token}/comments            (public, no auth)
 
 The internal routes reuse the authed-route gates (feature flag +
-require_app_session + workspace filter); the public routes ride on the P2-05
+require_company + workspace filter); the public routes ride on the P2-05
 `by-token` resolver, where the share_token IS the access primitive (F6) — no
 auth, no session workspace claim, workspace taken from the resolved row. The
 security posture under test:
@@ -38,6 +38,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.conftest import _TEST_COMPANY_ID
 
 # SQLite-compatible end-state of `prototypes` (P1-06 + P2-06 sharing columns) +
 # `prototype_checkpoints` + `prototype_comments` (P3-01). Postgres-only constructs
@@ -89,12 +91,16 @@ CREATE TABLE prototype_comments (
     author        TEXT NOT NULL DEFAULT 'demo',
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
+    pin_x_pct          REAL,
+    pin_y_pct          REAL,
+    resolved_anchor_id TEXT,
+    user_id            TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
 );
 """
 
-_OTHER_WS = "other-workspace"  # foreign to the app-session's aud ("app")
+_OTHER_WS = "other-workspace"  # foreign to the caller's company (_TEST_COMPANY_ID)
 
 
 @pytest.fixture
@@ -119,12 +125,9 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
 @pytest.fixture
@@ -138,7 +141,7 @@ def unauth(env) -> TestClient:
 
 def _seed_prototype(
     *,
-    workspace_id: str = "app",
+    workspace_id: str = _TEST_COMPANY_ID,
     share_mode: str = "private",
     status: str = "ready",
     is_complete: int = 0,
@@ -165,7 +168,7 @@ def _seed_prototype(
 def _seed_comment(
     *,
     prototype_id: int,
-    workspace_id: str = "app",
+    workspace_id: str = _TEST_COMPANY_ID,
     anchor_id: str = "a1b2c3d4",
     body: str = "seeded comment",
     author: str = "demo",
@@ -198,7 +201,7 @@ def _count_comments(prototype_id: int) -> int:
 
 def test_post_comment_authed_returns_open_comment(client):
     # AC1 — authed POST returns 200 with an open CommentOut + persists a row.
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     resp = client.post(
         f"/v1/design-agent/{proto.id}/comments",
         json={"anchor_id": "deadbeef", "body": "make this blue"},
@@ -206,7 +209,9 @@ def test_post_comment_authed_returns_open_comment(client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "open"
-    assert body["author"] == "demo"
+    # B9a: author is now user_email when available, else user_id (UUID). The test
+    # JWT has no email claim, so the fallback is _TEST_USER_ID ("user-test").
+    assert body["author"] == "user-test"
     assert body["anchor_id"] == "deadbeef"
     assert body["body"] == "make this blue"
     assert body["resolved_at"] is None
@@ -225,8 +230,8 @@ def test_post_comment_wrong_workspace_returns_404(client):
 
 
 def test_post_comment_requires_session(unauth):
-    # AC (CRUD auth) — no session cookie → 401 from require_app_session.
-    proto = _seed_prototype(workspace_id="app")
+    # AC (CRUD auth) — no bearer → 401 from require_company.
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     resp = unauth.post(
         f"/v1/design-agent/{proto.id}/comments",
         json={"anchor_id": "deadbeef", "body": "x"},
@@ -236,7 +241,7 @@ def test_post_comment_requires_session(unauth):
 
 def test_get_comments_returns_all_statuses(client):
     # AC3 — GET returns every comment (all statuses), created_at-ascending.
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     _seed_comment(prototype_id=proto.id, status="open", anchor_id="aaa",
                   created_at="2026-01-01 00:00:01")
     _seed_comment(prototype_id=proto.id, status="resolved", anchor_id="bbb",
@@ -260,7 +265,7 @@ def test_get_comments_wrong_workspace_returns_404(client):
 
 def test_patch_resolve_flips_status(client):
     # AC4 — PATCH flips the comment to resolved + stamps resolved_at.
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     cid = _seed_comment(prototype_id=proto.id, status="open")
     resp = client.patch(f"/v1/design-agent/{proto.id}/comments/{cid}/resolve")
     assert resp.status_code == 200, resp.text
@@ -271,8 +276,8 @@ def test_patch_resolve_flips_status(client):
 
 def test_patch_resolve_comment_for_other_prototype_returns_404(client):
     # AC4 — a cid that belongs to a DIFFERENT prototype than the path → 404.
-    proto_a = _seed_prototype(workspace_id="app")
-    proto_b = _seed_prototype(workspace_id="app")
+    proto_a = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
+    proto_b = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     cid = _seed_comment(prototype_id=proto_a.id, status="open")
     resp = client.patch(f"/v1/design-agent/{proto_b.id}/comments/{cid}/resolve")
     assert resp.status_code == 404
@@ -290,26 +295,16 @@ def test_patch_resolve_other_workspace_returns_404(client):
 
 
 def test_post_comment_public_no_auth_persists_external_comment(unauth):
-    # AC5 — no-auth POST on a public ready prototype → 200, author='external',
-    # workspace from the resolved row.
+    # B9b: public comment CREATE is now disabled (returns 404).
+    # The route still exists (no import errors) but immediately raises 404 so
+    # unauthenticated external viewers cannot write comments.
     proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
     resp = unauth.post(
         f"/v1/design-agent/by-token/{proto.token}/comments",
         json={"anchor_id": "deadbeef", "body": "love this"},
     )
-    assert resp.status_code == 200, resp.text
-    assert resp.history == []                      # no redirect to /sign-in
-    assert "set-cookie" not in {k.lower() for k in resp.headers}
-    body = resp.json()
-    assert body["author"] == "external"
-    assert body["status"] == "open"
-    # workspace_id is internal — never surfaces in CommentOut — but the row must
-    # carry the resolved prototype's workspace, not a session claim.
-    from tests import _fake_supabase
-    ws = _fake_supabase.get_fake_db().execute(
-        "SELECT workspace_id FROM prototype_comments WHERE id = ?", [body["id"]]
-    ).fetchone()[0]
-    assert ws == "tenant-x"
+    assert resp.status_code == 404
+    assert _count_comments(proto.id) == 0  # nothing written
 
 
 def test_post_comment_public_private_mode_returns_404(unauth):
@@ -374,7 +369,7 @@ def test_no_public_resolve_route(unauth):
 
 def test_post_comment_empty_body_returns_422(client):
     # Pydantic min_length=1 on body → 422 (not a silent empty insert).
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     resp = client.post(
         f"/v1/design-agent/{proto.id}/comments",
         json={"anchor_id": "deadbeef", "body": ""},
@@ -384,7 +379,7 @@ def test_post_comment_empty_body_returns_422(client):
 
 def test_post_comment_empty_anchor_returns_422(client):
     # Pydantic min_length=1 on anchor_id → 422.
-    proto = _seed_prototype(workspace_id="app")
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
     resp = client.post(
         f"/v1/design-agent/{proto.id}/comments",
         json={"anchor_id": "", "body": "x"},
@@ -396,22 +391,18 @@ def test_post_comment_empty_anchor_returns_422(client):
 
 
 def test_public_write_logs_token_hash_not_raw(unauth, caplog):
-    # AC10 — the public write logs token_hash=<sha256[:8]>, never the raw token,
-    # and never the comment body (PII per Rule #24).
+    # B9b: public comment CREATE is disabled → 404 before any logging.
+    # The log-hygiene invariant (token never raw, body never logged) is vacuously
+    # satisfied because the route never reaches the insert or log statement.
     proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
-    expected_hash = hashlib.sha256(proto.token.encode("utf-8")).hexdigest()[:8]
     with caplog.at_level(logging.INFO, logger="app.routes.design_agent"):
         resp = unauth.post(
             f"/v1/design-agent/by-token/{proto.token}/comments",
             json={"anchor_id": "deadbeef", "body": "secret comment text"},
         )
-    assert resp.status_code == 200, resp.text
-    public_lines = [r for r in caplog.records if "comment_created_public" in r.getMessage()]
-    assert public_lines, "expected a comment_created_public log line"
-    text = caplog.text
-    assert f"token_hash={expected_hash}" in text
-    assert proto.token not in text                 # raw token never logged
-    assert "secret comment text" not in text        # comment body never logged
+    assert resp.status_code == 404
+    assert proto.token not in caplog.text      # raw token never in any log line
+    assert "secret comment text" not in caplog.text  # comment body never logged
 
 
 # ─── Non-breakage (AC9) ─────────────────────────────────────────────────────
@@ -430,3 +421,143 @@ def test_comment_routes_registered_and_existing_intact(env):
     assert "/v1/design-agent/{prototype_id}" in paths
     assert "/v1/design-agent/by-token/{token}" in paths
     assert "/v1/design-agent/by-token/{token}/passcode" in paths
+
+
+# ─── Durable comment position (route-level) ─────────────────────────────────
+
+
+def test_comment_out_projects_position_fields(env):
+    # _comment_to_out on a row WITH position → CommentOut carries the three values.
+    # On a row WITHOUT the keys → all three None (uses .get, safe for older rows).
+    from app.routes.design_agent import _comment_to_out, CommentOut
+
+    with_pos = _comment_to_out({
+        "id": 1,
+        "anchor_id": "pin-1",
+        "body": "hi",
+        "author": "demo",
+        "status": "open",
+        "created_at": "2026-01-01T00:00:00",
+        "resolved_at": None,
+        "pin_x_pct": 25.0,
+        "pin_y_pct": 50.0,
+        "resolved_anchor_id": "abc123",
+    })
+    out = CommentOut(**with_pos)
+    assert out.pin_x_pct == pytest.approx(25.0)
+    assert out.pin_y_pct == pytest.approx(50.0)
+    assert out.resolved_anchor_id == "abc123"
+
+    without_pos = _comment_to_out({
+        "id": 2,
+        "anchor_id": "anc1",
+        "body": "hi",
+        "author": "demo",
+        "status": "open",
+        "created_at": "2026-01-01T00:00:00",
+        "resolved_at": None,
+        # no position keys at all (older row)
+    })
+    out2 = CommentOut(**without_pos)
+    assert out2.pin_x_pct is None
+    assert out2.pin_y_pct is None
+    assert out2.resolved_anchor_id is None
+
+
+def test_comment_create_rejects_out_of_range_pct(client):
+    # CommentCreate ge=0 le=100 rejects out-of-range values with 422.
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
+    resp = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "pin-1", "body": "x", "pin_x_pct": 150},
+    )
+    assert resp.status_code == 422
+
+    resp2 = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "pin-1", "body": "x", "pin_y_pct": -1},
+    )
+    assert resp2.status_code == 422
+
+    # Omitted position is accepted.
+    resp3 = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "pin-1", "body": "x"},
+    )
+    assert resp3.status_code == 200
+
+
+def test_post_comment_authed_round_trips_position(client):
+    # Authed POST with position → CommentOut echoes all three; subsequent GET
+    # returns them as well.
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
+    resp = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={
+            "anchor_id": "pin-1",
+            "body": "make this bigger",
+            "pin_x_pct": 33.5,
+            "pin_y_pct": 66.0,
+            "resolved_anchor_id": "abcd1234",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pin_x_pct"] == pytest.approx(33.5)
+    assert body["pin_y_pct"] == pytest.approx(66.0)
+    assert body["resolved_anchor_id"] == "abcd1234"
+
+    get_resp = client.get(f"/v1/design-agent/{proto.id}/comments")
+    assert get_resp.status_code == 200
+    rows = get_resp.json()
+    assert len(rows) == 1
+    assert rows[0]["pin_x_pct"] == pytest.approx(33.5)
+    assert rows[0]["resolved_anchor_id"] == "abcd1234"
+
+
+def test_post_comment_public_round_trips_position(unauth):
+    # B9b: public comment CREATE is disabled → 404 regardless of payload shape.
+    # Position fields are irrelevant; nothing is persisted.
+    proto = _seed_prototype(workspace_id="tenant-pub", share_mode="public", status="ready")
+    resp = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={
+            "anchor_id": "pin-1",
+            "body": "nice layout",
+            "pin_x_pct": 10.0,
+            "pin_y_pct": 20.0,
+            "resolved_anchor_id": "ef567890",
+        },
+    )
+    assert resp.status_code == 404
+    assert _count_comments(proto.id) == 0  # nothing written
+
+
+def test_post_comment_omitted_position_defaults_null(client):
+    # POST with only {anchor_id, body} → all three position fields null (back-compat).
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID)
+    resp = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "anc-legacy", "body": "right-click anchor comment"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("pin_x_pct") is None
+    assert body.get("pin_y_pct") is None
+    assert body.get("resolved_anchor_id") is None
+
+
+def test_position_not_leaked_cross_workspace(client):
+    # A comment with position written under workspace A is not returned when
+    # GET /{id}/comments is queried under workspace B — the prototype lookup
+    # returns 404 before any row is read (existing workspace filter).
+    proto_a = _seed_prototype(workspace_id=_OTHER_WS)
+    _seed_comment(
+        prototype_id=proto_a.id,
+        workspace_id=_OTHER_WS,
+        anchor_id="pin-1",
+        body="cross-ws check",
+    )
+    # The client's company is _TEST_COMPANY_ID, which is different from _OTHER_WS.
+    resp = client.get(f"/v1/design-agent/{proto_a.id}/comments")
+    assert resp.status_code == 404

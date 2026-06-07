@@ -44,6 +44,7 @@ from app.design_agent.tools import (
     dispatch,
     tools_for_mode,
 )
+from tests._fake_anthropic import _FakeStream
 
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
@@ -77,7 +78,7 @@ class _RecordingClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls: list[dict] = []
-        self.messages = types.SimpleNamespace(create=self._create)
+        self.messages = types.SimpleNamespace(create=self._create, stream=self._stream)
 
     def _create(self, **kwargs):
         self.calls.append({
@@ -89,6 +90,9 @@ class _RecordingClient:
         if isinstance(resp, BaseException):
             raise resp
         return resp
+
+    def _stream(self, **kwargs):
+        return _FakeStream(self._create(**kwargs))
 
 
 def _usage(cache_creation=0, cache_read=0, inp=0, out=0):
@@ -588,3 +592,92 @@ def test_insert_patch_logs_no_patch_content(patches, caplog):
     assert f"prd_patch_proposed prototype_id=8 prd_id=7 patch_id={row['id']}" in blob
     assert secret_rationale not in blob
     assert secret_patch not in blob
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# P7-03 — lock apply_patches_to_prd_md against the ux-explore S3 dev-hack
+# ═══════════════════════════════════════════════════════════════════════════
+# The ux-explore session ran a local DO-NOT-COMMIT hack: an UNCONDITIONAL early
+# `return prd_md` at the top of apply_patches_to_prd_md (before the `applied`
+# filter), which short-circuited ALL patch application on read — a correctness
+# regression to the P3/F11 PRD-writeback loop, not just a heading-hide. That hack
+# was intentionally EXCLUDED from the committed snapshot (a10c2df). These tests
+# LOCK the clean P3 behaviour so the local patch cannot silently re-enter: they
+# assert applied patches still fold in, and would FAIL against the dev-hack's
+# unconditional `return prd_md`. They call apply_patches_to_prd_md directly with
+# in-test fixture inputs and assert on the returned string — no git-rev / historical
+# object reads (CI uses fetch-depth=1 shallow clones).
+
+
+def test_unconditional_early_return_absent(patches):
+    # P7-03 AC1/AC2 (regression) — a single status='applied' NON-heading patch must
+    # appear in the output. Against the S3 dev-hack (unconditional `return prd_md`
+    # at function top) this FAILS, because the function would return prd_md verbatim
+    # before ever reaching the `applied` fold.
+    prd = "# Checkout PRD\n\nOriginal flow description."
+    rows = [
+        {"id": 1, "status": "applied", "patch_md": "Add a confirm-before-pay step.",
+         "created_at": "2026-02-01T00:00:00Z"},
+    ]
+    out = patches.apply_patches_to_prd_md(prd, rows)
+    assert out != prd, "output must differ from input — the applied patch was folded"
+    assert "Add a confirm-before-pay step." in out
+    assert "## Design Agent updates" in out
+
+
+def test_applied_non_heading_patch_renders(patches):
+    # P7-03 AC2 — patch_md that is a plain (non-heading) line renders under the
+    # "## Design Agent updates" section.
+    prd = "# Onboarding PRD\n\nBody."
+    rows = [
+        {"id": 5, "status": "applied", "patch_md": "New bullet about onboarding.",
+         "created_at": "2026-02-02T00:00:00Z"},
+    ]
+    out = patches.apply_patches_to_prd_md(prd, rows)
+    assert "## Design Agent updates" in out
+    assert "New bullet about onboarding." in out
+    # The patch text appears AFTER the section heading.
+    assert out.index("## Design Agent updates") < out.index("New bullet about onboarding.")
+
+
+def test_no_applied_patches_returns_input_unchanged(patches):
+    # P7-03 AC3 (edge) — the LEGITIMATE `if not applied:` guard: an all-pending list
+    # returns prd_md unchanged (no "## Design Agent updates" section emitted). This
+    # is the guard the hack masqueraded as; the lock keeps the two distinct.
+    prd = "# PRD\n\nbody"
+    rows = [
+        {"id": 1, "status": "pending", "patch_md": "pending one",
+         "created_at": "2026-02-01T00:00:00Z"},
+        {"id": 2, "status": "pending", "patch_md": "pending two",
+         "created_at": "2026-02-02T00:00:00Z"},
+    ]
+    assert patches.apply_patches_to_prd_md(prd, rows) == prd
+    assert "## Design Agent updates" not in patches.apply_patches_to_prd_md(prd, rows)
+
+
+def test_apply_patches_is_deterministic(patches):
+    # P7-03 AC4 (edge) — same (prd_md, patches) inputs → byte-identical output on two
+    # successive calls.
+    prd = "# PRD\n\nbody"
+    rows = [
+        {"id": 2, "status": "applied", "patch_md": "second", "created_at": "2026-02-02T00:00:00Z"},
+        {"id": 1, "status": "applied", "patch_md": "first", "created_at": "2026-02-01T00:00:00Z"},
+    ]
+    out1 = patches.apply_patches_to_prd_md(prd, copy.deepcopy(rows))
+    out2 = patches.apply_patches_to_prd_md(prd, copy.deepcopy(rows))
+    assert out1 == out2
+
+
+def test_rejected_patches_excluded(patches):
+    # P7-03 (edge) — a status='rejected' patch is NOT folded into the output, even
+    # when an applied patch is present alongside it.
+    prd = "# PRD\n\nbody"
+    rows = [
+        {"id": 1, "status": "rejected", "patch_md": "REJECTED_CONTENT",
+         "created_at": "2026-02-01T00:00:00Z"},
+        {"id": 2, "status": "applied", "patch_md": "APPLIED_CONTENT",
+         "created_at": "2026-02-02T00:00:00Z"},
+    ]
+    out = patches.apply_patches_to_prd_md(prd, rows)
+    assert "APPLIED_CONTENT" in out
+    assert "REJECTED_CONTENT" not in out

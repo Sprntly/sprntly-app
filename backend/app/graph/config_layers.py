@@ -54,6 +54,18 @@ PLATFORM_DEFAULTS: dict[str, Any] = {
         "attribution": {"sim_threshold": 0.75, "window_days": 14},
         "learning_rate": None,  # TBD — tuned in Phase 3
     },
+    "research": {
+        # Social/community channels the Market Research agent sweeps with
+        # targeted site: queries. Per-enterprise overridable (Settings) —
+        # e.g. a healthcare company might drop reddit and add specialty forums.
+        "social_sources": [
+            {"id": "reddit",      "query": "site:reddit.com {subject} (also search relevant subreddits for the product category)"},
+            {"id": "hackernews",  "query": "site:news.ycombinator.com {subject}"},
+            {"id": "linkedin",    "query": "site:linkedin.com {subject} (public posts; coverage is partial — LinkedIn is login-walled)"},
+            {"id": "g2",          "query": "site:g2.com OR site:capterra.com {subject} reviews"},
+        ],
+        "max_searches": 12,
+    },
     "scoring": {
         "dimensions": [
             "kpi_impact", "strategic_alignment", "convergence",
@@ -69,6 +81,16 @@ PLATFORM_DEFAULTS: dict[str, Any] = {
         "cache": True,
     },
     "outcome": {"measurement_windows_days": [7, 14, 30]},
+    "ds": {
+        # Pilot-1 structured analyses. Anomaly = a weekly metric point that
+        # deviates from its own trailing history. A point is a Finding if EITHER
+        # the z-score magnitude or the pct-change magnitude clears its threshold.
+        "anomaly": {
+            "min_points": 4,      # need ≥ this many weekly points to judge a metric
+            "z_threshold": 2.0,   # |z| ≥ this ⇒ anomaly (z vs trailing mean/std)
+            "pct_threshold": 0.3, # |pct change vs trailing mean| ≥ this ⇒ anomaly
+        },
+    },
 }
 
 # ---- Layer 2: per-source_type config ----------------------------------------

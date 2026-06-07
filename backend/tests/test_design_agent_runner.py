@@ -24,6 +24,7 @@ import pytest
 from app.design_agent import runner
 from app.design_agent.runner import RunResult, agent_loop, generate_prototype
 from app.design_agent.tools import ToolContext
+from tests._fake_anthropic import _FakeStream
 
 TELEMETRY_LOGGER = "app.llm_telemetry"
 
@@ -59,7 +60,7 @@ class _RecordingClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls: list[dict] = []
-        self.messages = types.SimpleNamespace(create=self._create)
+        self.messages = types.SimpleNamespace(create=self._create, stream=self._stream)
 
     def _create(self, **kwargs):
         self.calls.append({
@@ -74,6 +75,9 @@ class _RecordingClient:
         if isinstance(resp, BaseException):
             raise resp
         return resp
+
+    def _stream(self, **kwargs):
+        return _FakeStream(self._create(**kwargs))
 
 
 def _usage(cache_creation=0, cache_read=0, inp=0, out=0):
@@ -607,26 +611,26 @@ def test_hash_tool_call_differs_on_input():
 
 def test_resolve_figma_token_none_when_no_file_key():
     # No file to fetch → no token resolution, no import side effects.
-    assert runner._resolve_figma_access_token(None) is None
+    assert runner._resolve_figma_access_token(None, "ws-id") is None
 
 
 def test_resolve_figma_token_happy(monkeypatch):
     fake = types.ModuleType("app.routes.connectors")
-    fake._figma_access_token = lambda: "figd_tok_123"
+    fake._figma_access_token = lambda company_id: "figd_tok_123"
     monkeypatch.setitem(sys.modules, "app.routes.connectors", fake)
-    assert runner._resolve_figma_access_token("FILEKEY") == "figd_tok_123"
+    assert runner._resolve_figma_access_token("FILEKEY", "ws-id") == "figd_tok_123"
 
 
 def test_resolve_figma_token_nonfatal_on_connector_error(monkeypatch):
     fake = types.ModuleType("app.routes.connectors")
 
-    def _raise():
+    def _raise(company_id):
         raise RuntimeError("Figma is not connected")
 
     fake._figma_access_token = _raise
     monkeypatch.setitem(sys.modules, "app.routes.connectors", fake)
     # Non-fatal: resolver swallows the error and returns None so the run proceeds.
-    assert runner._resolve_figma_access_token("FILEKEY") is None
+    assert runner._resolve_figma_access_token("FILEKEY", "ws-id") is None
 
 
 def test_generate_prototype_injects_figma_token_onto_ctx(monkeypatch):
@@ -637,7 +641,7 @@ def test_generate_prototype_injects_figma_token_onto_ctx(monkeypatch):
         return RunResult(status="complete", iters=1, usage=runner.RunUsage(),
                          duration_ms=1, final_content=[])
 
-    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key: "tok-xyz")
+    monkeypatch.setattr(runner, "_resolve_figma_access_token", lambda key, ws: "tok-xyz")
     monkeypatch.setattr(runner, "agent_loop", fake_loop)
     _run(generate_prototype(
         prototype_id=7, workspace_id="app", system_blocks=_system(),
@@ -704,3 +708,135 @@ def test_cost_summary_emitted_even_on_error(monkeypatch, caplog):
     msg = next(r.getMessage() for r in caplog.records if r.name == TELEMETRY_LOGGER)
     assert "status=error" in msg
     assert "error_class=RuntimeError" in msg
+
+
+# ─── P7-01 regression: lock the AD15 soft-cap envelope ──────────────────────
+# These guard against the S2 ux-explore DO-NOT-COMMIT dev-hack
+# (DEFAULT_MAX_TOKENS 4096 -> 16000) ever silently riding into a commit, and
+# pin the AD2 model. They assert the working-tree module symbols directly — no
+# historical git rev is consulted (CI uses shallow clones).
+
+
+def test_default_max_tokens_is_4096():
+    """P7-01 AC1/AC3: the per-turn cap stays at 4096; fails on the 16000 hack."""
+    assert runner.DEFAULT_MAX_TOKENS == 4096
+
+
+def test_agent_loop_default_max_tokens_kwarg_is_4096():
+    """P7-01: the default ``max_tokens`` kwarg resolves to 4096.
+
+    The ticket calls this entry point ``run``; the actual public function
+    carrying ``max_tokens: int = DEFAULT_MAX_TOKENS`` (runner.py:250) is
+    ``agent_loop``. Asserting the resolved default catches both a constant
+    change and a signature override.
+    """
+    import inspect
+
+    default = inspect.signature(runner.agent_loop).parameters["max_tokens"].default
+    assert default == 4096
+
+
+def test_model_pin_is_sonnet_4_6():
+    """P7-01 AC2 / AD2 / D4: model constant stays sonnet-4-6 — no drift to 4-7."""
+    assert runner.MODEL == "claude-sonnet-4-6"
+
+
+# ─── SSE publish_step wiring ─────────────────────────────────────────────────
+
+
+def test_publish_step_called_once_per_loop_iteration(monkeypatch):
+    """publish_step fires at the start of every loop iteration (coarse label)
+    AND before each tool dispatch (per-tool label), so the SSE stream gets
+    fine-grained progress breadcrumbs.
+
+    Setup: two iterations — tool_use "view" on iter 1, end_turn on iter 2.
+    Expected publish_step calls:
+      1. iter 1 loop-top coarse label ("Reading the change request")
+      2. per-tool label before "view" dispatch ("Running view")
+      3. iter 2 loop-top coarse label ("Analyzing the prototype")
+    Total: 3 calls.
+    """
+    calls: list[tuple] = []
+
+    def _capture(pid, event):
+        calls.append((pid, event))
+
+    monkeypatch.setattr(runner, "publish_step", _capture)
+
+    # Two iterations: tool_use on iter 1, end_turn on iter 2.
+    _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "/"})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+
+    async def _fake_dispatch(name, input, ctx, allowed_names=None):
+        return {"content": "ok"}
+
+    monkeypatch.setattr(runner, "dispatch", _fake_dispatch)
+
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=42)))
+
+    # 1 coarse (iter 1) + 1 per-tool (view dispatch) + 1 coarse (iter 2) = 3
+    assert len(calls) == 3, f"expected 3 publish_step calls, got {len(calls)}"
+    for pid, ev in calls:
+        assert pid == 42
+        assert ev["kind"] == "step"
+        assert ev["state"] == "active"
+
+
+def test_sse_stream_closed_with_done_on_complete_run(monkeypatch):
+    """_sse_close is called with kind='done' when the run completes normally."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=7)))
+
+    assert closed == [(7, "done")]
+
+
+def test_sse_stream_closed_with_error_on_non_complete_exit(monkeypatch):
+    """_sse_close is called with kind='error' for any non-complete exit (max_iters)."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    # One tool_use and max_iters=1 → the loop exits via max_iters (not complete).
+    async def _fake_dispatch(name, input, ctx, allowed_names=None):
+        return {"content": "ok"}
+
+    monkeypatch.setattr(runner, "dispatch", _fake_dispatch)
+
+    _install_client(monkeypatch, [_msg("tool_use", [_tool_use("t1", "view", {"path": "/"})])])
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=8), max_iters=1))
+
+    assert closed == [(8, "error")]
+
+
+def test_sse_not_closed_on_awaiting_clarification(monkeypatch):
+    """_sse_close is NOT called when the run pauses for a clarifying question —
+    the SSE stream stays open while the user composes their reply.
+
+    The loop detects clarifying_question in the tool_use block list and returns
+    early BEFORE dispatching any tool, so no _dispatch_tool stub is needed.
+    """
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind):
+        closed.append((pid, kind))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    cq_block = _tool_use("cq1", "clarifying_question", {"question": "Which palette?"})
+    _install_client(monkeypatch, [_msg("tool_use", [cq_block])])
+
+    result = _run(agent_loop(_system(), _user(), _ctx(prototype_id=9)))
+    assert result.status == "awaiting_clarification"
+    assert closed == [], "stream must remain open during awaiting_clarification pause"

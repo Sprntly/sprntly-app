@@ -1,4 +1,4 @@
-"""Tests for the ClickUp OAuth connector (commit H).
+"""Tests for the ClickUp OAuth connector.
 
 ClickUp uses OAuth 2.0:
   authorize:  https://app.clickup.com/api?client_id=...&redirect_uri=...&state=...
@@ -10,27 +10,19 @@ ClickUp uses OAuth 2.0:
               returns: {user: {id, username, email, ...}}
 
 No refresh tokens (ClickUp access tokens don't expire by default).
-
-All outbound HTTP is mocked. We assert:
-  - sign/verify oauth state round-trips and rejects wrong-provider
-  - authorize_url has the right base + required params
-  - exchange_code_for_token posts the right body and parses the response
-  - fetch_authenticated_user returns the username/email for account_label
-  - clickup_configured() reflects env presence
-  - start-oauth dispatch returns a clickup.com URL
-  - callback exchanges code, stores encrypted connection, redirects to frontend
-  - delete removes the connection
+All outbound HTTP is mocked.
 """
 from __future__ import annotations
 
 import importlib
-import json
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+
+from tests._company_helpers import company_client
 
 
 def _reload_app_modules():
@@ -60,14 +52,6 @@ def clickup_env(isolated_settings, monkeypatch):
     yield
 
 
-def _signed_in_client(clickup_env):
-    import app.main as main_mod
-    client = TestClient(main_mod.app)
-    r = client.post("/v1/auth/login", json={"password": "test-pw"})
-    assert r.status_code == 200, r.text
-    return client
-
-
 # ─────────────────────────── OAuth module unit tests ───────────────────────────
 
 
@@ -84,14 +68,15 @@ def test_clickup_configured_reflects_env(clickup_env, monkeypatch):
 
 def test_sign_verify_oauth_state_round_trip(clickup_env):
     from app.connectors import clickup_oauth
-    token = clickup_oauth.sign_oauth_state()
+    token = clickup_oauth.sign_oauth_state(company_id="ws-x")
     payload = clickup_oauth.verify_oauth_state(token)
     assert payload["provider"] == "clickup"
+    assert payload["company_id"] == "ws-x"
 
 
 def test_verify_oauth_state_rejects_wrong_provider(clickup_env):
     from app.connectors import clickup_oauth, figma_oauth
-    figma_state = figma_oauth.sign_oauth_state()
+    figma_state = figma_oauth.sign_oauth_state(company_id="ws-x")
     from fastapi import HTTPException
     with pytest.raises(HTTPException):
         clickup_oauth.verify_oauth_state(figma_state)
@@ -163,9 +148,11 @@ def test_fetch_authenticated_user_returns_user_dict(clickup_env):
 # ─────────────────────────── Route tests ───────────────────────────
 
 
-def test_start_oauth_clickup_returns_clickup_url(clickup_env):
-    client = _signed_in_client(clickup_env)
-    r = client.post("/v1/connectors/clickup/start-oauth")
+def test_start_oauth_clickup_returns_clickup_url(clickup_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/clickup/start-oauth",
+    )
     assert r.status_code == 200, r.text
     body = r.json()
     assert "authorize_url" in body
@@ -174,24 +161,22 @@ def test_start_oauth_clickup_returns_clickup_url(clickup_env):
 
 
 def test_start_oauth_clickup_500_when_not_configured(isolated_settings, monkeypatch):
-    # Empty-set rather than delenv — pydantic-settings reads from the real
-    # backend/.env file in addition to os.environ.
     monkeypatch.setenv("CLICKUP_CLIENT_ID", "")
     monkeypatch.setenv("CLICKUP_CLIENT_SECRET", "")
     monkeypatch.setenv("CLICKUP_OAUTH_REDIRECT_URI", "")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     _reload_app_modules()
-    import app.main as main_mod
-    client = TestClient(main_mod.app)
-    client.post("/v1/auth/login", json={"password": "test-pw"})
-    r = client.post("/v1/connectors/clickup/start-oauth")
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/clickup/start-oauth",
+    )
     assert r.status_code == 500
 
 
-def test_callback_stores_connection(clickup_env):
-    client = _signed_in_client(clickup_env)
+def test_callback_stores_connection(clickup_env, monkeypatch):
+    ctx = company_client(monkeypatch)
     from app.connectors import clickup_oauth
-    state = clickup_oauth.sign_oauth_state()
+    state = clickup_oauth.sign_oauth_state(company_id=ctx.company_id)
 
     mock_token_resp = MagicMock()
     mock_token_resp.ok = True
@@ -207,29 +192,29 @@ def test_callback_stores_connection(clickup_env):
         patch("app.connectors.clickup_oauth.requests.post", return_value=mock_token_resp),
         patch("app.connectors.clickup_oauth.requests.get", return_value=mock_user_resp),
     ):
-        r = client.get(
+        r = ctx.client.get(
             "/v1/connectors/clickup/callback",
             params={"code": "auth-code", "state": state},
             follow_redirects=False,
         )
 
-    # Redirects to frontend with ?connected=clickup
     assert r.status_code == 307
     assert "connected=clickup" in r.headers["location"]
 
-    # Connection persisted, account_label set, no raw token leak.
-    listed = client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors"
+    ).json()
     rows = [c for c in listed["connections"] if c["provider"] == "clickup"]
     assert len(rows) == 1
     assert rows[0]["account_label"] == "sarah@meridian.health"
     assert "token_json_encrypted" not in rows[0]
 
 
-def test_callback_rejects_wrong_state(clickup_env):
-    client = _signed_in_client(clickup_env)
+def test_callback_rejects_wrong_state(clickup_env, monkeypatch):
+    ctx = company_client(monkeypatch)
     from app.connectors import figma_oauth
-    wrong_state = figma_oauth.sign_oauth_state()  # signed for figma, not clickup
-    r = client.get(
+    wrong_state = figma_oauth.sign_oauth_state(company_id=ctx.company_id)
+    r = ctx.client.get(
         "/v1/connectors/clickup/callback",
         params={"code": "x", "state": wrong_state},
         follow_redirects=False,
@@ -237,11 +222,11 @@ def test_callback_rejects_wrong_state(clickup_env):
     assert r.status_code == 400
 
 
-def test_delete_clickup_disconnects(clickup_env):
-    client = _signed_in_client(clickup_env)
+def test_delete_clickup_disconnects(clickup_env, monkeypatch):
+    ctx = company_client(monkeypatch)
     from app.connectors import clickup_oauth
 
-    state = clickup_oauth.sign_oauth_state()
+    state = clickup_oauth.sign_oauth_state(company_id=ctx.company_id)
     mock_token_resp = MagicMock()
     mock_token_resp.ok = True
     mock_token_resp.json.return_value = {"access_token": "clk-token"}
@@ -253,18 +238,24 @@ def test_delete_clickup_disconnects(clickup_env):
         patch("app.connectors.clickup_oauth.requests.post", return_value=mock_token_resp),
         patch("app.connectors.clickup_oauth.requests.get", return_value=mock_user_resp),
     ):
-        client.get(
+        ctx.client.get(
             "/v1/connectors/clickup/callback",
             params={"code": "x", "state": state},
         )
 
-    r = client.delete("/v1/connectors/clickup")
+    r = ctx.client.delete(
+        "/v1/connectors/clickup"
+    )
     assert r.status_code == 200
-    listed = client.get("/v1/connectors").json()
+    listed = ctx.client.get(
+        "/v1/connectors"
+    ).json()
     assert not any(c["provider"] == "clickup" for c in listed["connections"])
 
 
-def test_delete_clickup_404_when_not_connected(clickup_env):
-    client = _signed_in_client(clickup_env)
-    r = client.delete("/v1/connectors/clickup")
+def test_delete_clickup_404_when_not_connected(clickup_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.delete(
+        "/v1/connectors/clickup"
+    )
     assert r.status_code == 404

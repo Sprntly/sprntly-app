@@ -1,0 +1,101 @@
+"""Loader for the vendored PM Agent Skills (prompt-layer method specs).
+
+Each skill lives at `backend/skills/<id>/` with a required `SKILL.md` (the
+*method* the agent follows) plus optional `modules/`, `templates/`, and
+`scripts/` directories. `get_skill(skill_id)` reads a skill off disk once,
+hashes all of its files into a short `content_hash`, and caches the result in
+process. The hash is recorded by the gateway in `prompt_version` so every
+decision is traceable to the exact method version behind it.
+
+Skills are STATIC bindings — agents name the skill they use directly in code.
+There is no dynamic routing here.
+"""
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
+
+from app.config import REPO_ROOT
+
+# backend/skills/ — sibling of backend/app/. REPO_ROOT is backend/.
+SKILLS_ROOT = REPO_ROOT / "skills"
+
+
+@dataclass(frozen=True)
+class SkillSpec:
+    """A loaded skill: its method text plus any modules/templates, fingerprinted.
+
+    `content_hash` is the first 12 hex chars of the sha256 over every file in
+    the skill directory (path + bytes), so any edit to the method, a module, a
+    template, or a script changes the hash.
+    """
+
+    id: str
+    method: str                                   # SKILL.md text
+    modules: dict[str, str] = field(default_factory=dict)    # name -> text
+    templates: dict[str, str] = field(default_factory=dict)  # name -> text
+    content_hash: str = ""
+
+
+class UnknownSkillError(KeyError):
+    """Raised when a skill id has no vendored directory."""
+
+
+def _read_subdir(skill_dir: Path, sub: str) -> dict[str, str]:
+    """Read every file in `skill_dir/<sub>/` into {filename: text}. Empty if
+    the subdir is absent."""
+    d = skill_dir / sub
+    if not d.is_dir():
+        return {}
+    out: dict[str, str] = {}
+    for f in sorted(d.iterdir()):
+        if f.is_file():
+            out[f.name] = f.read_text(encoding="utf-8")
+    return out
+
+
+def _content_hash(skill_dir: Path) -> str:
+    """sha256 over all files under the skill dir (relative path + bytes),
+    truncated to 12 hex chars. Deterministic across machines."""
+    h = hashlib.sha256()
+    for f in sorted(p for p in skill_dir.rglob("*") if p.is_file()):
+        h.update(str(f.relative_to(skill_dir)).encode("utf-8"))
+        h.update(b"\0")
+        h.update(f.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()[:12]
+
+
+@lru_cache(maxsize=None)
+def get_skill(skill_id: str) -> SkillSpec:
+    """Load a vendored skill by id (cached in process).
+
+    Raises UnknownSkillError if the id has no directory or no SKILL.md.
+    """
+    skill_dir = SKILLS_ROOT / skill_id
+    method_path = skill_dir / "SKILL.md"
+    if not method_path.is_file():
+        available = ", ".join(list_skills()) or "(none)"
+        raise UnknownSkillError(
+            f"unknown skill {skill_id!r}: no SKILL.md under {skill_dir}. "
+            f"Vendored skills: {available}"
+        )
+    return SkillSpec(
+        id=skill_id,
+        method=method_path.read_text(encoding="utf-8"),
+        modules=_read_subdir(skill_dir, "modules"),
+        templates=_read_subdir(skill_dir, "templates"),
+        content_hash=_content_hash(skill_dir),
+    )
+
+
+def list_skills() -> list[str]:
+    """Sorted ids of every vendored skill (a directory holding a SKILL.md)."""
+    if not SKILLS_ROOT.is_dir():
+        return []
+    return sorted(
+        d.name for d in SKILLS_ROOT.iterdir()
+        if d.is_dir() and (d / "SKILL.md").is_file()
+    )

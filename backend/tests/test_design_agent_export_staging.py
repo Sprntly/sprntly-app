@@ -21,10 +21,11 @@ stub) through the actual handler and assert on the persisted DB row. The clock
 is frozen (mirroring P2-08's determinism test) so the persisted markdown and a
 fresh re-render are byte-identical despite the `generated_at` line.
 
-AUTH NOTE (mirrors test_design_agent_lifecycle.py): the route uses
-`require_app_session`, so the client fixture logs in with `audience="app"`
-(workspace_id="app"); cross-workspace isolation is proven by seeding under a
-FOREIGN workspace and asserting 404.
+AUTH NOTE (P6-10, mirrors test_design_agent_lifecycle.py): the route now gates on
+`require_company` (Supabase Bearer JWT → company membership), so the client
+fixture delegates to conftest's bearer-authed `company_client`; authed calls
+resolve workspace_id to `_TEST_COMPANY_ID`. Cross-workspace isolation is proven by
+seeding under a FOREIGN workspace ('demo') and asserting 404.
 """
 from __future__ import annotations
 
@@ -38,6 +39,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.conftest import _TEST_COMPANY_ID
 
 # ─── SQLite mirror of the P2-09 DDL (Postgres → SQLite, same translation the
 # existing prototype tests use). prototype_exports carries the real P2-09 columns
@@ -100,7 +103,8 @@ CREATE TABLE prototype_comments (
     author       TEXT NOT NULL DEFAULT 'demo',
     status       TEXT NOT NULL DEFAULT 'open',
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at  TEXT
+    resolved_at  TEXT,
+    user_id        TEXT
 );
 """
 
@@ -160,12 +164,9 @@ def env(isolated_settings, monkeypatch):
 
 
 @pytest.fixture
-def client(env) -> TestClient:
-    """TestClient with an APP-audience session cookie (require_app_session)."""
-    c = TestClient(env.main.app)
-    resp = c.post("/v1/auth/login", json={"password": "test-pw", "audience": "app"})
-    assert resp.status_code == 200, resp.text
-    return c
+def client(company_client) -> TestClient:
+    """Bearer-authed TestClient (require_company) — see conftest.company_client."""
+    return company_client
 
 
 @pytest.fixture
@@ -182,7 +183,7 @@ def _fake_db() -> sqlite3.Connection:
     return _fake_supabase.get_fake_db()
 
 
-def _seed_ready(env, *, workspace_id="app", title="My Feature", md=_PRD_MD,
+def _seed_ready(env, *, workspace_id=_TEST_COMPANY_ID, title="My Feature", md=_PRD_MD,
                 bundle_url="https://x.example/p/1/index.html", prompt_history=None):
     """Seed a PRD + prototype + checkpoint and complete it to status='ready'
     (current_checkpoint_id set), so POST /complete's gate passes and the
@@ -201,7 +202,7 @@ def _seed_ready(env, *, workspace_id="app", title="My Feature", md=_PRD_MD,
     return pid, cid, prd_id
 
 
-def _new_checkpoint(env, prototype_id, *, workspace_id="app"):
+def _new_checkpoint(env, prototype_id, *, workspace_id=_TEST_COMPANY_ID):
     """Create a fresh checkpoint and point current_checkpoint_id at it (simulates
     a later Apply between Resume and re-Complete). Returns the new checkpoint id."""
     cid = env.proto.create_checkpoint(
@@ -326,10 +327,10 @@ def test_migration_unique_constraint_blocks_duplicate():
 
 def test_insert_returns_id_on_first_call(env):
     rid = env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=1, workspace_id="app", markdown_content="# brief",
+        prototype_id=1, checkpoint_id=1, workspace_id=_TEST_COMPANY_ID, markdown_content="# brief",
     )
     assert isinstance(rid, int)
-    found = env.exports.find_prototype_export(prototype_id=1, workspace_id="app")
+    found = env.exports.find_prototype_export(prototype_id=1, workspace_id=_TEST_COMPANY_ID)
     assert found is not None
     assert found["markdown_content"] == "# brief"  # AC #3 round-trip
 
@@ -337,10 +338,10 @@ def test_insert_returns_id_on_first_call(env):
 def test_insert_is_idempotent_on_same_pair(env):
     # AC #4 — second insert with the same pair returns the existing id, no new row.
     first = env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=1, workspace_id="app", markdown_content="first",
+        prototype_id=1, checkpoint_id=1, workspace_id=_TEST_COMPANY_ID, markdown_content="first",
     )
     second = env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=1, workspace_id="app", markdown_content="second",
+        prototype_id=1, checkpoint_id=1, workspace_id=_TEST_COMPANY_ID, markdown_content="second",
     )
     assert second == first
     rows = _export_rows(1)
@@ -350,47 +351,47 @@ def test_insert_is_idempotent_on_same_pair(env):
 
 def test_insert_allows_different_checkpoint_for_same_prototype(env):
     a = env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=10, workspace_id="app", markdown_content="A",
+        prototype_id=1, checkpoint_id=10, workspace_id=_TEST_COMPANY_ID, markdown_content="A",
     )
     b = env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=11, workspace_id="app", markdown_content="B",
+        prototype_id=1, checkpoint_id=11, workspace_id=_TEST_COMPANY_ID, markdown_content="B",
     )
     assert a != b
     assert len(_export_rows(1)) == 2
 
 
 def test_find_returns_none_when_no_export(env):
-    assert env.exports.find_prototype_export(prototype_id=999, workspace_id="app") is None
+    assert env.exports.find_prototype_export(prototype_id=999, workspace_id=_TEST_COMPANY_ID) is None
 
 
 def test_find_returns_most_recent_when_multiple(env):
     env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=10, workspace_id="app", markdown_content="older",
+        prototype_id=1, checkpoint_id=10, workspace_id=_TEST_COMPANY_ID, markdown_content="older",
     )
     env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=11, workspace_id="app", markdown_content="newer",
+        prototype_id=1, checkpoint_id=11, workspace_id=_TEST_COMPANY_ID, markdown_content="newer",
     )
-    found = env.exports.find_prototype_export(prototype_id=1, workspace_id="app")
+    found = env.exports.find_prototype_export(prototype_id=1, workspace_id=_TEST_COMPANY_ID)
     assert found["markdown_content"] == "newer"  # highest id first
 
 
 def test_find_workspace_isolated(env):
     # AC #8 — seed under 'app'; lookup under 'demo' returns None.
     env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=1, workspace_id="app", markdown_content="x",
+        prototype_id=1, checkpoint_id=1, workspace_id=_TEST_COMPANY_ID, markdown_content="x",
     )
     assert env.exports.find_prototype_export(prototype_id=1, workspace_id="demo") is None
 
 
 def test_delete_returns_count(env):
     env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=10, workspace_id="app", markdown_content="a",
+        prototype_id=1, checkpoint_id=10, workspace_id=_TEST_COMPANY_ID, markdown_content="a",
     )
     env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=11, workspace_id="app", markdown_content="b",
+        prototype_id=1, checkpoint_id=11, workspace_id=_TEST_COMPANY_ID, markdown_content="b",
     )
     deleted = env.exports.delete_prototype_export_by_prototype(
-        prototype_id=1, workspace_id="app",
+        prototype_id=1, workspace_id=_TEST_COMPANY_ID,
     )
     assert deleted == 2
     assert _export_rows(1) == []
@@ -398,12 +399,12 @@ def test_delete_returns_count(env):
 
 def test_delete_workspace_filtered(env):
     env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=1, workspace_id="app", markdown_content="app-row",
+        prototype_id=1, checkpoint_id=1, workspace_id=_TEST_COMPANY_ID, markdown_content="app-row",
     )
     env.exports.insert_prototype_export(
         prototype_id=1, checkpoint_id=2, workspace_id="demo", markdown_content="demo-row",
     )
-    env.exports.delete_prototype_export_by_prototype(prototype_id=1, workspace_id="app")
+    env.exports.delete_prototype_export_by_prototype(prototype_id=1, workspace_id=_TEST_COMPANY_ID)
     # demo row survives.
     assert env.exports.find_prototype_export(prototype_id=1, workspace_id="demo") is not None
 
@@ -411,18 +412,18 @@ def test_delete_workspace_filtered(env):
 def test_insert_sets_is_stale_false_by_default(env):
     # AC #18 — newly-inserted rows have is_stale = false.
     env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=1, workspace_id="app", markdown_content="x",
+        prototype_id=1, checkpoint_id=1, workspace_id=_TEST_COMPANY_ID, markdown_content="x",
     )
-    found = env.exports.find_prototype_export(prototype_id=1, workspace_id="app")
+    found = env.exports.find_prototype_export(prototype_id=1, workspace_id=_TEST_COMPANY_ID)
     assert found["is_stale"] in (False, 0)
 
 
 def test_find_returns_is_stale_field(env):
     # AC #18 — find result includes is_stale so flag_stale_handoff callers can read it.
     env.exports.insert_prototype_export(
-        prototype_id=1, checkpoint_id=1, workspace_id="app", markdown_content="x",
+        prototype_id=1, checkpoint_id=1, workspace_id=_TEST_COMPANY_ID, markdown_content="x",
     )
-    found = env.exports.find_prototype_export(prototype_id=1, workspace_id="app")
+    found = env.exports.find_prototype_export(prototype_id=1, workspace_id=_TEST_COMPANY_ID)
     assert "is_stale" in found
 
 
@@ -431,7 +432,7 @@ def test_insert_logs_observability_line_without_markdown_body(env, caplog):
     body = "# secret PRD content that must never hit the logs"
     with caplog.at_level(logging.INFO, logger="app.db.prototype_exports"):
         env.exports.insert_prototype_export(
-            prototype_id=7, checkpoint_id=3, workspace_id="app", markdown_content=body,
+            prototype_id=7, checkpoint_id=3, workspace_id=_TEST_COMPANY_ID, markdown_content=body,
         )
     blob = "\n".join(r.getMessage() for r in caplog.records)
     assert "prototype_exported" in blob
@@ -478,7 +479,7 @@ def test_complete_export_row_matches_serialiser_output(env, client, monkeypatch)
     assert len(rows) == 1
     persisted = rows[0]["markdown_content"]
 
-    expected = asyncio.run(env.export.render_export_markdown(pid, cid, workspace_id="app"))
+    expected = asyncio.run(env.export.render_export_markdown(pid, cid, workspace_id=_TEST_COMPANY_ID))
     assert persisted == expected
     assert persisted.startswith("# Design Brief: My Feature")
 
@@ -499,13 +500,13 @@ def test_complete_with_missing_prd_does_not_fail_handler(env, client, monkeypatc
     # response is already committed; the export regenerates via the GET fallback.
     _patch_source(env, monkeypatch, {})
     # Prototype whose prd_id does not resolve.
-    pid = env.proto.start_prototype(prd_id=999999, workspace_id="app", template_version=1)
+    pid = env.proto.start_prototype(prd_id=999999, workspace_id=_TEST_COMPANY_ID, template_version=1)
     cid = env.proto.create_checkpoint(
-        prototype_id=pid, workspace_id="app", bundle_url="https://x/index.html",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, bundle_url="https://x/index.html",
         prd_revision_hash=None, figma_frame_hash=None, prompt_history=[],
     )
     env.proto.complete_prototype(
-        prototype_id=pid, workspace_id="app", bundle_url="https://x/index.html",
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, bundle_url="https://x/index.html",
         current_checkpoint_id=cid,
     )
     resp = client.post(f"/v1/design-agent/{pid}/complete")
@@ -606,7 +607,7 @@ def test_get_export_falls_back_to_regeneration_when_row_missing(env, client, mon
     pid, cid, _ = _seed_ready(env)
     assert client.post(f"/v1/design-agent/{pid}/complete").status_code == 200
 
-    removed = env.exports.delete_prototype_export_by_prototype(prototype_id=pid, workspace_id="app")
+    removed = env.exports.delete_prototype_export_by_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert removed == 1
     assert _export_rows(pid) == []
 
@@ -630,7 +631,7 @@ async def test_record_export_at_complete_handles_missing_prototype_gracefully(en
     # Bogus id → no raise, no row, warning logged.
     _patch_source(env, monkeypatch, {})
     with caplog_at(logging.WARNING, "app.db.prototypes") as records:
-        result = await env.proto.record_export_at_complete(prototype_id=424242, workspace_id="app")
+        result = await env.proto.record_export_at_complete(prototype_id=424242, workspace_id=_TEST_COMPANY_ID)
     assert result is None
     assert _export_rows(424242) == []
     assert any("record_export_at_complete_skipped" in r.getMessage() for r in records)
@@ -641,7 +642,7 @@ async def test_record_export_at_complete_handles_missing_checkpoint_gracefully(e
     _patch_source(env, monkeypatch, {})
     # Ready prototype but never mark_complete'd, so complete_checkpoint_id is NULL.
     pid, _, _ = _seed_ready(env)
-    result = await env.proto.record_export_at_complete(prototype_id=pid, workspace_id="app")
+    result = await env.proto.record_export_at_complete(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert result is None
     assert _export_rows(pid) == []
 

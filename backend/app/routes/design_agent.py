@@ -38,31 +38,36 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
+from app.auth import CompanyContext, require_company, require_company_from_query  # company-scoped auth dep
 from app.config import settings
 from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
-from app.db.prds import get_prd_rendered
+from app.db.prds import get_prd_rendered, reset_prd_to_draft
+from app.db.products import get_company_website  # onboarding-website fallback source
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
     advance_current_checkpoint,
     complete_prototype,
     create_checkpoint,
+    delete_prototype,
     fail_prototype,
     find_existing_prototype,
     find_prototype_by_share_token,
+    find_ready_prototype_by_prd,
     flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
@@ -76,14 +81,28 @@ from app.db.prototypes import (
     set_share_config,
     start_prototype,
     verify_share_passcode,
+    clear_pending_question,
 )
+from app.design_agent.client import get_design_agent_client
 from app.design_agent.prompts import (
     DESIGN_AGENT_SCAFFOLD_SYSTEM,
     DESIGN_AGENT_TEMPLATE_VERSION,
     render_scaffold_user,
 )
-from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
-from app.design_agent.storage import TypeCheckError, ViteBuildError, stage_bundle, vite_build
+from app.design_agent.event_stream import publish_step, subscribe as _sse_subscribe
+from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
+from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_typecheck_run
+from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
+from app.design_agent.storage import (
+    TypeCheckError,
+    TypeCheckRepairExhausted,
+    ViteBuildError,
+    repair_unresolved_relative_imports,
+    stage_bundle,
+    stage_preview_image,
+    vite_build,
+    vite_build_with_repair,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,11 +155,26 @@ class GenerateRequest(BaseModel):
     instructions: str = Field("")
     figma_file_key: str | None = None     # explicit; auto-detection via the
     #                                       connector lookup lands in a later phase.
+    figma_node_id: str | None = None      # optional frame-level node-id extracted
+    #                                       from a pasted Figma URL (node-id query
+    #                                       param, hyphen→colon converted client-side).
+    #                                       When set, the fetch_figma tool targets this
+    #                                       specific frame instead of the file's top-5.
     website_url: str | None = None        # P5-02: Scenario B fallback source
     manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
+    github_repo: str | None = None        # connected-repo full_name ("org/repo");
+    #                                       prompt context only — no fetch, no clone,
+    #                                       no agent tool. The repo identifier travels
+    #                                       into the scaffold prompt so generation can
+    #                                       be told which existing codebase to match.
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
+
+    def normalised_github_repo(self) -> str | None:
+        """Treat an explicit empty / whitespace-only repo the same as absent."""
+        v = (self.github_repo or "").strip()
+        return v or None
 
 
 class GenerateResponse(BaseModel):
@@ -158,7 +192,7 @@ class GenerateResponse(BaseModel):
 )
 async def generate(
     body: GenerateRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> GenerateResponse:
     """Kick off prototype generation in the background; return the id in <200ms.
 
@@ -167,9 +201,7 @@ async def generate(
     dedupe) so a double-click on Generate does not fan out duplicate runs.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
 
     # Sync DB helpers, called directly (no await) — see CALL-STYLE NOTE.
     existing = find_existing_prototype(
@@ -180,6 +212,37 @@ async def generate(
     )
     if existing:
         return GenerateResponse(prototype_id=existing["id"], status=existing["status"])
+
+    # Onboarding website as the automatic design source fallback.
+    # Design-source precedence: Figma → website → manual → none. When the user
+    # connected NO Figma file AND typed NO website URL AND supplied no manual
+    # design hints, fall back to the company's onboarding website
+    # (products.website) so it becomes the automatic design source. We never
+    # override an explicit Figma file or a user-typed website_url, and we only
+    # consult the helper for the genuinely-empty case so Figma runs skip the DB
+    # read entirely. The resolved value is threaded into BOTH the prototype
+    # snapshot (below) and the background generation task, so it's observable on
+    # the prototype row's website_url column.
+    effective_website_url = body.website_url
+    typed = (body.website_url or "").strip()
+    if not body.figma_file_key and not typed and body.manual_design is None:
+        fallback_url = get_company_website(workspace_id)
+        if fallback_url:
+            effective_website_url = fallback_url
+            logger.info(
+                "design_agent_website_fallback company_id=%s prd_id=%s host=%s",
+                workspace_id,
+                body.prd_id,
+                urlsplit(fallback_url).hostname or "",
+            )
+
+    # Connected-repo identifier the user chose as the existing codebase to match.
+    # Prompt context only (no fetch, no clone, no agent tool). NO-PERSIST decision:
+    # `start_prototype` exposes no repo/codebase text column and this ticket adds
+    # no migration (NO `ALTER` on prds/briefs/evidences), so the repo is NOT
+    # snapshotted on the prototype row — it travels as a request-only field into
+    # the background generation task (prompt context + cost-summary identifier).
+    repo = body.normalised_github_repo()
 
     # Insert the generating row. Scenario inputs (figma_file_key, etc.) are
     # stored as snapshots; the A/B/C/0 label is DERIVED at read time
@@ -192,7 +255,7 @@ async def generate(
         instructions=body.instructions,
         target_platform=body.normalised_platform(),
         figma_file_key=body.figma_file_key,
-        website_url=body.website_url,  # P5-02: Scenario B source snapshot
+        website_url=effective_website_url,  # snapshot; resolved value incl. onboarding fallback
         github_installation_id=None,  # populated in P4-05 (Scenario C)
     )
 
@@ -204,8 +267,10 @@ async def generate(
             target_platform=body.normalised_platform(),
             instructions=body.instructions,
             figma_file_key=body.figma_file_key,
-            website_url=body.website_url,
+            figma_node_id=body.figma_node_id,  # frame-level targeting; None when absent
+            website_url=effective_website_url,  # resolved value incl. onboarding fallback
             manual_design=body.manual_design,
+            github_repo=repo,  # normalised connected-repo full_name; prompt context only
         )
     )
     _inflight_tasks.add(task)
@@ -271,7 +336,7 @@ def _patch_to_out(row: dict[str, Any]) -> dict[str, Any]:
 @router.get("/prd-patches", response_model=list[PrdPatchOut])
 def get_pending_patches(
     prd_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> list[PrdPatchOut]:
     """List the PENDING patches for a PRD (created_at-ascending), workspace-filtered.
 
@@ -280,9 +345,7 @@ def get_pending_patches(
     renders nothing). 401 without a session; 404-invisibility is moot here (a
     foreign-workspace PRD simply yields no rows under this workspace filter)."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     return [
         PrdPatchOut(**_patch_to_out(p))
         for p in list_pending_patches(prd_id=prd_id, workspace_id=workspace_id)
@@ -316,10 +379,75 @@ def get_by_prd(
     return existing
 
 
+# ─── Figma file listing (Generate modal design-source selector) ──────────────
+
+
+class FigmaFileItem(BaseModel):
+    """One listable Figma file for the Generate modal's design selector."""
+
+    key: str
+    name: str
+
+
+class FigmaFilesResponse(BaseModel):
+    files: list[FigmaFileItem]
+
+
+@router.get("/figma-files", response_model=FigmaFilesResponse)
+def list_figma_files(
+    company: CompanyContext = Depends(require_company),
+) -> FigmaFilesResponse:
+    """List the caller's Figma files for the Generate modal's design selector.
+
+    A read-only proxy over the Figma REST API using the company's stored Figma
+    OAuth token. Single-segment static path declared ABOVE the
+    `GET /{prototype_id}` catch-all so a request here is never shadowed into it.
+
+    Gating order matters: the feature flag is checked FIRST, so a probe with the
+    flag off returns 404 (never 401/403) and cannot tell this route from a
+    missing one -- matching every other Design Agent route's posture. Then the
+    Figma token is resolved scoped to the CALLER's company only
+    (`company.company_id`): a company never resolves another company's files, and
+    an unconnected company gets the same 404 the by-key route returns.
+
+    Honest degradation: the current Figma OAuth grant has no project/team-listing
+    scope and no stored team id, and the Figma REST API has no flat "list my
+    files" endpoint, so `fetch_files` returns an empty list until that upstream
+    provisioning lands (a connectors-lane dependency). Any upstream listing
+    failure is mapped to an empty list here -- never a 500 leaking the upstream
+    body -- so the modal renders an honest empty state rather than fake files.
+    """
+    _require_feature_enabled()
+    # Lazy imports mirror runner.py's `_resolve_figma_access_token`: they keep
+    # this module importable without the connector/db stack at import time (which
+    # the route-test module-reload env depends on) and let tests patch the token
+    # resolver + the REST helper. routes/connectors.py owns the token decryption
+    # (reused, not reimplemented); connectors/figma_oauth.py owns the REST call.
+    from app.connectors import figma_oauth
+    from app.routes.connectors import _figma_access_token
+
+    token = _figma_access_token(company.company_id)  # 404 when Figma not connected
+    try:
+        files = figma_oauth.fetch_files(token)
+    except Exception:  # upstream listing failure -> honest empty state, never 500
+        logger.warning(
+            "design_agent.figma_files_list_failed company_id=%s", company.company_id
+        )
+        files = []
+    logger.info(
+        "design_agent.figma_files_listed company_id=%s count=%d",
+        company.company_id,
+        len(files),
+    )
+    return FigmaFilesResponse(
+        files=[FigmaFileItem(key=f["key"], name=f["name"]) for f in files]
+    )
+
+
 @router.get("/{prototype_id}")
 def get_one(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> dict[str, Any]:
     """Return the full prototype row for the frontend poller (P1-09).
 
@@ -329,12 +457,52 @@ def get_one(
     so cross-tenant existence is not even disclosed (Rule #22).
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Prototype not found")
+    return row
+
+
+@router.delete("/{prototype_id}", status_code=204, dependencies=[Depends(require_same_origin)])
+def delete_prototype_route(
+    prototype_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> Response:
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    existing = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    delete_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    reset_prd_to_draft(existing["prd_id"])
+    return Response(status_code=204)
+
+
+@router.get("/by-prd/{prd_id}")
+def get_by_prd(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> dict[str, Any]:
+    """Return the most-recent READY prototype for a PRD (read-only lookup).
+
+    A pure read with NO generate side-effect — unlike the dedup inside
+    POST /generate, which kicks off a generation when none exists. That makes
+    it safe to call on PRD-screen load so the frontend can render a preview
+    card / flip Approve to "View Prototype". Returns 404 when no ready
+    prototype exists (the frontend swallows 404→null). Workspace-filtered: a
+    prototype in another workspace returns 404, not 403, so cross-tenant
+    existence is not disclosed. The path is two-segment (`/by-prd/{prd_id}`),
+    so it can never be shadowed by the single-segment `GET /{prototype_id}`
+    catch-all above regardless of declaration order — a one-segment route
+    pattern only ever matches one-segment paths.
+    """
+    _require_feature_enabled()
+    row = find_ready_prototype_by_prd(
+        prd_id=prd_id, workspace_id=company.company_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
     return row
 
 
@@ -349,8 +517,10 @@ async def _run_generation_bg(
     target_platform: str,
     instructions: str,
     figma_file_key: str | None,
+    figma_node_id: str | None = None,
     website_url: str | None = None,
     manual_design: ManualDesignInput | None = None,
+    github_repo: str | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -388,6 +558,7 @@ async def _run_generation_bg(
             target_platform=target_platform,
             instructions=instructions,
             figma_frames=source_block,
+            codebase_repo=github_repo,  # one-line "match this codebase" context; None -> "(no codebase source)"
         )
         user_message = {
             "role": "user",
@@ -413,7 +584,9 @@ async def _run_generation_bg(
             system_blocks=system_blocks,
             user_message=user_message,
             figma_file_key=figma_file_key,
+            figma_node_id=figma_node_id,  # frame-level targeting; None when absent
             scenario=scenario_label,
+            github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
         )
         # Success path (P1-08): a complete run that emitted files gets built +
         # staged + marked ready. A complete run with no files, or any non-complete
@@ -423,6 +596,10 @@ async def _run_generation_bg(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
                 virtual_fs=virtual_fs,
+                system_blocks=system_blocks,
+                figma_file_key=figma_file_key,
+                figma_node_id=figma_node_id,
+                scenario=scenario_label,
             )
         elif result.status == "complete" and not virtual_fs:
             fail_prototype(
@@ -465,11 +642,94 @@ async def _run_generation_bg(
         )
 
 
+# The post-build typecheck-repair loop: at most a few agent re-entries, each held
+# under its own small spend budget so repair can never reignite the very cost
+# pressure that caused the dangling-import failure in the first place.
+_TYPECHECK_REPAIR_MAX_ITERS = 3
+_TYPECHECK_REPAIR_CAP_USD = 0.10
+
+
+async def _typecheck_repair_loop(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    virtual_fs: dict[str, str],
+    system_blocks: list[dict],
+    figma_file_key: str | None,
+    figma_node_id: str | None,
+    scenario: str,
+    first_diagnostics: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Recover a build that failed its runtime-breaking type check.
+
+    Re-enter the agent up to a few times to write the missing file(s) the build
+    referenced, rebuilding after each pass. Returns `(dist_files, repaired_fs)` on
+    a green build. On exhaustion — re-tries used or the repair spend budget reached
+    — deterministically drop the dangling imports (the same strip the build's own
+    repair uses) and rebuild once, so the prototype still renders (incomplete but
+    visible). If even that still fails, raise TypeCheckRepairExhausted so the
+    caller fails the row with a precise reason.
+
+    Repair spend is tracked on its own budget, independent of the generation soft
+    and hard caps, so a repair turn can run even when the original generation was
+    stopped for cost. The agent sees the compiler diagnostics, but they are pinned
+    behind a generic progress label, so they never reach a user-facing step event.
+    """
+    # Show a single calm step the moment repair begins, so the user never sees the
+    # build stall in the gap between the failed build and the first repair re-entry.
+    publish_step(prototype_id, FINISHING_STEP)
+    diagnostics = first_diagnostics
+    repair_cost_usd = 0.0
+    for _ in range(_TYPECHECK_REPAIR_MAX_ITERS):
+        if repair_cost_usd >= _TYPECHECK_REPAIR_CAP_USD:
+            break
+        result, virtual_fs = await repair_typecheck_run(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            system_blocks=system_blocks,
+            virtual_fs=virtual_fs,
+            diagnostics=diagnostics,
+            figma_file_key=figma_file_key,
+            figma_node_id=figma_node_id,
+            scenario=scenario,
+        )
+        repair_cost_usd += result.usage.est_cost_usd(MODEL)
+        try:
+            dist_files, virtual_fs = await vite_build_with_repair(virtual_fs)
+            logger.info(
+                "typecheck_repair_succeeded prototype_id=%s repair_cost_usd=%.4f",
+                prototype_id, repair_cost_usd,
+            )
+            return dist_files, virtual_fs
+        except TypeCheckError as exc:
+            diagnostics = str(exc)  # feed the residual diagnostics into the next pass
+            continue
+        # A non-typecheck build failure (bad JSX, timeout, unresolved import the
+        # build's own repair could not fix) propagates to the caller and fails the
+        # row, exactly as a first-build failure of that kind does.
+    # Exhausted: deterministically drop the dangling imports and rebuild once.
+    logger.info(
+        "typecheck_repair_exhausted prototype_id=%s repair_cost_usd=%.4f action=strip_to_green",
+        prototype_id, repair_cost_usd,
+    )
+    stripped_fs, _actions = repair_unresolved_relative_imports(virtual_fs)
+    try:
+        return await vite_build_with_repair(stripped_fs)
+    except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
+        raise TypeCheckRepairExhausted(
+            f"type check still failing after repair and strip: {exc}"
+        ) from exc
+
+
 async def _stage_complete_run(
     *,
     prototype_id: int,
     workspace_id: str,
     virtual_fs: dict[str, str],
+    system_blocks: list[dict] | None = None,
+    figma_file_key: str | None = None,
+    figma_node_id: str | None = None,
+    scenario: str = "A",
 ) -> None:
     """Post-run hook (P1-08): vite_build → checkpoint → stage_bundle → complete.
 
@@ -491,16 +751,61 @@ async def _stage_complete_run(
     log lines) rather than propagated, so the error strings match the ticket ACs
     exactly; a DB-helper failure propagates to the caller's outer except.
     """
-    # Step 1 — Vite build (anchor-id plugin runs here).
+    # Step 1 — Vite build (anchor-id plugin runs here). P6-07: the bounded
+    # unresolved-relative-import repair wrapper stubs/strips an orphan `./screens/*`
+    # import (the degrade-converged 2/2-repro) and rebuilds instead of shipping
+    # status=failed; on exhaustion it raises UnresolvedImportRepairExhausted (a
+    # ViteBuildError subclass — caught by the tuple below, distinct error_class).
+    # vite_build_with_repair returns the (possibly) REPAIRED virtual_fs as its
+    # second element; we REBIND `virtual_fs` here, BEFORE the `_source/` staging
+    # step below, so the staged source matches the built dist.
+    publish_step(prototype_id, VITE_PHASE_STEP)
     try:
-        dist_files = await vite_build(virtual_fs)
-    except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
-        # P3-15 (B3): TypeCheckError joins the precise build-failure tuple so a
-        # runtime-break diagnostic routes to fail_prototype with the diagnostic in
-        # `prototypes.error` (NOT the generic outer except — which would lose this
-        # precise handling). error_class only in the log (Rule #24 — no
-        # stderr/secrets); the full message (incl. fatal codes) goes to the row's
-        # error column.
+        dist_files, repaired_virtual_fs = await vite_build_with_repair(virtual_fs)
+    except TypeCheckError as exc:
+        # A runtime-breaking type error (most often a screen the agent imported but
+        # was cut off before writing) does NOT fail outright. Re-enter the agent a
+        # few times to write the missing file(s); on exhaustion, deterministically
+        # drop the dangling imports so the prototype still renders. Only if we have
+        # the agent context to re-enter with — a direct staging call without it
+        # falls back to failing precisely, as before.
+        if system_blocks is None:
+            logger.warning(
+                "vite_build_failed prototype_id=%s error_class=%s",
+                prototype_id, type(exc).__name__,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        try:
+            dist_files, repaired_virtual_fs = await _typecheck_repair_loop(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                virtual_fs=virtual_fs,
+                system_blocks=system_blocks,
+                figma_file_key=figma_file_key,
+                figma_node_id=figma_node_id,
+                scenario=scenario,
+                first_diagnostics=str(exc),
+            )
+        except (ViteBuildError, FileNotFoundError, TypeCheckError) as repair_exc:
+            logger.warning(
+                "typecheck_repair_failed prototype_id=%s error_class=%s",
+                prototype_id, type(repair_exc).__name__,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=f"{type(repair_exc).__name__}: {repair_exc}",
+            )
+            return
+    except (ViteBuildError, FileNotFoundError) as exc:
+        # A build failure with no repair path (bad JSX, timeout, missing runtime,
+        # or unresolved imports the build's own repair could not fix) marks the row
+        # failed. error_class only in the log; the full message goes to the row.
         logger.warning(
             "vite_build_failed prototype_id=%s error_class=%s",
             prototype_id, type(exc).__name__,
@@ -511,6 +816,21 @@ async def _stage_complete_run(
             error=f"{type(exc).__name__}: {exc}",
         )
         return
+    # P6-07: rebind to the repaired source BEFORE the `_source/` staging step so
+    # the staged source matches the built dist. On a clean build this is the same
+    # map. When a repair was applied (the map changed), emit build_repair_applied
+    # with an action count only (Rule #24 — no source / no import paths): stubs add
+    # keys, strips change file bodies.
+    if repaired_virtual_fs != virtual_fs:
+        repair_actions = len(set(repaired_virtual_fs) - set(virtual_fs)) + sum(
+            1 for k in virtual_fs
+            if k in repaired_virtual_fs and repaired_virtual_fs[k] != virtual_fs[k]
+        )
+        logger.info(
+            "build_repair_applied prototype_id=%s actions=%d",
+            prototype_id, repair_actions,
+        )
+    virtual_fs = repaired_virtual_fs
     logger.info(
         "vite_build_succeeded prototype_id=%s checkpoint_id=N/A dist_file_count=%s",
         prototype_id, len(dist_files),
@@ -577,12 +897,45 @@ async def _stage_complete_run(
             prototype_id, type(exc).__name__,
         )
 
+    # Step 3.7 — best-effort preview screenshot of the staged bundle. HONEST-DEGRADE:
+    # a capture that returns no image (no browser runtime / nav error / timeout), or
+    # raises, leaves preview_image_url None and the prototype STILL completes ready.
+    # No fake/placeholder image is ever stored. Runs on the success path only — a
+    # build failure returned above before reaching here. When a Chromium runtime is
+    # provisioned on the host the thumbnail just works; until then it degrades to null.
+    preview_image_url = None
+    try:
+        png = await capture_bundle_screenshot(bundle_url)
+        if png is not None:
+            preview_image_url = await stage_preview_image(
+                prototype_id=prototype_id,
+                checkpoint_id=checkpoint_id,
+                png_bytes=png,
+            )
+            logger.info(
+                "preview_captured prototype_id=%s checkpoint_id=%s",
+                prototype_id, checkpoint_id,
+            )
+        else:
+            # Capture degraded internally (no browser / nav / timeout) — the
+            # specific class was handled inside the capture helper.
+            logger.warning(
+                "preview_capture_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+                prototype_id, checkpoint_id, "unavailable",
+            )
+    except Exception as exc:  # noqa: BLE001 — capture is best-effort; never fail completion.
+        logger.warning(
+            "preview_capture_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
     # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
     complete_prototype(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
         bundle_url=bundle_url,
         current_checkpoint_id=checkpoint_id,
+        preview_image_url=preview_image_url,
     )
 
 
@@ -938,7 +1291,7 @@ class CompleteResponse(BaseModel):
 )
 async def post_complete(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> CompleteResponse:
     """F14: lock the prototype. Sets is_complete=true and promotes
     current_checkpoint_id → complete_checkpoint_id. Idempotent: a second
@@ -953,9 +1306,7 @@ async def post_complete(
     `await` per the CALL-STYLE NOTE; only the export hook is awaited.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -987,7 +1338,7 @@ class ResumeResponse(BaseModel):
 )
 def post_resume(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> ResumeResponse:
     """F15: unlock the prototype + flag any open handoff record as stale.
 
@@ -998,9 +1349,7 @@ def post_resume(
     Idempotent: resume-on-WIP is a 200 no-op.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1032,7 +1381,7 @@ class ShareResponse(BaseModel):
 def post_share(
     prototype_id: int,
     body: ShareRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> ShareResponse:
     """F6: set / update share configuration. Wraps set_share_config (P2-06).
 
@@ -1040,9 +1389,7 @@ def post_share(
     (caught by pydantic). On row-not-found in this workspace → 404.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     if body.mode == "passcode" and not body.passcode:
         raise HTTPException(status_code=400, detail="passcode-mode requires a passcode")
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
@@ -1077,7 +1424,7 @@ def post_share(
 @router.get("/{prototype_id}/export")
 async def get_export(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> Response:
     """F16/F17: return the markdown export of the locked checkpoint.
 
@@ -1089,9 +1436,7 @@ async def get_export(
     reads the text body and copies via navigator.clipboard.writeText).
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1149,12 +1494,15 @@ def _export_filename(proto: dict[str, Any]) -> str:
 # credentials can act"), external viewers create + read only; there is NO public
 # resolve route. Public-write rate limiting is OUT of scope here — it lands in
 # P5-07 (per TICKET_LIST shared-resources).
-from app.db.prototype_comments import insert_comment, list_comments, resolve_comment
+from app.db.prototype_comments import insert_comment, list_comments, resolve_comment, delete_comment
 
 
 class CommentCreate(BaseModel):
     anchor_id: str = Field(..., min_length=1, max_length=64)
     body: str = Field(..., min_length=1, max_length=4000)
+    pin_x_pct: float | None = Field(default=None, ge=0, le=100)
+    pin_y_pct: float | None = Field(default=None, ge=0, le=100)
+    resolved_anchor_id: str | None = Field(default=None, max_length=64)
 
 
 class CommentOut(BaseModel):
@@ -1165,6 +1513,9 @@ class CommentOut(BaseModel):
     status: str           # 'open' | 'resolved' | 'orphaned'
     created_at: str
     resolved_at: str | None = None
+    pin_x_pct: float | None = None
+    pin_y_pct: float | None = None
+    resolved_anchor_id: str | None = None
 
 
 def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
@@ -1181,6 +1532,9 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
         "status": row["status"],
         "created_at": str(row["created_at"]),
         "resolved_at": str(row["resolved_at"]) if row.get("resolved_at") else None,
+        "pin_x_pct": row.get("pin_x_pct"),
+        "pin_y_pct": row.get("pin_y_pct"),
+        "resolved_anchor_id": row.get("resolved_anchor_id"),
     }
 
 
@@ -1195,15 +1549,13 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
 def post_comment(
     prototype_id: int,
     body: CommentCreate,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> CommentOut:
     """Create a comment as an internal user. Workspace-filtered: 404 if the
     prototype is not in the caller's workspace (cross-tenant existence is not
     disclosed — Rule #22). Attributed to the internal author label."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1212,7 +1564,11 @@ def post_comment(
         workspace_id=workspace_id,
         anchor_id=body.anchor_id,
         body=body.body,
-        author="demo",
+        author=company.user_name or company.user_email or company.user_id,
+        user_id=company.user_id,
+        pin_x_pct=body.pin_x_pct,
+        pin_y_pct=body.pin_y_pct,
+        resolved_anchor_id=body.resolved_anchor_id,
     )
     return CommentOut(**_comment_to_out(row))
 
@@ -1220,14 +1576,12 @@ def post_comment(
 @router.get("/{prototype_id}/comments", response_model=list[CommentOut])
 def get_comments(
     prototype_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> list[CommentOut]:
     """List every comment for a prototype (all statuses, created_at-ascending).
     Workspace-filtered: 404 if the prototype is not in the caller's workspace."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1245,20 +1599,30 @@ def get_comments(
 def patch_resolve_comment(
     prototype_id: int,
     cid: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> CommentOut:
     """Resolve a comment (internal only — external viewers cannot resolve, per
     spec §4 Stage 2 'only internal users with credentials can act'). Returns 404
     when the comment is not in the caller's workspace OR belongs to a different
     prototype than the one in the path (no cross-prototype resolve)."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = resolve_comment(comment_id=cid, workspace_id=workspace_id)
     if not row or row["prototype_id"] != prototype_id:
         raise HTTPException(status_code=404, detail="Comment not found")
     return CommentOut(**_comment_to_out(row))
+
+
+@router.delete("/{prototype_id}/comments/{cid}", status_code=204, dependencies=[Depends(require_same_origin)])
+def delete_comment_route(
+    prototype_id: int,
+    cid: int,
+    company: CompanyContext = Depends(require_company),
+) -> Response:
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    delete_comment(comment_id=cid, workspace_id=workspace_id)
+    return Response(status_code=204)
 
 
 # ─── Public (token-resolved, NO auth) comment routes ──────────────────────
@@ -1276,6 +1640,7 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     prototype is private or not ready (404, matching get_by_token's posture).
     The comment is attributed to the anonymous external author label, and the
     workspace_id is taken from the resolved row — never a session claim."""
+    raise HTTPException(status_code=404, detail="Not found")
     _require_feature_enabled()
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
@@ -1304,6 +1669,9 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
         anchor_id=body.anchor_id,
         body=body.body,
         author="external",
+        pin_x_pct=body.pin_x_pct,
+        pin_y_pct=body.pin_y_pct,
+        resolved_anchor_id=body.resolved_anchor_id,
     )
     # Token hashed, never raw (Rule #24 — the token is the access primitive); no
     # comment body in the log line (PII). insert_comment emits its own
@@ -1327,6 +1695,67 @@ def get_comments_public(token: str) -> list[CommentOut]:
         CommentOut(**_comment_to_out(r))
         for r in list_comments(prototype_id=proto["id"], workspace_id=proto["workspace_id"])
     ]
+
+
+# ─── Comment clarify ────────────────────────────────────────────────────────────
+#
+# POST /{prototype_id}/clarify-comment
+#
+# Lightweight LLM call (claude-haiku-4-5-20251001, max_tokens=200) that
+# generates a single clarifying question for a comment body before the Apply
+# flow commits an iterate. Backed by the shared `get_design_agent_client()`
+# factory. Uses the design agent API key.
+# Not in the iterate queue — this is a synchronous pre-flight, fast enough
+# (<1s on Haiku) to sit in the request path without a background task.
+
+
+class ClarifyCommentRequest(BaseModel):
+    comment_body: str = Field(..., min_length=1, max_length=4000)
+
+
+class ClarifyCommentResponse(BaseModel):
+    question: str
+
+
+@router.post("/{prototype_id}/clarify-comment", response_model=ClarifyCommentResponse, dependencies=[Depends(require_same_origin)])
+def clarify_comment_route(
+    prototype_id: int,
+    body: ClarifyCommentRequest,
+    company: CompanyContext = Depends(require_company),
+) -> ClarifyCommentResponse:
+    """Return a single clarifying question for a comment before Apply is confirmed.
+
+    Workspace-isolated (require_company) and feature-flag-gated. Uses the shared
+    Design Agent Anthropic client with a lightweight Haiku call so the
+    dialog loads in <1s without touching the iterate queue.
+    """
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if proto is None:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    client = get_design_agent_client()
+    FALLBACK_QUESTION = "Looks good — any additional context to add?"
+    try:
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            timeout=10.0,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f'You are reviewing a design feedback comment about to be applied to a UI prototype.\n'
+                    f'Comment: "{body.comment_body}"\n'
+                    f'Ask exactly ONE brief, specific clarifying question to understand the designer\'s intent before applying this change. '
+                    f'Be concise (one sentence max). Do not explain yourself, just ask the question.'
+                ),
+            }],
+        )
+        text_blocks = [b for b in (msg.content or []) if hasattr(b, "text")]
+        question = text_blocks[0].text.strip() if text_blocks else FALLBACK_QUESTION
+    except Exception:
+        question = FALLBACK_QUESTION
+    return ClarifyCommentResponse(question=question)
 
 
 # ─── Iterate: re-prompt + Apply-driven edits (P3-05) ───────────────────────────
@@ -1393,7 +1822,7 @@ class IterateResponse(BaseModel):
 async def post_iterate(
     prototype_id: int,
     body: IterateRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> IterateResponse:
     """F9/F10: kick off an iterate of an existing prototype; return in <200ms.
 
@@ -1407,9 +1836,7 @@ async def post_iterate(
     A full queue returns 429. No Anthropic call in the request path.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1479,7 +1906,7 @@ class EstimateRequest(BaseModel):
 async def post_iterate_estimate(
     prototype_id: int,
     body: EstimateRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> dict:
     """Pre-flight cost estimate (AD14): return the token + dollar estimate + soft-cap
     warning the CostEstimateModal renders BEFORE an iterate run. Deterministic, no
@@ -1496,9 +1923,7 @@ async def post_iterate_estimate(
     bundle content.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1538,7 +1963,7 @@ class ConfirmPlanRequest(BaseModel):
 async def post_confirm_plan(
     prototype_id: int,
     body: ConfirmPlanRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> IterateResponse:
     """Plan->Execute transition (P3-07, AD10): run the approved plan in EXECUTE mode.
 
@@ -1549,9 +1974,7 @@ async def post_confirm_plan(
     in <200ms — no Anthropic call in the request path.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -1675,6 +2098,15 @@ async def _run_iterate_bg(
             prd_references_codebase=False,  # P4-05 implements the codebase detector
         )
         scenario_label = ",".join(sorted(scenario_set))
+
+        try:
+            await asyncio.to_thread(
+                clear_pending_question,
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+            )
+        except Exception:
+            pass
 
         result, virtual_fs = await iterate_prototype(
             prototype_id=prototype_id,
@@ -1958,7 +2390,7 @@ async def _stage_iterate_run(
 )
 def post_accept_patch(
     patch_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> PrdPatchOut:
     """Accept a proposed PRD patch: flip its status to `applied` (P3-09
     `mark_patch_applied`) and return the updated row. The rendered PRD reflects the
@@ -1968,9 +2400,7 @@ def post_accept_patch(
     workspace (cross-tenant invisibility, Rule #22). Idempotent: re-accepting an
     already-applied patch is a no-op flip that returns the row."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = mark_patch_applied(patch_id=patch_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found")
@@ -1988,16 +2418,14 @@ def post_accept_patch(
 )
 def post_reject_patch(
     patch_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> PrdPatchOut:
     """Reject a proposed PRD patch: flip its status to `rejected` (P3-09
     `mark_patch_rejected`) and return the updated row. The PRD is unaffected
     (rejected patches are excluded by `apply_patches_to_prd_md`). 404 when not in
     the caller's workspace. Idempotent (mirrors accept)."""
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     row = mark_patch_rejected(patch_id=patch_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found")
@@ -2072,7 +2500,7 @@ class ManualEditResponse(BaseModel):
 async def post_manual_edit(
     prototype_id: int,
     body: ManualEditRequest,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> ManualEditResponse:
     """F13/AD23: commit a batch of manual visual edits into the prototype source.
 
@@ -2085,9 +2513,7 @@ async def post_manual_edit(
     Anthropic call in the request path (AC1/AC4 — the LLM runs once, in the bg).
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
+    workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
@@ -2233,3 +2659,50 @@ async def _run_manual_edit_bg(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+# ── SSE event stream (two-segment GET, order-independent vs the catch-all) ───
+# Bearer auth via query param because EventSource cannot set headers. The token
+# is validated through require_company_from_query — same decode + company-
+# resolution path as require_company, identical trust. Never logged.
+# Nginx buffering disabled via X-Accel-Buffering so events reach the client
+# immediately rather than accumulating until the connection closes.
+
+@router.get("/{prototype_id}/events")
+async def stream_prototype_events(
+    prototype_id: int,
+    company: CompanyContext = Depends(require_company_from_query),
+    _flag: None = Depends(_require_feature_enabled),
+) -> StreamingResponse:
+    workspace_id = company.company_id
+    # Workspace-scoped existence check before opening the stream. Returns 404
+    # (not 401, not 403) on cross-tenant or missing prototype — the same
+    # invisibility posture as GET /{prototype_id}.
+    if get_prototype(prototype_id=prototype_id, workspace_id=workspace_id) is None:
+        raise HTTPException(404, "Prototype not found")
+
+    logger.info(
+        "design_agent.events_connect prototype_id=%s workspace_id=%s",
+        prototype_id,
+        workspace_id,
+    )
+
+    async def _gen():
+        try:
+            async for event in _sse_subscribe(prototype_id):
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            logger.info(
+                "design_agent.events_disconnect prototype_id=%s workspace_id=%s",
+                prototype_id,
+                workspace_id,
+            )
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

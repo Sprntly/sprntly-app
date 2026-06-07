@@ -44,7 +44,8 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open'
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    user_id        TEXT
 );
 """
 
@@ -367,6 +368,11 @@ async def test_reconcile_exception_does_not_fail_stage(stage_env, monkeypatch, c
     pid = stage_env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
 
     monkeypatch.setattr(stage_env.routes, "vite_build", _async_return({"index.html": "<x/>"}))
+    # P6-07: _stage_complete_run builds via vite_build_with_repair → (dist, repaired_vfs).
+    monkeypatch.setattr(
+        stage_env.routes, "vite_build_with_repair",
+        _async_return(({"index.html": "<x/>"}, {"src/App.tsx": "x"})),
+    )
     monkeypatch.setattr(stage_env.routes, "stage_bundle", _async_return("https://x.example/i.html"))
 
     def _boom(**kwargs):
@@ -402,6 +408,11 @@ async def test_reconcile_runs_on_successful_stage(stage_env, monkeypatch):
 
     # Built bundle has NO anchors → the open comment must orphan.
     monkeypatch.setattr(stage_env.routes, "vite_build", _async_return({"index.html": "<x/>"}))
+    # P6-07: _stage_complete_run builds via vite_build_with_repair → (dist, repaired_vfs).
+    monkeypatch.setattr(
+        stage_env.routes, "vite_build_with_repair",
+        _async_return(({"index.html": "<x/>"}, {"src/App.tsx": "x"})),
+    )
     monkeypatch.setattr(stage_env.routes, "stage_bundle", _async_return("https://x.example/i.html"))
 
     await stage_env.routes._stage_complete_run(

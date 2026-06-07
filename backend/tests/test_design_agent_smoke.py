@@ -69,12 +69,20 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from tests._fake_anthropic import _FakeStream
 from urllib.parse import unquote, urlparse
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.design_agent import storage as _storage_mod
+
+from tests.conftest import (
+    _TEST_COMPANY_ID,
+    _bearer_header,
+    _enable_supabase_bearer,
+    _seed_company_membership,
+)
 
 # ─── Fixtures on disk ───────────────────────────────────────────────────────
 
@@ -162,6 +170,9 @@ def _mock_design_agent_client(*, raise_on_first: bool = False) -> MagicMock:
     error path (RunResult.status == 'error' → prototype marked 'failed').
     """
     client = MagicMock()
+    # stream() delegates to create() so the recorded usage/content/exception
+    # are the real scripted ones, not auto-generated MagicMocks.
+    client.messages.stream.side_effect = lambda **kw: _FakeStream(client.messages.create(**kw))
     if raise_on_first:
         client.messages.create.side_effect = RuntimeError(
             "smoke: simulated Anthropic failure"
@@ -207,6 +218,11 @@ def env(isolated_settings, monkeypatch):
     )
     monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
 
+    # P6-10: wire the bearer-authed require_company path (this e2e suite stays async +
+    # ASGITransport for the background create_task; only the auth source changed).
+    _enable_supabase_bearer(monkeypatch)
+    _seed_company_membership(isolated_settings["supabase"])
+
     import app.db.prototypes as proto_mod
     importlib.reload(proto_mod)
     import app.routes.design_agent as routes_mod
@@ -239,18 +255,19 @@ def _point_storage_to_tmp(monkeypatch, tmp_path: Path) -> None:
 
 @asynccontextmanager
 async def _login(env):
-    """An httpx AsyncClient driving the ASGI app, logged in with audience='app'.
+    """An httpx AsyncClient driving the ASGI app, authed via a Supabase Bearer JWT
+    (require_company). The seeded membership + JWT secret are wired by the `env`
+    fixture; authed calls resolve workspace_id to _TEST_COMPANY_ID.
 
     ASGITransport runs the app on the *current* event loop, so the route's
     `asyncio.create_task` background generation completes deterministically as
-    the test awaits — unlike a per-request-portal sync TestClient.
+    the test awaits — unlike a per-request-portal sync TestClient. (P6-10 keeps
+    this async harness; only the cookie-login → bearer-header swap changed.)
     """
     transport = ASGITransport(app=env.main.app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        resp = await client.post(
-            "/v1/auth/login", json={"password": "test-pw", "audience": "app"}
-        )
-        assert resp.status_code == 200, resp.text
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=_bearer_header()
+    ) as client:
         yield client
 
 
@@ -302,14 +319,14 @@ async def test_smoke_emits_cost_summary_log(env, monkeypatch, caplog):
         "app.design_agent.runner.get_design_agent_client",
         lambda: _mock_design_agent_client(),
     )
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     from app.design_agent.runner import generate_prototype
 
     secret_user = "TOP_SECRET_PRD_BODY_VALUE"
     with caplog.at_level(logging.INFO):
         result, virtual_fs = await generate_prototype(
             prototype_id=4242,
-            workspace_id="app",
+            workspace_id=_TEST_COMPANY_ID,
             system_blocks=[{
                 "type": "text",
                 "text": "system prompt",
@@ -347,7 +364,7 @@ async def test_smoke_runner_failure_marks_failed(env, monkeypatch):
         "app.design_agent.runner.get_design_agent_client",
         lambda: _mock_design_agent_client(raise_on_first=True),
     )
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     prd_id = _seed_prd(env.db)
 
     async with _login(env) as client:
@@ -424,7 +441,7 @@ def _install_mock(monkeypatch) -> None:
         lambda: _mock_design_agent_client(),
     )
     monkeypatch.setattr(
-        "app.design_agent.runner._resolve_figma_access_token", lambda k: None
+        "app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None
     )
 
 
@@ -454,7 +471,7 @@ async def _run_scaffold(monkeypatch, caplog, *, scenario="A", user_text="build a
     with caplog.at_level(logging.INFO):
         result, _vfs = await generate_prototype(
             prototype_id=4242,
-            workspace_id="app",
+            workspace_id=_TEST_COMPANY_ID,
             system_blocks=[dict(_SYS_BLOCK)],
             user_message=_user_msg(user_text),
             figma_file_key=None,
@@ -471,7 +488,7 @@ async def _run_iterate(monkeypatch, caplog, *, scenario="A", user_text="tweak th
     with caplog.at_level(logging.INFO):
         result, _vfs = await iterate_prototype(
             prototype_id=4343,
-            workspace_id="app",
+            workspace_id=_TEST_COMPANY_ID,
             system_blocks=[dict(_SYS_BLOCK)],
             user_message=_user_msg(user_text),
             current_source=source or {"src/App.tsx": "export default function App(){return null}"},
@@ -489,7 +506,7 @@ async def _run_manual(monkeypatch, caplog, *, scenario="A", user_text="commit th
     with caplog.at_level(logging.INFO):
         result, _vfs = await manual_edit_prototype(
             prototype_id=4444,
-            workspace_id="app",
+            workspace_id=_TEST_COMPANY_ID,
             system_blocks=[dict(_SYS_BLOCK)],
             user_message=_user_msg(user_text),
             current_source=source or {"src/App.tsx": "export default function App(){return null}"},
@@ -572,19 +589,24 @@ async def test_cost_lines_no_content_leak(env, monkeypatch, caplog):
         assert "sk-" not in line, f"api-key-shaped token in {op} line: {line!r}"
 
 
-def test_runner_has_three_cost_call_sites():
-    """AC6: runner.py calls log_llm_run at exactly three sites (scaffold,
-    iterate, manual-edit), each with its operation + mode literal. A new run mode
-    added without the cost line drops the count and fails this guard."""
+def test_runner_has_four_cost_call_sites():
+    """AC6: runner.py calls log_llm_run at exactly four sites (scaffold, iterate,
+    manual-edit, and the post-build typecheck-repair re-entry), each with its
+    operation literal. A new run mode added without the cost line drops the count
+    and fails this guard."""
     import app.design_agent.runner as runner_mod
 
     src = Path(runner_mod.__file__).read_text(encoding="utf-8")
     call_sites = re.findall(r"\blog_llm_run\(", src)
-    assert len(call_sites) == 3, (
-        f"expected 3 log_llm_run call sites in runner.py, found {len(call_sites)}"
+    assert len(call_sites) == 4, (
+        f"expected 4 log_llm_run call sites in runner.py, found {len(call_sites)}"
     )
     for op in _COST_OP.values():
         assert f'operation="{op}"' in src, f"missing operation={op!r} call in runner.py"
+    # The typecheck-repair re-entry is instrumented too; it reuses the scaffold mode.
+    assert 'operation="design_agent.run.typecheck_repair"' in src, (
+        "missing operation for the typecheck-repair re-entry in runner.py"
+    )
     for mode in ("scaffold", "iterate", "manual"):
         assert f'"mode": "{mode}"' in src, f"missing mode={mode!r} identifier in runner.py"
 
@@ -614,6 +636,7 @@ def test_llm_telemetry_unchanged():
 # ─── Full end-to-end happy path (real Vite build — toolchain-guarded) ───────
 
 
+@pytest.mark.integration
 @_skip_no_toolchain
 async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
     """The load-bearing P1 gate: POST → poll → ready + bundle_url, and the served
@@ -624,7 +647,7 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
     )
     # Scenario A = a Figma file is present in the inputs; stub the connector
     # token lookup so the run is hermetic (the mocked agent never calls fetch_figma).
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     _point_storage_to_tmp(monkeypatch, tmp_path)
     prd_id = _seed_prd(env.db)
 
@@ -695,6 +718,7 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
 # Scenario C is intentionally absent (dropped 2026-06-02, markdown-export-only).
 
 
+@pytest.mark.integration
 @_skip_no_toolchain
 async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     """Scenario B (P5-10 AC2): a website URL + NO Figma. The P5-01 extractor is
@@ -708,7 +732,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     )
     # No Figma in Scenario B; the figma-token resolver is stubbed only for parity
     # with test_scenario_a_smoke (the mocked agent never calls fetch_figma anyway).
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     # Mock the P5-01 extractor at its SOURCE module — `_website_context_block`
     # does a lazy `from app.design_agent.scenarios.website import
     # extract_website_design_system`, so the patch must land on that module for the
@@ -758,7 +782,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     assert row["bundle_url"], "bundle_url is empty on a ready prototype"
 
     # AC2: prototypes.website_url is persisted from the request; no Figma key.
-    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id="app")
+    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id=_TEST_COMPANY_ID)
     assert persisted is not None
     assert persisted["website_url"] == "https://example.com", (
         f"website_url not persisted: {persisted.get('website_url')!r}"
@@ -789,6 +813,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     ), f"no scenario=B cost line for prototype {prototype_id}: {cost_lines}"
 
 
+@pytest.mark.integration
 @_skip_no_toolchain
 async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
     """Scenario 0 (P5-10 AC3): no Figma, no website URL, no manual design — the
@@ -798,7 +823,7 @@ async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
         "app.design_agent.runner.get_design_agent_client",
         lambda: _mock_design_agent_client(),
     )
-    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k: None)
+    monkeypatch.setattr("app.design_agent.runner._resolve_figma_access_token", lambda k, ws: None)
     _point_storage_to_tmp(monkeypatch, tmp_path)
     prd_id = _seed_prd(env.db)
 
@@ -826,7 +851,7 @@ async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
     assert row["bundle_url"], "bundle_url is empty on a ready prototype"
 
     # AC3: all three source columns are NULL (no Figma / website / GitHub).
-    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id="app")
+    persisted = env.proto.get_prototype(prototype_id=prototype_id, workspace_id=_TEST_COMPANY_ID)
     assert persisted is not None
     assert not persisted["figma_file_key"], (
         f"figma_file_key not NULL: {persisted.get('figma_file_key')!r}"

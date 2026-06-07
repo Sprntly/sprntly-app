@@ -34,6 +34,73 @@
 
 import { useEffect, useRef, useState } from "react"
 import { designAgentApi, type CommentRecord } from "../../lib/api"
+import { CommentClarifyDialog } from "./CommentClarifyDialog"
+import { findByAnchor, parseStoredAnchor, getElementDescription } from "./pinAnchorBridge"
+
+// ---- Author identity helpers -------------------------------------------------
+// Comment rows show author label + avatar chip + relative timestamp. The backend
+// CommentRecord carries `author` (server-attributed) + `created_at` (ISO). These
+// pure helpers derive the display name, the avatar initials, and a short relative
+// timestamp. Exported so the pin-comment rows in PostGenerationResult reuse the
+// same identity rendering (one source of truth).
+
+/** Initials (1–2 chars, uppercase) from an author label. Falls back to "?". */
+export function authorInitials(author: string | null | undefined): string {
+  const a = (author ?? "").trim()
+  if (!a) return "?"
+  const parts = a.split(/[\s._-]+/).filter(Boolean)
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+  return a.slice(0, 2).toUpperCase()
+}
+
+/** Short relative timestamp ("just now", "5m", "3h", "2d") from an ISO string.
+ *  Falls back to the raw string when it can't be parsed (SSR-safe — uses a
+ *  caller-supplied `now` so the pure view stays deterministic in tests). */
+export function shortRelativeTime(
+  iso: string | null | undefined,
+  now: number = Date.now(),
+): string {
+  if (!iso) return ""
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  const sec = Math.max(0, Math.round((now - t) / 1000))
+  if (sec < 45) return "just now"
+  const min = Math.round(sec / 60)
+  if (min < 60) return `${min}m`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr}h`
+  const day = Math.round(hr / 24)
+  if (day < 7) return `${day}d`
+  const wk = Math.round(day / 7)
+  if (wk < 5) return `${wk}w`
+  return new Date(t).toLocaleDateString()
+}
+
+/** Avatar tint index (0–4) derived by summing char codes of the author string
+ *  modulo 5. Deterministic, no state, SSR-safe. */
+const AVATAR_TINTS = ["blue", "green", "purple", "amber", "teal"] as const
+function avatarTint(author: string | null | undefined): typeof AVATAR_TINTS[number] {
+  const a = (author ?? "").trim()
+  if (!a) return "green"
+  let sum = 0
+  for (let i = 0; i < a.length; i++) sum += a.charCodeAt(i)
+  return AVATAR_TINTS[sum % 5]
+}
+
+/** A small brand-tinted initials avatar (David's `.pc-av`). Shared by the
+ *  CommentsPanel rows and the PostGenerationResult pin-comment rows. */
+export function CommentAvatar({ author }: { author: string | null | undefined }) {
+  const tint = avatarTint(author)
+  return (
+    <span
+      className={`pc-av pc-av--${tint}`}
+      data-testid="comment-avatar"
+      aria-hidden="true"
+    >
+      {authorInitials(author)}
+    </span>
+  )
+}
 
 // ---- anchor-id capture (AD4 primitive) --------------------------------------
 
@@ -42,7 +109,7 @@ import { designAgentApi, type CommentRecord } from "../../lib/api"
  * `data-anchor-id` (auto-applied by the Vite plugin, AD4 — the agent never
  * emits it manually). The iframe sandbox is `allow-scripts allow-same-origin`
  * (P2-05), so same-origin DOM is reachable. Returns null when no ancestor
- * carries an anchor id. For P3 MVP the cross-iframe contextmenu→postMessage
+ * carries an anchor id. Currently the cross-iframe contextmenu→postMessage
  * bridge is out of scope; capture uses `closest` on same-origin DOM (P3-13 e2e
  * will surface it if the sandbox blocks access in the real build).
  */
@@ -163,72 +230,155 @@ export type CommentsPanelViewProps = {
   onSubmit?: () => void
   onCancelComposer?: () => void
   onResolve?: (commentId: number) => void
-  /** P3-14 (F10): Apply hands a comment to the IterateComposer. Supplied only on
-   *  the signed-in mount; absent on the public viewer → no Apply button (AC9). */
+  /** Apply hands a comment to the IterateComposer. Supplied only on the signed-in
+   *  mount; absent on the public viewer → no Apply button. Apply also resolves the
+   *  comment (the container handler calls the parent seam AND calls resolve). */
   onApply?: (comment: CommentRecord) => void
+  /** Ignore — resolve the comment WITHOUT pre-filling the composer. Supplied only
+   *  on the signed-in mount (alongside `onApply`). Absent → no Ignore button. */
+  onIgnore?: (comment: CommentRecord) => void
+  onDelete?: (commentId: number) => void
 }
 
 function CommentThread({
   comment,
   withPin,
+  stepNumber,
   canResolve,
   pinExtra,
+  busy = false,
   onResolve,
   onApply,
+  onIgnore,
+  onDelete,
 }: {
   comment: CommentRecord
   withPin: boolean
+  /** 1-based position in the open-comment list; renders a "Step N" chip when
+   *  supplied and withPin is true. Omitted for resolved/orphaned sections. */
+  stepNumber?: number
   canResolve?: boolean
   pinExtra?: string | null
+  /** Disables Apply/Ignore while an iterate is in flight to prevent overlapping runs. */
+  busy?: boolean
   onResolve?: (commentId: number) => void
-  /** P3-14 (F10): when supplied (signed-in mount only), an Apply action hands
-   *  the comment to the IterateComposer to pre-fill an iterate prompt. Absent on
-   *  the public mount → no Apply button renders (AC9 — behaves as before). */
+  /** When supplied (signed-in mount only), an Apply action hands the comment to
+   *  the IterateComposer to pre-fill an iterate prompt. Absent on the public mount
+   *  → no Apply button renders. Apply also resolves the comment. */
   onApply?: (comment: CommentRecord) => void
+  /** Ignore — resolve without pre-fill. */
+  onIgnore?: (comment: CommentRecord) => void
+  onDelete?: (commentId: number) => void
 }) {
   const resolved = comment.status === "resolved"
   return (
     <li
-      className={`comment-thread${resolved ? " comment--resolved" : ""}`}
+      className={`comment-thread${resolved ? " comment--resolved resolved" : ""}`}
       data-testid={`comment-thread-${comment.id}`}
       data-status={comment.status}
+      onClick={() => {
+        if (!comment.resolved_anchor_id) return
+        try {
+          const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+          if (!iframe) return
+          const anchor = parseStoredAnchor(comment.resolved_anchor_id)
+          if (!anchor) return
+          const el = findByAnchor(iframe, anchor)
+          el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        } catch {}
+      }}
+      style={{ cursor: comment.resolved_anchor_id ? 'pointer' : 'default' }}
     >
-      {withPin && (
+      {/* Author + avatar + relative timestamp header. The avatar uses author initials, brand-tinted. */}
+      <div className="comment-meta comment-meta-head">
+        <CommentAvatar author={comment.author} />
+        <span className="comment-author proto-comment-au">{comment.author}</span>
+        <time
+          className="comment-timestamp proto-comment-time"
+          dateTime={comment.created_at}
+          title={comment.created_at}
+        >
+          {shortRelativeTime(comment.created_at)}
+        </time>
+        {/* Change 4 — resolve-check indicator: visual state only, no click handler */}
         <span
-          className={`comment-pin${resolved ? " comment-pin--resolved" : ""}`}
-          data-testid={`comment-pin-${comment.id}`}
+          className={`comment-resolve-indicator${resolved ? " comment-resolve-indicator--resolved" : ""}`}
           aria-hidden="true"
         >
-          {resolved ? "✓" : "●"}
-          {pinExtra && <span className="comment-pin-extra">{pinExtra}</span>}
+          {resolved ? (
+            /* Filled green circle-check when resolved */
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="8" cy="8" r="8" fill="currentColor"/>
+              <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          ) : (
+            /* Outline gray circle-check when open */
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/>
+              <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          )}
         </span>
+      </div>
+      {/* Change 3 — "Step N" pin chip: shown for open comments with a pin */}
+      {withPin && stepNumber != null && (
+        <div className="comment-step-chip">
+          <svg width="10" height="12" viewBox="0 0 10 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M5 0C2.79 0 1 1.79 1 4c0 3 4 8 4 8s4-5 4-8c0-2.21-1.79-4-4-4zm0 5.5A1.5 1.5 0 1 1 5 2.5a1.5 1.5 0 0 1 0 3z" fill="currentColor"/>
+          </svg>
+          Step {stepNumber}
+        </div>
       )}
       <div className="comment-body">{comment.body}</div>
-      <div className="comment-meta">
-        <span className="comment-author">{comment.author}</span>
-        <time className="comment-timestamp" dateTime={comment.created_at}>
-          {comment.created_at}
-        </time>
-      </div>
-      {canResolve && !resolved && (
-        <button
-          type="button"
-          className="btn comment-resolve-btn"
-          data-testid={`comment-resolve-${comment.id}`}
-          onClick={() => onResolve?.(comment.id)}
-        >
-          Resolve
-        </button>
-      )}
-      {onApply && !resolved && (
-        <button
-          type="button"
-          className="btn comment-apply-btn"
-          data-testid={`comment-apply-${comment.id}`}
-          onClick={() => onApply(comment)}
-        >
-          Apply
-        </button>
+      {/* Apply / Ignore actions. Apply calls the parent handler (pre-fill or
+          immediate-iterate) then resolves; Ignore resolves only. Both rendered
+          only on the signed-in mount (onApply/onIgnore supplied) + open comments. */}
+      {(onApply || onIgnore || (canResolve && !resolved)) && !resolved && (
+        <div className="comment-actions" data-testid={`comment-actions-${comment.id}`}>
+          {onApply && (
+            <button
+              type="button"
+              className="btn btn-accent comment-apply-btn"
+              data-testid={`comment-apply-${comment.id}`}
+              disabled={busy}
+              onClick={(e) => { e.stopPropagation(); onApply(comment) }}
+            >
+              Apply
+            </button>
+          )}
+          {onIgnore && (
+            <button
+              type="button"
+              className="btn comment-ignore-btn"
+              data-testid={`comment-ignore-${comment.id}`}
+              disabled={busy}
+              onClick={(e) => { e.stopPropagation(); onIgnore(comment) }}
+            >
+              Ignore
+            </button>
+          )}
+          {/* Keep the original explicit Resolve for non-Apply/Ignore mounts. */}
+          {!onApply && !onIgnore && canResolve && (
+            <button
+              type="button"
+              className="btn comment-resolve-btn"
+              data-testid={`comment-resolve-${comment.id}`}
+              onClick={(e) => { e.stopPropagation(); onResolve?.(comment.id) }}
+            >
+              Resolve
+            </button>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              className="btn comment-delete-btn"
+              data-testid={`comment-delete-${comment.id}`}
+              onClick={(e) => { e.stopPropagation(); onDelete(comment.id) }}
+            >
+              Delete
+            </button>
+          )}
+        </div>
       )}
     </li>
   )
@@ -248,15 +398,27 @@ export function CommentsPanelView({
   onCancelComposer,
   onResolve,
   onApply,
+  onIgnore,
+  onDelete,
 }: CommentsPanelViewProps) {
-  const open = comments.filter((c) => c.status === "open")
-  const resolved = comments.filter((c) => c.status === "resolved")
-  const orphaned = comments.filter((c) => c.status === "orphaned")
+  const byNewestFirst = (a: CommentRecord, b: CommentRecord) =>
+    new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  const open = comments.filter((c) => c.status === "open").sort(byNewestFirst)
+  const resolved = comments.filter((c) => c.status === "resolved").sort(byNewestFirst)
+  const orphaned = comments.filter((c) => c.status === "orphaned").sort(byNewestFirst)
 
   return (
     <aside className="comments-panel" data-testid="comments-panel">
       <header className="comments-panel-header">
-        <h2 className="comments-panel-title">Comments</h2>
+        <h2 className="comments-panel-title">
+          Comments
+          {/* Change 1 — count badge: only shows when there are open (non-resolved, non-orphaned) comments */}
+          {open.length > 0 && (
+            <span className="comments-count-badge" aria-label={`${open.length} open comments`}>
+              {open.length}
+            </span>
+          )}
+        </h2>
       </header>
 
       {composer && (
@@ -306,15 +468,19 @@ export function CommentsPanelView({
       ) : (
         <>
           <ul className="comment-list" data-testid="comments-open">
-            {open.map((c) => (
+            {open.map((c, idx) => (
               <CommentThread
                 key={c.id}
                 comment={c}
                 withPin
+                stepNumber={idx + 1}
                 canResolve={canResolve}
                 pinExtra={pinExtra?.[c.anchor_id] ?? null}
+                busy={busy}
                 onResolve={onResolve}
                 onApply={onApply}
+                onIgnore={onIgnore}
+                onDelete={onDelete}
               />
             ))}
           </ul>
@@ -380,6 +546,18 @@ export type CommentsPanelProps = {
    *  pre-fill an iterate prompt. Absent on the public viewer → no Apply button
    *  (AC9 — the public mount behaves exactly as before P3-14). */
   onApply?: (comment: CommentRecord) => void
+  /** When supplied, Apply runs the comment through the canvas's shared iterate
+   *  runner immediately (instead of pre-filling the composer). The host passes the
+   *  runner's `runIterate` here; the comment body becomes the iterate instruction
+   *  and the comment is resolved. Takes precedence over `onApply` when present.
+   *  The agent decides applicability — the client never fabricates a change. */
+  onIterateComment?: (comment: CommentRecord) => void
+  /** Disables Apply while the shared runner is mid-iterate to prevent overlapping runs. */
+  iterateBusy?: boolean
+  /** When true, the composer is suppressed (no contextmenu listener, no write
+   *  affordance). Used on the public /p/<token> surface where comment create is
+   *  disabled (B9b/B9c). Read-only viewers can still read all comments. */
+  readOnly?: boolean
 }
 
 function toMessage(err: unknown, fallback: string): string {
@@ -389,16 +567,29 @@ function toMessage(err: unknown, fallback: string): string {
 /** Public component. Loads comments on mount, listens for right-clicks to open
  *  an anchored composer, and wires submit/resolve to the orchestration helpers
  *  and the canonical `designAgentApi`. Delegates rendering to the pure view. */
-export function CommentsPanel({ token, prototypeId, onApply }: CommentsPanelProps) {
+export function CommentsPanel({
+  token,
+  prototypeId,
+  onApply,
+  onIterateComment,
+  iterateBusy = false,
+  readOnly = false,
+}: CommentsPanelProps) {
+  // (see handleApply / handleIgnore below for the CHANGE C resolve wiring)
   const [comments, setComments] = useState<CommentRecord[]>([])
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [freeformDraft, setFreeformDraft] = useState('')
+  const [freeformBusy, setFreeformBusy] = useState(false)
   const [composer, setComposer] = useState<{ anchorId: string; body: string } | null>(
     null,
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+  // The comment currently pending confirmation via the dialog.
+  const [clarifyTarget, setClarifyTarget] = useState<CommentRecord | null>(null)
 
-  // Load existing comments once on mount.
+  // Load existing comments on mount and after a freeform submit.
   useEffect(() => {
     let active = true
     runLoadComments({ token, api: designAgentApi })
@@ -411,12 +602,14 @@ export function CommentsPanel({ token, prototypeId, onApply }: CommentsPanelProp
     return () => {
       active = false
     }
-  }, [token])
+  }, [token, refreshKey])
 
   // Right-click anywhere with a reachable anchor id opens the composer for that
-  // anchor. For P3 MVP this captures same-origin DOM under the panel/parent
-  // document; the cross-iframe bridge is a follow-up (see scope note above).
+  // anchor. Suppressed in readOnly mode (public viewer — comment create disabled).
+  // Currently this captures same-origin DOM under the panel/parent document; the
+  // cross-iframe bridge is a follow-up (see scope note above).
   useEffect(() => {
+    if (readOnly) return
     function onContextMenu(e: MouseEvent) {
       const anchorId = captureAnchorId(e.target as Element | null)
       if (!anchorId) return
@@ -425,7 +618,7 @@ export function CommentsPanel({ token, prototypeId, onApply }: CommentsPanelProp
     }
     document.addEventListener("contextmenu", onContextMenu)
     return () => document.removeEventListener("contextmenu", onContextMenu)
-  }, [])
+  }, [readOnly])
 
   async function handleSubmit() {
     if (!composer || !composer.body.trim()) return
@@ -468,12 +661,122 @@ export function CommentsPanel({ token, prototypeId, onApply }: CommentsPanelProp
     }
   }
 
+  // Apply = hand the comment to the parent (pre-fills the IterateComposer or runs
+  // the shared iterate runner) AND resolve it. Ignore = resolve ONLY (no pre-fill).
+  // Apply renders only when the parent supplied `onApply` or `onIterateComment`
+  // (signed-in mount) AND we can resolve (prototypeId).
+  //
+  // Apply now opens the ClarifyDialog instead of immediately
+  // calling the parent. The dialog fires a lightweight Haiku LLM call to generate
+  // a clarifying question, lets the user optionally add context, then calls back
+  // with an enriched prompt. The actual parent call + resolve happen in
+  // `handleClarifyConfirm` below.
+  function handleApply(comment: CommentRecord) {
+    let technicalRef = ''
+    if (comment.resolved_anchor_id) {
+      try {
+        const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
+        const anchor = parseStoredAnchor(comment.resolved_anchor_id)
+        if (anchor && iframe) {
+          const el = findByAnchor(iframe, anchor)
+          const desc = getElementDescription(el)
+          if (desc) technicalRef = `\n[ref: ${desc.technical}]`
+        }
+      } catch {}
+    }
+    setClarifyTarget({ ...comment, body: `${comment.body}${technicalRef}` })
+  }
+
+  // Called by ClarifyDialog's "Apply change" button with the (optionally enriched)
+  // prompt. Routes the enriched comment to the parent seam and resolves the original.
+  function handleClarifyConfirm(enrichedPrompt: string) {
+    if (!clarifyTarget) return
+    const enriched: CommentRecord = { ...clarifyTarget, body: enrichedPrompt }
+    if (onIterateComment) {
+      onIterateComment(enriched)
+    } else {
+      onApply?.(enriched)
+    }
+    void handleResolve(clarifyTarget.id)
+    setClarifyTarget(null)
+  }
+
+  function handleClarifyCancel() {
+    setClarifyTarget(null)
+  }
+
+  function handleIgnore(comment: CommentRecord) {
+    void handleResolve(comment.id)
+  }
+
+  async function handleDelete(commentId: number) {
+    if (!prototypeId) return
+    await designAgentApi.deleteComment(prototypeId, commentId).catch(() => {})
+    setComments((prev) => prev.filter((c) => c.id !== commentId))
+  }
+
+  async function handleFreeformSubmit() {
+    if (!freeformDraft.trim() || freeformBusy || !prototypeId) return
+    setFreeformBusy(true)
+    try {
+      await designAgentApi.createComment(prototypeId, {
+        anchor_id: 'general',
+        body: freeformDraft.trim(),
+      })
+      setFreeformDraft('')
+      setRefreshKey((k) => k + 1)
+    } catch {}
+    setFreeformBusy(false)
+  }
+
+  // Apply/Ignore are only meaningful when the parent wants the comment (either
+  // the pre-fill seam OR the immediate-iterate seam) AND we can resolve (authed
+  // mount). Public viewer → neither.
+  const canApply = (onApply != null || onIterateComment != null) && prototypeId != null
+
   return (
     <div ref={panelRef} className="comments-panel-mount">
+      {!readOnly && prototypeId != null && (
+        <div className="da-comment-compose" data-testid="da-comment-compose">
+          {/* Change 5 — restyled composer: input + green circular send button */}
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+            <textarea
+              className="proto-comment-input"
+              placeholder="Add a comment, or click a pin on the canvas…"
+              value={freeformDraft}
+              onChange={(e) => setFreeformDraft(e.target.value)}
+              rows={2}
+              style={{ flex: 1 }}
+            />
+            <button
+              type="button"
+              className="comment-composer-send-btn"
+              disabled={!freeformDraft.trim() || freeformBusy}
+              onClick={() => void handleFreeformSubmit()}
+              data-testid="da-comment-submit"
+              aria-label={freeformBusy ? "Posting…" : "Send comment"}
+            >
+              {/* Up-arrow SVG */}
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M8 13V3M8 3L3.5 7.5M8 3L12.5 7.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          {/* Change 5 — helper line below composer */}
+          <div className="comment-composer-helper">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <circle cx="6" cy="6" r="5.25" stroke="currentColor" strokeWidth="1.2"/>
+              <path d="M6 5.5v3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+              <circle cx="6" cy="3.75" r="0.6" fill="currentColor"/>
+            </svg>
+            <span>Click anywhere on the canvas to pin a comment</span>
+          </div>
+        </div>
+      )}
       <CommentsPanelView
         comments={comments}
-        composer={composer}
-        busy={busy}
+        composer={readOnly ? null : composer}
+        busy={busy || iterateBusy}
         error={error}
         canResolve={prototypeId != null}
         onBodyChange={(body) =>
@@ -482,8 +785,19 @@ export function CommentsPanel({ token, prototypeId, onApply }: CommentsPanelProp
         onSubmit={handleSubmit}
         onCancelComposer={() => setComposer(null)}
         onResolve={handleResolve}
-        onApply={onApply}
+        onApply={canApply ? handleApply : undefined}
+        onIgnore={canApply ? handleIgnore : undefined}
+        onDelete={prototypeId != null ? handleDelete : undefined}
       />
+      {prototypeId != null && (
+        <CommentClarifyDialog
+          open={clarifyTarget !== null}
+          comment={clarifyTarget}
+          prototypeId={prototypeId}
+          onConfirm={handleClarifyConfirm}
+          onCancel={handleClarifyCancel}
+        />
+      )}
     </div>
   )
 }

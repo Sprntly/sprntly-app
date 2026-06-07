@@ -2,6 +2,9 @@
 // testing-library), so — following the DesignAgentDrawer / page.test
 // convention — we SSR-render the pure view via renderToStaticMarkup and
 // unit-test the extracted orchestration helpers with injected deps.
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -28,6 +31,18 @@ function render(props: React.ComponentProps<typeof CompletionBarView>): string {
   return renderToStaticMarkup(React.createElement(CompletionBarView, props))
 }
 
+// P6-14: extract the opening <button> tag for the export action from SSR markup
+// so we can assert presence/absence of the `disabled` attribute without a DOM.
+function exportBtnTag(html: string): string | null {
+  const m = html.match(/<button[^>]*data-testid="export-claude-code-btn"[^>]*>/)
+  return m ? m[0] : null
+}
+
+// P6-14: design-agent.css lives one dir up from __tests__ (P6-11-owned; this
+// ticket appends). Read the WORKING-TREE file via fs — never a historical git
+// rev (CI shallow-clone has no such object). __tests__ → design-agent.
+const CSS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "design-agent.css")
+
 describe("CompletionBarView — editable rendering", () => {
   it("renders Mark Complete when WIP and editable (AC1)", () => {
     const html = render({ isComplete: false, editable: true, prototypeId: 42 })
@@ -35,11 +50,12 @@ describe("CompletionBarView — editable rendering", () => {
     expect(html).toContain("Mark Complete")
   })
 
-  it("renders Resume + Download + Copy when complete and editable (AC2)", () => {
+  it("renders Download + Copy when complete and editable (AC2)", () => {
     const html = render({ isComplete: true, editable: true, prototypeId: 42 })
-    expect(html).toContain('data-testid="resume-btn"')
     expect(html).toContain('data-testid="download-md-btn"')
     expect(html).toContain('data-testid="copy-md-btn"')
+    // Resume button intentionally removed — the left composer is usable by default.
+    expect(html).not.toContain('data-testid="resume-btn"')
   })
 
   it("does not render Mark Complete once complete (AC2)", () => {
@@ -177,5 +193,129 @@ describe("CompletionBarView — stale handoff (AC7)", () => {
     })
     expect(html).toContain('data-testid="stale-banner"')
     expect(html).toMatch(/out of date/)
+  })
+})
+
+// ---- P6-14 (UX-4) — "Export to Claude Code" gated handoff action -------------
+
+describe("CompletionBarView — Export to Claude Code gating (P6-14)", () => {
+  it("export button is disabled with a caption when WIP (AC1)", () => {
+    const html = render({ isComplete: false, editable: true, prototypeId: 42 })
+    const tag = exportBtnTag(html)
+    expect(tag).not.toBeNull()
+    expect(tag).toMatch(/\bdisabled\b/)
+    expect(html).toContain("Export to Claude Code")
+    expect(html).toContain("Available once the prototype is marked Complete.")
+  })
+
+  it("export button is enabled when complete and not busy (AC2)", () => {
+    const html = render({ isComplete: true, editable: true, prototypeId: 42, busy: false })
+    const tag = exportBtnTag(html)
+    expect(tag).not.toBeNull()
+    expect(tag).not.toMatch(/\bdisabled\b/)
+    expect(html).toContain("Export to Claude Code")
+  })
+
+  it("export button is disabled while busy even when complete (AC2 edge)", () => {
+    const html = render({ isComplete: true, editable: true, prototypeId: 42, busy: true })
+    const tag = exportBtnTag(html)
+    expect(tag).not.toBeNull()
+    expect(tag).toMatch(/\bdisabled\b/)
+  })
+
+  it("the WIP caption renders only in the WIP branch, never when complete", () => {
+    const wip = render({ isComplete: false, editable: true, prototypeId: 42 })
+    const done = render({ isComplete: true, editable: true, prototypeId: 42 })
+    expect(wip).toContain("export-claude-code-caption")
+    expect(done).not.toContain("export-claude-code-caption")
+  })
+
+  it("no export action on the read-only public branch (editable=false)", () => {
+    const html = render({ isComplete: true, editable: false })
+    expect(html).not.toContain('data-testid="export-claude-code-btn"')
+  })
+
+  it("completed branch renders three actions incl. the exact export label (AC5)", () => {
+    const html = render({ isComplete: true, editable: true, prototypeId: 42 })
+    expect(html).toContain('data-testid="download-md-btn"')
+    expect(html).toContain('data-testid="copy-md-btn"')
+    expect(html).toContain('data-testid="export-claude-code-btn"')
+    expect(html).toContain("Export to Claude Code")
+    // Resume button intentionally removed — the left composer is usable by default.
+    expect(html).not.toContain('data-testid="resume-btn"')
+  })
+})
+
+describe("Export to Claude Code — reuses onDownload → runDownloadMarkdown (P6-14)", () => {
+  // The enabled export button's onClick is the EXISTING onDownload prop (no new
+  // onExportClaudeCode prop — Check-25 reuse). onDownload → handleDownload →
+  // runDownloadMarkdown → api.exportMarkdown. Node-env vitest cannot fire an SSR
+  // onClick, so we exercise the wired target (the same helper "Download .md"
+  // uses), per the repo's view/helper testability split.
+  it("the export action's target invokes api.exportMarkdown and downloads (AC3)", async () => {
+    const exportMarkdown = vi.fn().mockResolvedValue("# Design brief\n")
+    const anchor = { href: "", download: "", click: vi.fn() }
+    vi.stubGlobal("document", {
+      createElement: vi.fn(() => anchor),
+      body: { appendChild: vi.fn(), removeChild: vi.fn() },
+    })
+    vi.stubGlobal("URL", {
+      createObjectURL: vi.fn(() => "blob:fake-url"),
+      revokeObjectURL: vi.fn(),
+    })
+    const md = await runDownloadMarkdown({ prototypeId: 42, api: { exportMarkdown } })
+    expect(exportMarkdown).toHaveBeenCalledWith(42)
+    expect(anchor.click).toHaveBeenCalledTimes(1)
+    expect(md).toBe("# Design brief\n")
+  })
+
+  it("a WIP 409 from the export route propagates rather than throwing uncaught (AC3 edge)", async () => {
+    const err = Object.assign(new Error("Mark prototype complete first"), { status: 409 })
+    const exportMarkdown = vi.fn().mockRejectedValue(err)
+    await expect(
+      runDownloadMarkdown({ prototypeId: 42, api: { exportMarkdown } }),
+    ).rejects.toMatchObject({ status: 409 })
+  })
+})
+
+describe("design-agent.css — P6-14 appended export rules (AC6, AC8)", () => {
+  const css = readFileSync(CSS_PATH, "utf8")
+  const markerIdx = css.indexOf("P6-14 (UX-4)")
+  const appended = markerIdx >= 0 ? css.slice(markerIdx) : ""
+
+  it("appends the three export selectors, all scoped to .design-agent-surface (AC6)", () => {
+    expect(markerIdx).toBeGreaterThan(0)
+    expect(appended).toContain(".design-agent-surface .btn-export {")
+    expect(appended).toContain(".design-agent-surface .btn-export:disabled {")
+    expect(appended).toContain(".design-agent-surface .export-claude-code-caption {")
+  })
+
+  it("every export selector rule in the appended block is prefixed .design-agent-surface (AC6)", () => {
+    const selectorLines = appended
+      .split("\n")
+      .filter((l) => /(\.btn-export|\.export-claude-code-caption)/.test(l) && l.includes("{"))
+    expect(selectorLines.length).toBeGreaterThan(0)
+    for (const line of selectorLines) {
+      expect(line.trimStart().startsWith(".design-agent-surface ")).toBe(true)
+    }
+  })
+
+  it("the appended block introduces no literal colour value (AC6)", () => {
+    const noComments = appended.replace(/\/\*[\s\S]*?\*\//g, "")
+    expect(noComments).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+    expect(noComments).not.toMatch(/\brgb\(/)
+    expect(noComments).not.toMatch(/\bhsl\(/)
+  })
+
+  it("btn-export styling appears only in the appended region — P6-11 blocks untouched (AC8)", () => {
+    // No `.btn-export`/`.export-claude-code-caption` selector predates the P6-14
+    // marker → the P6-11-owned section above is append-only (untouched). This is
+    // a working-tree invariant, not a git-rev diff (CI shallow-clone safe).
+    const firstCaption = css.indexOf("export-claude-code-caption")
+    expect(firstCaption).toBeGreaterThan(markerIdx)
+    // single append — the P6-14 header block appears exactly once.
+    expect(
+      css.split('"Export to Claude Code" gated handoff action').length - 1,
+    ).toBe(1)
   })
 })
