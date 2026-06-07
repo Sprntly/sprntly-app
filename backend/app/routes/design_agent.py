@@ -1021,28 +1021,35 @@ def _url_only_neutral_block(host: str) -> str:
     )
 
 
-def _extracted_design_block(
-    ds: dict[str, Any],
+def _website_design_system_block(
+    sample: dict[str, Any],
     *,
     host: str,
     manual_design: "ManualDesignInput | None",
 ) -> str:
-    """Render an extracted website design system as scaffold prose.
+    """Render extracted website signals via the unified DesignSystem path.
 
-    The COLOR fields are gated through `_is_usable_color`: a transparent /
-    zero-alpha extracted color is treated as below-confidence FOR THAT FIELD
-    ONLY — the color is then sourced from `manual_design` (if present) or a
-    neutral-palette instruction, while the good extracted font/logo/spacing
-    signal is KEPT. A transparent value NEVER reaches the prose.
+    This mirrors the pre-seed source: the sampled website dict is wrapped by the
+    website adapter, normalized to DesignSystem tokens, and summarized for the
+    scaffold. Transparent / zero-alpha colors keep the legacy field-level floor:
+    extracted typography/radius/spacing survive, while the primary color comes
+    from manual hints or the neutral default.
     """
+    from app.design_agent.design_system.adapters import WebExtractor
+
+    extractor = WebExtractor()
+    raw = extractor.extract_raw_signals(f"https://{host}", sample=sample)
+    design_system = extractor.normalize(raw)
+    tokens = design_system.tokens
+
     parts: list[str] = [
         f"Design system extracted from the brand website ({host}). "
         "Match this visual identity in the prototype."
     ]
 
-    primary = ds.get("primary_color")
+    primary = sample.get("primary_color")
     if _is_usable_color(primary):
-        parts.append(f"Primary color: {primary}.")
+        parts.append(f"Primary color: {tokens.colors.primary}.")
     elif manual_design is not None:
         parts.append(
             f"Primary color: {manual_design.primary_color} (user-supplied; no "
@@ -1054,23 +1061,27 @@ def _extracted_design_block(
             "neutral palette."
         )
 
-    background = ds.get("background_color")
+    background = sample.get("background_color")
     if _is_usable_color(background):
-        parts.append(f"Background color: {background}.")
+        parts.append(f"Background color: {tokens.colors.background}.")
 
-    if ds.get("heading_font_family"):
-        parts.append(f"Heading font: {ds['heading_font_family']}.")
-    if ds.get("heading_size_scale"):
-        parts.append(f"Heading size: {ds['heading_size_scale']}.")
-    if ds.get("body_font_family"):
-        parts.append(f"Body font: {ds['body_font_family']}.")
-    if ds.get("border_radius_convention"):
-        parts.append(f"Border radius: {ds['border_radius_convention']}.")
-    spacing = ds.get("spacing_scale_samples") or []
+    if sample.get("heading_font_family"):
+        parts.append(f"Heading font: {tokens.fonts.heading_family}.")
+    if sample.get("heading_size_scale"):
+        parts.append(f"Heading size: {sample['heading_size_scale']}.")
+    if sample.get("body_font_family"):
+        parts.append(f"Body font: {tokens.fonts.body_family}.")
+    if sample.get("border_radius_convention"):
+        parts.append(f"Border radius: {tokens.radius_convention}.")
+    spacing = sample.get("spacing_scale_samples") or []
     if spacing:
-        parts.append(f"Spacing samples: {', '.join(spacing)}.")
-    if ds.get("logo_url"):
-        parts.append(f"Logo: {ds['logo_url']}.")
+        parts.append(
+            "Spacing samples: "
+            + ", ".join(f"{value}px" for value in tokens.spacing_scale)
+            + "."
+        )
+    if sample.get("logo_url"):
+        parts.append(f"Logo: {sample['logo_url']}.")
 
     return " ".join(parts)
 
@@ -1138,7 +1149,7 @@ async def _website_context_block(
             except ImportError:
                 ds = None  # P5-01 not merged → fall through to manual / url-only.
         if ds is not None:
-            return _extracted_design_block(ds, host=host, manual_design=manual_design)
+            return _website_design_system_block(ds, host=host, manual_design=manual_design)
         if manual_design is not None:
             return _manual_design_block(
                 manual_design.primary_color, manual_design.font_family, host=host
