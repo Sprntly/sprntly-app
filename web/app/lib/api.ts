@@ -667,6 +667,10 @@ export const designAgentApi = {
     target_platform: "desktop" | "mobile" | "both"
     instructions: string
     figma_file_key?: string | null
+    /** Optional Figma node-id (frame-level targeting); extracted from a pasted
+     *  URL's node-id query param. Passed through to the backend so the agent
+     *  loop fetches only that specific frame instead of the file's top-5. */
+    figma_node_id?: string | null
     website_url?: string | null  // P5-02: Scenario B fallback source
     manual_design?: { primary_color: string; font_family: string } | null  // P5-02: manual floor
     github_repo?: string | null  // connected-repo full_name ("org/repo"); prompt context only

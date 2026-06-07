@@ -114,6 +114,7 @@ export function buildGenerateParams({
   platform,
   instructions,
   figmaFileKey,
+  figmaNodeId,
   websiteUrl,
   manualColor,
   manualFont,
@@ -123,6 +124,10 @@ export function buildGenerateParams({
   platform: TargetPlatform
   instructions: string
   figmaFileKey?: string | null
+  /** Optional node-id extracted from a pasted Figma URL; targets generation at
+   *  a specific frame rather than the file's default top-5. Null when the URL
+   *  has no node-id or when figmaFileKey came from the PRD context (not a paste). */
+  figmaNodeId?: string | null
   websiteUrl: string
   manualColor: string
   manualFont: string
@@ -134,6 +139,7 @@ export function buildGenerateParams({
     target_platform: platform,
     instructions,
     figma_file_key: figmaFileKey ?? null,
+    figma_node_id: figmaNodeId ?? null,
     website_url: websiteUrl || null,
     manual_design:
       manualColor && manualFont

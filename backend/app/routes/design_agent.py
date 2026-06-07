@@ -152,6 +152,11 @@ class GenerateRequest(BaseModel):
     instructions: str = Field("")
     figma_file_key: str | None = None     # explicit; auto-detection via the
     #                                       connector lookup lands in a later phase.
+    figma_node_id: str | None = None      # optional frame-level node-id extracted
+    #                                       from a pasted Figma URL (node-id query
+    #                                       param, hyphen→colon converted client-side).
+    #                                       When set, the fetch_figma tool targets this
+    #                                       specific frame instead of the file's top-5.
     website_url: str | None = None        # P5-02: Scenario B fallback source
     manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
     github_repo: str | None = None        # connected-repo full_name ("org/repo");
@@ -259,6 +264,7 @@ async def generate(
             target_platform=body.normalised_platform(),
             instructions=body.instructions,
             figma_file_key=body.figma_file_key,
+            figma_node_id=body.figma_node_id,  # frame-level targeting; None when absent
             website_url=effective_website_url,  # resolved value incl. onboarding fallback
             manual_design=body.manual_design,
             github_repo=repo,  # normalised connected-repo full_name; prompt context only
@@ -481,6 +487,7 @@ async def _run_generation_bg(
     target_platform: str,
     instructions: str,
     figma_file_key: str | None,
+    figma_node_id: str | None = None,
     website_url: str | None = None,
     manual_design: ManualDesignInput | None = None,
     github_repo: str | None = None,
@@ -547,6 +554,7 @@ async def _run_generation_bg(
             system_blocks=system_blocks,
             user_message=user_message,
             figma_file_key=figma_file_key,
+            figma_node_id=figma_node_id,  # frame-level targeting; None when absent
             scenario=scenario_label,
             github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
         )

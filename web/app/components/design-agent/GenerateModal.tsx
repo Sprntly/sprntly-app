@@ -82,46 +82,87 @@ export function GenerateModal({
   const [instructions, setInstructions] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
-  // Figma URL paste state — URL input, extracted key, resolved label, and
-  // validating flag. When figmaUrlKey is set it is preferred over figmaFileSel
-  // (the dropdown) as the figma_file_key for generation.
+  // Figma URL paste state — URL input, extracted key, extracted node-id,
+  // resolved label, and validating flag. When figmaUrlKey is set it is
+  // preferred over figmaFileSel (the dropdown) as the figma_file_key for
+  // generation. figmaNodeId carries the node-id from the URL query string so
+  // generation can target that specific frame.
   const [figmaUrlInput, setFigmaUrlInput] = useState("")
   const [figmaUrlKey, setFigmaUrlKey] = useState<string | null>(null)
+  const [figmaNodeId, setFigmaNodeId] = useState<string | null>(null)
   const [figmaUrlLabel, setFigmaUrlLabel] = useState<string | null>(null)
   const [figmaUrlValidating, setFigmaUrlValidating] = useState(false)
   const figmaDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  /** Extract the Figma file key from a pasted design/file URL. */
-  function extractFigmaKey(url: string): string | null {
+  /**
+   * Extract the Figma file key and optional node-id from a pasted design/file
+   * URL. node-id is encoded with hyphens in the URL but the Figma API expects
+   * colons; this converts automatically.
+   */
+  function extractFigmaKey(url: string): { key: string; nodeId: string | null } | null {
     const m = url.match(/(?:file|design)\/([A-Za-z0-9]+)/)
-    return m ? m[1] : null
+    if (!m) return null
+    const key = m[1]
+    // Extract node-id from query string; convert hyphen → colon (Figma URL
+    // encodes as "-", API expects ":").
+    const nodeMatch = url.match(/[?&]node-id=([A-Za-z0-9%:-]+)/)
+    const nodeId = nodeMatch ? decodeURIComponent(nodeMatch[1]).replace(/-/g, ":") : null
+    return { key, nodeId }
+  }
+
+  /** Walk a Figma document tree to find a node name by id. Returns null when
+   *  not found (caller falls back to showing the file name alone). */
+  function findNodeName(doc: unknown, targetId: string): string | null {
+    if (!doc || typeof doc !== "object") return null
+    const node = doc as Record<string, unknown>
+    if (node["id"] === targetId && typeof node["name"] === "string") return node["name"]
+    const children = node["children"]
+    if (Array.isArray(children)) {
+      for (const child of children) {
+        const found = findNodeName(child, targetId)
+        if (found) return found
+      }
+    }
+    return null
   }
 
   /**
-   * Fired on every change to the Figma URL input. Parses the key immediately;
-   * if a key is found, hits GET /v1/connectors/figma/files/{key} to resolve the
-   * file name as a confirmation label. Falls back to showing the raw key on
-   * error so the user at least sees _something_ was parsed.
+   * Fired on every change to the Figma URL input. Parses the key and node-id
+   * immediately; if a key is found, hits GET /v1/connectors/figma/files/{key}
+   * to resolve the file name (and frame name when a node-id is present) as a
+   * confirmation label. Falls back to showing the raw key on error so the user
+   * at least sees _something_ was parsed.
    */
   function handleFigmaUrlChange(raw: string) {
     setFigmaUrlInput(raw)
-    const key = extractFigmaKey(raw)
-    if (!key) {
+    const parsed = extractFigmaKey(raw)
+    if (!parsed) {
       setFigmaUrlKey(null)
+      setFigmaNodeId(null)
       setFigmaUrlLabel(null)
       return
     }
+    const { key, nodeId } = parsed
     setFigmaUrlKey(key)
+    setFigmaNodeId(nodeId)
     setFigmaUrlLabel(null)
     if (figmaDebounceRef.current) clearTimeout(figmaDebounceRef.current)
     figmaDebounceRef.current = setTimeout(async () => {
       setFigmaUrlValidating(true)
       try {
         const file = await connectorsApi.getFigmaFile(key)
-        const name = file && typeof file === "object" && "name" in file
+        const fileName = file && typeof file === "object" && "name" in file
           ? String((file as { name: string }).name)
           : null
-        setFigmaUrlLabel(name ?? key)
+        // When a node-id is present, try to surface the frame name alongside
+        // the file name ("✓ MyFile · MyFrame"). Falls back to the file name
+        // alone when the node is not found in the returned document tree.
+        let label = fileName ?? key
+        if (nodeId && file && typeof file === "object" && "document" in file) {
+          const frameName = findNodeName((file as { document: unknown }).document, nodeId)
+          if (frameName) label = `${label} · ${frameName}`
+        }
+        setFigmaUrlLabel(label)
       } catch {
         setFigmaUrlLabel(key)
       }
@@ -218,6 +259,10 @@ export function GenerateModal({
         //   1. figmaUrlKey — pasted URL (preferred: user explicitly targeted a file)
         //   2. figmaFileKey — prop fallback (pre-selected key from PRD context)
         figmaFileKey: figmaUrlKey || figmaFileKey,
+        // figmaNodeId is set when the pasted URL includes a node-id query param;
+        // it targets generation at that specific frame. Only applies when a URL
+        // was pasted (figmaUrlKey set) — the prop-level figmaFileKey has no frame.
+        figmaNodeId: figmaUrlKey ? figmaNodeId : null,
         websiteUrl: "",
         manualColor: "",
         manualFont: "",

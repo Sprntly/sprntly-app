@@ -729,6 +729,7 @@ async def generate_prototype(
     system_blocks: list[dict[str, Any]],
     user_message: dict[str, Any],
     figma_file_key: str | None,
+    figma_node_id: str | None = None,
     scenario: str = "A",
     github_repo: str | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
@@ -774,6 +775,7 @@ async def generate_prototype(
         workspace_id=workspace_id,
         virtual_fs=virtual_fs,  # pre-seeded with palette CSS (may be {} if no Figma)
         figma_file_key=figma_file_key,
+        figma_node_id=figma_node_id,  # frame-level targeting; None when absent
         figma_access_token=figma_access_token,
     )
     result = await agent_loop(
