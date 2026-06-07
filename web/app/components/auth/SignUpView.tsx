@@ -71,7 +71,7 @@ export function SignUpStep1View(props: SignUpStep1ViewProps) {
             />
             <button
               type="button"
-              className="toggle"
+              className="pwd-toggle"
               aria-label={props.showPassword ? "Hide password" : "Show password"}
               onClick={props.onToggleShowPassword}
             >

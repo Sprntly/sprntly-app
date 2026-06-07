@@ -4658,8 +4658,8 @@
 .auth-card .inp::placeholder { color: var(--ink-4); }
 .inp-pwd-wrap { position: relative; }
 .inp-pwd-wrap .inp { padding-right: 40px; }
-.inp-pwd-wrap .toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); color: var(--ink-3); font-size: 12px; cursor: pointer; padding: 6px 8px; background: none; border: none; }
-.inp-pwd-wrap .toggle:hover { color: var(--ink); }
+.inp-pwd-wrap .pwd-toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); color: var(--ink-3); font-size: 12px; cursor: pointer; padding: 6px 8px; background: none; border: none; }
+.inp-pwd-wrap .pwd-toggle:hover { color: var(--ink); }
 .pwd-strength { display: flex; gap: 3px; margin-top: 7px; }
 .pwd-bar { height: 3px; flex: 1; background: var(--surface-4); border-radius: 2px; transition: background 0.2s; }
 .pwd-bar.on1 { background: #C13838; }

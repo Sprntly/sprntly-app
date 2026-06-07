@@ -172,31 +172,16 @@ def require_session(
 
 
 def require_app_session(
-    authorization: str | None = Header(default=None),
     sprntly_app_session: str | None = Cookie(default=None),
 ) -> dict:
-    """Locked to the app audience.
+    """Locked to the app audience. Demo sessions are rejected even if present.
 
-    Accepts either:
-    - `sprntly_app_session` cookie (demo-password login)
-    - Supabase Bearer JWT in the Authorization header (Supabase auth login)
-
-    Demo sessions (sprntly_demo_session) are still rejected. For Supabase
-    JWTs the returned payload has `aud="app"` so downstream workspace_id
-    derivations (`session.get("aud")`) stay consistent with cookie sessions.
+    Cookie-only by design: the Supabase Bearer path lives in `require_session`
+    / `require_company` (the app-wide signed-in-user + tenant deps). Folding a
+    Bearer fallback in here was a scratch dev-hack (#143 excluded it) and broke
+    the positional `require_app_session(<session>)` contract the auth tests
+    assert — the session cookie is the first and only positional argument.
     """
-    # Supabase Bearer JWT path (frontend Supabase auth)
-    if authorization and authorization.startswith("Bearer "):
-        bearer = authorization.removeprefix("Bearer ").strip()
-        if bearer:
-            try:
-                payload = _decode_supabase_token(bearer)
-                # Normalise aud to "app" so design-agent workspace_id logic
-                # (session.get("aud")) works identically to cookie sessions.
-                return {**payload, "aud": "app", "scope": "app"}
-            except jwt.PyJWTError:
-                pass
-
     if not sprntly_app_session:
         raise HTTPException(401, "Not signed in")
     try:

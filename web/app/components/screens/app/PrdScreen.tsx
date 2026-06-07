@@ -102,7 +102,7 @@ export function PrdScreen() {
   const [showVersions, setShowVersions] = useState(false)
   const [versionsLoading, setVersionsLoading] = useState(false)
 
-  // Load saved draft into the contentEditable on mount / prd change
+  // Load saved draft into the editable PRD body on mount / prd change
   useEffect(() => {
     if (!prd || !bodyRef.current) return
     const draft = loadDraft(prd.prd_id)
@@ -167,22 +167,16 @@ export function PrdScreen() {
           <>
             <PrdSummaryStrip prd={prd} />
             <div
-              ref={bodyRef}
               className="prd-body"
               contentEditable
               spellCheck={false}
               suppressContentEditableWarning
+              ref={bodyRef}
               onInput={handleInput}
             >
               <div className="prd-meta">{prd.metaLine}</div>
               <h1 className="prd-title">{prd.title}</h1>
-              <PrdSections
-                sections={prd.sections}
-                prdId={prd.prd_id}
-                figmaFileKey={prd.figma_file_key ?? null}
-                prdTitle={prd.title}
-                prdMetaLine={prd.metaLine}
-              />
+              <PrdSections sections={prd.sections} prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} prdTitle={prd.title} prdMetaLine={prd.metaLine} />
             </div>
           </>
         ) : (

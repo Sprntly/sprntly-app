@@ -41,10 +41,15 @@ def test_brief_user_template_has_corpus_placeholder():
 
 
 def test_brief_user_template_formats_without_keyerror():
-    """The two placeholders are the only `.format()` keys; smoke-test it."""
-    out = prompts.BRIEF_USER_TEMPLATE.format(dataset="asurion", corpus="STUB")
+    """The three placeholders (dataset, signal_context, corpus) are the only
+    `.format()` keys; smoke-test it. (signal_context was added by the pipeline /
+    signal-fusion work and is supplied by the cli/brief_runner callers.)"""
+    out = prompts.BRIEF_USER_TEMPLATE.format(
+        dataset="asurion", signal_context="SIGNALS", corpus="STUB"
+    )
     assert "asurion" in out
     assert "STUB" in out
+    assert "SIGNALS" in out
 
 
 def test_predefined_ask_prompts_are_strings():
