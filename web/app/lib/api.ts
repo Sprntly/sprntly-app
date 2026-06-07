@@ -622,6 +622,15 @@ export const prdApi = {
   get: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
   /** Old name retained for compatibility. */
   byId: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
+  /** Save PRD edits (title + markdown). Auto-creates a version snapshot. */
+  update: (id: number, body: { title: string; payload_md: string }) =>
+    api.put<PrdRecord>(`/v1/prd/${id}`, body),
+  /** List all versions of a PRD, newest first. */
+  listVersions: (id: number) =>
+    api.get<{ id: number; prd_id: number; version_number: number; title: string; payload_md: string; saved_by: string; saved_at: string }[]>(`/v1/prd/${id}/versions`),
+  /** Restore a PRD to a specific version. */
+  restoreVersion: (prdId: number, versionId: number) =>
+    api.post<PrdRecord>(`/v1/prd/${prdId}/versions/${versionId}/restore`, {}),
 }
 
 // ---- Design Agent (P1-09) ---------------------------------------------------

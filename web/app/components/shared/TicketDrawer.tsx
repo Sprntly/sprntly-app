@@ -33,12 +33,13 @@ function InternalTicketForm({ onClose }: { onClose: () => void }) {
   const { showToast, goTo } = useNavigation()
   const { content } = useContent()
   const [title, setTitle] = useState(content.prd?.title ?? "")
-  const [priority, setPriority] = useState<"Urgent" | "High" | "Medium" | "Low">("High")
+  const [priority, setPriority] = useState<"P0" | "P1" | "P2" | "P3">("P1")
+  const [category, setCategory] = useState("Product")
   const [assignee, setAssignee] = useState("")
   const [description, setDescription] = useState(() => prdDescription(content.prd))
 
   const handleCreate = () => {
-    const ticket = saveTicket({ title, priority, assignee, description })
+    const ticket = saveTicket({ title, priority, category, assignee, description })
     onClose()
     showToast(
       `Internal ticket created · ${ticket.id}`,
@@ -76,10 +77,28 @@ function InternalTicketForm({ onClose }: { onClose: () => void }) {
             value={priority}
             onChange={(e) => setPriority(e.target.value as typeof priority)}
           >
-            <option>Urgent</option>
-            <option>High</option>
-            <option>Medium</option>
-            <option>Low</option>
+            <option value="P0">P0 — Critical</option>
+            <option value="P1">P1 — High</option>
+            <option value="P2">P2 — Medium</option>
+            <option value="P3">P3 — Low</option>
+          </select>
+        </div>
+
+        <div className="ticket-row">
+          <div className="ticket-row-label">Category</div>
+          <select
+            className="ticket-select"
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+          >
+            <option>Product</option>
+            <option>Design</option>
+            <option>Backend</option>
+            <option>Frontend</option>
+            <option>AI</option>
+            <option>Infra</option>
+            <option>Analytics</option>
+            <option>CS</option>
           </select>
         </div>
 

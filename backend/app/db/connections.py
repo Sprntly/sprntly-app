@@ -22,10 +22,31 @@ string under the key `config_json`. We preserve that key in returned
 dicts so existing callers don't have to change.
 """
 import json
+import logging
 import uuid
 from typing import Any
 
 from app.db.client import require_client, utc_now
+
+logger = logging.getLogger(__name__)
+
+# The connections table may use either `company_id` (new multitenant schema) or
+# `workspace_id` (legacy schema). Detect once at first call and cache.
+_OWNER_COL: str | None = None
+
+
+def _owner_column() -> str:
+    """Return the column name used to scope connections to a tenant."""
+    global _OWNER_COL
+    if _OWNER_COL is not None:
+        return _OWNER_COL
+    c = require_client()
+    try:
+        c.table("connections").select("company_id").limit(0).execute()
+        _OWNER_COL = "company_id"
+    except Exception:
+        _OWNER_COL = "workspace_id"
+    return _OWNER_COL
 
 
 def _to_legacy_shape(row: dict) -> dict:
@@ -61,7 +82,7 @@ def upsert_connection(
     existing = get_connection(company_id, provider)
     now = utc_now()
     payload = {
-        "company_id": company_id,
+        _owner_column(): company_id,
         "provider": provider,
         "status": status,
         "google_email": google_email,
@@ -76,7 +97,7 @@ def upsert_connection(
         payload["id"] = uuid.uuid4().hex
         payload["created_at"] = now
     c.table("connections").upsert(
-        payload, on_conflict="company_id,provider"
+        payload, on_conflict=f"{_owner_column()},provider"
     ).execute()
     row = get_connection(company_id, provider)
     assert row is not None
@@ -88,7 +109,7 @@ def get_connection(company_id: str, provider: str) -> dict | None:
     resp = (
         c.table("connections")
         .select("*")
-        .eq("company_id", company_id)
+        .eq(_owner_column(), company_id)
         .eq("provider", provider)
         .limit(1)
         .execute()
@@ -103,7 +124,7 @@ def list_connections(company_id: str) -> list[dict]:
     resp = (
         c.table("connections")
         .select("*")
-        .eq("company_id", company_id)
+        .eq(_owner_column(), company_id)
         .order("provider", desc=False)
         .execute()
     )
@@ -115,7 +136,7 @@ def delete_connection(company_id: str, provider: str) -> bool:
     resp = (
         c.table("connections")
         .delete()
-        .eq("company_id", company_id)
+        .eq(_owner_column(), company_id)
         .eq("provider", provider)
         .execute()
     )
@@ -139,7 +160,7 @@ def patch_connection_config(
     (
         c.table("connections")
         .update({"config": current, "updated_at": utc_now()})
-        .eq("company_id", company_id)
+        .eq(_owner_column(), company_id)
         .eq("provider", provider)
         .execute()
     )
@@ -155,7 +176,7 @@ def update_connection_tokens(
         .update(
             {"token_json_encrypted": token_encrypted, "updated_at": utc_now()}
         )
-        .eq("company_id", company_id)
+        .eq(_owner_column(), company_id)
         .eq("provider", provider)
         .execute()
     )
@@ -179,7 +200,7 @@ def update_connection_sync(
                 "updated_at": now,
             }
         )
-        .eq("company_id", company_id)
+        .eq(_owner_column(), company_id)
         .eq("provider", provider)
         .execute()
     )

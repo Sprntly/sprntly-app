@@ -46,7 +46,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import sys
+
 from app.config import settings
+
+# On Windows, npx/tsc are .cmd batch files. subprocess.run(["npx", ...]) raises
+# FileNotFoundError unless shell=True, because the OS cannot exec a .cmd directly.
+_SHELL = sys.platform == "win32"
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +168,7 @@ def _vite_build_sync(runtime_root: Path, virtual_fs: dict[str, str]) -> dict[str
                 text=True,
                 timeout=timeout_s,
                 check=False,
+                shell=_SHELL,
             )
         except subprocess.TimeoutExpired as exc:
             raise ViteBuildError(
@@ -205,6 +212,7 @@ def _typecheck_runtime_break(build_path: Path) -> None:
             text=True,
             timeout=_TSC_TIMEOUT_SECONDS,
             check=False,
+            shell=_SHELL,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         # Fail-open: a tsc tooling problem must not nuke an otherwise-working

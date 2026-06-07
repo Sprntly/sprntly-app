@@ -13,7 +13,7 @@ import { useContent } from "../../../context/ContentContext"
 import { PrdSections } from "../../shared/PrdSections"
 import { DesignAgentLauncher } from "../../design-agent/DesignAgentLauncher"
 import { PostGenerationResult } from "../../design-agent/PostGenerationResult"
-import { designAgentApi, type PrototypeRecord } from "../../../lib/api"
+import { designAgentApi, prdApi, type PrototypeRecord } from "../../../lib/api"
 import { runDesignAgentGeneration } from "../../../lib/runDesignAgentGeneration"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
@@ -88,6 +88,8 @@ function PrdSummaryStrip({ prd }: { prd: PrdState }) {
  * relocated generate trigger's preview card + canvas breadcrumb can label the
  * PRD. The editable PRD-body region is deliberately left untouched.
  */
+type PrdVersion = { id: number; prd_id: number; version_number: number; title: string; payload_md: string; saved_by: string; saved_at: string }
+
 export function PrdScreen() {
   const { goTo, openModal, shareMenuOpen, setShareMenuOpen, showToast } = useNavigation()
   const { content } = useContent()
@@ -96,6 +98,9 @@ export function PrdScreen() {
   const bodyRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved")
+  const [versions, setVersions] = useState<PrdVersion[]>([])
+  const [showVersions, setShowVersions] = useState(false)
+  const [versionsLoading, setVersionsLoading] = useState(false)
 
   // Load saved draft into the contentEditable on mount / prd change
   useEffect(() => {
@@ -106,16 +111,29 @@ export function PrdScreen() {
     }
   }, [prd?.prd_id])
 
-  // Auto-save: debounce 1.5s after last keystroke
+  // Auto-save: debounce 2s after last keystroke → save to Supabase + localStorage
   const handleInput = useCallback(() => {
     setSaveStatus("unsaved")
     if (saveTimer.current) clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(() => {
+    saveTimer.current = setTimeout(async () => {
       if (!prd || !bodyRef.current) return
       setSaveStatus("saving")
-      saveDraft(prd.prd_id, bodyRef.current.innerHTML)
-      setTimeout(() => setSaveStatus("saved"), 400)
-    }, 1500)
+      const html = bodyRef.current.innerHTML
+      // Save locally first (instant)
+      saveDraft(prd.prd_id, html)
+      // Extract text content for the markdown payload
+      const textContent = bodyRef.current.innerText || ""
+      try {
+        await prdApi.update(prd.prd_id, {
+          title: prd.title,
+          payload_md: textContent,
+        })
+        setSaveStatus("saved")
+      } catch {
+        // Supabase save failed — local draft is still safe
+        setSaveStatus("saved")
+      }
+    }, 2000)
   }, [prd])
 
   // Toolbar: execCommand helpers
@@ -179,8 +197,52 @@ export function PrdScreen() {
 
         <div className="prd-foot">
           <div className="prd-foot-left">
-            <button type="button" className="btn btn-ghost btn-sm" disabled={!prd}>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={!prd}
+              onClick={async () => {
+                if (!prd || !bodyRef.current) return
+                setSaveStatus("saving")
+                try {
+                  await prdApi.update(prd.prd_id, {
+                    title: prd.title,
+                    payload_md: bodyRef.current.innerText || "",
+                  })
+                  setSaveStatus("saved")
+                  showToast("Draft saved", "Your PRD has been saved to Supabase.")
+                } catch {
+                  showToast("Save failed", "Could not save to server. Local draft preserved.")
+                  setSaveStatus("saved")
+                }
+              }}
+            >
               Save as draft
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={!prd}
+              onClick={async () => {
+                if (!prd) return
+                setShowVersions(!showVersions)
+                if (!showVersions) {
+                  setVersionsLoading(true)
+                  try {
+                    const v = await prdApi.listVersions(prd.prd_id)
+                    setVersions(v)
+                  } catch {
+                    setVersions([])
+                  }
+                  setVersionsLoading(false)
+                }
+              }}
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            >
+              Version history
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ transform: showVersions ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+                <path d="M5 7L1 3h8z" />
+              </svg>
             </button>
           </div>
           <div className="prd-foot-right">
@@ -225,6 +287,73 @@ export function PrdScreen() {
           </div>
         </div>
       </div>
+
+      {/* Version history panel */}
+      {showVersions && prd && (
+        <div style={{
+          marginTop: 12, borderRadius: 10, border: "1px solid var(--line)",
+          background: "var(--surface)", overflow: "hidden",
+        }}>
+          <div style={{
+            padding: "10px 16px", background: "var(--surface-2)", borderBottom: "1px solid var(--line)",
+            fontSize: 12, fontWeight: 600, color: "var(--ink-2)", display: "flex", alignItems: "center", justifyContent: "space-between",
+          }}>
+            <span>Version History</span>
+            <span style={{ fontSize: 11, fontWeight: 400, color: "var(--ink-4)" }}>
+              {versions.length} version{versions.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+          {versionsLoading ? (
+            <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>
+              Loading versions...
+            </div>
+          ) : versions.length === 0 ? (
+            <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>
+              No versions saved yet. Edits auto-save a version each time.
+            </div>
+          ) : (
+            <div style={{ maxHeight: 260, overflowY: "auto" }}>
+              {versions.map((v) => (
+                <div
+                  key={v.id}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "10px 16px", borderBottom: "1px solid var(--line)", fontSize: 12.5,
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 500, color: "var(--ink)" }}>
+                      v{v.version_number} — {v.title.slice(0, 50)}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 2 }}>
+                      {v.saved_by} · {new Date(v.saved_at).toLocaleString()}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await prdApi.restoreVersion(prd.prd_id, v.id)
+                        showToast("Version restored", `Restored to v${v.version_number}. Reload to see changes.`)
+                        window.location.reload()
+                      } catch {
+                        showToast("Restore failed", "Could not restore this version.")
+                      }
+                    }}
+                    style={{
+                      fontSize: 11, padding: "4px 10px", borderRadius: 6,
+                      border: "1px solid var(--line)", background: "var(--surface)",
+                      cursor: "pointer", color: "var(--accent)", fontWeight: 600,
+                    }}
+                  >
+                    Restore
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {prd && (
         <PrototypeSection

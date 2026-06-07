@@ -164,3 +164,71 @@ def reset_prd_to_draft(prd_id: int) -> None:
     c = require_client()
     c.table("prds").update({"status": "draft"}).eq("id", prd_id).execute()
     logger.info("prd_reset_to_draft prd_id=%s", prd_id)
+
+
+# ── PRD version control ──────────────────────────────────────────────────
+
+def update_prd_content(prd_id: int, title: str, payload_md: str) -> dict | None:
+    """Update the PRD's title and markdown content. Returns the updated row."""
+    c = require_client()
+    c.table("prds").update({
+        "title": title,
+        "payload_md": payload_md,
+    }).eq("id", prd_id).execute()
+    return get_prd(prd_id)
+
+
+def save_prd_version(prd_id: int, title: str, payload_md: str, saved_by: str = "user") -> dict:
+    """Save a snapshot of the PRD as a version in the prd_versions table.
+    Creates the table row and returns it."""
+    from app.db.client import utc_now
+    c = require_client()
+    # Count existing versions to determine version number
+    existing = c.table("prd_versions").select("id").eq("prd_id", prd_id).execute()
+    version_number = len(existing.data) + 1 if existing.data else 1
+    resp = c.table("prd_versions").insert({
+        "prd_id": prd_id,
+        "version_number": version_number,
+        "title": title,
+        "payload_md": payload_md,
+        "saved_by": saved_by,
+        "saved_at": utc_now(),
+    }).execute()
+    logger.info("prd_version_saved prd_id=%s version=%s", prd_id, version_number)
+    return resp.data[0]
+
+
+def list_prd_versions(prd_id: int) -> list[dict]:
+    """List all saved versions of a PRD, newest first."""
+    c = require_client()
+    resp = (
+        c.table("prd_versions")
+        .select("*")
+        .eq("prd_id", prd_id)
+        .order("version_number", desc=True)
+        .execute()
+    )
+    return resp.data or []
+
+
+def get_prd_version(version_id: int) -> dict | None:
+    """Get a specific version by its id."""
+    c = require_client()
+    resp = c.table("prd_versions").select("*").eq("id", version_id).limit(1).execute()
+    return resp.data[0] if resp.data else None
+
+
+def restore_prd_version(prd_id: int, version_id: int) -> dict | None:
+    """Restore a PRD to a specific version. Saves the current content as a new
+    version first (so nothing is lost), then overwrites the PRD with the
+    version's content."""
+    # Get the version to restore
+    version = get_prd_version(version_id)
+    if not version or version["prd_id"] != prd_id:
+        return None
+    # Save current state as a version before overwriting
+    current = get_prd(prd_id)
+    if current:
+        save_prd_version(prd_id, current.get("title", ""), current.get("payload_md", ""), saved_by="auto-save before restore")
+    # Overwrite PRD with version content
+    return update_prd_content(prd_id, version["title"], version["payload_md"])
