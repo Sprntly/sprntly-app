@@ -273,6 +273,16 @@ def test_is_agent_writable_protects_scaffold_build_files():
         assert storage._is_agent_writable(rel_path) is False
     assert storage._is_agent_writable("./vite.config.ts") is False
 
+    # Every vite config extension the loader accepts is guarded, not just .ts.
+    for cfg in ("vite.config.js", "vite.config.mjs", "vite.config.cjs"):
+        assert storage._is_agent_writable(cfg) is False
+
+    # A traversal key that resolves to a scaffold-owned file at the build root
+    # is still caught, and a key that escapes the build root is refused.
+    assert storage._is_agent_writable("src/../vite.config.ts") is False
+    assert storage._is_agent_writable("../escape.ts") is False
+    assert storage._is_agent_writable("/abs/vite.config.ts") is False
+
     for rel_path in (
         "src/App.tsx",
         "src/index.css",

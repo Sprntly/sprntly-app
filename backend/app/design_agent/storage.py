@@ -75,7 +75,13 @@ _SCAFFOLD_EXCLUDE = {"node_modules", "dist", "dist-fixture", ".vite", "test", "_
 # (clobbering vite.config.ts drops base:"./" and the anchor-id plugin, which
 # blank-screens the prototype and breaks comment-pin anchoring).
 _AGENT_IMMUTABLE_FILES = frozenset({
+    # Vite loads vite.config.{ts,js,mjs,cjs} at the build root — guard every
+    # extension, not just .ts, so the agent can't reintroduce the clobber under
+    # a different config extension.
     "vite.config.ts",
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.cjs",
     "vite-plugin-anchor-id.ts",
     "tsconfig.json",
     "package.json",
@@ -128,8 +134,15 @@ class TypeCheckRepairExhausted(TypeCheckError):
 
 def _is_agent_writable(rel_path: str) -> bool:
     """False for scaffold-owned build/config files so the agent's overlay can
-    never clobber the build harness. The agent owns src/** and index.html."""
-    normalized = rel_path.lstrip("./").strip()
+    never clobber the build harness. The agent owns src/** and index.html.
+
+    The path is normalized first so a traversal key (e.g. ``src/../vite.config.ts``)
+    that resolves to a scaffold-owned file at the build root is still caught, and
+    any key that escapes the build root (absolute, or starting with ``..``) is
+    refused outright."""
+    normalized = os.path.normpath(rel_path.strip())
+    if os.path.isabs(normalized) or normalized == ".." or normalized.startswith(".." + os.sep):
+        return False
     return normalized not in _AGENT_IMMUTABLE_FILES
 
 
