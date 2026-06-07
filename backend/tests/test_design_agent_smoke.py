@@ -627,6 +627,7 @@ def test_llm_telemetry_unchanged():
 # ─── Full end-to-end happy path (real Vite build — toolchain-guarded) ───────
 
 
+@pytest.mark.integration
 @_skip_no_toolchain
 async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
     """The load-bearing P1 gate: POST → poll → ready + bundle_url, and the served
@@ -708,6 +709,7 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
 # Scenario C is intentionally absent (dropped 2026-06-02, markdown-export-only).
 
 
+@pytest.mark.integration
 @_skip_no_toolchain
 async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     """Scenario B (P5-10 AC2): a website URL + NO Figma. The P5-01 extractor is
@@ -802,6 +804,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     ), f"no scenario=B cost line for prototype {prototype_id}: {cost_lines}"
 
 
+@pytest.mark.integration
 @_skip_no_toolchain
 async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
     """Scenario 0 (P5-10 AC3): no Figma, no website URL, no manual design — the

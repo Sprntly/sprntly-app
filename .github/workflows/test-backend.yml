@@ -10,9 +10,15 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/test-backend.yml'
+  schedule:
+    # Nightly full suite (integration lane) — 02:00 UTC
+    - cron: '0 2 * * *'
 
 jobs:
-  pytest:
+  # Fast lane: runs on every PR
+  # Skips real vite-build and Node-subprocess tests (~29 tests, ~230s).
+  # Completes in ~3-4 minutes. Coverage: all unit + mock tests (~1,378 tests).
+  pytest-fast:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,11 +35,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      # @babel/parser powers the design_agent static autofixer's Node companion
-      # (P1-10). Installed to an isolated prefix so the design_agent autofixer
-      # tests exercise the babel-dependent path in CI; DESIGN_AGENT_NODE_PATH
-      # points the wrapper at it. (One-off DBD exception to touch Sprntly CI —
-      # see PR body; load-bearing for P1-11's e2e gate.)
+      - name: Run pytest (fast lane — no integration tests)
+        working-directory: backend
+        run: python -m pytest tests/ -q --strict-markers -m "not integration"
+
+  # Integration lane: gates merge-to-main + runs nightly
+  # Includes real vite builds, real tsc, real Node subprocesses.
+  # Runs: (a) on PRs targeting main, (b) on push to main, (c) nightly.
+  # Expected duration: ~7-8 minutes (full suite).
+  pytest-integration:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.base_ref == 'main')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dev requirements
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # Node toolchain required for integration tests only.
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -41,23 +72,11 @@ jobs:
       - name: Install @babel/parser for autofixer
         run: npm install --prefix /tmp/babel-deps @babel/parser
 
-      # prototype-runtime/node_modules is required for the design_agent storage
-      # layer's real vite-build path (P1-08): vite_build symlinks this directory
-      # into its temp build dir instead of npm-installing per build. Installing
-      # it here lets test_design_agent_storage.py's symlink unit test pass and
-      # un-skips the @integration real-build tests (incl. the AD4 anchor-id
-      # assertion) in CI. Also load-bearing for P1-11's e2e smoke (same install).
-      # (Second one-off DBD exception to touch Sprntly CI — see PR body; backend
-      # tests don't depend on prototype-runtime, so this is purely additive.)
-      - name: Install prototype-runtime node_modules (for storage symlink + autofixer + P1-11 smoke)
+      - name: Install prototype-runtime node_modules
         working-directory: prototype-runtime
-        # `npm ci` (not `install`) so the real-build @integration tests run against
-        # the exact pinned dep set in package-lock.json — the build the agent runs
-        # in prod must match what CI proves. The scaffold now carries real shadcn/
-        # tailwind deps, so lockfile fidelity is load-bearing.
         run: npm ci --no-audit --no-fund
 
-      - name: Run pytest
+      - name: Run pytest (full suite incl. integration)
         working-directory: backend
         env:
           DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules

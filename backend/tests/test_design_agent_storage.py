@@ -279,6 +279,7 @@ async def test_vite_build_reads_dist_after_successful_build(monkeypatch):
     assert out["assets/index.js"] == "console.log(1)"
 
 
+@pytest.mark.integration
 async def test_vite_build_symlinks_node_modules_not_install(monkeypatch):
     capture: dict = {}
     monkeypatch.setattr(storage.subprocess, "run", _fake_vite_run(capture=capture))
