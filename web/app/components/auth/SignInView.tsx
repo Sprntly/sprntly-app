@@ -67,7 +67,7 @@ export function SignInView(props: SignInViewProps) {
               />
               <button
                 type="button"
-                className="toggle"
+                className="pwd-toggle"
                 aria-label={props.showPassword ? "Hide password" : "Show password"}
                 onClick={props.onToggleShowPassword}
               >

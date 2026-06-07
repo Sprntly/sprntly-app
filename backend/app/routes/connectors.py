@@ -310,7 +310,9 @@ def test_connection(
         user_obj = hubspot_oauth.fetch_token_info(access_token) or {}
     elif provider == slack_oauth.SLACK_PROVIDER:
         access_token = token_json.get("access_token") or ""
-        user_obj = slack_oauth.fetch_auth_test(access_token) or {}
+        # Canonical token-validity check: team.info returns {id, name, domain},
+        # so the account_label below resolves to the Slack workspace name.
+        user_obj = slack_oauth.fetch_team_info(access_token) or {}
     elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
         api_key = token_json.get("api_key") or ""
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}

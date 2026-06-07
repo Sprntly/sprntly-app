@@ -386,7 +386,7 @@ def test_logs_identifiers_only_no_body(comments, caplog):
 
 _POSITION_MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
-    / "supabase" / "migrations" / "20260606000000_design_agent_comment_position.sql"
+    / "supabase" / "migrations" / "20260606000002_design_agent_comment_position.sql"
 )
 
 
