@@ -10,12 +10,18 @@ Endpoints:
   POST   /v1/team/invites/{invite_id}/resend
                                           (C2) — bump created_at (placeholder
                                                  for real email re-send)
+  PATCH  /v1/team/members/{user_id}       (C3) — change a member's role
+  DELETE /v1/team/members/{user_id}       (C3) — remove a member
+
+  POST   /v1/invites/accept               (C3) — invitee auto-accepts their
+                                                 pending invite. NOT on the
+                                                 /v1/team prefix because the
+                                                 caller has no membership yet.
 
 Tenancy: `require_company` resolves the active company from the JWT.
 Reads are open to any member (typical SaaS "see who's on the team"
-UX); writes are gated to admin/owner.
-
-Edit-role / remove / accept land in C3.
+UX); team writes are gated to admin/owner. The accept endpoint uses
+`require_session` instead (the invitee is *not* yet a company member).
 """
 from __future__ import annotations
 
@@ -24,16 +30,21 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
-from app.auth import CompanyContext, require_company
+from app.auth import CompanyContext, require_company, require_session
 from app.db.team import (
+    accept_invite_for_user,
+    count_owners,
     create_invite,
     delete_invite,
+    delete_member,
     get_invite,
+    get_member,
     get_pending_invite_by_email,
     list_company_members,
     list_pending_invites,
     member_exists_for_email,
     touch_invite,
+    update_member_role,
 )
 
 
@@ -168,3 +179,128 @@ def resend_team_invite(
         raise HTTPException(404, "Invite not found")
     updated = touch_invite(invite_id)
     return _public_invite(updated or invite)
+
+
+# ─────────────────────── Member edit / remove ───────────────────────
+
+
+class MemberRolePatch(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def _validate(cls, v: str) -> str:
+        if v not in ("owner", "admin", "member"):
+            raise ValueError("role must be 'owner', 'admin', or 'member'")
+        return v
+
+
+def _public_member(row: dict) -> dict:
+    return {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "role": row.get("role"),
+    }
+
+
+@router.patch("/members/{user_id}")
+def patch_team_member(
+    user_id: str,
+    body: MemberRolePatch,
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin(company)
+    member = get_member(company_id=company.company_id, user_id=user_id)
+    if not member:
+        raise HTTPException(404, "Member not found")
+
+    if (
+        member.get("role") == "owner"
+        and body.role != "owner"
+        and count_owners(company.company_id) <= 1
+    ):
+        raise HTTPException(
+            409, "Cannot demote the last owner — promote another member first"
+        )
+
+    updated = update_member_role(
+        company_id=company.company_id, user_id=user_id, role=body.role
+    )
+    return _public_member(updated or {"user_id": user_id, "role": body.role})
+
+
+@router.delete(
+    "/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+def remove_team_member(
+    user_id: str,
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin(company)
+    member = get_member(company_id=company.company_id, user_id=user_id)
+    if not member:
+        raise HTTPException(404, "Member not found")
+
+    if member.get("role") == "owner" and count_owners(company.company_id) <= 1:
+        raise HTTPException(
+            409, "Cannot remove the last owner — promote another member first"
+        )
+
+    delete_member(company_id=company.company_id, user_id=user_id)
+    return None
+
+
+# ─────────────────────── Invite acceptance (/v1/invites) ───────────────────────
+#
+# Lives on a separate router because the caller has no company yet —
+# `require_company` would 403 them out before they could accept their
+# invite. Path is fixed to /v1/invites/accept and uses `require_session`.
+
+accept_router = APIRouter(prefix="/v1/invites", tags=["team"])
+
+
+@accept_router.post("/accept")
+def post_accept_invite(
+    session: dict = Depends(require_session),
+):
+    user_id = session.get("sub")
+    user_email = (session.get("email") or "").strip().lower()
+
+    # `require_session` accepts legacy demo cookies too, but those have no
+    # user identity — there's nothing to bind a membership to.
+    if not user_id or session.get("aud") != "supabase":
+        raise HTTPException(403, "Invite accept requires a signed-in user")
+
+    # Fall back to the profile's stored email if the JWT did not carry one
+    # (Supabase sometimes omits `email` from the user-context token).
+    if not user_email:
+        from app.db.client import require_client
+
+        prof = (
+            require_client()
+            .table("profiles")
+            .select("email")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        user_email = ((prof[0] if prof else {}).get("email") or "").strip().lower()
+
+    if not user_email:
+        raise HTTPException(400, "No email on session — cannot match invite")
+
+    try:
+        result = accept_invite_for_user(user_id=user_id, email=user_email)
+    except ValueError as exc:
+        if str(exc) == "already_in_company":
+            raise HTTPException(
+                409,
+                "You're already a member of another company — leave it first to accept this invite",
+            )
+        raise
+
+    if result is None:
+        raise HTTPException(404, "No pending invite for your email")
+    return result
