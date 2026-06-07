@@ -64,12 +64,45 @@ class FigmaExtractor:
     category = "design_tool"
     provider = "figma"
 
-    def current_version(self, ref: str) -> str:
-        """Cheap staleness marker for a Figma file. Not implemented in this
-        pass — a real last-modified probe lands with the staleness logic."""
-        raise NotImplementedError(
-            "Figma version probing is not implemented yet."
+    def current_version(self, ref: str) -> str | None:
+        """Return a cheap staleness marker for a Figma file without fetching nodes."""
+        file_key = (ref or "").strip()
+        access_token = (
+            getattr(self, "figma_access_token", None)
+            or getattr(self, "access_token", None)
         )
+        if not file_key or not access_token:
+            return None
+
+        try:
+            from app.connectors import figma_oauth
+
+            resp = figma_oauth.requests.get(
+                f"{figma_oauth.FIGMA_API_BASE}/files/{file_key}/meta",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            )
+            if not resp.ok:
+                return None
+            payload = resp.json() or {}
+        except Exception:
+            return None
+
+        # The /meta endpoint nests its fields under a top-level "file" object and
+        # names the timestamp "last_touched_at"; the full-file endpoint instead
+        # exposes "lastModified" at the top level. The version id also changes on
+        # every edit, so any of these works as a staleness marker — return the
+        # first present, checking both the top level and the nested "file" object.
+        sources = [payload]
+        file_meta = payload.get("file")
+        if isinstance(file_meta, dict):
+            sources.append(file_meta)
+        for source in sources:
+            for key in ("last_touched_at", "lastModified", "last_modified", "version"):
+                marker = source.get(key)
+                if isinstance(marker, str) and marker:
+                    return marker
+        return None
 
     def extract_raw_signals(self, ref: str, file_doc: dict | None = None) -> RawSignals:
         """Capture the dominant palette + typography from an already-fetched

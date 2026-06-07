@@ -79,11 +79,8 @@ def test_figma_without_usable_background_falls_back_to_baseline():
     assert ds.has_explicit_system is False
 
 
-def test_figma_current_version_not_implemented_yet():
-    import pytest
-
-    with pytest.raises(NotImplementedError):
-        FigmaExtractor().current_version("file-key")
+def test_figma_current_version_returns_none_without_token():
+    assert FigmaExtractor().current_version("file-key") is None
 
 
 # ─── Website mapping ─────────────────────────────────────────────────────
