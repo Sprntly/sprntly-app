@@ -51,6 +51,7 @@ export type SignUpInput = {
 
 type AuthCtx = AuthState & {
   signInWithPassword: (email: string, password: string) => Promise<void>
+  signInWithGoogle: () => Promise<void>
   signUpWithPassword: (input: SignUpInput) => Promise<SignUpResult>
   resetPassword: (email: string) => Promise<void>
   resendVerificationEmail: (email: string) => Promise<void>
@@ -121,6 +122,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) throw error
   }, [])
 
+  const signInWithGoogle = useCallback(async () => {
+    const supabase = getSupabase()
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: authCallbackUrl() },
+    })
+    if (error) throw error
+  }, [])
+
   const signUpWithPassword = useCallback(
     async (input: SignUpInput): Promise<SignUpResult> => {
       const supabase = getSupabase()
@@ -182,6 +192,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       ...state,
       signInWithPassword,
+      signInWithGoogle,
       signUpWithPassword,
       resetPassword,
       resendVerificationEmail,
@@ -193,6 +204,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [
       state,
       signInWithPassword,
+      signInWithGoogle,
       signUpWithPassword,
       resetPassword,
       resendVerificationEmail,

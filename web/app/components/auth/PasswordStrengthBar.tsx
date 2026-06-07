@@ -2,66 +2,46 @@
 
 import { passwordStrength, type PasswordStrength } from "../../lib/auth-validation"
 
+// v4 design: four segmented bars + a single hint line. The number of lit
+// segments and their color tier come from the existing passwordStrength()
+// logic — only the presentation is restyled to match design page 02.
+const SEGMENTS: Record<PasswordStrength, number> = {
+  weak: 1,
+  fair: 2,
+  good: 3,
+  strong: 4,
+}
+
+// .on1/.on2/.on3 map to the design's red/amber/green bar colors.
+const TIER: Record<PasswordStrength, string> = {
+  weak: "on1",
+  fair: "on2",
+  good: "on3",
+  strong: "on3",
+}
+
+const HINT: Record<PasswordStrength, string> = {
+  weak: "Weak — add length, a number and a symbol",
+  fair: "Fair — add a number or symbol",
+  good: "Good — almost there",
+  strong: "Strong — meets all requirements ✓",
+}
+
 export function PasswordStrengthBar({ password }: { password: string }) {
   const strength = passwordStrength(password)
   if (!password) return null
 
-  const labels: Record<PasswordStrength, string> = {
-    weak: "Weak",
-    fair: "Fair",
-    good: "Good",
-    strong: "Strong",
-  }
-  const widths: Record<PasswordStrength, string> = {
-    weak: "25%",
-    fair: "50%",
-    good: "75%",
-    strong: "100%",
-  }
+  const lit = SEGMENTS[strength]
+  const tier = TIER[strength]
 
   return (
-    <div className="pw-strength">
-      <div className="pw-bar">
-        <div className={`pw-fill pw-${strength}`} style={{ width: widths[strength] }} />
+    <>
+      <div className="pwd-strength" data-strength={strength}>
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className={`pwd-bar${i < lit ? ` ${tier}` : ""}`} />
+        ))}
       </div>
-      <span className={`pw-label pw-${strength}`}>{labels[strength]}</span>
-      <style jsx>{`
-        .pw-strength {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          margin-top: 6px;
-        }
-        .pw-bar {
-          flex: 1;
-          height: 4px;
-          background: var(--line);
-          border-radius: 999px;
-          overflow: hidden;
-        }
-        .pw-fill {
-          height: 100%;
-          border-radius: 999px;
-          transition: width 0.2s;
-        }
-        .pw-weak {
-          background: #c0392b;
-        }
-        .pw-fair {
-          background: #d68910;
-        }
-        .pw-good {
-          background: #27ae60;
-        }
-        .pw-strong {
-          background: var(--accent);
-        }
-        .pw-label {
-          font-size: 11px;
-          font-weight: 500;
-          min-width: 44px;
-        }
-      `}</style>
-    </div>
+      <div className="pwd-hint">{HINT[strength]}</div>
+    </>
   )
 }

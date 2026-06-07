@@ -4610,3 +4610,88 @@
   font-size: 11.5px;
   color: var(--danger, #C13838);
 }
+
+/* ============================================================
+   V4 AUTH SCENES
+   Ported from the v4 design kit (sprntly.css auth-scene rules).
+   Design tokens are remapped to this app's existing Lightfield
+   theme variables (identical values, different names) to avoid
+   :root collisions — e.g. design --brand → --accent (#179463),
+   --bg2 → --surface-2, --text2 → --ink-2, --ff → --font-serif.
+   ============================================================ */
+.auth-shell {
+  flex: 1;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 7vh 24px 40px;
+  position: relative;
+  overflow: auto;
+  background: radial-gradient(ellipse 900px 500px at 50% -10%, var(--accent-alpha-10) 0%, transparent 60%), var(--surface);
+}
+.auth-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 32px; flex-wrap: wrap; justify-content: center; }
+.auth-logo { font-size: 19px; font-weight: 500; letter-spacing: -0.015em; color: var(--ink); }
+.auth-logo .dot { color: var(--accent); }
+.auth-tag { font-size: 11px; color: var(--ink-3); padding: 3px 10px; border-radius: 30px; border: 1px solid var(--line); background: var(--surface-2); }
+.auth-card {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 36px 40px;
+  width: 100%;
+  max-width: 440px;
+  box-shadow: var(--shadow-md);
+}
+.auth-card.auth-card-wide { max-width: 460px; }
+.auth-card.auth-card-center { text-align: center; max-width: 460px; }
+.auth-h { font-family: var(--font-serif); font-size: 34px; font-weight: 400; line-height: 1.08; margin-bottom: 10px; letter-spacing: -0.02em; color: var(--ink); }
+.auth-h em { font-style: italic; color: var(--accent); }
+.auth-sub { font-size: 13.5px; color: var(--ink-2); margin-bottom: 26px; line-height: 1.6; }
+.auth-card .field-l { font-size: 11px; font-weight: 500; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 7px; display: flex; align-items: center; gap: 6px; }
+.auth-card .field-l .req { color: var(--accent); }
+.auth-card .field-l .right { margin-left: auto; }
+.auth-card .field { margin-bottom: 16px; }
+.auth-card .inp { width: 100%; font-size: 14px; padding: 11px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--ink); transition: border-color 0.15s, box-shadow 0.15s; }
+.auth-card .inp:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.auth-card .inp::placeholder { color: var(--ink-4); }
+.inp-pwd-wrap { position: relative; }
+.inp-pwd-wrap .inp { padding-right: 40px; }
+.inp-pwd-wrap .toggle { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); color: var(--ink-3); font-size: 12px; cursor: pointer; padding: 6px 8px; background: none; border: none; }
+.inp-pwd-wrap .toggle:hover { color: var(--ink); }
+.pwd-strength { display: flex; gap: 3px; margin-top: 7px; }
+.pwd-bar { height: 3px; flex: 1; background: var(--surface-4); border-radius: 2px; transition: background 0.2s; }
+.pwd-bar.on1 { background: #C13838; }
+.pwd-bar.on2 { background: #C16A0B; }
+.pwd-bar.on3 { background: var(--accent); }
+.pwd-hint { font-size: 10.5px; color: var(--ink-3); margin-top: 5px; }
+/* June-6 design-system update: buttons/CTAs are fully pill-shaped. Scoped to
+   the auth scenes here; the app-wide .btn base is a separate pass. */
+.auth-card .btn { border-radius: 30px; }
+.auth-card .btn-brand { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+.auth-card .btn-brand:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.auth-card .btn-brand:disabled { opacity: 0.6; cursor: default; }
+.auth-divider { display: flex; align-items: center; gap: 10px; margin: 20px 0 14px; font-size: 11px; color: var(--ink-3); }
+.auth-divider::before, .auth-divider::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.sso-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.sso-btn { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 12.5px; padding: 10px; border: 1px solid var(--line-strong); border-radius: 30px; background: var(--surface-2); color: var(--ink); transition: background 0.15s; cursor: pointer; }
+.sso-btn:hover { background: var(--surface-3); }
+.sso-btn:disabled { opacity: 0.6; cursor: default; }
+.auth-foot { font-size: 12.5px; color: var(--ink-2); text-align: center; margin-top: 20px; line-height: 1.6; }
+.auth-foot a, .auth-link { color: var(--accent-hover); text-decoration: none; font-weight: 500; cursor: pointer; background: none; border: none; font: inherit; padding: 0; }
+.auth-foot a:hover, .auth-link:hover { text-decoration: underline; }
+.auth-foot-meta { position: absolute; bottom: 18px; left: 0; right: 0; text-align: center; font-size: 11px; color: var(--ink-4); }
+.auth-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 18px; }
+.auth-form-grid .field.full { grid-column: 1 / -1; }
+.auth-role-select { width: 100%; font-size: 13px; padding: 11px 14px; padding-right: 32px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface-2) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238C8576' stroke-width='2'><polyline points='6 9 12 15 18 9'/></svg>") right 12px center/12px no-repeat; -webkit-appearance: none; appearance: none; cursor: pointer; color: var(--ink); }
+.auth-role-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.welcome-banner { background: var(--accent-muted); border: 1px solid var(--accent-2); border-radius: var(--radius-sm); padding: 12px 14px; display: flex; gap: 11px; align-items: center; margin-bottom: 22px; text-align: left; }
+.welcome-banner .wb-icon { font-size: 18px; color: var(--accent-hover); line-height: 1; }
+.welcome-banner .t { font-size: 12.5px; font-weight: 500; color: var(--ink); }
+.welcome-banner .s { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
+.verify-icon { width: 68px; height: 68px; border-radius: 50%; background: var(--accent-soft); border: 1px solid var(--accent-2); display: flex; align-items: center; justify-content: center; color: var(--accent-hover); font-size: 30px; margin: 0 auto 20px; }
+.verify-email { font-family: var(--font-mono); font-size: 13.5px; color: var(--ink); background: var(--surface-3); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 14px; text-align: center; margin: 16px 0; word-break: break-all; }
+.spam-note { font-size: 11.5px; color: var(--ink-3); background: var(--surface-3); border-radius: var(--radius-sm); padding: 11px 14px; margin-top: 16px; display: flex; gap: 8px; align-items: flex-start; text-align: left; }
+.auth-msg { font-size: 12.5px; color: var(--accent-hover); margin: 0 0 12px; }
+.auth-error { color: #C13838; font-size: 13px; padding: 8px 12px; background: rgba(193,56,56,0.08); border-radius: var(--radius-sm); margin-bottom: 12px; text-align: left; }
