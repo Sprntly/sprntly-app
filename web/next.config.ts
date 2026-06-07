@@ -6,7 +6,9 @@ const basePath = process.env.NEXT_PUBLIC_BASE_PATH?.replace(/\/$/, "") || ""
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  output: "export",
+  // Default: "export" (Apurva's static-export/nginx deploy). Local dev:
+  // set DISABLE_STATIC_EXPORT=1 to enable SSR so dynamic routes work in dev.
+  output: process.env.DISABLE_STATIC_EXPORT === "1" ? undefined : "export",
   ...(basePath ? { basePath } : {}),
   trailingSlash: false,
   images: {
