@@ -438,11 +438,26 @@ def _resolve_design_system(
             except Exception:
                 current = None
 
+        def _populate_brief(ds):
+            """Populate the component_language brief when not already present and
+            no explicit documented system exists. Best-effort: any failure is
+            silently swallowed so a brief generation issue never aborts extraction.
+            """
+            if not ds.has_explicit_system and not ds.component_language.brief:
+                try:
+                    from app.design_agent.design_system.brief import (
+                        generate_component_language,
+                    )
+                    ds.component_language = generate_component_language(ds)
+                except Exception:
+                    pass  # best-effort; leave the deterministic default
+
         if force:
             raw = raw_signals_factory()
             if raw is None:
                 return None
             ds = normalize(raw)
+            _populate_brief(ds)
             adapter = registry.get(provider)
             upsert_design_system(
                 company_id=company_id,
@@ -468,6 +483,7 @@ def _resolve_design_system(
                     raw = None
                 if raw is not None:
                     ds = normalize(raw)
+                    _populate_brief(ds)
                     adapter = registry.get(provider)
                     upsert_design_system(
                         company_id=company_id,
@@ -489,6 +505,7 @@ def _resolve_design_system(
         if raw is None:
             return None
         ds = normalize(raw)
+        _populate_brief(ds)
         adapter = registry.get(provider)
         upsert_design_system(
             company_id=company_id,
