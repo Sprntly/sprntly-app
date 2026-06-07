@@ -275,6 +275,19 @@ CREATE TABLE products (
 );
 CREATE INDEX products_company_id_idx ON products (company_id);
 
+-- Mirrors supabase/migrations/20260525150000_onboarding_workspace.sql.
+-- Used by the Settings → Team route suite (test_team_*.py).
+CREATE TABLE workspace_invites (
+    id         TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    email      TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'member',
+    invited_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, email)
+);
+CREATE INDEX workspace_invites_company_id_idx ON workspace_invites (company_id);
+
 CREATE TABLE github_installations (
     installation_id      INTEGER PRIMARY KEY,
     account_id           INTEGER NOT NULL,
