@@ -1667,8 +1667,8 @@
 /* Live SSE rolling window — gradient mask fades oldest step out at top,
    new step slides in from bottom */
 .design-agent-surface.proto-gen-overlay .proto-gen-steps--live {
-  mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.5) 12%, black 28%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.5) 12%, black 28%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 28%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 28%);
   overflow: hidden;
 }
 @keyframes protoGenStepEnter {
@@ -1810,9 +1810,9 @@
 .design-agent-surface .proto-comment {
   display: block;
   padding: 12px 14px;
-  background: #fff;
+  background: var(--surface);
   border-radius: 10px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  box-shadow: var(--shadow-sm);
 }
 .design-agent-surface .proto-comment-pin {
   flex-shrink: 0;
@@ -2536,7 +2536,7 @@
  * Changes 1–6 from David's mockup alignment: count badge, avatar tints, step
  * chip, resolve indicator, footer send button + helper, card styling.
  * Append-only; no existing rules above are modified.
- * Token-only — no hex except #fff for the white card (change 6 permit).
+ * Token-only — no hex; every colour is a var(--…) token.
  * ─────────────────────────────────────────────────────────────────────────── */
 
 /* Change 1 — header count badge */
@@ -2558,9 +2558,9 @@
 
 /* Change 2 — avatar tint variants (cycle by author hash) */
 .design-agent-surface .pc-av--blue {
-  background: #dbeafe;
-  color: #1d4ed8;
-  border-color: rgba(29, 78, 216, 0.18);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  border-color: var(--line);
 }
 .design-agent-surface .pc-av--green {
   background: var(--accent-soft);
@@ -2568,19 +2568,19 @@
   border-color: var(--accent-alpha-18);
 }
 .design-agent-surface .pc-av--purple {
-  background: #ede9fe;
-  color: #7c3aed;
-  border-color: rgba(124, 58, 237, 0.18);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  border-color: var(--line);
 }
 .design-agent-surface .pc-av--amber {
-  background: #fef3c7;
-  color: #b45309;
-  border-color: rgba(180, 83, 9, 0.18);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  border-color: var(--line);
 }
 .design-agent-surface .pc-av--teal {
-  background: #ccfbf1;
-  color: #0f766e;
-  border-color: rgba(15, 118, 110, 0.18);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  border-color: var(--line);
 }
 
 /* Change 3 — "Step N" pin chip */
@@ -2619,7 +2619,7 @@
   border-radius: 50%;
   background: var(--accent);
   border: none;
-  color: #fff;
+  color: var(--surface);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2647,10 +2647,10 @@
   gap: 10px;
 }
 .design-agent-surface .comment-thread {
-  background: #fff;
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 12px 14px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--shadow-sm);
 }
 /* ── end CommentsPanel visual polish ─────────────────────────────────────── */
