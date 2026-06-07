@@ -69,6 +69,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from tests._fake_anthropic import _FakeStream
 from urllib.parse import unquote, urlparse
 
 import pytest
@@ -169,6 +170,9 @@ def _mock_design_agent_client(*, raise_on_first: bool = False) -> MagicMock:
     error path (RunResult.status == 'error' → prototype marked 'failed').
     """
     client = MagicMock()
+    # stream() delegates to create() so the recorded usage/content/exception
+    # are the real scripted ones, not auto-generated MagicMocks.
+    client.messages.stream.side_effect = lambda **kw: _FakeStream(client.messages.create(**kw))
     if raise_on_first:
         client.messages.create.side_effect = RuntimeError(
             "smoke: simulated Anthropic failure"

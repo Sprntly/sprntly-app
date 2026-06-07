@@ -57,6 +57,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from tests._fake_anthropic import _FakeStream
 
 import httpx
 import pytest
@@ -205,6 +206,7 @@ def _propose_patch_msg(*, rationale: str, patch_md: str):
 def _mock(side_effect: list) -> MagicMock:
     client = MagicMock()
     client.messages.create.side_effect = side_effect
+    client.messages.stream.side_effect = lambda **kw: _FakeStream(client.messages.create(**kw))
     return client
 
 

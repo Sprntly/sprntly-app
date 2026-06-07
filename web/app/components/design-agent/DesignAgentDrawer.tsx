@@ -73,6 +73,8 @@ type GenerateFlowDeps = {
     target_platform: TargetPlatform
     instructions: string
     figma_file_key?: string | null
+    /** Optional Figma node-id (frame-level targeting) parsed from a pasted URL. */
+    figma_node_id?: string | null
     /** P5-02: Scenario B fallback source (shown only when no Figma). */
     website_url?: string | null
     /** P5-02: manual color/font floor (shown only when no Figma). */
