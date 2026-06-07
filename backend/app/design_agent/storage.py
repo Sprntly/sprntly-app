@@ -76,6 +76,28 @@ _RUNTIME_ROOT = Path(__file__).resolve().parent.parent.parent.parent / "prototyp
 # so they don't affect the build; skipping keeps the copy small).
 _SCAFFOLD_EXCLUDE = {"node_modules", "dist", "dist-fixture", ".vite", "test", "__tests__"}
 
+# Build/config files the scaffold owns - the agent may emit React source under
+# src/ and its own index.html, but it must never overwrite the build harness
+# (clobbering vite.config.ts drops base:"./" and the anchor-id plugin, which
+# blank-screens the prototype and breaks comment-pin anchoring).
+_AGENT_IMMUTABLE_FILES = frozenset({
+    # Vite loads vite.config.{ts,js,mjs,cjs} at the build root — guard every
+    # extension, not just .ts, so the agent can't reintroduce the clobber under
+    # a different config extension.
+    "vite.config.ts",
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.cjs",
+    "vite-plugin-anchor-id.ts",
+    "tsconfig.json",
+    "package.json",
+    "package-lock.json",
+    "postcss.config.js",
+    "tailwind.config.ts",
+    "vitest.config.ts",
+    "components.json",
+})
+
 
 class ViteBuildError(RuntimeError):
     """Raised when `vite build` fails (non-zero exit, timeout, or no dist/)."""
@@ -114,6 +136,20 @@ class TypeCheckRepairExhausted(TypeCheckError):
 
 
 # ─── Vite build (where the anchor-id plugin runs — AD4) ─────────────────────
+
+
+def _is_agent_writable(rel_path: str) -> bool:
+    """False for scaffold-owned build/config files so the agent's overlay can
+    never clobber the build harness. The agent owns src/** and index.html.
+
+    The path is normalized first so a traversal key (e.g. ``src/../vite.config.ts``)
+    that resolves to a scaffold-owned file at the build root is still caught, and
+    any key that escapes the build root (absolute, or starting with ``..``) is
+    refused outright."""
+    normalized = os.path.normpath(rel_path.strip())
+    if os.path.isabs(normalized) or normalized == ".." or normalized.startswith(".." + os.sep):
+        return False
+    return normalized not in _AGENT_IMMUTABLE_FILES
 
 
 async def vite_build(virtual_fs: dict[str, str]) -> dict[str, str]:
@@ -156,13 +192,23 @@ def _vite_build_sync(runtime_root: Path, virtual_fs: dict[str, str]) -> dict[str
         _copy_scaffold(runtime_root, build_path)
         _symlink_node_modules(runtime_root, build_path)
         # Overlay the agent's emitted files on top of the scaffold baseline.
+        skipped = []
         for rel_path, content in virtual_fs.items():
+            if not _is_agent_writable(rel_path):
+                skipped.append(rel_path)
+                continue
             target = build_path / rel_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+        if skipped:
+            logger.info(
+                "vite_build: ignored %d agent-emitted scaffold-owned file(s)",
+                len(skipped),
+            )
         try:
             result = subprocess.run(
-                ["npx", "vite", "build", "--outDir", "dist"],
+                # --base ./ guarantees relative asset URLs even if a config slips through.
+                ["npx", "vite", "build", "--outDir", "dist", "--base", "./"],
                 cwd=str(build_path),
                 capture_output=True,
                 text=True,
