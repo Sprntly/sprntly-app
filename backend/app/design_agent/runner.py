@@ -368,6 +368,13 @@ def _render_design_system_css(ds: "DesignSystem") -> str:
     return _render_palette_css(palette)
 
 
+def _should_pre_seed(ds: "DesignSystem | None") -> bool:
+    """Pre-seed the prototype's index.css when the resolved design system
+    carries usable signal. Keyed on confidence (not on whether the system is
+    an explicit/documented one) so an inferred-but-usable palette still seeds."""
+    return ds is not None and ds.confidence != "low"
+
+
 def _resolve_design_system(
     *,
     company_id: str | None,
@@ -1049,7 +1056,7 @@ async def generate_prototype(
         raw_signals_factory=raw_factory,
         version_factory=version_factory,
     )
-    if design_system is not None and design_system.has_explicit_system:
+    if _should_pre_seed(design_system):
         try:
             virtual_fs["src/index.css"] = _render_design_system_css(design_system)
             logger.info(

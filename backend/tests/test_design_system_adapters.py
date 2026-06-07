@@ -19,7 +19,11 @@ from app.connectors import figma_oauth
 from app.design_agent.design_system.adapters import FigmaExtractor, WebExtractor
 from app.design_agent.design_system.extractors import RawSignals, normalize, registry
 from app.design_agent.design_system.models import DesignSystem
-from app.design_agent.runner import _render_design_system_css, _render_palette_css
+from app.design_agent.runner import (
+    _render_design_system_css,
+    _render_palette_css,
+    _should_pre_seed,
+)
 
 
 # A charcoal / gold / cream Figma palette — the long-standing regression shape.
@@ -68,7 +72,8 @@ def test_figma_signals_map_to_expected_tokens():
     assert c.foreground == "#f4f1ea"  # light text on a dark background
     assert ds.tokens.fonts.heading_family == "Inter"
     assert ds.tokens.fonts.weights == [400, 700]
-    assert ds.has_explicit_system is True
+    assert ds.has_explicit_system is False
+    assert ds.confidence != "low"
     assert ds.confidence == "high"   # palette + accent + font = rich signal
 
 
@@ -114,7 +119,8 @@ def test_website_signals_map_to_expected_tokens():
     assert ds.tokens.fonts.body_family == "Roboto"
     assert ds.tokens.radius_convention == "rounded"
     assert ds.tokens.spacing_scale == [8, 16, 24]
-    assert ds.has_explicit_system is True
+    assert ds.has_explicit_system is False
+    assert ds.confidence != "low"
     assert ds.confidence == "medium"
 
 
@@ -223,6 +229,13 @@ def test_website_current_version_returns_none_when_http_raises(monkeypatch):
 
 
 # ─── Unified pre-seed equivalence ────────────────────────────────────────
+
+
+def test_should_pre_seed_uses_confidence_not_explicit_system():
+    assert _should_pre_seed(None) is False
+    assert _should_pre_seed(DesignSystem(confidence="low")) is False
+    assert _should_pre_seed(DesignSystem(confidence="medium")) is True
+    assert _should_pre_seed(DesignSystem(confidence="high")) is True
 
 
 def test_unified_render_matches_legacy_figma_palette_css_byte_for_byte():

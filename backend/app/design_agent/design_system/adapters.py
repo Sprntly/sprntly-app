@@ -159,11 +159,13 @@ class FigmaExtractor:
             muted=muted if _is_hex(muted) else (surface if _is_hex(surface) else background),
             border=Colors().border,
         )
-        # A real palette plus typography is a richer signal than a palette alone.
+        # Figma signals here are inferred from fills and typography, not from a
+        # documented design system. A real palette plus typography is a richer
+        # signal than a palette alone.
         confidence = "high" if (font_family and accent) else "medium"
         return DesignSystem(
             tokens=Tokens(colors=colors, is_dark=is_dark, fonts=fonts),
-            has_explicit_system=True,
+            has_explicit_system=False,
             confidence=confidence,
         )
 
@@ -329,12 +331,14 @@ class WebExtractor:
             radius_convention=_radius_convention(s.get("border_radius_convention")),
             spacing_scale=_spacing_samples_to_scale(s.get("spacing_scale_samples")),
         )
-        # A usable brand color plus a heading font is the sampler's own
-        # confidence floor; meeting it here too keeps the signal honest.
+        # Website signals are inferred from sampled computed styles, not from a
+        # documented design system. A usable brand color plus a heading font is
+        # the sampler's own confidence floor; meeting it here too keeps the
+        # signal honest.
         has_system = bool(primary and heading)
         return DesignSystem(
             tokens=tokens,
-            has_explicit_system=has_system,
+            has_explicit_system=False,
             confidence="medium" if has_system else "low",
         )
 

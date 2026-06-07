@@ -108,7 +108,8 @@ def test_rich_website_extraction_matches_unified_css_and_tokens():
     assert ds.tokens.fonts.body_family == legacy["body_font"] == "Roboto"
     assert ds.tokens.radius_convention == legacy["radius"] == "rounded"
     assert ds.tokens.spacing_scale == legacy["spacing"] == [8, 16, 24]
-    assert ds.has_explicit_system is True
+    assert ds.has_explicit_system is False
+    assert ds.confidence != "low"
 
 
 def test_minimal_website_extraction_matches_unified_css_and_tokens():
@@ -131,7 +132,8 @@ def test_minimal_website_extraction_matches_unified_css_and_tokens():
     assert ds.tokens.fonts.heading_family == legacy["heading_font"] == "Poppins"
     assert ds.tokens.radius_convention == legacy["radius"] == "pill"
     assert ds.tokens.spacing_scale == legacy["spacing"] == [12]
-    assert ds.has_explicit_system is True
+    assert ds.has_explicit_system is False
+    assert ds.confidence != "low"
 
 
 def test_low_confidence_none_does_not_preseed_and_manual_floor_is_separate():

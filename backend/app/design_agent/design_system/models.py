@@ -94,5 +94,7 @@ class DesignSystem(BaseModel):
     # Component TYPES present in the source (e.g. "button", "card", "input") —
     # never component code.
     component_inventory: list[str] = Field(default_factory=list)
+    # True only when an explicit, documented design system was detected (not one
+    # inferred from colors/fonts).
     has_explicit_system: bool = False
     confidence: Literal["high", "medium", "low"] = "low"
