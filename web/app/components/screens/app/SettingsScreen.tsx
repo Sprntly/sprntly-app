@@ -12,6 +12,7 @@ import { NotificationsSettings } from "./settings/NotificationsSettings"
 import { BillingSettings } from "./settings/BillingSettings"
 import { SecuritySettings } from "./settings/SecuritySettings"
 import { ConnectorsSettings } from "./settings/ConnectorsSettings"
+import { TeamSettings } from "./settings/TeamSettings"
 import {
   SETTINGS_NAV,
   type SettingsSectionId,
@@ -42,17 +43,8 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
       return <StrategicSettings />
     case "flags":
       return <FeatureFlagsSettings />
-    // Unbuilt — render a placeholder.
     case "team":
-      return (
-        <div className="settings-coming-soon">
-          <h2 className="settings-sec-title">Coming soon</h2>
-          <p className="settings-sec-sub">
-            Team & roles management will land alongside the roles/permissions
-            backend work.
-          </p>
-        </div>
-      )
+      return <TeamSettings />
     case "connectors":
       return <ConnectorsSettings />
     default:

@@ -55,7 +55,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     items: [
       { id: "product-category", label: "Product & Category", available: true },
       { id: "goals-metrics", label: "Goals & metrics", available: true },
-      { id: "team", label: "Team & roles", available: false },
+      { id: "team", label: "Team & roles", available: true },
     ],
   },
   {
