@@ -374,15 +374,28 @@ def _resolve_design_system(
     provider: str | None,
     source_ref: str | None,
     raw_signals_factory,
+    version_factory=None,
 ) -> "DesignSystem | None":
     """Resolve the unified design system for one source via the company-scoped cache.
 
-    Flow (cache-as-source-of-truth, no staleness check in this pass):
+    Flow (cache-with-staleness-check):
 
-      1. Look the source up in the cache by (company, provider, source ref). On a
-         hit, rebuild the stored `DesignSystem` and use it as-is.
-      2. On a miss, pull the source's raw signals (`raw_signals_factory()`),
-         normalize them into a `DesignSystem`, store the result, and use it.
+      1. Probe the source version cheaply via `version_factory()` — best-effort,
+         so any probe failure (network, missing token, etc.) is silently caught and
+         treated as "undeterminable" (`current = None`). This probe never aborts
+         resolution.
+      2. Look the source up in the cache by (company, provider, source ref).
+         - Cache HIT + version unchanged (`current == stored`) or undeterminable
+           (`current is None`): return the cached design system as-is with no
+           re-extraction and no upsert.
+         - Cache HIT + version changed (`current != stored`): re-extract via
+           `raw_signals_factory()`, normalize, and upsert the fresh result with
+           `source_version=current`. If re-extraction yields nothing usable, fall
+           back to the cached design system so a transient fetch failure does not
+           discard a good cached row.
+      3. Cache MISS: extract via `raw_signals_factory()`, normalize, upsert with
+         `source_version=current` (None when undeterminable), and return the
+         freshly-normalized design system.
 
     Returns the design system, or None when there is no source to resolve (no
     provider/ref) so the caller leaves the virtual filesystem un-seeded exactly
@@ -402,8 +415,41 @@ def _resolve_design_system(
         from app.design_agent.design_system.extractors import normalize, registry
         from app.design_agent.design_system.models import DesignSystem
 
+        # Best-effort version probe — a failure here must never abort resolution
+        # or discard a good cached row.
+        current: str | None = None
+        if version_factory is not None:
+            try:
+                current = version_factory()
+            except Exception:
+                current = None
+
         cached = lookup_design_system(company_id, provider, source_ref)
         if cached is not None:
+            stored = cached.get("source_version")
+            if current is not None and current != stored:
+                # Source has changed — attempt a fresh extraction.
+                try:
+                    raw = raw_signals_factory()
+                except Exception:
+                    raw = None
+                if raw is not None:
+                    ds = normalize(raw)
+                    adapter = registry.get(provider)
+                    upsert_design_system(
+                        company_id=company_id,
+                        source_category=getattr(adapter, "category", provider),
+                        source_provider=provider,
+                        source_ref=source_ref,
+                        source_version=current,
+                        data=ds.model_dump(),
+                        has_explicit_system=ds.has_explicit_system,
+                        confidence=ds.confidence,
+                        extracted_at=None,
+                    )
+                    return ds
+            # Version unchanged, undeterminable, or re-extract yielded nothing
+            # usable — use the cached design system as-is.
             return DesignSystem.model_validate(cached.get("data") or {})
 
         raw = raw_signals_factory()
@@ -416,7 +462,7 @@ def _resolve_design_system(
             source_category=getattr(adapter, "category", provider),
             source_provider=provider,
             source_ref=source_ref,
-            source_version=None,  # staleness/version marker lands in a later pass
+            source_version=current,
             data=ds.model_dump(),
             has_explicit_system=ds.has_explicit_system,
             confidence=ds.confidence,
@@ -438,18 +484,28 @@ def _design_source_for_generation(
     website_sample: dict | None,
 ):
     """Pick the design source for this generation and return
-    `(provider, source_ref, raw_signals_factory)` for the cache flow.
+    ``(provider, source_ref, raw_signals_factory, version_factory)`` for the
+    cache-with-staleness-check flow.
 
     Figma wins when a file key AND an access token are both available (a file we
     cannot read is not a usable source); otherwise a website URL is the source.
-    When neither is present, returns `(None, None, None)` so the caller leaves the
-    virtual filesystem un-seeded.
+    When neither is present, returns ``(None, None, None, None)`` so the caller
+    leaves the virtual filesystem un-seeded.
 
-    The returned factory is SYNCHRONOUS and is only invoked on a cache miss — so
-    the (potentially expensive) Figma document fetch is skipped entirely on a
-    cache hit. The website sample is supplied by the caller (the route already ran
-    the headless-browser extraction for its scaffold prose) and is reused here, so
+    The raw factory is SYNCHRONOUS and is only invoked on a cache miss (or when
+    the staleness check detects a changed version) — so the (potentially
+    expensive) Figma document fetch is skipped entirely on an unchanged cache
+    hit. The website sample is supplied by the caller (the route already ran the
+    headless-browser extraction for its scaffold prose) and is reused here, so
     no second browser run fires.
+
+    The version factory is also SYNCHRONOUS and cheap: it calls either the Figma
+    ``/files/<key>/meta`` endpoint or an HTTP HEAD on the website URL. It is
+    bound with the relevant token at this point so ``_resolve_design_system`` can
+    call it without knowing where the token lives.
+
+    For Figma, a FRESH ``FigmaExtractor`` instance is created with the token set
+    — the shared registry singleton carries no token and must never be mutated.
     """
     if figma_file_key and figma_access_token:
         def _figma_raw():
@@ -458,16 +514,26 @@ def _design_source_for_generation(
             file_doc = _fetch_file(figma_access_token, figma_file_key, 10)
             return FigmaExtractor().extract_raw_signals(figma_file_key, file_doc=file_doc)
 
-        return "figma", figma_file_key, _figma_raw
+        def _figma_version():
+            from app.design_agent.design_system.adapters import FigmaExtractor
+            extractor = FigmaExtractor()
+            extractor.access_token = figma_access_token
+            return extractor.current_version(figma_file_key)
+
+        return "figma", figma_file_key, _figma_raw, _figma_version
 
     if website_url:
         def _web_raw():
             from app.design_agent.design_system.adapters import WebExtractor
             return WebExtractor().extract_raw_signals(website_url, sample=website_sample)
 
-        return "web", website_url, _web_raw
+        def _web_version():
+            from app.design_agent.design_system.adapters import WebExtractor
+            return WebExtractor().current_version(website_url)
 
-    return None, None, None
+        return "web", website_url, _web_raw, _web_version
+
+    return None, None, None, None
 
 
 _STEP_LABELS = [
@@ -943,7 +1009,7 @@ async def generate_prototype(
     figma_access_token = _resolve_figma_access_token(figma_file_key, workspace_id)
     virtual_fs: dict[str, str] = {}
 
-    provider, source_ref, raw_factory = _design_source_for_generation(
+    provider, source_ref, raw_factory, version_factory = _design_source_for_generation(
         figma_file_key=figma_file_key,
         figma_access_token=figma_access_token,
         website_url=website_url,
@@ -955,6 +1021,7 @@ async def generate_prototype(
         provider=provider,
         source_ref=source_ref,
         raw_signals_factory=raw_factory,
+        version_factory=version_factory,
     )
     if design_system is not None and design_system.has_explicit_system:
         try:
