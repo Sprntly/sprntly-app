@@ -1,7 +1,12 @@
 "use client"
 
-import type { ReactNode } from "react"
+import { useCallback, useRef, useState, type ReactNode } from "react"
 import { ONBOARDING_STEP_COUNT } from "../../lib/onboarding/types"
+import {
+  validateRequired,
+  type FieldCheck,
+  type ValidationResult,
+} from "../../lib/onboarding/validation"
 
 type InterviewLayoutProps = {
   step: number
@@ -17,6 +22,50 @@ type InterviewLayoutProps = {
   continueDisabled?: boolean
   loading?: boolean
   skipLabel?: string
+}
+
+/**
+ * Required-field validation for InterviewLayout-based steps.
+ *
+ * The step declares its checks (via `getChecks`) and tags each field's
+ * wrapper with `data-field="<key>"`. Calling `validate()` on Continue
+ * surfaces per-field messages (read by the step from `errors`) and
+ * focuses the first invalid field; the step blocks navigation when it
+ * returns `ok: false`. State lives here so a step needs only one hook.
+ */
+export function useFieldValidation(getChecks: () => FieldCheck[]) {
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const getChecksRef = useRef(getChecks)
+  getChecksRef.current = getChecks
+
+  const focusField = useCallback((key: string) => {
+    const root = containerRef.current
+    if (!root) return
+    const el = root.querySelector<HTMLElement>(
+      `[data-field="${key}"] input, [data-field="${key}"] textarea, [data-field="${key}"] select`,
+    )
+    el?.focus()
+  }, [])
+
+  /** Runs validation; updates errors and focuses the first invalid field. */
+  const validate = useCallback((): ValidationResult => {
+    const result = validateRequired(getChecksRef.current())
+    setErrors(result.errors)
+    if (result.firstInvalid) focusField(result.firstInvalid)
+    return result
+  }, [focusField])
+
+  const clearError = useCallback((key: string) => {
+    setErrors((prev) => {
+      if (!(key in prev)) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }, [])
+
+  return { errors, validate, clearError, containerRef }
 }
 
 export function InterviewLayout({

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
-import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import {
   advanceOnboardingStep,
@@ -99,8 +99,20 @@ export function Onboarding5() {
   const supportingHints =
     SUPPORTING_SUGGESTIONS[industry] ?? SUPPORTING_SUGGESTIONS.default
 
-  const canContinue =
-    productName.trim().length > 0 && canSaveKpiTree(northStar, supporting)
+  const { errors, validate, clearError, containerRef } = useFieldValidation(
+    () => [
+      {
+        key: "productName",
+        valid: productName.trim().length > 0,
+        message: "Add a product name.",
+      },
+      {
+        key: "northStar",
+        valid: canSaveKpiTree(northStar, supporting),
+        message: "Set a North Star metric to anchor your KPI tree.",
+      },
+    ],
+  )
 
   function toggleSupporting(metric: string) {
     setSupporting((prev) => {
@@ -120,6 +132,7 @@ export function Onboarding5() {
   async function persist() {
     if (!workspace) return
     setError(null)
+    if (!validate().ok) return
     const websiteErr = validateProductWebsite(productWebsite)
     if (websiteErr) {
       setError(websiteErr)
@@ -182,22 +195,26 @@ export function Onboarding5() {
           )}
         </div>
       }
-      onBack={() => router.push("/onboarding/4")}
+      onBack={() => router.push("/onboarding/3")}
       onContinue={persist}
-      continueDisabled={!canContinue}
       loading={saving}
     >
+      <div ref={containerRef}>
       {error && <div className="ob-form-error">{error}</div>}
 
-      <div className="field">
+      <div className={`field ${errors.productName ? "has-error" : ""}`} data-field="productName">
         <label className="field-label">Product name *</label>
         <input
           className="input"
           value={productName}
-          onChange={(e) => setProductName(e.target.value)}
+          onChange={(e) => {
+            setProductName(e.target.value)
+            clearError("productName")
+          }}
           maxLength={100}
           placeholder="The product this workspace is about"
         />
+        {errors.productName && <p className="field-error">{errors.productName}</p>}
       </div>
       <div className="field">
         <label className="field-label">Product website (optional)</label>
@@ -211,14 +228,18 @@ export function Onboarding5() {
         />
       </div>
 
-      <div className="field">
+      <div className={`field ${errors.northStar ? "has-error" : ""}`} data-field="northStar">
         <label className="field-label">Primary metric — your North Star *</label>
         <input
           className="input"
           value={northStar}
-          onChange={(e) => setNorthStar(e.target.value)}
+          onChange={(e) => {
+            setNorthStar(e.target.value)
+            clearError("northStar")
+          }}
           placeholder="The one metric that best captures product value"
         />
+        {errors.northStar && <p className="field-error">{errors.northStar}</p>}
         <div className="ob-ns-hints">
           <span className="ob-ns-hints-label">
             Common for {industry || "your stage"}:
@@ -292,6 +313,7 @@ export function Onboarding5() {
           {selectedCount} supporting metric{selectedCount === 1 ? "" : "s"}{" "}
           selected · suggestions tailored to your industry
         </p>
+      </div>
       </div>
 
       <style jsx>{`
