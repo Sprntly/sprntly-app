@@ -72,6 +72,12 @@ PLATFORM_DEFAULTS: dict[str, Any] = {
             "revenue_at_stake", "competitive_pressure", "reliability_risk",
             "confidence",
         ],
+        # Goal-alignment factor (prioritize skill goal mode). When enabled, each
+        # theme's base score is multiplied by a deterministic KPI-fit factor
+        # before the Synthesis judge re-ranks. `goal_weight` blends the factor
+        # toward 1.0 (1 = full effect, 0 = goal ignored) — skill default 1.0.
+        "goal_factor_enabled": True,
+        "goal_weight": 1.0,
     },
     "llm": {
         "default_model": "claude-sonnet-4-6",
