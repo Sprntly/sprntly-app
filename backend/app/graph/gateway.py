@@ -26,8 +26,32 @@ from typing import Any, Optional
 
 from app.llm import DEFAULT_MODEL, call_json, call_md
 from app.llm_telemetry import MODEL_PRICING
+from app.skills.loader import get_skill
 
 logger = logging.getLogger(__name__)
+
+
+def _build_method_prefix(skill: str, skill_module: Optional[str]) -> tuple[str, str]:
+    """Resolve a bound skill into (method_text_block, version_suffix).
+
+    The method block is the skill's SKILL.md (plus the named module, if any)
+    under a delimited header so the model reads it as the METHOD layer. The
+    version suffix (`+<id>@<hash>`) is appended to prompt_version so the
+    decision log records the exact method version behind the call.
+    """
+    spec = get_skill(skill)
+    header = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n"
+    block = header + spec.method
+    if skill_module:
+        try:
+            module_text = spec.modules[skill_module]
+        except KeyError as exc:
+            raise KeyError(
+                f"skill {skill!r} has no module {skill_module!r}; "
+                f"available: {sorted(spec.modules)}"
+            ) from exc
+        block += f"\n\n### MODULE: {skill_module}\n{module_text}"
+    return block + "\n", f"+{spec.id}@{spec.content_hash}"
 
 
 @dataclass
@@ -68,21 +92,46 @@ def llm_call(
     json_schema: Optional[dict] = None,
     max_tokens: int = 16000,
     user_cacheable_prefix: Optional[str] = None,
+    skill: Optional[str] = None,
+    skill_module: Optional[str] = None,
     log: bool = True,
 ) -> LLMResult:
-    """One attributed, telemetered LLM call. See module docstring."""
+    """One attributed, telemetered LLM call. See module docstring.
+
+    When `skill` is set, the bound skill's method text (its SKILL.md, plus the
+    named `skill_module` if given) is PREPENDED to the cacheable prefix under a
+    "## METHOD (skill: <id> @<hash>)" delimiter — the agent's own `system`
+    prompt stays as the agent-specific layer AFTER the method. The method text
+    rides the existing user_cacheable_prefix mechanism (see app.llm) so it is
+    cache-friendly across calls. `prompt_version` is suffixed with
+    `+<skill_id>@<hash>` so the decision log pins the exact method version.
+    """
     chosen_model = model or DEFAULT_MODEL
+    method_block = ""
+    if skill is not None:
+        method_block, version_suffix = _build_method_prefix(skill, skill_module)
+        prompt_version = f"{prompt_version}{version_suffix}"
     meta: dict = {}
     t0 = time.monotonic()
     if json_schema is not None:
+        # call_json supports a cacheable user prefix — keep the method there so
+        # it's cache-friendly across calls; the agent system prompt stays after.
+        if method_block:
+            user_cacheable_prefix = (
+                method_block if user_cacheable_prefix is None
+                else f"{method_block}\n{user_cacheable_prefix}"
+            )
         output: Any = call_json(
             system=system, user=input, model=chosen_model, max_tokens=max_tokens,
             schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
             meta_out=meta,
         )
     else:
+        # call_md has no cacheable-prefix path; fold the method into the system
+        # prompt (method first, agent layer after) so the binding still applies.
+        md_system = f"{method_block}\n{system}" if method_block else system
         output = call_md(
-            system=system, user=input, model=chosen_model, max_tokens=max_tokens,
+            system=md_system, user=input, model=chosen_model, max_tokens=max_tokens,
             meta_out=meta,
         )
     latency_ms = int((time.monotonic() - t0) * 1000)
