@@ -6,6 +6,7 @@
 // ApproveModal closing. Its open/close state lives in the shared navigation
 // modal union (`activeModal === "generate"`), not local component state.
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useWorkspace } from "../../context/WorkspaceContext"
@@ -33,6 +34,7 @@ const MIN_VISIBLE_MS = 2500
 const SAFETY_MAX_MS = 6.5 * 60 * 1000
 
 export function ApproveModal() {
+  const router = useRouter()
   const { activeModal, openModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas, showToast } =
     useNavigation()
   const { content } = useContent()
@@ -161,12 +163,22 @@ export function ApproveModal() {
     setApplyTarget(null)
     setUrlPrdSections(undefined)
     setUrlPrdTitle(null)
-    urlResolvedIdRef.current = null
+    // Keep the resolved-id sentinel at its current value (the URL prototype id)
+    // rather than clearing it to null. Clearing it caused a re-resolution race:
+    // canvasResult → null triggered the resolver effect which, seeing
+    // urlResolvedIdRef.current = null while canvasPrototypeId was still the old
+    // id (Next.js router.push is async), would re-fetch and re-open the canvas
+    // before the /prd navigation completed, making the breadcrumb appear to do
+    // nothing on the standalone /design/[id] route.
+    urlResolvedIdRef.current = canvasPrototypeId
     // Leave the canvas route so the URL and view stay consistent and the
     // resolver does not immediately re-open the canvas. The canvas opens from
     // the approved PRD, so the PRD is its logical parent.
-    if (canvasPrototypeId != null) goTo("prd")
-  }, [canvasPrototypeId, goTo])
+    if (canvasPrototypeId != null) {
+      goTo("prd")
+      router.push("/prd")
+    }
+  }, [canvasPrototypeId, goTo, router])
 
   // After a Share or an iterate advances the
   // SAME prototype, re-fetch the record so the in-canvas share-gated CommentsPanel
