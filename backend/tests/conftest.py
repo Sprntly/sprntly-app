@@ -228,7 +228,7 @@ CREATE TABLE company_members (
     company_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
     user_id    TEXT NOT NULL,
     role       TEXT NOT NULL DEFAULT 'member'
-                CHECK (role IN ('owner', 'admin', 'member')),
+                CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, user_id)
 );
@@ -371,6 +371,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     full_name  TEXT,
     first_name TEXT,
     last_name  TEXT,
+    avatar_url TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

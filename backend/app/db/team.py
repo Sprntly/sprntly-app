@@ -15,20 +15,59 @@ from app.db.client import require_client
 
 
 def list_company_members(company_id: str) -> list[dict]:
-    """All company_members rows for `company_id`.
+    """All company_members rows for `company_id`, enriched with profile
+    display data.
 
-    Each row: {id, user_id, role, created_at}. The Settings page may
-    later join in `profiles` (name/email) for display; routes do that
-    on top, not the DB helper.
+    Each row carries:
+      id, user_id, role, created_at,
+      display_name (full_name → first+last fallback → None),
+      email, avatar_url
+
+    The profile fields default to None when no `profiles` row exists for
+    the user (brand-new auth.users without a profile, test fixtures
+    that skip the profile seed, etc.). Routes pass these through to the
+    Settings → Team & roles page (mockup needs name + email + avatar).
     """
     client = require_client()
-    result = (
+    members = (
         client.table("company_members")
         .select("id, user_id, role, created_at")
         .eq("company_id", company_id)
         .execute()
+        .data
+        or []
     )
-    return result.data or []
+    if not members:
+        return []
+
+    user_ids = [m["user_id"] for m in members]
+    profiles_resp = (
+        client.table("profiles")
+        .select("id, email, full_name, first_name, last_name, avatar_url")
+        .in_("id", user_ids)
+        .execute()
+    )
+    by_id = {p["id"]: p for p in (profiles_resp.data or [])}
+
+    enriched: list[dict] = []
+    for m in members:
+        prof = by_id.get(m["user_id"]) or {}
+        full = (prof.get("full_name") or "").strip()
+        first = (prof.get("first_name") or "").strip()
+        last = (prof.get("last_name") or "").strip()
+        display = full or (f"{first} {last}".strip() if (first or last) else None) or None
+        enriched.append(
+            {
+                "id": m.get("id"),
+                "user_id": m["user_id"],
+                "role": m.get("role"),
+                "created_at": m.get("created_at"),
+                "display_name": display,
+                "email": prof.get("email"),
+                "avatar_url": prof.get("avatar_url"),
+            }
+        )
+    return enriched
 
 
 def list_pending_invites(company_id: str) -> list[dict]:

@@ -1,4 +1,4 @@
-// View tests for the Settings → Team & roles pane (C4 of the team-roles slice).
+// View tests for the redesigned Settings → Team & roles pane (SC3).
 // Same node-env SSR pattern as ConnectorsSettings.test.tsx.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
@@ -19,9 +19,27 @@ const ADMIN_ID = "user-admin"
 const MEMBER_ID = "user-member"
 
 const members: TeamMember[] = [
-  { user_id: OWNER_ID, role: "owner", display: "Owner Person", email: "owner@co.com" },
-  { user_id: ADMIN_ID, role: "admin", display: "Admin Person", email: "admin@co.com" },
-  { user_id: MEMBER_ID, role: "member", display: "Mem Person", email: "mem@co.com" },
+  {
+    user_id: OWNER_ID,
+    role: "owner",
+    display_name: "Owner Person",
+    email: "owner@co.com",
+    avatar_url: null,
+  },
+  {
+    user_id: ADMIN_ID,
+    role: "admin",
+    display_name: "Admin Person",
+    email: "admin@co.com",
+    avatar_url: null,
+  },
+  {
+    user_id: MEMBER_ID,
+    role: "member",
+    display_name: "Mem Person",
+    email: "mem@co.com",
+    avatar_url: null,
+  },
 ]
 
 const invites: TeamInvite[] = [
@@ -37,11 +55,13 @@ function render(override: Partial<React.ComponentProps<typeof TeamSettingsView>>
     currentUserRole: "owner",
     loading: false,
     loadError: null,
+    showInviteForm: false,
     inviteEmail: "",
     inviteRole: "member",
     inviteSubmitting: false,
     inviteError: null,
     inviteNotice: null,
+    onToggleInviteForm: noop,
     onChangeInviteEmail: noop,
     onChangeInviteRole: noop,
     onSubmitInvite: noopAsync,
@@ -55,16 +75,38 @@ function render(override: Partial<React.ComponentProps<typeof TeamSettingsView>>
   )
 }
 
-describe("TeamSettingsView — chrome", () => {
-  it("renders the section title and sub-copy", () => {
+describe("TeamSettingsView — chrome (mockup-aligned)", () => {
+  it("uses the mockup's set-pane / set-h / set-sub structure", () => {
     const html = render()
+    expect(html).toContain('class="set-pane sp-team"')
+    expect(html).toContain('class="set-h"')
     expect(html).toContain("Team &amp; roles")
-    // Some hint about the page's purpose.
-    expect(html.toLowerCase()).toContain("invite")
+    expect(html).toContain("Anyone on your team can sign in")
+  })
+
+  it("renders two set-block cards (combined roster + roles ref)", () => {
+    const html = render()
+    const matches = html.match(/class="set-block"/g) || []
+    expect(matches.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it("renders the combined header count ('3 members · 2 pending invites')", () => {
+    const html = render()
+    expect(html).toContain("3 members")
+    expect(html).toContain("2 pending invites")
+  })
+
+  it("singularises counts (1 member · 1 pending invite)", () => {
+    const html = render({
+      members: [members[0]],
+      invites: [invites[0]],
+    })
+    expect(html).toContain("1 member ")
+    expect(html).toContain("1 pending invite")
   })
 
   it("shows loading state when loading=true", () => {
-    expect(render({ loading: true })).toContain("Loading")
+    expect(render({ loading: true })).toContain("Loading team")
   })
 
   it("shows load error when set", () => {
@@ -72,72 +114,92 @@ describe("TeamSettingsView — chrome", () => {
   })
 })
 
-describe("TeamSettingsView — members table", () => {
-  it("renders every member with their role", () => {
+describe("TeamSettingsView — combined roster", () => {
+  it("renders all members AND all pending invites in one list", () => {
     const html = render()
     expect(html).toContain("owner@co.com")
     expect(html).toContain("admin@co.com")
     expect(html).toContain("mem@co.com")
-    // role chips/labels
-    expect(html.toLowerCase()).toContain("owner")
-    expect(html.toLowerCase()).toContain("admin")
-    expect(html.toLowerCase()).toContain("member")
+    expect(html).toContain("pending1@co.com")
+    expect(html).toContain("pending2@co.com")
   })
 
-  it("admin role unlocks the role <select> and remove control", () => {
+  it("renders an Active status chip per member and Invited per invite", () => {
+    const html = render()
+    const active = html.match(/class="st active"/g) || []
+    expect(active.length).toBe(members.length)
+    const invited = html.match(/class="st invited"/g) || []
+    expect(invited.length).toBe(invites.length)
+  })
+
+  it("renders an avatar per row (member + invite)", () => {
+    const html = render()
+    const avatars = html.match(/class="set-team-row-av"/g) || []
+    expect(avatars.length).toBe(members.length + invites.length)
+  })
+
+  it("admin sees the 3-dot actions menu (<details>)", () => {
     const html = render({ currentUserRole: "admin", currentUserId: ADMIN_ID })
-    // Some role-edit control is present.
-    expect(html).toContain("<select")
-    // Remove control is present.
-    expect(html.toLowerCase()).toContain("remove")
+    expect(html).toContain('class="set-team-row-actions"')
+    expect(html).toContain("⋯")
   })
 
-  it("member role: no role <select>, no remove buttons", () => {
+  it("member viewer: no actions menu, no role <select>", () => {
     const html = render({ currentUserRole: "member", currentUserId: MEMBER_ID })
+    expect(html).not.toContain('class="set-team-row-actions"')
     expect(html).not.toContain("<select")
-    expect(html.toLowerCase()).not.toContain("remove")
   })
 
-  it("owner is flagged in the row (not editable away on the UI level when sole owner)", () => {
+  it("viewer-role caller: same read-only treatment as member", () => {
+    const html = render({ currentUserRole: "viewer", currentUserId: MEMBER_ID })
+    expect(html).not.toContain('class="set-team-row-actions"')
+    expect(html).not.toContain("<select")
+  })
+
+  it("sole-owner row has its role select disabled (kept guard, decision 3-A)", () => {
     const html = render({
-      members: [members[0]], // only the owner
+      members: [members[0]],
       currentUserRole: "owner",
       currentUserId: OWNER_ID,
     })
-    // A 'last owner' or 'sole owner' marker, OR the select for that row is disabled.
-    expect(
-      html.toLowerCase().includes("sole owner") ||
-        html.toLowerCase().includes("last owner") ||
-        html.includes("disabled"),
-    ).toBe(true)
+    expect(html).toMatch(/<select[^>]*\bdisabled\b/)
+  })
+
+  it("includes Viewer in the member role select dropdown", () => {
+    const html = render({ currentUserRole: "admin", currentUserId: ADMIN_ID })
+    expect(html).toContain('value="viewer"')
+    expect(html).toContain(">Viewer<")
   })
 })
 
 describe("TeamSettingsView — invite form", () => {
-  it("renders the invite form when caller is admin", () => {
-    const html = render({ currentUserRole: "admin", currentUserId: ADMIN_ID })
-    // An email input + a role select + a submit button.
-    expect(html).toContain('type="email"')
-    expect(html.toLowerCase()).toContain("invite")
-  })
-
-  it("hides the invite form when caller is a member", () => {
-    const html = render({ currentUserRole: "member", currentUserId: MEMBER_ID })
+  it("invite form hidden by default", () => {
+    const html = render()
     expect(html).not.toContain('type="email"')
   })
 
-  it("shows inline invite error", () => {
-    expect(
-      render({ inviteError: "That email is already a member" }),
-    ).toContain("That email is already a member")
+  it("admin sees + Invite teammate trigger", () => {
+    const html = render({ currentUserRole: "admin", currentUserId: ADMIN_ID })
+    expect(html).toContain("+ Invite teammate")
   })
 
-  it("disables submit while submitting=true", () => {
-    const html = render({ inviteSubmitting: true })
+  it("member doesn't see the invite trigger", () => {
+    const html = render({ currentUserRole: "member", currentUserId: MEMBER_ID })
+    expect(html).not.toContain("Invite teammate")
+  })
+
+  it("renders inline form when showInviteForm=true", () => {
+    const html = render({ showInviteForm: true })
+    expect(html).toContain('type="email"')
+    expect(html).toContain(">Viewer<")
+  })
+
+  it("submit disabled while submitting", () => {
+    const html = render({ showInviteForm: true, inviteSubmitting: true })
     expect(html).toContain("disabled")
   })
 
-  it("shows 'invite emailed' notice when inviteNotice.kind === 'sent'", () => {
+  it("shows 'invite emailed' notice on sent", () => {
     const html = render({
       inviteNotice: { kind: "sent", email: "fresh@co.com" },
     })
@@ -145,36 +207,26 @@ describe("TeamSettingsView — invite form", () => {
     expect(html).toContain("fresh@co.com")
   })
 
-  it("shows 'email didn't send — Resend' warning when kind === 'saved'", () => {
+  it("shows warning on saved-without-email", () => {
     const html = render({
       inviteNotice: { kind: "saved", email: "fresh@co.com" },
     })
     expect(html.toLowerCase()).toContain("didn&#x27;t send")
-    expect(html).toContain("fresh@co.com")
   })
 })
 
-describe("TeamSettingsView — pending invites table", () => {
-  it("lists every pending invite", () => {
+describe("TeamSettingsView — Roles reference block", () => {
+  it("renders all four role descriptions", () => {
     const html = render()
-    expect(html).toContain("pending1@co.com")
-    expect(html).toContain("pending2@co.com")
+    expect(html).toMatch(/<strong>\s*Owner\s*<\/strong>/)
+    expect(html).toMatch(/<strong>\s*Admin\s*<\/strong>/)
+    expect(html).toMatch(/<strong>\s*Member\s*<\/strong>/)
+    expect(html).toMatch(/<strong>\s*Viewer\s*<\/strong>/)
   })
 
-  it("renders revoke + resend controls when admin", () => {
-    const html = render({ currentUserRole: "admin", currentUserId: ADMIN_ID })
-    expect(html.toLowerCase()).toContain("revoke")
-    expect(html.toLowerCase()).toContain("resend")
-  })
-
-  it("no controls for member viewer", () => {
-    const html = render({ currentUserRole: "member", currentUserId: MEMBER_ID })
-    expect(html.toLowerCase()).not.toContain("revoke")
-    expect(html.toLowerCase()).not.toContain("resend")
-  })
-
-  it("renders empty-state when no invites", () => {
-    const html = render({ invites: [] })
-    expect(html.toLowerCase()).toContain("no pending")
+  it("uses the set-row primitives for the role reference", () => {
+    const html = render()
+    const setRows = html.match(/class="set-row"/g) || []
+    expect(setRows.length).toBeGreaterThanOrEqual(4)
   })
 })
