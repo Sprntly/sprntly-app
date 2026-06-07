@@ -88,12 +88,14 @@ from app.design_agent.prompts import (
     render_scaffold_user,
 )
 from app.design_agent.event_stream import publish_step, subscribe as _sse_subscribe
-from app.design_agent.progress import VITE_PHASE_STEP
-from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
+from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
+from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_typecheck_run
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.storage import (
     TypeCheckError,
+    TypeCheckRepairExhausted,
     ViteBuildError,
+    repair_unresolved_relative_imports,
     stage_bundle,
     stage_preview_image,
     vite_build,
@@ -567,6 +569,10 @@ async def _run_generation_bg(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
                 virtual_fs=virtual_fs,
+                system_blocks=system_blocks,
+                figma_file_key=figma_file_key,
+                figma_node_id=figma_node_id,
+                scenario=scenario_label,
             )
         elif result.status == "complete" and not virtual_fs:
             fail_prototype(
@@ -609,11 +615,94 @@ async def _run_generation_bg(
         )
 
 
+# The post-build typecheck-repair loop: at most a few agent re-entries, each held
+# under its own small spend budget so repair can never reignite the very cost
+# pressure that caused the dangling-import failure in the first place.
+_TYPECHECK_REPAIR_MAX_ITERS = 3
+_TYPECHECK_REPAIR_CAP_USD = 0.10
+
+
+async def _typecheck_repair_loop(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    virtual_fs: dict[str, str],
+    system_blocks: list[dict],
+    figma_file_key: str | None,
+    figma_node_id: str | None,
+    scenario: str,
+    first_diagnostics: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Recover a build that failed its runtime-breaking type check.
+
+    Re-enter the agent up to a few times to write the missing file(s) the build
+    referenced, rebuilding after each pass. Returns `(dist_files, repaired_fs)` on
+    a green build. On exhaustion — re-tries used or the repair spend budget reached
+    — deterministically drop the dangling imports (the same strip the build's own
+    repair uses) and rebuild once, so the prototype still renders (incomplete but
+    visible). If even that still fails, raise TypeCheckRepairExhausted so the
+    caller fails the row with a precise reason.
+
+    Repair spend is tracked on its own budget, independent of the generation soft
+    and hard caps, so a repair turn can run even when the original generation was
+    stopped for cost. The agent sees the compiler diagnostics, but they are pinned
+    behind a generic progress label, so they never reach a user-facing step event.
+    """
+    # Show a single calm step the moment repair begins, so the user never sees the
+    # build stall in the gap between the failed build and the first repair re-entry.
+    publish_step(prototype_id, FINISHING_STEP)
+    diagnostics = first_diagnostics
+    repair_cost_usd = 0.0
+    for _ in range(_TYPECHECK_REPAIR_MAX_ITERS):
+        if repair_cost_usd >= _TYPECHECK_REPAIR_CAP_USD:
+            break
+        result, virtual_fs = await repair_typecheck_run(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            system_blocks=system_blocks,
+            virtual_fs=virtual_fs,
+            diagnostics=diagnostics,
+            figma_file_key=figma_file_key,
+            figma_node_id=figma_node_id,
+            scenario=scenario,
+        )
+        repair_cost_usd += result.usage.est_cost_usd(MODEL)
+        try:
+            dist_files, virtual_fs = await vite_build_with_repair(virtual_fs)
+            logger.info(
+                "typecheck_repair_succeeded prototype_id=%s repair_cost_usd=%.4f",
+                prototype_id, repair_cost_usd,
+            )
+            return dist_files, virtual_fs
+        except TypeCheckError as exc:
+            diagnostics = str(exc)  # feed the residual diagnostics into the next pass
+            continue
+        # A non-typecheck build failure (bad JSX, timeout, unresolved import the
+        # build's own repair could not fix) propagates to the caller and fails the
+        # row, exactly as a first-build failure of that kind does.
+    # Exhausted: deterministically drop the dangling imports and rebuild once.
+    logger.info(
+        "typecheck_repair_exhausted prototype_id=%s repair_cost_usd=%.4f action=strip_to_green",
+        prototype_id, repair_cost_usd,
+    )
+    stripped_fs, _actions = repair_unresolved_relative_imports(virtual_fs)
+    try:
+        return await vite_build_with_repair(stripped_fs)
+    except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
+        raise TypeCheckRepairExhausted(
+            f"type check still failing after repair and strip: {exc}"
+        ) from exc
+
+
 async def _stage_complete_run(
     *,
     prototype_id: int,
     workspace_id: str,
     virtual_fs: dict[str, str],
+    system_blocks: list[dict] | None = None,
+    figma_file_key: str | None = None,
+    figma_node_id: str | None = None,
+    scenario: str = "A",
 ) -> None:
     """Post-run hook (P1-08): vite_build → checkpoint → stage_bundle → complete.
 
@@ -646,13 +735,50 @@ async def _stage_complete_run(
     publish_step(prototype_id, VITE_PHASE_STEP)
     try:
         dist_files, repaired_virtual_fs = await vite_build_with_repair(virtual_fs)
-    except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
-        # P3-15 (B3): TypeCheckError joins the precise build-failure tuple so a
-        # runtime-break diagnostic routes to fail_prototype with the diagnostic in
-        # `prototypes.error` (NOT the generic outer except — which would lose this
-        # precise handling). error_class only in the log (Rule #24 — no
-        # stderr/secrets); the full message (incl. fatal codes) goes to the row's
-        # error column.
+    except TypeCheckError as exc:
+        # A runtime-breaking type error (most often a screen the agent imported but
+        # was cut off before writing) does NOT fail outright. Re-enter the agent a
+        # few times to write the missing file(s); on exhaustion, deterministically
+        # drop the dangling imports so the prototype still renders. Only if we have
+        # the agent context to re-enter with — a direct staging call without it
+        # falls back to failing precisely, as before.
+        if system_blocks is None:
+            logger.warning(
+                "vite_build_failed prototype_id=%s error_class=%s",
+                prototype_id, type(exc).__name__,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        try:
+            dist_files, repaired_virtual_fs = await _typecheck_repair_loop(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                virtual_fs=virtual_fs,
+                system_blocks=system_blocks,
+                figma_file_key=figma_file_key,
+                figma_node_id=figma_node_id,
+                scenario=scenario,
+                first_diagnostics=str(exc),
+            )
+        except (ViteBuildError, FileNotFoundError, TypeCheckError) as repair_exc:
+            logger.warning(
+                "typecheck_repair_failed prototype_id=%s error_class=%s",
+                prototype_id, type(repair_exc).__name__,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=f"{type(repair_exc).__name__}: {repair_exc}",
+            )
+            return
+    except (ViteBuildError, FileNotFoundError) as exc:
+        # A build failure with no repair path (bad JSX, timeout, missing runtime,
+        # or unresolved imports the build's own repair could not fix) marks the row
+        # failed. error_class only in the log; the full message goes to the row.
         logger.warning(
             "vite_build_failed prototype_id=%s error_class=%s",
             prototype_id, type(exc).__name__,

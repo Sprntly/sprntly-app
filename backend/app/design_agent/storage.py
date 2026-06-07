@@ -100,6 +100,13 @@ class TypeCheckError(RuntimeError):
     tuple to include this (P3-15 B3) so it gets the same fail_prototype handling."""
 
 
+class TypeCheckRepairExhausted(TypeCheckError):
+    """The post-build typecheck-repair loop ran its bounded re-tries and the built
+    bundle still carries a runtime-breaking diagnostic. Distinct subclass of
+    TypeCheckError, so callers that catch TypeCheckError still catch it, but the
+    route can surface a precise error name in the failed row and the logs."""
+
+
 # ─── Vite build (where the anchor-id plugin runs — AD4) ─────────────────────
 
 

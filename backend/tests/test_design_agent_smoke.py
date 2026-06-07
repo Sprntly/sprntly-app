@@ -589,19 +589,24 @@ async def test_cost_lines_no_content_leak(env, monkeypatch, caplog):
         assert "sk-" not in line, f"api-key-shaped token in {op} line: {line!r}"
 
 
-def test_runner_has_three_cost_call_sites():
-    """AC6: runner.py calls log_llm_run at exactly three sites (scaffold,
-    iterate, manual-edit), each with its operation + mode literal. A new run mode
-    added without the cost line drops the count and fails this guard."""
+def test_runner_has_four_cost_call_sites():
+    """AC6: runner.py calls log_llm_run at exactly four sites (scaffold, iterate,
+    manual-edit, and the post-build typecheck-repair re-entry), each with its
+    operation literal. A new run mode added without the cost line drops the count
+    and fails this guard."""
     import app.design_agent.runner as runner_mod
 
     src = Path(runner_mod.__file__).read_text(encoding="utf-8")
     call_sites = re.findall(r"\blog_llm_run\(", src)
-    assert len(call_sites) == 3, (
-        f"expected 3 log_llm_run call sites in runner.py, found {len(call_sites)}"
+    assert len(call_sites) == 4, (
+        f"expected 4 log_llm_run call sites in runner.py, found {len(call_sites)}"
     )
     for op in _COST_OP.values():
         assert f'operation="{op}"' in src, f"missing operation={op!r} call in runner.py"
+    # The typecheck-repair re-entry is instrumented too; it reuses the scaffold mode.
+    assert 'operation="design_agent.run.typecheck_repair"' in src, (
+        "missing operation for the typecheck-repair re-entry in runner.py"
+    )
     for mode in ("scaffold", "iterate", "manual"):
         assert f'"mode": "{mode}"' in src, f"missing mode={mode!r} identifier in runner.py"
 

@@ -54,7 +54,7 @@ from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
 from app.design_agent.event_stream import close as _sse_close
 from app.design_agent.event_stream import publish_step
-from app.design_agent.progress import friendly_step
+from app.design_agent.progress import FINISHING_LABEL, friendly_step
 from app.design_agent.prompts import DESIGN_AGENT_ITERATE_SYSTEM
 from app.design_agent.storage import read_source_files_for_checkpoint
 from app.design_agent.tools import (
@@ -207,18 +207,20 @@ def _hash_tool_call(name: str, input: dict[str, Any]) -> str:
 def _wrap_up_nudge(iters_remaining: int) -> str:
     if iters_remaining <= 2:
         return (
-            f"You have {iters_remaining} tool-call turn(s) left. STOP now: finish "
-            f"the current file, do NOT start new ones, then end your turn with a "
-            f"1-2 sentence summary. A cut-off build is lost. If you imported a file "
-            f"you have not written, remove that import now — a build cannot resolve "
-            f"a missing file."
+            f"You have {iters_remaining} tool-call turn(s) left. FIRST, if you "
+            f"imported any file you have not written yet, remove that import now — a "
+            f"build cannot resolve a missing file and the whole prototype will fail "
+            f"to load. THEN STOP now: finish the current file, do NOT start new "
+            f"ones, and end your turn with a 1-2 sentence summary. A cut-off build "
+            f"is lost."
         )
     return (
-        f"You have ~{iters_remaining} tool-call turns left. Start converging: make "
-        f"the core flow navigable, batch any remaining writes, prefer finishing the "
-        f"primary flow over adding screens. End your turn (no tool calls) as soon as "
-        f"the core flow works. If you imported a file you have not written, remove "
-        f"that import now — a build cannot resolve a missing file."
+        f"You have ~{iters_remaining} tool-call turns left. FIRST, if you imported "
+        f"any file you have not written yet, remove that import now — a build cannot "
+        f"resolve a missing file. Start converging: make the core flow navigable, "
+        f"batch any remaining writes, and prefer finishing the primary flow over "
+        f"adding screens. End your turn (no tool calls) as soon as the core flow "
+        f"works."
     )
 
 
@@ -358,6 +360,7 @@ async def agent_loop(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     scenario: str = "A",
     mode: str = "scaffold",
+    progress_label: str | None = None,
 ) -> RunResult:
     """Run the agent's tool-use loop until end_turn / max_iters.
 
@@ -402,9 +405,17 @@ async def agent_loop(
             # non-blocking: never raises, never alters loop behaviour. The
             # frontend poll loop remains the source of truth for terminal state;
             # these are progress breadcrumbs only.
+            # When the caller pins a generic label (the post-build typecheck-repair
+            # loop does this), use it for every step so the compiler diagnostics fed
+            # to the agent can never surface in a user-facing step; otherwise use the
+            # normal per-iteration build label.
             publish_step(
                 ctx.prototype_id,
-                {"kind": "step", "text": _step_label(iters, mode), "state": "active"},
+                {
+                    "kind": "step",
+                    "text": progress_label or _step_label(iters, mode),
+                    "state": "active",
+                },
             )
 
             # Graduated wrap-up pressure (per agent-build-research.md §4.2) with
@@ -436,7 +447,7 @@ async def agent_loop(
                         if etype == "RawContentBlockStartEvent":
                             block = getattr(event, "content_block", None)
                             if block and getattr(block, "type", None) == "tool_use":
-                                label = friendly_step(getattr(block, "name", ""), None)
+                                label = progress_label or friendly_step(getattr(block, "name", ""), None)
                                 if label != _last_step[0]:
                                     _last_step[0] = label
                                     loop.call_soon_threadsafe(
@@ -838,6 +849,81 @@ async def generate_prototype(
     log_llm_run(
         operation="design_agent.run.complete",
         identifier=run_identifier,
+        usage=result.usage,
+        duration_ms=result.duration_ms,
+        status=result.status,
+        model=MODEL,
+        error_class=result.error_class,
+        iters=result.iters,
+    )
+    return result, ctx.virtual_fs
+
+
+def _render_typecheck_repair_user(diagnostics: str) -> str:
+    """Build the user turn for a repair re-entry. Plain English; the diagnostics
+    are the build's own message (real file and symbol names), never internal IDs."""
+    return (
+        "The prototype was built, but it will not run yet. The compiler found "
+        "references to things that do not exist:\n\n"
+        f"{diagnostics}\n\n"
+        "Fix this so the app runs. For each problem, either write the missing file "
+        "or, if the reference is left over and no longer needed, remove the import "
+        "that points at it. Prefer writing the missing screen so the flow stays "
+        "complete. Make the smallest set of changes that resolves every problem, "
+        "then end your turn with a one-sentence summary. Do not start unrelated work."
+    )
+
+
+async def repair_typecheck_run(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    system_blocks: list[dict[str, Any]],
+    virtual_fs: dict[str, str],
+    diagnostics: str,
+    figma_file_key: str | None = None,
+    figma_node_id: str | None = None,
+    scenario: str = "A",
+    max_iters: int = 6,
+) -> tuple[RunResult, dict[str, str]]:
+    """Re-enter the agent once to repair a runtime-breaking type diagnostic.
+
+    Used by the route's post-build typecheck-repair loop: the agent is handed the
+    files it already built plus the compiler diagnostics and asked to write the
+    missing file(s) or drop the dangling import so the bundle resolves. Returns
+    `(result, virtual_fs)` — the second element is the (possibly) updated source.
+
+    Runs with the same scaffold tools as the first pass, but pins a generic
+    progress label so the diagnostics handed to it here never reach a user-facing
+    step event. The Figma token is re-resolved best-effort so a repair turn can
+    still read the design if it needs to. The caller's `virtual_fs` is copied, not
+    mutated in place.
+    """
+    figma_access_token = _resolve_figma_access_token(figma_file_key, workspace_id)
+    ctx = ToolContext(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        virtual_fs=dict(virtual_fs),
+        figma_file_key=figma_file_key,
+        figma_node_id=figma_node_id,
+        figma_access_token=figma_access_token,
+    )
+    user_message = {
+        "role": "user",
+        "content": [{"type": "text", "text": _render_typecheck_repair_user(diagnostics)}],
+    }
+    result = await agent_loop(
+        system_blocks=system_blocks,
+        user_message=user_message,
+        ctx=ctx,
+        max_iters=max_iters,
+        scenario=scenario,
+        mode="scaffold",
+        progress_label=FINISHING_LABEL,
+    )
+    log_llm_run(
+        operation="design_agent.run.typecheck_repair",
+        identifier={"prototype_id": prototype_id, "scenario": scenario, "mode": "scaffold"},
         usage=result.usage,
         duration_ms=result.duration_ms,
         status=result.status,
