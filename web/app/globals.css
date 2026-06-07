@@ -2564,6 +2564,8 @@
   .team-invite-form { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; }
   .settings-input { font-size: 13px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
   .settings-error { font-size: 12.5px; color: #b00020; margin-top: 8px; }
+  .settings-notice { font-size: 12.5px; color: var(--accent); margin-top: 8px; }
+  .settings-warning { font-size: 12.5px; color: #b07000; margin-top: 8px; }
   .btn { font-size: 13px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: pointer; }
   .btn.primary { background: var(--ink); color: var(--nav-text-hover); border-color: var(--ink); }
   .btn.primary:disabled { opacity: 0.5; cursor: not-allowed; }

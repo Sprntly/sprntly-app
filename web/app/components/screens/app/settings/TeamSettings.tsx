@@ -42,6 +42,10 @@ export type TeamInvite = {
   email: string
   role: InviteRole
   created_at: string | null
+  /** Whether the backend successfully fired the Supabase magic-link
+   * email. Only present on POST /invites and POST /invites/{id}/resend
+   * responses (the list endpoint omits it). */
+  email_sent?: boolean
 }
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -59,6 +63,13 @@ export type TeamSettingsViewProps = {
   inviteRole: InviteRole
   inviteSubmitting: boolean
   inviteError: string | null
+  /**
+   * Last invite/resend feedback. `kind: "sent"` means Supabase fired the
+   * magic-link email; `kind: "saved"` means the invite row persisted but
+   * the email send failed — the inviter should share the accept URL
+   * manually. Null = no recent feedback.
+   */
+  inviteNotice: { kind: "sent" | "saved"; email: string } | null
   onChangeInviteEmail: (value: string) => void
   onChangeInviteRole: (value: InviteRole) => void
   onSubmitInvite: () => Promise<void>
@@ -84,6 +95,7 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
     inviteRole,
     inviteSubmitting,
     inviteError,
+    inviteNotice,
     onChangeInviteEmail,
     onChangeInviteRole,
     onSubmitInvite,
@@ -208,6 +220,19 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
             </button>
           </form>
           {inviteError && <p className="settings-error">{inviteError}</p>}
+          {inviteNotice && !inviteError && (
+            <p
+              className={
+                inviteNotice.kind === "sent"
+                  ? "settings-notice"
+                  : "settings-warning"
+              }
+            >
+              {inviteNotice.kind === "sent"
+                ? `Invite emailed to ${inviteNotice.email}.`
+                : `Invite saved for ${inviteNotice.email}, but the email didn't send. Click Resend to retry.`}
+            </p>
+          )}
         </div>
       )}
 
@@ -294,6 +319,9 @@ export function TeamSettings() {
   const [inviteRole, setInviteRole] = useState<InviteRole>("member")
   const [inviteSubmitting, setInviteSubmitting] = useState(false)
   const [inviteError, setInviteError] = useState<string | null>(null)
+  const [inviteNotice, setInviteNotice] = useState<
+    { kind: "sent" | "saved"; email: string } | null
+  >(null)
 
   const currentUserId = auth.kind === "authed" ? auth.user.id : ""
   const currentRow = members.find((m) => m.user_id === currentUserId)
@@ -334,10 +362,15 @@ export function TeamSettings() {
     if (!email) return
     setInviteSubmitting(true)
     setInviteError(null)
+    setInviteNotice(null)
     try {
-      await teamApi.invite(email, inviteRole)
+      const created = await teamApi.invite(email, inviteRole)
       setInviteEmail("")
       setInviteRole("member")
+      setInviteNotice({
+        kind: created.email_sent ? "sent" : "saved",
+        email: created.email,
+      })
       await reload()
     } catch (e) {
       setInviteError(e instanceof Error ? e.message : String(e))
@@ -350,6 +383,7 @@ export function TeamSettings() {
     void (async () => {
       try {
         await teamApi.revokeInvite(id)
+        setInviteNotice(null)
         await reload()
       } catch (e) {
         setInviteError(e instanceof Error ? e.message : String(e))
@@ -360,7 +394,12 @@ export function TeamSettings() {
   function resend(id: string) {
     void (async () => {
       try {
-        await teamApi.resendInvite(id)
+        const updated = await teamApi.resendInvite(id)
+        setInviteError(null)
+        setInviteNotice({
+          kind: updated.email_sent ? "sent" : "saved",
+          email: updated.email,
+        })
         await reload()
       } catch (e) {
         setInviteError(e instanceof Error ? e.message : String(e))
@@ -403,6 +442,7 @@ export function TeamSettings() {
       inviteRole={inviteRole}
       inviteSubmitting={inviteSubmitting}
       inviteError={inviteError}
+      inviteNotice={inviteNotice}
       onChangeInviteEmail={setInviteEmail}
       onChangeInviteRole={setInviteRole}
       onSubmitInvite={submitInvite}

@@ -41,6 +41,7 @@ function render(override: Partial<React.ComponentProps<typeof TeamSettingsView>>
     inviteRole: "member",
     inviteSubmitting: false,
     inviteError: null,
+    inviteNotice: null,
     onChangeInviteEmail: noop,
     onChangeInviteRole: noop,
     onSubmitInvite: noopAsync,
@@ -134,6 +135,22 @@ describe("TeamSettingsView — invite form", () => {
   it("disables submit while submitting=true", () => {
     const html = render({ inviteSubmitting: true })
     expect(html).toContain("disabled")
+  })
+
+  it("shows 'invite emailed' notice when inviteNotice.kind === 'sent'", () => {
+    const html = render({
+      inviteNotice: { kind: "sent", email: "fresh@co.com" },
+    })
+    expect(html.toLowerCase()).toContain("invite emailed")
+    expect(html).toContain("fresh@co.com")
+  })
+
+  it("shows 'email didn't send — Resend' warning when kind === 'saved'", () => {
+    const html = render({
+      inviteNotice: { kind: "saved", email: "fresh@co.com" },
+    })
+    expect(html.toLowerCase()).toContain("didn&#x27;t send")
+    expect(html).toContain("fresh@co.com")
   })
 })
 

@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth import CompanyContext, require_company, require_session
+from app.team_email import send_invite_email
 from app.db.team import (
     accept_invite_for_user,
     count_owners,
@@ -114,14 +115,17 @@ def get_team_invites(company: CompanyContext = Depends(require_company)):
     }
 
 
-def _public_invite(row: dict) -> dict:
-    return {
+def _public_invite(row: dict, *, email_sent: bool | None = None) -> dict:
+    out = {
         "id": row.get("id"),
         "email": row.get("email"),
         "role": row.get("role"),
         "invited_by": row.get("invited_by"),
         "created_at": row.get("created_at"),
     }
+    if email_sent is not None:
+        out["email_sent"] = email_sent
+    return out
 
 
 @router.post("/invites", status_code=status.HTTP_201_CREATED)
@@ -149,7 +153,12 @@ def post_team_invite(
         role=body.role,
         invited_by=company.user_id,
     )
-    return _public_invite(row)
+    # Fire the Supabase magic-link email. Best-effort: if the call fails
+    # we still return 201 so the workspace_invites row stays visible in
+    # the UI, but `email_sent: false` lets the frontend nudge the
+    # inviter to resend or share the link manually.
+    email_sent = send_invite_email(body.email)
+    return _public_invite(row, email_sent=email_sent)
 
 
 @router.delete(
@@ -178,7 +187,9 @@ def resend_team_invite(
     if not invite or invite.get("company_id") != company.company_id:
         raise HTTPException(404, "Invite not found")
     updated = touch_invite(invite_id)
-    return _public_invite(updated or invite)
+    # Resend = bump created_at + actually fire a new magic-link email.
+    email_sent = send_invite_email(invite["email"])
+    return _public_invite(updated or invite, email_sent=email_sent)
 
 
 # ─────────────────────── Member edit / remove ───────────────────────
