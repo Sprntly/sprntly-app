@@ -153,9 +153,11 @@
     border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
     cursor: pointer; transition: all 0.15s ease; text-decoration: none; line-height: 1;
   }
-  .btn:hover { background: var(--surface-2); border-color: var(--ink-3); }
+  .btn:hover:not(:disabled) { background: var(--surface-2); border-color: var(--ink-3); }
   .btn-primary { background: var(--ink); color: var(--nav-text-hover); border-color: var(--ink); }
-  .btn-primary:hover { background: #000; border-color: #000; }
+  .btn-primary:hover:not(:disabled) { background: #000; border-color: #000; }
+  .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn-primary:disabled { background: var(--ink); color: var(--nav-text-hover); border-color: var(--ink); }
   .btn-accent { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn-accent:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
   .btn-ghost { background: transparent; border-color: transparent; color: var(--ink-3); }
@@ -2648,7 +2650,10 @@
   .settings-error { font-size: 12.5px; color: var(--danger); margin-top: 8px; }
   .settings-notice { font-size: 12.5px; color: var(--accent-ink); margin-top: 8px; }
   .settings-warning { font-size: 12.5px; color: var(--warn); margin-top: 8px; }
-  .btn { font-size: 13px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: pointer; }
+  .field.has-error .input, .field.has-error .textarea, .field.has-error .ob-radio-row,
+  .field.has-error .ob-chip-row, .field .input.has-error, .field .textarea.has-error { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(193, 56, 56, 0.12); }
+  .field-error { color: var(--danger); font-size: 12.5px; margin: 6px 0 0; line-height: 1.4; }
+  .team-block .btn { font-size: 13px; padding: 8px 14px; }
   .btn.primary { background: var(--ink); color: var(--nav-text-hover); border-color: var(--ink); }
   .btn.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-link { font-size: 12.5px; background: none; border: none; color: var(--ink); cursor: pointer; padding: 0; }

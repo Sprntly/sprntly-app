@@ -8,6 +8,8 @@ type Props = {
   hints?: string[]
   onNorthStarChange: (v: string) => void
   onMetricsChange: (metrics: KpiMetric[]) => void
+  northStarError?: string
+  metricsError?: string
 }
 
 export function normalizeKpiWeights(metrics: KpiMetric[]): KpiMetric[] {
@@ -26,6 +28,8 @@ export function KpiTreeEditor({
   hints = [],
   onNorthStarChange,
   onMetricsChange,
+  northStarError,
+  metricsError,
 }: Props) {
   function updateMetric(i: number, patch: Partial<KpiMetric>) {
     onMetricsChange(metrics.map((m, idx) => (idx === i ? { ...m, ...patch } : m)))
@@ -41,7 +45,7 @@ export function KpiTreeEditor({
 
   return (
     <>
-      <div className="field">
+      <div className={`field ${northStarError ? "has-error" : ""}`} data-field="northStar">
         <label className="field-label">North star metric *</label>
         <input
           className="input"
@@ -52,8 +56,9 @@ export function KpiTreeEditor({
         {hints.length > 0 && (
           <div className="ob-hints">Suggestions: {hints.join(" · ")}</div>
         )}
+        {northStarError && <p className="field-error">{northStarError}</p>}
       </div>
-      <div className="field">
+      <div className={`field ${metricsError ? "has-error" : ""}`} data-field="metrics">
         <label className="field-label">Supporting metrics (2–4) *</label>
         {metrics.map((m, i) => (
           <div key={i} className="ob-metric-block">
@@ -94,6 +99,7 @@ export function KpiTreeEditor({
             + Add metric
           </button>
         )}
+        {metricsError && <p className="field-error">{metricsError}</p>}
       </div>
     </>
   )
