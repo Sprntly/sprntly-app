@@ -1,23 +1,10 @@
 "use client"
 
-/*
- * Full-screen "Building your prototype" loading screen, shown while a prototype
- * generates and dismissed when generation resolves. Reproduces the product
- * mockup's generating block — animated forest-green orb (app `--accent` token,
- * no coral), blinking-cursor headline, status line, progress bar with elapsed
- * time, and a steps checklist. The step reveal + progress fill are COSMETIC: the
- * generation backend does not emit per-step events today, so the steps animate
- * on a local timer purely to give the wait some texture. Actual dismissal is
- * driven by the parent (`open` flips false once generation resolves AND the
- * min-visible duration has elapsed). Live per-step events are a future
- * enhancement.
- */
-
 import { useEffect, useRef, useState } from "react"
+import { designAgentApi, getAccessToken } from "../../lib/api"
 
-// Generic, plausible step labels for this app's generation. These are cosmetic
-// placeholders revealed on a local timer — the backend emits no per-step events
-// yet — not live progress.
+// Cosmetic step labels for generate mode — shown only until the SSE stream
+// delivers the first real step (or when no prototypeId is available).
 const STEPS = [
   "Reading the PRD",
   "Analyzing the design source",
@@ -27,8 +14,6 @@ const STEPS = [
   "Accessibility pass",
   "Rendering preview",
 ]
-
-// Matching ellipsised status lines for the italic status row (one per step).
 const STATUSES = [
   "Reading the PRD acceptance criteria…",
   "Analyzing the connected design source…",
@@ -38,9 +23,6 @@ const STATUSES = [
   "Accessibility pass · keyboard + screen reader…",
   "Rendering the preview frame…",
 ]
-
-// Cosmetic timings (ms). The bar fills over ESTIMATE_MS; steps advance on a
-// per-step cadence. These do NOT gate real completion — `open` does.
 const ESTIMATE_MS = 30000
 const STEP_MS = 3200
 
@@ -60,12 +42,15 @@ const REFRESH_STATUSES = [
 const REFRESH_ESTIMATE_MS = 5000
 const REFRESH_STEP_MS = 800
 
+type LiveStep = { text: string; state: "active" | "done" }
+
 export function GenerationLoadingScreen({
   open,
   onDone,
   figmaFileKey,
   githubRepo,
   mode = "generate",
+  prototypeId,
 }: {
   open: boolean
   /** Optional: fired once the exit fade completes (cosmetic hook). */
@@ -76,62 +61,134 @@ export function GenerationLoadingScreen({
   githubRepo?: string | null
   /** "generate" (default) = full generation flow; "refresh" = canvas reload. */
   mode?: "generate" | "refresh"
+  /** When provided, the component subscribes to the backend SSE stream and
+   *  renders live friendly step text instead of the cosmetic checklist. */
+  prototypeId?: number | null
 }) {
-  // Derive base arrays and timings from mode.
+  // ── Cosmetic fallback (used when no SSE stream is active) ──────────────────
   const steps = mode === "refresh" ? REFRESH_STEPS : STEPS
   const statuses = mode === "refresh" ? REFRESH_STATUSES : STATUSES
   const estimateMs = mode === "refresh" ? REFRESH_ESTIMATE_MS : ESTIMATE_MS
   const stepMs = mode === "refresh" ? REFRESH_STEP_MS : STEP_MS
 
-  // Derive source-aware first two steps (generate mode only).
   const firstStep = figmaFileKey
     ? "Reading your Figma file…"
     : githubRepo
     ? "Reading repository…"
     : steps[0]
-  const secondStep = figmaFileKey
-    ? "Analyzing the design system…"
-    : steps[1]
-  const activeSteps = mode === "generate"
-    ? [firstStep, secondStep, ...steps.slice(2)]
-    : steps
+  const secondStep = figmaFileKey ? "Analyzing the design system…" : steps[1]
+  const activeSteps =
+    mode === "generate" ? [firstStep, secondStep, ...steps.slice(2)] : steps
 
-  // Number of steps marked done (0..steps.length). The "active" step is `done`.
   const [doneCount, setDoneCount] = useState(0)
   const [elapsedMs, setElapsedMs] = useState(0)
   const startedAtRef = useRef<number>(0)
 
   useEffect(() => {
     if (!open) {
-      // Reset for the next run.
       setDoneCount(0)
       setElapsedMs(0)
       return
     }
-
     startedAtRef.current = Date.now()
     setDoneCount(0)
     setElapsedMs(0)
-
-    // Progress / elapsed ticker (100ms cadence like the mockup).
-    const tick = window.setInterval(() => {
-      setElapsedMs(Date.now() - startedAtRef.current)
-    }, 100)
-
-    // Progressive step reveal — advance one step per stepMs, but never mark the
-    // LAST step done while we're still waiting (so the final spinner keeps
-    // spinning until the parent dismisses on real completion).
-    const stepTimer = window.setInterval(() => {
-      setDoneCount((c) => (c < activeSteps.length - 1 ? c + 1 : c))
-    }, stepMs)
-
+    const tick = window.setInterval(
+      () => setElapsedMs(Date.now() - startedAtRef.current),
+      100,
+    )
+    const stepTimer = window.setInterval(
+      () => setDoneCount((c) => (c < activeSteps.length - 1 ? c + 1 : c)),
+      stepMs,
+    )
     return () => {
       window.clearInterval(tick)
       window.clearInterval(stepTimer)
     }
   }, [open, activeSteps.length, stepMs])
 
-  // Fire onDone after the overlay is removed.
+  // ── Live SSE steps ─────────────────────────────────────────────────────────
+  const [liveSteps, setLiveSteps] = useState<LiveStep[]>([])
+  const [isLiveDone, setIsLiveDone] = useState(false)
+  const esRef = useRef<EventSource | null>(null)
+
+  useEffect(() => {
+    if (!open || !prototypeId || mode !== "generate") {
+      setLiveSteps([])
+      setIsLiveDone(false)
+      return
+    }
+
+    let cancelled = false
+
+    const openEs = async () => {
+      let token: string | null = null
+      try {
+        token = await getAccessToken()
+      } catch {
+        return
+      }
+      if (cancelled || !token) return
+
+      try {
+        const url = designAgentApi.eventsUrl(prototypeId, token)
+        const es = new EventSource(url)
+        esRef.current = es
+
+        es.onmessage = (e: MessageEvent) => {
+          if (cancelled) {
+            es.close()
+            return
+          }
+          try {
+            const event = JSON.parse(e.data as string) as {
+              kind: string
+              text?: string
+            }
+            if (event.kind === "step" && event.text) {
+              setLiveSteps((prev) => {
+                const updated = prev.map((s) =>
+                  s.state === "active" ? { ...s, state: "done" as const } : s,
+                )
+                return [...updated, { text: event.text!, state: "active" }]
+              })
+            }
+            if (event.kind === "done" || event.kind === "error") {
+              setLiveSteps((prev) =>
+                prev.map((s) =>
+                  s.state === "active" ? { ...s, state: "done" as const } : s,
+                ),
+              )
+              setIsLiveDone(true)
+              es.close()
+              esRef.current = null
+            }
+          } catch {
+            // ignore parse errors
+          }
+        }
+
+        es.onerror = () => {
+          es.close()
+          esRef.current = null
+        }
+      } catch {
+        // degrade to cosmetic if EventSource construction fails
+      }
+    }
+
+    void openEs()
+
+    return () => {
+      cancelled = true
+      esRef.current?.close()
+      esRef.current = null
+      setLiveSteps([])
+      setIsLiveDone(false)
+    }
+  }, [open, prototypeId, mode])
+
+  // ── onDone hook ────────────────────────────────────────────────────────────
   const prevOpen = useRef(open)
   useEffect(() => {
     if (prevOpen.current && !open) onDone?.()
@@ -140,12 +197,25 @@ export function GenerationLoadingScreen({
 
   if (!open) return null
 
-  // Cap at 85% for generate (never completes prematurely); refresh keeps 96%.
-  const pct = mode === "refresh"
+  const isLive = liveSteps.length > 0
+
+  // Progress bar: live mode fills toward 95% over elapsed time then snaps to
+  // 100% on the done signal; cosmetic mode caps at 85%/96% as before.
+  const pct = isLive
+    ? isLiveDone
+      ? 100
+      : Math.min(95, Math.round((elapsedMs / ESTIMATE_MS) * 95))
+    : mode === "refresh"
     ? Math.min(96, Math.round((elapsedMs / estimateMs) * 100))
     : Math.min(85, Math.round((elapsedMs / estimateMs) * 85))
+
   const activeIndex = Math.min(doneCount, activeSteps.length - 1)
-  const status = statuses[activeIndex] ?? statuses[statuses.length - 1]
+  const cosmeticStatus = statuses[activeIndex] ?? statuses[statuses.length - 1]
+  const liveStatus =
+    liveSteps.find((s) => s.state === "active")?.text ??
+    liveSteps[liveSteps.length - 1]?.text ??
+    "Starting up…"
+  const status = isLive ? liveStatus : cosmeticStatus
 
   const headline =
     mode === "refresh" ? "Loading your prototype" : "Building your prototype"
@@ -175,19 +245,35 @@ export function GenerationLoadingScreen({
           </div>
         </div>
         <div className="proto-gen-steps">
-          {activeSteps.map((label, i) => {
-            const isDone = i < doneCount
-            const isActive = i === activeIndex && !isDone ? true : i === doneCount
-            const cls =
-              "proto-gen-step" +
-              (isDone ? " done" : isActive ? " active" : "")
-            return (
-              <div key={label} className={cls}>
-                {!isDone && <span className="spin" aria-hidden="true" />}
-                {label}
-              </div>
-            )
-          })}
+          {isLive
+            ? liveSteps.map((step, i) => (
+                <div
+                  key={i}
+                  className={
+                    "proto-gen-step" +
+                    (step.state === "done" ? " done" : " active")
+                  }
+                >
+                  {step.state !== "done" && (
+                    <span className="spin" aria-hidden="true" />
+                  )}
+                  {step.text}
+                </div>
+              ))
+            : activeSteps.map((label, i) => {
+                const isDone = i < doneCount
+                const isActive =
+                  i === activeIndex && !isDone ? true : i === doneCount
+                const cls =
+                  "proto-gen-step" +
+                  (isDone ? " done" : isActive ? " active" : "")
+                return (
+                  <div key={label} className={cls}>
+                    {!isDone && <span className="spin" aria-hidden="true" />}
+                    {label}
+                  </div>
+                )
+              })}
         </div>
       </div>
     </div>

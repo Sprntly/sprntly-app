@@ -97,6 +97,9 @@ type GenerateFlowDeps = {
   /** P2-12: receives the terminal poll outcome so the host can render the
    *  post-generation result view. Optional — absent in the pre-P2-12 flow. */
   onGenerated?: (result: DesignAgentGenResult) => void
+  /** Fires immediately after the generate POST returns with the new prototype_id.
+   *  Lets the loading screen subscribe to the SSE stream as soon as the agent starts. */
+  onKickoff?: (prototypeId: number) => void
 }
 
 /**
@@ -179,6 +182,7 @@ export async function runGenerateFlow({
   notifyOnReady,
   notifyOnKickoff = true,
   onGenerated,
+  onKickoff,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
   try {
@@ -186,6 +190,7 @@ export async function runGenerateFlow({
     // P5-09: persist a `pending` entry so a reload mid-generation that then
     // completes still captures the ready notification.
     markPending(kickoff.prototype_id)
+    onKickoff?.(kickoff.prototype_id)
     onOpenChange(false)
     // UX-EXPLORE (throwaway — REVERT): the kickoff "Design Agent generating"
     // toast is gated on `notifyOnKickoff` (default true → legacy drawer

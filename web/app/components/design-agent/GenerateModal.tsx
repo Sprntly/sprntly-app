@@ -60,10 +60,12 @@ export function GenerateModal({
   prdId,
   figmaFileKey,
   // Full-screen loading-screen hooks. onGenStart fires the instant the kickoff
-  // is requested (so the parent can show the overlay); onGenDone fires on the
-  // terminal generation outcome (ready/failed/timeout) so the parent can dismiss
-  // it.
+  // is requested (so the parent can show the overlay); onKickoff fires once the
+  // generate POST returns with the prototype_id (so the loading screen can subscribe
+  // to the SSE stream); onGenDone fires on the terminal generation outcome
+  // (ready/failed/timeout) so the parent can dismiss it.
   onGenStart,
+  onKickoff,
   onGenDone,
 }: {
   open: boolean
@@ -71,6 +73,8 @@ export function GenerateModal({
   prdId: number | null
   figmaFileKey: string | null
   onGenStart?: (ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => void
+  /** Fires immediately after generate POST returns with the new prototype_id. */
+  onKickoff?: (prototypeId: number) => void
   // onGenDone receives the terminal generation RESULT (DesignAgentGenResult) so
   // the parent can reveal the full-screen post-generation canvas on success. May
   // be undefined if the flow rejects before producing a result.
@@ -283,6 +287,7 @@ export function GenerateModal({
       // runGenerateFlow still toasts "Generation failed" / "Generate failed".
       notifyOnReady: false,
       notifyOnKickoff: false,
+      onKickoff,
       // runGenerateFlow fires onGenerated on the terminal poll outcome (ready OR
       // failed/timeout) — that's the dismissal signal for the loading overlay.
       // Separate from the toasts above: suppressing the toasts does not touch

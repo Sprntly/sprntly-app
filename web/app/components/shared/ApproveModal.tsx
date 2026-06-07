@@ -45,6 +45,9 @@ export function ApproveModal() {
   // Context captured at generation-start for the loading screen's source-aware steps.
   const [genFigmaKey, setGenFigmaKey] = useState<string | null>(null)
   const [genGithubRepo, setGenGithubRepo] = useState<string | null>(null)
+  // Prototype id known once the generate POST returns — lets the loading screen
+  // subscribe to the real SSE step stream immediately after kickoff.
+  const [genProtoId, setGenProtoId] = useState<number | null>(null)
   // The prototype to show in the full-screen post-generation canvas (the loading
   // takeover reveals the canvas), or null when no canvas is shown. Set on a
   // successful generation once the loading overlay dismisses; cleared by the
@@ -112,6 +115,7 @@ export function ApproveModal() {
   const handleGenStart = useCallback((ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => {
     setGenFigmaKey(ctx?.figmaFileKey ?? null)
     setGenGithubRepo(ctx?.githubRepo ?? null)
+    setGenProtoId(null)
     shownAtRef.current = Date.now()
     resolvedRef.current = false
     // Clear any canvas-to-reveal from a prior run before this generation
@@ -415,12 +419,14 @@ export function ApproveModal() {
         prdId={prd?.prd_id ?? null}
         figmaFileKey={prd?.figma_file_key ?? null}
         onGenStart={handleGenStart}
+        onKickoff={(id) => setGenProtoId(id)}
         onGenDone={handleGenDone}
       />
       <GenerationLoadingScreen
         open={genLoading}
         figmaFileKey={genFigmaKey}
         githubRepo={genGithubRepo}
+        prototypeId={genProtoId}
       />
       {canvasOverlay}
     </>
