@@ -80,6 +80,10 @@ function SignUpForm() {
         lastName,
         role,
       })
+      if (result === "already_registered") {
+        setError("An account with this email already exists. Try signing in.")
+        return
+      }
       if (result === "confirm_email") {
         router.replace(`/verify-email?email=${encodeURIComponent(email)}`)
       } else {

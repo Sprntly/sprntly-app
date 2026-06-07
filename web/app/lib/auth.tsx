@@ -24,7 +24,21 @@ type AuthState =
   | { kind: "anonymous" }
   | { kind: "unconfigured" }
 
-export type SignUpResult = "session" | "confirm_email"
+export type SignUpResult = "session" | "confirm_email" | "already_registered"
+
+/** Map a successful supabase.auth.signUp response to what the UI should do.
+ *  Confirm-email mode returns "success" with an obfuscated user carrying NO
+ *  identities when the address is already registered — and sends no email.
+ *  Surface that instead of a false "check your inbox". */
+export function interpretSignUpResponse(data: {
+  user: { identities?: unknown[] | null } | null
+  session: unknown | null
+}): SignUpResult {
+  if (data.user && (data.user.identities?.length ?? 0) === 0) {
+    return "already_registered"
+  }
+  return data.session ? "session" : "confirm_email"
+}
 
 export type SignUpInput = {
   email: string
@@ -123,7 +137,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         },
       })
       if (error) throw error
-      return data.session ? "session" : "confirm_email"
+      return interpretSignUpResponse(data)
     },
     [],
   )
