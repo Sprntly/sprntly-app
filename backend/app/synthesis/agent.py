@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from app.db.briefs import save_brief
 from app.kpi_tree import load_kpi_tree
+from app.graph.config_layers import config_get
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
@@ -25,6 +26,7 @@ from app.graph.types import Entity, Relationship
 from app.prompts import BRIEF_SCHEMA_VERSION
 from app.synthesis.convergence import ThemeConvergence, compute_convergence
 from app.synthesis.delivery import deliver_brief_to_slack
+from app.synthesis.scoring import classify_theme_fit, goal_factor
 
 logger = logging.getLogger(__name__)
 
@@ -123,10 +125,37 @@ def run_synthesis(
     cands = convergence[:MAX_CANDIDATES]
 
     tree = load_kpi_tree(enterprise_id)
+
+    # Goal-alignment factor (§4c): price KPI-tree fit into each candidate's score
+    # BEFORE the judge sees them, so the judge never re-ranks by strategic fit
+    # (no double-counting). Deterministic: base_score × goal_factor(fit).
+    goal_enabled = bool(config_get("scoring.goal_factor_enabled", enterprise_id,
+                                   default=True))
+    goal_weight = float(config_get("scoring.goal_weight", enterprise_id, default=1.0))
+    score_factors: dict[str, dict] = {}
+    for c in cands:
+        if goal_enabled:
+            fit = classify_theme_fit(facade, enterprise_id, c, tree, agent=agent)
+            factor = goal_factor(fit, goal_weight=goal_weight)
+        else:
+            fit, factor = "off", 1.0
+        adjusted = c.base_score * factor
+        score_factors[c.theme_id] = {
+            "base_score": round(c.base_score, 4),
+            "fit": fit,
+            "goal_factor": round(factor, 4),
+            "goal_adjusted_score": round(adjusted, 4),
+        }
+    cands.sort(key=lambda c: -score_factors[c.theme_id]["goal_adjusted_score"])
+
     strategic = (
-        "STRATEGIC CONTEXT — the company's KPI tree. Weigh candidates by how "
-        "directly they move these metrics (north star first, then by weight):\n"
+        "STRATEGIC CONTEXT — the company's KPI tree (for grounding and "
+        "explanations only):\n"
         + tree.render_for_prompt() + "\n\n"
+        "Strategic fit is ALREADY priced into the candidate scores and ordering "
+        "below — do NOT re-rank by strategic fit. Judge the candidates on "
+        "evidence quality, framing, and actionability. Use the tree only to "
+        "ground claims and explain impact.\n\n"
     ) if tree else ""
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="rank_brief_insights",
@@ -180,9 +209,12 @@ def run_synthesis(
                 {"theme_id": c.theme_id, "label": c.theme_label,
                  "breadth": c.breadth, "weight": round(c.effective_weight, 2),
                  "revenue": c.revenue_at_stake_usd,
-                 "competitor_pressure": c.competitor_pressure}
+                 "competitor_pressure": c.competitor_pressure,
+                 **score_factors[c.theme_id]}
                 for c in cands
             ],
+            "goal_factor_enabled": goal_enabled,
+            "goal_weight": goal_weight,
             "prompt_version": PROMPT_VERSION,
         },
         reasoning="\n".join(

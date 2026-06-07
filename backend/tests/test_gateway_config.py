@@ -149,3 +149,10 @@ def test_config_get_dotted_path(isolated_settings):
 
     assert config_get("resolution.tau_low") == 0.72
     assert config_get("nope.nothing", default="d") == "d"
+
+
+def test_goal_factor_config_keys_default(isolated_settings):
+    from app.graph.config_layers import config_get
+
+    assert config_get("scoring.goal_factor_enabled") is True
+    assert config_get("scoring.goal_weight") == 1.0

@@ -106,6 +106,8 @@ def test_synthesis_includes_strategic_context(isolated_settings, monkeypatch):
         ("revenue", "deal_blocker", {}, 1),
     ])
     monkeypatch.setattr(synth, "load_kpi_tree", lambda eid: _tree())
+    monkeypatch.setattr(synth, "classify_theme_fit",
+                        lambda *a, **k: "high")  # avoid a live classifier call
 
     captured = {}
     def fake_llm(**kw):
