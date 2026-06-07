@@ -215,12 +215,19 @@ CREATE TABLE datasets (
 -- (auth.py) reads company_members to resolve the active tenant from
 -- the Supabase JWT.
 CREATE TABLE companies (
-    id             TEXT PRIMARY KEY,
-    slug           TEXT NOT NULL UNIQUE,
-    display_name   TEXT NOT NULL,
-    coworker_names TEXT NOT NULL DEFAULT '{}',
-    kpi_tree       TEXT NOT NULL DEFAULT '{}',
-    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    id                  TEXT PRIMARY KEY,
+    slug                TEXT NOT NULL UNIQUE,
+    display_name        TEXT NOT NULL,
+    coworker_names      TEXT NOT NULL DEFAULT '{}',
+    kpi_tree            TEXT NOT NULL DEFAULT '{}',
+    -- Onboarding profile columns the research agents read/write (mirrors
+    -- 20260525150000_onboarding_workspace.sql). competitors[] is the fixed
+    -- competitor roster; the Competitor agent auto-discovers + writes it when empty.
+    competitors         TEXT NOT NULL DEFAULT '[]',
+    product_description TEXT,
+    industry            TEXT,
+    business_type       TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE company_members (
