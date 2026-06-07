@@ -339,6 +339,7 @@ CREATE TABLE IF NOT EXISTS company_members (
 -- to resolve user_name instead of stale JWT user_metadata).
 CREATE TABLE IF NOT EXISTS profiles (
     id         TEXT PRIMARY KEY,
+    email      TEXT,
     full_name  TEXT,
     first_name TEXT,
     last_name  TEXT,
