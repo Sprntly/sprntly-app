@@ -375,6 +375,32 @@ def _should_pre_seed(ds: "DesignSystem | None") -> bool:
     return ds is not None and ds.confidence != "low"
 
 
+def _render_design_brief_block(ds: "DesignSystem | None") -> str | None:
+    """Render a compact design-language guidance paragraph from a resolved
+    design system, for injection into the agent's user prompt. Returns None
+    when there is no usable brief so the prompt is left unchanged.
+
+    This text goes ONLY into the user-turn prompt — never into system_blocks
+    (which are cached and must not vary per-request) and never into any
+    publish_step event.
+    """
+    if ds is None:
+        return None
+    brief = (ds.component_language.brief or "").strip()
+    if not brief:
+        return None
+    cl = ds.component_language
+    cues = (
+        f"Density: {cl.density}. Separation: {cl.separation}. "
+        f"Radius: {cl.radius}. Buttons: {cl.buttons.style}, {cl.buttons.radius} corners, "
+        f"{cl.buttons.weight} weight. Accent usage: {cl.accent_usage}."
+    )
+    return (
+        f"Design language (inferred from the connected design source): "
+        f"{brief} {cues}"
+    )
+
+
 def _resolve_design_system(
     *,
     company_id: str | None,
@@ -1085,6 +1111,27 @@ async def generate_prototype(
             )
         except Exception:
             pass  # best-effort — generation continues without pre-seeded CSS
+
+    # Inject the design-language guidance into the user prompt so the model's
+    # first write is informed by the brand's visual vocabulary. The brief goes
+    # ONLY into user_message — never into system_blocks (cached prefix must be
+    # stable across requests) and never into any publish_step event.
+    try:
+        brief_block = _render_design_brief_block(design_system)
+        if brief_block:
+            content = user_message.get("content")
+            if isinstance(content, list):
+                user_message["content"] = list(content) + [
+                    {"type": "text", "text": brief_block}
+                ]
+            elif isinstance(content, str):
+                user_message["content"] = [
+                    {"type": "text", "text": content},
+                    {"type": "text", "text": brief_block},
+                ]
+            # If content is absent or another type, skip silently.
+    except Exception:
+        pass  # best-effort — generation continues without the design brief
 
     ctx = ToolContext(
         prototype_id=prototype_id,
