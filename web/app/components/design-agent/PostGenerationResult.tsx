@@ -1220,6 +1220,11 @@ export function PostGenerationResultView({
           <div className="da-right-top">
             <IconMessage size={15} />
             <span className="da-right-title">Comments</span>
+            {pins.filter((p) => p.saved && !p.resolved).length > 0 && (
+              <span className="comments-count-badge">
+                {pins.filter((p) => p.saved && !p.resolved).length}
+              </span>
+            )}
             <button
               type="button"
               className="da-right-close"
@@ -1252,7 +1257,12 @@ export function PostGenerationResultView({
                           {/* author +
                               avatar + relative time on the saved pin comment. */}
                           <div className="proto-comment-au-row">
-                            <span className="proto-comment-pin">{pin.n}</span>
+                            <div className="comment-step-chip">
+                              <svg width="10" height="12" viewBox="0 0 10 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                <path d="M5 0C2.79 0 1 1.79 1 4c0 3 4 8 4 8s4-5 4-8c0-2.21-1.79-4-4-4zm0 5.5A1.5 1.5 0 1 1 5 2.5a1.5 1.5 0 0 1 0 3z" fill="currentColor"/>
+                              </svg>
+                              Step {pin.n}
+                            </div>
                             <CommentAvatar author={pin.author ?? "demo"} />
                             <span className="proto-comment-au">{pin.author ?? "demo"}</span>
                             <time
@@ -1262,6 +1272,22 @@ export function PostGenerationResultView({
                             >
                               {shortRelativeTime(pin.createdAt)}
                             </time>
+                            <span
+                              className={`comment-resolve-indicator${pin.resolved ? " comment-resolve-indicator--resolved" : ""}`}
+                              aria-hidden="true"
+                            >
+                              {pin.resolved ? (
+                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                                  <circle cx="8" cy="8" r="8" fill="currentColor"/>
+                                  <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                                </svg>
+                              ) : (
+                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                                  <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/>
+                                  <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                                </svg>
+                              )}
+                            </span>
                           </div>
                           <p className="proto-comment-body">{pin.body}</p>
                           {/* Apply /
@@ -1304,20 +1330,24 @@ export function PostGenerationResultView({
                             className="proto-comment-input"
                             data-testid={`da-pin-input-${pin.n}`}
                             value={pin.draft}
-                            placeholder="Add a comment…"
+                            placeholder="Add a comment, or click a pin on the canvas…"
                             autoFocus
                             onChange={(e) =>
                               onPinDraftChange?.(pin.n, e.target.value)
                             }
                           />
+                          <span className="comment-composer-helper">Click anywhere on the canvas to pin a comment</span>
                           <div className="proto-comment-actions">
                             <button
                               type="submit"
-                              className="btn btn-accent"
+                              className="comment-composer-send-btn"
                               data-testid={`da-pin-submit-${pin.n}`}
                               disabled={pin.busy || !pin.draft.trim()}
+                              aria-label="Send comment"
                             >
-                              Comment
+                              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                <path d="M2 8l10-6-3 6 3 6-10-6z" fill="currentColor"/>
+                              </svg>
                             </button>
                             <button
                               type="button"

@@ -1809,10 +1809,10 @@
 }
 .design-agent-surface .proto-comment {
   display: block;
-  padding: 10px;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
 .design-agent-surface .proto-comment-pin {
   flex-shrink: 0;
