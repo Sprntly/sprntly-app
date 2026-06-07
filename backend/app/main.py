@@ -31,6 +31,7 @@ from app.routes import (
     oncall,
     research,
     synthesis,
+    team,
     evidence,
     health,
     prd,
@@ -168,3 +169,5 @@ app.include_router(ingest.router)
 app.include_router(research.router)
 app.include_router(oncall.router)
 app.include_router(company.router)
+app.include_router(team.router)
+app.include_router(team.accept_router)

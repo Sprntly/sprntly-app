@@ -2546,6 +2546,34 @@
   .team-email { font-size: 11.5px; color: var(--muted); }
   .team-role-pill { font-size: 10.5px; padding: 3px 8px; background: var(--surface-2); border-radius: 4px; font-weight: 500; }
 
+  /* ---------- TEAM SETTINGS PANE (Settings → Team & roles) ---------- */
+  .team-block { margin-top: 18px; }
+  .team-block:first-child { margin-top: 0; }
+  .team-block-title { font-size: 13px; font-weight: 600; color: var(--ink); margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .team-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .team-table th, .team-table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .team-table th { font-weight: 600; color: var(--ink-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .team-table tr:last-child td { border-bottom: none; }
+  .team-member-name { font-weight: 500; }
+  .team-member-email { font-size: 11.5px; color: var(--muted); }
+  .team-role-chip { font-size: 11px; padding: 2px 8px; background: var(--surface-2); border-radius: 999px; font-weight: 500; }
+  .team-role-select { font-size: 12px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  .team-role-note { font-size: 11px; color: var(--muted); }
+  .team-row-actions { text-align: right; white-space: nowrap; }
+  .team-row-actions .btn-link { margin-left: 12px; }
+  .team-invite-form { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; }
+  .settings-input { font-size: 13px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .settings-error { font-size: 12.5px; color: #b00020; margin-top: 8px; }
+  .settings-notice { font-size: 12.5px; color: var(--accent); margin-top: 8px; }
+  .settings-warning { font-size: 12.5px; color: #b07000; margin-top: 8px; }
+  .btn { font-size: 13px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: pointer; }
+  .btn.primary { background: var(--ink); color: var(--nav-text-hover); border-color: var(--ink); }
+  .btn.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-link { font-size: 12.5px; background: none; border: none; color: var(--ink); cursor: pointer; padding: 0; }
+  .btn-link:hover { text-decoration: underline; }
+  .btn-link.danger { color: #b00020; }
+  .btn-link:disabled { color: var(--muted); cursor: not-allowed; text-decoration: none; }
+
   /* ---------- CONNECTORS MANAGEMENT (redesigned — not a laundry list) ---------- */
   .conn-summary {
     background: var(--nav); color: var(--nav-text-hover); border-radius: var(--radius-xl);
