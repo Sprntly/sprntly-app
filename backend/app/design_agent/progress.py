@@ -14,6 +14,7 @@ Rules:
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 
@@ -39,6 +40,9 @@ def friendly_step(tool_name: str, tool_input: dict[str, Any] | None = None) -> s
     if tool_name == "search":
         return "Exploring your codebase…"
 
+    if tool_name == "view":
+        return "Reading the codebase…"
+
     if tool_name == "read":
         return "Reading the codebase…"
 
@@ -56,6 +60,17 @@ def friendly_step(tool_name: str, tool_input: dict[str, Any] | None = None) -> s
     return "Working on your prototype…"
 
 
+def _humanize_stem(stem: str) -> str:
+    """CamelCase → spaced title words. 'CallSheet' → 'Call Sheet'."""
+    if not stem:
+        return stem
+    # Insert space before an uppercase letter preceded by a lowercase letter
+    spaced = re.sub(r'([a-z])([A-Z])', r'\1 \2', stem)
+    # Insert space before an uppercase letter followed by lowercase (e.g. UIButton → UI Button)
+    spaced = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', spaced)
+    return spaced.strip()
+
+
 def _write_label(path: str | None) -> str:
     """Derive a friendly label for a `write` tool call given its path.
 
@@ -66,26 +81,45 @@ def _write_label(path: str | None) -> str:
         return "Building your prototype…"
 
     if path.startswith("src/screens/") or path.startswith("src/pages/"):
-        # Extract just the filename stem, capitalise the first letter
         basename = os.path.basename(path)
         stem = os.path.splitext(basename)[0]
         if stem:
-            name = stem[0].upper() + stem[1:]
+            name = _humanize_stem(stem)
             return f"Building the {name} screen…"
         return "Building your prototype…"
 
     if path.startswith("src/components/ui/"):
-        return "Designing UI components…"
+        # Vary the label based on path hash so consecutive UI writes don't repeat
+        basename = os.path.basename(path)
+        stem = os.path.splitext(basename)[0].lower()
+        _ui_labels = [
+            "Designing UI components…",
+            "Styling the interface pieces…",
+            "Building reusable components…",
+            "Polishing the UI elements…",
+        ]
+        idx = sum(ord(c) for c in stem) % len(_ui_labels)
+        return _ui_labels[idx]
 
     if path.startswith("src/components/"):
+        basename = os.path.basename(path)
+        stem = os.path.splitext(basename)[0]
+        if stem:
+            name = _humanize_stem(stem)
+            # Vary between prefixes based on stem hash
+            _prefixes = ["Building", "Adding", "Designing", "Composing"]
+            idx = sum(ord(c) for c in stem) % len(_prefixes)
+            prefix = _prefixes[idx]
+            return f"{prefix} the {name}…"
         return "Building components…"
 
     if path == "src/App.tsx":
-        return "Wiring the app together…"
+        return "Wiring the screens together…"
 
     if path.startswith("src/index."):
         return "Applying the design system…"
 
+    # Generic fallback for other paths (styles, utils, etc.)
     return "Building your prototype…"
 
 

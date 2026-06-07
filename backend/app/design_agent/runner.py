@@ -421,6 +421,7 @@ async def agent_loop(
                 _append_text_block(messages[-1], _wrap_up_nudge(remaining))
 
             loop = asyncio.get_running_loop()
+            _last_step: list[str] = [""]  # mutable container for dedup
 
             def _stream() -> object:
                 with client.messages.stream(
@@ -436,11 +437,13 @@ async def agent_loop(
                             block = getattr(event, "content_block", None)
                             if block and getattr(block, "type", None) == "tool_use":
                                 label = friendly_step(getattr(block, "name", ""), None)
-                                loop.call_soon_threadsafe(
-                                    publish_step,
-                                    ctx.prototype_id,
-                                    {"kind": "step", "text": label, "state": "active"},
-                                )
+                                if label != _last_step[0]:
+                                    _last_step[0] = label
+                                    loop.call_soon_threadsafe(
+                                        publish_step,
+                                        ctx.prototype_id,
+                                        {"kind": "step", "text": label, "state": "active"},
+                                    )
                     return stream.get_final_message()
 
             resp = await asyncio.to_thread(_stream)

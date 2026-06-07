@@ -244,22 +244,29 @@ export function GenerationLoadingScreen({
             <div className="fill" style={{ width: `${pct}%` }} />
           </div>
         </div>
-        <div className="proto-gen-steps">
+        <div className={`proto-gen-steps${isLive ? " proto-gen-steps--live" : ""}`}>
           {isLive
-            ? liveSteps.map((step, i) => (
-                <div
-                  key={i}
-                  className={
-                    "proto-gen-step" +
-                    (step.state === "done" ? " done" : " active")
-                  }
-                >
-                  {step.state !== "done" && (
-                    <span className="spin" aria-hidden="true" />
-                  )}
-                  {step.text}
-                </div>
-              ))
+            ? (() => {
+                const sliced = liveSteps.slice(-8)
+                return sliced.map((step, i) => {
+                  const isNewest = i === sliced.length - 1
+                  return (
+                    <div
+                      key={`live-${liveSteps.length - sliced.length + i}`}
+                      className={
+                        "proto-gen-step" +
+                        (step.state === "done" ? " done" : " active") +
+                        (isNewest ? " proto-gen-step--entering" : "")
+                      }
+                    >
+                      {step.state !== "done" && (
+                        <span className="spin" aria-hidden="true" />
+                      )}
+                      {step.text}
+                    </div>
+                  )
+                })
+              })()
             : activeSteps.map((label, i) => {
                 const isDone = i < doneCount
                 const isActive =

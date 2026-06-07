@@ -1663,6 +1663,21 @@
 .design-agent-surface.proto-gen-overlay .proto-gen-step:not(.done):not(.active) { display: none; }
 .design-agent-surface.proto-gen-overlay .proto-gen-step.active { color: var(--ink); }
 @keyframes protoGenSpin { to { transform: rotate(360deg); } }
+
+/* Live SSE rolling window — gradient mask fades oldest step out at top,
+   new step slides in from bottom */
+.design-agent-surface.proto-gen-overlay .proto-gen-steps--live {
+  mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.5) 12%, black 28%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.5) 12%, black 28%);
+  overflow: hidden;
+}
+@keyframes protoGenStepEnter {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-step--entering {
+  animation: protoGenStepEnter 0.25s ease-out forwards;
+}
 /* === generation loading overlay (end) ===================================== */
 
 /* =============================================================================
