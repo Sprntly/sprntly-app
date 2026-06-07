@@ -81,6 +81,16 @@ PLATFORM_DEFAULTS: dict[str, Any] = {
         "cache": True,
     },
     "outcome": {"measurement_windows_days": [7, 14, 30]},
+    "ds": {
+        # Pilot-1 structured analyses. Anomaly = a weekly metric point that
+        # deviates from its own trailing history. A point is a Finding if EITHER
+        # the z-score magnitude or the pct-change magnitude clears its threshold.
+        "anomaly": {
+            "min_points": 4,      # need ≥ this many weekly points to judge a metric
+            "z_threshold": 2.0,   # |z| ≥ this ⇒ anomaly (z vs trailing mean/std)
+            "pct_threshold": 0.3, # |pct change vs trailing mean| ≥ this ⇒ anomaly
+        },
+    },
 }
 
 # ---- Layer 2: per-source_type config ----------------------------------------
