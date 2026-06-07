@@ -74,9 +74,11 @@ class InviteIn(BaseModel):
     @classmethod
     def _validate_role(cls, v: str) -> str:
         # 'owner' is reserved for the creator and rejected by the DB CHECK
-        # constraint on workspace_invites.role anyway.
-        if v not in ("admin", "member"):
-            raise ValueError("role must be 'admin' or 'member'")
+        # constraint on workspace_invites.role anyway. 'viewer' was added
+        # in the team-settings-style slice (SC1, 2026-06-07) — read-only
+        # access, can comment but not edit.
+        if v not in ("admin", "member", "viewer"):
+            raise ValueError("role must be 'admin', 'member', or 'viewer'")
         return v
 
 router = APIRouter(prefix="/v1/team", tags=["team"])
@@ -201,8 +203,11 @@ class MemberRolePatch(BaseModel):
     @field_validator("role")
     @classmethod
     def _validate(cls, v: str) -> str:
-        if v not in ("owner", "admin", "member"):
-            raise ValueError("role must be 'owner', 'admin', or 'member'")
+        # 'viewer' was added in the team-settings-style slice (SC1).
+        if v not in ("owner", "admin", "member", "viewer"):
+            raise ValueError(
+                "role must be 'owner', 'admin', 'member', or 'viewer'"
+            )
         return v
 
 
