@@ -74,6 +74,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from tests._fake_anthropic import _FakeStream
 from tests.conftest import (
     _bearer_header,
     _enable_supabase_bearer,
@@ -199,6 +200,7 @@ def _mock_design_agent_client() -> MagicMock:
             usage=_usage(cache_creation=0, cache_read=2000, inp=200, out=100),
         ),
     ]
+    client.messages.stream.side_effect = lambda **kw: _FakeStream(client.messages.create(**kw))
     return client
 
 

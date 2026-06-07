@@ -24,6 +24,7 @@ import types
 import pytest
 
 from app.design_agent import autofixer, runner
+from tests._fake_anthropic import _FakeStream
 
 AUTOFIXER_LOGGER = "app.design_agent.autofixer"
 
@@ -314,12 +315,15 @@ class _RecordingClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = []
-        self.messages = types.SimpleNamespace(create=self._create)
+        self.messages = types.SimpleNamespace(create=self._create, stream=self._stream)
 
     def _create(self, **kwargs):
         self.calls.append({"messages": copy.deepcopy(kwargs.get("messages"))})
         i = len(self.calls) - 1
         return self._responses[i] if i < len(self._responses) else self._responses[-1]
+
+    def _stream(self, **kwargs):
+        return _FakeStream(self._create(**kwargs))
 
 
 def _tool_use(tid, name, inp):

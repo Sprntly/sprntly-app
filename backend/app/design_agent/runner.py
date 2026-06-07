@@ -688,18 +688,17 @@ def _append_text_block(message: dict[str, Any], text: str) -> None:
 def _to_api_block(block: Any) -> dict[str, Any]:
     """Reconstruct a content block using only API-legal input fields.
 
-    The streaming SDK enriches response blocks with extra attributes
-    (e.g. `parsed_output` on TextBlock) that are not valid in the
-    `messages` input schema.  Whitelisting the legal keys per block type
-    prevents those extras from leaking into conversation history.
+    Sources all values from model_dump() so SDK-added extras (e.g.
+    parsed_output on TextBlock) never leak into conversation history.
+    Works with both real SDK objects and test fakes that implement
+    model_dump().
     """
-    btype = getattr(block, "type", None)
-    if btype == "text":
-        return {"type": "text", "text": block.text}
-    if btype == "tool_use":
-        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
-    # Fallback: model_dump stripping None/unset; rare for other block types.
-    return {k: v for k, v in block.model_dump().items() if v is not None}
+    d = block.model_dump()
+    if d.get("type") == "text":
+        return {"type": "text", "text": d["text"]}
+    if d.get("type") == "tool_use":
+        return {"type": "tool_use", "id": d["id"], "name": d["name"], "input": d["input"]}
+    return {k: v for k, v in d.items() if v is not None}
 
 
 def _serialise_tool_result(result: dict[str, Any]) -> str:
