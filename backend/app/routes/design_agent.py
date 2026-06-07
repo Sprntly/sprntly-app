@@ -87,7 +87,8 @@ from app.design_agent.prompts import (
     DESIGN_AGENT_TEMPLATE_VERSION,
     render_scaffold_user,
 )
-from app.design_agent.event_stream import subscribe as _sse_subscribe
+from app.design_agent.event_stream import publish_step, subscribe as _sse_subscribe
+from app.design_agent.progress import VITE_PHASE_STEP
 from app.design_agent.runner import generate_prototype, reconcile_comments_on_checkpoint
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.storage import (
@@ -642,6 +643,7 @@ async def _stage_complete_run(
     # vite_build_with_repair returns the (possibly) REPAIRED virtual_fs as its
     # second element; we REBIND `virtual_fs` here, BEFORE the `_source/` staging
     # step below, so the staged source matches the built dist.
+    publish_step(prototype_id, VITE_PHASE_STEP)
     try:
         dist_files, repaired_virtual_fs = await vite_build_with_repair(virtual_fs)
     except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
