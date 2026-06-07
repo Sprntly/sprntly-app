@@ -130,3 +130,16 @@ VITE_PHASE_STEP: dict[str, str] = {
     "text": "Putting it together…",
     "state": "active",
 }
+
+
+# Generic step shown during the post-build typecheck-repair loop. That loop hands
+# the agent the compiler's own error text so it can fix the build; those raw
+# diagnostics must never reach a user-facing step event, so every repair iteration
+# surfaces this one calm line instead of the per-file build labels. Exported so the
+# runner and the route can fire it without duplicating the dict.
+FINISHING_LABEL = "Finishing up…"
+FINISHING_STEP: dict[str, str] = {
+    "kind": "step",
+    "text": FINISHING_LABEL,
+    "state": "active",
+}

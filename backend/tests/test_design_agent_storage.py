@@ -998,21 +998,30 @@ def test_routes_imports_typecheck_error(env):
     assert issubclass(env.routes.TypeCheckError, RuntimeError)
 
 
-async def test_complete_path_routes_typecheck_error_to_precise_fail(env, monkeypatch):
-    """AC #1a (B3): a TypeCheckError from the build routes to fail_prototype via the
-    PRECISE widened except — status='failed' with the fatal codes in `error`, NOT
-    the generic outer except. No checkpoint; stage_bundle never called."""
+async def test_complete_path_repairs_then_precise_fails_on_typecheck_error(env, monkeypatch):
+    """A TypeCheckError from the build no longer fails outright: the complete path
+    re-enters the agent to repair it, and only on exhaustion fails the row — with
+    the PRECISE TypeCheckRepairExhausted class (not the generic outer except) and
+    the fatal diagnostic preserved in `error`. No checkpoint; stage_bundle never
+    called."""
     stage_mock = MagicMock()
     _stub_generate(monkeypatch, env.routes, status="complete", virtual_fs={"src/App.tsx": "x"})
-    # P6-07: the complete path builds via vite_build_with_repair; a TypeCheckError
-    # (not a ViteBuildError) propagates out of the wrapper unchanged → the route's
-    # widened except routes it to fail_prototype exactly as before.
+    # The build always fails its type check; the repair re-entry never fixes it, so
+    # the bounded loop exhausts and the deterministic strip cannot help either.
     monkeypatch.setattr(
         env.routes, "vite_build_with_repair",
         _async_raise(env.routes.TypeCheckError(
             "runtime-breaking type errors: src/App.tsx(1,47): error TS2304: Cannot find name 'useState'."
         )),
     )
+
+    async def _repair_noop(**kwargs):
+        # Simulate the agent failing to fix the build: return the source unchanged
+        # at zero cost so the loop runs its full bounded re-tries before giving up.
+        result = SimpleNamespace(usage=SimpleNamespace(est_cost_usd=lambda m: 0.0))
+        return result, kwargs["virtual_fs"]
+
+    monkeypatch.setattr(env.routes, "repair_typecheck_run", _repair_noop)
     monkeypatch.setattr(env.routes, "stage_bundle", stage_mock)
     prd_id = _seed_prd(env.db)
     pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
@@ -1022,8 +1031,8 @@ async def test_complete_path_routes_typecheck_error_to_precise_fail(env, monkeyp
     )
     row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
     assert row["status"] == "failed"
-    assert "TypeCheckError" in row["error"]
-    assert "TS2304" in row["error"]            # the fatal diagnostic lands in error
+    assert "TypeCheckRepairExhausted" in row["error"]  # the precise exhaustion class
+    assert "TS2304" in row["error"]            # the fatal diagnostic survives into error
     assert _checkpoints_for(pid) == []         # no checkpoint created
     assert stage_mock.call_count == 0          # staging never attempted
 
