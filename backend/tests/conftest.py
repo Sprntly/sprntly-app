@@ -371,6 +371,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     full_name  TEXT,
     first_name TEXT,
     last_name  TEXT,
+    avatar_url TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

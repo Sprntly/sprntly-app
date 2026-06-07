@@ -94,6 +94,12 @@ def get_team_members(company: CompanyContext = Depends(require_company)):
                 "user_id": r.get("user_id"),
                 "role": r.get("role"),
                 "created_at": r.get("created_at"),
+                # SC2 (2026-06-07): profile join enrichment for the
+                # Settings → Team & roles page (mockup needs name +
+                # email + avatar per row).
+                "display_name": r.get("display_name"),
+                "email": r.get("email"),
+                "avatar_url": r.get("avatar_url"),
             }
             for r in rows
         ]
