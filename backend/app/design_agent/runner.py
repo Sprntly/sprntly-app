@@ -39,7 +39,10 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.design_agent.design_system.models import DesignSystem
 
 from app.config import settings
 from app.db.prototype_comments import list_comments, mark_comments_orphaned
@@ -327,6 +330,144 @@ body {{
   font-family: var(--font-sans);
 }}
 """
+
+
+def _render_design_system_css(ds: "DesignSystem") -> str:
+    """Render `src/index.css` from a unified, source-agnostic design system.
+
+    This is the source-independent pre-seed: any source (Figma, a live website,
+    a future code repository) normalizes into a `DesignSystem`, and this renders
+    the same starting CSS from it. It maps the design-system tokens back onto the
+    palette-dict shape the long-standing `_render_palette_css` renderer expects
+    and delegates, so a Figma-sourced design system produces byte-identical CSS
+    to the legacy Figma palette path — and a website-sourced one now pre-seeds
+    the very same way (closing Scenario B's parity gap).
+
+    The reconstructed `swatches` list places the surface color at index 1 and the
+    muted color at index 2 because that is exactly where the renderer reads them.
+    """
+    colors = ds.tokens.colors
+    # The default heading family is a generic system stack, NOT a named brand
+    # font. The legacy renderer expects None ("no explicit font") in that case so
+    # it falls through to its own system stack and emits no @import. Treat the
+    # baseline family as None so a Figma design system with no detected font
+    # renders byte-identically to the legacy Figma palette path.
+    heading_family = ds.tokens.fonts.heading_family
+    if "," in (heading_family or ""):
+        heading_family = None
+    palette = {
+        "background": colors.background,
+        "accent": colors.accent,
+        "is_dark": ds.tokens.is_dark,
+        # index 0 = background, 1 = surface (card), 2 = muted — the renderer's
+        # swatch positions for the card and muted CSS variables.
+        "swatches": [colors.background, colors.surface, colors.muted],
+        "font_family": heading_family,
+        "font_weights": ds.tokens.fonts.weights,
+    }
+    return _render_palette_css(palette)
+
+
+def _resolve_design_system(
+    *,
+    company_id: str | None,
+    provider: str | None,
+    source_ref: str | None,
+    raw_signals_factory,
+) -> "DesignSystem | None":
+    """Resolve the unified design system for one source via the company-scoped cache.
+
+    Flow (cache-as-source-of-truth, no staleness check in this pass):
+
+      1. Look the source up in the cache by (company, provider, source ref). On a
+         hit, rebuild the stored `DesignSystem` and use it as-is.
+      2. On a miss, pull the source's raw signals (`raw_signals_factory()`),
+         normalize them into a `DesignSystem`, store the result, and use it.
+
+    Returns the design system, or None when there is no source to resolve (no
+    provider/ref) so the caller leaves the virtual filesystem un-seeded exactly
+    as before. Best-effort: any failure returns None and generation continues
+    without a pre-seed rather than aborting.
+    """
+    if not (company_id and provider and source_ref):
+        return None
+    try:
+        from app.db.design_systems import (
+            lookup_design_system,
+            upsert_design_system,
+        )
+        # Importing the package runs the adapter-registration side-effect, so the
+        # registry is populated before we look an adapter up by provider name.
+        import app.design_agent.design_system  # noqa: F401 — registers adapters
+        from app.design_agent.design_system.extractors import normalize, registry
+        from app.design_agent.design_system.models import DesignSystem
+
+        cached = lookup_design_system(company_id, provider, source_ref)
+        if cached is not None:
+            return DesignSystem.model_validate(cached.get("data") or {})
+
+        raw = raw_signals_factory()
+        if raw is None:
+            return None
+        ds = normalize(raw)
+        adapter = registry.get(provider)
+        upsert_design_system(
+            company_id=company_id,
+            source_category=getattr(adapter, "category", provider),
+            source_provider=provider,
+            source_ref=source_ref,
+            source_version=None,  # staleness/version marker lands in a later pass
+            data=ds.model_dump(),
+            has_explicit_system=ds.has_explicit_system,
+            confidence=ds.confidence,
+            extracted_at=None,
+        )
+        return ds
+    except Exception:
+        logger.info(
+            "design_agent.design_system_resolve_failed provider=%s", provider
+        )
+        return None
+
+
+def _design_source_for_generation(
+    *,
+    figma_file_key: str | None,
+    figma_access_token: str | None,
+    website_url: str | None,
+    website_sample: dict | None,
+):
+    """Pick the design source for this generation and return
+    `(provider, source_ref, raw_signals_factory)` for the cache flow.
+
+    Figma wins when a file key AND an access token are both available (a file we
+    cannot read is not a usable source); otherwise a website URL is the source.
+    When neither is present, returns `(None, None, None)` so the caller leaves the
+    virtual filesystem un-seeded.
+
+    The returned factory is SYNCHRONOUS and is only invoked on a cache miss — so
+    the (potentially expensive) Figma document fetch is skipped entirely on a
+    cache hit. The website sample is supplied by the caller (the route already ran
+    the headless-browser extraction for its scaffold prose) and is reused here, so
+    no second browser run fires.
+    """
+    if figma_file_key and figma_access_token:
+        def _figma_raw():
+            from app.connectors.figma_oauth import fetch_file as _fetch_file
+            from app.design_agent.design_system.adapters import FigmaExtractor
+            file_doc = _fetch_file(figma_access_token, figma_file_key, 10)
+            return FigmaExtractor().extract_raw_signals(figma_file_key, file_doc=file_doc)
+
+        return "figma", figma_file_key, _figma_raw
+
+    if website_url:
+        def _web_raw():
+            from app.design_agent.design_system.adapters import WebExtractor
+            return WebExtractor().extract_raw_signals(website_url, sample=website_sample)
+
+        return "web", website_url, _web_raw
+
+    return None, None, None
 
 
 _STEP_LABELS = [
@@ -771,6 +912,8 @@ async def generate_prototype(
     figma_node_id: str | None = None,
     scenario: str = "A",
     github_repo: str | None = None,
+    website_url: str | None = None,
+    website_sample: dict | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
     """Public entrypoint: run agent_loop with a fresh ToolContext, emit the
     cost-summary log line, and return `(result, virtual_fs)` for P1-07 + P1-08
@@ -787,25 +930,42 @@ async def generate_prototype(
     Figma data API. Resolution is best-effort: a prototype without a Figma
     connection runs fine, with fetch_figma reporting its own is_error.
     """
-    # Pre-seed virtual_fs with Figma palette CSS when a Figma source is present.
-    # This guarantees the palette is on disk before the agent's first write, so
-    # it cannot start from stock Tailwind defaults and then ignore a palette
-    # instruction embedded only in a tool result. Best-effort: a failure here
-    # never aborts generation — the agent runs with an empty virtual_fs instead.
+    # Pre-seed virtual_fs with the source's design-system CSS before the agent's
+    # first write, so it cannot start from stock Tailwind defaults and then ignore
+    # a design instruction embedded only in a tool result. The design system is
+    # resolved through the company-scoped cache and rendered the SAME way for any
+    # source — a Figma file or a live brand website — so Scenario B now pre-seeds
+    # exactly as Scenario A does. Best-effort throughout: any failure here leaves
+    # the virtual filesystem un-seeded and generation continues.
+    #
+    # `workspace_id` carries the company id (the route resolves it from the
+    # company-scoped session before calling in), which is the cache scope.
     figma_access_token = _resolve_figma_access_token(figma_file_key, workspace_id)
     virtual_fs: dict[str, str] = {}
-    if figma_file_key and figma_access_token:
+
+    provider, source_ref, raw_factory = _design_source_for_generation(
+        figma_file_key=figma_file_key,
+        figma_access_token=figma_access_token,
+        website_url=website_url,
+        website_sample=website_sample,
+    )
+    design_system = await asyncio.to_thread(
+        _resolve_design_system,
+        company_id=workspace_id,
+        provider=provider,
+        source_ref=source_ref,
+        raw_signals_factory=raw_factory,
+    )
+    if design_system is not None and design_system.has_explicit_system:
         try:
-            from app.connectors.figma_oauth import fetch_file as _fetch_file
-            from app.design_agent.tools import _extract_palette_summary
-            _file_doc = await asyncio.to_thread(_fetch_file, figma_access_token, figma_file_key, 10)
-            _palette = _extract_palette_summary(_file_doc)
-            if _palette and _palette.get("background"):
-                virtual_fs["src/index.css"] = _render_palette_css(_palette)
-                logger.info(
-                    "design_agent.palette_pre_seeded prototype_id=%s bg=%s accent=%s is_dark=%s",
-                    prototype_id, _palette.get("background"), _palette.get("accent"), _palette.get("is_dark"),
-                )
+            virtual_fs["src/index.css"] = _render_design_system_css(design_system)
+            logger.info(
+                "design_agent.design_system_pre_seeded prototype_id=%s provider=%s bg=%s accent=%s is_dark=%s",
+                prototype_id, provider,
+                design_system.tokens.colors.background,
+                design_system.tokens.colors.accent,
+                design_system.tokens.is_dark,
+            )
         except Exception:
             pass  # best-effort — generation continues without pre-seeded CSS
 

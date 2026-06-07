@@ -512,9 +512,23 @@ async def _run_generation_bg(
         # `_website_context_block` returns None when there is neither a website
         # URL nor manual hints, so we fall back to the generic Figma string
         # ("(no Figma source detected)").
+        # Run the website extractor at most once per generation. The same sample
+        # feeds both the scaffold prose block (below) and the design-system
+        # pre-seed (threaded into `generate_prototype`), so Scenario B's tokens
+        # reach the prototype the same way Scenario A's do — via a pre-seeded
+        # `src/index.css` — without a second browser run. Skipped entirely when a
+        # Figma file is present (Figma wins the single design-source slot).
+        website_sample: dict | None = None
+        if not figma_file_key:
+            website_sample = await _extract_website_sample(website_url)
         website_block = (
             None if figma_file_key
-            else await _website_context_block(website_url, manual_design)
+            else await _website_context_block(
+                website_url,
+                manual_design,
+                extracted_ds=website_sample,
+                extracted_ds_resolved=True,
+            )
         )
         source_block = website_block or _figma_context_block(figma_file_key)
 
@@ -560,6 +574,8 @@ async def _run_generation_bg(
             figma_node_id=figma_node_id,  # frame-level targeting; None when absent
             scenario=scenario_label,
             github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
+            website_url=None if figma_file_key else website_url,  # Scenario B pre-seed source
+            website_sample=website_sample,  # reuse the single extractor run for the pre-seed
         )
         # Success path (P1-08): a complete run that emitted files gets built +
         # staged + marked ready. A complete run with no files, or any non-complete
@@ -1059,9 +1075,32 @@ def _extracted_design_block(
     return " ".join(parts)
 
 
+async def _extract_website_sample(website_url: str | None) -> dict | None:
+    """Run the headless-browser website extractor once for `website_url`.
+
+    Returns the sampled design-system dict, or None on a low-confidence sample,
+    an extractor failure, or no URL. Isolated as its own helper so the same
+    sample feeds BOTH the scaffold prose block and the design-system pre-seed
+    without paying for two browser runs. The import is lazy + ImportError-guarded
+    so the rest of the generate path ships even when the extractor is absent.
+    """
+    if not website_url:
+        return None
+    try:
+        from app.design_agent.scenarios.website import (
+            extract_website_design_system,
+        )
+        return await extract_website_design_system(website_url)
+    except ImportError:
+        return None
+
+
 async def _website_context_block(
     website_url: str | None,
     manual_design: "ManualDesignInput | None",
+    *,
+    extracted_ds: dict | None = None,
+    extracted_ds_resolved: bool = False,
 ) -> str | None:
     """Scaffold context for Scenario B (analog of `_figma_context_block`).
 
@@ -1085,13 +1124,19 @@ async def _website_context_block(
     if website_url:
         host = urlsplit(website_url).hostname or website_url
         ds: dict[str, Any] | None = None
-        try:
-            from app.design_agent.scenarios.website import (
-                extract_website_design_system,
-            )
-            ds = await extract_website_design_system(website_url)
-        except ImportError:
-            ds = None  # P5-01 not merged → fall through to manual / url-only.
+        if extracted_ds_resolved:
+            # The caller already ran extraction once (and is reusing the sample
+            # for the design-system pre-seed). Reuse it here rather than paying
+            # for a second browser run.
+            ds = extracted_ds
+        else:
+            try:
+                from app.design_agent.scenarios.website import (
+                    extract_website_design_system,
+                )
+                ds = await extract_website_design_system(website_url)
+            except ImportError:
+                ds = None  # P5-01 not merged → fall through to manual / url-only.
         if ds is not None:
             return _extracted_design_block(ds, host=host, manual_design=manual_design)
         if manual_design is not None:
