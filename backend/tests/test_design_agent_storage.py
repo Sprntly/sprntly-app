@@ -268,6 +268,83 @@ def _fake_vite_run(*, dist_files=None, returncode=0, stderr="", capture=None):
     return _run
 
 
+def test_is_agent_writable_protects_scaffold_build_files():
+    for rel_path in storage._AGENT_IMMUTABLE_FILES:
+        assert storage._is_agent_writable(rel_path) is False
+    assert storage._is_agent_writable("./vite.config.ts") is False
+
+    for rel_path in (
+        "src/App.tsx",
+        "src/index.css",
+        "index.html",
+        "src/components/ui/button.tsx",
+    ):
+        assert storage._is_agent_writable(rel_path) is True
+
+
+def test_vite_build_sync_skips_agent_emitted_scaffold_files(monkeypatch, tmp_path):
+    captured: dict = {}
+
+    def _copy_scaffold(runtime_root: Path, build_path: Path) -> None:
+        (build_path / "vite.config.ts").write_text("scaffold config", encoding="utf-8")
+
+    def _run(cmd, cwd=None, **kwargs):
+        build_path = Path(cwd)
+        captured["vite_config"] = (build_path / "vite.config.ts").read_text(
+            encoding="utf-8"
+        )
+        captured["app"] = (build_path / "src" / "App.tsx").read_text(
+            encoding="utf-8"
+        )
+        dist = build_path / "dist"
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "index.html").write_text("<html>built</html>", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(storage, "_copy_scaffold", _copy_scaffold)
+    monkeypatch.setattr(storage, "_symlink_node_modules", lambda *args, **kwargs: None)
+    monkeypatch.setattr(storage.subprocess, "run", _run)
+    monkeypatch.setattr(storage, "_typecheck_runtime_break", lambda build_path: None)
+    monkeypatch.setattr(
+        storage, "_read_dist", lambda dist_dir: {"index.html": "<html>built</html>"}
+    )
+
+    storage._vite_build_sync(
+        tmp_path,
+        {
+            "vite.config.ts": "agent config",
+            "src/App.tsx": "export default () => null;",
+        },
+    )
+
+    assert captured["vite_config"] == "scaffold config"
+    assert captured["app"] == "export default () => null;"
+
+
+def test_vite_build_command_includes_relative_base(monkeypatch, tmp_path):
+    captured: dict = {}
+
+    def _run(cmd, cwd=None, **kwargs):
+        captured["cmd"] = cmd
+        dist = Path(cwd) / "dist"
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "index.html").write_text("<html>built</html>", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(storage, "_copy_scaffold", lambda *args, **kwargs: None)
+    monkeypatch.setattr(storage, "_symlink_node_modules", lambda *args, **kwargs: None)
+    monkeypatch.setattr(storage.subprocess, "run", _run)
+    monkeypatch.setattr(storage, "_typecheck_runtime_break", lambda build_path: None)
+    monkeypatch.setattr(
+        storage, "_read_dist", lambda dist_dir: {"index.html": "<html>built</html>"}
+    )
+
+    storage._vite_build_sync(tmp_path, {"src/App.tsx": "export default () => null;"})
+
+    base_index = captured["cmd"].index("--base")
+    assert captured["cmd"][base_index + 1] == "./"
+
+
 async def test_vite_build_reads_dist_after_successful_build(monkeypatch):
     monkeypatch.setattr(
         storage.subprocess, "run",
