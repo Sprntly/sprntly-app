@@ -54,7 +54,19 @@ def get_status(dataset: str) -> dict:
 
 def _run_sync(dataset: str) -> None:
     corpus = load_corpus(dataset)
-    user = BRIEF_USER_TEMPLATE.format(dataset=dataset, corpus=corpus.joined())
+
+    # Signal fusion: rank sources by freshness, confidence, and diversity
+    try:
+        from app.signal_fusion import fuse_signals
+        signal_context = fuse_signals(dataset)
+    except Exception:
+        signal_context = ""
+
+    user = BRIEF_USER_TEMPLATE.format(
+        dataset=dataset,
+        signal_context=signal_context,
+        corpus=corpus.joined(),
+    )
     payload = call_json(system=BRIEF_SYSTEM, user=user)
     save_brief(
         dataset,

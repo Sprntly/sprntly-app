@@ -134,13 +134,9 @@ function RenderBlock({
       // EvidenceSections).
       return <div className="evv2-context-chip">{renderInline(block.text)}</div>
     case "prd-tldr":
-      return (
-        <TldrTriptych
-          problem={block.problem}
-          fix={block.fix}
-          impact={block.impact}
-        />
-      )
+      // Suppressed here — PrdSummaryStrip in PrdScreen renders it above the
+      // body so it shows once at the top regardless of where the LLM placed it.
+      return null
     case "prd-problem":
       return <ProblemBlock userStory={block.userStory} impact={block.impact} />
     case "prd-hypothesis":

@@ -108,7 +108,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: "PDF · DOCX · TXT",
     uploadExtensions: [".pdf", ".doc", ".docx", ".txt"],
     items: [
-      { id: "slack",   name: "Slack",    logo: "S", logoText: "S", logoColor: "#4A154B", oauth: true },
+      { id: "slack",   name: "Slack",    logo: "S", logoText: "S", logoColor: "#4A154B", oauth: true, authType: "apikey" },
       { id: "msteams", name: "MS Teams", logo: "M", logoText: "M", logoColor: "#5059C9", oauth: false },
     ],
   },

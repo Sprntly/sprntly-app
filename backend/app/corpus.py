@@ -38,7 +38,7 @@ def load_corpus(dataset: str = "asurion") -> Corpus:
     for p in sorted(base.glob("*.md")):
         if p.name.startswith("_"):
             continue
-        docs.append(CorpusDoc(name=p.stem, path=str(p), text=p.read_text()))
+        docs.append(CorpusDoc(name=p.stem, path=str(p), text=p.read_text(encoding="utf-8")))
     if not docs:
         raise RuntimeError(f"No corpus docs found for dataset {dataset!r}")
     return Corpus(dataset=dataset, docs=tuple(docs))
@@ -46,8 +46,8 @@ def load_corpus(dataset: str = "asurion") -> Corpus:
 
 def load_prd_template() -> str:
     # Templates ship in-repo (TEMPLATE_DIR), separate from user uploads (DATA_DIR).
-    return (settings.template_path / "sprntly_prd_template.md").read_text()
+    return (settings.template_path / "sprntly_prd_template.md").read_text(encoding="utf-8")
 
 
 def load_evidence_template() -> str:
-    return (settings.template_path / "sprntly_evidence_template.md").read_text()
+    return (settings.template_path / "sprntly_evidence_template.md").read_text(encoding="utf-8")

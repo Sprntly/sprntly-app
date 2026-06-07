@@ -16,6 +16,10 @@ venv/
 *.db-shm
 *.db-wal
 
+# Corpus data — generated/uploaded files per dataset (never commit client data)
+backend/data/*/
+!backend/data/.gitkeep
+
 # Claude Code local state
 .claude/
 

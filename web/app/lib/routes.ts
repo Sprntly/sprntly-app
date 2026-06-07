@@ -29,6 +29,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // the dormant ConnectorsScreen.tsx (see commit A note in that file).
   connectors: "/settings?section=connectors",
   sources: "/sources",
+  tickets: "/tickets",
   // The refresh-stable canvas route. The bare base path; the id-bearing path
   // (`/design/{prototype_id}`) is built by canvasPath() below.
   // pathForScreen("da-canvas") returns this base — canvas navigation goes
@@ -46,6 +47,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/settings": "settings",
   "/team": "team",
   "/sources": "sources",
+  "/tickets": "tickets",
   // Inverse for the canvas base path. screenIdFromPathname is left UNCHANGED —
   // it exact-matches, so the bare "/design" resolves to "da-canvas" while the
   // id-bearing "/design/{id}" falls through to "chat" (the canvas is a

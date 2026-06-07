@@ -1,0 +1,13 @@
+Feature,Daily Active Users,Weekly Active Users,Monthly Active Users,Adoption Rate,Satisfaction Score,MoM Growth,Retention Week4,Support Tickets,Revenue Impact
+Dashboard,38200,95500,285000,84%,4.2,5%,72%,45,$1.2M
+Reports Builder,22100,58300,174000,49%,3.8,12%,58%,67,$680K
+Real-time Alerts,15800,41200,128000,35%,4.0,8%,65%,23,$420K
+API Access,8900,24500,72000,20%,4.5,31%,81%,12,$890K
+Mobile App,12400,33100,98000,27%,3.5,-8%,44%,89,$310K
+Collaboration Tools,19500,48700,152000,43%,4.1,15%,67%,34,$540K
+Custom Integrations,6200,17800,54000,14%,4.3,22%,78%,18,$720K
+Data Export,28100,71200,218000,62%,3.9,3%,61%,56,$280K
+Admin Console,14300,38900,115000,32%,3.7,-2%,55%,78,$190K
+Onboarding Wizard,31200,82400,246000,69%,4.4,10%,75%,15,$95K
+Search,25800,66100,201000,57%,3.6,6%,59%,42,$150K
+Notifications,20700,54300,168000,46%,3.4,-5%,48%,91,$110K

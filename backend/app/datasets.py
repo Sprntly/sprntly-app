@@ -18,9 +18,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import logging
+
 from app import db
 from app.config import settings
 from app.ingest import UnsupportedFileType, convert, md_filename
+
+logger = logging.getLogger(__name__)
 
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}$")
@@ -84,6 +88,14 @@ def create_dataset(slug: str, display_name: str) -> dict:
     base = dataset_path(slug)
     (base / "raw").mkdir(parents=True, exist_ok=True)
     db.insert_dataset(slug=slug, display_name=display_name)
+
+    # Seed default enterprise input sources for this dataset.
+    try:
+        db.upsert_input_source(slug, "csv_upload", enabled=True)
+        db.upsert_input_source(slug, "google_drive", enabled=False)
+    except Exception:
+        logger.warning("Failed to seed input sources for %s (table may not exist yet)", slug, exc_info=True)
+
     return {
         "slug": slug,
         "display_name": display_name,
@@ -185,7 +197,7 @@ def seed_filesystem_datasets() -> int:
     base = settings.data_path
     if not base.exists():
         return 0
-    seeded = 0
+    seeded = 0  # noqa: SIM113
     for child in sorted(base.iterdir()):
         if not child.is_dir():
             continue
@@ -200,3 +212,53 @@ def seed_filesystem_datasets() -> int:
         db.insert_dataset(slug=child.name, display_name=display)
         seeded += 1
     return seeded
+
+
+# ----- Onboarding context seeding ------------------------------------------
+
+
+def seed_onboarding_context(
+    slug: str,
+    *,
+    company_name: str = "",
+    product_name: str = "",
+    industry: str = "",
+    kpi_tree: dict | None = None,
+    strategic_context: str = "",
+) -> str:
+    """Write onboarding metadata into the corpus as a markdown file.
+
+    This ensures brief generation has company context even before any
+    connector data arrives.  The file is named ``onboarding_context.md``
+    (no underscore prefix, so the corpus loader picks it up).
+
+    Returns the path of the written file.
+    """
+    if not db.dataset_exists(slug):
+        raise DatasetNotFound(f"Dataset {slug!r} does not exist")
+
+    lines: list[str] = ["# Company & Product Context\n"]
+    if company_name:
+        lines.append(f"**Company:** {company_name}")
+    if product_name:
+        lines.append(f"**Product:** {product_name}")
+    if industry:
+        lines.append(f"**Industry:** {industry}")
+    if kpi_tree:
+        lines.append("\n## KPIs")
+        north_star = kpi_tree.get("north_star") or kpi_tree.get("northStar")
+        if north_star:
+            lines.append(f"**North Star Metric:** {north_star}")
+        for metric in kpi_tree.get("supporting_metrics", kpi_tree.get("supportingMetrics", [])):
+            name = metric.get("name", "")
+            weight = metric.get("weight", "")
+            if name:
+                lines.append(f"- {name}" + (f" ({weight}%)" if weight else ""))
+    if strategic_context:
+        lines.append(f"\n## Strategic Context\n\n{strategic_context}")
+
+    md_text = "\n".join(lines) + "\n"
+    target = dataset_path(slug) / "onboarding_context.md"
+    target.write_text(md_text, encoding="utf-8")
+    logger.info("Seeded onboarding context for %s (%d chars)", slug, len(md_text))
+    return str(target)

@@ -27,6 +27,13 @@ from app.db import (
     get_prd_rendered,
     start_prd,
 )
+from app.db.prds import (
+    get_prd,
+    list_prd_versions,
+    restore_prd_version,
+    save_prd_version,
+    update_prd_content,
+)
 from app.prd_runner import generate_prd
 from app.prompts import PRD_TEMPLATE_VERSION
 
@@ -98,13 +105,77 @@ def get(
     prd_id: int,
     _session: dict = Depends(require_session),
 ):
-    """Fetch a PRD row by id.
-
-    Permissive on variant — historical v1 rows still resolve so old
-    bookmarks don't 409. The `variant` field on the response identifies
-    which format the row was generated under.
-    """
+    """Fetch a PRD row by id."""
     row = get_prd_rendered(prd_id)
     if not row:
         raise HTTPException(404, "PRD not found")
     return row
+
+
+# ── PRD editing + version control ──────────────────────────────────────
+
+
+class PrdUpdateIn(BaseModel):
+    title: str = Field(..., min_length=1)
+    payload_md: str = Field(...)
+
+
+@router.put("/{prd_id}")
+def update(
+    prd_id: int,
+    body: PrdUpdateIn,
+    _session: dict = Depends(require_session),
+):
+    """Save PRD edits to Supabase. Auto-creates a version snapshot."""
+    row = get_prd(prd_id)
+    if not row:
+        raise HTTPException(404, "PRD not found")
+    # Save current content as a version before overwriting
+    try:
+        save_prd_version(prd_id, row.get("title", ""), row.get("payload_md", ""), saved_by="auto")
+    except Exception:
+        pass  # version table may not exist yet — don't block the save
+    updated = update_prd_content(prd_id, body.title, body.payload_md)
+    return updated
+
+
+class PrdVersionSaveIn(BaseModel):
+    title: str = Field(..., min_length=1)
+    payload_md: str = Field(...)
+    label: str = Field("Manual save")
+
+
+@router.post("/{prd_id}/versions")
+def create_version(
+    prd_id: int,
+    body: PrdVersionSaveIn,
+    _session: dict = Depends(require_session),
+):
+    """Explicitly save a named version of the PRD."""
+    row = get_prd(prd_id)
+    if not row:
+        raise HTTPException(404, "PRD not found")
+    version = save_prd_version(prd_id, body.title, body.payload_md, saved_by=body.label)
+    return version
+
+
+@router.get("/{prd_id}/versions")
+def get_versions(
+    prd_id: int,
+    _session: dict = Depends(require_session),
+):
+    """List all versions of a PRD, newest first."""
+    return list_prd_versions(prd_id)
+
+
+@router.post("/{prd_id}/versions/{version_id}/restore")
+def restore_version(
+    prd_id: int,
+    version_id: int,
+    _session: dict = Depends(require_session),
+):
+    """Restore a PRD to a specific version."""
+    result = restore_prd_version(prd_id, version_id)
+    if not result:
+        raise HTTPException(404, "Version not found")
+    return result

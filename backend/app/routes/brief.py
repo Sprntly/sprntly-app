@@ -82,7 +82,14 @@ def generate(
     /v1/brief/regenerate for fire-and-forget behavior instead.
     """
     corpus = load_corpus(dataset)
-    user = BRIEF_USER_TEMPLATE.format(dataset=dataset, corpus=corpus.joined())
+    try:
+        from app.signal_fusion import fuse_signals
+        signal_context = fuse_signals(dataset)
+    except Exception:
+        signal_context = ""
+    user = BRIEF_USER_TEMPLATE.format(
+        dataset=dataset, signal_context=signal_context, corpus=corpus.joined(),
+    )
     payload = call_json(system=BRIEF_SYSTEM, user=user)
     week_label = payload.get("week_label", "")
     brief_id = save_brief(

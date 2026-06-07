@@ -89,6 +89,32 @@ from app.db.connections import (
     upsert_connection,
 )
 
+# Enterprise input sources
+from app.db.input_sources import (
+    delete_input_source,
+    list_input_sources,
+    upsert_input_source,
+)
+
+# Knowledge graph
+from app.db.knowledge import (
+    clear_entities,
+    list_entities,
+    list_relationships,
+    upsert_entity,
+    upsert_relationship,
+)
+
+# Pipeline runs
+from app.db.pipeline_runs import (
+    complete_run,
+    create_run,
+    fail_run,
+    get_latest_run,
+    list_runs,
+    update_run_stage,
+)
+
 # Metric points (DS rolling aggregates)
 from app.db.metric_points import (
     distinct_metrics,
@@ -152,6 +178,10 @@ __all__ = [
     "insert_dataset",
     "list_dataset_slugs",
     "list_datasets",
+    # input sources
+    "delete_input_source",
+    "list_input_sources",
+    "upsert_input_source",
     # connections
     "delete_connection",
     "get_connection",

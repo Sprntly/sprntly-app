@@ -46,7 +46,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import sys
+
 from app.config import settings
+
+# On Windows, npx/tsc are .cmd batch files. subprocess.run(["npx", ...]) raises
+# FileNotFoundError unless shell=True, because the OS cannot exec a .cmd directly.
+_SHELL = sys.platform == "win32"
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +75,28 @@ _RUNTIME_ROOT = Path(__file__).resolve().parent.parent.parent.parent / "prototyp
 # instead — AC #3), build artefacts, and test trees (unreferenced by the entry,
 # so they don't affect the build; skipping keeps the copy small).
 _SCAFFOLD_EXCLUDE = {"node_modules", "dist", "dist-fixture", ".vite", "test", "__tests__"}
+
+# Build/config files the scaffold owns - the agent may emit React source under
+# src/ and its own index.html, but it must never overwrite the build harness
+# (clobbering vite.config.ts drops base:"./" and the anchor-id plugin, which
+# blank-screens the prototype and breaks comment-pin anchoring).
+_AGENT_IMMUTABLE_FILES = frozenset({
+    # Vite loads vite.config.{ts,js,mjs,cjs} at the build root — guard every
+    # extension, not just .ts, so the agent can't reintroduce the clobber under
+    # a different config extension.
+    "vite.config.ts",
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.cjs",
+    "vite-plugin-anchor-id.ts",
+    "tsconfig.json",
+    "package.json",
+    "package-lock.json",
+    "postcss.config.js",
+    "tailwind.config.ts",
+    "vitest.config.ts",
+    "components.json",
+})
 
 
 class ViteBuildError(RuntimeError):
@@ -108,6 +136,20 @@ class TypeCheckRepairExhausted(TypeCheckError):
 
 
 # ─── Vite build (where the anchor-id plugin runs — AD4) ─────────────────────
+
+
+def _is_agent_writable(rel_path: str) -> bool:
+    """False for scaffold-owned build/config files so the agent's overlay can
+    never clobber the build harness. The agent owns src/** and index.html.
+
+    The path is normalized first so a traversal key (e.g. ``src/../vite.config.ts``)
+    that resolves to a scaffold-owned file at the build root is still caught, and
+    any key that escapes the build root (absolute, or starting with ``..``) is
+    refused outright."""
+    normalized = os.path.normpath(rel_path.strip())
+    if os.path.isabs(normalized) or normalized == ".." or normalized.startswith(".." + os.sep):
+        return False
+    return normalized not in _AGENT_IMMUTABLE_FILES
 
 
 async def vite_build(virtual_fs: dict[str, str]) -> dict[str, str]:
@@ -150,18 +192,29 @@ def _vite_build_sync(runtime_root: Path, virtual_fs: dict[str, str]) -> dict[str
         _copy_scaffold(runtime_root, build_path)
         _symlink_node_modules(runtime_root, build_path)
         # Overlay the agent's emitted files on top of the scaffold baseline.
+        skipped = []
         for rel_path, content in virtual_fs.items():
+            if not _is_agent_writable(rel_path):
+                skipped.append(rel_path)
+                continue
             target = build_path / rel_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+        if skipped:
+            logger.info(
+                "vite_build: ignored %d agent-emitted scaffold-owned file(s)",
+                len(skipped),
+            )
         try:
             result = subprocess.run(
-                ["npx", "vite", "build", "--outDir", "dist"],
+                # --base ./ guarantees relative asset URLs even if a config slips through.
+                ["npx", "vite", "build", "--outDir", "dist", "--base", "./"],
                 cwd=str(build_path),
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,
                 check=False,
+                shell=_SHELL,
             )
         except subprocess.TimeoutExpired as exc:
             raise ViteBuildError(
@@ -205,6 +258,7 @@ def _typecheck_runtime_break(build_path: Path) -> None:
             text=True,
             timeout=_TSC_TIMEOUT_SECONDS,
             check=False,
+            shell=_SHELL,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         # Fail-open: a tsc tooling problem must not nuke an otherwise-working
@@ -253,11 +307,30 @@ def _symlink_node_modules(runtime_root: Path, build_path: Path) -> None:
     working dir, so a symlink is sufficient and ~free. No-op when the scaffold
     has no node_modules (the build then fails loudly via ViteBuildError, which is
     the correct signal that the deploy step never installed prototype-runtime).
+
+    Falls back to junction (Windows) when os.symlink requires Developer Mode /
+    admin privileges that aren't available.
     """
     nm = build_path / "node_modules"
     rt_nm = runtime_root / "node_modules"
     if rt_nm.exists() and not nm.exists():
-        os.symlink(rt_nm, nm, target_is_directory=True)
+        try:
+            os.symlink(rt_nm, nm, target_is_directory=True)
+        except OSError:
+            # Windows without Developer Mode: symlink fails. Use a junction
+            # (no privilege needed) via subprocess, or copy as last resort.
+            if os.name == "nt":
+                import subprocess as _sp
+                try:
+                    _sp.run(
+                        ["cmd", "/c", "mklink", "/J", str(nm), str(rt_nm)],
+                        check=True, capture_output=True,
+                    )
+                except Exception:
+                    # Last resort: copy (slow but works everywhere).
+                    shutil.copytree(rt_nm, nm, symlinks=True)
+            else:
+                raise
 
 
 def _read_dist(dist_dir: Path) -> dict[str, str]:

@@ -7,6 +7,7 @@ import {
   ApiError,
   companiesApi,
   sourcesApi,
+  pipelineApi,
   type CompanySummary,
   type SourceFile,
   type UploadFilesResponse,
@@ -20,7 +21,7 @@ import {
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
-const SUPPORTED_EXT = [".docx", ".xlsx", ".pdf", ".txt", ".md"]
+const SUPPORTED_EXT = [".docx", ".xlsx", ".csv", ".pdf", ".txt", ".md"]
 
 export function SourcesScreen() {
   const { activeCompany } = useCompany()
@@ -31,6 +32,7 @@ export function SourcesScreen() {
   const [companyName, setCompanyName] = useState<string>(activeCompany)
   const [dirty, setDirty] = useState(false)
   const [regenerating, setRegenerating] = useState(false)
+  const [runningPipeline, setRunningPipeline] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadResult, setUploadResult] = useState<UploadFilesResponse | null>(null)
   const [removing, setRemoving] = useState<Set<string>>(new Set())
@@ -80,6 +82,23 @@ export function SourcesScreen() {
       cancelled = true
     }
   }, [activeCompany, reloadFiles])
+
+  const onRunPipeline = useCallback(async () => {
+    if (!activeCompany || runningPipeline) return
+    setRunningPipeline(true)
+    try {
+      await pipelineApi.run(activeCompany)
+      showToast(
+        "Pipeline started",
+        `Full pipeline running for ${companyName}: connectors → agents → knowledge graph → brief.`,
+      )
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      showToast("Pipeline failed to start", msg)
+    } finally {
+      setRunningPipeline(false)
+    }
+  }, [activeCompany, companyName, runningPipeline, showToast])
 
   const onRegenerate = useCallback(async () => {
     if (!activeCompany || regenerating) return
@@ -205,6 +224,15 @@ export function SourcesScreen() {
           )}
           <button
             type="button"
+            className="btn btn-secondary"
+            onClick={() => void onRunPipeline()}
+            disabled={runningPipeline || fileCount === 0}
+            title="Sync connectors, run Marketing + Competitor agents, build Knowledge Graph, then regenerate brief"
+          >
+            {runningPipeline ? "Running pipeline…" : "Run pipeline"}
+          </button>
+          <button
+            type="button"
             className="btn btn-accent"
             onClick={() => void onRegenerate()}
             disabled={regenerating || fileCount === 0}
@@ -278,7 +306,7 @@ export function SourcesScreen() {
         <span>
           {uploading
             ? "Uploading…"
-            : "Click to choose files or drag-and-drop (.docx, .xlsx, .pdf, .txt, .md)"}
+            : "Click to choose files or drag-and-drop (.docx, .xlsx, .csv, .pdf, .txt, .md)"}
         </span>
       </label>
 

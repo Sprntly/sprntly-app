@@ -1,9 +1,11 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app import auth, db, datasets as datasets_service
 from app.brief_runner import auto_generate_all
@@ -35,10 +37,13 @@ from app.routes import (
     team,
     evidence,
     health,
+    internal,
+    pipeline,
     prd,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -49,13 +54,15 @@ async def lifespan(app: FastAPI):
     # pre-existing `asurion` corpus and any sibling dirs added manually.
     seeded = datasets_service.seed_filesystem_datasets()
     if seeded:
-        logger.info("Seeded %d on-disk dataset(s) into the datasets table", seeded)
+        logger.info(
+            "Seeded %d on-disk dataset(s) into the datasets table", seeded)
     # Demote any cached brief whose payload schema doesn't match the current
     # code. auto_generate_all will then treat affected datasets as empty and
     # regenerate them under the new schema on the next tick.
     invalidated = db.invalidate_stale_briefs(BRIEF_SCHEMA_VERSION)
     if invalidated:
-        logger.info("Invalidated %d stale brief(s) (schema bump → v%d)", invalidated, BRIEF_SCHEMA_VERSION)
+        logger.info("Invalidated %d stale brief(s) (schema bump → v%d)",
+                    invalidated, BRIEF_SCHEMA_VERSION)
     # Same for cached evidence docs — mismatched template_version → status
     # 'invalidated' so the next view regenerates under the current prompt.
     # Variant-scoped to v2 (the only variant we generate now); historical
@@ -118,7 +125,8 @@ async def lifespan(app: FastAPI):
         # bump). Sync helpers, across ALL workspaces — system-wide cleanup, not a
         # user-driven query (Rule #23) — mirroring the prd/evidence invalidation above.
         proto_orphans = invalidate_orphan_generating_prototypes()
-        proto_stale = invalidate_stale_prototypes(DESIGN_AGENT_TEMPLATE_VERSION, variant="v1")
+        proto_stale = invalidate_stale_prototypes(
+            DESIGN_AGENT_TEMPLATE_VERSION, variant="v1")
         if proto_orphans or proto_stale:
             logger.info(
                 "Invalidated %d orphan generating prototype(s), %d stale prototype(s)",
@@ -131,7 +139,8 @@ async def lifespan(app: FastAPI):
         # (Rule #23) — mirroring the prototype orphan-clear above.
         iter_orphans = invalidate_orphan_running_iterations()
         if iter_orphans:
-            logger.info("Invalidated %d orphan running iteration(s)", iter_orphans)
+            logger.info(
+                "Invalidated %d orphan running iteration(s)", iter_orphans)
     except Exception:
         logger.warning(
             "Design Agent startup invalidation skipped — table(s) unavailable "
@@ -143,7 +152,24 @@ async def lifespan(app: FastAPI):
     # auto_generate_all is idempotent: it skips datasets that already have a
     # cached brief in SQLite at the current schema version.
     asyncio.create_task(auto_generate_all())
+
+    # Start the pipeline scheduler if enabled (opt-in via SCHEDULER_ENABLED=true).
+    if settings.scheduler_enabled:
+        try:
+            from app.scheduler import start_scheduler
+            start_scheduler()
+        except Exception:
+            logger.warning("Scheduler startup failed", exc_info=True)
+
     yield
+
+    # Teardown: shut down scheduler if it was started.
+    if settings.scheduler_enabled:
+        try:
+            from app.scheduler import shutdown_scheduler
+            shutdown_scheduler()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="Sprntly API", version="0.3.0", lifespan=lifespan)
@@ -164,7 +190,9 @@ app.include_router(brief.router)
 app.include_router(ask.router)
 app.include_router(prd.router)
 app.include_router(evidence.router)
+app.include_router(internal.router)
 app.include_router(design_agent.router)
+app.include_router(pipeline.router)
 app.include_router(synthesis.router)
 app.include_router(ingest.router)
 app.include_router(metrics.router)
@@ -173,3 +201,9 @@ app.include_router(oncall.router)
 app.include_router(company.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
+
+# Serve prototype bundles in dev (filesystem fallback when no Supabase Storage bucket).
+_proto_dir = Path(settings.storage_dir)
+if _proto_dir.exists() or settings.env == "development":
+    _proto_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/static/prototypes", StaticFiles(directory=str(_proto_dir)), name="prototypes")

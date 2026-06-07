@@ -91,11 +91,40 @@ def txt_to_md(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def csv_to_md(data: bytes, max_rows: int = 200) -> str:
+    """Convert CSV data to a markdown table."""
+    import csv as _csv
+
+    text = data.decode("utf-8", errors="replace")
+    reader = _csv.reader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        return "_Empty CSV file._\n"
+
+    parts: list[str] = []
+    header = rows[0]
+    parts.append("| " + " | ".join(h.strip() for h in header) + " |")
+    parts.append("| " + " | ".join("---" for _ in header) + " |")
+
+    data_rows = rows[1:]
+    truncated = len(data_rows) > max_rows
+    for row in data_rows[:max_rows]:
+        # Pad or trim row to match header length
+        cells = row + [""] * (len(header) - len(row))
+        parts.append("| " + " | ".join(c.strip() for c in cells[:len(header)]) + " |")
+
+    if truncated:
+        parts.append(f"\n_…(truncated to {max_rows} of {len(data_rows)} rows)_")
+
+    return "\n".join(parts) + "\n"
+
+
 # Routing -----------------------------------------------------------------
 
 _SUFFIX_TO_CONVERTER = {
     ".docx": docx_to_md,
     ".xlsx": xlsx_to_md,
+    ".csv": csv_to_md,
     ".pdf": pdf_to_md,
     ".txt": txt_to_md,
     ".md": txt_to_md,  # already markdown, passthrough

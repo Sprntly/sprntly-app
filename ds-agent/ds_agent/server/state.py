@@ -36,9 +36,14 @@ class SessionState:
 
     messages: list[dict[str, Any]] = field(default_factory=list)
 
+    # When set, this session is scoped to an enterprise dataset.
+    # corpus_context holds the joined corpus text from the backend.
+    dataset_slug: str | None = None
+    corpus_context: str | None = None
+
     @property
     def has_files(self) -> bool:
-        return bool(self.files)
+        return bool(self.files) or bool(self.corpus_context)
 
     @property
     def unattached_files(self) -> list[FileEntry]:

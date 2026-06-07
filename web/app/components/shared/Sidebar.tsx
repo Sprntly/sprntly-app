@@ -13,6 +13,7 @@ import {
   IconPrd,
   IconSettings,
   IconSources,
+  IconTickets,
 } from "./sidebar-icons"
 import { CompanySwitcher } from "./CompanySwitcher"
 
@@ -149,6 +150,7 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         />
         <NavItem screen="detail" icon={<IconEvidence />} label="Evidence" />
         <NavItem screen="prd" icon={<IconPrd />} label="PRD" />
+        <NavItem screen="tickets" icon={<IconTickets />} label="Tickets" />
         <div className="sb-spacer" />
 
         <div className="sb-section-title">Workspace</div>
