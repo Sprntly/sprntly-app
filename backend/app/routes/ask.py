@@ -6,8 +6,9 @@ from fastapi import Depends, APIRouter
 from pydantic import BaseModel, Field
 
 from app.ask_runner import compose_ask_answer
-from app.auth import CompanyContext, require_session, resolve_company_optional
+from app.auth import CompanyContext, require_company
 from app.db import find_cached_ask, log_ask
+from app.deps.ownership import require_owned_dataset
 
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
 
@@ -82,9 +83,14 @@ def _strip_citations(payload: dict) -> dict:
 @router.post("")
 def ask(
     body: AskIn,
-    _session: dict = Depends(require_session),
-    company: CompanyContext | None = Depends(resolve_company_optional),
+    company: CompanyContext = Depends(require_company),
 ):
+    # 0) Tenant gate: the dataset slug must resolve to the caller's company.
+    # Without this, an arbitrary client slug would seed a FOREIGN company's
+    # corpus into the LLM answer (cross-tenant corpus leak). require_company
+    # scopes the KG half; this scopes the corpus/dataset half. 404 on mismatch.
+    require_owned_dataset(body.dataset, company.company_id)
+
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. Returns
     # without an LLM call, with a small random delay so the response
@@ -125,7 +131,7 @@ def ask(
     # decision-logs the ask with kg_refs. When no company resolves (legacy cookie
     # session) or the KG is empty, it falls back to corpus-only — the pre-#18
     # behaviour.
-    enterprise_id = company.company_id if company else None
+    enterprise_id = company.company_id
     payload = compose_ask_answer(
         body.dataset, body.question, enterprise_id=enterprise_id
     )

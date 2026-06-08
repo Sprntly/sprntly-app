@@ -40,6 +40,19 @@ _errors: dict[str, str] = {}
 # insight queues behind another; PRD warming fills slots as they free.
 _WARM_SEMA = asyncio.Semaphore(3)
 
+# Strong refs to in-flight warm tasks. asyncio holds only a weak reference to a
+# bare create_task result, so without this a fanned-out evidence/PRD warm task
+# can be garbage-collected mid-run. The done-callback discards each on
+# completion (mirrors routes/design_agent.py's _inflight_tasks). The drain in
+# _warm_drilldowns_to_completion still works — it gathers asyncio.all_tasks().
+_inflight_tasks: set[asyncio.Task] = set()
+
+
+def _track(task: asyncio.Task) -> asyncio.Task:
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return task
+
 
 def get_status(dataset: str) -> dict:
     """Return one of: ready, generating, failed, empty (+ error message if any)."""
@@ -159,11 +172,11 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
     # Pass 1: all evidence — these get the early semaphore slots.
     for i, ins in enumerate(insights):
         title = (ins or {}).get("title") or f"Insight #{i + 1}"
-        asyncio.create_task(_warm_evidence(brief_id, i, title))
+        _track(asyncio.create_task(_warm_evidence(brief_id, i, title)))
     # Pass 2: all PRDs — they wait behind evidence for sema slots.
     for i, ins in enumerate(insights):
         title = (ins or {}).get("title") or f"Insight #{i + 1}"
-        asyncio.create_task(_warm_prd(brief_id, i, title))
+        _track(asyncio.create_task(_warm_prd(brief_id, i, title)))
     # Pass 3: predefined Ask Sprntly starter prompts. The home + Ask chips
     # send a fixed set of questions; pre-generating responses means the
     # demo's first click renders instantly.
