@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from app import datasets
 from app.auth import require_session
 from app.brief_runner import auto_generate_brief
+from app.config import settings
 from app.ingest import UnsupportedFileType, md_filename
 
 logger = logging.getLogger(__name__)
@@ -208,11 +209,23 @@ async def generate(
     slug: str,
     _session: dict = Depends(require_session),
 ):
-    """Fire-and-forget brief generation. Frontend polls /v1/brief/status?dataset=slug."""
+    """Fire-and-forget brief generation. Frontend polls /v1/brief/status?dataset=slug.
+
+    Honors BRIEF_ENGINE so a newly-created dataset produces the SAME engine's
+    brief as /regenerate + the scheduler: "synthesis" (default) runs the KG
+    seed-if-empty → run_synthesis path (+ drill-down warming); "legacy" keeps
+    the corpus→Claude auto_generate_brief.
+    """
     from app import db
     if not db.dataset_exists(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")
-    asyncio.create_task(auto_generate_brief(slug))
+    if settings.brief_engine == "synthesis":
+        # Reuse the brief route's synthesis background body (run_synthesis +
+        # warm-drilldowns, error-isolated) so both write paths stay identical.
+        from app.routes.brief import _synthesis_generate_bg
+        asyncio.create_task(_synthesis_generate_bg(slug))
+    else:
+        asyncio.create_task(auto_generate_brief(slug))
     return {"started": True, "dataset": slug}
 
 

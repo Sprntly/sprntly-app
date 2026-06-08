@@ -29,6 +29,7 @@ async def _run_synthesis_for_all_companies() -> None:
     skipped so the rest of the cycle still runs. run_synthesis save_brief()s
     each result into the `briefs` table the UI reads.
     """
+    from app.brief_runner import warm_synthesis_drilldowns
     from app.db.companies import list_companies
     from app.synthesis_brief import generate_brief_for
 
@@ -51,6 +52,9 @@ async def _run_synthesis_for_all_companies() -> None:
             # event loop so one slow company can't stall the scheduler thread.
             await asyncio.to_thread(generate_brief_for, slug)
             logger.info("Scheduler: synthesis brief for %s → ok", slug)
+            # Parity with the legacy path: warm evidence/PRD/Ask drill-downs so
+            # the first user click is instant. Error-isolated in the helper.
+            warm_synthesis_drilldowns(slug)
         except Exception as exc:  # noqa: BLE001 — per-company isolation
             logger.error("Scheduler: synthesis failed for %s: %s", slug, exc)
 

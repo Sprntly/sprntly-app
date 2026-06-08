@@ -146,6 +146,36 @@ def seed_if_empty(facade: GraphFacade, company_id: str, slug: str) -> dict | Non
     return {"corpus": corpus, "connectors": connectors}
 
 
+def generate_all_synthesis_briefs() -> None:
+    """Generate a synthesis brief for every company, warming drill-downs.
+
+    The startup counterpart to the legacy ``brief_runner.auto_generate_all``,
+    selected when ``settings.brief_engine == "synthesis"``. Mirrors the
+    scheduler's per-company synthesis cycle: error-isolated per company so one
+    bad slug/empty-KG/LLM hiccup is logged and skipped without aborting the
+    rest, and the whole pass never blocks or breaks startup.
+    """
+    from app.brief_runner import warm_synthesis_drilldowns
+    from app.db.companies import list_companies
+
+    try:
+        companies = list_companies()
+    except Exception:  # noqa: BLE001 — startup must never block on this
+        logger.exception("synthesis startup: failed to list companies")
+        return
+
+    for company in companies:
+        slug = company.get("slug") or company.get("id")
+        if not slug:
+            continue
+        try:
+            generate_brief_for(slug)
+            warm_synthesis_drilldowns(slug)
+        except Exception:  # noqa: BLE001 — per-company isolation
+            logger.exception("synthesis startup: brief generation failed for %s",
+                             slug)
+
+
 def generate_brief_for(company_id_or_slug: str) -> dict:
     """Generate + persist the KG-driven weekly brief for one company.
 
