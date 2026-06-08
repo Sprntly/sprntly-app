@@ -1,4 +1,4 @@
-"""Tests for the Figma + website design-source adapters and the unified pre-seed.
+"""Tests for the Figma + website + GitHub design-source adapters and the unified pre-seed.
 
 These cover the source-specific mapping into the common `DesignSystem` shape and
 the source-agnostic CSS pre-seed:
@@ -15,8 +15,10 @@ test_design_system_cache_flow.py.
 """
 from __future__ import annotations
 
+import base64
+
 from app.connectors import figma_oauth
-from app.design_agent.design_system.adapters import FigmaExtractor, WebExtractor
+from app.design_agent.design_system.adapters import FigmaExtractor, GithubExtractor, WebExtractor
 from app.design_agent.design_system.extractors import RawSignals, normalize, registry
 from app.design_agent.design_system.models import DesignSystem
 from app.design_agent.runner import (
@@ -44,14 +46,29 @@ _FIGMA_PALETTE = {
 def test_adapters_register_themselves_on_import():
     assert isinstance(registry.get("figma"), FigmaExtractor)
     assert isinstance(registry.get("web"), WebExtractor)
+    assert isinstance(registry.get("github"), GithubExtractor)
     assert registry.get("figma").category == "design_tool"
     assert registry.get("web").category == "website"
+    assert registry.get("github").category == "codebase"
 
 
 def test_module_normalize_dispatches_by_provider():
     raw = RawSignals(provider="figma", ref="k", signals=_FIGMA_PALETTE)
     ds = normalize(raw)
     assert ds.tokens.colors.background == "#2b2b2b"
+    gh = normalize(
+        RawSignals(
+            provider="github",
+            ref="org/repo",
+            signals={
+                "files_present": ["tokens.json"],
+                "colors": {"primary": "#123456"},
+                "fonts": [],
+            },
+        )
+    )
+    assert gh.tokens.colors.primary == "#123456"
+    assert gh.has_explicit_system is True
     # An unknown provider falls back to the neutral baseline (no adapter).
     assert normalize(RawSignals(provider="nope", ref="x")) == DesignSystem()
 
@@ -105,6 +122,126 @@ def test_generation_source_selection_preserves_figma_website_github_precedence()
         github_installation_id=None,
     )
     assert (provider, source_ref, raw_factory, version_factory) == (None, None, None, None)
+
+
+class _FakeResp:
+    def __init__(self, payload=None, ok=True, status_code=200):
+        self._payload = payload or {}
+        self.ok = ok
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+
+def _contents(text: str) -> dict:
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return {"encoding": "base64", "content": encoded, "size": len(text)}
+
+
+def test_github_current_version_uses_default_branch_sha(monkeypatch):
+    calls: list[str] = []
+
+    def fake_headers(installation_id):
+        assert installation_id == 987
+        return {"Authorization": "Bearer install-token"}
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        assert kwargs["headers"]["Authorization"] == "Bearer install-token"
+        assert kwargs["timeout"] == 15
+        if url.endswith("/repos/org/repo"):
+            return _FakeResp({"default_branch": "main", "pushed_at": "fallback"})
+        if url.endswith("/repos/org/repo/commits/main"):
+            return _FakeResp({"sha": "abc123"})
+        return _FakeResp(ok=False, status_code=404)
+
+    monkeypatch.setattr("app.connectors.github_app.headers_for_installation", fake_headers)
+    monkeypatch.setattr("app.connectors.github_app.requests.get", fake_get)
+
+    assert GithubExtractor(installation_id=987).current_version("org/repo") == "abc123"
+    assert calls == [
+        "https://api.github.com/repos/org/repo",
+        "https://api.github.com/repos/org/repo/commits/main",
+    ]
+
+
+def test_github_extracts_explicit_tailwind_css_and_token_files(monkeypatch):
+    files = {
+        "tailwind.config.ts": """
+            export default {
+              theme: {
+                colors: {
+                  background: "#0b1120",
+                  primary: "#38bdf8",
+                  border: "#1e293b"
+                },
+                fontFamily: { sans: ["Inter", "system-ui"] },
+                borderRadius: { lg: "12px" },
+                spacing: { 4: "16px", 6: "24px" },
+                boxShadow: { card: "0 12px 32px rgba(15,23,42,0.18)" }
+              }
+            }
+        """,
+        "tokens.json": '{"colors":{"surface":{"value":"#111827"}}}',
+        "components.json": '{"aliases":{"button":"components/ui/button","card":"components/ui/card"}}',
+        "app/globals.css": ':root { --muted: #64748b; --radius: 10px; } body { font-family: "Inter", sans-serif; }',
+    }
+
+    def fake_headers(installation_id):
+        assert installation_id == 321
+        return {"Authorization": "Bearer install-token"}
+
+    def fake_get(url, **kwargs):
+        path = url.split("/contents/", 1)[1]
+        assert kwargs["headers"]["Authorization"] == "Bearer install-token"
+        assert kwargs["timeout"] == 15
+        if path in files:
+            return _FakeResp(_contents(files[path]))
+        return _FakeResp(ok=False, status_code=404)
+
+    monkeypatch.setattr("app.connectors.github_app.headers_for_installation", fake_headers)
+    monkeypatch.setattr("app.connectors.github_app.requests.get", fake_get)
+
+    raw = GithubExtractor(installation_id=321).extract_raw_signals("org/repo")
+    assert raw.provider == "github"
+    assert set(raw.signals["files_present"]) == {
+        "tailwind.config.ts", "components.json", "tokens.json", "app/globals.css",
+    }
+    ds = normalize(raw)
+    assert ds.tokens.colors.background == "#0b1120"
+    assert ds.tokens.colors.primary == "#38bdf8"
+    assert ds.tokens.colors.accent == "#38bdf8"
+    assert ds.tokens.colors.surface == "#111827"
+    assert ds.tokens.colors.muted == "#64748b"
+    assert ds.tokens.colors.border == "#1e293b"
+    assert ds.tokens.is_dark is True
+    assert ds.tokens.fonts.heading_family == "Inter"
+    assert ds.tokens.fonts.body_family == "Inter"
+    assert ds.tokens.radius_convention == "rounded"
+    assert ds.tokens.spacing_scale == [16, 24]
+    assert ds.tokens.elevation_style == "shadows"
+    assert {"button", "card"}.issubset(set(ds.component_inventory))
+    assert ds.has_explicit_system is True
+    assert ds.confidence == "high"
+
+
+def test_github_missing_or_unreadable_files_fall_back_to_baseline(monkeypatch):
+    monkeypatch.setattr(
+        "app.connectors.github_app.headers_for_installation",
+        lambda installation_id: {"Authorization": "Bearer install-token"},
+    )
+    monkeypatch.setattr(
+        "app.connectors.github_app.requests.get",
+        lambda url, **kwargs: _FakeResp(ok=False, status_code=404),
+    )
+
+    raw = GithubExtractor(installation_id=321).extract_raw_signals("org/repo")
+    assert raw.signals["files_present"] == []
+    assert normalize(raw) == DesignSystem()
+
+    raw = GithubExtractor(installation_id=321).extract_raw_signals("")
+    assert normalize(raw) == DesignSystem()
 
 
 # ─── Figma mapping ───────────────────────────────────────────────────────
