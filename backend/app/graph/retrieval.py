@@ -249,6 +249,219 @@ def retrieve_context(
     }
 
 
+# ── insight → hypothesis → SUPPORTS-signals evidence trail ────────────────
+#
+# The synthesis agent writes, per chosen brief insight, a `hypothesis` Entity
+# whose `properties.theme_id` copies the insight's `theme_id`, with an
+# ADDRESSES edge to the theme and SUPPORTS edges (signal → hypothesis) from the
+# evidence that backed it. This is the SAME "evidence trail" that grounds the
+# brief insight; resolving it here lets evidence AND PRD ground on identical KG
+# primitives instead of re-deriving from the corpus.
+
+# How many theme-convergence signals to fold in alongside the SUPPORTS trail,
+# capturing breadth the hypothesis edges may not all carry.
+_TRAIL_THEME_SIGNALS = 8
+
+
+def _trail_signal_payload(signal: Signal, *, edge_type: str) -> dict:
+    """Flatten a Signal into the trail's signal shape — content + source_type +
+    provenance + confidence the PRD/evidence cite, tagged with the edge that
+    surfaced it (SUPPORTS = direct backing, theme = convergence breadth)."""
+    return {
+        "signal_id": signal.id,
+        "content": signal.content,
+        "kind": signal.kind,
+        "source_type": signal.source_type,
+        "provenance": signal.provenance or {},
+        "confidence": round(signal.confidence, 3),
+        "edge": edge_type,
+    }
+
+
+def _resolve_hypothesis(
+    facade: GraphFacade,
+    enterprise_id: str,
+    theme_id: Optional[str],
+    insight_title: Optional[str],
+) -> Optional[Any]:
+    """Find the hypothesis Entity the synthesis agent wrote for this insight.
+
+    Match is on `properties.theme_id` (the synthesis linkage). When several
+    hypotheses address the same theme (multiple brief weeks, or two insights on
+    one theme), prefer the one whose canonical_label matches the insight title,
+    then the most recently written. Returns None when nothing matches — the
+    caller then degrades to a theme-only trail (or to corpus)."""
+    if not theme_id:
+        return None
+    try:
+        hyps = facade.query_entities(enterprise_id, type="hypothesis")
+    except Exception as exc:  # noqa: BLE001 — trail read must not hard-fail
+        logger.info("evidence trail: query hypotheses failed (%s)", exc)
+        return None
+    matches = [h for h in hyps if (h.properties or {}).get("theme_id") == theme_id]
+    if not matches:
+        return None
+    if insight_title:
+        titled = [h for h in matches if h.canonical_label == insight_title[:200]]
+        if titled:
+            matches = titled
+    matches.sort(key=lambda h: h.transaction_at, reverse=True)
+    return matches[0]
+
+
+def _theme_id_for_insight(insight: dict) -> Optional[str]:
+    return insight.get("theme_id") if isinstance(insight, dict) else None
+
+
+def insight_evidence_trail(
+    facade: GraphFacade,
+    enterprise_id: str,
+    brief: dict,
+    insight_index: int,
+) -> dict[str, Any]:
+    """Resolve the KG evidence trail behind one brief insight.
+
+    Walks insight → theme_id → hypothesis (the synthesis-written Entity) →
+    SUPPORTS signals, and folds in the theme's convergence signals for breadth.
+    Each signal carries content/source_type/provenance/confidence so the
+    consumer (evidence OR PRD) can cite the actual data-source signals.
+
+    Returns a dict:
+      {
+        "insight":      <the insight dict>,
+        "theme_id":     <str | None>,
+        "hypothesis":   {entity_id, label, properties} | None,
+        "signals":      [ {signal_id, content, kind, source_type, provenance,
+                           confidence, edge}, ... ],   # SUPPORTS first, deduped
+        "kg_refs":      [ ...signal + hypothesis + theme ids... ],
+        "empty":        <bool>,   # True when no KG backing was found
+      }
+
+    Pure, tenant-scoped, best-effort: every read is isolated, and an unbacked
+    insight (no theme_id, no hypothesis, no signals) yields empty=True so the
+    caller can fall back to the corpus. The helper name may collide with the
+    parallel evidence branch at merge — that is intentional; both consumers
+    want exactly this shape.
+    """
+    insights = (brief.get("insights") or []) if isinstance(brief, dict) else []
+    insight = (
+        insights[insight_index]
+        if 0 <= insight_index < len(insights)
+        else {}
+    )
+    theme_id = _theme_id_for_insight(insight)
+    insight_title = insight.get("title") if isinstance(insight, dict) else None
+
+    by_id: dict[str, dict] = {}  # dedupe; SUPPORTS edges win over theme edges
+
+    # 1) SUPPORTS signals — the direct backing the synthesis agent wired to the
+    #    hypothesis. These are the strongest evidence for the insight.
+    hyp = _resolve_hypothesis(facade, enterprise_id, theme_id, insight_title)
+    hyp_out: Optional[dict] = None
+    if hyp is not None:
+        hyp_out = {
+            "entity_id": hyp.id,
+            "label": hyp.canonical_label,
+            "properties": hyp.properties or {},
+        }
+        try:
+            edges = facade.edges_to(enterprise_id, hyp.id, type="SUPPORTS")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("evidence trail: edges_to(hyp=%s) failed (%s)", hyp.id, exc)
+            edges = []
+        for edge in edges:
+            if edge.source_kind != "signal":
+                continue
+            sig = facade.get_signal(enterprise_id, edge.source_id)
+            if sig is None or (sig.properties or {}).get("superseded_by"):
+                continue
+            by_id[sig.id] = _trail_signal_payload(sig, edge_type="SUPPORTS")
+
+    # 2) Theme convergence signals — every non-stale signal wired to the theme,
+    #    for breadth the SUPPORTS set may not fully carry. Doesn't overwrite a
+    #    signal already tagged SUPPORTS.
+    if theme_id:
+        try:
+            theme_edges = facade.edges_to(enterprise_id, theme_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("evidence trail: edges_to(theme=%s) failed (%s)", theme_id, exc)
+            theme_edges = []
+        kept = 0
+        for edge in theme_edges:
+            if edge.source_kind != "signal":
+                continue
+            sig = facade.get_signal(enterprise_id, edge.source_id)
+            if sig is None or (sig.properties or {}).get("superseded_by"):
+                continue
+            if sig.id not in by_id:
+                by_id[sig.id] = _trail_signal_payload(sig, edge_type="theme")
+            kept += 1
+            if kept >= _TRAIL_THEME_SIGNALS:
+                break
+
+    # SUPPORTS-edged signals first (direct backing), theme-convergence after.
+    signals_out = sorted(
+        by_id.values(), key=lambda s: 0 if s["edge"] == "SUPPORTS" else 1
+    )
+
+    kg_refs: list[str] = [s["signal_id"] for s in signals_out]
+    if hyp_out:
+        kg_refs.append(hyp_out["entity_id"])
+    if theme_id:
+        kg_refs.append(theme_id)
+
+    empty = not signals_out and hyp_out is None
+
+    return {
+        "insight": insight,
+        "theme_id": theme_id,
+        "hypothesis": hyp_out,
+        "signals": signals_out,
+        "kg_refs": kg_refs,
+        "empty": empty,
+    }
+
+
+def render_evidence_trail_section(trail: dict[str, Any]) -> str:
+    """Render an evidence trail into a markdown block the PRD/evidence prompt
+    grounds on, under a "KNOWLEDGE GRAPH EVIDENCE" header. Empty trail → "".
+    Each signal cites its source_type + provenance so the grounding rules can
+    point a reader at the same data."""
+    if not trail or trail.get("empty"):
+        return ""
+
+    lines: list[str] = ["# KNOWLEDGE GRAPH EVIDENCE"]
+    lines.append(
+        "The data-source signals backing this insight, drawn from the "
+        "knowledge graph (the same evidence trail behind the brief). Ground "
+        "every claim, number, and acceptance criterion in these signals and "
+        "cite the source_type (and provenance where present); never invent."
+    )
+
+    hyp = trail.get("hypothesis")
+    if hyp:
+        props = hyp.get("properties") or {}
+        claim = props.get("claim")
+        lines.append("\n## Hypothesis (the insight's claim)")
+        lines.append(f"- {hyp['label']}")
+        if claim:
+            lines.append(f"  - claim: {claim}")
+
+    signals = trail.get("signals") or []
+    if signals:
+        lines.append("\n## Backing signals")
+        for s in signals:
+            prov = s.get("provenance") or {}
+            src = prov.get("source") or prov.get("doc") or prov.get("connector")
+            prov_txt = f" · provenance: {src}" if src else ""
+            tag = "SUPPORTS" if s.get("edge") == "SUPPORTS" else "theme"
+            lines.append(
+                f"- [{s['source_type']}/{s['kind']} · {tag}]{prov_txt}: {s['content']}"
+            )
+
+    return "\n".join(lines)
+
+
 def render_context_section(bundle: dict[str, Any]) -> str:
     """Render a retrieval bundle into the markdown block injected into the Ask
     prompt under a "KNOWLEDGE GRAPH CONTEXT" header. Empty bundle → "" (the
