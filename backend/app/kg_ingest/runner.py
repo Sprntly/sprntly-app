@@ -13,7 +13,7 @@ from typing import Callable, Iterable
 
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
-from app.kg_ingest.pullers import clickup, fireflies, hubspot
+from app.kg_ingest.pullers import clickup, fireflies, github, hubspot
 from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
@@ -23,8 +23,9 @@ _BATCH_CHAR_BUDGET = 6000
 # provider → (puller fn, token_json key, source-type hint for the extractor)
 PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     "clickup":   (clickup.pull,   "access_token", "project_mgmt (work items; classify bug/feature/fix)"),
-    "hubspot":   (hubspot.pull,   "access_token", "revenue (deals; extract blockers/feature gaps)"),
+    "hubspot":   (hubspot.pull,   "access_token", "revenue + support + customer_voice (deals: blockers/feature gaps; tickets: support pain/churn risk; notes/emails: voice-of-customer; owners: attribution; line items: revenue detail)"),
     "fireflies": (fireflies.pull, "api_key",      "customer_voice / communication (meeting transcripts)"),
+    "github":    (github.pull,    "access_token", "engineering activity (PRs + commit messages; distilled ship signals — classify feature/fix/refactor, surface what's being built)"),
 }
 
 
