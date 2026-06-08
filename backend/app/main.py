@@ -23,6 +23,7 @@ from app.prompts import (
     PRD_TEMPLATE_VERSION,
 )
 from app.routes import (
+    agent_chat,
     ask,
     brief,
     company,
@@ -188,6 +189,7 @@ app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(ask.router)
+app.include_router(agent_chat.router)
 app.include_router(prd.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
