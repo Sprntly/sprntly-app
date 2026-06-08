@@ -540,9 +540,23 @@ async def _run_generation_bg(
         # `_website_context_block` returns None when there is neither a website
         # URL nor manual hints, so we fall back to the generic Figma string
         # ("(no Figma source detected)").
+        # Run the website extractor at most once per generation. The same sample
+        # feeds both the scaffold prose block (below) and the design-system
+        # pre-seed (threaded into `generate_prototype`), so Scenario B's tokens
+        # reach the prototype the same way Scenario A's do — via a pre-seeded
+        # `src/index.css` — without a second browser run. Skipped entirely when a
+        # Figma file is present (Figma wins the single design-source slot).
+        website_sample: dict | None = None
+        if not figma_file_key:
+            website_sample = await _extract_website_sample(website_url)
         website_block = (
             None if figma_file_key
-            else await _website_context_block(website_url, manual_design)
+            else await _website_context_block(
+                website_url,
+                manual_design,
+                extracted_ds=website_sample,
+                extracted_ds_resolved=True,
+            )
         )
         source_block = website_block or _figma_context_block(figma_file_key)
 
@@ -588,6 +602,8 @@ async def _run_generation_bg(
             figma_node_id=figma_node_id,  # frame-level targeting; None when absent
             scenario=scenario_label,
             github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
+            website_url=None if figma_file_key else website_url,  # Scenario B pre-seed source
+            website_sample=website_sample,  # reuse the single extractor run for the pre-seed
         )
         # Success path (P1-08): a complete run that emitted files gets built +
         # staged + marked ready. A complete run with no files, or any non-complete
@@ -1033,28 +1049,35 @@ def _url_only_neutral_block(host: str) -> str:
     )
 
 
-def _extracted_design_block(
-    ds: dict[str, Any],
+def _website_design_system_block(
+    sample: dict[str, Any],
     *,
     host: str,
     manual_design: "ManualDesignInput | None",
 ) -> str:
-    """Render an extracted website design system as scaffold prose.
+    """Render extracted website signals via the unified DesignSystem path.
 
-    The COLOR fields are gated through `_is_usable_color`: a transparent /
-    zero-alpha extracted color is treated as below-confidence FOR THAT FIELD
-    ONLY — the color is then sourced from `manual_design` (if present) or a
-    neutral-palette instruction, while the good extracted font/logo/spacing
-    signal is KEPT. A transparent value NEVER reaches the prose.
+    This mirrors the pre-seed source: the sampled website dict is wrapped by the
+    website adapter, normalized to DesignSystem tokens, and summarized for the
+    scaffold. Transparent / zero-alpha colors keep the legacy field-level floor:
+    extracted typography/radius/spacing survive, while the primary color comes
+    from manual hints or the neutral default.
     """
+    from app.design_agent.design_system.adapters import WebExtractor
+
+    extractor = WebExtractor()
+    raw = extractor.extract_raw_signals(f"https://{host}", sample=sample)
+    design_system = extractor.normalize(raw)
+    tokens = design_system.tokens
+
     parts: list[str] = [
         f"Design system extracted from the brand website ({host}). "
         "Match this visual identity in the prototype."
     ]
 
-    primary = ds.get("primary_color")
+    primary = sample.get("primary_color")
     if _is_usable_color(primary):
-        parts.append(f"Primary color: {primary}.")
+        parts.append(f"Primary color: {tokens.colors.primary}.")
     elif manual_design is not None:
         parts.append(
             f"Primary color: {manual_design.primary_color} (user-supplied; no "
@@ -1066,30 +1089,57 @@ def _extracted_design_block(
             "neutral palette."
         )
 
-    background = ds.get("background_color")
+    background = sample.get("background_color")
     if _is_usable_color(background):
-        parts.append(f"Background color: {background}.")
+        parts.append(f"Background color: {tokens.colors.background}.")
 
-    if ds.get("heading_font_family"):
-        parts.append(f"Heading font: {ds['heading_font_family']}.")
-    if ds.get("heading_size_scale"):
-        parts.append(f"Heading size: {ds['heading_size_scale']}.")
-    if ds.get("body_font_family"):
-        parts.append(f"Body font: {ds['body_font_family']}.")
-    if ds.get("border_radius_convention"):
-        parts.append(f"Border radius: {ds['border_radius_convention']}.")
-    spacing = ds.get("spacing_scale_samples") or []
+    if sample.get("heading_font_family"):
+        parts.append(f"Heading font: {tokens.fonts.heading_family}.")
+    if sample.get("heading_size_scale"):
+        parts.append(f"Heading size: {sample['heading_size_scale']}.")
+    if sample.get("body_font_family"):
+        parts.append(f"Body font: {tokens.fonts.body_family}.")
+    if sample.get("border_radius_convention"):
+        parts.append(f"Border radius: {tokens.radius_convention}.")
+    spacing = sample.get("spacing_scale_samples") or []
     if spacing:
-        parts.append(f"Spacing samples: {', '.join(spacing)}.")
-    if ds.get("logo_url"):
-        parts.append(f"Logo: {ds['logo_url']}.")
+        parts.append(
+            "Spacing samples: "
+            + ", ".join(f"{value}px" for value in tokens.spacing_scale)
+            + "."
+        )
+    if sample.get("logo_url"):
+        parts.append(f"Logo: {sample['logo_url']}.")
 
     return " ".join(parts)
+
+
+async def _extract_website_sample(website_url: str | None) -> dict | None:
+    """Run the headless-browser website extractor once for `website_url`.
+
+    Returns the sampled design-system dict, or None on a low-confidence sample,
+    an extractor failure, or no URL. Isolated as its own helper so the same
+    sample feeds BOTH the scaffold prose block and the design-system pre-seed
+    without paying for two browser runs. The import is lazy + ImportError-guarded
+    so the rest of the generate path ships even when the extractor is absent.
+    """
+    if not website_url:
+        return None
+    try:
+        from app.design_agent.scenarios.website import (
+            extract_website_design_system,
+        )
+        return await extract_website_design_system(website_url)
+    except ImportError:
+        return None
 
 
 async def _website_context_block(
     website_url: str | None,
     manual_design: "ManualDesignInput | None",
+    *,
+    extracted_ds: dict | None = None,
+    extracted_ds_resolved: bool = False,
 ) -> str | None:
     """Scaffold context for Scenario B (analog of `_figma_context_block`).
 
@@ -1113,15 +1163,21 @@ async def _website_context_block(
     if website_url:
         host = urlsplit(website_url).hostname or website_url
         ds: dict[str, Any] | None = None
-        try:
-            from app.design_agent.scenarios.website import (
-                extract_website_design_system,
-            )
-            ds = await extract_website_design_system(website_url)
-        except ImportError:
-            ds = None  # P5-01 not merged → fall through to manual / url-only.
+        if extracted_ds_resolved:
+            # The caller already ran extraction once (and is reusing the sample
+            # for the design-system pre-seed). Reuse it here rather than paying
+            # for a second browser run.
+            ds = extracted_ds
+        else:
+            try:
+                from app.design_agent.scenarios.website import (
+                    extract_website_design_system,
+                )
+                ds = await extract_website_design_system(website_url)
+            except ImportError:
+                ds = None  # P5-01 not merged → fall through to manual / url-only.
         if ds is not None:
-            return _extracted_design_block(ds, host=host, manual_design=manual_design)
+            return _website_design_system_block(ds, host=host, manual_design=manual_design)
         if manual_design is not None:
             return _manual_design_block(
                 manual_design.primary_color, manual_design.font_family, host=host
