@@ -36,6 +36,7 @@ from app.db.briefs import (
 # PRDs
 from app.db.prds import (
     complete_prd,
+    complete_prd_2part,
     fail_prd,
     find_existing_prd,
     get_prd,
@@ -147,6 +148,7 @@ __all__ = [
     "save_brief",
     # prds
     "complete_prd",
+    "complete_prd_2part",
     "fail_prd",
     "find_existing_prd",
     "get_prd",
