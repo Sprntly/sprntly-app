@@ -1,11 +1,48 @@
 import { describe, expect, it } from "vitest"
 import {
   dedupeFiles,
+  generateSlug,
   GEN_STAGES,
   progressForElapsed,
   stageForElapsed,
   suggestedSlug,
 } from "../onboard-helpers"
+
+const SLUG_FORMAT = /^[a-z0-9][a-z0-9_-]{1,62}$/
+
+describe("generateSlug", () => {
+  it("always matches the backend slug format over many iterations", () => {
+    for (let i = 0; i < 5000; i++) {
+      const slug = generateSlug()
+      expect(slug).toMatch(SLUG_FORMAT)
+    }
+  })
+
+  it("produces tokens within the 2-63 char bound", () => {
+    for (let i = 0; i < 1000; i++) {
+      const slug = generateSlug()
+      expect(slug.length).toBeGreaterThanOrEqual(2)
+      expect(slug.length).toBeLessThanOrEqual(63)
+    }
+  })
+
+  it("starts with an alphanumeric character", () => {
+    for (let i = 0; i < 1000; i++) {
+      expect(generateSlug()[0]).toMatch(/[a-z0-9]/)
+    }
+  })
+
+  it("is unique across many calls (collision resistant)", () => {
+    const seen = new Set<string>()
+    const N = 10000
+    for (let i = 0; i < N; i++) seen.add(generateSlug())
+    expect(seen.size).toBe(N)
+  })
+
+  it("varies per call (not name-derived, not constant)", () => {
+    expect(generateSlug()).not.toBe(generateSlug())
+  })
+})
 
 describe("suggestedSlug", () => {
   it("lowercases and replaces spaces with underscores", () => {

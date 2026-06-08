@@ -13,6 +13,38 @@ export function suggestedSlug(name: string): string {
     .slice(0, 63)
 }
 
+/**
+ * Generate a unique, opaque company slug. The slug is decoupled from the
+ * company name: it's a random token, not name-derived, so it ALWAYS satisfies
+ * the backend `companies_slug_format` CHECK (^[a-z0-9][a-z0-9_-]{1,62}$,
+ * 2-63 chars, must start alphanumeric) regardless of what the user types.
+ *
+ * Shape: a leading letter ("c") + 11 random chars from [a-z0-9] = 12 chars,
+ * which is well within 2-63 and starts alphanumeric by construction. The
+ * random body uses a crypto-strong RNG for collision resistance, and varies
+ * on every call. On a UNIQUE collision the caller simply regenerates.
+ */
+export function generateSlug(): string {
+  const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789" // [a-z0-9]
+  const BODY_LEN = 11
+  const bytes = new Uint8Array(BODY_LEN)
+  randomBytesInto(bytes)
+  let body = ""
+  for (let i = 0; i < BODY_LEN; i++) {
+    body += ALPHABET[bytes[i] % ALPHABET.length]
+  }
+  // Leading letter guarantees the first char is alphanumeric (a-z).
+  return "c" + body
+}
+
+/**
+ * Fill `out` with crypto-strong random bytes via the Web Crypto API
+ * (`crypto.getRandomValues`), available in browsers, Edge, and Node 20+.
+ */
+function randomBytesInto(out: Uint8Array): void {
+  globalThis.crypto.getRandomValues(out)
+}
+
 /** Strip duplicate uploads keyed by name+size (a user re-dropping the same file). */
 export function dedupeFiles(files: File[]): File[] {
   const seen = new Set<string>()

@@ -1,4 +1,4 @@
-import { suggestedSlug } from "../onboard-helpers"
+import { generateSlug } from "../onboard-helpers"
 import { getSupabase } from "../supabase/client"
 import {
   DEFAULT_FEATURE_FLAGS,
@@ -208,11 +208,12 @@ export async function createWorkspace(input: {
   userId: string
 }): Promise<WorkspaceCompany> {
   const supabase = getSupabase()
-  let slug = suggestedSlug(input.companyName)
-  if (slug.length < 2) slug = "workspace"
 
+  // The slug is an opaque, name-independent token that always satisfies the
+  // backend slug format. The company name flows into display_name only. On a
+  // UNIQUE collision (23505) we regenerate a fresh token and retry.
   for (let i = 0; i < 5; i++) {
-    const trySlug = i === 0 ? slug : `${slug}-${i + 1}`
+    const trySlug = generateSlug()
     const { data: company, error: companyErr } = await supabase
       .from("companies")
       .insert({
@@ -252,7 +253,7 @@ export async function createWorkspace(input: {
     }
     if (companyErr?.code !== "23505") throw companyErr ?? new Error("Could not create workspace")
   }
-  throw new Error("Could not create workspace — try a different company name.")
+  throw new Error("Could not create workspace — please try again.")
 }
 
 export async function updateWorkspace(
