@@ -501,8 +501,12 @@ def _resolve_design_system(
         cached = lookup_design_system(company_id, provider, source_ref)
         if cached is not None:
             stored = cached.get("source_version")
-            if current is not None and current != stored:
-                # Source has changed — attempt a fresh extraction.
+            cache_status = cached.get("status")
+            version_changed = current is not None and current != stored
+            marked_stale = bool(cache_status) and cache_status != "active"
+            if version_changed or marked_stale:
+                # Source changed, or the row was proactively marked stale (e.g. by the
+                # GitHub push webhook) — attempt a fresh extraction.
                 try:
                     raw = raw_signals_factory()
                 except Exception:

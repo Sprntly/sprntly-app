@@ -208,6 +208,35 @@ def test_github_current_version_api_failure_returns_none(monkeypatch):
     assert GithubExtractor(installation_id=None).current_version("org/repo") is None
 
 
+def test_codebase_current_version_returns_branch_head_sha(monkeypatch):
+    """The GitHub extractor's current_version probe fetches the default branch
+    from the repo endpoint and then retrieves the HEAD commit SHA from the
+    commits endpoint — it does NOT enumerate the full file tree."""
+    calls: list[str] = []
+
+    def fake_headers(installation_id):
+        return {"Authorization": "Bearer install-token"}
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        if url.endswith("/repos/owner/codebase-repo"):
+            return _FakeResp({"default_branch": "main", "pushed_at": "fallback"})
+        if url.endswith("/repos/owner/codebase-repo/commits/main"):
+            return _FakeResp({"sha": "deadbeef123"})
+        return _FakeResp(ok=False, status_code=404)
+
+    monkeypatch.setattr("app.connectors.github_app.headers_for_installation", fake_headers)
+    monkeypatch.setattr("app.connectors.github_app.requests.get", fake_get)
+
+    sha = GithubExtractor(installation_id=42).current_version("owner/codebase-repo")
+    assert sha == "deadbeef123"
+    # Exactly two calls: repo metadata + branch HEAD. No tree/blob traversal.
+    assert calls == [
+        "https://api.github.com/repos/owner/codebase-repo",
+        "https://api.github.com/repos/owner/codebase-repo/commits/main",
+    ]
+
+
 def test_github_extracts_explicit_tailwind_css_and_token_files(monkeypatch):
     files = {
         "tailwind.config.ts": """

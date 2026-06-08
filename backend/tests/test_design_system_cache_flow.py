@@ -785,3 +785,62 @@ def test_design_source_for_generation_none_branch_returns_four_none_tuple():
     )
 
     assert result == (None, None, None, None)
+
+
+# ─── Stale-marker cache flow ───────────────────────────────────────────────────
+
+
+def test_codebase_cache_hit_reextracts_when_marked_stale(monkeypatch):
+    """A cached row whose status has been set to 'stale' by the GitHub push
+    webhook triggers re-extraction even when the version probe is unchanged (or
+    returns None), so a proactively-invalidated cache row is never served stale
+    past the next generation call."""
+    cached_ds = _make_ds("#aabbcc")
+    fresh_ds = _make_ds("#112233")
+
+    # Build the cached row with status='stale' and the SAME version as what the
+    # probe would return — version alone would not trigger re-extraction.
+    stale_row = {
+        "data": cached_ds.model_dump(),
+        "source_version": "sha-same",
+        "status": "stale",
+        "source_category": "codebase",
+        "source_provider": "github",
+        "source_ref": "owner/repo@main",
+    }
+
+    raw_calls: list[int] = []
+    fake_raw = RawSignals(provider="github", ref="owner/repo@main", signals={"files_present": []})
+
+    def raw_factory():
+        raw_calls.append(1)
+        return fake_raw
+
+    # Version probe returns the same SHA as stored — without the stale flag this
+    # would be a cache hit with no re-extraction.
+    version_factory = lambda: "sha-same"  # noqa: E731
+
+    class _FakeGithubAdapter:
+        category = "codebase"
+
+    with _patched_internals(
+        monkeypatch,
+        cached_row=stale_row,
+        upsert_return={},
+        normalize_return=fresh_ds,
+    ) as fakes:
+        fakes.registry.get.return_value = _FakeGithubAdapter()
+        result = _resolve_design_system(
+            company_id="co-stale",
+            provider="github",
+            source_ref="owner/repo@main",
+            raw_signals_factory=raw_factory,
+            version_factory=version_factory,
+        )
+
+    assert result is not None
+    assert result.tokens.colors.background == "#112233"  # fresh, not cached
+    assert raw_calls == [1], "raw factory must be called once when row is marked stale"
+    assert fakes.upsert.call_count == 1, "upsert must run to refresh the cache row"
+    assert fakes.upsert.call_args.kwargs["source_version"] == "sha-same"
+    assert fakes.upsert.call_args.kwargs["source_category"] == "codebase"

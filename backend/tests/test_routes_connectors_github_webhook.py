@@ -438,6 +438,39 @@ def test_webhook_unknown_event_returns_ok_unhandled(client):
     assert r.json()["handled"] is False
 
 
+def test_webhook_push_marks_codebase_design_system_stale(client, monkeypatch):
+    """A GitHub push webhook event triggers the stale-marker for the pushed repo
+    and returns handled:true."""
+    import app.routes.connectors as connectors_mod
+
+    calls: list[str] = []
+
+    def _fake_mark(repo_full_name: str) -> int:
+        calls.append(repo_full_name)
+        return 1
+
+    monkeypatch.setattr(connectors_mod.db, "mark_github_design_systems_stale", _fake_mark)
+
+    payload = {
+        "repository": {"full_name": "owner/repo"},
+        "ref": "refs/heads/main",
+        "after": "abc123sha",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    r = client.post(
+        "/v1/connectors/github/webhook",
+        content=body,
+        headers={
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": _sign(body),
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["handled"] is True
+    assert calls == ["owner/repo"]
+
+
 # ─────────────────────── list endpoints ───────────────────────
 
 

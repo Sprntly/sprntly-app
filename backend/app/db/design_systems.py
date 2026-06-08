@@ -90,3 +90,40 @@ def upsert_design_system(
         company_id, source_provider, confidence,
     )
     return row
+
+
+def mark_github_design_systems_stale(repo_full_name: str) -> int:
+    """Mark every cached GitHub-sourced design system for a repository stale.
+
+    Called from the GitHub push webhook: a push to a connected repo means any
+    design system extracted from that repo's code may now be out of date, so the
+    next generation re-extracts instead of serving the cached row. Matches by
+    source_ref across companies — the webhook is installation-scoped, not
+    company-scoped, and source_ref already encodes the repo as "owner/repo" or
+    "owner/repo@branch". Returns the number of rows marked stale.
+    """
+    cleaned = (repo_full_name or "").strip()
+    if not cleaned:
+        return 0
+    c = require_client()
+    rows = (
+        c.table(_TABLE)
+        .select("id,source_ref")
+        .eq("source_provider", "github")
+        .execute()
+    ).data or []
+    branch_prefix = cleaned + "@"
+    stale_ids = [
+        r["id"]
+        for r in rows
+        if r.get("source_ref") == cleaned
+        or str(r.get("source_ref") or "").startswith(branch_prefix)
+    ]
+    if stale_ids:
+        c.table(_TABLE).update(
+            {"status": "stale", "updated_at": utc_now()}
+        ).in_("id", stale_ids).execute()
+    logger.info(
+        "design_system_marked_stale repo=%s count=%d", cleaned, len(stale_ids)
+    )
+    return len(stale_ids)
