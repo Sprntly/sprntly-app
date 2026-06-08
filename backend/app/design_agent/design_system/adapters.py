@@ -79,6 +79,58 @@ _COMPONENT_HINTS = (
     "tooltip",
 )
 
+_GITHUB_UI_DIRS = (
+    "components/ui",
+    "src/components/ui",
+    "app/components/ui",
+    "components",
+    "src/components",
+    "app/components",
+)
+_GITHUB_MAX_DIRS = 6
+_GITHUB_MAX_UI_FILES = 12
+_GITHUB_MAX_UI_FILE_BYTES = 96_000
+_GITHUB_EXPLICIT_FILE_BYTES = 128_000
+
+_TAILWIND_COLORS = {
+    "slate": "#64748b",
+    "gray": "#6b7280",
+    "zinc": "#71717a",
+    "neutral": "#737373",
+    "stone": "#78716c",
+    "red": "#ef4444",
+    "orange": "#f97316",
+    "amber": "#f59e0b",
+    "yellow": "#eab308",
+    "lime": "#84cc16",
+    "green": "#22c55e",
+    "emerald": "#10b981",
+    "teal": "#14b8a6",
+    "cyan": "#06b6d4",
+    "sky": "#0ea5e9",
+    "blue": "#3b82f6",
+    "indigo": "#6366f1",
+    "violet": "#8b5cf6",
+    "purple": "#a855f7",
+    "fuchsia": "#d946ef",
+    "pink": "#ec4899",
+    "rose": "#f43f5e",
+    "white": "#ffffff",
+    "black": "#000000",
+}
+
+_TAILWIND_COLOR_CLASS_RE = re.compile(
+    r"\b(?:bg|text|border|ring|from|to)-([a-z]+)(?:-\d{2,3})?\b"
+)
+_TAILWIND_RADIUS_RE = re.compile(r"\brounded(?:-(none|sm|md|lg|xl|2xl|3xl|full))?\b")
+_TAILWIND_SPACING_RE = re.compile(r"\b(?:p|px|py|pt|pr|pb|pl|gap|space-x|space-y|m|mx|my)-(\d+)\b")
+_TAILWIND_SHADOW_RE = re.compile(r"\bshadow(?:-(sm|md|lg|xl|2xl|none))?\b")
+_TAILWIND_WEIGHT_RE = re.compile(r"\bfont-(medium|semibold|bold)\b")
+_TAILWIND_TEXT_SIZE_RE = re.compile(r"\btext-(xs|sm|base|lg|xl|2xl|3xl)\b")
+_EXPORT_COMPONENT_RE = re.compile(
+    r"\b(?:function|const)\s+([A-Z][A-Za-z0-9]*)|\bexport\s+\{\s*([A-Z][A-Za-z0-9]*)"
+)
+
 
 def _luminance(hex_color: str) -> float:
     """Perceptual luminance of a #rrggbb string (same weights the Figma walk uses)."""
@@ -496,7 +548,7 @@ class GithubExtractor:
         except Exception:
             return None
 
-    def _fetch_text_file(self, repo_full_name: str, path: str, branch: str | None) -> str | None:
+    def _github_get_contents(self, repo_full_name: str, path: str, branch: str | None):
         if not self.installation_id:
             return None
         try:
@@ -512,17 +564,60 @@ class GithubExtractor:
             )
             if resp.status_code == 404 or not resp.ok:
                 return None
-            payload = resp.json() or {}
-            if isinstance(payload, list):
-                return None
-            if int(payload.get("size") or 0) > 128_000:
-                return None
-            content = payload.get("content")
-            if payload.get("encoding") != "base64" or not isinstance(content, str):
-                return None
+            return resp.json()
+        except Exception:
+            return None
+
+    def _fetch_text_file(
+        self,
+        repo_full_name: str,
+        path: str,
+        branch: str | None,
+        *,
+        max_bytes: int = _GITHUB_EXPLICIT_FILE_BYTES,
+    ) -> str | None:
+        payload = self._github_get_contents(repo_full_name, path, branch) or {}
+        if isinstance(payload, list):
+            return None
+        try:
+            size = int(payload.get("size") or 0)
+        except (TypeError, ValueError):
+            return None
+        if size > max_bytes:
+            return None
+        content = payload.get("content")
+        if payload.get("encoding") != "base64" or not isinstance(content, str):
+            return None
+        try:
             return base64.b64decode(content).decode("utf-8", errors="ignore")
         except Exception:
             return None
+
+    def _list_ui_files(self, repo_full_name: str, branch: str | None) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for directory in _GITHUB_UI_DIRS[:_GITHUB_MAX_DIRS]:
+            payload = self._github_get_contents(repo_full_name, directory, branch)
+            if not isinstance(payload, list):
+                continue
+            for item in payload:
+                if len(out) >= _GITHUB_MAX_UI_FILES:
+                    return out
+                if not isinstance(item, dict) or item.get("type") != "file":
+                    continue
+                path = str(item.get("path") or "")
+                name = str(item.get("name") or path.rsplit("/", 1)[-1])
+                if not path.endswith((".tsx", ".ts", ".jsx", ".js")):
+                    continue
+                if not self._is_likely_component_file(name):
+                    continue
+                out.append((path, name))
+        return out
+
+    def _is_likely_component_file(self, name: str) -> bool:
+        stem = name.rsplit(".", 1)[0].lower()
+        return stem in _COMPONENT_HINTS or stem in {
+            "index", "button", "card", "input", "label", "badge",
+        }
 
     def extract_raw_signals(self, ref: str) -> RawSignals:
         repo_full_name, branch = _repo_ref_parts(ref)
@@ -537,10 +632,23 @@ class GithubExtractor:
             "radius": None,
             "shadows": [],
             "components": [],
+            "inferred_colors": {},
+            "inferred_spacing": [],
+            "inferred_radius": None,
+            "inferred_shadows": [],
+            "inferred_fonts": [],
+            "inferred_components": [],
+            "inference_files": [],
         }
         components: set[str] = set()
         spacing: set[int] = set()
         shadows: list[str] = []
+        inferred_components: set[str] = set()
+        inferred_spacing: set[int] = set()
+        inferred_shadows: list[str] = []
+        inferred_fonts: list[str] = []
+        inferred_colors: dict[str, str] = {}
+        inference_stats: dict[str, int] = {}
 
         for path in _GITHUB_DESIGN_FILES:
             text = self._fetch_text_file(repo_full_name, path, branch)
@@ -553,9 +661,37 @@ class GithubExtractor:
             if lowered_path.endswith((".css", ".js", ".ts", ".mjs", ".cjs")):
                 self._collect_text_signals(text, signals, components, spacing, shadows)
 
+        for path, name in self._list_ui_files(repo_full_name, branch):
+            text = self._fetch_text_file(
+                repo_full_name,
+                path,
+                branch,
+                max_bytes=_GITHUB_MAX_UI_FILE_BYTES,
+            )
+            if not text:
+                continue
+            signals["inference_files"].append(path)
+            self._collect_inferred_signals(
+                text,
+                name,
+                inferred_colors,
+                inferred_spacing,
+                inferred_shadows,
+                inferred_fonts,
+                inferred_components,
+                inference_stats,
+            )
+
         signals["spacing"] = sorted(spacing)
         signals["shadows"] = shadows[:8]
         signals["components"] = sorted(components)
+        signals["inferred_colors"] = inferred_colors
+        signals["inferred_spacing"] = sorted(inferred_spacing)
+        signals["inferred_radius"] = inference_stats.get("_radius")
+        signals["inferred_shadows"] = inferred_shadows[:8]
+        signals["inferred_fonts"] = inferred_fonts[:8]
+        signals["inferred_components"] = sorted(inferred_components)
+        signals["inference_stats"] = inference_stats
         return RawSignals(provider=self.provider, ref=ref, signals=signals)
 
     def _collect_json_signals(
@@ -677,14 +813,101 @@ class GithubExtractor:
             if re.search(rf"\b{name}\b", haystack):
                 components.add(name)
 
+    def _collect_inferred_signals(
+        self,
+        text: str,
+        file_name: str,
+        colors: dict[str, str],
+        spacing: set[int],
+        shadows: list[str],
+        fonts: list[str],
+        components: set[str],
+        stats: dict[str, int],
+    ) -> None:
+        lower_file = file_name.rsplit(".", 1)[0].lower()
+        if lower_file in _COMPONENT_HINTS:
+            components.add(lower_file)
+        self._collect_component_hints(text, components)
+        for match in _EXPORT_COMPONENT_RE.findall(text):
+            exported = (match[0] or match[1] or "").strip()
+            if exported:
+                self._collect_component_hints(exported, components)
+
+        color_counts: dict[str, int] = {}
+        for color_name in _TAILWIND_COLOR_CLASS_RE.findall(text):
+            if color_name in _TAILWIND_COLORS:
+                color_counts[color_name] = color_counts.get(color_name, 0) + 1
+        for color_name, count in sorted(color_counts.items(), key=lambda item: item[1], reverse=True):
+            if count >= 2 and "primary" not in colors:
+                colors["primary"] = _TAILWIND_COLORS[color_name]
+                stats["color_classes"] = stats.get("color_classes", 0) + count
+                break
+        if "bg-white" in text and "background" not in colors:
+            colors["background"] = "#ffffff"
+        if "bg-black" in text and "background" not in colors:
+            colors["background"] = "#000000"
+        if "text-white" in text and "foreground" not in colors:
+            colors["foreground"] = "#ffffff"
+        if "border-" in text and "border" not in colors:
+            colors["border"] = Colors().border
+
+        radius_hits = _TAILWIND_RADIUS_RE.findall(text)
+        if radius_hits:
+            stats["radius_classes"] = stats.get("radius_classes", 0) + len(radius_hits)
+            order = {"full": 4, "3xl": 3, "2xl": 3, "xl": 2, "lg": 2, "md": 1, "sm": 1, "": 1}
+            current = stats.get("_radius_rank", 0)
+            for value in radius_hits:
+                rank = order.get(value or "", 1)
+                if rank >= current:
+                    stats["_radius_rank"] = rank
+                    if value == "full":
+                        stats["_radius"] = "9999px"
+                    elif value in {"2xl", "3xl"}:
+                        stats["_radius"] = "24px"
+                    elif value in {"lg", "xl"}:
+                        stats["_radius"] = "12px"
+                    elif value == "sm":
+                        stats["_radius"] = "4px"
+                    else:
+                        stats["_radius"] = "8px"
+
+        for raw in _TAILWIND_SPACING_RE.findall(text):
+            try:
+                step = int(raw)
+            except ValueError:
+                continue
+            if step > 0:
+                spacing.add(step * 4)
+                stats["spacing_classes"] = stats.get("spacing_classes", 0) + 1
+
+        shadow_hits = _TAILWIND_SHADOW_RE.findall(text)
+        if shadow_hits:
+            stats["shadow_classes"] = stats.get("shadow_classes", 0) + len(shadow_hits)
+            for value in shadow_hits:
+                label = f"shadow-{value}" if value else "shadow"
+                if label != "shadow-none" and label not in shadows:
+                    shadows.append(label)
+
+        if _TAILWIND_WEIGHT_RE.search(text):
+            fonts.append("font-weight")
+            stats["font_classes"] = stats.get("font_classes", 0) + 1
+        if _TAILWIND_TEXT_SIZE_RE.search(text):
+            fonts.append("type-scale")
+            stats["text_size_classes"] = stats.get("text_size_classes", 0) + 1
+
     def normalize(self, raw: RawSignals) -> DesignSystem:
         s = raw.signals or {}
-        if not s or not s.get("files_present"):
+        if not s or not (s.get("files_present") or s.get("inference_files")):
             return DesignSystem()
 
         color_map = {
             str(k).lower(): v
             for k, v in (s.get("colors") or {}).items()
+            if _normalize_hex(str(v))
+        }
+        inferred_color_map = {
+            str(k).lower(): v
+            for k, v in (s.get("inferred_colors") or {}).items()
             if _normalize_hex(str(v))
         }
 
@@ -693,6 +916,12 @@ class GithubExtractor:
                 if name in color_map:
                     return color_map[name]
             for key, value in color_map.items():
+                if any(name in key for name in names):
+                    return value
+            for name in names:
+                if name in inferred_color_map:
+                    return inferred_color_map[name]
+            for key, value in inferred_color_map.items():
                 if any(name in key for name in names):
                     return value
             return None
@@ -727,10 +956,23 @@ class GithubExtractor:
             fonts.heading_family = font
             fonts.body_family = font
 
-        spacing_scale = s.get("spacing") or list(Tokens().spacing_scale)
-        radius = _radius_convention(str(s.get("radius") or ""))
+        spacing_scale = (
+            s.get("spacing")
+            or s.get("inferred_spacing")
+            or list(Tokens().spacing_scale)
+        )
+        radius = _radius_convention(str(s.get("radius") or s.get("inferred_radius") or ""))
         is_dark = bool(background and _luminance(background) < 128)
-        has_tokens = bool(color_map or font or s.get("spacing") or s.get("radius") or s.get("shadows"))
+        has_explicit_tokens = bool(
+            color_map or font or s.get("spacing") or s.get("radius") or s.get("shadows")
+        )
+        has_inferred_tokens = bool(
+            inferred_color_map
+            or s.get("inferred_spacing")
+            or s.get("inferred_radius")
+            or s.get("inferred_shadows")
+            or s.get("inferred_components")
+        )
 
         tokens = Tokens(
             colors=colors,
@@ -738,13 +980,23 @@ class GithubExtractor:
             fonts=fonts,
             spacing_scale=spacing_scale,
             radius_convention=radius,
-            elevation_style="shadows" if s.get("shadows") else Tokens().elevation_style,
+            elevation_style=(
+                "shadows"
+                if (s.get("shadows") or s.get("inferred_shadows"))
+                else Tokens().elevation_style
+            ),
         )
         return DesignSystem(
             tokens=tokens,
-            component_inventory=list(s.get("components") or []),
-            has_explicit_system=has_tokens,
-            confidence="high" if color_map and font else ("medium" if has_tokens else "low"),
+            component_inventory=sorted(
+                set(s.get("components") or []) | set(s.get("inferred_components") or [])
+            ),
+            has_explicit_system=has_explicit_tokens,
+            confidence=(
+                "high"
+                if color_map and font
+                else ("medium" if (has_explicit_tokens or has_inferred_tokens) else "low")
+            ),
         )
 
 

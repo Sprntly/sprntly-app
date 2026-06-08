@@ -244,6 +244,153 @@ def test_github_missing_or_unreadable_files_fall_back_to_baseline(monkeypatch):
     assert normalize(raw) == DesignSystem()
 
 
+def test_github_infers_from_bounded_component_tailwind_patterns(monkeypatch):
+    directory = [
+        {"type": "file", "name": "button.tsx", "path": "components/ui/button.tsx"},
+        {"type": "file", "name": "card.tsx", "path": "components/ui/card.tsx"},
+    ]
+    files = {
+        "components/ui/button.tsx": """
+            export function Button() {
+              return <button className="bg-blue-600 text-white border-blue-700
+                rounded-lg px-4 py-2 gap-2 shadow-md font-semibold text-sm" />
+            }
+        """,
+        "components/ui/card.tsx": """
+            export const Card = () => (
+              <section className="bg-blue-50 border-blue-200 rounded-lg p-6
+                shadow-lg text-slate-900" />
+            )
+        """,
+    }
+
+    def fake_headers(installation_id):
+        assert installation_id == 321
+        return {"Authorization": "Bearer install-token"}
+
+    def fake_get(url, **kwargs):
+        path = url.split("/contents/", 1)[1]
+        if path == "components/ui":
+            return _FakeResp(directory)
+        if path in files:
+            return _FakeResp(_contents(files[path]))
+        return _FakeResp(ok=False, status_code=404)
+
+    monkeypatch.setattr("app.connectors.github_app.headers_for_installation", fake_headers)
+    monkeypatch.setattr("app.connectors.github_app.requests.get", fake_get)
+
+    raw = GithubExtractor(installation_id=321).extract_raw_signals("org/repo")
+    assert raw.signals["files_present"] == []
+    assert raw.signals["inference_files"] == [
+        "components/ui/button.tsx",
+        "components/ui/card.tsx",
+    ]
+
+    ds = normalize(raw)
+    assert ds.tokens.colors.primary == "#3b82f6"
+    assert ds.tokens.colors.accent == "#3b82f6"
+    assert ds.tokens.colors.foreground == "#ffffff"
+    assert ds.tokens.radius_convention == "rounded"
+    assert ds.tokens.spacing_scale == [8, 16, 24]
+    assert ds.tokens.elevation_style == "shadows"
+    assert {"button", "card"}.issubset(set(ds.component_inventory))
+    assert ds.has_explicit_system is False
+    assert ds.confidence == "medium"
+
+
+def test_github_explicit_tokens_override_inferred_patterns(monkeypatch):
+    files = {
+        "tokens.json": '{"primary":{"value":"#ef4444"},"background":{"value":"#ffffff"}}',
+        "components/ui/button.tsx": (
+            'export function Button(){ return <button className="bg-blue-600 bg-blue-700 '
+            'rounded-full p-8 shadow-lg" /> }'
+        ),
+    }
+
+    def fake_get(url, **kwargs):
+        path = url.split("/contents/", 1)[1]
+        if path == "components/ui":
+            return _FakeResp([
+                {"type": "file", "name": "button.tsx", "path": "components/ui/button.tsx"},
+            ])
+        if path in files:
+            return _FakeResp(_contents(files[path]))
+        return _FakeResp(ok=False, status_code=404)
+
+    monkeypatch.setattr(
+        "app.connectors.github_app.headers_for_installation",
+        lambda installation_id: {"Authorization": "Bearer install-token"},
+    )
+    monkeypatch.setattr("app.connectors.github_app.requests.get", fake_get)
+
+    raw = GithubExtractor(installation_id=321).extract_raw_signals("org/repo")
+    ds = normalize(raw)
+    assert ds.tokens.colors.primary == "#ef4444"
+    assert ds.tokens.colors.background == "#ffffff"
+    # Explicit token files remain authoritative for explicit-system status even
+    # when inference contributes radius/elevation/component inventory.
+    assert ds.has_explicit_system is True
+    assert ds.tokens.radius_convention == "pill"
+    assert "button" in ds.component_inventory
+
+
+def test_github_inference_directory_errors_and_oversized_files_degrade(monkeypatch):
+    def fake_get(url, **kwargs):
+        path = url.split("/contents/", 1)[1]
+        if path == "components/ui":
+            return _FakeResp([
+                {"type": "file", "name": "button.tsx", "path": "components/ui/button.tsx"},
+            ])
+        if path == "components/ui/button.tsx":
+            return _FakeResp({
+                "encoding": "base64",
+                "content": base64.b64encode(b"className='bg-blue-600'").decode("ascii"),
+                "size": 200_000,
+            })
+        return _FakeResp(ok=False, status_code=500)
+
+    monkeypatch.setattr(
+        "app.connectors.github_app.headers_for_installation",
+        lambda installation_id: {"Authorization": "Bearer install-token"},
+    )
+    monkeypatch.setattr("app.connectors.github_app.requests.get", fake_get)
+
+    raw = GithubExtractor(installation_id=321).extract_raw_signals("org/repo")
+    assert raw.signals["inference_files"] == []
+    assert normalize(raw) == DesignSystem()
+
+
+def test_github_inference_caps_primitive_file_reads(monkeypatch):
+    read_paths: list[str] = []
+    directory = [
+        {"type": "file", "name": f"button{i}.tsx", "path": f"components/ui/button{i}.tsx"}
+        for i in range(20)
+    ]
+    # Use primitive file names so all entries are eligible until the cap is hit.
+    for i, item in enumerate(directory):
+        item["name"] = "button.tsx"
+        item["path"] = f"components/ui/button-{i}.tsx"
+
+    def fake_get(url, **kwargs):
+        path = url.split("/contents/", 1)[1]
+        if path == "components/ui":
+            return _FakeResp(directory)
+        if path.startswith("components/ui/button-"):
+            read_paths.append(path)
+            return _FakeResp(_contents('export function Button(){ return <button className="rounded-md" /> }'))
+        return _FakeResp(ok=False, status_code=404)
+
+    monkeypatch.setattr(
+        "app.connectors.github_app.headers_for_installation",
+        lambda installation_id: {"Authorization": "Bearer install-token"},
+    )
+    monkeypatch.setattr("app.connectors.github_app.requests.get", fake_get)
+
+    raw = GithubExtractor(installation_id=321).extract_raw_signals("org/repo")
+    assert len(read_paths) == 12
+    assert len(raw.signals["inference_files"]) == 12
+
+
 # ─── Figma mapping ───────────────────────────────────────────────────────
 
 
