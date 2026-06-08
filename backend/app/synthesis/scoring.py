@@ -128,6 +128,47 @@ def goal_factor(fit, *, goal_weight: float = 1.0) -> float:
     return base * goal_weight + (1 - goal_weight)
 
 
+def score_candidates(
+    facade: "GraphFacade",
+    enterprise_id: str,
+    candidates: list,
+    kpi_tree: Optional["KpiTree"],
+    *,
+    goal_enabled: bool,
+    goal_weight: float,
+    agent: str = "synthesis",
+    classifier=None,
+) -> dict[str, dict]:
+    """Price KPI-tree fit into each candidate's score — the shared §4c scoring
+    pass used by BOTH the brief ranker and the backlog sequencer.
+
+    For each ThemeConvergence, returns {theme_id: {base_score, fit, goal_factor,
+    goal_adjusted_score}}. Deterministic: goal_adjusted_score = base_score ×
+    goal_factor(fit). When goal scoring is disabled, fit is "off" and the factor
+    is 1.0 (no classification call). Factoring this out keeps the backlog and the
+    brief on one identical scoring path (no second formula to drift).
+
+    `classifier` injects the fit-classification function (defaults to
+    `classify_theme_fit`); callers pass their own module-level reference so a
+    monkeypatch of THAT reference is honored."""
+    classify = classifier or classify_theme_fit
+    out: dict[str, dict] = {}
+    for c in candidates:
+        if goal_enabled:
+            fit = classify(facade, enterprise_id, c, kpi_tree, agent=agent)
+            factor = goal_factor(fit, goal_weight=goal_weight)
+        else:
+            fit, factor = "off", 1.0
+        adjusted = c.base_score * factor
+        out[c.theme_id] = {
+            "base_score": round(c.base_score, 4),
+            "fit": fit,
+            "goal_factor": round(factor, 4),
+            "goal_adjusted_score": round(adjusted, 4),
+        }
+    return out
+
+
 def _fit_payload(theme_label: str, evidence: list[dict], tree_text: str) -> str:
     snippets = "\n".join(
         f"  - [{e.get('source_type')}/{e.get('kind')}] {e.get('content', '')}"

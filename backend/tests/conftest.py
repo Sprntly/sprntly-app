@@ -481,6 +481,27 @@ CREATE TABLE agent_decision_log (
     kg_refs        TEXT NOT NULL DEFAULT '[]',
     timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Sequenced product backlog (mirrors 20260608120000_backlog_items.sql).
+-- One row per non-brief theme, carrying its rank/score + triage rationale.
+-- uuid PK / timestamptz are TEXT under SQLite, matching the other seeded tables.
+CREATE TABLE backlog_items (
+    id            TEXT PRIMARY KEY,
+    enterprise_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    theme_id      TEXT NOT NULL,
+    hypothesis_id TEXT,
+    title         TEXT NOT NULL,
+    tag           TEXT,
+    rank          INTEGER NOT NULL,
+    score         REAL NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'backlog'
+                  CHECK (status IN ('backlog', 'in_progress', 'done', 'dismissed')),
+    reasoning     TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (enterprise_id, theme_id)
+);
+CREATE INDEX backlog_items_rank_idx ON backlog_items (enterprise_id, rank);
 """
 
 
