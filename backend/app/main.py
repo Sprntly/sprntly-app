@@ -35,6 +35,7 @@ from app.routes import (
     metrics,
     oncall,
     research,
+    stories,
     synthesis,
     team,
     evidence,
@@ -192,6 +193,7 @@ app.include_router(brief.router)
 app.include_router(ask.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)
+app.include_router(stories.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
 app.include_router(design_agent.router)
