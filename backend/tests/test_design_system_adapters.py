@@ -20,6 +20,7 @@ from app.design_agent.design_system.adapters import FigmaExtractor, WebExtractor
 from app.design_agent.design_system.extractors import RawSignals, normalize, registry
 from app.design_agent.design_system.models import DesignSystem
 from app.design_agent.runner import (
+    _design_source_for_generation,
     _render_design_system_css,
     _render_palette_css,
     _should_pre_seed,
@@ -53,6 +54,57 @@ def test_module_normalize_dispatches_by_provider():
     assert ds.tokens.colors.background == "#2b2b2b"
     # An unknown provider falls back to the neutral baseline (no adapter).
     assert normalize(RawSignals(provider="nope", ref="x")) == DesignSystem()
+
+
+def test_generation_source_selection_preserves_figma_website_github_precedence():
+    provider, source_ref, raw_factory, version_factory = _design_source_for_generation(
+        figma_file_key="figma-file",
+        figma_access_token="figma-token",
+        website_url="https://brand.example",
+        website_sample={},
+        github_repo="org/repo",
+        github_installation_id=123,
+    )
+    assert provider == "figma"
+    assert source_ref == "figma-file"
+    assert raw_factory is not None
+    assert version_factory is not None
+
+    provider, source_ref, raw_factory, version_factory = _design_source_for_generation(
+        figma_file_key=None,
+        figma_access_token=None,
+        website_url="https://brand.example",
+        website_sample={},
+        github_repo="org/repo",
+        github_installation_id=123,
+    )
+    assert provider == "web"
+    assert source_ref == "https://brand.example"
+    assert raw_factory is not None
+    assert version_factory is not None
+
+    provider, source_ref, raw_factory, version_factory = _design_source_for_generation(
+        figma_file_key=None,
+        figma_access_token=None,
+        website_url=None,
+        website_sample=None,
+        github_repo="org/repo",
+        github_installation_id=123,
+    )
+    assert provider == "github"
+    assert source_ref == "org/repo"
+    assert raw_factory is not None
+    assert version_factory is not None
+
+    provider, source_ref, raw_factory, version_factory = _design_source_for_generation(
+        figma_file_key=None,
+        figma_access_token=None,
+        website_url=None,
+        website_sample=None,
+        github_repo="org/repo",
+        github_installation_id=None,
+    )
+    assert (provider, source_ref, raw_factory, version_factory) == (None, None, None, None)
 
 
 # ─── Figma mapping ───────────────────────────────────────────────────────

@@ -91,6 +91,32 @@ def list_github_installations() -> list[dict]:
     return [_legacy_install(r) for r in (resp.data or [])]
 
 
+def find_github_installation_for_repo(repo_full_name: str) -> dict | None:
+    """Return the non-suspended GitHub App installation for ``owner/repo``.
+
+    GitHub App installations are account-scoped. Until we persist a per-repo
+    installation inventory, the durable production-shaped lookup is by the repo
+    owner/account login. A selected-repos installation may still reject a future
+    extractor if the app was not granted this specific repo; that is an honest
+    extraction-time failure, not a generate-time product decision.
+    """
+    owner = (repo_full_name or "").split("/", 1)[0].strip()
+    if not owner:
+        return None
+    c = require_client()
+    resp = (
+        c.table("github_installations")
+        .select("*")
+        .eq("account_login", owner)
+        .eq("suspended", False)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        return None
+    return _legacy_install(resp.data[0])
+
+
 def delete_github_installation(installation_id: int) -> bool:
     c = require_client()
     # Drop tracked PRs first — they're scoped to this install.

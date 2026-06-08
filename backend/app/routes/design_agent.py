@@ -51,12 +51,16 @@ from pydantic import BaseModel, Field
 from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
 from app.auth import CompanyContext, require_company, require_company_from_query  # company-scoped auth dep
 from app.config import settings
+from app.connectors import github_app
+from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
+from app.db.connections import get_connection
 from app.db.prds import get_prd_rendered, reset_prd_to_draft
+from app.db.github import find_github_installation_for_repo
 from app.db.products import get_company_website  # onboarding-website fallback source
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
@@ -136,6 +140,50 @@ def _require_feature_enabled() -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
+def _resolve_github_installation_id_for_repo(
+    company_id: str, repo_full_name: str | None
+) -> int | None:
+    """Best-effort company-scoped repo full_name -> GitHub App installation id.
+
+    The repo full_name is chosen through the company's GitHub OAuth connection.
+    We verify that connection and confirm the repo appears in the connected
+    user's accessible repos before consulting the account-scoped installation
+    table. Any auth/token/API failure degrades to no codebase installation
+    snapshot rather than trusting a global installation row.
+    """
+    if not repo_full_name:
+        return None
+    row = get_connection(company_id, github_app.GITHUB_PROVIDER)
+    if not row:
+        return None
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except (KeyError, TokenEncryptionError, json.JSONDecodeError, TypeError):
+        logger.info("design_agent.github_connection_unreadable")
+        return None
+    access_token = token_json.get("access_token")
+    if not access_token:
+        return None
+    try:
+        repos = github_app.fetch_user_repos(access_token, per_page=100)
+    except Exception:
+        logger.info("design_agent.github_repo_access_check_failed")
+        return None
+    if not any(r.get("full_name") == repo_full_name for r in repos):
+        return None
+    try:
+        install = find_github_installation_for_repo(repo_full_name)
+    except Exception:
+        logger.info("design_agent.github_installation_resolve_failed")
+        return None
+    if not install:
+        return None
+    try:
+        return int(install["installation_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 # ─── Schemas ────────────────────────────────────────────────────────────────
 
 
@@ -163,10 +211,11 @@ class GenerateRequest(BaseModel):
     website_url: str | None = None        # P5-02: Scenario B fallback source
     manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
     github_repo: str | None = None        # connected-repo full_name ("org/repo");
-    #                                       prompt context only — no fetch, no clone,
-    #                                       no agent tool. The repo identifier travels
-    #                                       into the scaffold prompt so generation can
-    #                                       be told which existing codebase to match.
+    #                                       no fetch, no clone, no agent tool. The repo
+    #                                       identifier travels into the scaffold prompt
+    #                                       and, when a matching GitHub App installation
+    #                                       is known, into the design-system source
+    #                                       resolver for future codebase extraction.
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
@@ -237,12 +286,15 @@ async def generate(
             )
 
     # Connected-repo identifier the user chose as the existing codebase to match.
-    # Prompt context only (no fetch, no clone, no agent tool). NO-PERSIST decision:
-    # `start_prototype` exposes no repo/codebase text column and this ticket adds
-    # no migration (NO `ALTER` on prds/briefs/evidences), so the repo is NOT
-    # snapshotted on the prototype row — it travels as a request-only field into
-    # the background generation task (prompt context + cost-summary identifier).
+    # No fetch, no clone, no agent tool. The repo full_name remains request-only
+    # because the prototypes table has no codebase text column, but we do persist
+    # the matching GitHub App installation id when available: that is the existing
+    # production-shaped scenario/source column and gives the future codebase
+    # extractor enough installation context to read the selected repo.
     repo = body.normalised_github_repo()
+    github_installation_id = _resolve_github_installation_id_for_repo(
+        workspace_id, repo
+    )
 
     # Insert the generating row. Scenario inputs (figma_file_key, etc.) are
     # stored as snapshots; the A/B/C/0 label is DERIVED at read time
@@ -256,7 +308,7 @@ async def generate(
         target_platform=body.normalised_platform(),
         figma_file_key=body.figma_file_key,
         website_url=effective_website_url,  # snapshot; resolved value incl. onboarding fallback
-        github_installation_id=None,  # populated in P4-05 (Scenario C)
+        github_installation_id=github_installation_id,
     )
 
     task = asyncio.create_task(
@@ -271,6 +323,7 @@ async def generate(
             website_url=effective_website_url,  # resolved value incl. onboarding fallback
             manual_design=body.manual_design,
             github_repo=repo,  # normalised connected-repo full_name; prompt context only
+            github_installation_id=github_installation_id,
         )
     )
     _inflight_tasks.add(task)
@@ -521,6 +574,7 @@ async def _run_generation_bg(
     website_url: str | None = None,
     manual_design: ManualDesignInput | None = None,
     github_repo: str | None = None,
+    github_installation_id: int | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -587,7 +641,7 @@ async def _run_generation_bg(
         scenario_set = infer_scenario_from_inputs(
             figma_file_key=figma_file_key,
             website_url=website_url,        # P5-02: derives 'B' (url, no figma) / '0'
-            github_installation_id=None,    # P4-05 populates
+            github_installation_id=github_installation_id,
             prd_references_codebase=False,  # P4-05 implements the detector
         )
         scenario_label = ",".join(sorted(scenario_set))  # "A" | "A,C" | "0" ...
@@ -601,6 +655,7 @@ async def _run_generation_bg(
             figma_node_id=figma_node_id,  # frame-level targeting; None when absent
             scenario=scenario_label,
             github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
+            github_installation_id=github_installation_id,
             website_url=None if figma_file_key else website_url,  # Scenario B pre-seed source
             website_sample=website_sample,  # reuse the single extractor run for the pre-seed
         )
