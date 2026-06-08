@@ -173,6 +173,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
+print("Sprntly API server starting...")
 app = FastAPI(title="Sprntly API", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
