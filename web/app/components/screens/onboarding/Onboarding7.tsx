@@ -71,11 +71,15 @@ export function Onboarding7() {
     }
   }
 
-  if (loading) return <div className="ob-shell">Loading…</div>
-  if (!workspace) {
-    router.replace("/onboarding/1")
-    return null
-  }
+  // Redirect when there's no workspace to anchor the step. Done in an effect
+  // (not during render) so navigation never fires as a render side-effect —
+  // that path surfaces in production as a client-side exception / error
+  // boundary. Render returns the loading shell until the redirect lands.
+  useEffect(() => {
+    if (!loading && !workspace) router.replace("/onboarding/1")
+  }, [loading, workspace, router])
+
+  if (loading || !workspace) return <div className="ob-shell">Loading…</div>
 
   const namedCount = COWORKERS.filter((c) => names[c.slot].trim()).length
 
