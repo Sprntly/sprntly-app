@@ -391,6 +391,14 @@ export type GitHubRepo = {
   stargazers_count: number
 }
 
+export type GitHubInstallation = {
+  installation_id: number
+  account_login: string
+  account_type: "User" | "Organization" | string
+  repository_selection: "selected" | "all" | string
+  suspended?: boolean
+}
+
 export type GoogleDriveSyncResult = {
   dataset: string
   folder_id: string
@@ -467,6 +475,10 @@ export const connectorsApi = {
   listGithubRepos: (perPage = 50) =>
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
+    ),
+  listGithubInstallations: () =>
+    api.get<{ installations: GitHubInstallation[] }>(
+      `/v1/connectors/github/installations`,
     ),
 
   // ---- ClickUp -------------------------------------------------------------
@@ -615,6 +627,27 @@ export const pipelineApi = {
     api.get<PipelineRunStatus>(
       `/v1/pipeline/${encodeURIComponent(company)}/status`,
     ),
+}
+
+// ─────────────────────── Agent with live tools ───────────────────────
+//
+// POST /v1/agent/chat-with-tools — runs an Anthropic tool-use loop so the
+// agent can fetch live data from GitHub during the chat (no pre-sync).
+// See backend app/agent_tools/github.py for the available tools.
+
+export type AgentChatWithToolsResponse = {
+  response: string
+  iterations: number
+  tool_calls: string[]
+  truncated: boolean
+}
+
+export const agentChatApi = {
+  chatWithTools: (message: string, installationId: number) =>
+    api.post<AgentChatWithToolsResponse>(`/v1/agent/chat-with-tools`, {
+      message,
+      installation_id: installationId,
+    }),
 }
 
 export const prdApi = {
