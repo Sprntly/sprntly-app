@@ -621,6 +621,51 @@ class GithubExtractor:
             "index", "button", "card", "input", "label", "badge",
         }
 
+    def extract_ui_primitives(self, ref: str) -> dict[str, str]:
+        """Return existing component files from the repo's strict UI primitive directory.
+
+        Looks only in `components/ui`, `src/components/ui`, and `app/components/ui`
+        (the canonical shadcn/ui locations) — not broader component trees. Filters
+        to files whose stem is a known component hint, caps at _GITHUB_MAX_UI_FILES,
+        and skips files that exceed _GITHUB_MAX_UI_FILE_BYTES or fail to fetch.
+        Returns an empty dict when installation_id is None.
+        """
+        if not self.installation_id:
+            return {}
+        repo_full_name, branch = _repo_ref_parts(ref)
+        if not repo_full_name or "/" not in repo_full_name:
+            return {}
+
+        _STRICT_UI_DIRS = ("components/ui", "src/components/ui", "app/components/ui")
+        out: dict[str, str] = {}
+
+        for directory in _STRICT_UI_DIRS:
+            payload = self._github_get_contents(repo_full_name, directory, branch)
+            if not isinstance(payload, list):
+                continue
+            for item in payload:
+                if len(out) >= _GITHUB_MAX_UI_FILES:
+                    return out
+                if not isinstance(item, dict) or item.get("type") != "file":
+                    continue
+                path = str(item.get("path") or "")
+                name = str(item.get("name") or path.rsplit("/", 1)[-1])
+                if not path.endswith((".tsx", ".ts", ".jsx", ".js")):
+                    continue
+                stem = name.rsplit(".", 1)[0].lower()
+                if stem not in _COMPONENT_HINTS:
+                    continue
+                text = self._fetch_text_file(
+                    repo_full_name, path, branch, max_bytes=_GITHUB_MAX_UI_FILE_BYTES
+                )
+                if text is None:
+                    continue
+                out[f"src/components/ui/{name}"] = text
+            if out:
+                return out
+
+        return out
+
     def extract_raw_signals(self, ref: str) -> RawSignals:
         repo_full_name, branch = _repo_ref_parts(ref)
         if not repo_full_name or "/" not in repo_full_name:

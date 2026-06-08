@@ -1134,8 +1134,21 @@ async def generate_prototype(
                 design_system.tokens.colors.accent,
                 design_system.tokens.is_dark,
             )
+            # Seed primitive component stubs so the agent has a starting point
+            # that already matches the brand's tokens. GitHub source: read the
+            # repo's own components/ui files so the stubs match the real codebase.
+            # Other sources: generate deterministic stubs from the design system.
+            if provider == "github":
+                from app.design_agent.design_system.adapters import GithubExtractor
+                primitives = GithubExtractor(
+                    installation_id=github_installation_id
+                ).extract_ui_primitives(source_ref)
+            else:
+                from app.design_agent.design_system.primitives import render_primitive_set
+                primitives = render_primitive_set(design_system)
+            virtual_fs.update(primitives)
         except Exception:
-            pass  # best-effort — generation continues without pre-seeded CSS
+            pass  # best-effort — generation continues without pre-seeded CSS or primitives
 
     # Inject the design-language guidance into the user prompt so the model's
     # first write is informed by the brand's visual vocabulary. The brief goes
