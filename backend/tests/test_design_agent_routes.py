@@ -761,6 +761,25 @@ def test_by_prd_two_segment_resolves(env, client):
     assert client.get("/v1/design-agent/by-prd/76").status_code == 404
 
 
+def test_by_prd_registered_exactly_once(env):
+    # Regression: a duplicate, identical get_by_prd definition once registered the
+    # same GET /by-prd/{prd_id} route twice (duplicate operation ids / redundant
+    # registration). There must be exactly ONE GET route at that path.
+    matches = [
+        r for r in env.main.app.router.routes
+        if getattr(r, "path", None) == "/v1/design-agent/by-prd/{prd_id}"
+        and "GET" in getattr(r, "methods", set())
+    ]
+    assert len(matches) == 1, f"expected one /by-prd route, found {len(matches)}"
+    # Operation ids across the router are unique (a duplicate op id breaks the
+    # generated OpenAPI client).
+    op_ids = [
+        r.operation_id for r in env.main.app.router.routes
+        if getattr(r, "operation_id", None)
+    ]
+    assert len(op_ids) == len(set(op_ids))
+
+
 # ─── Connected-repo identifier threaded into generation ─────────────────────
 #
 # The Generate modal lets a user pick one of their connected GitHub repos. That

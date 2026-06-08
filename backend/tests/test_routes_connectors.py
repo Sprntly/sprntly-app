@@ -139,3 +139,80 @@ def test_disconnect(google_env, monkeypatch):
     assert ctx.client.get(
         "/v1/connectors"
     ).json() == {"connections": []}
+
+
+# ─── POST /google-drive/sync — auto-enable branch (no-dataset path) ──────────
+#
+# The dataset-less branch resolves the dataset from the stored connection's
+# config_json. It used to call db.get_connection(provider) with ONE positional
+# arg, but the signature is get_connection(company_id, provider) — a TypeError
+# that crashed every no-dataset sync. These tests pin the two-arg call.
+
+
+def _seed_drive_connection(company_id: str, *, config_json: str) -> None:
+    from app import db
+    from app.connectors.tokens import encrypt_token_json
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=google_oauth.GOOGLE_DRIVE_PROVIDER,
+        token_encrypted=encrypt_token_json('{"token":"x","refresh_token":"y"}'),
+        scopes="",
+        account_label="pm@company.com",
+        config_json=config_json,
+    )
+
+
+def test_sync_no_dataset_auto_enable_uses_two_arg_get_connection(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme","folder_id":"f1"}')
+
+    fake_result = MagicMock()
+    fake_result.to_dict.return_value = {"dataset": "acme", "ingested": 0, "skipped": 0}
+
+    seen: dict = {}
+    import app.routes.connectors as routes_mod
+    real_get_connection = routes_mod.db.get_connection
+
+    def spy_get_connection(company_id, provider):
+        seen["args"] = (company_id, provider)
+        return real_get_connection(company_id, provider)
+
+    with (
+        patch.object(routes_mod, "sync_google_drive", return_value=fake_result),
+        patch.object(routes_mod.db, "get_connection", side_effect=spy_get_connection),
+    ):
+        r = ctx.client.post("/v1/connectors/google-drive/sync", json={})
+
+    # No TypeError → the no-dataset branch resolved the dataset and returned 200.
+    assert r.status_code == 200, r.text
+    # The auto-enable lookup passed BOTH company_id and provider (the bug fix).
+    assert seen["args"] == (ctx.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+
+
+def test_sync_no_dataset_resolves_dataset_and_auto_enables_input_source(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme","folder_id":"f1"}')
+
+    fake_result = MagicMock()
+    fake_result.to_dict.return_value = {"dataset": "acme"}
+
+    import app.routes.connectors as routes_mod
+    upserts: list = []
+
+    def spy_upsert(dataset, source_type, **kw):
+        upserts.append((dataset, source_type, kw))
+        return {"dataset": dataset, "source_type": source_type}
+
+    with (
+        patch.object(routes_mod, "sync_google_drive", return_value=fake_result),
+        patch.object(routes_mod.db, "upsert_input_source", side_effect=spy_upsert),
+    ):
+        r = ctx.client.post("/v1/connectors/google-drive/sync", json={})
+
+    assert r.status_code == 200, r.text
+    # The dataset resolved from the connection's config_json drove the auto-enable.
+    assert len(upserts) == 1
+    assert upserts[0][0] == "acme"
+    assert upserts[0][1] == "google_drive"
+    assert upserts[0][2]["enabled"] is True

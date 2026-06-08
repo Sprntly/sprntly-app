@@ -621,6 +621,46 @@ def _extract_signed_url(signed: Any) -> str:
     return ""
 
 
+def fresh_bundle_url(
+    *,
+    prototype_id: int,
+    checkpoint_id: int,
+    stored_bundle_url: str | None = None,
+) -> str | None:
+    """Mint a FRESH signed bundle URL for a public/passcode share, sign-on-read.
+
+    The stored `bundle_url` is a short-lived (24h) Supabase signed URL minted at
+    stage time. A public/passcode share is permanent, so the stored URL goes
+    stale and the iframe 403s after the TTL elapses. This re-derives the bundle
+    object path (`prototypes/<pid>/<cid>/index.html`) and signs it afresh on
+    every public read, so a permanent share always serves a live URL.
+
+    Sync (the public view routes are sync `def`, run in FastAPI's threadpool).
+
+    Falls back to `stored_bundle_url` when no Supabase bucket is configured (the
+    filesystem/dev path serves a stable public/file:// URL that never expires) or
+    when re-signing fails for any reason (better a possibly-stale URL than a 500).
+    """
+    bucket = _bucket_name()
+    if not bucket:
+        # Filesystem/dev fallback: the stored URL is a stable public/file:// URL.
+        return stored_bundle_url
+    object_path = f"{_bundle_prefix(prototype_id, checkpoint_id)}/index.html"
+    try:
+        from app.db.client import require_client
+
+        storage = require_client().storage.from_(bucket)
+        signed = storage.create_signed_url(path=object_path, expires_in=_SIGNED_URL_TTL_SECONDS)
+        url = _extract_signed_url(signed)
+        return url or stored_bundle_url
+    except Exception:
+        logger.warning(
+            "fresh_bundle_url_resign_failed prototype_id=%s checkpoint_id=%s",
+            prototype_id, checkpoint_id, exc_info=True,
+        )
+        return stored_bundle_url
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 
