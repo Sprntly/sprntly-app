@@ -67,7 +67,10 @@ def test_hubspot_puller_yields_deals_with_paging(monkeypatch):
             "id": "d2", "properties": {"dealname": "Globex", "amount": "50000"},
         }]}
     monkeypatch.setattr(hubspot, "_get", fake_get)
-    recs = list(hubspot.pull("tok"))
+    # _pull_deals is the deals sub-puller; the top-level pull() now fans out
+    # across every CRM sub-resource (tickets/notes/owners/line items), tested
+    # separately in test_hubspot_puller_expansion.
+    recs = list(hubspot._pull_deals("tok"))
     assert [r.external_id for r in recs] == ["d1", "d2"]
     assert recs[0].properties["company_ids"] == ["c9"]
     assert calls[1]["after"] == "pg2"

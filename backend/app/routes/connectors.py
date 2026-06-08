@@ -65,6 +65,7 @@ from app.connectors.tokens import (
     decrypt_token_json,
     encrypt_token_json,
 )
+from app.kg_ingest.auto_sync import kickoff_sync
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,32 @@ def list_connections(
 ):
     rows = db.list_connections(company.company_id)
     return {"connections": [_public_connection(r) for r in rows]}
+
+
+@router.get("/status")
+def connector_status(
+    company: CompanyContext = Depends(require_company),
+):
+    """Company-scoped sync status for every connected provider.
+
+    Backs the Settings status indicators: per provider, whether it has a
+    background ingest puller and its last_sync_at / last_sync_error stamp
+    (set by the auto-sync-on-connect kickoff and by manual /v1/ingest runs)."""
+    from app.kg_ingest.runner import PULLERS
+
+    rows = db.list_connections(company.company_id)
+    out = []
+    for r in rows:
+        provider = r["provider"]
+        out.append({
+            "provider": provider,
+            "status": r["status"],
+            "account_label": r.get("account_label") or r.get("google_email"),
+            "ingestable": provider in PULLERS,
+            "last_sync_at": r.get("last_sync_at"),
+            "last_sync_error": r.get("last_sync_error"),
+        })
+    return {"statuses": out}
 
 
 # ─────────────────────── Start-OAuth (fetch-friendly) ───────────────────────
@@ -784,6 +811,9 @@ def github_callback(
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
+    # Populate the KG immediately — fire-and-forget, never blocks the redirect.
+    kickoff_sync(company_id, github_app.GITHUB_PROVIDER)
+
     # Two-step GitHub auth: OAuth tells us who the user is, but they ALSO
     # need to install the Sprntly App on at least one repo so we have an
     # installation_id (without that, the agent has no repo access — the
@@ -1011,6 +1041,8 @@ def clickup_callback(code: str, state: str):
         config_json=json.dumps({"user": user}) if user else "{}",
     )
 
+    kickoff_sync(company_id, clickup_oauth.CLICKUP_PROVIDER)
+
     return _build_post_oauth_redirect(payload, clickup_oauth.CLICKUP_PROVIDER)
 
 
@@ -1059,6 +1091,8 @@ def hubspot_callback(code: str, state: str):
         account_label=label or None,
         config_json=json.dumps({"info": info}) if info else "{}",
     )
+
+    kickoff_sync(company_id, hubspot_oauth.HUBSPOT_PROVIDER)
 
     return _build_post_oauth_redirect(payload, hubspot_oauth.HUBSPOT_PROVIDER)
 
@@ -1370,6 +1404,9 @@ def fireflies_connect_apikey(
         account_label=label,
         config_json=json.dumps({"user": user}) if user else "{}",
     )
+
+    kickoff_sync(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
+
     return {
         "ok": True,
         "provider": fireflies_apikey.FIREFLIES_PROVIDER,
