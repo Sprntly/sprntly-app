@@ -46,6 +46,7 @@ from app.config import settings
 from app.connectors import (
     clickup_oauth,
     figma_oauth,
+    figma_pat,
     fireflies_apikey,
     github_app,
     google_oauth,
@@ -542,6 +543,60 @@ def figma_callback(code: str, state: str):
     )
 
     return _build_post_oauth_redirect(payload, figma_oauth.FIGMA_PROVIDER)
+
+
+# ─────────── Figma Personal Access Token (PAT) ───────────
+#
+# Stopgap auth path while the Sprntly public OAuth app is in Figma's
+# review queue. Customers paste a PAT from Figma → Account settings →
+# Personal Access Tokens; we validate by hitting /v1/me, then store the
+# PAT in connections.token_json_encrypted (same column OAuth tokens use).
+
+
+class FigmaPatIn(BaseModel):
+    pat: str
+
+    def model_post_init(self, _context) -> None:
+        if not self.pat or not self.pat.strip():
+            raise ValueError("pat cannot be empty")
+
+
+@router.post("/figma/pat")
+def figma_connect_pat(
+    body: FigmaPatIn,
+    company: CompanyContext = Depends(require_company),
+):
+    pat = body.pat.strip()
+    user = figma_pat.fetch_me(pat)
+    if not user:
+        raise HTTPException(
+            400,
+            "Figma rejected this Personal Access Token — double-check "
+            "the value at Figma → Account settings → Personal Access Tokens.",
+        )
+
+    label = user.get("handle") or user.get("email") or "Figma user"
+
+    try:
+        token_encrypted = encrypt_token_json(
+            figma_pat.token_payload_to_store(pat)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company.company_id,
+        provider=figma_pat.FIGMA_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes="",
+        account_label=label,
+        config_json=json.dumps({"user": user, "auth_kind": "pat"}),
+    )
+    return {
+        "ok": True,
+        "provider": figma_pat.FIGMA_PROVIDER,
+        "account_label": label,
+    }
 
 
 @router.delete("/figma")

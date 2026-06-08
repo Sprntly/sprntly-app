@@ -98,7 +98,11 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: "PDF · PNG · JPG",
     uploadExtensions: [".pdf", ".png", ".jpg", ".jpeg"],
     items: [
-      { id: "figma",  name: "Figma",  logo: "F", logoText: "F", logoColor: "#F24E1E", oauth: true },
+      // OAuth path is implemented (backend figma_oauth.py + routes) but the
+      // Sprntly public OAuth app is in Figma's review queue. Until approved,
+      // route Connect to the PAT modal. Flip back to `oauth: true, authType:
+      // undefined` once OAuth is approved.
+      { id: "figma",  name: "Figma",  logo: "F", logoText: "F", logoColor: "#F24E1E", oauth: false, authType: "apikey" },
       { id: "framer", name: "Framer", logo: "F", logoText: "F", logoColor: "#000000", oauth: false },
     ],
   },

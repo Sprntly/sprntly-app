@@ -99,12 +99,23 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
     expect(matches.length).toBe(31)
   })
 
-  it("shows 'Off' pill + 'Connect' action for OAuth-supported connector with no connection", () => {
+  it("shows 'Off' pill + 'Connect' action for an apikey-supported connector with no connection", () => {
     const html = render()
-    // Figma is OAuth-supported (oauth: true) but has no connection in this render.
-    // The row should carry a Connect action.
+    // Figma is currently apikey-only (PAT — the OAuth app is in Figma's review queue).
+    // Both `oauth: true` and `authType: "apikey"` rows surface a Connect action.
     expect(html).toContain("Figma")
     expect(html).toContain("Connect")
+  })
+
+  it("Figma row is currently routed to the API-key (PAT) modal, not OAuth", () => {
+    // Stopgap while the Sprntly Figma OAuth app is in Figma's review queue.
+    // The catalog flag drives this; flipping back to oauth:true re-enables OAuth.
+    const figma = CONNECTOR_CATALOG.flatMap((c) => c.items).find(
+      (i) => i.id === "figma",
+    )
+    expect(figma).toBeTruthy()
+    expect(figma!.oauth).toBe(false)
+    expect(figma!.authType).toBe("apikey")
   })
 
   it("shows 'Coming soon' (disabled) action for non-OAuth connector with no connection", () => {
