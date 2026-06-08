@@ -34,9 +34,36 @@ from tests._company_helpers import company_client, seed_connection
 # installation_id, both tied to the company so the guard admits the call).
 
 
+_TOKEN_ENV_INSTALLED = False
+
+
+def _ensure_token_env() -> None:
+    """seed_connection encrypts the token blob via app.connectors.tokens,
+    which reads TOKEN_ENCRYPTION_KEY through a `settings` reference
+    captured at import time. In CI the env is clean, so we set the key
+    AND reload the tokens module before the first encrypt. Idempotent
+    across tests in this module."""
+    global _TOKEN_ENV_INSTALLED
+    if _TOKEN_ENV_INSTALLED:
+        return
+    import os
+    if not os.environ.get("TOKEN_ENCRYPTION_KEY"):
+        from cryptography.fernet import Fernet
+
+        os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+    import importlib
+    import sys
+
+    for name in ("app.config", "app.connectors.tokens"):
+        if name in sys.modules:
+            importlib.reload(sys.modules[name])
+    _TOKEN_ENV_INSTALLED = True
+
+
 def _grant_install(company_id: str, installation_id: int) -> None:
     """Ensure the chat-with-tools guard admits `installation_id` for this
     company. Idempotent across multiple installation_ids in one test."""
+    _ensure_token_env()
     from app.db.client import require_client
 
     # Seed the connection once per company (no-op upsert if already present).

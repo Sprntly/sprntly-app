@@ -37,14 +37,31 @@ from tests._company_helpers import (
 @pytest.fixture
 def github_env(monkeypatch, isolated_settings):
     """Minimal env for the GitHub routes to import cleanly (mirrors the
-    `github_env` fixture in test_routes_connectors_figma_github.py)."""
+    `github_env` fixture in test_routes_connectors_figma_github.py).
+
+    Note on TOKEN_ENCRYPTION_KEY: `app.connectors.tokens` reads it via
+    `settings.token_encryption_key` — and `settings` is captured at
+    import time. So after we reload `app.config` we MUST also reload
+    `app.connectors.tokens` (and `app.routes.connectors`, which captures
+    the encrypt helpers at import time) or `seed_connection` will raise
+    TokenEncryptionError in a fresh process (CI)."""
+    from cryptography.fernet import Fernet
+
     monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "Iv1.client")
     monkeypatch.setenv("GITHUB_APP_CLIENT_SECRET", "secret")
     monkeypatch.setenv("GITHUB_APP_ID", "999")
     monkeypatch.setenv("GITHUB_APP_SLUG", "sprntly-test")
     monkeypatch.setenv("GITHUB_APP_WEBHOOK_SECRET", "wh-secret")
-    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", "k" * 44)
-    importlib.reload(sys.modules["app.config"])
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    for name in (
+        "app.config",
+        "app.connectors.tokens",
+        "app.connectors.github_app",
+        "app.routes.connectors",
+        "app.main",
+    ):
+        if name in sys.modules:
+            importlib.reload(sys.modules[name])
 
 
 def _seed_install(account_login: str, installation_id: int) -> None:
