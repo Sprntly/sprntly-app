@@ -2556,6 +2556,31 @@
   .team-email { font-size: 11.5px; color: var(--muted); }
   .team-role-pill { font-size: 10.5px; padding: 3px 8px; background: var(--surface-2); border-radius: 4px; font-weight: 500; }
 
+  /* ─── /lab/code-chat — GitHub tool-use try-it surface ─── */
+  .lab-pane { padding: 28px 32px 60px; max-width: 840px; width: 100%; }
+  .lab-h { font-family: var(--ff-serif, "Instrument Serif", Georgia, serif); font-size: 30px; font-weight: 400; letter-spacing: -0.018em; line-height: 1.1; margin-bottom: 8px; color: var(--ink); }
+  .lab-h-em { font-style: italic; color: var(--accent); }
+  .lab-sub { font-size: 13.5px; color: var(--ink-2); margin-bottom: 26px; line-height: 1.55; max-width: 580px; }
+  .lab-install-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .lab-label { font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+  .lab-select { font-size: 13px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); flex: 1; }
+  .lab-thread { display: flex; flex-direction: column; gap: 14px; min-height: 200px; padding: 16px 0; }
+  .lab-empty { font-size: 13px; color: var(--ink-3); font-style: italic; }
+  .lab-turn { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface-2); }
+  .lab-turn-user { background: var(--accent-soft); border-color: var(--accent-2); }
+  .lab-turn-who { font-size: 10.5px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; }
+  .lab-turn-body { font-size: 14px; color: var(--ink); white-space: pre-wrap; line-height: 1.5; }
+  .lab-turn-meta { margin-top: 6px; font-size: 11.5px; color: var(--ink-3); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .lab-tool-pill { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; color: var(--ink-2); }
+  .lab-thinking .lab-turn-body { color: var(--ink-3); font-style: italic; }
+  .lab-input-row { display: flex; gap: 8px; margin-top: 8px; }
+  .lab-input { flex: 1; font-size: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
+  .lab-input:focus { outline: none; border-color: var(--accent-ink); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .lab-send { font-size: 13px; padding: 10px 18px; border-radius: var(--radius-sm); border: 1px solid var(--accent-ink); background: var(--accent-ink); color: var(--surface-2); cursor: pointer; font-weight: 500; }
+  .lab-send:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); }
+  .lab-send:disabled { opacity: 0.5; cursor: not-allowed; }
+  .lab-error { font-size: 12.5px; color: var(--danger); margin-top: 8px; }
+
   /* ─── Settings → Team & roles (mockup-aligned, sprntly-pages/15-settings.html lines 2245-2262) ───
      Refactored 2026-06-07 to use design-kit tokens (see Sprntly-Design-System.md §2/§4).
      Token mapping: --accent* = kit --brand*, --warn* = kit --amber*, --danger* = kit --red*. */
