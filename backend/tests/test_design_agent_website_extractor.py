@@ -22,6 +22,21 @@ import pytest
 
 from app.design_agent.scenarios import website
 
+
+@pytest.fixture(autouse=True)
+def _allow_public_dns(monkeypatch):
+    """The SSRF guard (app.net_guard) resolves each website URL via getaddrinfo
+    before launching Chromium. These tests use mock ``*.example.com`` hosts that
+    do not resolve, so we stub resolution to a public IP — keeping the guard
+    active while letting the browser-behavior assertions run. The guard's own
+    reject/allow logic is covered in test_net_guard.py."""
+    import socket
+
+    def _public(host, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr("app.net_guard.socket.getaddrinfo", _public)
+
 # A well-formed raw page.evaluate() return (pre-mapping): a button color, an h1
 # font stack, a body, padding samples, and a logo — i.e. the confident case.
 _GOOD_RAW = {

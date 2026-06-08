@@ -15,6 +15,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.config import settings
+from app.net_guard import UnsafeURLError, assert_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,12 @@ _SCRAPE_SEMA = asyncio.Semaphore(3)
 
 # Shared httpx client config
 _TIMEOUT = httpx.Timeout(15.0, connect=10.0)
+
+# Cap on manually-followed redirect hops. Matches the historical follow depth
+# (5); we follow redirects by hand so each hop's target is SSRF-checked BEFORE
+# the connection is opened — httpx's auto-follow would connect to the redirect
+# host first, defeating the guard.
+_MAX_REDIRECTS = 5
 _HEADERS = {
     "User-Agent": getattr(settings, "scraping_user_agent", "Sprntly/1.0"),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -34,21 +41,40 @@ async def fetch_page(url: str, max_chars: int = 50_000) -> str:
     """Fetch a URL and return its text content.
 
     Returns the extracted text (no HTML tags). Empty string on failure.
+
+    SSRF guard: the URL — and every redirect hop — is validated by
+    ``assert_public_url`` before any connection is opened. Auto-redirect is
+    disabled so each ``Location`` is re-checked by hand; a redirect to an
+    internal/loopback/link-local host (or a non-http scheme) is refused.
     """
     async with _SCRAPE_SEMA:
         try:
+            assert_public_url(url)
             async with httpx.AsyncClient(
                 timeout=_TIMEOUT,
                 headers=_HEADERS,
-                follow_redirects=True,
-                max_redirects=5,
+                follow_redirects=False,
             ) as client:
-                resp = await client.get(url)
-                if resp.status_code >= 400:
-                    logger.warning("Scrape %s returned %d", url, resp.status_code)
-                    return ""
-                html = resp.text[:200_000]  # cap raw HTML size
-                return extract_text(html)[:max_chars]
+                current = url
+                for _ in range(_MAX_REDIRECTS + 1):
+                    resp = await client.get(current)
+                    if resp.is_redirect:
+                        location = resp.headers.get("location")
+                        if not location:
+                            break
+                        current = str(resp.url.join(location))
+                        assert_public_url(current)  # re-validate before next hop
+                        continue
+                    if resp.status_code >= 400:
+                        logger.warning("Scrape %s returned %d", url, resp.status_code)
+                        return ""
+                    html = resp.text[:200_000]  # cap raw HTML size
+                    return extract_text(html)[:max_chars]
+                logger.warning("Scrape %s exceeded redirect limit", url)
+                return ""
+        except UnsafeURLError as exc:
+            logger.warning("Scrape blocked unsafe URL %s: %s", url, exc)
+            return ""
         except Exception as exc:
             logger.warning("Scrape failed for %s: %s", url, exc)
             return ""
