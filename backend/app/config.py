@@ -148,8 +148,35 @@ class Settings(BaseSettings):
 
     @property
     def github_app_private_key_pem(self) -> str:
-        """Normalize the PEM: turn literal `\\n` sequences into real newlines."""
-        return (self.github_app_private_key or "").replace("\\n", "\n")
+        """Return a clean PEM regardless of how the .env value was written.
+
+        Why this defensiveness: systemd's `EnvironmentFile=` parser handles
+        unquoted values DIFFERENTLY from pydantic-settings + python-dotenv —
+        in particular, an unquoted value with `\\n` sequences can have its
+        backslashes silently stripped, leaving the running process with a
+        PEM that has literal `n` characters where line breaks should be.
+        PyJWT then raises `"Could not parse the provided public key."`
+
+        Defensive normalisation steps (in order):
+          1. Strip leading/trailing whitespace
+          2. Strip a matched outer pair of single OR double quotes
+          3. Replace any literal `\\n` with real `\n` (idempotent if the
+             value is already a valid multi-line PEM)
+        """
+        raw = self.github_app_private_key or ""
+        if not raw:
+            return ""
+        # Trim ONLY non-newline whitespace before quote detection. A clean
+        # PEM ends with `\n` and we must preserve that; pyjwt accepts PEMs
+        # without it too, but losing the trailing newline subtly changes
+        # the value and can mask diffs in tests / logs.
+        raw = raw.strip(" \t\r")
+        # Strip a balanced outer pair of quotes (both must match).
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in '"\'':
+            raw = raw[1:-1]
+        # Idempotent: a PEM that already has real newlines has no `\n`
+        # sequences to replace, so this is a no-op for that case.
+        return raw.replace("\\n", "\n")
 
     @property
     def origins_list(self) -> list[str]:
