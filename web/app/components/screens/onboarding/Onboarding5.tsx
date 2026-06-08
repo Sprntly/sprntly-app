@@ -4,14 +4,7 @@ import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import {
-  advanceOnboardingStep,
-  upsertPrimaryProduct,
-} from "../../../lib/onboarding/store"
-import {
-  validateProductWebsite,
-  normalizeProductWebsite,
-} from "../../../lib/onboarding/product-helpers"
+import { advanceOnboardingStep } from "../../../lib/onboarding/store"
 import {
   buildKpiTreePayload,
   canSaveKpiTree,
@@ -21,13 +14,17 @@ import {
 } from "../../../lib/onboarding/kpiTreeApi"
 
 /**
- * Onboarding page 05 (design-v4) — "Tell us about your product."
+ * Onboarding page 05 (design-v4) — "Set your success metrics."
  *
- * A product name + the success metrics that anchor the workspace. The
- * North Star is required; supporting metrics are picked from
- * industry-tailored suggestions or written in. The KPI tree is persisted
- * to the backend (PUT /v1/company/kpi-tree) — the canonical config entity
- * Synthesis later reads for strategic-alignment scoring.
+ * The success metrics that anchor the workspace. The North Star is
+ * required; supporting metrics are picked from industry-tailored
+ * suggestions or written in. The KPI tree is persisted to the backend
+ * (PUT /v1/company/kpi-tree) — the canonical config entity Synthesis
+ * later reads for strategic-alignment scoring.
+ *
+ * Product name + website are captured once on step 1 (the single source
+ * of truth); this step only shows the product name for context and does
+ * not re-collect it.
  */
 
 // North Star suggestions, tailored loosely by industry. Mirrors the
@@ -71,11 +68,177 @@ const SUPPORTING_SUGGESTIONS: Record<string, string[]> = {
 
 const MAX_SUPPORTING = MAX_PRIMARY_METRICS + MAX_SECONDARY_SIGNALS
 
+export type SuccessMetricsViewProps = {
+  productName: string
+  industry: string
+  northStar: string
+  supporting: string[]
+  customMetric: string
+  northStarHints: string[]
+  supportingHints: string[]
+  errors: Record<string, string | undefined>
+  error: string | null
+  onChangeNorthStar: (value: string) => void
+  onPickNorthStar: (value: string) => void
+  onToggleSupporting: (metric: string) => void
+  onChangeCustomMetric: (value: string) => void
+  onAddCustom: () => void
+}
+
+/**
+ * Pure presentational view for step 05 — the success-metrics picker. Kept
+ * free of hooks/context so it can be rendered to static markup in tests.
+ */
+export function SuccessMetricsView({
+  productName,
+  industry,
+  northStar,
+  supporting,
+  customMetric,
+  northStarHints,
+  supportingHints,
+  errors,
+  error,
+  onChangeNorthStar,
+  onPickNorthStar,
+  onToggleSupporting,
+  onChangeCustomMetric,
+  onAddCustom,
+}: SuccessMetricsViewProps) {
+  const selectedCount = supporting.length
+
+  return (
+    <>
+      {error && <div className="ob-form-error">{error}</div>}
+
+      {productName && (
+        <p className="ob-metrics-context">
+          Success metrics for <strong>{productName}</strong>
+        </p>
+      )}
+
+      <div className={`field ${errors.northStar ? "has-error" : ""}`} data-field="northStar">
+        <label className="field-label">Primary metric — your North Star *</label>
+        <input
+          className="input"
+          value={northStar}
+          onChange={(e) => onChangeNorthStar(e.target.value)}
+          placeholder="The one metric that best captures product value"
+        />
+        {errors.northStar && <p className="field-error">{errors.northStar}</p>}
+        <div className="ob-ns-hints">
+          <span className="ob-ns-hints-label">
+            Common for {industry || "your stage"}:
+          </span>
+          {northStarHints.map((h) => (
+            <button
+              key={h}
+              type="button"
+              className="metric-chip"
+              onClick={() => onPickNorthStar(h)}
+            >
+              {h}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="field">
+        <label className="field-label">
+          Supporting metrics — pick what fits, or write your own
+        </label>
+        <p className="field-hint">Primary leads to…</p>
+        <div className="ob-chip-row">
+          {supportingHints.map((m) => (
+            <button
+              key={m}
+              type="button"
+              className={`metric-chip ${supporting.includes(m) ? "selected" : ""}`}
+              onClick={() => onToggleSupporting(m)}
+            >
+              {m}
+            </button>
+          ))}
+          {supporting
+            .filter((m) => !supportingHints.includes(m))
+            .map((m) => (
+              <button
+                key={m}
+                type="button"
+                className="metric-chip selected"
+                onClick={() => onToggleSupporting(m)}
+              >
+                {m}
+              </button>
+            ))}
+        </div>
+        <div className="ob-custom-metric">
+          <input
+            className="input"
+            value={customMetric}
+            onChange={(e) => onChangeCustomMetric(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault()
+                onAddCustom()
+              }
+            }}
+            placeholder="Or write your own"
+            maxLength={80}
+          />
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={onAddCustom}
+            disabled={!customMetric.trim() || supporting.length >= MAX_SUPPORTING}
+          >
+            Add
+          </button>
+        </div>
+        <p className="ob-metric-count">
+          {selectedCount} supporting metric{selectedCount === 1 ? "" : "s"}{" "}
+          selected · suggestions tailored to your industry
+        </p>
+      </div>
+
+      <style jsx>{`
+        .ob-metrics-context {
+          font-size: 13px;
+          color: var(--muted);
+          margin: 0 0 18px;
+        }
+        .ob-ns-hints {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 8px;
+          margin-top: 10px;
+        }
+        .ob-ns-hints-label {
+          font-size: 12px;
+          color: var(--muted);
+        }
+        .ob-custom-metric {
+          display: flex;
+          gap: 8px;
+          margin-top: 10px;
+        }
+        .ob-custom-metric :global(.input) {
+          flex: 1;
+        }
+        .ob-metric-count {
+          font-size: 12px;
+          color: var(--muted);
+          margin: 10px 0 0;
+        }
+      `}</style>
+    </>
+  )
+}
+
 export function Onboarding5() {
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
-  const [productName, setProductName] = useState("")
-  const [productWebsite, setProductWebsite] = useState("")
   const [northStar, setNorthStar] = useState("")
   const [supporting, setSupporting] = useState<string[]>([])
   const [customMetric, setCustomMetric] = useState("")
@@ -84,8 +247,6 @@ export function Onboarding5() {
 
   useEffect(() => {
     if (!workspace) return
-    setProductName(workspace.product?.name ?? workspace.display_name)
-    setProductWebsite(workspace.product?.website ?? "")
     const tree = workspace.kpi_tree
     if (tree.north_star) setNorthStar(tree.north_star)
     if (tree.metrics.length) {
@@ -94,6 +255,7 @@ export function Onboarding5() {
   }, [workspace])
 
   const industry = workspace?.industry ?? ""
+  const productName = workspace?.product?.name ?? workspace?.display_name ?? ""
   const northStarHints =
     NORTH_STAR_SUGGESTIONS[industry] ?? NORTH_STAR_SUGGESTIONS.default
   const supportingHints =
@@ -101,11 +263,6 @@ export function Onboarding5() {
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(
     () => [
-      {
-        key: "productName",
-        valid: productName.trim().length > 0,
-        message: "Add a product name.",
-      },
       {
         key: "northStar",
         valid: canSaveKpiTree(northStar, supporting),
@@ -133,30 +290,19 @@ export function Onboarding5() {
     if (!workspace) return
     setError(null)
     if (!validate().ok) return
-    const websiteErr = validateProductWebsite(productWebsite)
-    if (websiteErr) {
-      setError(websiteErr)
-      return
-    }
     setSaving(true)
     try {
-      await upsertPrimaryProduct(workspace.id, {
-        name: productName,
-        website: normalizeProductWebsite(productWebsite),
-      })
       await kpiTreeApi.put(buildKpiTreePayload(northStar, supporting))
       const updated = await advanceOnboardingStep(workspace.id, 6)
       const product = updated.product ?? workspace.product
       setWorkspace({ ...updated, product })
       router.push("/onboarding/6")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't save your product.")
+      setError(e instanceof Error ? e.message : "Couldn't save your metrics.")
     } finally {
       setSaving(false)
     }
   }
-
-  const selectedCount = supporting.length
 
   const previewMetrics = useMemo(
     () => supporting.slice(0, MAX_SUPPORTING),
@@ -173,8 +319,8 @@ export function Onboarding5() {
     <InterviewLayout
       step={5}
       eyebrow="Saved · auto-saves after every step"
-      title="Tell us about your product"
-      agentMessage="A name and your success metrics anchor the whole workspace. Pick your North Star and the supporting metrics it leads to — or write your own. You'll add the full description in Settings."
+      title="Set your success metrics"
+      agentMessage="Success metrics anchor the whole workspace. Pick your North Star and the supporting metrics it leads to — or write your own."
       rightPane={
         <div>
           <div className="ob-preview-label">Success metrics</div>
@@ -195,153 +341,31 @@ export function Onboarding5() {
           )}
         </div>
       }
-      onBack={() => router.push("/onboarding/3")}
+      onBack={() => router.push("/onboarding/4")}
       onContinue={persist}
       loading={saving}
     >
       <div ref={containerRef}>
-      {error && <div className="ob-form-error">{error}</div>}
-
-      <div className={`field ${errors.productName ? "has-error" : ""}`} data-field="productName">
-        <label className="field-label">Product name *</label>
-        <input
-          className="input"
-          value={productName}
-          onChange={(e) => {
-            setProductName(e.target.value)
-            clearError("productName")
-          }}
-          maxLength={100}
-          placeholder="The product this workspace is about"
-        />
-        {errors.productName && <p className="field-error">{errors.productName}</p>}
-      </div>
-      <div className="field">
-        <label className="field-label">Product website (optional)</label>
-        <input
-          className="input"
-          type="url"
-          value={productWebsite}
-          onChange={(e) => setProductWebsite(e.target.value)}
-          placeholder="https://yourproduct.com"
-          autoComplete="url"
-        />
-      </div>
-
-      <div className={`field ${errors.northStar ? "has-error" : ""}`} data-field="northStar">
-        <label className="field-label">Primary metric — your North Star *</label>
-        <input
-          className="input"
-          value={northStar}
-          onChange={(e) => {
-            setNorthStar(e.target.value)
+        <SuccessMetricsView
+          productName={productName}
+          industry={industry}
+          northStar={northStar}
+          supporting={supporting}
+          customMetric={customMetric}
+          northStarHints={northStarHints}
+          supportingHints={supportingHints}
+          errors={errors}
+          error={error}
+          onChangeNorthStar={(value) => {
+            setNorthStar(value)
             clearError("northStar")
           }}
-          placeholder="The one metric that best captures product value"
+          onPickNorthStar={setNorthStar}
+          onToggleSupporting={toggleSupporting}
+          onChangeCustomMetric={setCustomMetric}
+          onAddCustom={addCustom}
         />
-        {errors.northStar && <p className="field-error">{errors.northStar}</p>}
-        <div className="ob-ns-hints">
-          <span className="ob-ns-hints-label">
-            Common for {industry || "your stage"}:
-          </span>
-          {northStarHints.map((h) => (
-            <button
-              key={h}
-              type="button"
-              className="metric-chip"
-              onClick={() => setNorthStar(h)}
-            >
-              {h}
-            </button>
-          ))}
-        </div>
       </div>
-
-      <div className="field">
-        <label className="field-label">
-          Supporting metrics — pick what fits, or write your own
-        </label>
-        <p className="field-hint">Primary leads to…</p>
-        <div className="ob-chip-row">
-          {supportingHints.map((m) => (
-            <button
-              key={m}
-              type="button"
-              className={`metric-chip ${supporting.includes(m) ? "selected" : ""}`}
-              onClick={() => toggleSupporting(m)}
-            >
-              {m}
-            </button>
-          ))}
-          {supporting
-            .filter((m) => !supportingHints.includes(m))
-            .map((m) => (
-              <button
-                key={m}
-                type="button"
-                className="metric-chip selected"
-                onClick={() => toggleSupporting(m)}
-              >
-                {m}
-              </button>
-            ))}
-        </div>
-        <div className="ob-custom-metric">
-          <input
-            className="input"
-            value={customMetric}
-            onChange={(e) => setCustomMetric(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault()
-                addCustom()
-              }
-            }}
-            placeholder="Or write your own"
-            maxLength={80}
-          />
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={addCustom}
-            disabled={!customMetric.trim() || supporting.length >= MAX_SUPPORTING}
-          >
-            Add
-          </button>
-        </div>
-        <p className="ob-metric-count">
-          {selectedCount} supporting metric{selectedCount === 1 ? "" : "s"}{" "}
-          selected · suggestions tailored to your industry
-        </p>
-      </div>
-      </div>
-
-      <style jsx>{`
-        .ob-ns-hints {
-          display: flex;
-          flex-wrap: wrap;
-          align-items: center;
-          gap: 8px;
-          margin-top: 10px;
-        }
-        .ob-ns-hints-label {
-          font-size: 12px;
-          color: var(--muted);
-        }
-        .ob-custom-metric {
-          display: flex;
-          gap: 8px;
-          margin-top: 10px;
-        }
-        .ob-custom-metric :global(.input) {
-          flex: 1;
-        }
-        .ob-metric-count {
-          font-size: 12px;
-          color: var(--muted);
-          margin: 10px 0 0;
-        }
-      `}</style>
     </InterviewLayout>
   )
 }
