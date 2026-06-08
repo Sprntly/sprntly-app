@@ -141,6 +141,14 @@ _RANKED = {
         "recommendation": "Ship SSO this quarter.",
         "metrics": [{"label": "ARR at risk", "value": "$1.4M"}],
         "impact_math": ["Revenue at risk: $1.4M/yr"],
+        "chart_hints": [
+            {"kind": "bar", "title": "SSO blocks $1.4M across deals",
+             "subtitle": "revenue signals",
+             "data": [{"label": "Acme", "value": 800000},
+                      {"label": "Globex", "value": 600000}]},
+            {"kind": "stat", "title": "3 sources converge on SSO",
+             "data": [{"label": "sources", "value": 3}]},
+        ],
         "convergence": [
             {"source": "revenue", "signal": "Acme deal blocked", "strength": "Strong"},
             {"source": "customer_voice", "signal": "asked in calls", "strength": "Moderate"},
@@ -198,6 +206,82 @@ def test_run_synthesis_empty_kg_raises(facade):
 
     with pytest.raises(ValueError, match="no themes"):
         synth.run_synthesis(facade, "ent-empty", dataset_slug="empty")
+
+
+# ---------- chart_hints parity (BUG 1) ----------
+
+def _run_with_ranked(facade, ranked):
+    """Seed an SSO theme, run synthesis with `ranked` as the judge output,
+    and return the persisted brief payload's first insight."""
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    ranked = {**ranked, "insights": [
+        {**ranked["insights"][0], "theme_id": theme.id}]}
+    with patch.object(synth, "llm_call", return_value=_llm_result(ranked)):
+        return synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+
+def test_brief_schema_declares_chart_hints():
+    """The judge schema must request chart_hints, matching the legacy shape
+    (kind|title|subtitle + data:[{label,value}]) the frontend renders."""
+    from app.synthesis import agent as synth
+
+    insight_schema = synth._BRIEF_SCHEMA["properties"]["insights"]["items"]
+    props = insight_schema["properties"]
+    assert "chart_hints" in props
+    assert "chart_hints" in insight_schema["required"]
+    item = props["chart_hints"]["items"]
+    # brief-adapter.ts reads h.kind, h.title, and h.data[].{label,value}
+    assert {"kind", "title", "data"} <= set(item["properties"])
+    assert item["required"] == ["kind", "title", "data"]
+    data_item = item["properties"]["data"]["items"]
+    assert set(data_item["properties"]) == {"label", "value"}
+    assert data_item["properties"]["value"]["type"] == "number"
+
+
+def test_run_synthesis_persists_chart_hints(facade, isolated_settings):
+    """chart_hints from the judge survive into the saved brief insight in the
+    exact shape brief-adapter.ts iterates over."""
+    brief = _run_with_ranked(facade, _RANKED)
+    insight = brief["insights"][0]
+    assert "chart_hints" in insight
+    hints = insight["chart_hints"]
+    assert len(hints) == 2
+    # parity with web/app/lib/brief-adapter.ts: each hint is {kind,title,data}
+    # where data is [{label, value:number}] — the adapter drops hints missing
+    # any of these, so they MUST be present for charts to render.
+    for h in hints:
+        assert h["kind"] in ("bar", "line", "pie", "stat")
+        assert isinstance(h["title"], str) and h["title"]
+        assert isinstance(h["data"], list) and h["data"]
+        for d in h["data"]:
+            assert isinstance(d["label"], str)
+            assert isinstance(d["value"], (int, float))
+
+
+def test_run_synthesis_chart_hints_in_saved_payload(facade, isolated_settings):
+    """The DB row (not just the returned dict) carries chart_hints, since the
+    UI reads the saved payload via /current."""
+    _run_with_ranked(facade, _RANKED)
+    rows = isolated_settings["supabase"].table("briefs").select("*") \
+        .eq("dataset", "acme").execute().data
+    saved_insight = rows[0]["payload"]["insights"][0]
+    assert saved_insight["chart_hints"][0]["kind"] == "bar"
+    assert saved_insight["chart_hints"][0]["data"][0]["value"] == 800000
+
+
+def test_synthesis_judge_prompt_requests_grounded_chart_hints():
+    """The judge system prompt instructs chart_hints generation grounded in the
+    insight's own evidence — never invented numbers."""
+    from app.synthesis import agent as synth
+
+    sys = synth._SYSTEM.lower()
+    assert "chart_hints" in sys
+    assert "never invent" in sys
 
 
 # ---------- goal-alignment factor (classifier + caching) ----------

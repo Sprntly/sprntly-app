@@ -13,7 +13,9 @@ from unittest.mock import patch
 
 import pytest
 
+import app.main as main_mod
 import app.routes.brief as brief_routes
+import app.routes.datasets as datasets_routes
 import app.scheduler as scheduler_mod
 import app.synthesis_brief as sb
 
@@ -336,3 +338,175 @@ def test_read_endpoints_unchanged_under_synthesis(app_client, isolated_settings,
     # /status — ready once a brief exists
     r = app_client.get("/v1/brief/status?dataset=acme")
     assert r.status_code == 200 and r.json()["status"] == "ready"
+
+
+# ── startup engine dispatch (BUG 2 — main.py) ───────────────────────────────
+
+def test_startup_synthesis_engine_runs_synthesis_not_legacy(isolated_settings, monkeypatch):
+    monkeypatch.setattr(main_mod.settings, "brief_engine", "synthesis", raising=False)
+    with patch.object(sb, "generate_all_synthesis_briefs") as synth, \
+         patch.object(main_mod, "auto_generate_all") as legacy:
+        asyncio.run(main_mod._startup_generate_briefs())
+    synth.assert_called_once()
+    legacy.assert_not_called()
+
+
+def test_startup_legacy_engine_runs_auto_generate_all(isolated_settings, monkeypatch):
+    monkeypatch.setattr(main_mod.settings, "brief_engine", "legacy", raising=False)
+
+    async def _noop():
+        return None
+
+    with patch.object(main_mod, "auto_generate_all", side_effect=_noop) as legacy, \
+         patch.object(sb, "generate_all_synthesis_briefs") as synth:
+        asyncio.run(main_mod._startup_generate_briefs())
+    legacy.assert_called_once()
+    synth.assert_not_called()
+
+
+def test_startup_brief_generation_swallows_errors(isolated_settings, monkeypatch):
+    # startup must never break on brief generation
+    monkeypatch.setattr(main_mod.settings, "brief_engine", "synthesis", raising=False)
+    with patch.object(sb, "generate_all_synthesis_briefs",
+                      side_effect=RuntimeError("boom")):
+        asyncio.run(main_mod._startup_generate_briefs())  # no raise
+
+
+def test_generate_all_synthesis_briefs_iterates_and_warms(isolated_settings, monkeypatch):
+    db = isolated_settings["supabase"]
+    _seed_company(db, company_id="co-1", slug="acme")
+    _seed_company(db, company_id="co-2", slug="globex")
+
+    seen: list[str] = []
+    warmed: list[str] = []
+    with patch.object(sb, "generate_brief_for",
+                      side_effect=lambda slug: seen.append(slug)), \
+         patch("app.brief_runner.warm_synthesis_drilldowns",
+               side_effect=lambda slug: warmed.append(slug)):
+        sb.generate_all_synthesis_briefs()
+    assert sorted(seen) == ["acme", "globex"]
+    assert sorted(warmed) == ["acme", "globex"]
+
+
+def test_generate_all_synthesis_briefs_isolates_failure(isolated_settings, monkeypatch):
+    db = isolated_settings["supabase"]
+    _seed_company(db, company_id="co-1", slug="acme")
+    _seed_company(db, company_id="co-2", slug="globex")
+
+    seen: list[str] = []
+
+    def _gen(slug):
+        if slug == "acme":
+            raise RuntimeError("boom")
+        seen.append(slug)
+
+    with patch.object(sb, "generate_brief_for", side_effect=_gen), \
+         patch("app.brief_runner.warm_synthesis_drilldowns"):
+        sb.generate_all_synthesis_briefs()  # no raise
+    assert seen == ["globex"]  # failing company skipped, rest still run
+
+
+# ── dataset-create engine dispatch (BUG 2 — datasets route) ──────────────────
+
+def test_dataset_generate_synthesis_routes_to_synthesis_bg(app_client, isolated_settings, monkeypatch):
+    db = isolated_settings["db"]
+    db.insert_dataset(slug="acme", display_name="Acme")
+    monkeypatch.setattr(datasets_routes.settings, "brief_engine", "synthesis",
+                        raising=False)
+
+    seen: list[str] = []
+
+    async def _fake_bg(dataset):
+        seen.append(dataset)
+
+    with patch.object(brief_routes, "_synthesis_generate_bg", side_effect=_fake_bg), \
+         patch.object(datasets_routes, "auto_generate_brief") as legacy:
+        r = app_client.post("/v1/datasets/acme/generate")
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"started": True, "dataset": "acme"}
+    legacy.assert_not_called()
+
+
+def test_dataset_generate_legacy_routes_to_auto_generate_brief(app_client, isolated_settings, monkeypatch):
+    db = isolated_settings["db"]
+    db.insert_dataset(slug="acme", display_name="Acme")
+    monkeypatch.setattr(datasets_routes.settings, "brief_engine", "legacy",
+                        raising=False)
+
+    async def _noop(dataset):
+        return None
+
+    with patch.object(datasets_routes, "auto_generate_brief",
+                      side_effect=_noop) as legacy, \
+         patch.object(brief_routes, "_synthesis_generate_bg") as synth_bg:
+        r = app_client.post("/v1/datasets/acme/generate")
+
+    assert r.status_code == 200, r.text
+    legacy.assert_called_once_with("acme")
+    synth_bg.assert_not_called()
+
+
+# ── warm-drilldowns parity (BUG 3) ───────────────────────────────────────────
+
+def test_synthesis_bg_warms_drilldowns_after_generate(isolated_settings, monkeypatch):
+    """/regenerate's synthesis bg body warms drill-downs after the brief."""
+    order: list[str] = []
+    with patch.object(brief_routes, "generate_brief_for",
+                      side_effect=lambda slug: order.append("gen")), \
+         patch.object(brief_routes, "warm_synthesis_drilldowns",
+                      side_effect=lambda slug: order.append("warm")) as warm:
+        asyncio.run(brief_routes._synthesis_generate_bg("acme"))
+    warm.assert_called_once_with("acme")
+    assert order == ["gen", "warm"]  # warm runs AFTER generation
+
+
+def test_synthesis_bg_skips_warm_when_generate_fails(isolated_settings):
+    """A failed brief generation must not warm (and must not raise)."""
+    with patch.object(brief_routes, "generate_brief_for",
+                      side_effect=RuntimeError("boom")), \
+         patch.object(brief_routes, "warm_synthesis_drilldowns") as warm:
+        asyncio.run(brief_routes._synthesis_generate_bg("acme"))  # no raise
+    warm.assert_not_called()
+
+
+def test_scheduler_synthesis_warms_drilldowns(isolated_settings, monkeypatch):
+    db = isolated_settings["supabase"]
+    _seed_company(db, company_id="co-1", slug="acme")
+    _set_engine(monkeypatch, "synthesis")
+
+    warmed: list[str] = []
+    with patch("app.synthesis_brief.generate_brief_for"), \
+         patch("app.brief_runner.warm_synthesis_drilldowns",
+               side_effect=lambda slug: warmed.append(slug)):
+        asyncio.run(scheduler_mod._run_synthesis_for_all_companies())
+    assert warmed == ["acme"]
+
+
+def test_warm_synthesis_drilldowns_swallows_errors(isolated_settings):
+    """A raise inside warming must not propagate (brief is already saved)."""
+    from app import brief_runner
+
+    with patch.object(brief_runner, "get_current_brief",
+                      side_effect=RuntimeError("db down")):
+        brief_runner.warm_synthesis_drilldowns("acme")  # no raise
+
+
+def test_warm_synthesis_drilldowns_fans_out_when_brief_exists(isolated_settings):
+    """When a brief exists, warming reads it back and fans out _warm_drilldowns."""
+    from app import brief_runner
+
+    fake_brief = {"id": 7, "insights": [{"title": "X"}]}
+    with patch.object(brief_runner, "get_current_brief", return_value=fake_brief), \
+         patch.object(brief_runner, "_warm_drilldowns") as warm:
+        brief_runner.warm_synthesis_drilldowns("acme")
+    warm.assert_called_once_with(fake_brief, dataset="acme")
+
+
+def test_warm_synthesis_drilldowns_noop_without_brief(isolated_settings):
+    from app import brief_runner
+
+    with patch.object(brief_runner, "get_current_brief", return_value=None), \
+         patch.object(brief_runner, "_warm_drilldowns") as warm:
+        brief_runner.warm_synthesis_drilldowns("acme")
+    warm.assert_not_called()

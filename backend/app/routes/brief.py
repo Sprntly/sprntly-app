@@ -4,7 +4,7 @@ import logging
 from fastapi import Depends, APIRouter, HTTPException
 
 from app.auth import require_session
-from app.brief_runner import auto_generate_brief, get_status
+from app.brief_runner import auto_generate_brief, get_status, warm_synthesis_drilldowns
 from app.config import settings
 from app.corpus import load_corpus
 from app.db import get_brief_by_id, get_current_brief, save_brief
@@ -30,6 +30,11 @@ async def _synthesis_generate_bg(dataset: str) -> None:
         logger.info("Synthesis brief generated for %s", dataset)
     except Exception:  # noqa: BLE001 — fire-and-forget; prior brief stays
         logger.exception("Synthesis brief generation failed for %s", dataset)
+        return
+    # Parity with the legacy auto_generate_brief: warm the per-insight
+    # drill-downs so the first click is instant. Error-isolated inside the
+    # helper, so it can never undo the brief we just generated.
+    warm_synthesis_drilldowns(dataset)
 
 
 @router.get("/current")

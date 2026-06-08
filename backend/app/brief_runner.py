@@ -175,6 +175,28 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
         warm_brief_dynamic_asks(dataset, brief, _WARM_SEMA)
 
 
+def warm_synthesis_drilldowns(dataset: str) -> None:
+    """Warm evidence/PRD/Ask drill-downs for the synthesis brief of `dataset`.
+
+    Parity with the legacy path: after a synthesis brief is generated+saved,
+    pre-generate the per-insight drill-downs so the first user click renders
+    instantly. Reads the freshly-saved brief back (so it carries the DB id +
+    insight titles _warm_drilldowns needs) and fans out the same warming.
+
+    Error-isolated: warming is a perf optimization, never a correctness
+    requirement, so a failure here must not break brief generation. Requires a
+    running event loop (warming schedules asyncio tasks); callers invoke it
+    from the synthesis background/scheduler coroutines.
+    """
+    try:
+        brief = get_current_brief(dataset)
+        if brief is None:
+            return
+        _warm_drilldowns(brief, dataset=dataset)
+    except Exception:  # noqa: BLE001 — warming is best-effort; brief must survive
+        logger.exception("Synthesis drill-down warming failed for %s", dataset)
+
+
 async def auto_generate_brief(dataset: str) -> None:
     """Generate a brief for `dataset` if one doesn't already exist, then warm
     the per-insight drill-downs (evidence + PRD).
