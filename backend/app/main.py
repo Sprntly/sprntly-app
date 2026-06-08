@@ -25,6 +25,7 @@ from app.prompts import (
 from app.routes import (
     agent_chat,
     ask,
+    backlog,
     brief,
     business_context as business_context_routes,
     company,
@@ -190,6 +191,7 @@ app.include_router(auth.router)
 app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
+app.include_router(backlog.router)
 app.include_router(ask.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)

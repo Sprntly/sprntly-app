@@ -27,7 +27,8 @@ from app.graph.types import Entity, Relationship
 from app.prompts import BRIEF_SCHEMA_VERSION
 from app.synthesis.convergence import ThemeConvergence, compute_convergence
 from app.synthesis.delivery import deliver_brief_to_slack
-from app.synthesis.scoring import classify_theme_fit, goal_factor
+from app.synthesis.backlog import sequence_backlog
+from app.synthesis.scoring import classify_theme_fit, score_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -133,20 +134,10 @@ def run_synthesis(
     goal_enabled = bool(config_get("scoring.goal_factor_enabled", enterprise_id,
                                    default=True))
     goal_weight = float(config_get("scoring.goal_weight", enterprise_id, default=1.0))
-    score_factors: dict[str, dict] = {}
-    for c in cands:
-        if goal_enabled:
-            fit = classify_theme_fit(facade, enterprise_id, c, tree, agent=agent)
-            factor = goal_factor(fit, goal_weight=goal_weight)
-        else:
-            fit, factor = "off", 1.0
-        adjusted = c.base_score * factor
-        score_factors[c.theme_id] = {
-            "base_score": round(c.base_score, 4),
-            "fit": fit,
-            "goal_factor": round(factor, 4),
-            "goal_adjusted_score": round(adjusted, 4),
-        }
+    score_factors = score_candidates(
+        facade, enterprise_id, cands, tree,
+        goal_enabled=goal_enabled, goal_weight=goal_weight, agent=agent,
+        classifier=classify_theme_fit)
     cands.sort(key=lambda c: -score_factors[c.theme_id]["goal_adjusted_score"])
 
     strategic = (
@@ -258,6 +249,20 @@ def run_synthesis(
         "_schema_version": BRIEF_SCHEMA_VERSION,
     }
     save_brief(dataset_slug, week_label, brief, schema_version=BRIEF_SCHEMA_VERSION)
+
+    # SEQUENCE the rest — one synthesis run yields BOTH the brief AND the
+    # ranked backlog behind it. Additive + resilient: a backlog failure must
+    # never break brief generation (the brief is already saved above), so it is
+    # isolated in try/except and only logged.
+    brief_theme_ids = [ins.get("theme_id") for ins in insights if ins.get("theme_id")]
+    try:
+        backlog = sequence_backlog(
+            facade, enterprise_id, exclude_theme_ids=brief_theme_ids)
+        brief["_backlog_count"] = len(backlog)
+    except Exception:  # noqa: BLE001 — backlog is best-effort; brief must survive
+        logger.exception("backlog sequencing failed (brief unaffected)")
+        brief["_backlog_count"] = None
+
     delivery = deliver_brief_to_slack(enterprise_id, brief)
     if not delivery.get("delivered") and delivery.get("reason") not in (
         "slack_not_connected", "no_channel_configured"
