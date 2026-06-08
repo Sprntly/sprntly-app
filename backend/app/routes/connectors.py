@@ -742,9 +742,8 @@ def github_callback(code: str, state: str):
         raise HTTPException(400, "GitHub did not return an access_token")
 
     me = github_app.fetch_authenticated_user(access_token)
-    label = me.get("login")
-    if label:
-        label = f"@{label}"
+    login = me.get("login") or ""
+    label = f"@{login}" if login else None
 
     try:
         token_encrypted = encrypt_token_json(github_app.token_payload_to_store(token_json))
@@ -761,7 +760,39 @@ def github_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
+    # Two-step GitHub auth: OAuth tells us who the user is, but they ALSO
+    # need to install the Sprntly App on at least one repo so we have an
+    # installation_id (without that, the agent has no repo access — the
+    # /lab/code-chat installation picker stays empty).
+    #
+    # If the user has no matching installation yet, redirect to GitHub's
+    # App install page instead of bouncing them back to /settings. The
+    # webhook fires on completion and creates the github_installations
+    # row; the user lands back at the App's Setup URL (configured in
+    # the App settings on GitHub).
+    if login and not _has_github_install_for(login) and settings.github_app_slug:
+        install_url = (
+            f"https://github.com/apps/{settings.github_app_slug}/installations/new"
+        )
+        return RedirectResponse(install_url, status_code=307)
+
     return _build_post_oauth_redirect(payload, github_app.GITHUB_PROVIDER)
+
+
+def _has_github_install_for(account_login: str) -> bool:
+    """True iff a Sprntly App installation already exists for the given
+    GitHub account login. Read-only — webhook handlers populate this
+    table when users install/uninstall the App."""
+    try:
+        rows = db.list_github_installations() or []
+    except Exception:
+        # Table may not exist in some local-dev / test contexts; be lenient
+        # and assume "no install" so we still redirect to the install page.
+        return False
+    needle = account_login.lower()
+    return any(
+        (row.get("account_login") or "").lower() == needle for row in rows
+    )
 
 
 @router.delete("/github")

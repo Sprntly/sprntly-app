@@ -130,6 +130,11 @@ class Settings(BaseSettings):
     github_app_private_key: str = ""
     github_oauth_redirect_uri: str = ""
     github_webhook_secret: str = ""
+    # GitHub App slug (the URL fragment in github.com/apps/<slug>). Used to
+    # build the App install URL the user is redirected to after OAuth when
+    # they have no existing install (so they can pick which repos to grant
+    # the agent access to). Defaults to the production slug.
+    github_app_slug: str = "sprntly-ai"
 
     # Design Agent share-token secret (F6 / AD Rule #14). A DISTINCT secret from
     # jwt_secret — never reuse JWT_SECRET for Design Agent surfaces. Bound here
