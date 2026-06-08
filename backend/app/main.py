@@ -1,7 +1,18 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# Guarantee the oauthlib scope-relax behavior in-process, regardless of whether
+# the deploy .env sets it. Google's OAuth client (shared with sign-in) auto-adds
+# openid / userinfo.email / userinfo.profile and may reorder/normalize openid,
+# which would otherwise trip oauthlib's "Scope has changed" guard at token
+# exchange. We request the full scope set explicitly (see connectors.google_oauth
+# .DRIVE_SCOPES); this is the belt-and-suspenders for the reordering case. MUST
+# run before any oauthlib import below (the connectors router pulls in
+# google_auth_oauthlib transitively), so it sits at the very top of startup.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
