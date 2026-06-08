@@ -46,6 +46,34 @@ class KpiTree(BaseModel):
     secondary_signals: list[SecondarySignal] = Field(default_factory=list, max_length=6)
     version: int = 1
 
+    @field_validator("north_star", mode="before")
+    @classmethod
+    def _coerce_north_star(cls, v):
+        """Tolerate legacy/hand-edited shapes stored in `companies.kpi_tree`.
+
+        Older rows persisted the north star as a bare string (e.g. "Revenue")
+        rather than a `{metric: ...}` object. Normalize on read: a non-empty
+        string → `{"metric": <string>}`; None/empty/garbage → a safe default
+        metric so the tree parses and goal-fit classification keeps working
+        instead of raising a ValidationError. (No data migration — read-side
+        normalization only.)
+        """
+        if isinstance(v, str):
+            metric = v.strip()
+            return {"metric": metric} if metric else {"metric": "North Star"}
+        if v is None:
+            return {"metric": "North Star"}
+        if isinstance(v, NorthStar):
+            # Already a valid model (e.g. constructed in-process) — pass through.
+            return v
+        if isinstance(v, dict):
+            # An object missing/empty `metric` still needs a usable label.
+            if not str(v.get("metric") or "").strip():
+                return {**v, "metric": "North Star"}
+            return v
+        # Any other shape (number, list, …) → default rather than raise.
+        return {"metric": "North Star"}
+
     @model_validator(mode="after")
     def _weights_sum_to_one(self) -> "KpiTree":
         if self.primary_metrics:
