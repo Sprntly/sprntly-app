@@ -34,6 +34,8 @@ import logging
 from typing import Annotated
 from urllib.parse import urlencode
 
+import requests
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -863,6 +865,113 @@ def github_disconnect(
 @router.get("/github/installations")
 def github_list_installations(_session: dict = Depends(require_session)):
     return {"installations": db.list_github_installations()}
+
+
+# ─────────── Per-installation repository management ───────────
+#
+# These wrap GitHub's `/user/installations/{id}/repositories` family,
+# which is gated on the USER's OAuth token (not the App JWT). The user
+# can add/remove repos from a "selected repositories" install. For an
+# "all repositories" install GitHub returns 422 and the UI should
+# disable the per-repo toggles (deep-link to GitHub settings instead).
+
+
+def _github_user_install_url(installation_id: int, repository_id: int | None = None) -> str:
+    base = (
+        f"https://api.github.com/user/installations/{installation_id}/repositories"
+    )
+    if repository_id is not None:
+        return f"{base}/{repository_id}"
+    return base
+
+
+def _github_user_token_headers(company_id: str) -> dict[str, str]:
+    """User-OAuth Bearer headers for /user/installations/* endpoints."""
+    return {
+        "Authorization": f"Bearer {_github_access_token(company_id)}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+@router.get("/github/installations/{installation_id}/repositories")
+def github_list_install_repos(
+    installation_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """List repositories accessible to this installation, using the
+    connected user's OAuth token (per GitHub's auth rules)."""
+    r = requests.get(
+        _github_user_install_url(installation_id),
+        headers=_github_user_token_headers(company.company_id),
+        timeout=10,
+    )
+    if not r.ok:
+        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
+    body = r.json() or {}
+    repos = [
+        {
+            "id": x.get("id"),
+            "name": x.get("name"),
+            "full_name": x.get("full_name"),
+            "private": x.get("private"),
+            "html_url": x.get("html_url"),
+            "default_branch": x.get("default_branch"),
+            "description": x.get("description"),
+        }
+        for x in (body.get("repositories") or [])
+    ]
+    return {
+        "installation_id": installation_id,
+        "total": body.get("total_count", len(repos)),
+        "repositories": repos,
+    }
+
+
+@router.put(
+    "/github/installations/{installation_id}/repositories/{repository_id}"
+)
+def github_add_install_repo(
+    installation_id: int,
+    repository_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Add a repo to this installation. 422 if the install is in
+    'all repositories' mode (per-repo control disallowed there)."""
+    r = requests.put(
+        _github_user_install_url(installation_id, repository_id),
+        headers=_github_user_token_headers(company.company_id),
+        timeout=10,
+    )
+    if r.status_code == 422:
+        raise HTTPException(
+            422,
+            "This installation is set to 'All repositories'. "
+            "Switch it to 'Only select repositories' on GitHub to "
+            "manage repos per-app.",
+        )
+    if not r.ok:
+        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
+    return {"added": True, "installation_id": installation_id, "repository_id": repository_id}
+
+
+@router.delete(
+    "/github/installations/{installation_id}/repositories/{repository_id}"
+)
+def github_remove_install_repo(
+    installation_id: int,
+    repository_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Remove a repo from this installation."""
+    r = requests.delete(
+        _github_user_install_url(installation_id, repository_id),
+        headers=_github_user_token_headers(company.company_id),
+        timeout=10,
+    )
+    if not r.ok:
+        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
+    return {"removed": True, "installation_id": installation_id, "repository_id": repository_id}
 
 
 @router.get("/github/pull-requests")
