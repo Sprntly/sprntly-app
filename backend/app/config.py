@@ -115,6 +115,15 @@ class Settings(BaseSettings):
     )
     slack_bot_scopes: str = "chat:write,channels:read"
 
+    # Which engine produces the weekly brief.
+    #   "synthesis" (default) — KG-driven: seed-if-empty → run_synthesis over the
+    #                           knowledge graph (kg_signal/kg_entity) → save_brief.
+    #   "legacy"              — placeholder corpus→single-Claude-call pipeline,
+    #                           kept dormant behind the flag as a fallback.
+    # Drives both the UI write endpoints (/v1/brief/regenerate,/generate) and the
+    # scheduler cycle; the UI read path (/current,/status,/{id}) is unchanged.
+    brief_engine: str = "synthesis"
+
     # Pipeline scheduler
     scheduler_enabled: bool = False
     pipeline_interval_hours: int = 6
