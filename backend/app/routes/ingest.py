@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app import db
@@ -58,6 +60,53 @@ def sync(provider: str, company: CompanyContext = Depends(require_company)):
     from app.db.client import utc_now
     db.update_connection_sync(company.company_id, provider, last_sync_at=utc_now(), last_sync_error=None)
     return {"ok": True, "provider": provider, **result}
+
+
+# Whisper's per-request hard limit. Longer recordings need server-side chunking
+# (split on silence, transcribe each chunk, concatenate) — tracked as a
+# follow-up; for the pilot we reject oversized files with a clear message.
+_MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+
+@router.post("/audio")
+async def ingest_audio_route(
+    file: Annotated[UploadFile, File(description="Meeting audio (mp3/m4a/wav)")],
+    source: Annotated[str, Form()] = "fireflies",
+    company: CompanyContext = Depends(require_company),
+):
+    """Upload a meeting audio file → transcribe (Whisper) → distill into the KG.
+
+    Complements the Fireflies puller (which pulls already-summarized meetings):
+    this path takes a raw recording, transcribes it, and routes the transcript
+    through the generic extractor. Only distilled signals are persisted, never
+    the verbatim transcript (§6 data minimization)."""
+    filename = file.filename or "audio"
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(400, "Empty audio file")
+    if len(audio_bytes) > _MAX_AUDIO_BYTES:
+        raise HTTPException(
+            413,
+            f"Audio file is {len(audio_bytes)} bytes; the limit is "
+            f"{_MAX_AUDIO_BYTES} bytes (~25 MB). Split longer recordings.",
+        )
+
+    from app.kg_ingest.audio_ingest import ingest_audio
+    facade = GraphFacade()
+    try:
+        result = ingest_audio(
+            facade, company.company_id,
+            audio_bytes=audio_bytes, filename=filename, source=source,
+        )
+    except RuntimeError as e:  # OPENAI_API_KEY unset → config problem, not a 5xx
+        raise HTTPException(503, str(e)) from e
+    except ValueError as e:  # empty / oversized audio surfaced from transcription
+        raise HTTPException(422, str(e)) from e
+    except Exception as e:  # noqa: BLE001 — transcription / extraction failure
+        logger.exception("audio ingestion failed for %s", filename)
+        raise HTTPException(502, f"audio ingestion failed: {e}") from e
+
+    return {"ok": True, "source": source, "filename": filename, **result}
 
 
 class GitHubDeepReadIn(BaseModel):
