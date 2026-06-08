@@ -288,6 +288,14 @@ export function ConfigureConnectorDrawerView({
               <span className="conn-config-meta-k">Connected since</span>
               <span className="conn-config-meta-v">{connectedSince}</span>
             </div>
+            {hasConnection && connection?.config?.auth_kind === "pat" && (
+              <div className="conn-config-meta-row">
+                <span className="conn-config-meta-k">Auth method</span>
+                <span className="conn-config-meta-v">
+                  Personal Access Token
+                </span>
+              </div>
+            )}
           </section>
 
           <section className="conn-config-test">

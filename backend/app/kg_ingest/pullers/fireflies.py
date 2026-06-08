@@ -3,6 +3,10 @@
 GraphQL API (api.fireflies.ai), API-key auth (per #106). We pull the meeting
 summary + action items rather than full sentence-level transcripts — the
 distilled layer is what the brain ingests (no raw-dump, §6).
+
+Raw-audio ingestion (transcribe an uploaded recording with Whisper, then
+extract) is a separate path in app/kg_ingest/audio_ingest.py — this puller is
+left untouched.
 """
 from __future__ import annotations
 

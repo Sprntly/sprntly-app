@@ -371,6 +371,8 @@ export type ConnectionSummary = {
     // Slack
     channel_id?: string
     channel_name?: string
+    // Figma (PAT-vs-OAuth distinction set by backend on save)
+    auth_kind?: "pat" | "oauth"
   }
   last_sync_at: string | null
   last_sync_error: string | null
@@ -387,6 +389,14 @@ export type GitHubRepo = {
   description: string | null
   updated_at: string
   stargazers_count: number
+}
+
+export type GitHubInstallation = {
+  installation_id: number
+  account_login: string
+  account_type: "User" | "Organization" | string
+  repository_selection: "selected" | "all" | string
+  suspended?: boolean
 }
 
 export type GoogleDriveSyncResult = {
@@ -466,6 +476,10 @@ export const connectorsApi = {
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
     ),
+  listGithubInstallations: () =>
+    api.get<{ installations: GitHubInstallation[] }>(
+      `/v1/connectors/github/installations`,
+    ),
 
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
@@ -520,6 +534,13 @@ export const connectorsApi = {
     ),
   disconnectFireflies: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
+
+  // ---- Figma Personal Access Token (PAT, stopgap while OAuth in review) ----
+  connectFigmaWithPat: (pat: string) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      `/v1/connectors/figma/pat`,
+      { pat },
+    ),
 
   // ---- Generic test-connection --------------------------------------------
   /**
@@ -606,6 +627,27 @@ export const pipelineApi = {
     api.get<PipelineRunStatus>(
       `/v1/pipeline/${encodeURIComponent(company)}/status`,
     ),
+}
+
+// ─────────────────────── Agent with live tools ───────────────────────
+//
+// POST /v1/agent/chat-with-tools — runs an Anthropic tool-use loop so the
+// agent can fetch live data from GitHub during the chat (no pre-sync).
+// See backend app/agent_tools/github.py for the available tools.
+
+export type AgentChatWithToolsResponse = {
+  response: string
+  iterations: number
+  tool_calls: string[]
+  truncated: boolean
+}
+
+export const agentChatApi = {
+  chatWithTools: (message: string, installationId: number) =>
+    api.post<AgentChatWithToolsResponse>(`/v1/agent/chat-with-tools`, {
+      message,
+      installation_id: installationId,
+    }),
 }
 
 export const prdApi = {

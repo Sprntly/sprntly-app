@@ -172,31 +172,16 @@ def require_session(
 
 
 def require_app_session(
-    authorization: str | None = Header(default=None),
     sprntly_app_session: str | None = Cookie(default=None),
 ) -> dict:
-    """Locked to the app audience.
+    """Locked to the app audience. Demo sessions are rejected even if present.
 
-    Accepts either:
-    - `sprntly_app_session` cookie (demo-password login)
-    - Supabase Bearer JWT in the Authorization header (Supabase auth login)
-
-    Demo sessions (sprntly_demo_session) are still rejected. For Supabase
-    JWTs the returned payload has `aud="app"` so downstream workspace_id
-    derivations (`session.get("aud")`) stay consistent with cookie sessions.
+    Cookie-only by design: the Supabase Bearer path lives in `require_session`
+    / `require_company` (the app-wide signed-in-user + tenant deps). Folding a
+    Bearer fallback in here was a scratch dev-hack (#143 excluded it) and broke
+    the positional `require_app_session(<session>)` contract the auth tests
+    assert — the session cookie is the first and only positional argument.
     """
-    # Supabase Bearer JWT path (frontend Supabase auth)
-    if authorization and authorization.startswith("Bearer "):
-        bearer = authorization.removeprefix("Bearer ").strip()
-        if bearer:
-            try:
-                payload = _decode_supabase_token(bearer)
-                # Normalise aud to "app" so design-agent workspace_id logic
-                # (session.get("aud")) works identically to cookie sessions.
-                return {**payload, "aud": "app", "scope": "app"}
-            except jwt.PyJWTError:
-                pass
-
     if not sprntly_app_session:
         raise HTTPException(401, "Not signed in")
     try:
@@ -407,3 +392,24 @@ def require_company_from_query(
     if not token:
         raise HTTPException(401, "Not signed in")
     return require_company(authorization=f"Bearer {token}")
+
+
+def resolve_company_optional(
+    authorization: str | None = Header(default=None),
+    sprntly_app_session: str | None = Cookie(default=None),
+    sprntly_demo_session: str | None = Cookie(default=None),
+) -> CompanyContext | None:
+    """Best-effort tenant resolution for surfaces that work WITH or WITHOUT a
+    company (e.g. Ask: corpus-only for legacy cookie sessions, corpus+KG when a
+    company resolves). Returns the CompanyContext when a Supabase-authenticated
+    user has exactly one membership; returns None for any non-resolvable case
+    (legacy cookie session, no membership, integrity anomaly) instead of
+    raising. The route's primary auth gate still runs via require_session."""
+    try:
+        return require_company(
+            authorization=authorization,
+            sprntly_app_session=sprntly_app_session,
+            sprntly_demo_session=sprntly_demo_session,
+        )
+    except HTTPException:
+        return None

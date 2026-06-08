@@ -1,40 +1,41 @@
 /**
- * Settings → Team & roles pane (C4 of the team-roles slice).
+ * Settings → Team & roles pane.
  *
  * Spec: Sprntly_Onboarding_Flow_Spec_v1 § Settings → Team [Only for Admins].
+ * Visual: sprntly-pages/15-settings.html § Team & roles (lines 2245-2262)
+ *   - Two `set-block` cards:
+ *       (1) combined Members + pending invites list with header
+ *           "N members · M pending invites" + inline "+ Invite teammate"
+ *           trigger.
+ *       (2) "Roles" reference card explaining what each role can do.
+ *   - Per-row layout: avatar + name/email + role select + status chip
+ *     + 3-dot actions menu (replaces the old inline Remove button).
  *
- *   - Invite new members — email + role.
- *   - Edit roles for existing members.
- *   - Remove members.
- *   - Pending invite management — resend or revoke.
+ * Pattern unchanged: pure View component (no hooks, no IO,
+ * renderToStaticMarkup-testable) + a default-exported hooks wrapper
+ * that does fetches + state.
  *
- * Pattern: pure View component (no hooks, no IO, unit-tested via
- * renderToStaticMarkup) + a default-exported hooks-wrapper that does the
- * fetches + state management. Mirrors ConnectorsSettings.tsx.
- *
- * Permission gate: members see a read-only roster (no controls); admins
- * and owners see the full team-management surface. The backend enforces
- * the same gate independently; the UI hide is purely cosmetic.
+ * Permission gate: the View renders controls only for owner/admin.
+ * Backend enforces the same gate independently.
  */
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
 import { useAuth } from "../../../../lib/auth"
 import { api } from "../../../../lib/api"
-import { SettingsSection } from "./SettingsLayout"
 
 // ─────────────────────────── Types ───────────────────────────
 
-export type TeamRole = "owner" | "admin" | "member"
+export type TeamRole = "owner" | "admin" | "member" | "viewer"
 /** Roles a non-owner invite/edit can target. `owner` is reserved. */
-export type InviteRole = "admin" | "member"
+export type InviteRole = "admin" | "member" | "viewer"
 
 export type TeamMember = {
   user_id: string
   role: TeamRole
-  /** Display name (full_name); falls back to email in the View. */
-  display: string | null
+  display_name: string | null
   email: string | null
+  avatar_url: string | null
 }
 
 export type TeamInvite = {
@@ -42,11 +43,14 @@ export type TeamInvite = {
   email: string
   role: InviteRole
   created_at: string | null
-  /** Whether the backend successfully fired the Supabase magic-link
-   * email. Only present on POST /invites and POST /invites/{id}/resend
-   * responses (the list endpoint omits it). */
+  /** Returned on POST /invites and POST /invites/{id}/resend. */
   email_sent?: boolean
 }
+
+/** Unified row type so members + pending invites render in one list. */
+type RosterRow =
+  | { kind: "member"; member: TeamMember }
+  | { kind: "invite"; invite: TeamInvite }
 
 // ─────────────────────────── Pure View ───────────────────────────
 
@@ -58,18 +62,14 @@ export type TeamSettingsViewProps = {
   loading: boolean
   loadError: string | null
 
-  // Invite form (controlled by the wrapper).
+  // Invite form state (controlled by the wrapper).
+  showInviteForm: boolean
   inviteEmail: string
   inviteRole: InviteRole
   inviteSubmitting: boolean
   inviteError: string | null
-  /**
-   * Last invite/resend feedback. `kind: "sent"` means Supabase fired the
-   * magic-link email; `kind: "saved"` means the invite row persisted but
-   * the email send failed — the inviter should share the accept URL
-   * manually. Null = no recent feedback.
-   */
   inviteNotice: { kind: "sent" | "saved"; email: string } | null
+  onToggleInviteForm: () => void
   onChangeInviteEmail: (value: string) => void
   onChangeInviteRole: (value: InviteRole) => void
   onSubmitInvite: () => Promise<void>
@@ -91,11 +91,13 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
     currentUserRole,
     loading,
     loadError,
+    showInviteForm,
     inviteEmail,
     inviteRole,
     inviteSubmitting,
     inviteError,
     inviteNotice,
+    onToggleInviteForm,
     onChangeInviteEmail,
     onChangeInviteRole,
     onSubmitInvite,
@@ -109,85 +111,42 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
   const ownerCount = members.filter((m) => m.role === "owner").length
 
   return (
-    <SettingsSection
-      title="Team & roles"
-      sub="Invite teammates, change their roles, and manage pending invites."
-    >
-      {loading && <p className="settings-placeholder">Loading team…</p>}
+    <div className="set-pane sp-team">
+      <div className="set-h">Team &amp; roles</div>
+      <div className="set-sub">
+        Anyone on your team can sign in to this workspace. Roles govern what
+        they can edit.
+      </div>
+
+      {loading && <p className="set-block-s-inline">Loading team…</p>}
       {loadError && (
         <p className="settings-error">Could not load team: {loadError}</p>
       )}
 
-      {/* ── Members ────────────────────────────────────────────────── */}
-      <div className="team-block">
-        <h3 className="team-block-title">Members</h3>
-        <table className="team-table">
-          <thead>
-            <tr>
-              <th>Member</th>
-              <th>Role</th>
-              {canManage && <th aria-label="Actions" />}
-            </tr>
-          </thead>
-          <tbody>
-            {members.map((m) => {
-              const isSoleOwner = m.role === "owner" && ownerCount <= 1
-              const display = m.display || m.email || m.user_id
-              return (
-                <tr key={m.user_id}>
-                  <td>
-                    <div className="team-member-name">{display}</div>
-                    {m.email && m.display && (
-                      <div className="team-member-email">{m.email}</div>
-                    )}
-                  </td>
-                  <td>
-                    {canManage ? (
-                      <select
-                        className="team-role-select"
-                        value={m.role}
-                        disabled={isSoleOwner}
-                        onChange={(e) =>
-                          onChangeMemberRole(m.user_id, e.target.value as TeamRole)
-                        }
-                        aria-label={`Role for ${display}`}
-                      >
-                        <option value="owner">Owner</option>
-                        <option value="admin">Admin</option>
-                        <option value="member">Member</option>
-                      </select>
-                    ) : (
-                      <span className="team-role-chip">{m.role}</span>
-                    )}
-                    {isSoleOwner && (
-                      <span className="team-role-note"> · sole owner</span>
-                    )}
-                  </td>
-                  {canManage && (
-                    <td className="team-row-actions">
-                      <button
-                        type="button"
-                        className="btn-link danger"
-                        disabled={isSoleOwner || m.user_id === currentUserId}
-                        onClick={() => onRemoveMember(m.user_id)}
-                      >
-                        Remove
-                      </button>
-                    </td>
-                  )}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
+      {/* ── Block 1: Members + pending invites ─────────────────────── */}
+      <div className="set-block">
+        <div className="set-block-h">
+          <div className="set-block-t">
+            {members.length} {pluralize(members.length, "member")} ·{" "}
+            {invites.length}{" "}
+            {pluralize(invites.length, "pending invite")}
+          </div>
+          {canManage && (
+            <div className="set-block-meta">
+              <button
+                type="button"
+                className="set-team-invite-trigger"
+                onClick={onToggleInviteForm}
+              >
+                {showInviteForm ? "Cancel" : "+ Invite teammate"}
+              </button>
+            </div>
+          )}
+        </div>
 
-      {/* ── Invite form (admin/owner only) ────────────────────────── */}
-      {canManage && (
-        <div className="team-block">
-          <h3 className="team-block-title">Invite a new member</h3>
+        {canManage && showInviteForm && (
           <form
-            className="team-invite-form"
+            className="set-team-invite-form"
             onSubmit={(e) => {
               e.preventDefault()
               void onSubmitInvite()
@@ -195,7 +154,7 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
           >
             <input
               type="email"
-              className="settings-input"
+              className="set-team-invite-input"
               placeholder="teammate@company.com"
               value={inviteEmail}
               onChange={(e) => onChangeInviteEmail(e.target.value)}
@@ -203,88 +162,314 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
               disabled={inviteSubmitting}
             />
             <select
-              className="settings-input"
+              className="set-team-invite-select"
               value={inviteRole}
-              onChange={(e) => onChangeInviteRole(e.target.value as InviteRole)}
+              onChange={(e) =>
+                onChangeInviteRole(e.target.value as InviteRole)
+              }
               disabled={inviteSubmitting}
             >
               <option value="member">Member</option>
               <option value="admin">Admin</option>
+              <option value="viewer">Viewer</option>
             </select>
             <button
               type="submit"
-              className="btn primary"
+              className="set-team-invite-submit"
               disabled={inviteSubmitting || !inviteEmail.trim()}
             >
               {inviteSubmitting ? "Sending…" : "Send invite"}
             </button>
           </form>
-          {inviteError && <p className="settings-error">{inviteError}</p>}
-          {inviteNotice && !inviteError && (
-            <p
-              className={
-                inviteNotice.kind === "sent"
-                  ? "settings-notice"
-                  : "settings-warning"
-              }
-            >
-              {inviteNotice.kind === "sent"
-                ? `Invite emailed to ${inviteNotice.email}.`
-                : `Invite saved for ${inviteNotice.email}, but the email didn't send. Click Resend to retry.`}
-            </p>
-          )}
-        </div>
-      )}
+        )}
 
-      {/* ── Pending invites ───────────────────────────────────────── */}
-      <div className="team-block">
-        <h3 className="team-block-title">Pending invites</h3>
-        {invites.length === 0 ? (
-          <p className="settings-placeholder">No pending invites.</p>
-        ) : (
-          <table className="team-table">
-            <thead>
-              <tr>
-                <th>Email</th>
-                <th>Role</th>
-                <th>Sent</th>
-                {canManage && <th aria-label="Actions" />}
-              </tr>
-            </thead>
-            <tbody>
-              {invites.map((inv) => (
-                <tr key={inv.id}>
-                  <td>{inv.email}</td>
-                  <td>
-                    <span className="team-role-chip">{inv.role}</span>
-                  </td>
-                  <td>{formatSent(inv.created_at)}</td>
-                  {canManage && (
-                    <td className="team-row-actions">
-                      <button
-                        type="button"
-                        className="btn-link"
-                        onClick={() => onResendInvite(inv.id)}
-                      >
-                        Resend
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-link danger"
-                        onClick={() => onRevokeInvite(inv.id)}
-                      >
-                        Revoke
-                      </button>
-                    </td>
+        {canManage && inviteError && (
+          <p className="settings-error">{inviteError}</p>
+        )}
+        {canManage && !inviteError && inviteNotice && (
+          <p
+            className={
+              inviteNotice.kind === "sent"
+                ? "settings-notice"
+                : "settings-warning"
+            }
+          >
+            {inviteNotice.kind === "sent"
+              ? `Invite emailed to ${inviteNotice.email}.`
+              : `Invite saved for ${inviteNotice.email}, but the email didn't send. Click Resend to retry.`}
+          </p>
+        )}
+
+        {/* Combined roster — members then pending invites. */}
+        {buildRoster(members, invites).map((row) => {
+          if (row.kind === "member") {
+            const m = row.member
+            const isSoleOwner = m.role === "owner" && ownerCount <= 1
+            const isSelf = m.user_id === currentUserId
+            const display = m.display_name || m.email || m.user_id
+            return (
+              <div className="set-team-row" key={`m-${m.user_id}`}>
+                <Avatar
+                  seed={m.user_id}
+                  initials={initialsFor(m.display_name, m.email, m.user_id)}
+                  url={m.avatar_url}
+                />
+                <div className="set-team-row-info">
+                  <div className="nm">{display}</div>
+                  {m.email && m.email !== display && (
+                    <div className="em">{m.email}</div>
                   )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                </div>
+                {canManage ? (
+                  <select
+                    className="set-team-row-select"
+                    value={m.role}
+                    disabled={isSoleOwner}
+                    onChange={(e) =>
+                      onChangeMemberRole(m.user_id, e.target.value as TeamRole)
+                    }
+                    aria-label={`Role for ${display}`}
+                  >
+                    <option value="owner">Owner</option>
+                    <option value="admin">Admin</option>
+                    <option value="member">Member</option>
+                    <option value="viewer">Viewer</option>
+                  </select>
+                ) : (
+                  <span className="st neutral">{m.role}</span>
+                )}
+                <span className="st active">
+                  <span className="st-dot" /> Active
+                </span>
+                {canManage ? (
+                  <RowActionsMenu
+                    label="Member actions"
+                    items={
+                      isSoleOwner
+                        ? []
+                        : isSelf
+                          ? []
+                          : [
+                              {
+                                label: "Remove from team",
+                                tone: "danger",
+                                onClick: () => onRemoveMember(m.user_id),
+                              },
+                            ]
+                    }
+                  />
+                ) : (
+                  <span className="set-team-row-actions-spacer" />
+                )}
+              </div>
+            )
+          }
+          // pending invite
+          const inv = row.invite
+          return (
+            <div className="set-team-row pending" key={`i-${inv.id}`}>
+              <Avatar
+                seed={inv.email}
+                initials={initialsFor(null, inv.email, inv.email)}
+                url={null}
+                muted
+              />
+              <div className="set-team-row-info">
+                <div className="nm">{inv.email}</div>
+                <div className="em">Invited {formatSent(inv.created_at)}</div>
+              </div>
+              <span className="st neutral">{inv.role}</span>
+              <span className="st invited">
+                <span className="st-dot" /> Invited
+              </span>
+              {canManage ? (
+                <RowActionsMenu
+                  label="Invite actions"
+                  items={[
+                    {
+                      label: "Resend email",
+                      onClick: () => onResendInvite(inv.id),
+                    },
+                    {
+                      label: "Revoke invite",
+                      tone: "danger",
+                      onClick: () => onRevokeInvite(inv.id),
+                    },
+                  ]}
+                />
+              ) : (
+                <span className="set-team-row-actions-spacer" />
+              )}
+            </div>
+          )
+        })}
+
+        {members.length === 0 && invites.length === 0 && (
+          <p className="set-block-s-inline">
+            No team members yet. Invite your first teammate above.
+          </p>
         )}
       </div>
-    </SettingsSection>
+
+      {/* ── Block 2: Roles reference ───────────────────────────────── */}
+      <div className="set-block">
+        <div className="set-block-h">
+          <div className="set-block-t">Roles</div>
+        </div>
+        <div className="set-row">
+          <span className="k">
+            <strong>Owner</strong>
+          </span>
+          <span className="v">
+            Full access · billing · delete workspace · transfer ownership
+          </span>
+        </div>
+        <div className="set-row">
+          <span className="k">
+            <strong>Admin</strong>
+          </span>
+          <span className="v">
+            Manage team, connectors, settings · cannot delete workspace
+          </span>
+        </div>
+        <div className="set-row">
+          <span className="k">
+            <strong>Member</strong>
+          </span>
+          <span className="v">
+            Edit Briefs, PRDs, tickets, prototypes · cannot manage team or
+            billing
+          </span>
+        </div>
+        <div className="set-row">
+          <span className="k">
+            <strong>Viewer</strong>
+          </span>
+          <span className="v">
+            Read-only access · can comment but not edit
+          </span>
+        </div>
+      </div>
+    </div>
   )
+}
+
+// ─────────────────────────── Subcomponents ───────────────────────────
+
+function Avatar({
+  seed,
+  initials,
+  url,
+  muted,
+}: {
+  seed: string
+  initials: string
+  url: string | null
+  muted?: boolean
+}) {
+  if (url) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img className="set-team-row-av img" src={url} alt="" />
+    )
+  }
+  const palette = avatarPalette(seed)
+  const style = muted
+    ? { background: "var(--surface-3)", color: "var(--ink-3)" }
+    : { background: palette.bg, color: palette.fg, border: `1px solid ${palette.border}` }
+  return (
+    <span className="set-team-row-av" style={style}>
+      {initials}
+    </span>
+  )
+}
+
+/** Native <details> popover so the View stays pure (no React state). */
+function RowActionsMenu({
+  label,
+  items,
+}: {
+  label: string
+  items: { label: string; tone?: "danger"; onClick: () => void }[]
+}) {
+  if (items.length === 0) {
+    return <span className="set-team-row-actions-spacer" aria-hidden="true" />
+  }
+  return (
+    <details className="set-team-row-actions">
+      <summary aria-label={label}>⋯</summary>
+      <div className="set-team-row-actions-menu" role="menu">
+        {items.map((it) => (
+          <button
+            key={it.label}
+            type="button"
+            role="menuitem"
+            className={
+              it.tone === "danger"
+                ? "set-team-row-actions-item danger"
+                : "set-team-row-actions-item"
+            }
+            onClick={it.onClick}
+          >
+            {it.label}
+          </button>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+// ─────────────────────────── Helpers ───────────────────────────
+
+function buildRoster(
+  members: TeamMember[],
+  invites: TeamInvite[],
+): RosterRow[] {
+  return [
+    ...members.map((m): RosterRow => ({ kind: "member", member: m })),
+    ...invites.map((i): RosterRow => ({ kind: "invite", invite: i })),
+  ]
+}
+
+function pluralize(n: number, singular: string): string {
+  return n === 1 ? singular : singular + "s"
+}
+
+function initialsFor(
+  name: string | null,
+  email: string | null,
+  fallback: string,
+): string {
+  const source = (name || email || fallback || "").trim()
+  if (!source) return "?"
+  const parts = source.split(/[\s@.]+/).filter(Boolean)
+  if (parts.length === 0) return source.slice(0, 2).toUpperCase()
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+  return (parts[0][0] + parts[1][0]).toUpperCase()
+}
+
+/** Deterministic per-user color pick from a small palette. Matches the
+ *  mockup's color vocabulary (brand/green/purple/blue/amber). */
+/** Maps a stable hash of a seed (user_id / email) to one of the 5 design-kit
+ *  semantic colour families. Returns CSS `var()` strings — the actual hexes
+ *  resolve from :root in globals.css, so the avatar honours any future
+ *  token tweaks without code change. Family mapping mirrors the design
+ *  system's agent colour pattern (brand / purple / blue / amber / red). */
+function avatarPalette(seed: string): {
+  bg: string
+  fg: string
+  border: string
+} {
+  const families = [
+    { bg: "var(--accent-soft)", fg: "var(--accent-ink)", border: "var(--accent-2)" },
+    { bg: "var(--purple-soft)", fg: "var(--purple)", border: "var(--purple-border)" },
+    { bg: "var(--info-soft)", fg: "var(--info)", border: "var(--info-border)" },
+    { bg: "var(--warn-soft)", fg: "var(--warn)", border: "var(--warn-border)" },
+    { bg: "var(--danger-soft)", fg: "var(--danger)", border: "var(--danger-border)" },
+  ]
+  let hash = 0
+  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) | 0
+  return families[Math.abs(hash) % families.length]
 }
 
 function formatSent(iso: string | null): string {
@@ -304,7 +489,13 @@ function formatSent(iso: string | null): string {
 // ─────────────────────────── Hooks wrapper ───────────────────────────
 
 type TeamMembersResp = {
-  members: { user_id: string; role: TeamRole; created_at: string | null }[]
+  members: {
+    user_id: string
+    role: TeamRole
+    display_name: string | null
+    email: string | null
+    avatar_url: string | null
+  }[]
 }
 type TeamInvitesResp = { invites: TeamInvite[] }
 
@@ -315,6 +506,7 @@ export function TeamSettings() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
 
+  const [showInviteForm, setShowInviteForm] = useState(false)
   const [inviteEmail, setInviteEmail] = useState("")
   const [inviteRole, setInviteRole] = useState<InviteRole>("member")
   const [inviteSubmitting, setInviteSubmitting] = useState(false)
@@ -335,14 +527,13 @@ export function TeamSettings() {
         teamApi.listMembers(),
         teamApi.listInvites(),
       ])
-      // Backend members carry only user_id + role; resolve display names from
-      // profiles when we can. For now we render user_id as fallback.
       setMembers(
         m.members.map((row) => ({
           user_id: row.user_id,
           role: row.role,
-          display: null,
-          email: null,
+          display_name: row.display_name,
+          email: row.email,
+          avatar_url: row.avatar_url,
         })),
       )
       setInvites(inv.invites)
@@ -367,6 +558,7 @@ export function TeamSettings() {
       const created = await teamApi.invite(email, inviteRole)
       setInviteEmail("")
       setInviteRole("member")
+      setShowInviteForm(false)
       setInviteNotice({
         kind: created.email_sent ? "sent" : "saved",
         email: created.email,
@@ -438,11 +630,13 @@ export function TeamSettings() {
       currentUserRole={currentUserRole}
       loading={loading}
       loadError={loadError}
+      showInviteForm={showInviteForm}
       inviteEmail={inviteEmail}
       inviteRole={inviteRole}
       inviteSubmitting={inviteSubmitting}
       inviteError={inviteError}
       inviteNotice={inviteNotice}
+      onToggleInviteForm={() => setShowInviteForm((prev) => !prev)}
       onChangeInviteEmail={setInviteEmail}
       onChangeInviteRole={setInviteRole}
       onSubmitInvite={submitInvite}
@@ -455,9 +649,6 @@ export function TeamSettings() {
 }
 
 // ─────────────────────────── API surface ───────────────────────────
-//
-// Defined here (rather than in lib/api.ts) so the team feature lives in one
-// place. If a second surface needs these, lift them out into lib/api.ts.
 
 export const teamApi = {
   listMembers: () => api.get<TeamMembersResp>("/v1/team/members"),

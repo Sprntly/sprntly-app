@@ -17,7 +17,9 @@ import logging
 from datetime import datetime, timezone
 
 from app.db.briefs import save_brief
+from app.business_context import load_business_context
 from app.kpi_tree import load_kpi_tree
+from app.graph.config_layers import config_get
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
@@ -25,6 +27,8 @@ from app.graph.types import Entity, Relationship
 from app.prompts import BRIEF_SCHEMA_VERSION
 from app.synthesis.convergence import ThemeConvergence, compute_convergence
 from app.synthesis.delivery import deliver_brief_to_slack
+from app.synthesis.backlog import sequence_backlog
+from app.synthesis.scoring import classify_theme_fit, score_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -123,15 +127,46 @@ def run_synthesis(
     cands = convergence[:MAX_CANDIDATES]
 
     tree = load_kpi_tree(enterprise_id)
+
+    # Goal-alignment factor (§4c): price KPI-tree fit into each candidate's score
+    # BEFORE the judge sees them, so the judge never re-ranks by strategic fit
+    # (no double-counting). Deterministic: base_score × goal_factor(fit).
+    goal_enabled = bool(config_get("scoring.goal_factor_enabled", enterprise_id,
+                                   default=True))
+    goal_weight = float(config_get("scoring.goal_weight", enterprise_id, default=1.0))
+    score_factors = score_candidates(
+        facade, enterprise_id, cands, tree,
+        goal_enabled=goal_enabled, goal_weight=goal_weight, agent=agent,
+        classifier=classify_theme_fit)
+    cands.sort(key=lambda c: -score_factors[c.theme_id]["goal_adjusted_score"])
+
     strategic = (
-        "STRATEGIC CONTEXT — the company's KPI tree. Weigh candidates by how "
-        "directly they move these metrics (north star first, then by weight):\n"
+        "STRATEGIC CONTEXT — the company's KPI tree (for grounding and "
+        "explanations only):\n"
         + tree.render_for_prompt() + "\n\n"
+        "Strategic fit is ALREADY priced into the candidate scores and ordering "
+        "below — do NOT re-rank by strategic fit. Judge the candidates on "
+        "evidence quality, framing, and actionability. Use the tree only to "
+        "ground claims and explain impact.\n\n"
     ) if tree else ""
+    # Additive business-context block (anchored on the candidates payload, not on
+    # the strategic-context wording, so it survives an in-flight edit to that text).
+    # Capped so it never crowds out the candidates.
+    bizctx_block = ""
+    doc = load_business_context(enterprise_id)
+    if doc is not None:
+        rendered = doc.render_for_prompt(max_chars=1500)
+        if rendered:
+            bizctx_block = (
+                "BUSINESS CONTEXT — the company's lens (model, users, vocabulary, "
+                "goals). Read candidates through it:\n" + rendered + "\n\n"
+            )
+
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="rank_brief_insights",
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
-        input=strategic + _candidates_payload(cands), json_schema=_BRIEF_SCHEMA,
+        input=strategic + bizctx_block + _candidates_payload(cands),
+        json_schema=_BRIEF_SCHEMA,
         skill="prioritize",
     )
     payload = result.output
@@ -180,9 +215,12 @@ def run_synthesis(
                 {"theme_id": c.theme_id, "label": c.theme_label,
                  "breadth": c.breadth, "weight": round(c.effective_weight, 2),
                  "revenue": c.revenue_at_stake_usd,
-                 "competitor_pressure": c.competitor_pressure}
+                 "competitor_pressure": c.competitor_pressure,
+                 **score_factors[c.theme_id]}
                 for c in cands
             ],
+            "goal_factor_enabled": goal_enabled,
+            "goal_weight": goal_weight,
             "prompt_version": PROMPT_VERSION,
         },
         reasoning="\n".join(
@@ -211,6 +249,20 @@ def run_synthesis(
         "_schema_version": BRIEF_SCHEMA_VERSION,
     }
     save_brief(dataset_slug, week_label, brief, schema_version=BRIEF_SCHEMA_VERSION)
+
+    # SEQUENCE the rest — one synthesis run yields BOTH the brief AND the
+    # ranked backlog behind it. Additive + resilient: a backlog failure must
+    # never break brief generation (the brief is already saved above), so it is
+    # isolated in try/except and only logged.
+    brief_theme_ids = [ins.get("theme_id") for ins in insights if ins.get("theme_id")]
+    try:
+        backlog = sequence_backlog(
+            facade, enterprise_id, exclude_theme_ids=brief_theme_ids)
+        brief["_backlog_count"] = len(backlog)
+    except Exception:  # noqa: BLE001 — backlog is best-effort; brief must survive
+        logger.exception("backlog sequencing failed (brief unaffected)")
+        brief["_backlog_count"] = None
+
     delivery = deliver_brief_to_slack(enterprise_id, brief)
     if not delivery.get("delivered") and delivery.get("reason") not in (
         "slack_not_connected", "no_channel_configured"

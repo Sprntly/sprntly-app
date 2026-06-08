@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
-import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
 import { KpiTreeEditor, normalizeKpiWeights } from "../../onboarding/KpiTreeEditor"
 import { KpiTreePreview } from "../../onboarding/KpiTreePreview"
 import { useOnboarding } from "../../../context/OnboardingContext"
@@ -41,10 +41,25 @@ export function Onboarding2() {
     NORTH_STAR_HINTS[workspace?.industry ?? ""] ?? NORTH_STAR_HINTS.default
   const tree = { north_star: northStar, metrics: normalizeKpiWeights(metrics) }
   const namedMetrics = metrics.filter((m) => m.name.trim())
-  const canContinue = northStar.trim().length > 0 && namedMetrics.length >= 2
+
+  const { errors, validate, clearError, containerRef } = useFieldValidation(
+    () => [
+      {
+        key: "northStar",
+        valid: northStar.trim().length > 0,
+        message: "Name your north star metric.",
+      },
+      {
+        key: "metrics",
+        valid: namedMetrics.length >= 2,
+        message: "Add at least two supporting metrics.",
+      },
+    ],
+  )
 
   async function persist(andContinue: boolean) {
     if (!workspace) return
+    if (andContinue && !validate().ok) return
     setSaving(true)
     setError(null)
     try {
@@ -59,11 +74,15 @@ export function Onboarding2() {
     }
   }
 
-  if (loading) return <div className="ob-shell">Loading…</div>
-  if (!workspace) {
-    router.replace("/onboarding/1")
-    return null
-  }
+  // Redirect when there's no workspace to anchor the step. Done in an effect
+  // (not during render) so navigation never fires as a render side-effect —
+  // that path surfaces in production as a client-side exception / error
+  // boundary. Render returns the loading shell until the redirect lands.
+  useEffect(() => {
+    if (!loading && !workspace) router.replace("/onboarding/1")
+  }, [loading, workspace, router])
+
+  if (loading || !workspace) return <div className="ob-shell">Loading…</div>
 
   return (
     <InterviewLayout
@@ -80,17 +99,26 @@ export function Onboarding2() {
         }
         router.push("/onboarding/3")
       }}
-      continueDisabled={!canContinue}
       loading={saving}
     >
+      <div ref={containerRef}>
       {error && <div className="ob-form-error">{error}</div>}
       <KpiTreeEditor
         northStar={northStar}
         metrics={metrics}
         hints={hints}
-        onNorthStarChange={setNorthStar}
-        onMetricsChange={setMetrics}
+        onNorthStarChange={(v) => {
+          setNorthStar(v)
+          clearError("northStar")
+        }}
+        onMetricsChange={(m) => {
+          setMetrics(m)
+          clearError("metrics")
+        }}
+        northStarError={errors.northStar}
+        metricsError={errors.metrics}
       />
+      </div>
     </InterviewLayout>
   )
 }

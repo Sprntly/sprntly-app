@@ -148,6 +148,7 @@ CREATE TABLE prds (
     generated_at     TEXT NOT NULL DEFAULT (datetime('now')),
     title            TEXT NOT NULL,
     payload_md       TEXT NOT NULL DEFAULT '',
+    llm_part         TEXT,
     status           TEXT NOT NULL DEFAULT 'ready',
     error            TEXT,
     template_version INTEGER,
@@ -215,12 +216,20 @@ CREATE TABLE datasets (
 -- (auth.py) reads company_members to resolve the active tenant from
 -- the Supabase JWT.
 CREATE TABLE companies (
-    id             TEXT PRIMARY KEY,
-    slug           TEXT NOT NULL UNIQUE,
-    display_name   TEXT NOT NULL,
-    coworker_names TEXT NOT NULL DEFAULT '{}',
-    kpi_tree       TEXT NOT NULL DEFAULT '{}',
-    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    id                  TEXT PRIMARY KEY,
+    slug                TEXT NOT NULL UNIQUE,
+    display_name        TEXT NOT NULL,
+    coworker_names      TEXT NOT NULL DEFAULT '{}',
+    kpi_tree            TEXT NOT NULL DEFAULT '{}',
+    business_context    TEXT NOT NULL DEFAULT '{}',
+    -- Onboarding profile columns the research agents read/write (mirrors
+    -- 20260525150000_onboarding_workspace.sql). competitors[] is the fixed
+    -- competitor roster; the Competitor agent auto-discovers + writes it when empty.
+    competitors         TEXT NOT NULL DEFAULT '[]',
+    product_description TEXT,
+    industry            TEXT,
+    business_type       TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE company_members (
@@ -228,7 +237,7 @@ CREATE TABLE company_members (
     company_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
     user_id    TEXT NOT NULL,
     role       TEXT NOT NULL DEFAULT 'member'
-                CHECK (role IN ('owner', 'admin', 'member')),
+                CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, user_id)
 );
@@ -371,6 +380,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     full_name  TEXT,
     first_name TEXT,
     last_name  TEXT,
+    avatar_url TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -471,6 +481,27 @@ CREATE TABLE agent_decision_log (
     kg_refs        TEXT NOT NULL DEFAULT '[]',
     timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Sequenced product backlog (mirrors 20260608120000_backlog_items.sql).
+-- One row per non-brief theme, carrying its rank/score + triage rationale.
+-- uuid PK / timestamptz are TEXT under SQLite, matching the other seeded tables.
+CREATE TABLE backlog_items (
+    id            TEXT PRIMARY KEY,
+    enterprise_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    theme_id      TEXT NOT NULL,
+    hypothesis_id TEXT,
+    title         TEXT NOT NULL,
+    tag           TEXT,
+    rank          INTEGER NOT NULL,
+    score         REAL NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'backlog'
+                  CHECK (status IN ('backlog', 'in_progress', 'done', 'dismissed')),
+    reasoning     TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (enterprise_id, theme_id)
+);
+CREATE INDEX backlog_items_rank_idx ON backlog_items (enterprise_id, rank);
 """
 
 

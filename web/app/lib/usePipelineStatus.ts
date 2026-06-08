@@ -11,7 +11,7 @@ const IDLE_POLL_MS = 60_000
 const COMPLETED_VISIBLE_MS = 4_000
 
 export type PipelineHookResult = {
-  runStatus: (PipelineRunStatus & { status: string }) | null
+  runStatus: PipelineRunStatus | null
   isTriggering: boolean
   showCompleted: boolean
   triggerRun: () => Promise<void>
@@ -27,7 +27,7 @@ export type PipelineHookResult = {
  */
 export function usePipelineStatus(company: string): PipelineHookResult {
   const { setContent } = useContent()
-  const [runStatus, setRunStatus] = useState<(PipelineRunStatus & { status: string }) | null>(null)
+  const [runStatus, setRunStatus] = useState<PipelineRunStatus | null>(null)
   const [isTriggering, setIsTriggering] = useState(false)
   const [showCompleted, setShowCompleted] = useState(false)
 
@@ -47,11 +47,11 @@ export function usePipelineStatus(company: string): PipelineHookResult {
     if (cancelledRef.current) return
     const slug = companyRef.current
 
-    let status: (PipelineRunStatus & { status: string }) | null = null
+    let status: PipelineRunStatus | null = null
     try {
       // The backend may return { status: "no_runs" } which doesn't match the
       // full PipelineRunStatus shape — cast via unknown to handle both.
-      status = (await pipelineApi.status(slug)) as unknown as typeof status
+      status = (await pipelineApi.status(slug)) as unknown as PipelineRunStatus | null
     } catch {
       // Network error — retry slowly
       schedulePoll(IDLE_POLL_MS, poll)

@@ -65,6 +65,14 @@ PLATFORM_DEFAULTS: dict[str, Any] = {
             {"id": "g2",          "query": "site:g2.com OR site:capterra.com {subject} reviews"},
         ],
         "max_searches": 12,
+        # Competitor deep-dive (CIR) controls. `cir_modules_max` caps how many
+        # CIR stages run per competitor (the agent picks the meaningful external
+        # sequence; this is a safety ceiling). `deep_dive_max_competitors` caps
+        # roster breadth per run; auto-discovery also targets this many. The
+        # cost guard caps total web-search calls across the whole deep-dive run.
+        "cir_modules_max": 8,
+        "deep_dive_max_competitors": 3,
+        "deep_dive_max_web_searches": 40,
     },
     "scoring": {
         "dimensions": [
@@ -72,6 +80,12 @@ PLATFORM_DEFAULTS: dict[str, Any] = {
             "revenue_at_stake", "competitive_pressure", "reliability_risk",
             "confidence",
         ],
+        # Goal-alignment factor (prioritize skill goal mode). When enabled, each
+        # theme's base score is multiplied by a deterministic KPI-fit factor
+        # before the Synthesis judge re-ranks. `goal_weight` blends the factor
+        # toward 1.0 (1 = full effect, 0 = goal ignored) — skill default 1.0.
+        "goal_factor_enabled": True,
+        "goal_weight": 1.0,
     },
     "llm": {
         "default_model": "claude-sonnet-4-6",

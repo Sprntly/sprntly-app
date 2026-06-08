@@ -48,7 +48,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import require_app_session  # app-audience auth dep (BUILD.md §6)
 from app.auth import CompanyContext, require_company, require_company_from_query  # company-scoped auth dep
 from app.config import settings
 from app.connectors import github_app
@@ -123,15 +122,17 @@ _inflight_tasks: set[asyncio.Task] = set()
 
 
 def _feature_enabled() -> bool:
-    """Read DESIGN_AGENT_ENABLED via pydantic-settings (never os.environ directly).
+    """Read DESIGN_AGENT_ENABLED at REQUEST TIME (never import time).
 
-    pydantic-settings loads .env into the settings object but does NOT populate
-    os.environ, so os.environ.get("DESIGN_AGENT_ENABLED") always returns None
-    when the value comes from .env. Using settings.design_agent_enabled fixes this.
-    The frontend uses a separate var, `NEXT_PUBLIC_DESIGN_AGENT_ENABLED`; the two
-    gate independently — this one is the security boundary.
+    Per skill-config Rule #27: default-off; never default-1 in any commit.
+    Request-time read means flipping the env var takes effect without a code
+    deploy or process restart, and keeps the gate honest under module reload in
+    tests. The frontend uses a *separate* var, `NEXT_PUBLIC_DESIGN_AGENT_ENABLED`
+    (the `NEXT_PUBLIC_` prefix is mandatory for Next.js client-bundle exposure);
+    the two gate independently — this one is the security boundary.
     """
-    return settings.design_agent_enabled
+    val = (os.environ.get("DESIGN_AGENT_ENABLED") or "").strip().lower()
+    return val in {"1", "true", "yes"}
 
 
 def _require_feature_enabled() -> None:
@@ -408,28 +409,28 @@ def get_pending_patches(
 @router.get("/by-prd/{prd_id}")
 def get_by_prd(
     prd_id: int,
-    session: dict = Depends(require_app_session),
+    company: CompanyContext = Depends(require_company),
 ) -> dict[str, Any]:
-    """Return the most recent ready/generating prototype for a PRD, or 404.
+    """Return the most-recent READY prototype for a PRD (read-only lookup).
 
-    Used by the frontend to load an existing prototype on mount so generated
-    prototypes survive page reloads. Declared BEFORE the /{prototype_id}
-    catch-all (route order is load-bearing — same reason as /prd-patches).
+    A pure read with NO generate side-effect — unlike the dedup inside
+    POST /generate, which kicks off a generation when none exists. That makes
+    it safe to call on PRD-screen load so the frontend can render a preview
+    card / flip Approve to "View Prototype". Returns 404 when no ready
+    prototype exists (the frontend swallows 404→null). Workspace-filtered: a
+    prototype in another workspace returns 404, not 403, so cross-tenant
+    existence is not disclosed. The path is two-segment (`/by-prd/{prd_id}`),
+    so it can never be shadowed by the single-segment `GET /{prototype_id}`
+    catch-all above regardless of declaration order — a one-segment route
+    pattern only ever matches one-segment paths.
     """
     _require_feature_enabled()
-    workspace_id = (session.get("aud") or "").strip()
-    if not workspace_id:
-        raise HTTPException(status_code=401, detail="No workspace claim")
-    from app.design_agent.prompts import DESIGN_AGENT_TEMPLATE_VERSION
-    existing = find_existing_prototype(
-        prd_id=prd_id,
-        workspace_id=workspace_id,
-        template_version=DESIGN_AGENT_TEMPLATE_VERSION,
-        variant=_VARIANT,
+    row = find_ready_prototype_by_prd(
+        prd_id=prd_id, workspace_id=company.company_id
     )
-    if not existing:
-        raise HTTPException(status_code=404, detail="No prototype for this PRD")
-    return existing
+    if not row:
+        raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
+    return row
 
 
 # ─── Figma file listing (Generate modal design-source selector) ──────────────

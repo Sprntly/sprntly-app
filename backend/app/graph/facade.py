@@ -154,6 +154,34 @@ class GraphFacade:
             .execute()
         )
 
+    def update_entity_properties(
+        self, enterprise_id: str, entity_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Shallow-merge `patch` into the entity's `properties` jsonb and persist.
+        Returns the merged properties. Tenant-scoped read-modify-write (mirrors
+        supersede_signal's update pattern)."""
+        existing = (
+            self._tbl("kg_entity")
+            .select("id, properties")
+            .eq("enterprise_id", enterprise_id)
+            .eq("id", entity_id)
+            .execute()
+        )
+        if not existing.data:
+            raise ValueError(
+                f"Entity {entity_id} not found in enterprise {enterprise_id}"
+            )
+        props = existing.data[0].get("properties") or {}
+        props.update(patch)
+        (
+            self._tbl("kg_entity")
+            .update({"properties": props})
+            .eq("enterprise_id", enterprise_id)
+            .eq("id", entity_id)
+            .execute()
+        )
+        return props
+
     # ---- reads ----------------------------------------------------------
     def get_entity(self, enterprise_id: str, entity_id: str) -> Optional[Entity]:
         r = (

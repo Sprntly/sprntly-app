@@ -203,13 +203,17 @@ describe("PrdSections — prd-design generate-trigger relocation + hot-file exce
   })
 
   it("test_content_editable_region_untouched — the PRD-body contentEditable element keeps its exact attributes", () => {
-    // Acceptance criterion: the editable PRD body is byte-identical to its prior
-    // form. PrdScreen needs an app-router-backed NavigationProvider to render in
-    // this node env,
-    // so the invariant is asserted on the on-disk source (NEVER `git show <rev>`
-    // — CI shallow clones lack historical objects).
+    // Acceptance criterion: the editable PRD body keeps its core editable
+    // attributes (className/contentEditable/spellCheck/suppressContentEditableWarning)
+    // in that order and untouched. PR #107 additionally wires draft persistence on
+    // this region via a `ref`/`onInput` pair appended AFTER those attributes — an
+    // orthogonal addition that does not conflict with the P7 generate-trigger
+    // relocation, so the invariant permits trailing attributes after the core set.
+    // PrdScreen needs an app-router-backed NavigationProvider to render in this node
+    // env, so the invariant is asserted on the on-disk source (NEVER `git show
+    // <rev>` — CI shallow clones lack historical objects).
     expect(PRD_SCREEN_SRC).toMatch(
-      /<div\s+className="prd-body"\s+contentEditable\s+spellCheck=\{false\}\s+suppressContentEditableWarning\s*>/,
+      /<div\s+className="prd-body"\s+contentEditable\s+spellCheck=\{false\}\s+suppressContentEditableWarning\b/,
     )
     // The PrdSections mount still lives INSIDE that editable region; prop list now
     // also includes prdMetaLine, checked individually.

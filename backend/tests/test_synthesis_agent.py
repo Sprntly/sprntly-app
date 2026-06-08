@@ -198,3 +198,227 @@ def test_run_synthesis_empty_kg_raises(facade):
 
     with pytest.raises(ValueError, match="no themes"):
         synth.run_synthesis(facade, "ent-empty", dataset_slug="empty")
+
+
+# ---------- goal-alignment factor (classifier + caching) ----------
+
+def _kpi_tree(version=1):
+    from app.kpi_tree import KpiTree, NorthStar, PrimaryMetric
+    return KpiTree(
+        north_star=NorthStar(metric="Weekly Active Technicians",
+                             current_value=5310, target_value=7500),
+        primary_metrics=[PrimaryMetric(metric="Net revenue retention",
+                                       current_value=0.96, weight=1.0)],
+        version=version,
+    )
+
+
+def _theme_conv(facade, ent, label, specs):
+    """Seed a theme then return its ThemeConvergence (with base_score)."""
+    from app.synthesis.convergence import compute_convergence
+    _seed_theme_with_signals(facade, ent, label, specs)
+    convs = compute_convergence(facade, ent)
+    return next(c for c in convs if c.theme_label == label)
+
+
+def test_classify_theme_fit_caches_after_first_call(facade):
+    from app.synthesis import scoring
+
+    tc = _theme_conv(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {}, 1),
+    ])
+    tree = _kpi_tree(version=3)
+
+    calls = []
+    def fake_llm(**kw):
+        calls.append(kw)
+        return _llm_result({"fit": "high", "reasoning": "moves NRR"})
+
+    with patch.object(scoring, "llm_call", fake_llm):
+        first = scoring.classify_theme_fit(facade, "ent-A", tc, tree)
+        second = scoring.classify_theme_fit(facade, "ent-A", tc, tree)
+
+    assert first == "high" and second == "high"
+    assert len(calls) == 1  # second run hit the cache, no llm_call
+    assert calls[0]["purpose"] == "classify_goal_fit"
+    assert calls[0]["prompt_version"] == scoring.FIT_PROMPT_VERSION
+    # cache persisted on the theme entity
+    ent = facade.get_entity("ent-A", tc.theme_id)
+    gf = ent.properties["goal_fit"]
+    assert gf["fit"] == "high" and gf["kpi_tree_version"] == 3
+    assert "classified_at" in gf
+
+
+def test_classify_reclassifies_on_tree_version_bump(facade):
+    from app.synthesis import scoring
+
+    tc = _theme_conv(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 1)])
+
+    seq = iter(["high", "low"])
+    calls = []
+    def fake_llm(**kw):
+        calls.append(kw)
+        return _llm_result({"fit": next(seq), "reasoning": "r"})
+
+    with patch.object(scoring, "llm_call", fake_llm):
+        a = scoring.classify_theme_fit(facade, "ent-A", tc, _kpi_tree(version=1))
+        b = scoring.classify_theme_fit(facade, "ent-A", tc, _kpi_tree(version=2))
+
+    assert a == "high" and b == "low"
+    assert len(calls) == 2  # version changed → reclassified
+
+
+def test_classify_no_tree_skips_classification(facade):
+    from app.synthesis import scoring
+
+    tc = _theme_conv(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 1)])
+    calls = []
+    with patch.object(scoring, "llm_call", lambda **kw: calls.append(kw)):
+        fit = scoring.classify_theme_fit(facade, "ent-A", tc, None)
+    assert fit == "high"          # neutral → goal_factor 1.0
+    assert calls == []            # no classification call
+    ent = facade.get_entity("ent-A", tc.theme_id)
+    assert "goal_fit" not in ent.properties
+
+
+def test_goal_factor_math():
+    from app.synthesis.scoring import goal_factor
+    assert goal_factor("high") == 1.0
+    assert goal_factor("med") == pytest.approx(0.6)
+    assert goal_factor("low") == pytest.approx(0.25)
+    # goal_weight blends toward 1.0
+    assert goal_factor("low", goal_weight=0.0) == 1.0
+    assert goal_factor("low", goal_weight=0.5) == pytest.approx(0.625)
+
+
+# ---------- factor application in the rank path ----------
+
+def _run_with_fits(facade, monkeypatch, ent, fits, *, tree=None, captured=None):
+    """Run synthesis with classify_theme_fit stubbed by theme label → fit."""
+    from app.synthesis import agent as synth
+
+    monkeypatch.setattr(synth, "load_kpi_tree", lambda eid: tree)
+    monkeypatch.setattr(synth, "classify_theme_fit",
+                        lambda f, e, c, t, **k: fits[c.theme_label])
+
+    def fake_llm(**kw):
+        if captured is not None:
+            captured["input"] = kw["input"]
+        ranked = {**_RANKED, "insights": [{**_RANKED["insights"][0],
+                                           "theme_id": "x"}]}
+        return _llm_result(ranked)
+
+    monkeypatch.setattr(synth, "llm_call", fake_llm)
+    return synth
+
+
+def test_factor_reorders_low_fit_below_high_fit(facade, isolated_settings, monkeypatch):
+    # "broad" has higher breadth (higher base_score) but LOW fit; its signals are
+    # aged (communication 7d half-life) so per-signal severity is ~0.5.
+    # "narrow" has a single fresh signal (lower base_score) but HIGH fit.
+    _seed_theme_with_signals(facade, "ent-A", "broad", [
+        ("communication", "feature_request", {}, 7),
+        ("customer_voice", "feature_request", {}, 30),
+        ("project_mgmt", "bug", {}, 14),
+        ("revenue", "deal_blocker", {}, 30),
+    ])
+    _seed_theme_with_signals(facade, "ent-A", "narrow", [
+        ("revenue", "deal_blocker", {}, 0),
+    ])
+    from app.synthesis.convergence import compute_convergence
+    convs = {c.theme_label: c for c in compute_convergence(facade, "ent-A")}
+    assert convs["broad"].base_score > convs["narrow"].base_score  # pre-factor
+
+    synth = _run_with_fits(facade, monkeypatch, "ent-A",
+                           {"broad": "low", "narrow": "high"}, tree=_kpi_tree())
+    synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    logs = isolated_settings["supabase"].table("agent_decision_log").select("*") \
+        .eq("enterprise_id", "ent-A").execute().data
+    rank = next(r for r in logs if r["decision_type"] == "rank")
+    cands = rank["factors"]["candidates"]
+    order = [c["label"] for c in cands]
+    assert order == ["narrow", "broad"]  # high-fit thin theme now leads
+    by_label = {c["label"]: c for c in cands}
+    assert by_label["broad"]["goal_adjusted_score"] < by_label["narrow"]["goal_adjusted_score"]
+
+
+def test_decision_log_factors_carry_four_score_fields(facade, isolated_settings, monkeypatch):
+    _seed_theme_with_signals(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 0)])
+    synth = _run_with_fits(facade, monkeypatch, "ent-A", {"SSO": "med"}, tree=_kpi_tree())
+    synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    logs = isolated_settings["supabase"].table("agent_decision_log").select("*") \
+        .eq("enterprise_id", "ent-A").execute().data
+    rank = next(r for r in logs if r["decision_type"] == "rank")
+    c0 = rank["factors"]["candidates"][0]
+    assert set(c0) >= {"base_score", "fit", "goal_factor", "goal_adjusted_score"}
+    assert c0["fit"] == "med"
+    assert c0["goal_factor"] == pytest.approx(0.6)
+    assert c0["goal_adjusted_score"] == pytest.approx(c0["base_score"] * 0.6)
+
+
+def test_flag_off_factors_all_one_and_no_classification(facade, isolated_settings, monkeypatch):
+    from app.synthesis import agent as synth
+
+    _seed_theme_with_signals(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 0)])
+    monkeypatch.setattr(synth, "load_kpi_tree", lambda eid: _kpi_tree())
+    monkeypatch.setitem(
+        __import__("app.graph.config_layers", fromlist=["PLATFORM_DEFAULTS"])
+        .PLATFORM_DEFAULTS["scoring"], "goal_factor_enabled", False)
+
+    classify_calls = []
+    monkeypatch.setattr(synth, "classify_theme_fit",
+                        lambda *a, **k: classify_calls.append(a) or "high")
+    monkeypatch.setattr(synth, "llm_call",
+                        lambda **kw: _llm_result({**_RANKED, "insights": [
+                            {**_RANKED["insights"][0], "theme_id": "x"}]}))
+    try:
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+    finally:
+        __import__("app.graph.config_layers", fromlist=["PLATFORM_DEFAULTS"]) \
+            .PLATFORM_DEFAULTS["scoring"]["goal_factor_enabled"] = True
+
+    assert classify_calls == []  # flag off → never classified
+    logs = isolated_settings["supabase"].table("agent_decision_log").select("*") \
+        .eq("enterprise_id", "ent-A").execute().data
+    rank = next(r for r in logs if r["decision_type"] == "rank")
+    assert rank["factors"]["goal_factor_enabled"] is False
+    for c in rank["factors"]["candidates"]:
+        assert c["goal_factor"] == 1.0
+        assert c["goal_adjusted_score"] == c["base_score"]
+        assert c["fit"] == "off"
+
+
+def test_judge_prompt_has_no_rerank_instruction(facade, isolated_settings, monkeypatch):
+    captured = {}
+    synth = _run_with_fits(facade, monkeypatch, "ent-A", {"SSO": "high"},
+                           tree=_kpi_tree(), captured=captured)
+    _seed_theme_with_signals(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 0)])
+    synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+    text = captured["input"]
+    assert "do NOT re-rank by strategic fit" in text
+    assert "ALREADY priced into the candidate scores" in text
+
+
+def test_no_tree_path_factors_neutral_no_classification(facade, isolated_settings, monkeypatch):
+    from app.synthesis import agent as synth
+    from app.synthesis import scoring
+
+    _seed_theme_with_signals(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 0)])
+    monkeypatch.setattr(synth, "load_kpi_tree", lambda eid: None)
+    # Real classify_theme_fit runs (no-tree branch), but it must make no llm_call.
+    llm_calls = []
+    monkeypatch.setattr(scoring, "llm_call", lambda **kw: llm_calls.append(kw))
+    monkeypatch.setattr(synth, "llm_call",
+                        lambda **kw: _llm_result({**_RANKED, "insights": [
+                            {**_RANKED["insights"][0], "theme_id": "x"}]}))
+    brief = synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+    assert brief["insights"]
+    assert llm_calls == []  # no tree → no classification llm_call
+    logs = isolated_settings["supabase"].table("agent_decision_log").select("*") \
+        .eq("enterprise_id", "ent-A").execute().data
+    rank = next(r for r in logs if r["decision_type"] == "rank")
+    for c in rank["factors"]["candidates"]:
+        assert c["goal_factor"] == 1.0
+        assert c["goal_adjusted_score"] == c["base_score"]

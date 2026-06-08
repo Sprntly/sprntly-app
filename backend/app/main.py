@@ -23,8 +23,11 @@ from app.prompts import (
     PRD_TEMPLATE_VERSION,
 )
 from app.routes import (
+    agent_chat,
     ask,
+    backlog,
     brief,
+    business_context as business_context_routes,
     company,
     connectors,
     datasets as datasets_routes,
@@ -33,6 +36,7 @@ from app.routes import (
     metrics,
     oncall,
     research,
+    stories,
     synthesis,
     team,
     evidence,
@@ -187,8 +191,11 @@ app.include_router(auth.router)
 app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
+app.include_router(backlog.router)
 app.include_router(ask.router)
+app.include_router(agent_chat.router)
 app.include_router(prd.router)
+app.include_router(stories.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
 app.include_router(design_agent.router)
@@ -199,6 +206,7 @@ app.include_router(metrics.router)
 app.include_router(research.router)
 app.include_router(oncall.router)
 app.include_router(company.router)
+app.include_router(business_context_routes.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
 

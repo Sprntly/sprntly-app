@@ -45,6 +45,10 @@ const APIKEY_HELP: Record<string, string> = {
     "Get your key from fireflies.ai → Settings → Integrations → Fireflies API.",
   slack:
     "Get your Bot User OAuth Token from api.slack.com/apps → your app → Install App → Bot User OAuth Token (starts with xoxb-).",
+  // PAT is the stopgap while our Figma OAuth app is in review. Once approved,
+  // flip the catalog entry back to oauth:true and this entry can be removed.
+  figma:
+    "Generate a Personal Access Token at Figma → Settings → Personal Access Tokens. Include read scopes for file content, file metadata, library content, and dev resources. Sprntly stores the token encrypted; revoke at any time in your Figma settings.",
 }
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -256,6 +260,9 @@ export function ConnectorsSettings() {
         await reload()
       } else if (apiKeyConnectingItem.id === "slack") {
         await connectorsApi.connectSlackWithBotToken(apiKey)
+        await reload()
+      } else if (apiKeyConnectingItem.id === "figma") {
+        await connectorsApi.connectFigmaWithPat(apiKey)
         await reload()
       } else {
         throw new Error(

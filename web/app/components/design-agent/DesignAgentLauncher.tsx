@@ -337,14 +337,12 @@ export function DesignAgentLauncherView({
 }: LauncherViewProps) {
   return (
     <div className="design-agent-surface prd-design-launcher" contentEditable={false}>
-      <button
-        type="button"
-        className="btn btn-accent"
-        onClick={() => setOpen(true)}
-        disabled={generatingId !== null && result === null}
-      >
-        Generate Prototype
-      </button>
+      {/* The PRD Design section no longer renders a "Generate Prototype" button:
+          the generation trigger lives in the "Approve & next step" modal (P7
+          relocation, #143). The launcher's state / drawer / result wiring below
+          is intentionally kept so the drawer/iterate/share flows still work, and
+          the in-page generating status card still surfaces once a generation is
+          kicked off from the Approve flow. */}
       {/* In-page generating status card — visible from kickoff until the
           terminal result mounts. Keeps the user informed without relying on
           the transient toast or the "Notify me" opt-in. */}

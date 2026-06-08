@@ -93,6 +93,22 @@ def complete_prd(prd_id: int, title: str, md: str) -> None:
     }).eq("id", prd_id).execute()
 
 
+def complete_prd_2part(prd_id: int, title: str, human_md: str, llm_part: str) -> None:
+    """Complete a 2-part PRD (prd-author skill): Part A (human-readable) goes to
+    `payload_md` — what the frontend renders, unchanged — and Part B (the
+    LLM-readable Implementation Spec) goes to the `llm_part` column for
+    downstream coding-agent consumption.
+    """
+    c = require_client()
+    c.table("prds").update({
+        "title": title,
+        "payload_md": human_md,
+        "llm_part": llm_part,
+        "status": "ready",
+        "error": None,
+    }).eq("id", prd_id).execute()
+
+
 def fail_prd(prd_id: int, error: str) -> None:
     c = require_client()
     c.table("prds").update({

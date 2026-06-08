@@ -35,8 +35,10 @@ CLICKUP_PROVIDER = "clickup"
 CLICKUP_AUTH_URL = "https://app.clickup.com/api"
 CLICKUP_TOKEN_URL = "https://api.clickup.com/api/v2/oauth/token"
 CLICKUP_USER_URL = "https://api.clickup.com/api/v2/user"
+CLICKUP_API = "https://api.clickup.com/api/v2"
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
+_WRITE_TIMEOUT = 20
 
 
 def clickup_configured() -> bool:
@@ -140,3 +142,115 @@ def token_payload_to_store(token_json: dict[str, Any]) -> str:
     payload = dict(token_json)
     payload["obtained_at"] = int(time.time())
     return json.dumps(payload)
+
+
+# ── Write side (push generated user stories into ClickUp) ────────────────────
+#
+# ClickUp OAuth tokens are UNSCOPED — they already carry the authorizing
+# user's full ClickUp permissions, so creating tasks needs no extra scope
+# beyond what Connect already granted. Same auth quirk as the read puller:
+# the token goes RAW in `Authorization`, never with a `Bearer ` prefix.
+
+
+def list_lists(access_token: str) -> list[dict[str, Any]]:
+    """Walk teams → spaces → (folderless) lists and return every list the
+    token can see, as `{id, name, space, folder}` dicts.
+
+    Used to let the caller pick a target list to push stories into. Mirrors
+    the puller's team/space/list traversal. Folder-nested lists are included
+    alongside the space's folderless lists. Best-effort: a failure on one
+    space/folder is skipped so one bad node doesn't blank the whole picker.
+    """
+    out: list[dict[str, Any]] = []
+    teams = _get(access_token, "/team").get("teams", [])
+    for team in teams:
+        team_id = team.get("id")
+        if not team_id:
+            continue
+        try:
+            spaces = _get(access_token, f"/team/{team_id}/space",
+                          params={"archived": "false"}).get("spaces", [])
+        except requests.RequestException:
+            logger.warning("ClickUp: failed to list spaces for team %s", team_id)
+            continue
+        for space in spaces:
+            space_id = space.get("id")
+            space_name = space.get("name")
+            if not space_id:
+                continue
+            # Folderless lists live directly under the space.
+            try:
+                folderless = _get(
+                    access_token, f"/space/{space_id}/list",
+                    params={"archived": "false"},
+                ).get("lists", [])
+            except requests.RequestException:
+                folderless = []
+            for lst in folderless:
+                out.append({
+                    "id": lst.get("id"), "name": lst.get("name"),
+                    "space": space_name, "folder": None,
+                })
+            # Lists nested inside folders.
+            try:
+                folders = _get(
+                    access_token, f"/space/{space_id}/folder",
+                    params={"archived": "false"},
+                ).get("folders", [])
+            except requests.RequestException:
+                folders = []
+            for folder in folders:
+                for lst in folder.get("lists", []):
+                    out.append({
+                        "id": lst.get("id"), "name": lst.get("name"),
+                        "space": space_name, "folder": folder.get("name"),
+                    })
+    return [item for item in out if item.get("id")]
+
+
+def create_task(
+    access_token: str,
+    list_id: str,
+    *,
+    name: str,
+    description: str | None = None,
+    priority: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create one task in a ClickUp list. Returns `{id, url}`.
+
+    POST https://api.clickup.com/api/v2/list/{list_id}/task with the raw
+    token in `Authorization` (no `Bearer `). `priority` is ClickUp's 1–4
+    scale (1=urgent … 4=low); omitted when None. Raises HTTPException on a
+    non-OK response so the caller can isolate per-story failures.
+    """
+    body: dict[str, Any] = {"name": name}
+    if description is not None:
+        body["description"] = description
+    if priority is not None:
+        body["priority"] = priority
+    if extra:
+        body.update(extra)
+    resp = requests.post(
+        f"{CLICKUP_API}/list/{list_id}/task",
+        json=body,
+        headers={"Authorization": access_token},
+        timeout=_WRITE_TIMEOUT,
+    )
+    if not resp.ok:
+        logger.warning(
+            "ClickUp create_task failed: %s %s", resp.status_code, resp.text[:300]
+        )
+        raise HTTPException(502, "ClickUp task creation failed")
+    data = resp.json() or {}
+    return {"id": data.get("id"), "url": data.get("url")}
+
+
+def _get(token: str, path: str, params: dict | None = None) -> dict[str, Any]:
+    """Authenticated GET against the ClickUp v2 API (raw-token auth quirk)."""
+    r = requests.get(
+        f"{CLICKUP_API}{path}", params=params or {},
+        headers={"Authorization": token}, timeout=_WRITE_TIMEOUT,
+    )
+    r.raise_for_status()
+    return r.json()

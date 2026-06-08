@@ -46,6 +46,7 @@ from app.config import settings
 from app.connectors import (
     clickup_oauth,
     figma_oauth,
+    figma_pat,
     fireflies_apikey,
     github_app,
     google_oauth,
@@ -64,6 +65,7 @@ from app.connectors.tokens import (
     decrypt_token_json,
     encrypt_token_json,
 )
+from app.kg_ingest.auto_sync import kickoff_sync
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,32 @@ def list_connections(
 ):
     rows = db.list_connections(company.company_id)
     return {"connections": [_public_connection(r) for r in rows]}
+
+
+@router.get("/status")
+def connector_status(
+    company: CompanyContext = Depends(require_company),
+):
+    """Company-scoped sync status for every connected provider.
+
+    Backs the Settings status indicators: per provider, whether it has a
+    background ingest puller and its last_sync_at / last_sync_error stamp
+    (set by the auto-sync-on-connect kickoff and by manual /v1/ingest runs)."""
+    from app.kg_ingest.runner import PULLERS
+
+    rows = db.list_connections(company.company_id)
+    out = []
+    for r in rows:
+        provider = r["provider"]
+        out.append({
+            "provider": provider,
+            "status": r["status"],
+            "account_label": r.get("account_label") or r.get("google_email"),
+            "ingestable": provider in PULLERS,
+            "last_sync_at": r.get("last_sync_at"),
+            "last_sync_error": r.get("last_sync_error"),
+        })
+    return {"statuses": out}
 
 
 # ─────────────────────── Start-OAuth (fetch-friendly) ───────────────────────
@@ -310,7 +338,9 @@ def test_connection(
         user_obj = hubspot_oauth.fetch_token_info(access_token) or {}
     elif provider == slack_oauth.SLACK_PROVIDER:
         access_token = token_json.get("access_token") or ""
-        user_obj = slack_oauth.fetch_auth_test(access_token) or {}
+        # Canonical token-validity check: team.info returns {id, name, domain},
+        # so the account_label below resolves to the Slack workspace name.
+        user_obj = slack_oauth.fetch_team_info(access_token) or {}
     elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
         api_key = token_json.get("api_key") or ""
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
@@ -542,6 +572,60 @@ def figma_callback(code: str, state: str):
     return _build_post_oauth_redirect(payload, figma_oauth.FIGMA_PROVIDER)
 
 
+# ─────────── Figma Personal Access Token (PAT) ───────────
+#
+# Stopgap auth path while the Sprntly public OAuth app is in Figma's
+# review queue. Customers paste a PAT from Figma → Account settings →
+# Personal Access Tokens; we validate by hitting /v1/me, then store the
+# PAT in connections.token_json_encrypted (same column OAuth tokens use).
+
+
+class FigmaPatIn(BaseModel):
+    pat: str
+
+    def model_post_init(self, _context) -> None:
+        if not self.pat or not self.pat.strip():
+            raise ValueError("pat cannot be empty")
+
+
+@router.post("/figma/pat")
+def figma_connect_pat(
+    body: FigmaPatIn,
+    company: CompanyContext = Depends(require_company),
+):
+    pat = body.pat.strip()
+    user = figma_pat.fetch_me(pat)
+    if not user:
+        raise HTTPException(
+            400,
+            "Figma rejected this Personal Access Token — double-check "
+            "the value at Figma → Account settings → Personal Access Tokens.",
+        )
+
+    label = user.get("handle") or user.get("email") or "Figma user"
+
+    try:
+        token_encrypted = encrypt_token_json(
+            figma_pat.token_payload_to_store(pat)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company.company_id,
+        provider=figma_pat.FIGMA_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes="",
+        account_label=label,
+        config_json=json.dumps({"user": user, "auth_kind": "pat"}),
+    )
+    return {
+        "ok": True,
+        "provider": figma_pat.FIGMA_PROVIDER,
+        "account_label": label,
+    }
+
+
 @router.delete("/figma")
 def figma_disconnect(
     company: CompanyContext = Depends(require_company),
@@ -676,7 +760,31 @@ def github_authorize(
 
 
 @router.get("/github/callback")
-def github_callback(code: str, state: str):
+def github_callback(
+    code: str | None = None,
+    state: str | None = None,
+    setup_action: str | None = None,
+    installation_id: int | None = None,
+):
+    # GitHub re-uses this URL for BOTH the post-OAuth redirect AND the
+    # post-install redirect (when 'Request OAuth during install' is on,
+    # or when the App's Setup URL is left blank). The post-install
+    # redirect has `setup_action` + `installation_id` but no `state`.
+    # If we hit this branch, OAuth has either already completed in a
+    # prior round or wasn't required — just acknowledge and bounce
+    # back to the connectors page with the setup_action carried in the
+    # query so the UI can show 'approval pending' vs 'install complete'.
+    if state is None or not code:
+        base = (settings.frontend_url or "http://localhost:3000").rstrip("/")
+        params = {"section": "connectors", "connected": "github"}
+        if setup_action:
+            params["setup_action"] = setup_action
+        if installation_id is not None:
+            params["installation_id"] = str(installation_id)
+        return RedirectResponse(
+            f"{base}/settings?{urlencode(params)}", status_code=307
+        )
+
     payload = github_app.verify_oauth_state(state)
     company_id = payload["company_id"]
     token_json = github_app.exchange_code_for_token(code)
@@ -685,9 +793,8 @@ def github_callback(code: str, state: str):
         raise HTTPException(400, "GitHub did not return an access_token")
 
     me = github_app.fetch_authenticated_user(access_token)
-    label = me.get("login")
-    if label:
-        label = f"@{label}"
+    login = me.get("login") or ""
+    label = f"@{login}" if login else None
 
     try:
         token_encrypted = encrypt_token_json(github_app.token_payload_to_store(token_json))
@@ -704,7 +811,42 @@ def github_callback(code: str, state: str):
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
+    # Populate the KG immediately — fire-and-forget, never blocks the redirect.
+    kickoff_sync(company_id, github_app.GITHUB_PROVIDER)
+
+    # Two-step GitHub auth: OAuth tells us who the user is, but they ALSO
+    # need to install the Sprntly App on at least one repo so we have an
+    # installation_id (without that, the agent has no repo access — the
+    # /lab/code-chat installation picker stays empty).
+    #
+    # If the user has no matching installation yet, redirect to GitHub's
+    # App install page instead of bouncing them back to /settings. The
+    # webhook fires on completion and creates the github_installations
+    # row; the user lands back at the App's Setup URL (configured in
+    # the App settings on GitHub).
+    if login and not _has_github_install_for(login) and settings.github_app_slug:
+        install_url = (
+            f"https://github.com/apps/{settings.github_app_slug}/installations/new"
+        )
+        return RedirectResponse(install_url, status_code=307)
+
     return _build_post_oauth_redirect(payload, github_app.GITHUB_PROVIDER)
+
+
+def _has_github_install_for(account_login: str) -> bool:
+    """True iff a Sprntly App installation already exists for the given
+    GitHub account login. Read-only — webhook handlers populate this
+    table when users install/uninstall the App."""
+    try:
+        rows = db.list_github_installations() or []
+    except Exception:
+        # Table may not exist in some local-dev / test contexts; be lenient
+        # and assume "no install" so we still redirect to the install page.
+        return False
+    needle = account_login.lower()
+    return any(
+        (row.get("account_login") or "").lower() == needle for row in rows
+    )
 
 
 @router.delete("/github")
@@ -899,6 +1041,8 @@ def clickup_callback(code: str, state: str):
         config_json=json.dumps({"user": user}) if user else "{}",
     )
 
+    kickoff_sync(company_id, clickup_oauth.CLICKUP_PROVIDER)
+
     return _build_post_oauth_redirect(payload, clickup_oauth.CLICKUP_PROVIDER)
 
 
@@ -947,6 +1091,8 @@ def hubspot_callback(code: str, state: str):
         account_label=label or None,
         config_json=json.dumps({"info": info}) if info else "{}",
     )
+
+    kickoff_sync(company_id, hubspot_oauth.HUBSPOT_PROVIDER)
 
     return _build_post_oauth_redirect(payload, hubspot_oauth.HUBSPOT_PROVIDER)
 
@@ -1258,6 +1404,9 @@ def fireflies_connect_apikey(
         account_label=label,
         config_json=json.dumps({"user": user}) if user else "{}",
     )
+
+    kickoff_sync(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
+
     return {
         "ok": True,
         "provider": fireflies_apikey.FIREFLIES_PROVIDER,
@@ -1284,6 +1433,7 @@ _WEBHOOK_HANDLED_EVENTS = {
     "installation",
     "installation_repositories",
     "pull_request",
+    "push",
     "ping",
 }
 
