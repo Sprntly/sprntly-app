@@ -575,6 +575,204 @@ def test_design_source_for_generation_website_returns_four_tuple():
     assert version_factory is not None
 
 
+def test_design_source_for_generation_github_preserves_source_ref_and_installation(monkeypatch):
+    """GitHub branch returns a stable source_ref and binds installation context into
+    fresh extractor instances for both extraction and version probing."""
+    from app.design_agent.runner import _design_source_for_generation
+
+    calls: list[tuple[str, int, str]] = []
+
+    class _FakeGithubExtractor:
+        def __init__(self, installation_id):
+            self.installation_id = installation_id
+
+        def current_version(self, ref: str) -> str:
+            calls.append(("version", self.installation_id, ref))
+            return f"sha-for-{ref}"
+
+        def extract_raw_signals(self, ref: str):
+            calls.append(("raw", self.installation_id, ref))
+            return RawSignals(provider="github", ref=ref, signals={"files_present": []})
+
+    import app.design_agent.design_system.adapters as _adapters_mod
+
+    monkeypatch.setattr(_adapters_mod, "GithubExtractor", _FakeGithubExtractor)
+
+    provider, source_ref, raw_factory, version_factory = _design_source_for_generation(
+        figma_file_key=None,
+        figma_access_token=None,
+        website_url=None,
+        website_sample=None,
+        github_repo="org/repo@develop",
+        github_installation_id=987,
+    )
+
+    assert provider == "github"
+    assert source_ref == "org/repo@develop"
+    assert raw_factory is not None
+    assert version_factory is not None
+    assert version_factory() == "sha-for-org/repo@develop"
+    raw = raw_factory()
+    assert raw.provider == "github"
+    assert calls == [
+        ("version", 987, "org/repo@develop"),
+        ("raw", 987, "org/repo@develop"),
+    ]
+
+
+def test_github_cache_miss_upserts_codebase_category_source_ref_and_version(monkeypatch):
+    """Cache MISS for provider=github stores source_category=codebase, stable
+    source_ref, and the probed GitHub source_version."""
+    fresh_ds = _make_ds("#223344")
+    fake_raw = RawSignals(provider="github", ref="org/repo@main", signals={"files_present": []})
+
+    raw_calls = []
+
+    def raw_factory():
+        raw_calls.append(1)
+        return fake_raw
+
+    class _FakeGithubAdapter:
+        category = "codebase"
+
+    with _patched_internals(
+        monkeypatch,
+        cached_row=None,
+        upsert_return={},
+        normalize_return=fresh_ds,
+    ) as fakes:
+        fakes.registry.get.return_value = _FakeGithubAdapter()
+        result = _resolve_design_system(
+            company_id="co-1",
+            provider="github",
+            source_ref="org/repo@main",
+            raw_signals_factory=raw_factory,
+            version_factory=lambda: "sha-123",
+        )
+
+    assert result is not None
+    assert len(raw_calls) == 1
+    assert fakes.upsert.call_count == 1
+    call_kwargs = fakes.upsert.call_args.kwargs
+    assert call_kwargs["company_id"] == "co-1"
+    assert call_kwargs["source_category"] == "codebase"
+    assert call_kwargs["source_provider"] == "github"
+    assert call_kwargs["source_ref"] == "org/repo@main"
+    assert call_kwargs["source_version"] == "sha-123"
+    assert call_kwargs["data"] == fresh_ds.model_dump()
+
+
+def test_github_cache_hit_unchanged_skips_extraction(monkeypatch):
+    cached_ds = _make_ds("#334455")
+    row = _cached_row(cached_ds, stored_version="sha-unchanged")
+    row["source_provider"] = "github"
+    row["source_category"] = "codebase"
+    row["source_ref"] = "org/repo"
+
+    raw_calls = []
+
+    with _patched_internals(
+        monkeypatch,
+        cached_row=row,
+        upsert_return={},
+        normalize_return=_make_ds("#ffffff"),
+    ) as fakes:
+        result = _resolve_design_system(
+            company_id="co-1",
+            provider="github",
+            source_ref="org/repo",
+            raw_signals_factory=lambda: raw_calls.append(1) or RawSignals(provider="github"),
+            version_factory=lambda: "sha-unchanged",
+        )
+
+    assert result is not None
+    assert result.tokens.colors.background == "#334455"
+    assert raw_calls == []
+    assert fakes.upsert.call_count == 0
+
+
+def test_github_cache_hit_changed_re_extracts_and_updates_version(monkeypatch):
+    cached_ds = _make_ds("#334455")
+    fresh_ds = _make_ds("#abcdef")
+    row = _cached_row(cached_ds, stored_version="sha-old")
+    row["source_provider"] = "github"
+    row["source_category"] = "codebase"
+    row["source_ref"] = "org/repo"
+    raw_calls = []
+
+    class _FakeGithubAdapter:
+        category = "codebase"
+
+    with _patched_internals(
+        monkeypatch,
+        cached_row=row,
+        upsert_return={},
+        normalize_return=fresh_ds,
+    ) as fakes:
+        fakes.registry.get.return_value = _FakeGithubAdapter()
+        result = _resolve_design_system(
+            company_id="co-1",
+            provider="github",
+            source_ref="org/repo",
+            raw_signals_factory=lambda: raw_calls.append(1) or RawSignals(provider="github"),
+            version_factory=lambda: "sha-new",
+        )
+
+    assert result is not None
+    assert result.tokens.colors.background == "#abcdef"
+    assert raw_calls == [1]
+    assert fakes.upsert.call_count == 1
+    assert fakes.upsert.call_args.kwargs["source_version"] == "sha-new"
+    assert fakes.upsert.call_args.kwargs["source_category"] == "codebase"
+
+
+def test_github_cache_hit_version_probe_failure_uses_cached_without_extract(monkeypatch):
+    cached_ds = _make_ds("#445566")
+    row = _cached_row(cached_ds, stored_version="sha-cached")
+    row["source_provider"] = "github"
+    row["source_category"] = "codebase"
+    row["source_ref"] = "org/repo"
+    raw_calls = []
+
+    with _patched_internals(
+        monkeypatch,
+        cached_row=row,
+        upsert_return={},
+        normalize_return=_make_ds("#ffffff"),
+    ) as fakes:
+        result = _resolve_design_system(
+            company_id="co-1",
+            provider="github",
+            source_ref="org/repo",
+            raw_signals_factory=lambda: raw_calls.append(1) or RawSignals(provider="github"),
+            version_factory=lambda: (_ for _ in ()).throw(RuntimeError("github down")),
+        )
+
+    assert result is not None
+    assert result.tokens.colors.background == "#445566"
+    assert raw_calls == []
+    assert fakes.upsert.call_count == 0
+
+
+def test_github_cache_miss_raw_failure_returns_none_without_upsert(monkeypatch):
+    with _patched_internals(
+        monkeypatch,
+        cached_row=None,
+        upsert_return={},
+        normalize_return=_make_ds("#ffffff"),
+    ) as fakes:
+        result = _resolve_design_system(
+            company_id="co-1",
+            provider="github",
+            source_ref="org/repo",
+            raw_signals_factory=lambda: None,
+            version_factory=lambda: "sha-123",
+        )
+
+    assert result is None
+    assert fakes.upsert.call_count == 0
+
+
 def test_design_source_for_generation_none_branch_returns_four_none_tuple():
     """No source → 4-tuple of Nones."""
     from app.design_agent.runner import _design_source_for_generation

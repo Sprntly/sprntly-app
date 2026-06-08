@@ -166,6 +166,48 @@ def test_github_current_version_uses_default_branch_sha(monkeypatch):
     ]
 
 
+def test_github_current_version_uses_explicit_branch_and_falls_back_to_pushed_at(monkeypatch):
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "app.connectors.github_app.headers_for_installation",
+        lambda installation_id: {"Authorization": "Bearer install-token"},
+    )
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        if url.endswith("/repos/org/repo"):
+            return _FakeResp({"default_branch": "main", "pushed_at": "2026-06-08T00:00:00Z"})
+        if url.endswith("/repos/org/repo/commits/feature%2Fbranch"):
+            return _FakeResp(ok=False, status_code=503)
+        return _FakeResp(ok=False, status_code=404)
+
+    monkeypatch.setattr("app.connectors.github_app.requests.get", fake_get)
+
+    assert (
+        GithubExtractor(installation_id=987).current_version("org/repo@feature/branch")
+        == "2026-06-08T00:00:00Z"
+    )
+    assert calls == [
+        "https://api.github.com/repos/org/repo",
+        "https://api.github.com/repos/org/repo/commits/feature%2Fbranch",
+    ]
+
+
+def test_github_current_version_api_failure_returns_none(monkeypatch):
+    monkeypatch.setattr(
+        "app.connectors.github_app.headers_for_installation",
+        lambda installation_id: {"Authorization": "Bearer install-token"},
+    )
+    monkeypatch.setattr(
+        "app.connectors.github_app.requests.get",
+        lambda url, **kwargs: _FakeResp(ok=False, status_code=500),
+    )
+
+    assert GithubExtractor(installation_id=987).current_version("org/repo") is None
+    assert GithubExtractor(installation_id=None).current_version("org/repo") is None
+
+
 def test_github_extracts_explicit_tailwind_css_and_token_files(monkeypatch):
     files = {
         "tailwind.config.ts": """
