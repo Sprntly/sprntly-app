@@ -171,7 +171,24 @@ describe("ApproveModal no longer owns generate visibility locally", () => {
     )
     expect(src).not.toContain("generateOpen")
     expect(src).not.toContain("setGenerateOpen")
-    expect(src).toContain('openModal("generate")')
+    // The GenerateModal subtree is still mounted (forward-compat / loading-overlay
+    // host) and still wired off the union, so the open binding stays.
     expect(src).toContain('open={activeModal === "generate"}')
+  })
+
+  it("test_approve_modal_generate_redirects_to_prototype_page: Generate Prototype now pushes /prototype, not openModal('generate')", () => {
+    // Founder request: "once someone clicks Generate Prototype it should redirect
+    // to a new page /prototype". The Approve flow's Generate option no longer
+    // opens the generate modal inline (openModal("generate")); it closes the
+    // modal and router.push(prototypePath(prdId)). Asserted on the source so the
+    // redirect contract is pinned (the click handler reads NavigationContext +
+    // router, which the node/source check covers without a full DOM mount).
+    const src = readFileSync(
+      resolve(process.cwd(), "app/components/shared/ApproveModal.tsx"),
+      "utf8",
+    )
+    expect(src).not.toContain('openModal("generate")')
+    expect(src).toContain("prototypePath(")
+    expect(src).toContain("router.push(prototypePath(")
   })
 })
