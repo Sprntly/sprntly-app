@@ -100,6 +100,7 @@ from app.design_agent.storage import (
     TypeCheckError,
     TypeCheckRepairExhausted,
     ViteBuildError,
+    fresh_bundle_url,
     repair_unresolved_relative_imports,
     stage_bundle,
     stage_preview_image,
@@ -533,31 +534,10 @@ def delete_prototype_route(
     return Response(status_code=204)
 
 
-@router.get("/by-prd/{prd_id}")
-def get_by_prd(
-    prd_id: int,
-    company: CompanyContext = Depends(require_company),
-) -> dict[str, Any]:
-    """Return the most-recent READY prototype for a PRD (read-only lookup).
-
-    A pure read with NO generate side-effect — unlike the dedup inside
-    POST /generate, which kicks off a generation when none exists. That makes
-    it safe to call on PRD-screen load so the frontend can render a preview
-    card / flip Approve to "View Prototype". Returns 404 when no ready
-    prototype exists (the frontend swallows 404→null). Workspace-filtered: a
-    prototype in another workspace returns 404, not 403, so cross-tenant
-    existence is not disclosed. The path is two-segment (`/by-prd/{prd_id}`),
-    so it can never be shadowed by the single-segment `GET /{prototype_id}`
-    catch-all above regardless of declaration order — a one-segment route
-    pattern only ever matches one-segment paths.
-    """
-    _require_feature_enabled()
-    row = find_ready_prototype_by_prd(
-        prd_id=prd_id, workspace_id=company.company_id
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
-    return row
+# NOTE: GET /by-prd/{prd_id} is defined ABOVE (near the other PRD routes), not
+# here — a second identical definition used to live at this spot, which produced
+# a duplicate operation id and a redundant route registration. Removed; the
+# single definition above is canonical.
 
 
 # ─── Background generation ────────────────────────────────────────────────
@@ -1275,6 +1255,26 @@ def _share_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
 
 
+def _public_bundle_url(row: dict[str, Any]) -> str | None:
+    """Bundle URL for a public/passcode view, freshly signed on read.
+
+    The stored `bundle_url` is a 24h-TTL Supabase signed URL minted at stage
+    time, but a public/passcode share is permanent — the stored URL goes stale
+    and the iframe 403s after the TTL. Re-sign per request from the bundle object
+    path (derived from the current checkpoint) so the share never expires. Falls
+    back to the stored URL when there is no checkpoint to derive a path from, or
+    on the filesystem/dev backend (handled inside `fresh_bundle_url`)."""
+    stored = row.get("bundle_url")
+    checkpoint_id = row.get("current_checkpoint_id")
+    if checkpoint_id is None:
+        return stored
+    return fresh_bundle_url(
+        prototype_id=row["id"],
+        checkpoint_id=checkpoint_id,
+        stored_bundle_url=stored,
+    )
+
+
 class PublicPrototypeView(BaseModel):
     share_mode: Literal["public", "passcode"]  # "private" is never returned
     requires_passcode: bool                    # true iff share_mode == "passcode"
@@ -1329,7 +1329,9 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         requires_passcode=(mode == "passcode"),
         # bundle_url is released for public mode immediately; for passcode mode it
         # stays null here and is only returned by the verify route on success.
-        bundle_url=row.get("bundle_url") if mode == "public" else None,
+        # A public/passcode share is permanent but the stored bundle_url is a 24h
+        # signed URL — re-sign on read so the iframe never 403s once the TTL lapses.
+        bundle_url=_public_bundle_url(row) if mode == "public" else None,
         is_complete=bool(row.get("is_complete")),
     )
 
@@ -1368,7 +1370,8 @@ def verify_passcode(
     return PublicPrototypeView(
         share_mode="passcode",
         requires_passcode=True,
-        bundle_url=row.get("bundle_url"),
+        # Permanent share, 24h stored signed URL — re-sign on read (see get_by_token).
+        bundle_url=_public_bundle_url(row),
         is_complete=bool(row.get("is_complete")),
     )
 
@@ -1751,7 +1754,12 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     """Public comment write. Resolves token → prototype; rejects when the
     prototype is private or not ready (404, matching get_by_token's posture).
     The comment is attributed to the anonymous external author label, and the
-    workspace_id is taken from the resolved row — never a session claim."""
+    workspace_id is taken from the resolved row — never a session claim.
+
+    Intentionally disabled: anonymous public comment WRITES stay gated off
+    (404, indistinguishable from missing/private) pending a product decision —
+    re-enabling this opens an unauthenticated write endpoint. The resolution +
+    rate-limit logic below is built and ready for when it's enabled."""
     raise HTTPException(status_code=404, detail="Not found")
     _require_feature_enabled()
     proto = find_prototype_by_share_token(token)

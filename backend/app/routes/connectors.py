@@ -489,7 +489,7 @@ def google_drive_sync(
     # Auto-enable the Google Drive input source for this dataset.
     dataset_slug = payload.dataset
     if not dataset_slug:
-        row = db.get_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
+        row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
         if row and row.get("config_json"):
             try:
                 cfg = json.loads(row["config_json"])

@@ -129,6 +129,69 @@ def test_find_hypothesis_none_when_no_match(facade):
     assert _find_hypothesis(facade, "ent-A", "nope", "no such title") is None
 
 
+# ---------- shared resolver: Evidence and PRD ground on the SAME hypothesis ----------
+#
+# evidence_kg._find_hypothesis and graph.retrieval used to be SEPARATE resolvers
+# that diverged on the no-theme_id path (evidence title-fell-back, PRD bailed).
+# They are now ONE shared resolver — these pin that single source of truth and the
+# aligned no-theme_id behavior so Evidence and PRD can never drift apart.
+
+
+def test_evidence_resolver_delegates_to_shared_retrieval_resolver():
+    # The evidence resolver IS the retrieval one — same function object reached
+    # via the thin wrapper, so there is exactly one resolution implementation.
+    import app.evidence_kg as ek
+    from app.graph.retrieval import resolve_insight_hypothesis
+
+    # The wrapper imports the shared resolver function-locally; assert the symbol
+    # it would call is the canonical one (no duplicate body in evidence_kg).
+    import inspect
+    src = inspect.getsource(ek._find_hypothesis)
+    assert "resolve_insight_hypothesis" in src
+    assert callable(resolve_insight_hypothesis)
+
+
+def test_evidence_and_prd_resolve_same_hypothesis_by_theme(facade):
+    # Given one insight (with theme_id), Evidence and PRD resolve the IDENTICAL
+    # hypothesis Entity.
+    from app.evidence_kg import _find_hypothesis
+    from app.graph.retrieval import resolve_insight_hypothesis
+
+    theme, hyp, _ = _seed_theme_hypothesis(facade)
+    title = "SSO gap blocks $1.4M in deals"
+    ev = _find_hypothesis(facade, "ent-A", theme.id, title)
+    prd = resolve_insight_hypothesis(facade, "ent-A", theme.id, title)
+    assert ev is not None and prd is not None
+    assert ev.id == prd.id == hyp.id
+
+
+def test_evidence_and_prd_agree_on_no_theme_id_title_fallback(facade):
+    # The previously-divergent path: insight carries NO theme_id but its title
+    # matches a hypothesis label. BOTH resolvers must now title-fall-back to the
+    # SAME hypothesis (the safer aligned behavior), never one resolving and the
+    # other bailing.
+    from app.evidence_kg import _find_hypothesis
+    from app.graph.retrieval import resolve_insight_hypothesis
+
+    _, hyp, _ = _seed_theme_hypothesis(facade)
+    title = "SSO gap blocks $1.4M in deals"
+    ev = _find_hypothesis(facade, "ent-A", None, title)
+    prd = resolve_insight_hypothesis(facade, "ent-A", None, title)
+    assert ev is not None and prd is not None
+    assert ev.id == prd.id == hyp.id
+
+
+def test_shared_resolver_no_theme_id_no_title_match_is_none_for_both(facade):
+    # No theme_id AND no title match → both bail (empty trail), never a blind
+    # corpus guess. Aligned across Evidence and PRD.
+    from app.evidence_kg import _find_hypothesis
+    from app.graph.retrieval import resolve_insight_hypothesis
+
+    _seed_theme_hypothesis(facade)
+    assert _find_hypothesis(facade, "ent-A", None, "unrelated title") is None
+    assert resolve_insight_hypothesis(facade, "ent-A", None, "unrelated title") is None
+
+
 # ---------- evidence trail assembly ----------
 
 def test_trail_unions_supports_and_convergence_signals(facade):

@@ -196,7 +196,9 @@ def test_trail_kg_refs_cover_signals_hypothesis_theme(facade):
 
 
 def test_trail_empty_when_no_theme_id(facade):
-    """An insight with no theme_id has no KG linkage → empty trail."""
+    """An insight with no theme_id AND no title-matching hypothesis has no KG
+    linkage → empty trail. (With a title that matches a hypothesis, the shared
+    resolver title-falls-back; covered by the shared-resolver tests below.)"""
     from app.graph.retrieval import insight_evidence_trail
 
     brief = {"insights": [{"title": "no linkage"}]}

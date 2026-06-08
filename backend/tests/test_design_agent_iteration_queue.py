@@ -253,8 +253,10 @@ def test_post_iterate_returns_queue_position(env, client, monkeypatch):
 
 
 def test_dequeue_marks_oldest_running(env):
-    # AC4: dequeue marks the OLDEST pending row 'running' and returns it; a second
-    # dequeue advances to the next-oldest pending.
+    # AC4: dequeue marks the OLDEST pending row 'running' and returns it. While that
+    # row is still running, a second dequeue must NO-OP (concurrency guard: at most
+    # one iteration running per prototype) — it does NOT advance to the next pending.
+    # Only once the running row leaves the active set does dequeue advance to B.
     pid = _seed_ready(env)
     a = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="a")["id"]
     b = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="b")["id"]
@@ -264,8 +266,15 @@ def test_dequeue_marks_oldest_running(env):
     by_id = {r["id"]: r for r in _all_rows(pid)}
     assert by_id[a]["status"] == "running"
     assert by_id[a]["started_at"]
+    # A is still running → a fresh dequeue (e.g. from a kick fired by enqueuing B)
+    # must NOT promote B; it returns None so B does not run concurrently with A.
+    assert env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) is None
+    assert {r["id"]: r["status"] for r in _all_rows(pid)}[b] == "pending"  # B untouched
+    # A finishes → B becomes dequeuable.
+    env.queue.mark_iteration_done(iteration_id=a, workspace_id=_TEST_COMPANY_ID)
     second = env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert second["id"] == b               # advanced to the next-oldest pending
+    env.queue.mark_iteration_done(iteration_id=b, workspace_id=_TEST_COMPANY_ID)
     assert env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) is None
 
 
@@ -292,6 +301,73 @@ async def test_drain_runs_all_serially_no_concurrency(env, monkeypatch):
 
     assert [r["status"] for r in _all_rows(pid)] == ["done", "done", "done"]
     assert max_running == 1
+
+
+def test_dequeue_noop_when_running_row_exists(env):
+    # Concurrency-guard regression (the BUG): enqueuing iteration #2 while #1 is
+    # running used to let a fresh drain's dequeue_next pick up #2 and run it
+    # CONCURRENTLY with #1 (lost update on the shared bundle). dequeue_next must
+    # no-op (return None) whenever a 'running' row already exists for the prototype.
+    pid = _seed_ready(env)
+    a = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="a")["id"]
+    running = env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert running["id"] == a and running["status"] == "running"
+    # #2 enqueued while #1 runs.
+    b = env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="b")["id"]
+    # The kick fired on that enqueue calls dequeue_next again — it must NOT promote B.
+    assert env.queue.dequeue_next(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) is None
+    assert {r["id"]: r["status"] for r in _all_rows(pid)}[b] == "pending"
+    # Guard is per-prototype: a DIFFERENT prototype's queue is unaffected.
+    pid2 = _seed_ready(env)
+    c = env.queue.enqueue_iteration(prototype_id=pid2, workspace_id=_TEST_COMPANY_ID, prompt="c")["id"]
+    other = env.queue.dequeue_next(prototype_id=pid2, workspace_id=_TEST_COMPANY_ID)
+    assert other["id"] == c and other["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_drain_kicks_do_not_double_run(env, monkeypatch):
+    # End-to-end: enqueue #1, start a long-running drain, then enqueue #2 and fire a
+    # SECOND drain (exactly what POST /iterate does on every enqueue). The second
+    # drain must NOT run #2 concurrently — max concurrent runs stays 1 throughout.
+    pid = _seed_ready(env)
+    env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="a")
+
+    running = 0
+    max_running = 0
+    first_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_one(row):
+        nonlocal running, max_running
+        running += 1
+        max_running = max(max_running, running)
+        if row["prompt"] == "a":
+            first_started.set()
+            await release.wait()      # hold #1 'running' while we kick a 2nd drain
+        running -= 1
+
+    monkeypatch.setattr(env.routes, "_run_one_iteration", fake_one)
+    inflight = env.routes._inflight_tasks
+    t1 = asyncio.create_task(runner.drain_iteration_queue(prototype_id=pid, workspace_id=_TEST_COMPANY_ID))
+    inflight.add(t1); t1.add_done_callback(inflight.discard)
+    await first_started.wait()        # #1 is now running and parked
+
+    # #2 enqueued + a fresh drain kicked while #1 is still running.
+    env.queue.enqueue_iteration(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prompt="b")
+    t2 = asyncio.create_task(runner.drain_iteration_queue(prototype_id=pid, workspace_id=_TEST_COMPANY_ID))
+    inflight.add(t2); t2.add_done_callback(inflight.discard)
+    await t2                          # the 2nd kick must no-op (guard), not run #2
+    assert max_running == 1           # #2 did NOT start concurrently
+
+    release.set()                     # let #1 finish; its chained drain runs #2
+    await t1
+    for _ in range(50):
+        pend = list(inflight)
+        if not pend:
+            break
+        await asyncio.gather(*pend, return_exceptions=True)
+    assert [r["status"] for r in _all_rows(pid)] == ["done", "done"]
+    assert max_running == 1           # never two at once across the whole sequence
 
 
 @pytest.mark.asyncio

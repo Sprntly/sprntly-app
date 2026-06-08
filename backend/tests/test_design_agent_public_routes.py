@@ -266,3 +266,119 @@ def test_existing_routes_still_resolve(env):
     assert "/v1/design-agent/{prototype_id}" in paths
     assert "/v1/design-agent/by-token/{token}" in paths
     assert "/v1/design-agent/by-token/{token}/passcode" in paths
+
+
+# ─── bundle_url re-signed on read (permanent share, 24h stored URL) ──────────
+#
+# The stored bundle_url is a 24h-TTL signed URL minted at stage time, but a
+# public/passcode share is permanent — serving the stored URL 403s the iframe
+# once the TTL lapses. The public view paths must mint a FRESH signed URL per
+# request from the bundle object path. We stub the routes module's bound
+# `fresh_bundle_url` to assert the route (a) calls it with the prototype_id +
+# current_checkpoint_id (so it can re-derive the object path) and (b) serves the
+# freshly-signed value, NOT the stale stored bundle_url.
+
+
+def _seed_with_checkpoint(
+    *, share_mode: str, checkpoint_id: int = 99, passcode_hash: str | None = None
+) -> str:
+    from tests import _fake_supabase
+
+    token = str(uuid.uuid4())
+    _fake_supabase.get_fake_db().execute(
+        "INSERT INTO prototypes "
+        "(prd_id, workspace_id, template_version, status, share_mode, share_token, "
+        " share_passcode_hash, bundle_url, current_checkpoint_id, is_complete) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [1, "app", 1, "ready", share_mode, token, passcode_hash,
+         "https://cdn.example/STALE-signed-url?token=expired", checkpoint_id, 1],
+    )
+    return token
+
+
+def test_get_by_token_public_resigns_bundle_url(unauth, env, monkeypatch):
+    fresh = "https://cdn.example/p/abc/index.html?token=FRESH"
+    calls: list[dict] = []
+
+    def _stub(*, prototype_id, checkpoint_id, stored_bundle_url):
+        calls.append(
+            {"prototype_id": prototype_id, "checkpoint_id": checkpoint_id,
+             "stored_bundle_url": stored_bundle_url}
+        )
+        return fresh
+
+    monkeypatch.setattr(env.routes, "fresh_bundle_url", _stub)
+    token = _seed_with_checkpoint(share_mode="public", checkpoint_id=99)
+    body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
+    # Served the freshly-signed URL, not the stored stale one.
+    assert body["bundle_url"] == fresh
+    assert "STALE" not in body["bundle_url"]
+    # Called with the inputs needed to re-derive prototypes/<pid>/<cid>/index.html.
+    assert len(calls) == 1
+    assert calls[0]["checkpoint_id"] == 99
+    assert "STALE" in calls[0]["stored_bundle_url"]
+
+
+def test_verify_passcode_resigns_bundle_url(unauth, env, monkeypatch):
+    fresh = "https://cdn.example/p/abc/index.html?token=FRESH"
+    monkeypatch.setattr(
+        env.routes, "fresh_bundle_url",
+        lambda *, prototype_id, checkpoint_id, stored_bundle_url: fresh,
+    )
+    h = env.proto.hash_share_passcode("hunter2")
+    token = _seed_with_checkpoint(share_mode="passcode", checkpoint_id=42, passcode_hash=h)
+    resp = unauth.post(
+        f"/v1/design-agent/by-token/{token}/passcode", json={"passcode": "hunter2"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["bundle_url"] == fresh
+
+
+def test_public_bundle_url_helper_falls_back_without_checkpoint(env):
+    # When the row has no current_checkpoint_id there is no object path to derive,
+    # so the helper returns the stored URL unchanged (never None-crashes).
+    row = {"id": 7, "bundle_url": "https://cdn.example/stored", "current_checkpoint_id": None}
+    assert env.routes._public_bundle_url(row) == "https://cdn.example/stored"
+
+
+def test_fresh_bundle_url_no_bucket_returns_stored():
+    # On the filesystem/dev backend (no SUPABASE_STORAGE_BUCKET) the stored URL is a
+    # stable public/file:// URL that never expires, so fresh_bundle_url returns it.
+    from app.design_agent import storage
+
+    assert storage._bucket_name() is None  # default env: no bucket configured
+    out = storage.fresh_bundle_url(
+        prototype_id=1, checkpoint_id=2, stored_bundle_url="file:///tmp/x/index.html"
+    )
+    assert out == "file:///tmp/x/index.html"
+
+
+def test_fresh_bundle_url_signs_from_object_path_with_bucket(monkeypatch):
+    # With a bucket configured, fresh_bundle_url signs the derived object path
+    # (prototypes/<pid>/<cid>/index.html) afresh and returns the new signed URL,
+    # NOT the stale stored one.
+    from app.design_agent import storage
+
+    monkeypatch.setenv("SUPABASE_STORAGE_BUCKET", "prototypes-bucket")
+    signed_paths: list[str] = []
+
+    class _FakeStorageObj:
+        def create_signed_url(self, *, path, expires_in):
+            signed_paths.append(path)
+            return {"signedURL": f"https://signed.example/{path}?fresh=1"}
+
+    class _FakeStorage:
+        def from_(self, bucket):
+            assert bucket == "prototypes-bucket"
+            return _FakeStorageObj()
+
+    class _FakeClient:
+        storage = _FakeStorage()
+
+    monkeypatch.setattr("app.db.client.require_client", lambda: _FakeClient())
+    out = storage.fresh_bundle_url(
+        prototype_id=11, checkpoint_id=22, stored_bundle_url="https://STALE"
+    )
+    assert signed_paths == ["prototypes/11/22/index.html"]
+    assert out == "https://signed.example/prototypes/11/22/index.html?fresh=1"
+    assert "STALE" not in out
