@@ -1754,7 +1754,13 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     """Public comment write. Resolves token → prototype; rejects when the
     prototype is private or not ready (404, matching get_by_token's posture).
     The comment is attributed to the anonymous external author label, and the
-    workspace_id is taken from the resolved row — never a session claim."""
+    workspace_id is taken from the resolved row — never a session claim.
+
+    Intentionally disabled: anonymous public comment WRITES stay gated off
+    (404, indistinguishable from missing/private) pending a product decision —
+    re-enabling this opens an unauthenticated write endpoint. The resolution +
+    rate-limit logic below is built and ready for when it's enabled."""
+    raise HTTPException(status_code=404, detail="Not found")
     _require_feature_enabled()
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":

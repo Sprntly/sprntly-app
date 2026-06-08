@@ -295,21 +295,16 @@ def test_patch_resolve_other_workspace_returns_404(client):
 
 
 def test_post_comment_public_no_auth_persists_external_comment(unauth):
-    # F8: an unauthenticated external viewer with the share URL CAN write a comment
-    # on a public+ready prototype. The comment is attributed to the "external"
-    # author label and the workspace_id is taken from the RESOLVED row (not a
-    # session claim). Regression guard for the dead-route bug (a leading 404 raise
-    # once made this path unreachable).
+    # B9b: public comment CREATE is now disabled (returns 404).
+    # The route still exists (no import errors) but immediately raises 404 so
+    # unauthenticated external viewers cannot write comments.
     proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
     resp = unauth.post(
         f"/v1/design-agent/by-token/{proto.token}/comments",
         json={"anchor_id": "deadbeef", "body": "love this"},
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["body"] == "love this"
-    assert body["author"] == "external"
-    assert _count_comments(proto.id) == 1  # persisted under the resolved workspace
+    assert resp.status_code == 404
+    assert _count_comments(proto.id) == 0  # nothing written
 
 
 def test_post_comment_public_private_mode_returns_404(unauth):
@@ -396,19 +391,18 @@ def test_post_comment_empty_anchor_returns_422(client):
 
 
 def test_public_write_logs_token_hash_not_raw(unauth, caplog):
-    # Rule #24 log hygiene on the public write path: the success line correlates by
-    # the HASHED token (never the raw token, which is the access primitive) and
-    # never logs the comment body (PII).
+    # B9b: public comment CREATE is disabled → 404 before any logging.
+    # The log-hygiene invariant (token never raw, body never logged) is vacuously
+    # satisfied because the route never reaches the insert or log statement.
     proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
     with caplog.at_level(logging.INFO, logger="app.routes.design_agent"):
         resp = unauth.post(
             f"/v1/design-agent/by-token/{proto.token}/comments",
             json={"anchor_id": "deadbeef", "body": "secret comment text"},
         )
-    assert resp.status_code == 200, resp.text
-    assert "comment_created_public" in caplog.text     # the public correlation marker fired
-    assert proto.token not in caplog.text              # raw token never in any log line
-    assert "secret comment text" not in caplog.text    # comment body never logged
+    assert resp.status_code == 404
+    assert proto.token not in caplog.text      # raw token never in any log line
+    assert "secret comment text" not in caplog.text  # comment body never logged
 
 
 # ─── Non-breakage (AC9) ─────────────────────────────────────────────────────
@@ -522,8 +516,8 @@ def test_post_comment_authed_round_trips_position(client):
 
 
 def test_post_comment_public_round_trips_position(unauth):
-    # A public comment with pin coordinates round-trips through the write path:
-    # the position fields are persisted and echoed back on the CommentOut.
+    # B9b: public comment CREATE is disabled → 404 regardless of payload shape.
+    # Position fields are irrelevant; nothing is persisted.
     proto = _seed_prototype(workspace_id="tenant-pub", share_mode="public", status="ready")
     resp = unauth.post(
         f"/v1/design-agent/by-token/{proto.token}/comments",
@@ -535,12 +529,8 @@ def test_post_comment_public_round_trips_position(unauth):
             "resolved_anchor_id": "ef567890",
         },
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["pin_x_pct"] == pytest.approx(10.0)
-    assert body["pin_y_pct"] == pytest.approx(20.0)
-    assert body["resolved_anchor_id"] == "ef567890"
-    assert _count_comments(proto.id) == 1
+    assert resp.status_code == 404
+    assert _count_comments(proto.id) == 0  # nothing written
 
 
 def test_post_comment_omitted_position_defaults_null(client):
