@@ -128,7 +128,9 @@ from app.db.github import (
     delete_github_installation,
     get_github_installation,
     list_github_installations,
+    list_github_installations_for_account,
     list_open_pull_requests,
+    list_open_pull_requests_for_installations,
     upsert_github_installation,
     upsert_github_pull_request,
 )
@@ -200,7 +202,9 @@ __all__ = [
     "delete_github_installation",
     "get_github_installation",
     "list_github_installations",
+    "list_github_installations_for_account",
     "list_open_pull_requests",
+    "list_open_pull_requests_for_installations",
     "upsert_github_installation",
     "upsert_github_pull_request",
 ]

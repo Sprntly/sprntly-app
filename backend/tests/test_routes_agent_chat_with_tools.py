@@ -21,7 +21,40 @@ import pytest
 
 import app.auth  # noqa: F401
 
-from tests._company_helpers import company_client
+from tests._company_helpers import company_client, seed_connection
+
+
+# ─────────────────────── tenant-isolation guard setup ───────────────────────
+#
+# Since the security hotfix, chat-with-tools verifies the supplied
+# installation_id is owned by the caller's company before reaching the
+# LLM. These tests aren't about that guard — they're about the tool-use
+# loop itself — so this helper seeds the bare minimum (a github
+# connection labelled @octocat + a github_installations row for the test's
+# installation_id, both tied to the company so the guard admits the call).
+
+
+def _grant_install(company_id: str, installation_id: int) -> None:
+    """Ensure the chat-with-tools guard admits `installation_id` for this
+    company. Idempotent across multiple installation_ids in one test."""
+    from app.db.client import require_client
+
+    # Seed the connection once per company (no-op upsert if already present).
+    seed_connection(
+        company_id=company_id,
+        provider="github",
+        token_blob={"access_token": "tok"},
+        label="@octocat",
+    )
+    require_client().table("github_installations").upsert(
+        {
+            "installation_id": installation_id,
+            "account_id": installation_id * 10,
+            "account_login": "octocat",
+            "account_type": "User",
+            "repository_selection": "selected",
+        }
+    ).execute()
 
 
 # ─────────────────────── helpers ───────────────────────
@@ -70,6 +103,7 @@ def _install_anthropic_mock(monkeypatch, responses: list):
 def test_chat_responds_without_calling_tools(isolated_settings, monkeypatch):
     """User asks something the model can answer with no GitHub lookup."""
     ctx = company_client(monkeypatch)
+    _grant_install(ctx.company_id, 1)
     _install_anthropic_mock(
         monkeypatch,
         [_resp("end_turn", [_content_text("Hi! I'm the Sprntly agent.")])],
@@ -94,6 +128,7 @@ def test_chat_dispatches_tool_then_synthesises_answer(
 ):
     """Model returns tool_use → backend dispatches → model returns text."""
     ctx = company_client(monkeypatch)
+    _grant_install(ctx.company_id, 42)
 
     # Patch the github tool dispatch so we don't hit the network.
     import app.agent_tools.registry as reg
@@ -139,6 +174,7 @@ def test_chat_dispatches_tool_then_synthesises_answer(
 def test_chat_passes_installation_id_to_dispatch(isolated_settings, monkeypatch):
     """The installation_id from the request body must flow into dispatch."""
     ctx = company_client(monkeypatch)
+    _grant_install(ctx.company_id, 7777)
     import app.agent_tools.registry as reg
 
     captured = {}
@@ -174,6 +210,7 @@ def test_chat_caps_tool_iterations(isolated_settings, monkeypatch):
     """If the model keeps requesting tools, the loop must bail at the
     configured limit instead of running forever."""
     ctx = company_client(monkeypatch)
+    _grant_install(ctx.company_id, 1)
     import app.agent_tools.registry as reg
 
     monkeypatch.setattr(
@@ -210,6 +247,7 @@ def test_chat_returns_tool_errors_to_model_gracefully(
     """When a tool raises, the loop should still continue — feed the
     error back as a tool_result so the model can recover."""
     ctx = company_client(monkeypatch)
+    _grant_install(ctx.company_id, 1)
     import app.agent_tools.registry as reg
 
     def _raises(name, args, *, installation_id):

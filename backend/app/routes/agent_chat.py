@@ -80,10 +80,17 @@ def chat_with_tools(
     company: CompanyContext = Depends(require_company),
 ):
     """Run the tool-use loop until the model returns end_turn or we hit
-    MAX_ITERATIONS. Tenancy: gated on require_company; the caller must
-    provide their installation_id (the frontend gets it from GET
-    /v1/connectors/github/installations).
+    MAX_ITERATIONS. Tenancy: gated on require_company AND on
+    require_installation_for_company so a stolen installation_id from
+    another tenant cannot be used to drive the App-token tool path.
     """
+    from app.connectors import github_app
+
+    # Verify the caller owns the install BEFORE spending any LLM tokens
+    # or minting a GitHub App installation token.
+    github_app.require_installation_for_company(
+        company.company_id, body.installation_id
+    )
     client = get_llm_client()
     tools = registry.list_tools()
 

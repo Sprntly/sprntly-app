@@ -888,8 +888,19 @@ def github_disconnect(
 
 
 @router.get("/github/installations")
-def github_list_installations(_session: dict = Depends(require_session)):
-    return {"installations": db.list_github_installations()}
+def github_list_installations(
+    company: CompanyContext = Depends(require_company),
+):
+    """Tenant-isolated installation list. Returns ONLY the installs whose
+    GitHub `account_login` matches this company's stored GitHub connection
+    `account_label`. Empty list when the company has no GitHub
+    connection — see `github_app.require_installation_for_company` for the
+    full failure matrix and the `[security]` doc block above."""
+    return {
+        "installations": github_app.list_installations_for_company(
+            company.company_id
+        )
+    }
 
 
 # ─────────── Per-installation repository management ───────────
@@ -925,7 +936,9 @@ def github_list_install_repos(
     company: CompanyContext = Depends(require_company),
 ):
     """List repositories accessible to this installation, using the
-    connected user's OAuth token (per GitHub's auth rules)."""
+    connected user's OAuth token (per GitHub's auth rules). Guarded so
+    a tenant cannot list another tenant's installation's repos."""
+    github_app.require_installation_for_company(company.company_id, installation_id)
     r = requests.get(
         _github_user_install_url(installation_id),
         headers=_github_user_token_headers(company.company_id),
@@ -962,7 +975,9 @@ def github_add_install_repo(
     company: CompanyContext = Depends(require_company),
 ):
     """Add a repo to this installation. 422 if the install is in
-    'all repositories' mode (per-repo control disallowed there)."""
+    'all repositories' mode (per-repo control disallowed there).
+    Guarded so a tenant cannot mutate another tenant's installation."""
+    github_app.require_installation_for_company(company.company_id, installation_id)
     r = requests.put(
         _github_user_install_url(installation_id, repository_id),
         headers=_github_user_token_headers(company.company_id),
@@ -988,7 +1003,9 @@ def github_remove_install_repo(
     repository_id: int,
     company: CompanyContext = Depends(require_company),
 ):
-    """Remove a repo from this installation."""
+    """Remove a repo from this installation. Guarded so a tenant
+    cannot mutate another tenant's installation."""
+    github_app.require_installation_for_company(company.company_id, installation_id)
     r = requests.delete(
         _github_user_install_url(installation_id, repository_id),
         headers=_github_user_token_headers(company.company_id),
@@ -1002,9 +1019,29 @@ def github_remove_install_repo(
 @router.get("/github/pull-requests")
 def github_list_open_prs(
     installation_id: int | None = None,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
-    return {"pull_requests": db.list_open_pull_requests(installation_id)}
+    """Tenant-isolated PR list.
+
+    - With installation_id → guard that install belongs to this company
+      (403 otherwise), then return its PRs.
+    - Without installation_id → return PRs only for installs owned by
+      this company. Empty when no GitHub connection — never a global dump.
+    """
+    if installation_id is not None:
+        github_app.require_installation_for_company(
+            company.company_id, installation_id
+        )
+        return {
+            "pull_requests": db.list_open_pull_requests(installation_id)
+        }
+    owned = github_app.list_installations_for_company(company.company_id)
+    install_ids = [i["installation_id"] for i in owned]
+    return {
+        "pull_requests": db.list_open_pull_requests_for_installations(
+            install_ids
+        )
+    }
 
 
 def _github_access_token(company_id: str) -> str:
@@ -1042,14 +1079,29 @@ class GitHubSyncCorpusIn(BaseModel):
 @router.post("/github/sync-to-corpus")
 def github_sync_to_corpus(
     body: GitHubSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Sync tracked GitHub PRs into the corpus as a markdown file.
+
+    Tenant-isolated:
+      - With installation_id → guard ownership (403 otherwise), sync that
+        install's PRs.
+      - Without installation_id → sync PRs only for installs owned by
+        this company. Empty markdown when no GitHub connection — never
+        a global PR dump.
 
     Reads open PRs from the github_pull_requests table and writes
     a summary into DATA_DIR/{dataset}/github_active_prs.md.
     """
-    prs = db.list_open_pull_requests(body.installation_id)
+    if body.installation_id is not None:
+        github_app.require_installation_for_company(
+            company.company_id, body.installation_id
+        )
+        prs = db.list_open_pull_requests(body.installation_id)
+    else:
+        owned = github_app.list_installations_for_company(company.company_id)
+        install_ids = [i["installation_id"] for i in owned]
+        prs = db.list_open_pull_requests_for_installations(install_ids)
 
     lines: list[str] = ["# GitHub Active Pull Requests\n"]
     if not prs:
@@ -1096,51 +1148,15 @@ def github_sync_to_corpus(
 # ─────────────────────── Connector sync status ───────────────────────
 
 
-@router.get("/sync-status")
-def connector_sync_status(_session: dict = Depends(require_session)):
-    """Summary of all connector sync states + corpus stats.
+# /sync-status removed in the GitHub installation tenant-isolation
+# hotfix (PR #215): the endpoint iterated `db.list_connections()` with
+# no company filter — same class of cross-tenant leak as the GitHub
+# installation list. It had no consumer in the frontend and the call
+# was broken-on-call anyway (db.list_connections() requires
+# company_id). See test_github_installation_isolation.py
+# ::test_sync_status_returns_404 for the regression guard.
 
-    Returns per-connector status and per-dataset corpus size.
-    Used for demo dashboards to verify data capture.
-    """
-    connections = db.list_connections()
-    connectors_out = []
-    for row in connections:
-        config = {}
-        if row.get("config_json"):
-            try:
-                config = json.loads(row["config_json"])
-            except (TypeError, ValueError):
-                pass
-        connectors_out.append({
-            "provider": row["provider"],
-            "status": row["status"],
-            "account_label": row.get("account_label") or row.get("google_email"),
-            "last_sync_at": row.get("last_sync_at"),
-            "last_sync_error": row.get("last_sync_error"),
-            "dataset": config.get("dataset"),
-        })
 
-    # Corpus stats per dataset
-    datasets_out = []
-    for ds in db.list_datasets():
-        slug = ds["slug"]
-        base = settings.data_path / slug
-        md_count = 0
-        total_chars = 0
-        if base.exists():
-            for p in base.glob("*.md"):
-                if not p.name.startswith("_"):
-                    md_count += 1
-                    total_chars += p.stat().st_size
-        datasets_out.append({
-            "slug": slug,
-            "display_name": ds.get("display_name", slug),
-            "md_file_count": md_count,
-            "total_chars": total_chars,
-        })
-
-    return {"connectors": connectors_out, "datasets": datasets_out}
 # ─────────────────────── ClickUp ───────────────────────
 #
 # Commit H. OAuth-only — no data sync into the corpus yet. Follow-on

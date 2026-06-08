@@ -476,3 +476,75 @@ def fetch_repo_meta(access_token: str, repo_full_name: str) -> dict[str, Any]:
         "language": r.get("language"),
         "private": bool(r.get("private")),
     }
+
+
+# ─────────────────────── tenant-isolation guard ───────────────────────
+#
+# Conservative binding for an installation_id to a Sprntly company. Until
+# github_installations gains a real `company_id` column (separate
+# follow-up migration), the only signal we have linking an install to a
+# tenant is that the install's `account_login` matches the GitHub login
+# captured at OAuth time and stored as `connections.account_label`
+# (formatted as "@<login>").
+#
+# Fail-closed:
+#   - No GitHub connection for this company             → 403
+#   - account_label can't be normalized to a login      → 403
+#   - Installation row not found                        → 403 (not 404 —
+#     same response shape regardless of cause, so the caller can't probe
+#     for which installation_ids exist)
+#   - account_login mismatch (incl. org installs whose
+#     account_login is an org name, not the user login) → 403
+#
+# Org installs intentionally fail closed under this binding: the proper
+# fix is the schema migration adding company_id to github_installations.
+
+
+def _normalize_github_login(account_label: str | None) -> str:
+    """Strip an optional leading '@' and lower-case for case-insensitive
+    comparison. Returns '' for None/empty so callers can simply check
+    truthiness."""
+    if not account_label:
+        return ""
+    return account_label.lstrip("@").strip().lower()
+
+
+def require_installation_for_company(
+    company_id: str, installation_id: int
+) -> None:
+    """Raise HTTPException(403) unless `installation_id` is owned by the
+    given company under the conservative login-match binding.
+
+    See the module-level note above for the full failure matrix.
+    """
+    from app import db  # local import to avoid circular dep at import time
+
+    row = db.get_connection(company_id, GITHUB_PROVIDER)
+    if not row:
+        raise HTTPException(403, "GitHub installation not accessible")
+    company_login = _normalize_github_login(row.get("account_label"))
+    if not company_login:
+        raise HTTPException(403, "GitHub installation not accessible")
+
+    install = db.get_github_installation(installation_id)
+    if not install:
+        raise HTTPException(403, "GitHub installation not accessible")
+    install_login = _normalize_github_login(install.get("account_login"))
+    if install_login != company_login:
+        raise HTTPException(403, "GitHub installation not accessible")
+
+
+def list_installations_for_company(company_id: str) -> list[dict]:
+    """List installations whose account_login matches the company's
+    stored GitHub connection. Empty when the company has no GitHub
+    connection (LIST endpoints must be empty, not 403, on a missing
+    connection — this is the only place this distinction lives in code)."""
+    from app import db
+
+    row = db.get_connection(company_id, GITHUB_PROVIDER)
+    if not row:
+        return []
+    company_login = _normalize_github_login(row.get("account_label"))
+    if not company_login:
+        return []
+    return db.list_github_installations_for_account(company_login)

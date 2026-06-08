@@ -441,37 +441,70 @@ def test_webhook_unknown_event_returns_ok_unhandled(client):
 # ─────────────────────── list endpoints ───────────────────────
 
 
-def test_list_installations_endpoint(client):
+def test_list_installations_endpoint(github_app_env, monkeypatch):
+    """Webhook → list end-to-end. The list endpoint is now tenant-isolated
+    (security hotfix), so the test seeds a company with a github
+    connection labelled @octocat to match the webhook payload's
+    account_login."""
+    from tests._company_helpers import company_client, seed_connection
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        provider="github",
+        token_blob={"access_token": "tok"},
+        label="@octocat",
+    )
     body = _install_payload("created")
-    client.post(
+    ctx.client.post(
         "/v1/connectors/github/webhook",
         content=body,
         headers={"X-GitHub-Event": "installation", "X-Hub-Signature-256": _sign(body)},
     )
-    r = client.get("/v1/connectors/github/installations")
+    r = ctx.client.get("/v1/connectors/github/installations")
     assert r.status_code == 200
     out = r.json()["installations"]
     assert len(out) == 1
     assert out[0]["account_login"] == "octocat"
 
 
-def test_list_open_prs_endpoint_filters_by_installation(client):
-    # Install 99 has one open PR; install 100 has none.
+def test_list_open_prs_endpoint_filters_by_installation(github_app_env, monkeypatch):
+    """Install 99 owned by @octocat has one open PR; install 100 (not
+    even seeded, would be cross-tenant) returns 403 under the new guard.
+    Was 200/empty under the global pre-hotfix shape."""
+    from tests._company_helpers import company_client, seed_connection
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        provider="github",
+        token_blob={"access_token": "tok"},
+        label="@octocat",
+    )
     body = _install_payload("created", install_id=99)
-    client.post("/v1/connectors/github/webhook", content=body,
-                headers={"X-GitHub-Event": "installation", "X-Hub-Signature-256": _sign(body)})
+    ctx.client.post(
+        "/v1/connectors/github/webhook", content=body,
+        headers={"X-GitHub-Event": "installation", "X-Hub-Signature-256": _sign(body)},
+    )
 
     pr = _pr_payload("opened")
-    client.post("/v1/connectors/github/webhook", content=pr,
-                headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": _sign(pr)})
+    ctx.client.post(
+        "/v1/connectors/github/webhook", content=pr,
+        headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": _sign(pr)},
+    )
 
-    r = client.get("/v1/connectors/github/pull-requests", params={"installation_id": 99})
+    r = ctx.client.get(
+        "/v1/connectors/github/pull-requests", params={"installation_id": 99}
+    )
     assert r.status_code == 200
     assert len(r.json()["pull_requests"]) == 1
 
-    r2 = client.get("/v1/connectors/github/pull-requests", params={"installation_id": 100})
-    assert r2.status_code == 200
-    assert r2.json()["pull_requests"] == []
+    # Install 100 is not owned by this company → 403, not 200/empty.
+    # Don't leak whether the install exists.
+    r2 = ctx.client.get(
+        "/v1/connectors/github/pull-requests", params={"installation_id": 100}
+    )
+    assert r2.status_code == 403
 
 
 def test_list_endpoints_require_auth(github_app_env):

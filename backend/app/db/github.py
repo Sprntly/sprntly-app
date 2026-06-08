@@ -91,6 +91,26 @@ def list_github_installations() -> list[dict]:
     return [_legacy_install(r) for r in (resp.data or [])]
 
 
+def list_github_installations_for_account(account_login: str) -> list[dict]:
+    """List installations whose account_login matches (case-insensitive).
+    Used by tenant-isolation paths — see
+    `app.connectors.github_app.require_installation_for_company`.
+
+    Case-insensitive comparison happens in Python (the table is small —
+    one row per Sprntly App install across all tenants — and we already
+    pay the round-trip for the connection lookup; adding a CITEXT
+    column / case-insensitive index would need a schema migration this
+    hotfix avoids)."""
+    needle = (account_login or "").lower()
+    if not needle:
+        return []
+    return [
+        row
+        for row in list_github_installations()
+        if (row.get("account_login") or "").lower() == needle
+    ]
+
+
 def delete_github_installation(installation_id: int) -> bool:
     c = require_client()
     # Drop tracked PRs first — they're scoped to this install.
@@ -156,6 +176,30 @@ def list_open_pull_requests(installation_id: int | None = None) -> list[dict]:
     resp = q.order("pr_updated_at", desc=True).execute()
     rows = resp.data or []
     # is_draft: Supabase bool -> back-compat int.
+    for r in rows:
+        if isinstance(r.get("is_draft"), bool):
+            r["is_draft"] = 1 if r["is_draft"] else 0
+    return rows
+
+
+def list_open_pull_requests_for_installations(
+    installation_ids: list[int],
+) -> list[dict]:
+    """Tenant-isolated PR list: only PRs whose installation_id is in the
+    allow-list. Empty `installation_ids` returns [] without a DB call —
+    the only place 'no installations' must NOT silently mean 'global'."""
+    if not installation_ids:
+        return []
+    c = require_client()
+    resp = (
+        c.table("github_pull_requests")
+        .select("*")
+        .in_("installation_id", installation_ids)
+        .eq("state", "open")
+        .order("pr_updated_at", desc=True)
+        .execute()
+    )
+    rows = resp.data or []
     for r in rows:
         if isinstance(r.get("is_draft"), bool):
             r["is_draft"] = 1 if r["is_draft"] else 0

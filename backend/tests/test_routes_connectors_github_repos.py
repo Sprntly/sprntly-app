@@ -53,14 +53,35 @@ def github_env(isolated_settings, monkeypatch):
     yield
 
 
-def _seed_github_oauth(*, company_id: str) -> None:
-    """Seed a github connection row with an encrypted user OAuth token."""
+def _seed_install(*, installation_id: int, account_login: str = "octocat") -> None:
+    """Seed a github_installations row so the tenant-isolation guard
+    (require_installation_for_company) treats `installation_id` as owned
+    by a company whose stored github account_label matches `account_login`."""
+    from app.db.client import require_client
+
+    require_client().table("github_installations").upsert(
+        {
+            "installation_id": installation_id,
+            "account_id": installation_id * 10,
+            "account_login": account_login,
+            "account_type": "User",
+            "repository_selection": "selected",
+        }
+    ).execute()
+
+
+def _seed_github_oauth(*, company_id: str, installation_id: int = 12345) -> None:
+    """Seed a github connection row with an encrypted user OAuth token,
+    PLUS a github_installations row tying that installation_id to the same
+    account_login the connection's account_label points at. Both are
+    required for the tenant-isolation guard to admit the request."""
     seed_connection(
         company_id=company_id,
         provider="github",
         token_blob={"access_token": "gho_USER_TOKEN", "token_type": "bearer"},
         label="@octocat",
     )
+    _seed_install(installation_id=installation_id)
 
 
 # ─────────────────────── GET repositories ───────────────────────
@@ -110,7 +131,7 @@ def test_list_install_repos_passes_user_oauth_token(github_env, monkeypatch):
     """Per GitHub docs, /user/installations/{id}/repositories needs the
     user's OAuth token (not the App JWT). Confirm we send the right one."""
     ctx = company_client(monkeypatch)
-    _seed_github_oauth(company_id=ctx.company_id)
+    _seed_github_oauth(company_id=ctx.company_id, installation_id=99)
 
     captured = {}
 
@@ -132,11 +153,14 @@ def test_list_install_repos_passes_user_oauth_token(github_env, monkeypatch):
 
 def test_list_install_repos_requires_github_connection(github_env, monkeypatch):
     ctx = company_client(monkeypatch)
-    # NO connection seeded — should 404.
+    # NO connection seeded — the tenant-isolation guard returns 403 for
+    # *all* unauthorized cases (no connection / no install / wrong owner)
+    # so the response shape doesn't reveal which one. Was 404 before the
+    # security hotfix when the only check was for a missing OAuth token.
     r = ctx.client.get(
         "/v1/connectors/github/installations/12345/repositories"
     )
-    assert r.status_code == 404
+    assert r.status_code == 403
 
 
 # ─────────────────────── PUT (add repo to installation) ───────────────────────
