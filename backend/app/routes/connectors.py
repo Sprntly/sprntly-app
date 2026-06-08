@@ -1567,6 +1567,7 @@ _WEBHOOK_HANDLED_EVENTS = {
     "installation",
     "installation_repositories",
     "pull_request",
+    "push",
     "ping",
 }
 
@@ -1641,6 +1642,17 @@ def _handle_installation_repositories_event(payload: dict) -> None:
     )
 
 
+def _handle_push_event(payload: dict) -> None:
+    """A push to a connected repo may have changed its design tokens, so mark
+    any cached design system extracted from that repo stale. The next design
+    generation then re-extracts instead of serving a now-outdated cached row."""
+    repo = payload.get("repository") or {}
+    repo_full_name = str(repo.get("full_name") or "").strip()
+    if not repo_full_name:
+        return
+    db.mark_github_design_systems_stale(repo_full_name)
+
+
 def _handle_pull_request_event(payload: dict) -> None:
     install = payload.get("installation") or {}
     install_id = install.get("id")
@@ -1692,6 +1704,8 @@ async def github_webhook(
         _handle_installation_repositories_event(payload)
     elif event == "pull_request":
         _handle_pull_request_event(payload)
+    elif event == "push":
+        _handle_push_event(payload)
     else:
         logger.info("GitHub webhook: ignoring event %s delivery=%s", event, x_github_delivery)
         return {"ok": True, "event": event, "handled": False}

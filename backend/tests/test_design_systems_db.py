@@ -221,3 +221,75 @@ def test_lookup_is_scoped_to_company(design_systems_db):
     # Company A must not see company B's cached system under the same provider/ref.
     assert design_systems_db.lookup_design_system(co_a, "figma", "shared-key") is None
     assert design_systems_db.lookup_design_system(co_b, "figma", "shared-key") is not None
+
+
+# ─── mark_github_design_systems_stale ────────────────────────────────────
+
+
+def _seed_github_row(design_systems_db, company_id: str, source_ref: str) -> str:
+    """Seed a github-provider row and return its id."""
+    row = design_systems_db.upsert_design_system(
+        company_id=company_id,
+        source_category="codebase",
+        source_provider="github",
+        source_ref=source_ref,
+        source_version="sha-abc",
+        data={},
+        has_explicit_system=False,
+        confidence="low",
+        extracted_at=None,
+    )
+    return row["id"]
+
+
+def test_mark_codebase_github_design_systems_stale_matches_repo_and_branch(design_systems_db):
+    """The helper marks bare 'owner/repo' rows AND 'owner/repo@branch' rows stale
+    while leaving rows for a different repo and rows from a non-github provider
+    untouched. Returns the count of rows that were marked."""
+    from app.db.design_systems import mark_github_design_systems_stale
+
+    company_id = _seed_company("mark-stale-co")
+
+    # Bare repo match (no branch qualifier).
+    _seed_github_row(design_systems_db, company_id, "owner/repo")
+    # Branch-qualified variant of the same repo.
+    _seed_github_row(design_systems_db, company_id, "owner/repo@main")
+    # A different repo — must NOT be marked stale.
+    _seed_github_row(design_systems_db, company_id, "owner/other")
+    # A non-github provider with the same ref string — must NOT be affected.
+    design_systems_db.upsert_design_system(
+        company_id=company_id,
+        source_category="design_tool",
+        source_provider="figma",
+        source_ref="owner/repo",
+        source_version=None,
+        data={},
+        has_explicit_system=None,
+        confidence=None,
+        extracted_at=None,
+    )
+
+    count = mark_github_design_systems_stale("owner/repo")
+    assert count == 2
+
+    # The two matched rows must now carry status='stale'.
+    bare = design_systems_db.lookup_design_system(company_id, "github", "owner/repo")
+    branch = design_systems_db.lookup_design_system(company_id, "github", "owner/repo@main")
+    assert bare["status"] == "stale"
+    assert branch["status"] == "stale"
+
+    # The unrelated repo stays active.
+    other = design_systems_db.lookup_design_system(company_id, "github", "owner/other")
+    assert other["status"] == "active"
+
+    # The non-github row is unaffected.
+    figma_row = design_systems_db.lookup_design_system(company_id, "figma", "owner/repo")
+    assert figma_row["status"] == "active"
+
+
+def test_mark_codebase_github_design_systems_stale_empty_name_noops(design_systems_db):
+    """Calling the helper with an empty repo name returns 0 and touches nothing."""
+    from app.db.design_systems import mark_github_design_systems_stale
+
+    assert mark_github_design_systems_stale("") == 0
+    assert mark_github_design_systems_stale("   ") == 0

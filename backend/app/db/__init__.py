@@ -123,6 +123,8 @@ from app.db.metric_points import (
     upsert_metric_point,
 )
 
+from app.db.design_systems import mark_github_design_systems_stale
+
 # GitHub App (webhook-driven)
 from app.db.github import (
     delete_github_installation,
@@ -196,6 +198,8 @@ __all__ = [
     "distinct_metrics",
     "list_metric_points",
     "upsert_metric_point",
+    # design systems cache
+    "mark_github_design_systems_stale",
     # github (webhook-driven)
     "delete_github_installation",
     "get_github_installation",

@@ -501,8 +501,12 @@ def _resolve_design_system(
         cached = lookup_design_system(company_id, provider, source_ref)
         if cached is not None:
             stored = cached.get("source_version")
-            if current is not None and current != stored:
-                # Source has changed — attempt a fresh extraction.
+            cache_status = cached.get("status")
+            version_changed = current is not None and current != stored
+            marked_stale = bool(cache_status) and cache_status != "active"
+            if version_changed or marked_stale:
+                # Source changed, or the row was proactively marked stale (e.g. by the
+                # GitHub push webhook) — attempt a fresh extraction.
                 try:
                     raw = raw_signals_factory()
                 except Exception:
@@ -558,14 +562,17 @@ def _design_source_for_generation(
     figma_access_token: str | None,
     website_url: str | None,
     website_sample: dict | None,
+    github_repo: str | None = None,
+    github_installation_id: int | None = None,
 ):
     """Pick the design source for this generation and return
     ``(provider, source_ref, raw_signals_factory, version_factory)`` for the
     cache-with-staleness-check flow.
 
     Figma wins when a file key AND an access token are both available (a file we
-    cannot read is not a usable source); otherwise a website URL is the source.
-    When neither is present, returns ``(None, None, None, None)`` so the caller
+    cannot read is not a usable source); otherwise a website URL is the source;
+    otherwise an installed GitHub repo can become the future codebase source.
+    When none is present, returns ``(None, None, None, None)`` so the caller
     leaves the virtual filesystem un-seeded.
 
     The raw factory is SYNCHRONOUS and is only invoked on a cache miss (or when
@@ -608,6 +615,21 @@ def _design_source_for_generation(
             return WebExtractor().current_version(website_url)
 
         return "web", website_url, _web_raw, _web_version
+
+    if github_repo and github_installation_id:
+        def _github_raw():
+            from app.design_agent.design_system.adapters import GithubExtractor
+            return GithubExtractor(
+                installation_id=github_installation_id
+            ).extract_raw_signals(github_repo)
+
+        def _github_version():
+            from app.design_agent.design_system.adapters import GithubExtractor
+            return GithubExtractor(
+                installation_id=github_installation_id
+            ).current_version(github_repo)
+
+        return "github", github_repo, _github_raw, _github_version
 
     return None, None, None, None
 
@@ -1054,6 +1076,7 @@ async def generate_prototype(
     figma_node_id: str | None = None,
     scenario: str = "A",
     github_repo: str | None = None,
+    github_installation_id: int | None = None,
     website_url: str | None = None,
     website_sample: dict | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
@@ -1090,6 +1113,8 @@ async def generate_prototype(
         figma_access_token=figma_access_token,
         website_url=website_url,
         website_sample=website_sample,
+        github_repo=github_repo,
+        github_installation_id=github_installation_id,
     )
     design_system = await asyncio.to_thread(
         _resolve_design_system,

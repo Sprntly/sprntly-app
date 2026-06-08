@@ -51,7 +51,7 @@ class DesignSystemExtractor(Protocol):
     category: str
     provider: str
 
-    def current_version(self, ref: str) -> str:
+    def current_version(self, ref: str) -> str | None:
         """Return a cheap version marker for `ref` (last-modified time, commit
         SHA, ETag, etc.) used to detect when a cached design system is stale."""
         ...
