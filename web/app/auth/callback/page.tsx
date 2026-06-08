@@ -3,6 +3,9 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { getSupabase, isSupabaseConfigured, postLoginPath } from "../../lib/supabase/client"
+import { isRecoveryFlow } from "../../lib/authRecovery"
+
+const RESET_PASSWORD_PATH = "/reset-password"
 
 export default function AuthCallbackPage() {
   const router = useRouter()
@@ -18,6 +21,13 @@ export default function AuthCallbackPage() {
     let subscription: { unsubscribe: () => void } | null = null
     let timeoutId: ReturnType<typeof setTimeout> | null = null
     let cancelled = false
+    // Capture the recovery flag from the URL once — supabase strips the
+    // hash after detectSessionInUrl runs, so we can't re-read it later.
+    const recovery = isRecoveryFlow(window.location.href)
+
+    async function nextPath(): Promise<string> {
+      return recovery ? RESET_PASSWORD_PATH : await postLoginPath()
+    }
 
     async function finish() {
       const params = new URLSearchParams(window.location.search)
@@ -35,13 +45,20 @@ export default function AuthCallbackPage() {
         data: { session },
       } = await supabase.auth.getSession()
       if (session && !cancelled) {
-        router.replace(await postLoginPath())
+        router.replace(await nextPath())
         return
       }
 
-      const { data } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+      const { data } = supabase.auth.onAuthStateChange(async (event, nextSession) => {
+        // Supabase fires PASSWORD_RECOVERY when the recovery session is
+        // established — treat it as recovery even if the URL didn't
+        // carry type=recovery (defensive across SDK versions).
+        if (event === "PASSWORD_RECOVERY" && !cancelled) {
+          router.replace(RESET_PASSWORD_PATH)
+          return
+        }
         if (nextSession && !cancelled) {
-          router.replace(await postLoginPath())
+          router.replace(await nextPath())
         }
       })
       subscription = data.subscription
@@ -52,7 +69,7 @@ export default function AuthCallbackPage() {
           data: { session: late },
         } = await supabase.auth.getSession()
         if (late) {
-          router.replace(await postLoginPath())
+          router.replace(await nextPath())
         } else {
           setMessage("Sign-in failed. Redirecting…")
           router.replace("/sign-in")

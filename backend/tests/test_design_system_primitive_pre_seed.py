@@ -1,6 +1,6 @@
 """Tests for the primitive pre-seed wiring in generate_prototype.
 
-Verifies that the C3 primitive seeding is correctly merged into virtual_fs
+Verifies that the primitive seeding is correctly merged into virtual_fs
 for each source path (figma/website, github, low-confidence) and that a
 failure in the primitive factory does not propagate or corrupt the CSS seed.
 

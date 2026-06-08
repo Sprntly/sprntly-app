@@ -399,6 +399,16 @@ export type GitHubInstallation = {
   suspended?: boolean
 }
 
+export type GitHubInstallRepo = {
+  id: number
+  name: string
+  full_name: string
+  private: boolean | null
+  html_url: string
+  default_branch: string | null
+  description: string | null
+}
+
 export type GoogleDriveSyncResult = {
   dataset: string
   folder_id: string
@@ -479,6 +489,26 @@ export const connectorsApi = {
   listGithubInstallations: () =>
     api.get<{ installations: GitHubInstallation[] }>(
       `/v1/connectors/github/installations`,
+    ),
+  listGithubInstallRepos: (installationId: number) =>
+    api.get<{
+      installation_id: number
+      total: number
+      repositories: GitHubInstallRepo[]
+    }>(
+      `/v1/connectors/github/installations/${installationId}/repositories`,
+    ),
+  addGithubInstallRepo: (installationId: number, repositoryId: number) =>
+    api.put<{ added: true; installation_id: number; repository_id: number }>(
+      `/v1/connectors/github/installations/${installationId}/repositories/${repositoryId}`,
+    ),
+  removeGithubInstallRepo: (installationId: number, repositoryId: number) =>
+    api.delete<{
+      removed: true
+      installation_id: number
+      repository_id: number
+    }>(
+      `/v1/connectors/github/installations/${installationId}/repositories/${repositoryId}`,
     ),
 
   // ---- ClickUp -------------------------------------------------------------

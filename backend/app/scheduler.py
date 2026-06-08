@@ -20,8 +20,47 @@ logger = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
 
 
+async def _run_synthesis_for_all_companies() -> None:
+    """KG-synthesis cycle: seed-if-empty + run_synthesis per company.
+
+    Iterates every tenant and runs the SAME engine the UI write endpoints use
+    (app.synthesis_brief.generate_brief_for). Error-isolated per company — one
+    company raising (unknown slug, empty KG, LLM/gateway hiccup) is logged and
+    skipped so the rest of the cycle still runs. run_synthesis save_brief()s
+    each result into the `briefs` table the UI reads.
+    """
+    from app.brief_runner import warm_synthesis_drilldowns
+    from app.db.companies import list_companies
+    from app.synthesis_brief import generate_brief_for
+
+    try:
+        companies = list_companies()
+    except Exception as exc:
+        logger.error("Scheduler: failed to list companies: %s", exc)
+        return
+
+    if not companies:
+        logger.info("Scheduler: no companies found, skipping synthesis cycle")
+        return
+
+    logger.info("Scheduler: starting synthesis cycle for %d companies", len(companies))
+
+    for company in companies:
+        slug = company.get("slug") or company.get("id")
+        try:
+            # generate_brief_for is blocking (LLM + Supabase); keep it off the
+            # event loop so one slow company can't stall the scheduler thread.
+            await asyncio.to_thread(generate_brief_for, slug)
+            logger.info("Scheduler: synthesis brief for %s → ok", slug)
+            # Parity with the legacy path: warm evidence/PRD/Ask drill-downs so
+            # the first user click is instant. Error-isolated in the helper.
+            warm_synthesis_drilldowns(slug)
+        except Exception as exc:  # noqa: BLE001 — per-company isolation
+            logger.error("Scheduler: synthesis failed for %s: %s", slug, exc)
+
+
 async def _run_pipeline_for_all_datasets() -> None:
-    """Run the full pipeline for every registered dataset."""
+    """Run the legacy full pipeline for every registered dataset."""
     from app import db
     from app.pipeline import run_full_pipeline
 
@@ -46,6 +85,18 @@ async def _run_pipeline_for_all_datasets() -> None:
             logger.error("Scheduler: pipeline failed for %s: %s", slug, exc)
 
 
+async def _run_scheduled_cycle() -> None:
+    """Dispatch the scheduled cycle to the engine selected by BRIEF_ENGINE.
+
+    "synthesis" (default) → KG seed + run_synthesis per company.
+    "legacy"              → the placeholder full pipeline per dataset.
+    """
+    if settings.brief_engine == "synthesis":
+        await _run_synthesis_for_all_companies()
+    else:
+        await _run_pipeline_for_all_datasets()
+
+
 def start_scheduler() -> None:
     """Initialize and start the APScheduler. Call from FastAPI lifespan."""
     global _scheduler
@@ -55,18 +106,24 @@ def start_scheduler() -> None:
         return
 
     interval_hours = getattr(settings, "pipeline_interval_hours", 6)
+    engine = settings.brief_engine
+    job_name = (
+        f"KG synthesis cycle (every {interval_hours}h)"
+        if engine == "synthesis"
+        else f"Full pipeline cycle (every {interval_hours}h)"
+    )
 
     _scheduler = AsyncIOScheduler()
     _scheduler.add_job(
-        _run_pipeline_for_all_datasets,
+        _run_scheduled_cycle,
         trigger=IntervalTrigger(hours=interval_hours),
         id="pipeline_full_cycle",
-        name=f"Full pipeline cycle (every {interval_hours}h)",
+        name=job_name,
         replace_existing=True,
     )
     _scheduler.start()
     logger.info(
-        "Scheduler started: pipeline runs every %d hours", interval_hours,
+        "Scheduler started: %s engine runs every %d hours", engine, interval_hours,
     )
 
 

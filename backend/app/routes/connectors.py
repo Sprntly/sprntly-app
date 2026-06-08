@@ -34,6 +34,8 @@ import logging
 from typing import Annotated
 from urllib.parse import urlencode
 
+import requests
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -417,7 +419,7 @@ def google_drive_callback(code: str, state: str):
         company_id=company_id,
         provider=google_oauth.GOOGLE_DRIVE_PROVIDER,
         token_encrypted=token_encrypted,
-        scopes=google_oauth.DRIVE_READONLY_SCOPE,
+        scopes=" ".join(google_oauth.DRIVE_SCOPES),
         google_email=email,
         config_json=json.dumps(config),
     )
@@ -767,23 +769,41 @@ def github_callback(
     installation_id: int | None = None,
 ):
     # GitHub re-uses this URL for BOTH the post-OAuth redirect AND the
-    # post-install redirect (when 'Request OAuth during install' is on,
-    # or when the App's Setup URL is left blank). The post-install
-    # redirect has `setup_action` + `installation_id` but no `state`.
-    # If we hit this branch, OAuth has either already completed in a
-    # prior round or wasn't required — just acknowledge and bounce
-    # back to the connectors page with the setup_action carried in the
-    # query so the UI can show 'approval pending' vs 'install complete'.
-    if state is None or not code:
+    # post-install redirect. Two trigger shapes:
+    #   1. Post-OAuth:     ?code=X&state=Y                  (handled below)
+    #   2. Post-install:   ?setup_action=install&installation_id=N[&state=Y]
+    #                      OR ?code=X&setup_action=request
+    # When the install URL we redirected to includes our `state` JWT
+    # (see the install-URL build below), GitHub preserves it through to
+    # the Setup URL — so `return_to` (e.g. /onboarding/6) survives the
+    # round-trip and we can bounce the user back to their original page
+    # instead of always defaulting to /settings.
+    if setup_action or state is None or not code:
         base = (settings.frontend_url or "http://localhost:3000").rstrip("/")
-        params = {"section": "connectors", "connected": "github"}
+        return_to: str | None = None
+        if state:
+            try:
+                payload = github_app.verify_oauth_state(state)
+                rt = payload.get("return_to")
+                if rt and _is_safe_return_to(rt):
+                    return_to = rt
+            except HTTPException:
+                # state expired or invalid — fall back to /settings
+                return_to = None
+
+        params = {"connected": "github"}
         if setup_action:
             params["setup_action"] = setup_action
         if installation_id is not None:
             params["installation_id"] = str(installation_id)
-        return RedirectResponse(
-            f"{base}/settings?{urlencode(params)}", status_code=307
-        )
+
+        if return_to:
+            sep = "&" if "?" in return_to else "?"
+            target = f"{base}{return_to}{sep}{urlencode(params)}"
+        else:
+            params["section"] = "connectors"
+            target = f"{base}/settings?{urlencode(params)}"
+        return RedirectResponse(target, status_code=307)
 
     payload = github_app.verify_oauth_state(state)
     company_id = payload["company_id"]
@@ -823,10 +843,17 @@ def github_callback(
     # App install page instead of bouncing them back to /settings. The
     # webhook fires on completion and creates the github_installations
     # row; the user lands back at the App's Setup URL (configured in
-    # the App settings on GitHub).
+    # the App settings on GitHub) — which should point at this same
+    # /github/callback so the original `state` (carrying return_to) is
+    # threaded all the way through to the post-install branch above.
     if login and not _has_github_install_for(login) and settings.github_app_slug:
+        # Include the original state JWT on the install URL so GitHub
+        # preserves it through to the Setup URL redirect. That lets us
+        # bounce the user back to wherever they started (e.g.
+        # /onboarding/6) instead of always /settings.
         install_url = (
             f"https://github.com/apps/{settings.github_app_slug}/installations/new"
+            f"?{urlencode({'state': state})}"
         )
         return RedirectResponse(install_url, status_code=307)
 
@@ -863,6 +890,113 @@ def github_disconnect(
 @router.get("/github/installations")
 def github_list_installations(_session: dict = Depends(require_session)):
     return {"installations": db.list_github_installations()}
+
+
+# ─────────── Per-installation repository management ───────────
+#
+# These wrap GitHub's `/user/installations/{id}/repositories` family,
+# which is gated on the USER's OAuth token (not the App JWT). The user
+# can add/remove repos from a "selected repositories" install. For an
+# "all repositories" install GitHub returns 422 and the UI should
+# disable the per-repo toggles (deep-link to GitHub settings instead).
+
+
+def _github_user_install_url(installation_id: int, repository_id: int | None = None) -> str:
+    base = (
+        f"https://api.github.com/user/installations/{installation_id}/repositories"
+    )
+    if repository_id is not None:
+        return f"{base}/{repository_id}"
+    return base
+
+
+def _github_user_token_headers(company_id: str) -> dict[str, str]:
+    """User-OAuth Bearer headers for /user/installations/* endpoints."""
+    return {
+        "Authorization": f"Bearer {_github_access_token(company_id)}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+@router.get("/github/installations/{installation_id}/repositories")
+def github_list_install_repos(
+    installation_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """List repositories accessible to this installation, using the
+    connected user's OAuth token (per GitHub's auth rules)."""
+    r = requests.get(
+        _github_user_install_url(installation_id),
+        headers=_github_user_token_headers(company.company_id),
+        timeout=10,
+    )
+    if not r.ok:
+        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
+    body = r.json() or {}
+    repos = [
+        {
+            "id": x.get("id"),
+            "name": x.get("name"),
+            "full_name": x.get("full_name"),
+            "private": x.get("private"),
+            "html_url": x.get("html_url"),
+            "default_branch": x.get("default_branch"),
+            "description": x.get("description"),
+        }
+        for x in (body.get("repositories") or [])
+    ]
+    return {
+        "installation_id": installation_id,
+        "total": body.get("total_count", len(repos)),
+        "repositories": repos,
+    }
+
+
+@router.put(
+    "/github/installations/{installation_id}/repositories/{repository_id}"
+)
+def github_add_install_repo(
+    installation_id: int,
+    repository_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Add a repo to this installation. 422 if the install is in
+    'all repositories' mode (per-repo control disallowed there)."""
+    r = requests.put(
+        _github_user_install_url(installation_id, repository_id),
+        headers=_github_user_token_headers(company.company_id),
+        timeout=10,
+    )
+    if r.status_code == 422:
+        raise HTTPException(
+            422,
+            "This installation is set to 'All repositories'. "
+            "Switch it to 'Only select repositories' on GitHub to "
+            "manage repos per-app.",
+        )
+    if not r.ok:
+        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
+    return {"added": True, "installation_id": installation_id, "repository_id": repository_id}
+
+
+@router.delete(
+    "/github/installations/{installation_id}/repositories/{repository_id}"
+)
+def github_remove_install_repo(
+    installation_id: int,
+    repository_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Remove a repo from this installation."""
+    r = requests.delete(
+        _github_user_install_url(installation_id, repository_id),
+        headers=_github_user_token_headers(company.company_id),
+        timeout=10,
+    )
+    if not r.ok:
+        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
+    return {"removed": True, "installation_id": installation_id, "repository_id": repository_id}
 
 
 @router.get("/github/pull-requests")

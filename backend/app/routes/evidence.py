@@ -21,12 +21,14 @@ from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import require_session
+from app.config import settings
 from app.db import (
     find_existing_evidence,
     get_brief_by_id,
     get_evidence,
     start_evidence,
 )
+from app.evidence_kg import generate_evidence_kg
 from app.evidence_runner import generate_evidence
 from app.prompts import EVIDENCE_TEMPLATE_VERSION
 
@@ -84,8 +86,18 @@ async def generate(
         template_version=EVIDENCE_TEMPLATE_VERSION,
         variant=_VARIANT,
     )
+    # Engine selection (BRIEF_ENGINE): "synthesis" (default) grounds evidence
+    # in the knowledge graph — the provenance trail (SUPPORTS signals + theme
+    # convergence) behind the insight. generate_evidence_kg itself falls back
+    # to the legacy corpus path when the KG has no backing for the insight, so
+    # this never hard-fails. "legacy" keeps the corpus-only runner.
+    runner = (
+        generate_evidence_kg
+        if settings.brief_engine == "synthesis"
+        else generate_evidence
+    )
     asyncio.create_task(
-        generate_evidence(evidence_id, body.brief_id, body.insight_index)
+        runner(evidence_id, body.brief_id, body.insight_index)
     )
     return {
         "evidence_id": evidence_id,

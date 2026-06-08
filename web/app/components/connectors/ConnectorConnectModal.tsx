@@ -29,6 +29,7 @@ import {
 } from "../../lib/api"
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
+import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
 
@@ -454,6 +455,11 @@ export function ConnectorConnectModal({
           onSaved={onConnected}
         />
       )
+    } else if (providerId === "github") {
+      // Same picker the settings Configure drawer mounts — lets the
+      // user manage which repos the agent can read right inside the
+      // onboarding modal, without bouncing to /settings or github.com.
+      slot = <GithubInstallsSlot onChanged={onConnected} />
     }
   }
 

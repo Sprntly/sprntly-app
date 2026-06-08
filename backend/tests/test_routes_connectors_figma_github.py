@@ -320,6 +320,95 @@ def test_github_callback_post_install_with_installation_id(github_env, monkeypat
     assert "installation_id=12345" in loc
 
 
+def test_github_install_redirect_carries_state_param(github_env, monkeypatch):
+    """When we redirect the user to GitHub's install page, the original
+    state JWT must ride along as `?state=...` so GitHub forwards it to
+    the Setup URL after install — that's how return_to (e.g.
+    /onboarding/6) survives the round-trip."""
+    ctx = company_client(monkeypatch)
+    from app.connectors import github_app
+
+    fake_token = {"access_token": "gho_xxx", "token_type": "bearer"}
+    fake_user = {"login": "newuser-rt", "id": 7, "email": "new@user.dev"}
+
+    # state JWT with return_to baked in
+    original_state = github_app.sign_oauth_state(
+        company_id=ctx.company_id, return_to="/onboarding/6"
+    )
+    with patch("app.routes.connectors.github_app.exchange_code_for_token", return_value=fake_token), \
+         patch("app.routes.connectors.github_app.fetch_authenticated_user", return_value=fake_user):
+        r = ctx.client.get(
+            "/v1/connectors/github/callback",
+            params={"code": "abc", "state": original_state},
+            follow_redirects=False,
+        )
+
+    assert r.status_code == 307
+    loc = r.headers["location"]
+    assert "/installations/new" in loc
+    assert "state=" in loc
+    # The state in the install URL should be the same JWT we minted —
+    # GitHub will preserve it through to Setup URL.
+    from urllib.parse import urlparse, parse_qs
+
+    qs = parse_qs(urlparse(loc).query)
+    assert qs["state"][0] == original_state
+
+
+def test_github_post_install_with_state_returns_to_onboarding(
+    github_env, monkeypatch
+):
+    """Setup URL callback (post-install) with the threaded state JWT
+    bounces the user to return_to (e.g. /onboarding/6) instead of the
+    default /settings. The setup_action + installation_id ride along on
+    the query for the UI to show a 'just installed' message."""
+    ctx = company_client(monkeypatch)
+    from app.connectors import github_app
+
+    threaded_state = github_app.sign_oauth_state(
+        company_id=ctx.company_id, return_to="/onboarding/6"
+    )
+    r = ctx.client.get(
+        "/v1/connectors/github/callback",
+        params={
+            "setup_action": "install",
+            "installation_id": 67890,
+            "state": threaded_state,
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 307
+    loc = r.headers["location"]
+    assert "/onboarding/6" in loc
+    assert "connected=github" in loc
+    assert "setup_action=install" in loc
+    assert "installation_id=67890" in loc
+    # Should NOT have bounced to /settings since return_to was provided.
+    assert "section=connectors" not in loc
+
+
+def test_github_post_install_with_invalid_state_falls_back_to_settings(
+    github_env, monkeypatch
+):
+    """If the threaded state JWT is expired/invalid, fall back to the
+    default /settings redirect — never error out on the user."""
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get(
+        "/v1/connectors/github/callback",
+        params={
+            "setup_action": "install",
+            "installation_id": 12345,
+            "state": "bogus.jwt.value",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 307
+    loc = r.headers["location"]
+    assert "/settings?" in loc
+    assert "section=connectors" in loc
+    assert "setup_action=install" in loc
+
+
 def test_github_callback_with_no_install_redirects_to_app_install_url(
     github_env, monkeypatch
 ):

@@ -10,6 +10,48 @@ from __future__ import annotations
 from app.db.client import require_client
 
 
+def list_companies() -> list[dict]:
+    """All companies (tenants), shaped {id, slug, display_name}.
+
+    Used by the scheduler to iterate every tenant for the KG-synthesis cycle.
+    """
+    client = require_client()
+    result = (
+        client.table("companies")
+        .select("id, slug, display_name")
+        .order("slug", desc=False)
+        .execute()
+    )
+    return result.data or []
+
+
+def company_id_for_slug(slug: str) -> str | None:
+    """Resolve a company slug → company id (the KG enterprise_id). None if
+    no company owns the slug."""
+    client = require_client()
+    result = (
+        client.table("companies")
+        .select("id")
+        .eq("slug", slug)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0]["id"] if result.data else None
+
+
+def slug_for_company_id(company_id: str) -> str | None:
+    """Resolve a company id → its slug (the dataset slug). None if not found."""
+    client = require_client()
+    result = (
+        client.table("companies")
+        .select("slug")
+        .eq("id", company_id)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0]["slug"] if result.data else None
+
+
 def memberships_for_user(user_id: str) -> list[dict]:
     """All company memberships for a Supabase user id.
 

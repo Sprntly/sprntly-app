@@ -1,7 +1,18 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# Guarantee the oauthlib scope-relax behavior in-process, regardless of whether
+# the deploy .env sets it. Google's OAuth client (shared with sign-in) auto-adds
+# openid / userinfo.email / userinfo.profile and may reorder/normalize openid,
+# which would otherwise trip oauthlib's "Scope has changed" guard at token
+# exchange. We request the full scope set explicitly (see connectors.google_oauth
+# .DRIVE_SCOPES); this is the belt-and-suspenders for the reordering case. MUST
+# run before any oauthlib import below (the connectors router pulls in
+# google_auth_oauthlib transitively), so it sits at the very top of startup.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,6 +60,24 @@ from app.routes import (
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+async def _startup_generate_briefs() -> None:
+    """Generate startup briefs with the engine selected by BRIEF_ENGINE.
+
+    "synthesis" (default) runs the KG synthesis path per company (off the event
+    loop — it makes blocking LLM/Supabase calls); "legacy" keeps the corpus→
+    Claude auto_generate_all. Error-isolated: a failure here is logged and
+    never blocks or breaks startup.
+    """
+    try:
+        if settings.brief_engine == "synthesis":
+            from app.synthesis_brief import generate_all_synthesis_briefs
+            await asyncio.to_thread(generate_all_synthesis_briefs)
+        else:
+            await auto_generate_all()
+    except Exception:  # noqa: BLE001 — startup must never break on brief gen
+        logger.exception("Startup brief generation failed")
 
 
 @asynccontextmanager
@@ -153,9 +182,12 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
     # Kick off brief generation in the background so the service starts fast.
-    # auto_generate_all is idempotent: it skips datasets that already have a
-    # cached brief in SQLite at the current schema version.
-    asyncio.create_task(auto_generate_all())
+    # Honor BRIEF_ENGINE so a fresh deploy/restart produces the SAME engine's
+    # brief as /regenerate + the scheduler: "synthesis" → KG synthesis per
+    # company; "legacy" → the corpus→Claude path (idempotent: skips datasets
+    # that already have a cached brief at the current schema version).
+    # Error-isolated: startup must never block on brief generation.
+    asyncio.create_task(_startup_generate_briefs())
 
     # Start the pipeline scheduler if enabled (opt-in via SCHEDULER_ENABLED=true).
     if settings.scheduler_enabled:
@@ -176,6 +208,7 @@ async def lifespan(app: FastAPI):
             pass
 
 
+print("Sprntly API server starting...")
 app = FastAPI(title="Sprntly API", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(

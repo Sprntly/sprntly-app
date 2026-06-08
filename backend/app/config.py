@@ -115,6 +115,15 @@ class Settings(BaseSettings):
     )
     slack_bot_scopes: str = "chat:write,channels:read"
 
+    # Which engine produces the weekly brief.
+    #   "synthesis" (default) — KG-driven: seed-if-empty → run_synthesis over the
+    #                           knowledge graph (kg_signal/kg_entity) → save_brief.
+    #   "legacy"              — placeholder corpus→single-Claude-call pipeline,
+    #                           kept dormant behind the flag as a fallback.
+    # Drives both the UI write endpoints (/v1/brief/regenerate,/generate) and the
+    # scheduler cycle; the UI read path (/current,/status,/{id}) is unchanged.
+    brief_engine: str = "synthesis"
+
     # Pipeline scheduler
     scheduler_enabled: bool = False
     pipeline_interval_hours: int = 6
@@ -148,8 +157,35 @@ class Settings(BaseSettings):
 
     @property
     def github_app_private_key_pem(self) -> str:
-        """Normalize the PEM: turn literal `\\n` sequences into real newlines."""
-        return (self.github_app_private_key or "").replace("\\n", "\n")
+        """Return a clean PEM regardless of how the .env value was written.
+
+        Why this defensiveness: systemd's `EnvironmentFile=` parser handles
+        unquoted values DIFFERENTLY from pydantic-settings + python-dotenv —
+        in particular, an unquoted value with `\\n` sequences can have its
+        backslashes silently stripped, leaving the running process with a
+        PEM that has literal `n` characters where line breaks should be.
+        PyJWT then raises `"Could not parse the provided public key."`
+
+        Defensive normalisation steps (in order):
+          1. Strip leading/trailing whitespace
+          2. Strip a matched outer pair of single OR double quotes
+          3. Replace any literal `\\n` with real `\n` (idempotent if the
+             value is already a valid multi-line PEM)
+        """
+        raw = self.github_app_private_key or ""
+        if not raw:
+            return ""
+        # Trim ONLY non-newline whitespace before quote detection. A clean
+        # PEM ends with `\n` and we must preserve that; pyjwt accepts PEMs
+        # without it too, but losing the trailing newline subtly changes
+        # the value and can mask diffs in tests / logs.
+        raw = raw.strip(" \t\r")
+        # Strip a balanced outer pair of quotes (both must match).
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in '"\'':
+            raw = raw[1:-1]
+        # Idempotent: a PEM that already has real newlines has no `\n`
+        # sequences to replace, so this is a no-op for that case.
+        return raw.replace("\\n", "\n")
 
     @property
     def origins_list(self) -> list[str]:

@@ -175,6 +175,59 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
         warm_brief_dynamic_asks(dataset, brief, _WARM_SEMA)
 
 
+async def _warm_drilldowns_to_completion(brief: dict, dataset: str | None = None) -> None:
+    """Run the same warming fan-out as `_warm_drilldowns`, but awaited to
+    completion rather than fire-and-forget.
+
+    Used when warming is invoked from a no-loop (startup worker thread) context
+    via `asyncio.run`: the loop closes as soon as this returns, so the warm
+    tasks must finish before then rather than being scheduled and abandoned.
+    """
+    _warm_drilldowns(brief, dataset=dataset)
+    # Drain every warm task scheduled on this loop (evidence/PRD/Ask) so they
+    # complete before the loop is torn down. Their own runners are error-
+    # isolated, so failures here are swallowed (return_exceptions).
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+def warm_synthesis_drilldowns(dataset: str) -> None:
+    """Warm evidence/PRD/Ask drill-downs for the synthesis brief of `dataset`.
+
+    Parity with the legacy path: after a synthesis brief is generated+saved,
+    pre-generate the per-insight drill-downs so the first user click renders
+    instantly. Reads the freshly-saved brief back (so it carries the DB id +
+    insight titles _warm_drilldowns needs) and fans out the same warming.
+
+    Works from either context: when a loop is already running (the synthesis
+    background/scheduler coroutines) it schedules the warm tasks on it
+    (fire-and-forget, unchanged); when invoked from a no-loop context (the
+    startup pass runs on a worker thread via `asyncio.to_thread`, which has no
+    event loop) it spins up a loop with `asyncio.run` and drains the fan-out to
+    completion — so startup warming actually runs instead of throwing
+    "no running event loop".
+
+    Error-isolated: warming is a perf optimization, never a correctness
+    requirement, so a failure here must not break brief generation.
+    """
+    try:
+        brief = get_current_brief(dataset)
+        if brief is None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (startup worker thread) — run the fan-out to
+            # completion on a fresh loop.
+            asyncio.run(_warm_drilldowns_to_completion(brief, dataset=dataset))
+        else:
+            # A loop is already running — schedule tasks on it as before.
+            _warm_drilldowns(brief, dataset=dataset)
+    except Exception:  # noqa: BLE001 — warming is best-effort; brief must survive
+        logger.exception("Synthesis drill-down warming failed for %s", dataset)
+
+
 async def auto_generate_brief(dataset: str) -> None:
     """Generate a brief for `dataset` if one doesn't already exist, then warm
     the per-insight drill-downs (evidence + PRD).

@@ -19,6 +19,9 @@ export type ScreenId =
   | "connectors"
   | "sources"
   | "tickets"
+  // The dedicated full-page prototype generation surface ("Generate Prototype"
+  // redirects here instead of opening the generate modal inline over the PRD).
+  | "prototype"
   // The post-generation Design Agent canvas — the one refresh-stable deep-URL
   // screen (`/design/{prototype_id}`). Layered on top of the existing no-deep-URL
   // nav; see lib/routes.ts canvasPath / prototypeIdFromCanvasPath.
@@ -50,6 +53,7 @@ export const APP_SCREENS: ScreenId[] = [
   // the dormant ConnectorsScreen.tsx (salvaged in commit D).
   "sources",
   "tickets",
+  "prototype",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
@@ -74,6 +78,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   connectors: "Connectors",
   sources: "Sources",
   tickets: "Tickets",
+  prototype: "Prototype",
   // The canvas renders as a full-screen overlay (its own breadcrumb), so this
   // chrome title is never actually shown; present only for Record<ScreenId>
   // completeness.

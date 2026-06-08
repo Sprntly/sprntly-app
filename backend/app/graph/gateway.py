@@ -24,11 +24,28 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from app.llm import DEFAULT_MODEL, call_json, call_md
+from app.llm import (
+    DEFAULT_MODEL,
+    LONG_REQUEST_TIMEOUT_S,
+    call_json,
+    call_md,
+)
 from app.llm_telemetry import MODEL_PRICING
 from app.skills.loader import get_skill
 
 logger = logging.getLogger(__name__)
+
+# Skills whose output is large/slow enough that a non-streamed call risks the
+# Anthropic read timeout (e.g. the 2-part PRD: a human PRD + an LLM impl-spec,
+# ~4-6k output tokens). For these the gateway streams the response and runs on
+# the long read timeout — the SDK's required pattern for big generations —
+# accumulating the streamed text into the same return value. Behavior for all
+# other skills/callers is unchanged.
+_LONG_OUTPUT_SKILLS = frozenset({"prd-author"})
+
+
+def _is_long_output(skill: Optional[str]) -> bool:
+    return skill is not None and skill in _LONG_OUTPUT_SKILLS
 
 
 def _build_method_prefix(skill: str, skill_module: Optional[str]) -> tuple[str, str]:
@@ -111,6 +128,12 @@ def llm_call(
     if skill is not None:
         method_block, version_suffix = _build_method_prefix(skill, skill_module)
         prompt_version = f"{prompt_version}{version_suffix}"
+    # Long-output skills (e.g. prd-author) stream on the long read timeout so a
+    # large/slow generation never trips the default per-request timeout. Gated
+    # on the skill, so non-long callers keep the existing non-streamed path.
+    long_output = _is_long_output(skill)
+    stream = long_output
+    timeout = LONG_REQUEST_TIMEOUT_S if long_output else None
     meta: dict = {}
     t0 = time.monotonic()
     if json_schema is not None:
@@ -124,7 +147,7 @@ def llm_call(
         output: Any = call_json(
             system=system, user=input, model=chosen_model, max_tokens=max_tokens,
             schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
-            meta_out=meta,
+            meta_out=meta, stream=stream, timeout=timeout,
         )
     else:
         # call_md has no cacheable-prefix path; fold the method into the system
@@ -132,7 +155,7 @@ def llm_call(
         md_system = f"{method_block}\n{system}" if method_block else system
         output = call_md(
             system=md_system, user=input, model=chosen_model, max_tokens=max_tokens,
-            meta_out=meta,
+            meta_out=meta, stream=stream, timeout=timeout,
         )
     latency_ms = int((time.monotonic() - t0) * 1000)
 
