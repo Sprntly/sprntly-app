@@ -173,6 +173,10 @@ def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
         )
     insight = insights[insight_index]
     dataset = brief.get("dataset", "asurion")
+    # The decision log is tenant-scoped by company UUID, not the dataset slug.
+    # Resolve it once; a dataset that owns no company (legacy corpus datasets)
+    # yields None and the §4d decision log is skipped below.
+    company_id = company_id_for_slug(dataset)
     # Reground on the KG evidence trail (synthesis engine) — the same signals
     # that back the brief insight — falling back to the corpus when there's no
     # KG backing or under the legacy engine. `trail` (None on the corpus path)
@@ -187,7 +191,7 @@ def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
         template=template,
     )
     result = llm_call(
-        enterprise_id=dataset,
+        enterprise_id=company_id or dataset,
         agent=_AGENT,
         purpose="generate_prd",
         prompt_version=PROMPT_VERSION,
@@ -208,25 +212,26 @@ def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
     # the §4d audit row pins the exact KG nodes this PRD was grounded on (empty
     # on the corpus-fallback path, where `trail` is None).
     kg_refs = (trail or {}).get("kg_refs") or []
-    log_agent_decision(
-        enterprise_id=dataset,
-        agent=_AGENT,
-        decision_type="generate_prd",
-        factors={
-            "prd_id": prd_id,
-            "brief_id": brief_id,
-            "insight_index": insight_index,
-            "skill": _SKILL,
-            "has_llm_part": bool(llm_part),
-            "grounding": "kg" if trail is not None else "corpus",
-            "kg_signals": len((trail or {}).get("signals") or []),
-            "brief_engine": settings.brief_engine,
-        },
-        output={"title": title, "prd_id": prd_id},
-        model=result.model,
-        prompt_version=result.prompt_version,
-        kg_refs=kg_refs,
-    )
+    if company_id:
+        log_agent_decision(
+            enterprise_id=company_id,
+            agent=_AGENT,
+            decision_type="generate_prd",
+            factors={
+                "prd_id": prd_id,
+                "brief_id": brief_id,
+                "insight_index": insight_index,
+                "skill": _SKILL,
+                "has_llm_part": bool(llm_part),
+                "grounding": "kg" if trail is not None else "corpus",
+                "kg_signals": len((trail or {}).get("signals") or []),
+                "brief_engine": settings.brief_engine,
+            },
+            output={"title": title, "prd_id": prd_id},
+            model=result.model,
+            prompt_version=result.prompt_version,
+            kg_refs=kg_refs,
+        )
 
 
 async def generate_prd(prd_id: int, brief_id: int, insight_index: int) -> None:

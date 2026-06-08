@@ -339,6 +339,36 @@ def test_prd_decision_log_carries_kg_refs(isolated_settings, facade, monkeypatch
     assert gen[0]["factors"]["kg_signals"] >= 1
 
 
+def test_prd_decision_log_uses_company_uuid_not_slug(isolated_settings, facade, monkeypatch):
+    """Regression: the decision log is keyed by the resolved company UUID, not the
+    dataset slug — agent_decision_log.enterprise_id is a uuid column, so logging the
+    slug ('asurion') raised 22P02 and failed the PRD after generation succeeded."""
+    db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
+    monkeypatch.setattr(prd_runner, "llm_call", lambda **kw: _llm_result(_TWO_PART))
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    sup = isolated_settings["supabase"]
+    gen = [r for r in sup.table("agent_decision_log").select("*").execute().data
+           if r["decision_type"] == "generate_prd"]
+    assert len(gen) == 1
+    assert gen[0]["enterprise_id"] == COMPANY_ID   # the uuid …
+    assert gen[0]["enterprise_id"] != SLUG          # … not the slug
+
+
+def test_prd_no_company_for_slug_skips_decision_log(isolated_settings, facade, monkeypatch):
+    """A dataset that owns no company resolves to None → the decision log is skipped
+    (no uuid to key on) rather than crashing the PRD."""
+    db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
+    monkeypatch.setattr(prd_runner, "company_id_for_slug", lambda _slug: None)
+    monkeypatch.setattr(prd_runner, "llm_call", lambda **kw: _llm_result(_TWO_PART))
+    prd_runner._run_sync(prd_id, brief_id, 0)  # must not raise
+
+    sup = isolated_settings["supabase"]
+    gen = [r for r in sup.table("agent_decision_log").select("*").execute().data
+           if r["decision_type"] == "generate_prd"]
+    assert gen == []
+
+
 def test_prd_empty_trail_falls_back_to_corpus(isolated_settings, facade, monkeypatch):
     """An insight with no KG backing → corpus grounding (PRD never hard-fails),
     and the decision log records the corpus path with empty kg_refs."""
