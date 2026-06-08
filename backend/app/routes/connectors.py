@@ -733,7 +733,31 @@ def github_authorize(
 
 
 @router.get("/github/callback")
-def github_callback(code: str, state: str):
+def github_callback(
+    code: str | None = None,
+    state: str | None = None,
+    setup_action: str | None = None,
+    installation_id: int | None = None,
+):
+    # GitHub re-uses this URL for BOTH the post-OAuth redirect AND the
+    # post-install redirect (when 'Request OAuth during install' is on,
+    # or when the App's Setup URL is left blank). The post-install
+    # redirect has `setup_action` + `installation_id` but no `state`.
+    # If we hit this branch, OAuth has either already completed in a
+    # prior round or wasn't required — just acknowledge and bounce
+    # back to the connectors page with the setup_action carried in the
+    # query so the UI can show 'approval pending' vs 'install complete'.
+    if state is None or not code:
+        base = (settings.frontend_url or "http://localhost:3000").rstrip("/")
+        params = {"section": "connectors", "connected": "github"}
+        if setup_action:
+            params["setup_action"] = setup_action
+        if installation_id is not None:
+            params["installation_id"] = str(installation_id)
+        return RedirectResponse(
+            f"{base}/settings?{urlencode(params)}", status_code=307
+        )
+
     payload = github_app.verify_oauth_state(state)
     company_id = payload["company_id"]
     token_json = github_app.exchange_code_for_token(code)

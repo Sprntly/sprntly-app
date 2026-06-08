@@ -286,6 +286,40 @@ def test_github_callback_with_existing_install_redirects_to_settings(
     assert gh["account_label"] == "@octocat"
 
 
+def test_github_callback_post_install_redirect_no_state(github_env, monkeypatch):
+    """GitHub reuses our OAuth callback URL for the post-install redirect
+    (when the App is configured with 'Request OAuth during install', or
+    when no Setup URL is set). That redirect carries setup_action +
+    installation_id but NO state. We must not 422 on it — instead bounce
+    back to /settings, carrying the setup_action forward so the UI can
+    show 'approval pending' vs 'install complete'."""
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get(
+        "/v1/connectors/github/callback",
+        params={"code": "ignored", "setup_action": "request"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 307
+    loc = r.headers["location"]
+    assert "section=connectors" in loc
+    assert "connected=github" in loc
+    assert "setup_action=request" in loc
+
+
+def test_github_callback_post_install_with_installation_id(github_env, monkeypatch):
+    """The setup_action=install variant also carries installation_id."""
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get(
+        "/v1/connectors/github/callback",
+        params={"setup_action": "install", "installation_id": 12345},
+        follow_redirects=False,
+    )
+    assert r.status_code == 307
+    loc = r.headers["location"]
+    assert "setup_action=install" in loc
+    assert "installation_id=12345" in loc
+
+
 def test_github_callback_with_no_install_redirects_to_app_install_url(
     github_env, monkeypatch
 ):
