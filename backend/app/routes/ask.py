@@ -5,11 +5,9 @@ import time
 from fastapi import Depends, APIRouter
 from pydantic import BaseModel, Field
 
-from app.auth import require_session
-from app.corpus import load_corpus
+from app.ask_runner import compose_ask_answer
+from app.auth import CompanyContext, require_session, resolve_company_optional
 from app.db import find_cached_ask, log_ask
-from app.llm import call_json
-from app.prompts import ASK_SYSTEM, ASK_USER_TEMPLATE_QUESTION_ONLY
 
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
 
@@ -85,6 +83,7 @@ def _strip_citations(payload: dict) -> dict:
 def ask(
     body: AskIn,
     _session: dict = Depends(require_session),
+    company: CompanyContext | None = Depends(resolve_company_optional),
 ):
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. Returns
@@ -119,21 +118,16 @@ def ask(
                 )
             return _strip_citations(payload)
 
-    # 2) Cache miss → standard LLM call.
-    corpus = load_corpus(body.dataset)
-    # The corpus is constant per dataset, so we pass it as a cacheable prefix
-    # — repeat /v1/ask calls within the cache TTL skip re-encoding it.
-    cacheable = f"Corpus:\n\n{corpus.joined()}"
-    user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=body.question)
-    # Lower than the call_json default (16k) — Ask answers run on the home
-    # surface and load time matters more than max answer length. Brief and
-    # PRD generation keep the default headroom.
-    payload = call_json(
-        system=ASK_SYSTEM,
-        user=user,
-        user_cacheable_prefix=cacheable,
-        schema=ASK_RESPONSE_SCHEMA,
-        max_tokens=12000,
+    # 2) Cache miss → compose the answer from the legacy corpus AND the
+    # knowledge graph (#18). compose_ask_answer loads the corpus as a cacheable
+    # prefix, retrieves a ranked KG context bundle for the resolved tenant (if
+    # any), injects it as a "KNOWLEDGE GRAPH CONTEXT" section, runs the LLM, and
+    # decision-logs the ask with kg_refs. When no company resolves (legacy cookie
+    # session) or the KG is empty, it falls back to corpus-only — the pre-#18
+    # behaviour.
+    enterprise_id = company.company_id if company else None
+    payload = compose_ask_answer(
+        body.dataset, body.question, enterprise_id=enterprise_id
     )
     log_ask(
         question=body.question,

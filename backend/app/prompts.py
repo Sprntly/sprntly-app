@@ -326,6 +326,53 @@ Question:
 """
 
 
+# ── Ask × Knowledge Graph bridge (#18) ──────────────────────────────────────
+# When the KG has relevant signals/entities for the question, we append this
+# clause to ASK_SYSTEM so the model treats KG context as first-class evidence
+# alongside the corpus — without loosening the never-invent grounding rule.
+# The legacy corpus-only path (and the cache warmer) keep the unmodified
+# ASK_SYSTEM, so this is additive and does not affect cached rows.
+ASK_SYSTEM_KG_ADDENDUM = """\
+
+You also have a "KNOWLEDGE GRAPH CONTEXT" section below the corpus. It carries \
+live signals + entities from the PM's connected sources (analytics, CRM, \
+project tracker, customer voice, revenue) and prior agent findings. Treat \
+those signals as first-class evidence ALONGSIDE the corpus — the same \
+grounding rules apply: cite the source (use the signal's source_type and \
+provenance, e.g. `[Source: revenue]`), never speculate, never invent numbers. \
+When the corpus and the knowledge graph agree, say so; when only one has the \
+answer, ground the claim in whichever supports it."""
+
+
+# Post-corpus user template used when a KG context section is composed in.
+# The corpus (cacheable prefix) sits above; this block carries the KG section
+# then the schema + question. Mirrors ASK_USER_TEMPLATE_QUESTION_ONLY's schema.
+ASK_USER_TEMPLATE_WITH_KG = """\
+---
+
+{kg_context}
+
+---
+
+Answer the question below using the corpus above AND the knowledge graph \
+context. Ground every claim in one or the other — never invent. Return JSON of \
+this shape:
+
+{{
+  "answer": "<markdown-formatted answer per the formatting rules in the system prompt. For quantitative questions, include 1–4 `chart` fenced blocks embedded inline.>",
+  "key_points": ["<bullet 1>", "<bullet 2>", "..."],
+  "citations": [
+    {{ "source": "<source doc name or signal source_type>", "evidence": "<exact phrase or number>" }}
+  ],
+  "confidence": <float 0-1>,
+  "unanswered": "<empty string if fully answered, else what data is missing>"
+}}
+
+Question:
+{question}
+"""
+
+
 PRD_SYSTEM = """\
 You are Sprntly's PRD generator. You output a Product Requirements \
 Document in the exact format described by the supplied template. The PRD \
