@@ -76,6 +76,7 @@ def upsert_design_system(
         "confidence": confidence,
         "extracted_at": extracted_at,
         "updated_at": now,
+        "status": "active",
     }
     if not existing:
         payload["id"] = uuid.uuid4().hex

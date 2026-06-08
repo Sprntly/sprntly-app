@@ -160,7 +160,7 @@ def _repo_ref_parts(ref: str) -> tuple[str, str | None]:
     cleaned = (ref or "").strip()
     if "@" not in cleaned:
         return cleaned, None
-    repo, branch = cleaned.rsplit("@", 1)
+    repo, branch = cleaned.split("@", 1)
     return repo.strip(), branch.strip() or None
 
 
@@ -521,8 +521,9 @@ class GithubExtractor:
         try:
             from app.connectors import github_app
 
+            quoted_repo = quote(repo_full_name, safe="/")
             repo_resp = github_app.requests.get(
-                f"{github_app.GITHUB_API_BASE}/repos/{repo_full_name}",
+                f"{github_app.GITHUB_API_BASE}/repos/{quoted_repo}",
                 headers=github_app.headers_for_installation(self.installation_id),
                 timeout=15,
             )
@@ -535,7 +536,7 @@ class GithubExtractor:
                 return pushed if isinstance(pushed, str) and pushed else None
             quoted_branch = quote(branch_name, safe="")
             commit_resp = github_app.requests.get(
-                f"{github_app.GITHUB_API_BASE}/repos/{repo_full_name}/commits/{quoted_branch}",
+                f"{github_app.GITHUB_API_BASE}/repos/{quoted_repo}/commits/{quoted_branch}",
                 headers=github_app.headers_for_installation(self.installation_id),
                 timeout=15,
             )
@@ -556,8 +557,9 @@ class GithubExtractor:
 
             params = {"ref": branch} if branch else None
             quoted_path = quote(path, safe="/")
+            quoted_repo = quote(repo_full_name, safe="/")
             resp = github_app.requests.get(
-                f"{github_app.GITHUB_API_BASE}/repos/{repo_full_name}/contents/{quoted_path}",
+                f"{github_app.GITHUB_API_BASE}/repos/{quoted_repo}/contents/{quoted_path}",
                 headers=github_app.headers_for_installation(self.installation_id),
                 params=params,
                 timeout=15,
@@ -595,7 +597,7 @@ class GithubExtractor:
 
     def _list_ui_files(self, repo_full_name: str, branch: str | None) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
-        for directory in _GITHUB_UI_DIRS[:_GITHUB_MAX_DIRS]:
+        for directory in _GITHUB_UI_DIRS:
             payload = self._github_get_contents(repo_full_name, directory, branch)
             if not isinstance(payload, list):
                 continue

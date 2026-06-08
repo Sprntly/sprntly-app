@@ -90,6 +90,12 @@ def env(isolated_settings, monkeypatch):
     monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
+    import importlib as _il
+    import app.config as _config_mod
+    _il.reload(_config_mod)
+    import app.connectors.tokens as _tokens_mod
+    _il.reload(_tokens_mod)
+
     import app.db.prototypes as proto_mod
     importlib.reload(proto_mod)            # rebind require_client -> reloaded client
     import app.routes.design_agent as routes_mod
