@@ -65,7 +65,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "briefs":               {"payload"},
     "ask_log":              {"citations"},
     "cached_asks":          {"response"},
-    "companies":            {"coworker_names", "kpi_tree", "competitors"},
+    "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context"},
     "connections":          {"config"},
     "github_installations": {"permissions", "events"},
     # ---- KG foundation (jsonb + array + vector columns; the fake JSON-encodes) ----

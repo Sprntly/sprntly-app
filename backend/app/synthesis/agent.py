@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.db.briefs import save_brief
+from app.business_context import load_business_context
 from app.kpi_tree import load_kpi_tree
 from app.graph.config_layers import config_get
 from app.graph.decision_log import log_agent_decision
@@ -157,10 +158,24 @@ def run_synthesis(
         "evidence quality, framing, and actionability. Use the tree only to "
         "ground claims and explain impact.\n\n"
     ) if tree else ""
+    # Additive business-context block (anchored on the candidates payload, not on
+    # the strategic-context wording, so it survives an in-flight edit to that text).
+    # Capped so it never crowds out the candidates.
+    bizctx_block = ""
+    doc = load_business_context(enterprise_id)
+    if doc is not None:
+        rendered = doc.render_for_prompt(max_chars=1500)
+        if rendered:
+            bizctx_block = (
+                "BUSINESS CONTEXT — the company's lens (model, users, vocabulary, "
+                "goals). Read candidates through it:\n" + rendered + "\n\n"
+            )
+
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="rank_brief_insights",
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
-        input=strategic + _candidates_payload(cands), json_schema=_BRIEF_SCHEMA,
+        input=strategic + bizctx_block + _candidates_payload(cands),
+        json_schema=_BRIEF_SCHEMA,
         skill="prioritize",
     )
     payload = result.output

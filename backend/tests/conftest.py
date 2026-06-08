@@ -220,6 +220,7 @@ CREATE TABLE companies (
     display_name        TEXT NOT NULL,
     coworker_names      TEXT NOT NULL DEFAULT '{}',
     kpi_tree            TEXT NOT NULL DEFAULT '{}',
+    business_context    TEXT NOT NULL DEFAULT '{}',
     -- Onboarding profile columns the research agents read/write (mirrors
     -- 20260525150000_onboarding_workspace.sql). competitors[] is the fixed
     -- competitor roster; the Competitor agent auto-discovers + writes it when empty.

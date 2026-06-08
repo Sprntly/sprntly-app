@@ -26,6 +26,7 @@ from app.routes import (
     agent_chat,
     ask,
     brief,
+    business_context as business_context_routes,
     company,
     connectors,
     datasets as datasets_routes,
@@ -201,6 +202,7 @@ app.include_router(metrics.router)
 app.include_router(research.router)
 app.include_router(oncall.router)
 app.include_router(company.router)
+app.include_router(business_context_routes.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
 
