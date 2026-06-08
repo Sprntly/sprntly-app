@@ -769,23 +769,41 @@ def github_callback(
     installation_id: int | None = None,
 ):
     # GitHub re-uses this URL for BOTH the post-OAuth redirect AND the
-    # post-install redirect (when 'Request OAuth during install' is on,
-    # or when the App's Setup URL is left blank). The post-install
-    # redirect has `setup_action` + `installation_id` but no `state`.
-    # If we hit this branch, OAuth has either already completed in a
-    # prior round or wasn't required — just acknowledge and bounce
-    # back to the connectors page with the setup_action carried in the
-    # query so the UI can show 'approval pending' vs 'install complete'.
-    if state is None or not code:
+    # post-install redirect. Two trigger shapes:
+    #   1. Post-OAuth:     ?code=X&state=Y                  (handled below)
+    #   2. Post-install:   ?setup_action=install&installation_id=N[&state=Y]
+    #                      OR ?code=X&setup_action=request
+    # When the install URL we redirected to includes our `state` JWT
+    # (see the install-URL build below), GitHub preserves it through to
+    # the Setup URL — so `return_to` (e.g. /onboarding/6) survives the
+    # round-trip and we can bounce the user back to their original page
+    # instead of always defaulting to /settings.
+    if setup_action or state is None or not code:
         base = (settings.frontend_url or "http://localhost:3000").rstrip("/")
-        params = {"section": "connectors", "connected": "github"}
+        return_to: str | None = None
+        if state:
+            try:
+                payload = github_app.verify_oauth_state(state)
+                rt = payload.get("return_to")
+                if rt and _is_safe_return_to(rt):
+                    return_to = rt
+            except HTTPException:
+                # state expired or invalid — fall back to /settings
+                return_to = None
+
+        params = {"connected": "github"}
         if setup_action:
             params["setup_action"] = setup_action
         if installation_id is not None:
             params["installation_id"] = str(installation_id)
-        return RedirectResponse(
-            f"{base}/settings?{urlencode(params)}", status_code=307
-        )
+
+        if return_to:
+            sep = "&" if "?" in return_to else "?"
+            target = f"{base}{return_to}{sep}{urlencode(params)}"
+        else:
+            params["section"] = "connectors"
+            target = f"{base}/settings?{urlencode(params)}"
+        return RedirectResponse(target, status_code=307)
 
     payload = github_app.verify_oauth_state(state)
     company_id = payload["company_id"]
@@ -825,10 +843,17 @@ def github_callback(
     # App install page instead of bouncing them back to /settings. The
     # webhook fires on completion and creates the github_installations
     # row; the user lands back at the App's Setup URL (configured in
-    # the App settings on GitHub).
+    # the App settings on GitHub) — which should point at this same
+    # /github/callback so the original `state` (carrying return_to) is
+    # threaded all the way through to the post-install branch above.
     if login and not _has_github_install_for(login) and settings.github_app_slug:
+        # Include the original state JWT on the install URL so GitHub
+        # preserves it through to the Setup URL redirect. That lets us
+        # bounce the user back to wherever they started (e.g.
+        # /onboarding/6) instead of always /settings.
         install_url = (
             f"https://github.com/apps/{settings.github_app_slug}/installations/new"
+            f"?{urlencode({'state': state})}"
         )
         return RedirectResponse(install_url, status_code=307)
 
