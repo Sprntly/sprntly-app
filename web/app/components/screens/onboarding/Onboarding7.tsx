@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep } from "../../../lib/onboarding/store"
 import {
@@ -38,8 +38,18 @@ export function Onboarding7() {
       .catch(() => {})
   }, [workspace?.id])
 
+  const { errors, validate, clearError, containerRef } = useFieldValidation(
+    () =>
+      COWORKERS.map((c) => ({
+        key: c.slot,
+        valid: names[c.slot].trim().length > 0,
+        message: `Give your ${c.label.toLowerCase()} a name.`,
+      })),
+  )
+
   function setName(slot: CoworkerSlot, value: string) {
     setNames((prev) => ({ ...prev, [slot]: value }))
+    clearError(slot)
   }
 
   const canLaunch = canLaunchWorkspace(names)
@@ -47,6 +57,7 @@ export function Onboarding7() {
   async function launch() {
     if (!workspace) return
     setError(null)
+    if (!validate().ok) return
     setSaving(true)
     try {
       await coworkersApi.put(names)
@@ -92,20 +103,25 @@ export function Onboarding7() {
       onBack={() => router.push("/onboarding/6")}
       onContinue={launch}
       continueLabel="Launch workspace"
-      continueDisabled={!canLaunch}
       loading={saving}
     >
+      <div ref={containerRef}>
       {error && <div className="ob-form-error">{error}</div>}
 
       <div className="ob-coworker-list">
         {COWORKERS.map((c) => (
-          <div key={c.slot} className={`ob-coworker-row cw-${c.color}`}>
+          <div
+            key={c.slot}
+            className={`ob-coworker-row cw-${c.color}`}
+            data-field={c.slot}
+          >
             <div className="ob-coworker-meta">
               <div className="ob-coworker-label">{c.label}</div>
               <div className="ob-coworker-blurb">{c.blurb}</div>
+              {errors[c.slot] && <p className="field-error">{errors[c.slot]}</p>}
             </div>
             <input
-              className="input ob-coworker-input"
+              className={`input ob-coworker-input ${errors[c.slot] ? "has-error" : ""}`}
               value={names[c.slot]}
               onChange={(e) => setName(c.slot, e.target.value)}
               placeholder={c.placeholder}
@@ -120,6 +136,7 @@ export function Onboarding7() {
         {namedCount} of {COWORKERS.length} named ·{" "}
         {canLaunch ? "ready to launch" : "name each coworker to launch"}
       </p>
+      </div>
 
       <style jsx>{`
         .ob-coworker-list {

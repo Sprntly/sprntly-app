@@ -104,14 +104,21 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
             Finish onboarding →
           </Link>
           <style jsx>{`
-            .ds-onboard-link {
+            .ds-onboard-link,
+            .ds-onboard-link:link,
+            .ds-onboard-link:visited {
               display: block;
-              padding: 8px 10px;
-              font-size: 13px;
-              color: #a8a8b3;
+              padding: 9px 12px;
+              font-size: 14px;
+              font-weight: 600;
+              color: #ffffff;
               text-decoration: none;
-              border: 1px dashed #232329;
+              border: 1px dashed rgba(255, 255, 255, 0.35);
               border-radius: 8px;
+            }
+            .ds-onboard-link:hover {
+              background: rgba(255, 255, 255, 0.08);
+              border-color: rgba(255, 255, 255, 0.55);
             }
           `}</style>
         </div>

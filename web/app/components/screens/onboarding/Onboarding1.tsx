@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
-import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import {
   validateProductWebsite,
@@ -56,9 +56,30 @@ export function Onboarding1() {
     productName.trim().length > 0 &&
     resolvedIndustry.length > 0
 
+  const { errors, validate, clearError, containerRef } = useFieldValidation(
+    () => [
+      {
+        key: "companyName",
+        valid: companyName.trim().length > 0,
+        message: "Enter your company name.",
+      },
+      {
+        key: "productName",
+        valid: productName.trim().length > 0,
+        message: "Enter your primary product name.",
+      },
+      {
+        key: "industry",
+        valid: resolvedIndustry.length > 0,
+        message: "Tell us your industry.",
+      },
+    ],
+  )
+
   async function save(andContinue: boolean) {
     if (auth.kind !== "authed") return
     setError(null)
+    if (andContinue && !validate().ok) return
     const websiteErr = validateProductWebsite(productWebsite)
     if (websiteErr) {
       setError(websiteErr)
@@ -141,30 +162,38 @@ export function Onboarding1() {
       }
       onContinue={() => save(true)}
       onSkip={onSkip}
-      continueDisabled={!canContinue}
       loading={saving}
     >
+      <div ref={containerRef}>
       {error && <div className="ob-form-error">{error}</div>}
-      <div className="field">
+      <div className={`field ${errors.companyName ? "has-error" : ""}`} data-field="companyName">
         <label className="field-label">Company name *</label>
         <input
           className="input"
           value={companyName}
-          onChange={(e) => setCompanyName(e.target.value)}
+          onChange={(e) => {
+            setCompanyName(e.target.value)
+            clearError("companyName")
+          }}
           maxLength={100}
           placeholder="Legal or brand name of your organization"
         />
+        {errors.companyName && <p className="field-error">{errors.companyName}</p>}
       </div>
-      <div className="field">
+      <div className={`field ${errors.productName ? "has-error" : ""}`} data-field="productName">
         <label className="field-label">Product name *</label>
         <input
           className="input"
           value={productName}
-          onChange={(e) => setProductName(e.target.value)}
+          onChange={(e) => {
+            setProductName(e.target.value)
+            clearError("productName")
+          }}
           maxLength={100}
           placeholder="The product you're onboarding (you can add more later)"
         />
         <p className="field-hint">One company can have multiple products; this is your primary one.</p>
+        {errors.productName && <p className="field-error">{errors.productName}</p>}
       </div>
       <div className="field">
         <label className="field-label">Product website</label>
@@ -177,9 +206,16 @@ export function Onboarding1() {
           autoComplete="url"
         />
       </div>
-      <div className="field">
+      <div className={`field ${errors.industry ? "has-error" : ""}`} data-field="industry">
         <label className="field-label">Industry *</label>
-        <select className="input" value={industry} onChange={(e) => setIndustry(e.target.value)}>
+        <select
+          className="input"
+          value={industry}
+          onChange={(e) => {
+            setIndustry(e.target.value)
+            clearError("industry")
+          }}
+        >
           {INDUSTRIES.map((i) => (
             <option key={i}>
               {i}
@@ -191,10 +227,14 @@ export function Onboarding1() {
             className="input"
             style={{ marginTop: 8 }}
             value={industryOther}
-            onChange={(e) => setIndustryOther(e.target.value)}
+            onChange={(e) => {
+              setIndustryOther(e.target.value)
+              clearError("industry")
+            }}
             placeholder="Your industry"
           />
         )}
+        {errors.industry && <p className="field-error">{errors.industry}</p>}
       </div>
       <div className="field">
         <label className="field-label">Stage *</label>
@@ -246,6 +286,7 @@ export function Onboarding1() {
             </button>
           ))}
         </div>
+      </div>
       </div>
     </InterviewLayout>
   )
