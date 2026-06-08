@@ -25,7 +25,14 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 # backoff (+ jitter) worst-case before surfacing the error.
 MAX_ATTEMPTS = 4
 _BACKOFF_BASE_S = 0.5
+# Default per-request read timeout. Generous enough for the ranking-class
+# calls (~100s observed) but well below the SDK's own non-streaming ceiling.
 _REQUEST_TIMEOUT_S = 120.0
+# Long-generation read timeout (public — the gateway reads it for long-output
+# skills). Big non-streamed responses (e.g. the 2-part PRD) exceed the default;
+# long-output skills run with this floor AND stream the response, which is the
+# SDK's required pattern for slow/large requests and sidesteps the read timeout.
+LONG_REQUEST_TIMEOUT_S = 600.0
 
 _client: Anthropic | None = None
 
@@ -54,16 +61,33 @@ def _is_retryable(exc: Exception) -> bool:
     return False
 
 
-def _create_with_retries(client: Anthropic, **kwargs):
-    """`messages.create` with exponential backoff on transient failures."""
+def _attempt_delay(attempt: int) -> float:
+    return _BACKOFF_BASE_S * (4 ** attempt) * (1 + random.random() * 0.25)
+
+
+def _create_with_retries(client: Anthropic, *, stream: bool = False, **kwargs):
+    """`messages.create` with exponential backoff on transient failures.
+
+    When `stream=True`, the request is issued through `client.messages.stream`
+    and the streamed deltas are accumulated into the final message — the SDK's
+    required pattern for long/large outputs, which avoids the read timeout a
+    big non-streamed response would hit. The return value is the same final
+    Message object either way, so callers (`_capture_meta`, content extraction)
+    are unchanged.
+    """
     last: Exception | None = None
     for attempt in range(MAX_ATTEMPTS):
         try:
+            if stream:
+                with client.messages.stream(**kwargs) as s:
+                    # Drain the stream so deltas are consumed, then return the
+                    # assembled final message (same shape as messages.create).
+                    return s.get_final_message()
             return client.messages.create(**kwargs)
         except Exception as exc:  # noqa: BLE001 — classified below
             if not _is_retryable(exc) or attempt == MAX_ATTEMPTS - 1:
                 raise
-            delay = _BACKOFF_BASE_S * (4 ** attempt) * (1 + random.random() * 0.25)
+            delay = _attempt_delay(attempt)
             logger.warning(
                 "LLM call transient failure (attempt %d/%d, retrying in %.1fs): %s",
                 attempt + 1, MAX_ATTEMPTS, delay, exc,
@@ -141,6 +165,8 @@ def call_json(
     schema: dict | None = None,
     user_cacheable_prefix: str | None = None,
     meta_out: dict | None = None,
+    stream: bool = False,
+    timeout: float | None = None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
 
@@ -166,6 +192,10 @@ def call_json(
         user=user,
         user_cacheable_prefix=user_cacheable_prefix,
     )
+    if timeout is not None:
+        # Per-request read-timeout override (an SDK request option) — used for
+        # long generations that exceed the client default.
+        base_kwargs["timeout"] = timeout
     if schema is not None:
         tool = {
             "name": "submit_response",
@@ -174,6 +204,7 @@ def call_json(
         }
         msg = _create_with_retries(
             client,
+            stream=stream,
             **base_kwargs,
             tools=[tool],
             tool_choice={"type": "tool", "name": "submit_response"},
@@ -186,7 +217,7 @@ def call_json(
             502, "LLM did not invoke the structured response tool"
         )
 
-    msg = _create_with_retries(client, **base_kwargs)
+    msg = _create_with_retries(client, stream=stream, **base_kwargs)
     _capture_meta(meta_out, msg, model)
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
     # Tolerate accidental fences
@@ -210,15 +241,24 @@ def call_md(
     model: str = DEFAULT_MODEL,
     max_tokens: int = 16000,
     meta_out: dict | None = None,
+    stream: bool = False,
+    timeout: float | None = None,
 ) -> str:
-    """Call Claude expecting plain markdown output."""
-    msg = _create_with_retries(
-        get_client(),
+    """Call Claude expecting plain markdown output.
+
+    `stream=True` streams the response (required for long/large outputs; avoids
+    the read timeout) and `timeout` overrides the per-request read timeout for
+    a single slow call. Both default off, so existing callers are unchanged.
+    """
+    kwargs: dict = dict(
         model=model,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
     )
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    msg = _create_with_retries(get_client(), stream=stream, **kwargs)
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
