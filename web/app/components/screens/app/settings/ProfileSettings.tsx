@@ -1,10 +1,8 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { AuthApiError } from "@supabase/supabase-js"
 import { useWorkspace } from "../../../../context/WorkspaceContext"
 import { useAuth } from "../../../../lib/auth"
-import { validatePassword } from "../../../../lib/auth-validation"
 import { fetchUserProfile, updateUserProfile } from "../../../../lib/onboarding/store"
 import { ROLE_OPTIONS } from "../../../../lib/onboarding/types"
 import { getSupabase } from "../../../../lib/supabase/client"
@@ -26,12 +24,6 @@ export function ProfileSettings() {
   const [lastName, setLastName] = useState("")
   const [role, setRole] = useState("")
   const [roleOther, setRoleOther] = useState("")
-
-  const [newPassword, setNewPassword] = useState("")
-  const [confirmPassword, setConfirmPassword] = useState("")
-  const [passwordSaving, setPasswordSaving] = useState(false)
-  const [passwordMessage, setPasswordMessage] = useState<string | null>(null)
-  const [passwordError, setPasswordError] = useState<string | null>(null)
 
   const email = auth.kind === "authed" ? auth.user.email ?? "" : ""
 
@@ -122,38 +114,6 @@ export function ProfileSettings() {
     }
   }
 
-  async function onChangePassword(e: React.FormEvent) {
-    e.preventDefault()
-    setPasswordError(null)
-    setPasswordMessage(null)
-    const pwErr = validatePassword(newPassword)
-    if (pwErr) {
-      setPasswordError(pwErr)
-      return
-    }
-    if (newPassword !== confirmPassword) {
-      setPasswordError("Passwords do not match.")
-      return
-    }
-    setPasswordSaving(true)
-    try {
-      const supabase = getSupabase()
-      const { error } = await supabase.auth.updateUser({ password: newPassword })
-      if (error) throw error
-      setPasswordMessage("Password updated successfully.")
-      setNewPassword("")
-      setConfirmPassword("")
-    } catch (e) {
-      if (e instanceof AuthApiError) {
-        setPasswordError(e.message)
-      } else {
-        setPasswordError("Could not update password.")
-      }
-    } finally {
-      setPasswordSaving(false)
-    }
-  }
-
   if (loading) {
     return <p className="settings-loading">Loading profile…</p>
   }
@@ -221,42 +181,6 @@ export function ProfileSettings() {
           )}
           <button type="submit" className="btn btn-primary" disabled={saving}>
             {saving ? "Saving…" : "Save profile"}
-          </button>
-        </form>
-      </SettingsSection>
-
-      <SettingsSection title="Password" sub="Change the password you use to sign in.">
-        <form onSubmit={onChangePassword}>
-          <div className="field">
-            <label className="field-label">New password</label>
-            <input
-              type="password"
-              className="input"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              autoComplete="new-password"
-            />
-          </div>
-          <div className="field">
-            <label className="field-label">Confirm new password</label>
-            <input
-              type="password"
-              className="input"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              autoComplete="new-password"
-            />
-          </div>
-          {passwordError && <SettingsMessage kind="error">{passwordError}</SettingsMessage>}
-          {passwordMessage && (
-            <SettingsMessage kind="success">{passwordMessage}</SettingsMessage>
-          )}
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={passwordSaving || !newPassword}
-          >
-            {passwordSaving ? "Updating…" : "Update password"}
           </button>
         </form>
       </SettingsSection>
