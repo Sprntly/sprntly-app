@@ -371,6 +371,8 @@ export type ConnectionSummary = {
     // Slack
     channel_id?: string
     channel_name?: string
+    // Figma (PAT-vs-OAuth distinction set by backend on save)
+    auth_kind?: "pat" | "oauth"
   }
   last_sync_at: string | null
   last_sync_error: string | null
@@ -520,6 +522,13 @@ export const connectorsApi = {
     ),
   disconnectFireflies: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
+
+  // ---- Figma Personal Access Token (PAT, stopgap while OAuth in review) ----
+  connectFigmaWithPat: (pat: string) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      `/v1/connectors/figma/pat`,
+      { pat },
+    ),
 
   // ---- Generic test-connection --------------------------------------------
   /**
