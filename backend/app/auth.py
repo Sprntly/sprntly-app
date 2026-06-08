@@ -392,3 +392,24 @@ def require_company_from_query(
     if not token:
         raise HTTPException(401, "Not signed in")
     return require_company(authorization=f"Bearer {token}")
+
+
+def resolve_company_optional(
+    authorization: str | None = Header(default=None),
+    sprntly_app_session: str | None = Cookie(default=None),
+    sprntly_demo_session: str | None = Cookie(default=None),
+) -> CompanyContext | None:
+    """Best-effort tenant resolution for surfaces that work WITH or WITHOUT a
+    company (e.g. Ask: corpus-only for legacy cookie sessions, corpus+KG when a
+    company resolves). Returns the CompanyContext when a Supabase-authenticated
+    user has exactly one membership; returns None for any non-resolvable case
+    (legacy cookie session, no membership, integrity anomaly) instead of
+    raising. The route's primary auth gate still runs via require_session."""
+    try:
+        return require_company(
+            authorization=authorization,
+            sprntly_app_session=sprntly_app_session,
+            sprntly_demo_session=sprntly_demo_session,
+        )
+    except HTTPException:
+        return None
