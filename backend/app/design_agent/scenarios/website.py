@@ -21,6 +21,8 @@ import logging
 from typing import TypedDict
 from urllib.parse import urlsplit
 
+from app.net_guard import UnsafeURLError, assert_public_url
+
 logger = logging.getLogger(__name__)
 
 # Navigation wall-clock cap (ms) — AC4. A flaky public site must not block a
@@ -213,6 +215,18 @@ async def extract_website_design_system(url: str) -> WebsiteDesignSystem | None:
         # to the caller's `except ImportError` -> silent neutral floor with NO
         # website_extract_complete line. The floor OUTPUT (return None) is
         # unchanged — only the observability is.
+        # SSRF guard: reject non-public / non-http(s) website URLs before we
+        # spin up Chromium and navigate. A blocked URL floors to None (the
+        # FALLBACK SENTINEL) like any other failure, with reason=blocked_url so
+        # it is distinguishable in logs. Note: this validates the host as
+        # supplied; the headless browser still follows redirects internally,
+        # but the only style values we ever return are short non-content
+        # strings, never response bodies.
+        try:
+            assert_public_url(url)
+        except UnsafeURLError:
+            reason = "blocked_url"
+            return None
         async_playwright = _resolve_async_playwright()
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=_CHROMIUM_ARGS)
