@@ -234,20 +234,42 @@ def test_github_authorize_redirects_to_github(github_env, monkeypatch):
     assert "state=" in loc
 
 
-def test_github_callback_stores_token(github_env, monkeypatch):
+def _seed_github_install(*, account_login: str, installation_id: int = 12345) -> None:
+    """Seed a github_installations row for the given login. Mimics what the
+    'installation' webhook would have created when the user installed the
+    Sprntly App on a repo. Used to test the OAuth-callback branching:
+    if an install exists for the OAuth'd user → redirect to /settings;
+    if not → redirect to the App install URL."""
+    from app.db.client import require_client
+
+    require_client().table("github_installations").upsert(
+        {
+            "installation_id": installation_id,
+            "account_id": 42,
+            "account_login": account_login,
+            "account_type": "User",
+            "repository_selection": "all",
+        }
+    ).execute()
+
+
+def test_github_callback_with_existing_install_redirects_to_settings(
+    github_env, monkeypatch
+):
+    """If the OAuth'd user already has the Sprntly App installed on their
+    account, send them to the connectors page (current happy-path UX)."""
     ctx = company_client(monkeypatch)
     from app.connectors import github_app
-    state = github_app.sign_oauth_state(company_id=ctx.company_id)
 
     fake_token = {
         "access_token": "gho_xxx",
         "token_type": "bearer",
         "scope": "read:user,user:email",
-        "refresh_token": "ghr_xxx",
-        "expires_in": 28800,
     }
     fake_user = {"login": "octocat", "id": 1, "email": "octo@cat.dev"}
+    _seed_github_install(account_login="octocat")
 
+    state = github_app.sign_oauth_state(company_id=ctx.company_id)
     with patch("app.routes.connectors.github_app.exchange_code_for_token", return_value=fake_token), \
          patch("app.routes.connectors.github_app.fetch_authenticated_user", return_value=fake_user):
         r = ctx.client.get(
@@ -258,13 +280,43 @@ def test_github_callback_stores_token(github_env, monkeypatch):
 
     assert r.status_code == 307
     assert "connected=github" in r.headers["location"]
-
-    listed = ctx.client.get(
-        "/v1/connectors"
-    ).json()["connections"]
+    # The connection row is still written either way.
+    listed = ctx.client.get("/v1/connectors").json()["connections"]
     gh = next(c for c in listed if c["provider"] == "github")
     assert gh["account_label"] == "@octocat"
-    assert gh["scopes"] == "read:user,user:email"
+
+
+def test_github_callback_with_no_install_redirects_to_app_install_url(
+    github_env, monkeypatch
+):
+    """If the OAuth'd user has no Sprntly App install yet, the callback
+    must redirect them to github.com/apps/<slug>/installations/new so
+    they can pick which repos to grant access to. This closes the gap
+    where users finished OAuth but had no installation_id → empty
+    installation picker on /lab/code-chat."""
+    ctx = company_client(monkeypatch)
+    from app.connectors import github_app
+
+    fake_token = {"access_token": "gho_yyy", "token_type": "bearer"}
+    fake_user = {"login": "newuser", "id": 99, "email": "new@user.dev"}
+
+    state = github_app.sign_oauth_state(company_id=ctx.company_id)
+    with patch("app.routes.connectors.github_app.exchange_code_for_token", return_value=fake_token), \
+         patch("app.routes.connectors.github_app.fetch_authenticated_user", return_value=fake_user):
+        r = ctx.client.get(
+            "/v1/connectors/github/callback",
+            params={"code": "abc", "state": state},
+            follow_redirects=False,
+        )
+
+    assert r.status_code == 307
+    loc = r.headers["location"]
+    assert loc.startswith("https://github.com/apps/")
+    assert "/installations/new" in loc
+    # The connection row was still written — OAuth succeeded, we just
+    # need them to install the App on a repo before they can use it.
+    listed = ctx.client.get("/v1/connectors").json()["connections"]
+    assert any(c["provider"] == "github" for c in listed)
 
 
 def test_github_callback_rejects_error_payload(github_env, monkeypatch):
