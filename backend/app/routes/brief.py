@@ -1,15 +1,35 @@
 import asyncio
+import logging
 
 from fastapi import Depends, APIRouter, HTTPException
 
 from app.auth import require_session
 from app.brief_runner import auto_generate_brief, get_status
+from app.config import settings
 from app.corpus import load_corpus
 from app.db import get_brief_by_id, get_current_brief, save_brief
 from app.llm import call_json
 from app.prompts import BRIEF_SCHEMA_VERSION, BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
+from app.synthesis_brief import generate_brief_for
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/brief", tags=["brief"])
+
+
+async def _synthesis_generate_bg(dataset: str) -> None:
+    """Background body for /regenerate under the synthesis engine.
+
+    Mirrors auto_generate_brief's posture: seed-if-empty + run_synthesis runs
+    off the event loop (it makes blocking LLM/Supabase calls); failures are
+    logged, never raised — the service keeps serving the prior cached brief.
+    run_synthesis save_brief()s the new brief, so /current picks it up.
+    """
+    try:
+        await asyncio.to_thread(generate_brief_for, dataset)
+        logger.info("Synthesis brief generated for %s", dataset)
+    except Exception:  # noqa: BLE001 — fire-and-forget; prior brief stays
+        logger.exception("Synthesis brief generation failed for %s", dataset)
 
 
 @router.get("/current")
@@ -55,8 +75,15 @@ async def regenerate(
     Use case: API key was just fixed, want to retry without restarting the
     service. Existing cached brief (if any) stays in place until the new
     generation completes successfully.
+
+    Engine selection (BRIEF_ENGINE): "synthesis" (default) runs the KG
+    seed-if-empty → run_synthesis path; "legacy" keeps the placeholder
+    corpus→Claude path. Response contract is identical either way.
     """
-    asyncio.create_task(auto_generate_brief(dataset))
+    if settings.brief_engine == "synthesis":
+        asyncio.create_task(_synthesis_generate_bg(dataset))
+    else:
+        asyncio.create_task(auto_generate_brief(dataset))
     return {"started": True, "dataset": dataset}
 
 
@@ -80,7 +107,22 @@ def generate(
 
     Note: invokes Claude. Costs tokens. Blocks until done (~30s). Use
     /v1/brief/regenerate for fire-and-forget behavior instead.
+
+    Engine selection (BRIEF_ENGINE): "synthesis" (default) runs the KG
+    seed-if-empty → run_synthesis path (which save_brief()s the result); we
+    then read it back to preserve the {brief_id, **payload} response shape.
+    "legacy" keeps the placeholder corpus→Claude path.
     """
+    if settings.brief_engine == "synthesis":
+        try:
+            payload = generate_brief_for(dataset)
+        except ValueError as e:
+            # Unknown dataset/company or an empty KG even after seeding.
+            raise HTTPException(409, str(e)) from e
+        saved = get_current_brief(dataset)
+        brief_id = saved.get("id") if saved else None
+        return {"brief_id": brief_id, **payload}
+
     corpus = load_corpus(dataset)
     try:
         from app.signal_fusion import fuse_signals
