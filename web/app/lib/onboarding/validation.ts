@@ -1,3 +1,4 @@
+// Required-field validation for onboarding steps (block Continue + highlight gaps).
 /**
  * Lightweight required-field validation for the v4 onboarding steps.
  *
