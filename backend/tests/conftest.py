@@ -148,6 +148,7 @@ CREATE TABLE prds (
     generated_at     TEXT NOT NULL DEFAULT (datetime('now')),
     title            TEXT NOT NULL,
     payload_md       TEXT NOT NULL DEFAULT '',
+    llm_part         TEXT,
     status           TEXT NOT NULL DEFAULT 'ready',
     error            TEXT,
     template_version INTEGER,

@@ -174,32 +174,41 @@ def test_generate_does_not_dedupe_against_v1_row(
     assert body["variant"] == "v2"
 
 
-def test_generate_renders_v2_semantic_blocks_via_canonical_path(
+def test_generate_via_prd_author_skill_through_canonical_path(
     app_client, isolated_settings, monkeypatch
 ):
-    """A v2-style payload (typed `:::` blocks) flows end-to-end through
-    the canonical /v1/prd/generate path. Confirms the runner picks up
-    the v2 template + system prompt and stores the result for GET."""
+    """A 2-part document flows end-to-end through the canonical
+    /v1/prd/generate path. Confirms the runner binds the prd-author skill at
+    the gateway and stores Part A (human) for GET + Part B (LLM) alongside."""
     import asyncio
     from app import prd_runner
+    from app.graph.gateway import LLMResult
 
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _save_brief_with_insights(db_mod)
 
     captured: dict = {}
-    v2_md = (
+    two_part = (
         "# Claims — Move deductible upfront\n\n"
-        ":::tldr\n"
-        '{"problem": "57% abandon", "fix": "step 1", "impact": "+$143M"}\n'
-        ":::\n"
+        "# Part A — Product Requirements Document (human-readable)\n"
+        "## 1. Problem & evidence\n57% abandon.\n"
+        "\n---\n"
+        "# Part B — Implementation Spec (LLM-readable / agent-executable)\n"
+        "WHEN x THE SYSTEM SHALL y.\n"
     )
 
     def _capture(**kwargs):
         captured.update(kwargs)
-        return v2_md
+        return LLMResult(
+            output=two_part, model="claude-sonnet-4-6",
+            prompt_version=kwargs["prompt_version"] + "+prd-author@abc123",
+            input_tokens=1, output_tokens=1, cache_read_input_tokens=0,
+            cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=1,
+            stop_reason="end_turn",
+        )
 
-    monkeypatch.setattr(prd_runner, "call_md", _capture)
+    monkeypatch.setattr(prd_runner, "llm_call", _capture)
 
     resp = app_client.post(
         "/v1/prd/generate",
@@ -217,12 +226,13 @@ def test_generate_renders_v2_semantic_blocks_via_canonical_path(
     finally:
         loop.close()
 
-    # v2 system prompt carries this phrase; the now-deleted v1 system prompt
-    # did not. Guards against accidentally re-introducing a v1 code path.
-    assert ":::tldr" in captured["user"]
-    assert "semantic blocks" in captured["system"]
+    # The gateway was driven with the prd-author skill binding.
+    assert captured["skill"] == "prd-author"
 
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
     assert row["variant"] == "v2"
-    assert ":::tldr" in row["payload_md"]
+    # Part A renders as the human PRD; Part B is stored alongside, not in it.
+    assert "Part A — Product Requirements Document" in row["payload_md"]
+    assert "Part B — Implementation Spec" not in row["payload_md"]
+    assert "Part B — Implementation Spec" in row["llm_part"]
