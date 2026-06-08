@@ -15,11 +15,42 @@ Tenancy: gated on require_company. Cross-tenant isolation tested.
 """
 from __future__ import annotations
 
+import importlib
+import sys
 from unittest.mock import patch
+
+import pytest
+from cryptography.fernet import Fernet
 
 import app.auth  # noqa: F401
 
 from tests._company_helpers import company_client
+
+
+def _reload_app_modules() -> None:
+    """Reload the modules that capture env at import time. Same shape the
+    fireflies + clickup test suites use after setting TOKEN_ENCRYPTION_KEY."""
+    for name in (
+        "app.config",
+        "app.connectors.tokens",
+        "app.connectors.figma_pat",
+        "app.routes.connectors",
+        "app.main",
+    ):
+        if name in sys.modules:
+            importlib.reload(sys.modules[name])
+
+
+@pytest.fixture
+def figma_pat_env(isolated_settings, monkeypatch):
+    """Set TOKEN_ENCRYPTION_KEY for tests that exercise the encrypt path.
+    Mirrors `fireflies_env` from test_routes_connectors_fireflies.py.
+
+    Without this fixture, route tests 500 with 'TOKEN_ENCRYPTION_KEY is not
+    configured' because CI runs in a clean environment (no `.env` file)."""
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    _reload_app_modules()
+    yield
 
 
 # ─────────────────────── helpers ───────────────────────
@@ -60,7 +91,7 @@ def _list_figma_connection(company_id: str) -> dict | None:
 # ─────────────────────── happy path ───────────────────────
 
 
-def test_figma_pat_valid_creates_connection(isolated_settings, monkeypatch):
+def test_figma_pat_valid_creates_connection(figma_pat_env, monkeypatch):
     """Pasted PAT is validated, then stored under provider='figma'."""
     ctx = company_client(monkeypatch)
     import app.connectors.figma_pat as mod
@@ -84,7 +115,7 @@ def test_figma_pat_valid_creates_connection(isolated_settings, monkeypatch):
 
 
 def test_figma_pat_falls_back_to_email_when_no_handle(
-    isolated_settings, monkeypatch
+    figma_pat_env, monkeypatch
 ):
     ctx = company_client(monkeypatch)
     import app.connectors.figma_pat as mod
@@ -99,7 +130,7 @@ def test_figma_pat_falls_back_to_email_when_no_handle(
 
 
 def test_figma_pat_replaces_existing_connection(
-    isolated_settings, monkeypatch
+    figma_pat_env, monkeypatch
 ):
     """Pasting a new PAT upserts the existing connection row (one per company
     per provider, enforced by unique(company_id, provider))."""
@@ -120,7 +151,7 @@ def test_figma_pat_replaces_existing_connection(
 # ─────────────────────── invalid PAT ───────────────────────
 
 
-def test_figma_pat_invalid_returns_400(isolated_settings, monkeypatch):
+def test_figma_pat_invalid_returns_400(figma_pat_env, monkeypatch):
     ctx = company_client(monkeypatch)
     import app.connectors.figma_pat as mod
 
@@ -136,13 +167,13 @@ def test_figma_pat_invalid_returns_400(isolated_settings, monkeypatch):
     assert _list_figma_connection(ctx.company_id) is None
 
 
-def test_figma_pat_empty_string_rejected(isolated_settings, monkeypatch):
+def test_figma_pat_empty_string_rejected(figma_pat_env, monkeypatch):
     ctx = company_client(monkeypatch)
     r = ctx.client.post("/v1/connectors/figma/pat", json={"pat": "   "})
     assert r.status_code == 422
 
 
-def test_figma_pat_missing_field_rejected(isolated_settings, monkeypatch):
+def test_figma_pat_missing_field_rejected(figma_pat_env, monkeypatch):
     ctx = company_client(monkeypatch)
     r = ctx.client.post("/v1/connectors/figma/pat", json={})
     assert r.status_code == 422
@@ -151,7 +182,7 @@ def test_figma_pat_missing_field_rejected(isolated_settings, monkeypatch):
 # ─────────────────────── auth gate ───────────────────────
 
 
-def test_figma_pat_requires_auth(isolated_settings, monkeypatch):
+def test_figma_pat_requires_auth(figma_pat_env, monkeypatch):
     """Without bearer header → 401 (require_session)."""
     company_client(monkeypatch)
     from fastapi.testclient import TestClient
@@ -164,7 +195,7 @@ def test_figma_pat_requires_auth(isolated_settings, monkeypatch):
     assert r.status_code == 401
 
 
-def test_figma_pat_requires_company(isolated_settings, monkeypatch):
+def test_figma_pat_requires_company(figma_pat_env, monkeypatch):
     """Bearer but no company membership → 403 (require_company)."""
     from tests._company_helpers import (
         setup_supabase_auth,
@@ -188,7 +219,7 @@ def test_figma_pat_requires_company(isolated_settings, monkeypatch):
 # ─────────────────────── unit test: fetch_me ───────────────────────
 
 
-def test_fetch_me_calls_figma_with_token_header(isolated_settings, monkeypatch):
+def test_fetch_me_calls_figma_with_token_header(figma_pat_env, monkeypatch):
     """Verify the HTTP shape: GET api.figma.com/v1/me with X-Figma-Token header."""
     import app.connectors.figma_pat as mod
 
@@ -222,7 +253,7 @@ def test_fetch_me_calls_figma_with_token_header(isolated_settings, monkeypatch):
     assert captured["timeout"] == 10
 
 
-def test_fetch_me_returns_empty_on_401(isolated_settings, monkeypatch):
+def test_fetch_me_returns_empty_on_401(figma_pat_env, monkeypatch):
     import app.connectors.figma_pat as mod
 
     class _FakeResp:
@@ -237,7 +268,7 @@ def test_fetch_me_returns_empty_on_401(isolated_settings, monkeypatch):
     assert mod.fetch_me("bad") == {}
 
 
-def test_fetch_me_returns_empty_on_network_error(isolated_settings, monkeypatch):
+def test_fetch_me_returns_empty_on_network_error(figma_pat_env, monkeypatch):
     import app.connectors.figma_pat as mod
     import requests
 
