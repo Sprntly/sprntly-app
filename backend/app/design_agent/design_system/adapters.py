@@ -859,280 +859,82 @@ class GithubExtractor:
         return out
 
     def extract_raw_signals(self, ref: str) -> RawSignals:
+        """Gather design tokens from a GitHub repository via the styling-system sub-registry.
+
+        Fetch strategy:
+          1. Fetch ``package.json`` + the bounded design-file list to detect the styling system.
+          2. Detect the stack via the sub-registry (deps + file paths only — no bodies read
+             for strategies that don't match).
+          3. Fetch ONLY the winning strategy's file bodies.
+          4. Call the strategy's ``gather`` function and return the gather dict.
+
+        The ``_collect_*`` parsing helpers live in ``github_gather.py``; this method owns
+        all network I/O and passes already-fetched content into the pure gather module.
+        """
+        from app.design_agent.design_system.github_gather import (
+            gather_github_signals,
+            styling_registry,
+            degrade_strategy,
+        )
+
         repo_full_name, branch = _repo_ref_parts(ref)
         if not repo_full_name or "/" not in repo_full_name:
             return RawSignals(provider=self.provider, ref=ref, signals={})
 
-        signals: dict = {
-            "files_present": [],
-            "colors": {},
-            "fonts": [],
-            "spacing": [],
-            "radius": None,
-            "shadows": [],
-            "components": [],
-            "inferred_colors": {},
-            "inferred_spacing": [],
-            "inferred_radius": None,
-            "inferred_shadows": [],
-            "inferred_fonts": [],
-            "inferred_components": [],
-            "inference_files": [],
-        }
-        components: set[str] = set()
-        spacing: set[int] = set()
-        shadows: list[str] = []
-        inferred_components: set[str] = set()
-        inferred_spacing: set[int] = set()
-        inferred_shadows: list[str] = []
-        inferred_fonts: list[str] = []
-        inferred_colors: dict[str, str] = {}
-        inference_stats: dict[str, int] = {}
+        # ── Step 1: Fetch package.json and the bounded design-file listing ──
+        # Read package.json first so we can extract deps for detection.
+        # Then fetch each design-file path within the explicit-file byte cap.
+        # We record which paths are present (regardless of whether their body
+        # fits the cap) so the strategy detector can do path-glob checks.
+
+        fetched_design: dict[str, str] = {}  # path -> text (already-fetched bodies)
+        all_design_paths: list[str] = []     # paths that exist in the repo (for detection)
+        deps: set[str] = set()
 
         for path in _GITHUB_DESIGN_FILES:
-            text = self._fetch_text_file(repo_full_name, path, branch)
-            if not text:
+            text = self._fetch_text_file(repo_full_name, path, branch,
+                                         max_bytes=_GITHUB_EXPLICIT_FILE_BYTES)
+            if text is None:
                 continue
-            signals["files_present"].append(path)
-            lowered_path = path.lower()
-            if lowered_path.endswith(".json"):
-                self._collect_json_signals(text, signals, components, spacing, shadows)
-            if lowered_path.endswith((".css", ".js", ".ts", ".mjs", ".cjs")):
-                self._collect_text_signals(text, signals, components, spacing, shadows)
+            all_design_paths.append(path)
+            fetched_design[path] = text
+            # Extract dependency names from package.json for stack detection.
+            if path == "package.json":
+                try:
+                    pkg = json.loads(text)
+                    for section in ("dependencies", "devDependencies", "peerDependencies"):
+                        deps.update((pkg.get(section) or {}).keys())
+                except (TypeError, ValueError):
+                    pass
 
-        for path, name in self._list_ui_files(repo_full_name, branch):
-            text = self._fetch_text_file(
-                repo_full_name,
-                path,
-                branch,
-                max_bytes=_GITHUB_MAX_UI_FILE_BYTES,
-            )
-            if not text:
-                continue
-            signals["inference_files"].append(path)
-            self._collect_inferred_signals(
-                text,
-                name,
-                inferred_colors,
-                inferred_spacing,
-                inferred_shadows,
-                inferred_fonts,
-                inferred_components,
-                inference_stats,
-            )
+        # ── Step 2: Detect the styling system ──
+        # Detection reads only deps + the list of present paths — no extra fetches.
+        strategy = styling_registry.detect(deps, all_design_paths)
+        if strategy is None:
+            strategy = degrade_strategy
 
-        signals["spacing"] = sorted(spacing)
-        signals["shadows"] = shadows[:8]
-        signals["components"] = sorted(components)
-        signals["inferred_colors"] = inferred_colors
-        signals["inferred_spacing"] = sorted(inferred_spacing)
-        signals["inferred_radius"] = inference_stats.get("_radius")
-        signals["inferred_shadows"] = inferred_shadows[:8]
-        signals["inferred_fonts"] = inferred_fonts[:8]
-        signals["inferred_components"] = sorted(inferred_components)
-        signals["inference_stats"] = inference_stats
-        return RawSignals(provider=self.provider, ref=ref, signals=signals)
-
-    def _collect_json_signals(
-        self,
-        text: str,
-        signals: dict,
-        components: set[str],
-        spacing: set[int],
-        shadows: list[str],
-    ) -> None:
-        try:
-            data = json.loads(text)
-        except (TypeError, ValueError):
-            return
-
-        for node in _walk_json(data):
-            if isinstance(node, dict):
-                for key, value in node.items():
-                    if (
-                        isinstance(value, dict)
-                        and isinstance(value.get("value"), str)
-                    ):
-                        self._collect_named_value(
-                            str(key), value["value"], signals, spacing, shadows
-                        )
-                    self._collect_named_value(str(key), value, signals, spacing, shadows)
-            elif isinstance(node, str):
-                self._collect_component_hints(node, components)
-        if isinstance(data, dict):
-            for key in ("components", "aliases"):
-                section = data.get(key)
-                if isinstance(section, dict):
-                    for name in section:
-                        self._collect_component_hints(str(name), components)
-
-    def _collect_text_signals(
-        self,
-        text: str,
-        signals: dict,
-        components: set[str],
-        spacing: set[int],
-        shadows: list[str],
-    ) -> None:
-        for name, value in _JS_HEX_PAIR_RE.findall(text):
-            signals["colors"].setdefault(name.lower(), value.lower())
-
-        for var_name, raw_value in _CSS_VAR_RE.findall(text):
-            key = var_name.lower()
-            value = raw_value.strip()
-            color = _normalize_hex(value)
-            if color:
-                signals["colors"].setdefault(key, color)
-                continue
-            size = _parse_px_or_rem(value)
-            if size is not None:
-                if "radius" in key:
-                    signals["radius"] = value
-                elif any(k in key for k in ("space", "spacing", "gap")):
-                    spacing.add(size)
-
-        for value in _FONT_DECL_RE.findall(text):
-            if value:
-                signals["fonts"].append(value.strip())
-
-        for name, value in _FONT_TOKEN_RE.findall(text):
-            if "font" in name.lower() or name.lower() in {"sans", "heading", "body"}:
-                signals["fonts"].append(value.strip())
-
-        for name, value in _SIZE_PAIR_RE.findall(text):
-            lower = name.lower()
-            px = _parse_px_or_rem(value)
-            if px is None:
-                continue
-            if "radius" in lower or lower in {"sm", "md", "lg", "xl", "full"}:
-                signals["radius"] = value
-            if "space" in lower or "spacing" in lower or lower.isdigit():
-                spacing.add(px)
-
-        for name, value in _SHADOW_PAIR_RE.findall(text):
-            if "shadow" in name.lower() and value not in shadows:
-                shadows.append(value)
-
-        self._collect_component_hints(text, components)
-
-    def _collect_named_value(
-        self,
-        key: str,
-        value,
-        signals: dict,
-        spacing: set[int],
-        shadows: list[str],
-    ) -> None:
-        lower = key.lower()
-        if isinstance(value, str):
-            color = _normalize_hex(value)
-            if color:
-                signals["colors"].setdefault(lower, color)
-                return
-            px = _parse_px_or_rem(value)
-            if px is not None:
-                if "radius" in lower:
-                    signals["radius"] = value
-                elif "space" in lower or "spacing" in lower or lower.isdigit():
-                    spacing.add(px)
-            if "font" in lower:
-                signals["fonts"].append(value)
-            if "shadow" in lower and value not in shadows:
-                shadows.append(value)
-        elif isinstance(value, list) and (
-            "font" in lower or lower in {"sans", "heading", "body"}
-        ):
-            for item in value:
-                if isinstance(item, str):
-                    signals["fonts"].append(item)
-
-    def _collect_component_hints(self, text: str, components: set[str]) -> None:
-        haystack = text.lower()
-        for name in _COMPONENT_HINTS:
-            if re.search(rf"\b{name}\b", haystack):
-                components.add(name)
-
-    def _collect_inferred_signals(
-        self,
-        text: str,
-        file_name: str,
-        colors: dict[str, str],
-        spacing: set[int],
-        shadows: list[str],
-        fonts: list[str],
-        components: set[str],
-        stats: dict[str, int],
-    ) -> None:
-        lower_file = file_name.rsplit(".", 1)[0].lower()
-        if lower_file in _COMPONENT_HINTS:
-            components.add(lower_file)
-        self._collect_component_hints(text, components)
-        for match in _EXPORT_COMPONENT_RE.findall(text):
-            exported = (match[0] or match[1] or "").strip()
-            if exported:
-                self._collect_component_hints(exported, components)
-
-        color_counts: dict[str, int] = {}
-        for color_name in _TAILWIND_COLOR_CLASS_RE.findall(text):
-            if color_name in _TAILWIND_COLORS:
-                color_counts[color_name] = color_counts.get(color_name, 0) + 1
-        for color_name, count in sorted(color_counts.items(), key=lambda item: item[1], reverse=True):
-            if count >= 2 and "primary" not in colors:
-                colors["primary"] = _TAILWIND_COLORS[color_name]
-                stats["color_classes"] = stats.get("color_classes", 0) + count
+        # ── Step 3: Fetch the winning strategy's UI-file bodies ──
+        # UI files (component source files) provide inferred signals regardless of
+        # which strategy won.  The file listing is already bounded to _GITHUB_MAX_UI_FILES
+        # inside _list_ui_files; we enforce the cap here as well so callers that
+        # substitute a test double cannot accidentally exceed it.
+        ui_listing = self._list_ui_files(repo_full_name, branch)
+        ui_fetched = 0
+        for path, _name in ui_listing:
+            if ui_fetched >= _GITHUB_MAX_UI_FILES:
                 break
-        if "bg-white" in text and "background" not in colors:
-            colors["background"] = "#ffffff"
-        if "bg-black" in text and "background" not in colors:
-            colors["background"] = "#000000"
-        if "text-white" in text and "foreground" not in colors:
-            colors["foreground"] = "#ffffff"
-        if "border-" in text and "border" not in colors:
-            colors["border"] = Colors().border
+            if path in fetched_design:
+                continue  # already fetched above (counts against the cap only once)
+            text = self._fetch_text_file(
+                repo_full_name, path, branch, max_bytes=_GITHUB_MAX_UI_FILE_BYTES
+            )
+            if text is not None:
+                fetched_design[path] = text
+                ui_fetched += 1
 
-        radius_hits = _TAILWIND_RADIUS_RE.findall(text)
-        if radius_hits:
-            stats["radius_classes"] = stats.get("radius_classes", 0) + len(radius_hits)
-            order = {"full": 4, "3xl": 3, "2xl": 3, "xl": 2, "lg": 2, "md": 1, "sm": 1, "": 1}
-            current = stats.get("_radius_rank", 0)
-            for value in radius_hits:
-                rank = order.get(value or "", 1)
-                if rank >= current:
-                    stats["_radius_rank"] = rank
-                    if value == "full":
-                        stats["_radius"] = "9999px"
-                    elif value in {"2xl", "3xl"}:
-                        stats["_radius"] = "24px"
-                    elif value in {"lg", "xl"}:
-                        stats["_radius"] = "12px"
-                    elif value == "sm":
-                        stats["_radius"] = "4px"
-                    else:
-                        stats["_radius"] = "8px"
-
-        for raw in _TAILWIND_SPACING_RE.findall(text):
-            try:
-                step = int(raw)
-            except ValueError:
-                continue
-            if step > 0:
-                spacing.add(step * 4)
-                stats["spacing_classes"] = stats.get("spacing_classes", 0) + 1
-
-        shadow_hits = _TAILWIND_SHADOW_RE.findall(text)
-        if shadow_hits:
-            stats["shadow_classes"] = stats.get("shadow_classes", 0) + len(shadow_hits)
-            for value in shadow_hits:
-                label = f"shadow-{value}" if value else "shadow"
-                if label != "shadow-none" and label not in shadows:
-                    shadows.append(label)
-
-        if _TAILWIND_WEIGHT_RE.search(text):
-            fonts.append("font-weight")
-            stats["font_classes"] = stats.get("font_classes", 0) + 1
-        if _TAILWIND_TEXT_SIZE_RE.search(text):
-            fonts.append("type-scale")
-            stats["text_size_classes"] = stats.get("text_size_classes", 0) + 1
+        # ── Step 4: Gather via the winning strategy ──
+        signals = gather_github_signals(fetched_design, deps, all_design_paths, _COMPONENT_HINTS)
+        return RawSignals(provider=self.provider, ref=ref, signals=signals)
 
     def normalize(self, raw: RawSignals) -> DesignSystem:
         """Fold GitHub gather signals into the common DesignSystem shape via the shared kernel.
