@@ -25,6 +25,7 @@ from anthropic import Anthropic
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app import db
 from app.agent_tools import registry
 import app.agent_tools.github  # noqa: F401 — side-effect: registers GitHub tools
 from app.auth import CompanyContext, require_company
@@ -80,10 +81,20 @@ def chat_with_tools(
     company: CompanyContext = Depends(require_company),
 ):
     """Run the tool-use loop until the model returns end_turn or we hit
-    MAX_ITERATIONS. Tenancy: gated on require_company; the caller must
-    provide their installation_id (the frontend gets it from GET
-    /v1/connectors/github/installations).
+    MAX_ITERATIONS.
+
+    Tenancy: gated on require_company AND on installation ownership.
+    The caller's installation_id must belong to their company; otherwise
+    we 404 BEFORE consulting the LLM (no Anthropic tokens burned on
+    rejected calls). Without this guard the dispatched GitHub tools
+    would mint a GitHub App *installation token* for whatever id the
+    body carried — Apurva's PR #230 closed the same lateral-access path
+    on the connector routes but left this surface unguarded.
     """
+    if not db.get_github_installation_for_company(
+        body.installation_id, company.company_id
+    ):
+        raise HTTPException(404, "GitHub installation not found")
     client = get_llm_client()
     tools = registry.list_tools()
 

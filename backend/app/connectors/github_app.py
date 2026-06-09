@@ -342,3 +342,179 @@ def fetch_user_repos(access_token: str, per_page: int = 50) -> list[dict[str, An
         }
         for r in (raw or [])
     ]
+
+
+def fetch_installation_repos(
+    installation_id: int, per_page: int = 100
+) -> list[dict[str, Any]]:
+    """Repos this installation can read, using the App INSTALLATION token.
+
+    GitHub endpoint: GET /installation/repositories. Unlike /user/repos
+    (which is OAuth-token-gated and scope-limited), this returns exactly
+    the repos the App was granted access to during install — which is
+    what users actually expect to see in the prototype picker.
+
+    Returns the same trimmed shape as fetch_user_repos so callers can
+    treat the two interchangeably.
+    """
+    resp = requests.get(
+        f"{GITHUB_API_BASE}/installation/repositories",
+        headers=headers_for_installation(installation_id),
+        params={"per_page": per_page},
+        timeout=20,
+    )
+    if not resp.ok:
+        logger.warning(
+            "GitHub /installation/repositories failed for install %s: %s %s",
+            installation_id, resp.status_code, resp.text[:200],
+        )
+        # Honest empty rather than raise — one bad install in an aggregate
+        # call shouldn't sink the whole list.
+        return []
+    raw = (resp.json() or {}).get("repositories") or []
+    return [
+        {
+            "full_name": r.get("full_name"),
+            "name": r.get("name"),
+            "private": bool(r.get("private")),
+            "html_url": r.get("html_url"),
+            "default_branch": r.get("default_branch"),
+            "description": r.get("description"),
+            "updated_at": r.get("updated_at"),
+        }
+        for r in raw
+    ]
+
+
+def _api_get(access_token: str, path: str, params: dict | None = None,
+             *, accept: str = "application/vnd.github+json", timeout: int = 20):
+    """GET against the GitHub REST API with a bearer token. Returns the
+    requests.Response (caller inspects status — some callers tolerate 404/403)."""
+    return requests.get(
+        f"{GITHUB_API_BASE}{path}",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": accept,
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        params=params or {},
+        timeout=timeout,
+    )
+
+
+def fetch_recent_pull_requests(
+    access_token: str, repo_full_name: str, per_page: int = 20
+) -> list[dict[str, Any]]:
+    """Recent PRs (any state) for a repo — title/body/state/author distilled.
+
+    Used by the activity puller as a code-insight signal. Returns trimmed
+    dicts; raises on a hard failure so the puller can decide to skip the repo."""
+    resp = _api_get(
+        access_token, f"/repos/{repo_full_name}/pulls",
+        params={"state": "all", "sort": "updated", "direction": "desc",
+                "per_page": per_page},
+    )
+    if not resp.ok:
+        logger.warning("GitHub pulls failed for %s: %s %s",
+                       repo_full_name, resp.status_code, resp.text[:200])
+        resp.raise_for_status()
+    return [
+        {
+            "number": pr.get("number"),
+            "title": pr.get("title") or "",
+            "body": pr.get("body") or "",
+            "state": "merged" if pr.get("merged_at") else (pr.get("state") or "open"),
+            "author": (pr.get("user") or {}).get("login"),
+            "updated_at": pr.get("updated_at"),
+        }
+        for pr in (resp.json() or [])
+    ]
+
+
+def fetch_recent_commits(
+    access_token: str, repo_full_name: str, per_page: int = 30
+) -> list[dict[str, Any]]:
+    """Recent commits for a repo — message + author + sha distilled."""
+    resp = _api_get(
+        access_token, f"/repos/{repo_full_name}/commits",
+        params={"per_page": per_page},
+    )
+    if not resp.ok:
+        logger.warning("GitHub commits failed for %s: %s %s",
+                       repo_full_name, resp.status_code, resp.text[:200])
+        resp.raise_for_status()
+    out: list[dict[str, Any]] = []
+    for c in (resp.json() or []):
+        commit = c.get("commit") or {}
+        out.append({
+            "sha": (c.get("sha") or "")[:10],
+            "message": (commit.get("message") or "").strip(),
+            "author": (commit.get("author") or {}).get("name"),
+            "date": (commit.get("author") or {}).get("date"),
+        })
+    return out
+
+
+# ─────────────────────── deep-read helpers (on-demand) ───────────────────────
+
+
+def fetch_repo_languages(access_token: str, repo_full_name: str) -> dict[str, int]:
+    """Language → byte-count map for a repo. Empty dict on any failure."""
+    resp = _api_get(access_token, f"/repos/{repo_full_name}/languages")
+    if not resp.ok:
+        return {}
+    data = resp.json()
+    return data if isinstance(data, dict) else {}
+
+
+def fetch_repo_readme(access_token: str, repo_full_name: str,
+                      max_chars: int = 8000) -> str:
+    """Decoded README text (truncated). Empty string if none / on failure."""
+    resp = _api_get(access_token, f"/repos/{repo_full_name}/readme")
+    if not resp.ok:
+        return ""
+    payload = resp.json()
+    content = payload.get("content") or ""
+    if (payload.get("encoding") or "").lower() == "base64":
+        import base64
+        try:
+            text = base64.b64decode(content).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            return ""
+    else:
+        text = content
+    return text[:max_chars]
+
+
+def fetch_repo_tree(access_token: str, repo_full_name: str, branch: str,
+                    max_entries: int = 200) -> list[str]:
+    """Top-of-repo file paths (recursive tree, capped). Empty list on failure.
+
+    Returns only the path strings — a structural map, never file contents."""
+    resp = _api_get(
+        access_token, f"/repos/{repo_full_name}/git/trees/{branch}",
+        params={"recursive": "1"},
+    )
+    if not resp.ok:
+        return []
+    tree = (resp.json() or {}).get("tree") or []
+    paths = [t.get("path") for t in tree if t.get("type") == "blob" and t.get("path")]
+    return paths[:max_entries]
+
+
+def fetch_repo_meta(access_token: str, repo_full_name: str) -> dict[str, Any]:
+    """Repo metadata (description, default_branch, topics…). {} on failure."""
+    resp = _api_get(access_token, f"/repos/{repo_full_name}")
+    if not resp.ok:
+        logger.warning("GitHub repo meta failed for %s: %s",
+                       repo_full_name, resp.status_code)
+        return {}
+    r = resp.json()
+    return {
+        "full_name": r.get("full_name"),
+        "description": r.get("description"),
+        "default_branch": r.get("default_branch") or "main",
+        "topics": r.get("topics") or [],
+        "language": r.get("language"),
+        "private": bool(r.get("private")),
+    }

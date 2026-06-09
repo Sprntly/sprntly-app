@@ -209,15 +209,19 @@ export function GenerateModal({
     }
   }, [open])
 
-  // Fetch the connected user's GitHub repos for the repo selector — real
-  // endpoint. Runs only when GitHub is active. The active check comes from the
-  // shared row helper so the effect gate and the rendered row read one mapping.
+  // Fetch repos the Sprntly App can access for this company — uses the
+  // App installation token via /v1/connectors/github/accessible-repos so
+  // we list exactly what was granted at App-install time. The old
+  // /github/repos endpoint went via the OAuth user token + read:user
+  // scope which couldn't enumerate private repos and returned empty for
+  // users with no public repos under their login (e.g. service accounts
+  // like @sprntlyai). Runs only when GitHub is active.
   const githubActive = getGenerateConnectorRowState(connFor("github")).connected
   useEffect(() => {
     if (!open || !githubActive) return
     let cancelled = false
     setReposError(false)
-    void withAuthRetry(() => connectorsApi.listGithubRepos())
+    void withAuthRetry(() => connectorsApi.listAccessibleGithubRepos())
       .then((r) => {
         if (!cancelled) setRepos(r.repositories)
       })
@@ -444,7 +448,7 @@ export function GenerateModal({
                       <option value="">
                         {reposError
                           ? "Couldn’t load repos"
-                          : "Pick repo — not wired yet"}
+                          : "No repos — install the Sprntly App on a repo"}
                       </option>
                     ) : (
                       <>

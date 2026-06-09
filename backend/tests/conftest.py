@@ -148,6 +148,7 @@ CREATE TABLE prds (
     generated_at     TEXT NOT NULL DEFAULT (datetime('now')),
     title            TEXT NOT NULL,
     payload_md       TEXT NOT NULL DEFAULT '',
+    llm_part         TEXT,
     status           TEXT NOT NULL DEFAULT 'ready',
     error            TEXT,
     template_version INTEGER,
@@ -204,6 +205,9 @@ CREATE TABLE cached_asks (
     generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- slug PRIMARY KEY mirrors the prod UNIQUE on datasets.slug
+-- (20260608160000_datasets_slug_unique.sql); a duplicate INSERT raises
+-- IntegrityError here, which insert_dataset treats as "already exists".
 CREATE TABLE datasets (
     slug         TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
@@ -215,12 +219,20 @@ CREATE TABLE datasets (
 -- (auth.py) reads company_members to resolve the active tenant from
 -- the Supabase JWT.
 CREATE TABLE companies (
-    id             TEXT PRIMARY KEY,
-    slug           TEXT NOT NULL UNIQUE,
-    display_name   TEXT NOT NULL,
-    coworker_names TEXT NOT NULL DEFAULT '{}',
-    kpi_tree       TEXT NOT NULL DEFAULT '{}',
-    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    id                  TEXT PRIMARY KEY,
+    slug                TEXT NOT NULL UNIQUE,
+    display_name        TEXT NOT NULL,
+    coworker_names      TEXT NOT NULL DEFAULT '{}',
+    kpi_tree            TEXT NOT NULL DEFAULT '{}',
+    business_context    TEXT NOT NULL DEFAULT '{}',
+    -- Onboarding profile columns the research agents read/write (mirrors
+    -- 20260525150000_onboarding_workspace.sql). competitors[] is the fixed
+    -- competitor roster; the Competitor agent auto-discovers + writes it when empty.
+    competitors         TEXT NOT NULL DEFAULT '[]',
+    product_description TEXT,
+    industry            TEXT,
+    business_type       TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE company_members (
@@ -248,6 +260,12 @@ CREATE TABLE connections (
     product_id           TEXT,
     company_name         TEXT,
     product_name         TEXT,
+    -- Slack is PER-USER (each user's own bot/channel); every other
+    -- provider is company-scoped + member-shared. user_id is NULL for
+    -- company-scoped rows and set for Slack rows (see migration
+    -- 20260608000000_slack_per_user.sql). The two partial unique indexes
+    -- below mirror that split.
+    user_id              TEXT,
     provider             TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'active',
     google_email         TEXT,
@@ -258,10 +276,14 @@ CREATE TABLE connections (
     last_sync_at         TEXT,
     last_sync_error      TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (company_id, provider)
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE UNIQUE INDEX connections_company_provider_non_slack_key
+    ON connections (company_id, provider) WHERE provider <> 'slack';
+CREATE UNIQUE INDEX connections_company_user_slack_key
+    ON connections (company_id, user_id, provider) WHERE provider = 'slack';
 CREATE INDEX connections_company_id_idx ON connections (company_id);
+CREATE INDEX connections_user_id_idx ON connections (user_id);
 CREATE INDEX connections_workspace_id_idx ON connections (workspace_id);
 CREATE INDEX connections_product_id_idx   ON connections (product_id);
 
@@ -318,6 +340,7 @@ CREATE INDEX workspace_invites_company_id_idx ON workspace_invites (company_id);
 
 CREATE TABLE github_installations (
     installation_id      INTEGER PRIMARY KEY,
+    company_id           TEXT,
     account_id           INTEGER NOT NULL,
     account_login        TEXT NOT NULL,
     account_type         TEXT NOT NULL,
@@ -331,6 +354,7 @@ CREATE TABLE github_installations (
 
 CREATE TABLE github_pull_requests (
     installation_id INTEGER NOT NULL,
+    company_id      TEXT,
     repo_full_name  TEXT NOT NULL,
     pr_number       INTEGER NOT NULL,
     title           TEXT NOT NULL,
@@ -472,6 +496,27 @@ CREATE TABLE agent_decision_log (
     kg_refs        TEXT NOT NULL DEFAULT '[]',
     timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Sequenced product backlog (mirrors 20260608120000_backlog_items.sql).
+-- One row per non-brief theme, carrying its rank/score + triage rationale.
+-- uuid PK / timestamptz are TEXT under SQLite, matching the other seeded tables.
+CREATE TABLE backlog_items (
+    id            TEXT PRIMARY KEY,
+    enterprise_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    theme_id      TEXT NOT NULL,
+    hypothesis_id TEXT,
+    title         TEXT NOT NULL,
+    tag           TEXT,
+    rank          INTEGER NOT NULL,
+    score         REAL NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'backlog'
+                  CHECK (status IN ('backlog', 'in_progress', 'done', 'dismissed')),
+    reasoning     TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (enterprise_id, theme_id)
+);
+CREATE INDEX backlog_items_rank_idx ON backlog_items (enterprise_id, rank);
 """
 
 
@@ -725,6 +770,72 @@ def _enable_supabase_bearer(monkeypatch) -> None:
 
     monkeypatch.setattr(
         auth_mod.settings, "supabase_jwt_secret", _TEST_SUPABASE_SECRET, raising=False
+    )
+
+
+@pytest.fixture
+def tenant_client(fake_llm, isolated_settings, monkeypatch):
+    """A Supabase-bearer-authed TestClient bound to a seeded company whose slug
+    is controllable, for the legacy dataset/id-keyed route suites after the
+    tenant-isolation fix (require_session → require_company).
+
+    Returns a SimpleNamespace with:
+      - `make(slug, user_id=...)` → seed a company with that slug + membership,
+        and return a TestClient already carrying that user's Bearer header. The
+        dataset slug used by briefs/prds/asks MUST equal the company slug for the
+        ownership chain (dataset slug → company) to resolve to the caller.
+      - `bearer(user_id)` → an Authorization header dict for an arbitrary user.
+
+    Composes on `fake_llm`/`isolated_settings` (the same in-memory fake Supabase
+    + reloaded app the legacy suites already use), and patches the bearer secret
+    onto the live `app.auth.settings` so require_company verifies minted tokens."""
+    from types import SimpleNamespace
+
+    import app.main as main_mod
+    from app.db.client import require_client
+
+    _enable_supabase_bearer(monkeypatch)
+
+    def _seed(slug: str, user_id: str, company_id: str | None) -> str:
+        import uuid as _uuid
+
+        c = require_client()
+        existing = c.table("companies").select("id").eq("slug", slug).execute().data
+        if existing:
+            company_id = existing[0]["id"]
+        else:
+            company_id = company_id or _uuid.uuid4().hex
+            c.table("companies").insert(
+                {"id": company_id, "slug": slug, "display_name": slug.title()}
+            ).execute()
+        c.table("company_members").insert(
+            {
+                "id": f"cm-{company_id}-{user_id}",
+                "company_id": company_id,
+                "user_id": user_id,
+                "role": "owner",
+            }
+        ).execute()
+        if not c.table("profiles").select("id").eq("id", user_id).execute().data:
+            c.table("profiles").insert({"id": user_id}).execute()
+        return company_id
+
+    def make(
+        slug: str, user_id: str | None = None, company_id: str | None = None
+    ) -> SimpleNamespace:
+        import uuid as _uuid
+
+        uid = user_id or ("user-" + _uuid.uuid4().hex[:8])
+        company_id = _seed(slug, uid, company_id)
+        client = TestClient(main_mod.app)
+        client.headers["Authorization"] = f"Bearer {_mint_supabase_token(uid)}"
+        return SimpleNamespace(
+            client=client, company_id=company_id, user_id=uid, slug=slug
+        )
+
+    return SimpleNamespace(
+        make=make,
+        bearer=lambda uid: {"Authorization": f"Bearer {_mint_supabase_token(uid)}"},
     )
 
 

@@ -16,8 +16,10 @@ _BRIEF = {
 }
 
 
-def _row(channel="C0123", status="active", token={"access_token": "xoxb-1"}):
-    return {"status": status, "config": {"channel_id": channel},
+def _row(channel="C0123", status="active", token={"access_token": "xoxb-1"},
+         user_id="user-1"):
+    return {"user_id": user_id, "status": status,
+            "config": {"channel_id": channel},
             "token_json_encrypted": "enc"}, token
 
 
@@ -26,14 +28,18 @@ def test_delivers_with_blocks(isolated_settings, monkeypatch):
 
     row, token = _row()
     sent = {}
-    monkeypatch.setattr(delivery.db, "get_connection", lambda cid, prov: row)
+    # Delivery is per-user now: list_slack_connections returns this user's row.
+    monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: [row])
     monkeypatch.setattr(delivery, "decrypt_token_json", lambda s: json.dumps(token))
     monkeypatch.setattr(delivery.slack_oauth, "post_message",
                         lambda tok, *, channel, text, blocks: sent.update(
                             tok=tok, channel=channel, text=text, blocks=blocks) or {"ok": True})
 
     out = delivery.deliver_brief_to_slack("ent-A", _BRIEF)
-    assert out == {"delivered": True, "channel": "C0123"}
+    assert out["delivered"] is True
+    assert out["recipients"] == [
+        {"user_id": "user-1", "delivered": True, "channel": "C0123"}
+    ]
     assert sent["tok"] == "xoxb-1"
     assert "Offline sync is the week's dominant risk" in sent["text"]
     header = sent["blocks"][0]["text"]["text"]
@@ -44,29 +50,31 @@ def test_delivers_with_blocks(isolated_settings, monkeypatch):
     assert sent["blocks"][-1]["elements"][0]["url"].endswith("/brief")
 
 
-@pytest.mark.parametrize("row,reason", [
-    (None, "slack_not_connected"),
-    ({"status": "error", "config": {"channel_id": "C1"}, "token_json_encrypted": "e"}, "slack_not_connected"),
-    ({"status": "active", "config": {}, "token_json_encrypted": "e"}, "no_channel_configured"),
+@pytest.mark.parametrize("rows,reason", [
+    ([], "slack_not_connected"),
+    ([{"user_id": "u", "status": "error", "config": {"channel_id": "C1"}, "token_json_encrypted": "e"}], "slack_not_connected"),
+    ([{"user_id": "u", "status": "active", "config": {}, "token_json_encrypted": "e"}], "no_channel_configured"),
 ])
-def test_clean_noops(isolated_settings, monkeypatch, row, reason):
+def test_clean_noops(isolated_settings, monkeypatch, rows, reason):
     from app.synthesis import delivery
 
-    monkeypatch.setattr(delivery.db, "get_connection", lambda cid, prov: row)
+    monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: rows)
     out = delivery.deliver_brief_to_slack("ent-A", _BRIEF)
-    assert out == {"delivered": False, "reason": reason}
+    assert out["delivered"] is False
+    assert out["reason"] == reason
 
 
 def test_post_failure_never_raises(isolated_settings, monkeypatch):
     from app.synthesis import delivery
 
     row, token = _row()
-    monkeypatch.setattr(delivery.db, "get_connection", lambda cid, prov: row)
+    monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: [row])
     monkeypatch.setattr(delivery, "decrypt_token_json", lambda s: json.dumps(token))
     monkeypatch.setattr(delivery.slack_oauth, "post_message",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("slack 500")))
     out = delivery.deliver_brief_to_slack("ent-A", _BRIEF)
-    assert out["delivered"] is False and "slack 500" in out["reason"]
+    assert out["delivered"] is False
+    assert "slack 500" in out["recipients"][0]["reason"]
 
 
 def test_synthesis_attaches_delivery_status(isolated_settings, monkeypatch):

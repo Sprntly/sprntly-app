@@ -50,12 +50,16 @@ from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company, require_company_from_query  # company-scoped auth dep
 from app.config import settings
+from app.connectors import github_app
+from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
+from app.db.connections import get_connection
 from app.db.prds import get_prd_rendered, reset_prd_to_draft
+from app.db.github import find_github_installation_for_repo
 from app.db.products import get_company_website  # onboarding-website fallback source
 from app.db.prototype_exports import find_prototype_export
 from app.db.prototypes import (
@@ -96,6 +100,7 @@ from app.design_agent.storage import (
     TypeCheckError,
     TypeCheckRepairExhausted,
     ViteBuildError,
+    fresh_bundle_url,
     repair_unresolved_relative_imports,
     stage_bundle,
     stage_preview_image,
@@ -137,6 +142,50 @@ def _require_feature_enabled() -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
+def _resolve_github_installation_id_for_repo(
+    company_id: str, repo_full_name: str | None
+) -> int | None:
+    """Best-effort company-scoped repo full_name -> GitHub App installation id.
+
+    The repo full_name is chosen through the company's GitHub OAuth connection.
+    We verify that connection and confirm the repo appears in the connected
+    user's accessible repos before consulting the account-scoped installation
+    table. Any auth/token/API failure degrades to no codebase installation
+    snapshot rather than trusting a global installation row.
+    """
+    if not repo_full_name:
+        return None
+    row = get_connection(company_id, github_app.GITHUB_PROVIDER)
+    if not row:
+        return None
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except (KeyError, TokenEncryptionError, json.JSONDecodeError, TypeError):
+        logger.info("design_agent.github_connection_unreadable")
+        return None
+    access_token = token_json.get("access_token")
+    if not access_token:
+        return None
+    try:
+        repos = github_app.fetch_user_repos(access_token, per_page=100)
+    except Exception:
+        logger.info("design_agent.github_repo_access_check_failed")
+        return None
+    if not any(r.get("full_name") == repo_full_name for r in repos):
+        return None
+    try:
+        install = find_github_installation_for_repo(repo_full_name, company_id)
+    except Exception:
+        logger.info("design_agent.github_installation_resolve_failed")
+        return None
+    if not install:
+        return None
+    try:
+        return int(install["installation_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 # ─── Schemas ────────────────────────────────────────────────────────────────
 
 
@@ -164,10 +213,11 @@ class GenerateRequest(BaseModel):
     website_url: str | None = None        # P5-02: Scenario B fallback source
     manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
     github_repo: str | None = None        # connected-repo full_name ("org/repo");
-    #                                       prompt context only — no fetch, no clone,
-    #                                       no agent tool. The repo identifier travels
-    #                                       into the scaffold prompt so generation can
-    #                                       be told which existing codebase to match.
+    #                                       no fetch, no clone, no agent tool. The repo
+    #                                       identifier travels into the scaffold prompt
+    #                                       and, when a matching GitHub App installation
+    #                                       is known, into the design-system source
+    #                                       resolver for future codebase extraction.
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
@@ -238,12 +288,15 @@ async def generate(
             )
 
     # Connected-repo identifier the user chose as the existing codebase to match.
-    # Prompt context only (no fetch, no clone, no agent tool). NO-PERSIST decision:
-    # `start_prototype` exposes no repo/codebase text column and this ticket adds
-    # no migration (NO `ALTER` on prds/briefs/evidences), so the repo is NOT
-    # snapshotted on the prototype row — it travels as a request-only field into
-    # the background generation task (prompt context + cost-summary identifier).
+    # No fetch, no clone, no agent tool. The repo full_name remains request-only
+    # because the prototypes table has no codebase text column, but we do persist
+    # the matching GitHub App installation id when available: that is the existing
+    # production-shaped scenario/source column and gives the future codebase
+    # extractor enough installation context to read the selected repo.
     repo = body.normalised_github_repo()
+    github_installation_id = _resolve_github_installation_id_for_repo(
+        workspace_id, repo
+    )
 
     # Insert the generating row. Scenario inputs (figma_file_key, etc.) are
     # stored as snapshots; the A/B/C/0 label is DERIVED at read time
@@ -257,7 +310,7 @@ async def generate(
         target_platform=body.normalised_platform(),
         figma_file_key=body.figma_file_key,
         website_url=effective_website_url,  # snapshot; resolved value incl. onboarding fallback
-        github_installation_id=None,  # populated in P4-05 (Scenario C)
+        github_installation_id=github_installation_id,
     )
 
     task = asyncio.create_task(
@@ -272,6 +325,7 @@ async def generate(
             website_url=effective_website_url,  # resolved value incl. onboarding fallback
             manual_design=body.manual_design,
             github_repo=repo,  # normalised connected-repo full_name; prompt context only
+            github_installation_id=github_installation_id,
         )
     )
     _inflight_tasks.add(task)
@@ -480,31 +534,10 @@ def delete_prototype_route(
     return Response(status_code=204)
 
 
-@router.get("/by-prd/{prd_id}")
-def get_by_prd(
-    prd_id: int,
-    company: CompanyContext = Depends(require_company),
-) -> dict[str, Any]:
-    """Return the most-recent READY prototype for a PRD (read-only lookup).
-
-    A pure read with NO generate side-effect — unlike the dedup inside
-    POST /generate, which kicks off a generation when none exists. That makes
-    it safe to call on PRD-screen load so the frontend can render a preview
-    card / flip Approve to "View Prototype". Returns 404 when no ready
-    prototype exists (the frontend swallows 404→null). Workspace-filtered: a
-    prototype in another workspace returns 404, not 403, so cross-tenant
-    existence is not disclosed. The path is two-segment (`/by-prd/{prd_id}`),
-    so it can never be shadowed by the single-segment `GET /{prototype_id}`
-    catch-all above regardless of declaration order — a one-segment route
-    pattern only ever matches one-segment paths.
-    """
-    _require_feature_enabled()
-    row = find_ready_prototype_by_prd(
-        prd_id=prd_id, workspace_id=company.company_id
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
-    return row
+# NOTE: GET /by-prd/{prd_id} is defined ABOVE (near the other PRD routes), not
+# here — a second identical definition used to live at this spot, which produced
+# a duplicate operation id and a redundant route registration. Removed; the
+# single definition above is canonical.
 
 
 # ─── Background generation ────────────────────────────────────────────────
@@ -522,6 +555,7 @@ async def _run_generation_bg(
     website_url: str | None = None,
     manual_design: ManualDesignInput | None = None,
     github_repo: str | None = None,
+    github_installation_id: int | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -588,7 +622,7 @@ async def _run_generation_bg(
         scenario_set = infer_scenario_from_inputs(
             figma_file_key=figma_file_key,
             website_url=website_url,        # P5-02: derives 'B' (url, no figma) / '0'
-            github_installation_id=None,    # P4-05 populates
+            github_installation_id=github_installation_id,
             prd_references_codebase=False,  # P4-05 implements the detector
         )
         scenario_label = ",".join(sorted(scenario_set))  # "A" | "A,C" | "0" ...
@@ -602,6 +636,7 @@ async def _run_generation_bg(
             figma_node_id=figma_node_id,  # frame-level targeting; None when absent
             scenario=scenario_label,
             github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
+            github_installation_id=github_installation_id,
             website_url=None if figma_file_key else website_url,  # Scenario B pre-seed source
             website_sample=website_sample,  # reuse the single extractor run for the pre-seed
         )
@@ -1220,6 +1255,26 @@ def _share_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
 
 
+def _public_bundle_url(row: dict[str, Any]) -> str | None:
+    """Bundle URL for a public/passcode view, freshly signed on read.
+
+    The stored `bundle_url` is a 24h-TTL Supabase signed URL minted at stage
+    time, but a public/passcode share is permanent — the stored URL goes stale
+    and the iframe 403s after the TTL. Re-sign per request from the bundle object
+    path (derived from the current checkpoint) so the share never expires. Falls
+    back to the stored URL when there is no checkpoint to derive a path from, or
+    on the filesystem/dev backend (handled inside `fresh_bundle_url`)."""
+    stored = row.get("bundle_url")
+    checkpoint_id = row.get("current_checkpoint_id")
+    if checkpoint_id is None:
+        return stored
+    return fresh_bundle_url(
+        prototype_id=row["id"],
+        checkpoint_id=checkpoint_id,
+        stored_bundle_url=stored,
+    )
+
+
 class PublicPrototypeView(BaseModel):
     share_mode: Literal["public", "passcode"]  # "private" is never returned
     requires_passcode: bool                    # true iff share_mode == "passcode"
@@ -1274,7 +1329,9 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         requires_passcode=(mode == "passcode"),
         # bundle_url is released for public mode immediately; for passcode mode it
         # stays null here and is only returned by the verify route on success.
-        bundle_url=row.get("bundle_url") if mode == "public" else None,
+        # A public/passcode share is permanent but the stored bundle_url is a 24h
+        # signed URL — re-sign on read so the iframe never 403s once the TTL lapses.
+        bundle_url=_public_bundle_url(row) if mode == "public" else None,
         is_complete=bool(row.get("is_complete")),
     )
 
@@ -1313,7 +1370,8 @@ def verify_passcode(
     return PublicPrototypeView(
         share_mode="passcode",
         requires_passcode=True,
-        bundle_url=row.get("bundle_url"),
+        # Permanent share, 24h stored signed URL — re-sign on read (see get_by_token).
+        bundle_url=_public_bundle_url(row),
         is_complete=bool(row.get("is_complete")),
     )
 
@@ -1696,7 +1754,12 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     """Public comment write. Resolves token → prototype; rejects when the
     prototype is private or not ready (404, matching get_by_token's posture).
     The comment is attributed to the anonymous external author label, and the
-    workspace_id is taken from the resolved row — never a session claim."""
+    workspace_id is taken from the resolved row — never a session claim.
+
+    Intentionally disabled: anonymous public comment WRITES stay gated off
+    (404, indistinguishable from missing/private) pending a product decision —
+    re-enabling this opens an unauthenticated write endpoint. The resolution +
+    rate-limit logic below is built and ready for when it's enabled."""
     raise HTTPException(status_code=404, detail="Not found")
     _require_feature_enabled()
     proto = find_prototype_by_share_token(token)

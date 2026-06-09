@@ -28,6 +28,7 @@ import {
 } from "../../lib/api"
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
+import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
 
@@ -503,6 +504,8 @@ export function ConfigureConnectorDrawer({
         />
       </>
     )
+  } else if (providerId === "github") {
+    slot = <GithubInstallsSlot onChanged={onDisconnected} />
   }
 
   return (
@@ -522,3 +525,4 @@ export function ConfigureConnectorDrawer({
     </ConfigureConnectorDrawerView>
   )
 }
+

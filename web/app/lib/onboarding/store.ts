@@ -1,4 +1,4 @@
-import { suggestedSlug } from "../onboard-helpers"
+import { generateSlug } from "../onboard-helpers"
 import { getSupabase } from "../supabase/client"
 import {
   DEFAULT_FEATURE_FLAGS,
@@ -197,9 +197,11 @@ export async function createWorkspace(input: {
   companyName: string
   productName: string
   productWebsite?: string | null
-  industry: string
+  /** Optional on create — Claude infers it from the website; confirmed later. */
+  industry?: string | null
   stage: string
-  businessType: string
+  /** Optional on create — Claude infers it from the website; confirmed later. */
+  businessType?: string | null
   teamSize?: number | null
   engineeringCapacity?: number | null
   pmEngineerRatio?: string | null
@@ -208,20 +210,21 @@ export async function createWorkspace(input: {
   userId: string
 }): Promise<WorkspaceCompany> {
   const supabase = getSupabase()
-  let slug = suggestedSlug(input.companyName)
-  if (slug.length < 2) slug = "workspace"
 
+  // The slug is an opaque, name-independent token that always satisfies the
+  // backend slug format. The company name flows into display_name only. On a
+  // UNIQUE collision (23505) we regenerate a fresh token and retry.
   for (let i = 0; i < 5; i++) {
-    const trySlug = i === 0 ? slug : `${slug}-${i + 1}`
+    const trySlug = generateSlug()
     const { data: company, error: companyErr } = await supabase
       .from("companies")
       .insert({
         created_by: input.userId,
         slug: trySlug,
         display_name: input.companyName.trim(),
-        industry: input.industry,
+        industry: input.industry ?? null,
         stage: input.stage,
-        business_type: input.businessType,
+        business_type: input.businessType ?? null,
         team_size: input.teamSize ?? null,
         engineering_capacity: input.engineeringCapacity ?? null,
         pm_engineer_ratio: input.pmEngineerRatio?.trim() || null,
@@ -252,7 +255,7 @@ export async function createWorkspace(input: {
     }
     if (companyErr?.code !== "23505") throw companyErr ?? new Error("Could not create workspace")
   }
-  throw new Error("Could not create workspace — try a different company name.")
+  throw new Error("Could not create workspace — please try again.")
 }
 
 export async function updateWorkspace(
@@ -271,8 +274,33 @@ export async function updateWorkspace(
   return rowToCompany(data as Record<string, unknown>, product)
 }
 
-export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 3) {
-  return updateWorkspace(companyId, { kpi_tree: tree, onboarding_step: nextStep })
+/**
+ * Serialize the workspace KpiTree (north_star + flat metrics) into the backend
+ * canonical `companies.kpi_tree` shape: a `{ metric, description }` north star
+ * plus primary_metrics (first ≤4) and secondary_signals (remainder). Each
+ * metric is `{ metric, description }` only — no weights / current / target.
+ */
+export function serializeKpiTree(tree: KpiTree): Record<string, unknown> {
+  const named = tree.metrics.filter((m) => m.name.trim().length > 0)
+  const toEntry = (m: { name: string; description: string }) => ({
+    metric: m.name.trim(),
+    description: m.description.trim(),
+  })
+  return {
+    north_star: {
+      metric: tree.north_star.trim(),
+      description: tree.north_star_description.trim(),
+    },
+    primary_metrics: named.slice(0, 4).map(toEntry),
+    secondary_signals: named.slice(4, 10).map(toEntry),
+  }
+}
+
+export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 5) {
+  return updateWorkspace(companyId, {
+    kpi_tree: serializeKpiTree(tree),
+    onboarding_step: nextStep,
+  })
 }
 
 export async function saveStrategicContext(
@@ -283,7 +311,7 @@ export async function saveStrategicContext(
     dead_ends?: string[]
     biggest_risk?: string | null
   },
-  nextStep = 4,
+  nextStep = 3,
 ) {
   return updateWorkspace(companyId, {
     okrs: input.okrs?.trim() || null,
@@ -319,11 +347,11 @@ export async function completeOnboarding(companyId: string, userId: string) {
   const now = new Date().toISOString()
   await supabase
     .from("companies")
-    .update({ onboarding_step: 8, onboarding_completed_at: now })
+    .update({ onboarding_step: 7, onboarding_completed_at: now })
     .eq("id", companyId)
   await supabase
     .from("profiles")
-    .update({ onboarding_step: 8, onboarding_completed_at: now })
+    .update({ onboarding_step: 7, onboarding_completed_at: now })
     .eq("id", userId)
 }
 

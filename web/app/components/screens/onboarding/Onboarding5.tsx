@@ -2,324 +2,266 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAuth } from "../../../lib/auth"
 import { InterviewLayout } from "../../onboarding/InterviewLayout"
 import { useOnboarding } from "../../../context/OnboardingContext"
+import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
+import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
+import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
+import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
 import {
-  advanceOnboardingStep,
-  upsertPrimaryProduct,
-} from "../../../lib/onboarding/store"
-import {
-  validateProductWebsite,
-  normalizeProductWebsite,
-} from "../../../lib/onboarding/product-helpers"
-import {
-  buildKpiTreePayload,
-  canSaveKpiTree,
-  kpiTreeApi,
-  MAX_PRIMARY_METRICS,
-  MAX_SECONDARY_SIGNALS,
-} from "../../../lib/onboarding/kpiTreeApi"
+  categoryTitle,
+  isLastCategory,
+  nextStep,
+  toggleSelection,
+  wizardCategories,
+} from "../../../lib/onboarding/connectorsWizard"
 
 /**
- * Onboarding page 05 (design-v4) — "Tell us about your product."
+ * Onboarding page 05 — "Connect your tools."
  *
- * A product name + the success metrics that anchor the workspace. The
- * North Star is required; supporting metrics are picked from
- * industry-tailored suggestions or written in. The KPI tree is persisted
- * to the backend (PUT /v1/company/kpi-tree) — the canonical config entity
- * Synthesis later reads for strategic-alignment scoring.
+ * A categorized SEQUENTIAL wizard: the PM works one connector category at
+ * a time — "each one opens the next" — with Skip / Done·next per category.
+ * Categories + connectors come from CONNECTOR_CATALOG so this tracks the
+ * Settings page automatically. At least one Analytics source is required
+ * before Continue; live OAuth/API-key wiring happens in Settings after
+ * onboarding (selections here pre-stage intent).
  */
-
-// North Star suggestions, tailored loosely by industry. Mirrors the
-// "Common for {industry}" block in the v4 mock.
-const NORTH_STAR_SUGGESTIONS: Record<string, string[]> = {
-  Healthtech: [
-    "Day-30 active clinicians per deployment",
-    "Weekly active clinicians",
-    "Net revenue retention",
-  ],
-  "B2B SaaS": ["Net revenue retention", "Weekly active teams", "Activation rate"],
-  B2C: ["Day-30 retention", "DAU/MAU ratio", "Conversion rate"],
-  Fintech: ["Transaction volume", "Net revenue retention", "Activated accounts"],
-  default: ["Weekly active users", "Day-30 retention", "Net revenue retention"],
-}
-
-// Supporting-metric suggestions ("Primary leads to…") — a flat pool the PM
-// toggles. Industry-tailored where we have a list, else a sensible default.
-const SUPPORTING_SUGGESTIONS: Record<string, string[]> = {
-  Healthtech: [
-    "Shift-handoff completion rate",
-    "Care plans co-authored / week",
-    "Time-to-first-handoff",
-    "Weekly active clinicians",
-    "EHR session depth",
-    "Cross-location context views",
-    "Activation rate (week 2)",
-    "Average deployment ramp",
-  ],
-  default: [
-    "Activation rate (week 2)",
-    "Weekly active users",
-    "Feature adoption",
-    "Time-to-value",
-    "Expansion revenue",
-    "Net promoter score",
-    "Support tickets / 100 accounts",
-    "Churn rate",
-  ],
-}
-
-const MAX_SUPPORTING = MAX_PRIMARY_METRICS + MAX_SECONDARY_SIGNALS
-
 export function Onboarding5() {
+  const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
-  const [productName, setProductName] = useState("")
-  const [productWebsite, setProductWebsite] = useState("")
-  const [northStar, setNorthStar] = useState("")
-  const [supporting, setSupporting] = useState<string[]>([])
-  const [customMetric, setCustomMetric] = useState("")
+  const categories = useMemo(() => wizardCategories(), [])
+  const [catStep, setCatStep] = useState(0)
+  const [connected, setConnected] = useState<Set<string>>(new Set())
+  const [connections, setConnections] = useState<ConnectionSummary[]>([])
+  const [modalProvider, setModalProvider] = useState<string | null>(null)
+  const [planned, setPlanned] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!workspace) return
-    setProductName(workspace.product?.name ?? workspace.display_name)
-    setProductWebsite(workspace.product?.website ?? "")
-    const tree = workspace.kpi_tree
-    if (tree.north_star) setNorthStar(tree.north_star)
-    if (tree.metrics.length) {
-      setSupporting(tree.metrics.map((m) => m.name).filter(Boolean))
+    if (!workspace?.id) return
+    void connectorsApi
+      .list()
+      .then((r) => {
+        const ids = new Set<string>()
+        setConnections(r.connections)
+        for (const c of r.connections) {
+          if (c.status === "active") ids.add(c.provider)
+        }
+        setConnected(ids)
+      })
+      .catch(() => {})
+  }, [workspace?.id])
+
+  const selected = useMemo(() => {
+    const s = new Set<string>()
+    connected.forEach((id) => s.add(id))
+    planned.forEach((id) => s.add(id))
+    return s
+  }, [connected, planned])
+
+  function toggle(id: string) {
+    if (connected.has(id)) return // live connections aren't togglable here
+    if (CONNECTOR_IDS_CONNECTABLE.has(id)) {
+      setModalProvider(id) // real connect via the shared modal
+      return
     }
-  }, [workspace])
+    setPlanned((prev) => toggleSelection(prev, id))
+  }
 
-  const industry = workspace?.industry ?? ""
-  const northStarHints =
-    NORTH_STAR_SUGGESTIONS[industry] ?? NORTH_STAR_SUGGESTIONS.default
-  const supportingHints =
-    SUPPORTING_SUGGESTIONS[industry] ?? SUPPORTING_SUGGESTIONS.default
-
-  const canContinue =
-    productName.trim().length > 0 && canSaveKpiTree(northStar, supporting)
-
-  function toggleSupporting(metric: string) {
-    setSupporting((prev) => {
-      if (prev.includes(metric)) return prev.filter((m) => m !== metric)
-      if (prev.length >= MAX_SUPPORTING) return prev
-      return [...prev, metric]
+  function reloadConnections() {
+    void connectorsApi.list().then((r) => {
+      setConnections(r.connections)
+      const ids = new Set<string>()
+      for (const c of r.connections) {
+        if (c.status === "active") ids.add(c.provider)
+      }
+      setConnected(ids)
     })
   }
 
-  function addCustom() {
-    const m = customMetric.trim()
-    if (!m || supporting.includes(m) || supporting.length >= MAX_SUPPORTING) return
-    setSupporting((prev) => [...prev, m])
-    setCustomMetric("")
+  function advanceCategory() {
+    setCatStep((s) => nextStep(s))
   }
 
-  async function persist() {
-    if (!workspace) return
-    setError(null)
-    const websiteErr = validateProductWebsite(productWebsite)
-    if (websiteErr) {
-      setError(websiteErr)
-      return
-    }
+  async function go(skipped: boolean) {
+    if (!workspace || auth.kind !== "authed") return
     setSaving(true)
     try {
-      await upsertPrimaryProduct(workspace.id, {
-        name: productName,
-        website: normalizeProductWebsite(productWebsite),
-      })
-      await kpiTreeApi.put(buildKpiTreePayload(northStar, supporting))
+      if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
       const updated = await advanceOnboardingStep(workspace.id, 6)
-      const product = updated.product ?? workspace.product
-      setWorkspace({ ...updated, product })
+      setWorkspace(updated)
       router.push("/onboarding/6")
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't save your product.")
     } finally {
       setSaving(false)
     }
   }
 
-  const selectedCount = supporting.length
+  // Redirect when there's no workspace to anchor the step. Done in an effect
+  // (not during render) so navigation never fires as a render side-effect —
+  // that path surfaces in production as a client-side exception / error
+  // boundary. Render returns the loading shell until the redirect lands.
+  useEffect(() => {
+    if (!loading && !workspace) router.replace("/onboarding/1")
+  }, [loading, workspace, router])
 
-  const previewMetrics = useMemo(
-    () => supporting.slice(0, MAX_SUPPORTING),
-    [supporting],
-  )
+  if (loading || !workspace) return <div className="ob-shell">Loading…</div>
 
-  if (loading) return <div className="ob-shell">Loading…</div>
-  if (!workspace) {
-    router.replace("/onboarding/1")
-    return null
+  const cat = categories[catStep]
+  const onLast = isLastCategory(catStep)
+  const selectedNames: string[] = []
+  for (const c of categories) {
+    for (const item of c.items) {
+      if (selected.has(item.id)) selectedNames.push(item.name)
+    }
   }
 
   return (
     <InterviewLayout
       step={5}
-      eyebrow="Saved · auto-saves after every step"
-      title="Tell us about your product"
-      agentMessage="A name and your success metrics anchor the whole workspace. Pick your North Star and the supporting metrics it leads to — or write your own. You'll add the full description in Settings."
+      eyebrow="Saved"
+      title="Connect your tools"
+      agentMessage="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
       rightPane={
         <div>
-          <div className="ob-preview-label">Success metrics</div>
-          {!northStar ? (
-            <p className="ob-preview-empty">
-              Set a North Star and supporting metrics to see your KPI tree take
-              shape.
-            </p>
-          ) : (
-            <ul className="ob-preview-list">
-              <li>
-                <strong>North Star:</strong> {northStar}
-              </li>
-              {previewMetrics.map((m) => (
-                <li key={m}>{m}</li>
-              ))}
-            </ul>
-          )}
+          <div className="ob-preview-label">Connection status</div>
+          <p className="ob-stat-lg">{selectedNames.length} selected</p>
+          <ul className="ob-preview-list">
+            {selectedNames.map((n, i) => {
+              const item = categories
+                .flatMap((c) => c.items)
+                .find((it) => it.name === n)
+              const isLive = item ? connected.has(item.id) : false
+              return (
+                <li key={`${n}-${i}`}>
+                  {isLive ? "✓" : "○"} {n}
+                </li>
+              )
+            })}
+          </ul>
         </div>
       }
       onBack={() => router.push("/onboarding/4")}
-      onContinue={persist}
-      continueDisabled={!canContinue}
+      onContinue={() => go(false)}
+      onSkip={() => go(true)}
+      continueLabel="Continue"
+      skipLabel="Connect later"
       loading={saving}
     >
-      {error && <div className="ob-form-error">{error}</div>}
-
-      <div className="field">
-        <label className="field-label">Product name *</label>
-        <input
-          className="input"
-          value={productName}
-          onChange={(e) => setProductName(e.target.value)}
-          maxLength={100}
-          placeholder="The product this workspace is about"
-        />
-      </div>
-      <div className="field">
-        <label className="field-label">Product website (optional)</label>
-        <input
-          className="input"
-          type="url"
-          value={productWebsite}
-          onChange={(e) => setProductWebsite(e.target.value)}
-          placeholder="https://yourproduct.com"
-          autoComplete="url"
-        />
+      <div className="ob-wiz-progress">
+        Step {catStep + 1} of {categories.length} · {cat.title}
       </div>
 
-      <div className="field">
-        <label className="field-label">Primary metric — your North Star *</label>
-        <input
-          className="input"
-          value={northStar}
-          onChange={(e) => setNorthStar(e.target.value)}
-          placeholder="The one metric that best captures product value"
-        />
-        <div className="ob-ns-hints">
-          <span className="ob-ns-hints-label">
-            Common for {industry || "your stage"}:
-          </span>
-          {northStarHints.map((h) => (
-            <button
-              key={h}
-              type="button"
-              className="metric-chip"
-              onClick={() => setNorthStar(h)}
-            >
-              {h}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="field">
-        <label className="field-label">
-          Supporting metrics — pick what fits, or write your own
-        </label>
-        <p className="field-hint">Primary leads to…</p>
-        <div className="ob-chip-row">
-          {supportingHints.map((m) => (
-            <button
-              key={m}
-              type="button"
-              className={`metric-chip ${supporting.includes(m) ? "selected" : ""}`}
-              onClick={() => toggleSupporting(m)}
-            >
-              {m}
-            </button>
-          ))}
-          {supporting
-            .filter((m) => !supportingHints.includes(m))
-            .map((m) => (
+      <div className="ob-conn-group">
+        <div className="ob-group-title">{categoryTitle(cat)}</div>
+        {cat.subtitle && <p className="ob-conn-cat-sub">{cat.subtitle}</p>}
+        <div className="ob-conn-grid">
+          {cat.items.map((item) => {
+            const live = connected.has(item.id)
+            const sel = selected.has(item.id)
+            return (
               <button
-                key={m}
+                key={item.id}
                 type="button"
-                className="metric-chip selected"
-                onClick={() => toggleSupporting(m)}
+                className={`ob-conn-card ${sel ? "connected" : ""}`}
+                onClick={() => toggle(item.id)}
               >
-                {m}
+                <span
+                  className="ob-conn-logo"
+                  style={{ background: item.logoColor ?? "var(--ink)" }}
+                  aria-hidden
+                >
+                  {item.logoText ?? item.name.charAt(0)}
+                </span>
+                <span className="ob-conn-name">{item.name}</span>
+                {live && <span className="ob-conn-badge">Live</span>}
               </button>
-            ))}
+            )
+          })}
         </div>
-        <div className="ob-custom-metric">
-          <input
-            className="input"
-            value={customMetric}
-            onChange={(e) => setCustomMetric(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault()
-                addCustom()
-              }
-            }}
-            placeholder="Or write your own"
-            maxLength={80}
-          />
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={addCustom}
-            disabled={!customMetric.trim() || supporting.length >= MAX_SUPPORTING}
-          >
-            Add
-          </button>
+
+        <div className="ob-wiz-actions">
+          {!onLast ? (
+            <>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={advanceCategory}>
+                Skip
+              </button>
+              <button type="button" className="btn btn-sm" onClick={advanceCategory}>
+                Done · next
+              </button>
+            </>
+          ) : (
+            <span className="ob-wiz-done-note">
+              Last category — use Continue below to finish.
+            </span>
+          )}
         </div>
-        <p className="ob-metric-count">
-          {selectedCount} supporting metric{selectedCount === 1 ? "" : "s"}{" "}
-          selected · suggestions tailored to your industry
-        </p>
       </div>
+
+      <p className="ob-conn-note">
+        OAuth and API-key connections are configured in Settings → Connectors
+        after onboarding. Selections here pre-stage what you intend to wire up.
+      </p>
 
       <style jsx>{`
-        .ob-ns-hints {
+        .ob-wiz-progress {
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.1em;
+          color: var(--muted);
+          margin-bottom: 14px;
+        }
+        .ob-conn-cat-sub {
+          font-size: 13px;
+          color: var(--ink-3);
+          margin: 0 0 12px;
+        }
+        .ob-conn-group :global(.ob-conn-card) {
           display: flex;
-          flex-wrap: wrap;
           align-items: center;
-          gap: 8px;
-          margin-top: 10px;
         }
-        .ob-ns-hints-label {
+        .ob-conn-logo {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 22px;
+          height: 22px;
+          border-radius: 6px;
+          color: #fff;
           font-size: 12px;
-          color: var(--muted);
+          font-weight: 600;
+          margin-right: 8px;
+          flex-shrink: 0;
         }
-        .ob-custom-metric {
+        .ob-wiz-actions {
           display: flex;
           gap: 8px;
-          margin-top: 10px;
+          margin-top: 16px;
+          align-items: center;
         }
-        .ob-custom-metric :global(.input) {
-          flex: 1;
-        }
-        .ob-metric-count {
+        .ob-wiz-done-note {
           font-size: 12px;
           color: var(--muted);
-          margin: 10px 0 0;
         }
       `}</style>
+      <ConnectorConnectModal
+        providerId={modalProvider}
+        activeCompany={workspace.slug}
+        connection={
+          connections.find((c) => c.provider === modalProvider) ?? null
+        }
+        returnTo="/onboarding/5"
+        onClose={() => setModalProvider(null)}
+        onConnected={() => {
+          setModalProvider(null)
+          reloadConnections()
+        }}
+        onSkipForLater={() => {
+          if (modalProvider) setPlanned((prev) => toggleSelection(prev, modalProvider))
+          setModalProvider(null)
+        }}
+      />
     </InterviewLayout>
   )
 }

@@ -15,6 +15,7 @@ import {
   IconSources,
   IconTickets,
 } from "./sidebar-icons"
+import { IconSparkle } from "./app-icons"
 import { CompanySwitcher } from "./CompanySwitcher"
 
 interface SidebarProps {
@@ -150,6 +151,10 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         />
         <NavItem screen="detail" icon={<IconEvidence />} label="Evidence" />
         <NavItem screen="prd" icon={<IconPrd />} label="PRD" />
+        {/* Dedicated full-page prototype surface (v4 nav). Goes through goTo
+            ("prototype") → /prototype with no PRD context; the in-PRD "Generate
+            Prototype" entry threads the ?prd=<id> param instead. */}
+        <NavItem screen="prototype" icon={<IconSparkle />} label="Prototype" />
         <NavItem screen="tickets" icon={<IconTickets />} label="Project Management" />
         <div className="sb-spacer" />
 

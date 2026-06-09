@@ -382,8 +382,20 @@ def _pr_payload(action: str, *, number: int = 7, state: str = "open", merged: bo
     }).encode("utf-8")
 
 
+def _raw_prs(state: str | None = None, install_id: int = 99) -> list[dict]:
+    """Read github_pull_requests directly (bypassing the company-scoped db
+    helper) so webhook state-transition tests don't depend on a company
+    binding the webhook never has."""
+    from app.db.client import require_client
+    q = require_client().table("github_pull_requests").select("*").eq(
+        "installation_id", install_id
+    )
+    if state is not None:
+        q = q.eq("state", state)
+    return q.execute().data or []
+
+
 def test_webhook_pull_request_opened_upserts(client):
-    import app.db as db
     body = _pr_payload("opened")
     r = client.post(
         "/v1/connectors/github/webhook",
@@ -391,7 +403,7 @@ def test_webhook_pull_request_opened_upserts(client):
         headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": _sign(body)},
     )
     assert r.status_code == 200
-    prs = db.list_open_pull_requests(99)
+    prs = _raw_prs(state="open")
     assert len(prs) == 1
     assert prs[0]["repo_full_name"] == "octocat/hello"
     assert prs[0]["pr_number"] == 7
@@ -400,7 +412,6 @@ def test_webhook_pull_request_opened_upserts(client):
 
 
 def test_webhook_pull_request_closed_marks_closed(client):
-    import app.db as db
     client.post(
         "/v1/connectors/github/webhook",
         content=_pr_payload("opened"),
@@ -412,11 +423,10 @@ def test_webhook_pull_request_closed_marks_closed(client):
         content=closed,
         headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": _sign(closed)},
     )
-    assert db.list_open_pull_requests(99) == []
+    assert _raw_prs(state="open") == []
 
 
 def test_webhook_pull_request_merged_marks_merged(client):
-    import app.db as db
     merged = _pr_payload("closed", state="closed", merged=True)
     client.post(
         "/v1/connectors/github/webhook",
@@ -424,7 +434,7 @@ def test_webhook_pull_request_merged_marks_merged(client):
         headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": _sign(merged)},
     )
     # No open PRs.
-    assert db.list_open_pull_requests(99) == []
+    assert _raw_prs(state="open") == []
 
 
 def test_webhook_unknown_event_returns_ok_unhandled(client):
@@ -438,44 +448,70 @@ def test_webhook_unknown_event_returns_ok_unhandled(client):
     assert r.json()["handled"] is False
 
 
+def test_webhook_push_marks_codebase_design_system_stale(client, monkeypatch):
+    """A GitHub push webhook event triggers the stale-marker for the pushed repo
+    and returns handled:true."""
+    import app.routes.connectors as connectors_mod
+
+    calls: list[str] = []
+
+    def _fake_mark(repo_full_name: str) -> int:
+        calls.append(repo_full_name)
+        return 1
+
+    monkeypatch.setattr(connectors_mod.db, "mark_github_design_systems_stale", _fake_mark)
+
+    payload = {
+        "repository": {"full_name": "owner/repo"},
+        "ref": "refs/heads/main",
+        "after": "abc123sha",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    r = client.post(
+        "/v1/connectors/github/webhook",
+        content=body,
+        headers={
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": _sign(body),
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["handled"] is True
+    assert calls == ["owner/repo"]
+
+
 # ─────────────────────── list endpoints ───────────────────────
 
 
-def test_list_installations_endpoint(client):
+def test_webhook_only_installs_are_not_company_visible(client):
+    """Installs created by the webhook alone (no OAuth round-trip) have NO
+    company binding, so the company-scoped list endpoint must NOT surface them.
+    Those legacy/unbound rows require a reconnect to bind a company. The
+    company-visible path is covered in test_github_tenant_scope.py."""
+    from tests._company_helpers import company_client
+
     body = _install_payload("created")
     client.post(
         "/v1/connectors/github/webhook",
         content=body,
         headers={"X-GitHub-Event": "installation", "X-Hub-Signature-256": _sign(body)},
     )
-    r = client.get("/v1/connectors/github/installations")
-    assert r.status_code == 200
-    out = r.json()["installations"]
-    assert len(out) == 1
-    assert out[0]["account_login"] == "octocat"
+    # A real company session sees nothing — the install is unbound (NULL company).
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        ctx = company_client(mp)
+        r = ctx.client.get("/v1/connectors/github/installations")
+        assert r.status_code == 200
+        assert r.json()["installations"] == []
+    finally:
+        mp.undo()
 
 
-def test_list_open_prs_endpoint_filters_by_installation(client):
-    # Install 99 has one open PR; install 100 has none.
-    body = _install_payload("created", install_id=99)
-    client.post("/v1/connectors/github/webhook", content=body,
-                headers={"X-GitHub-Event": "installation", "X-Hub-Signature-256": _sign(body)})
-
-    pr = _pr_payload("opened")
-    client.post("/v1/connectors/github/webhook", content=pr,
-                headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": _sign(pr)})
-
-    r = client.get("/v1/connectors/github/pull-requests", params={"installation_id": 99})
-    assert r.status_code == 200
-    assert len(r.json()["pull_requests"]) == 1
-
-    r2 = client.get("/v1/connectors/github/pull-requests", params={"installation_id": 100})
-    assert r2.status_code == 200
-    assert r2.json()["pull_requests"] == []
-
-
-def test_list_endpoints_require_auth(github_app_env):
-    """Unauthenticated callers should get 401 on the listing endpoints."""
+def test_list_endpoints_require_company(github_app_env):
+    """Unauthenticated callers get 401; legacy demo/password sessions (no
+    company identity) get 403 on the now company-scoped listing endpoints."""
     import app.main as main_mod
     c = TestClient(main_mod.app)
     assert c.get("/v1/connectors/github/installations").status_code == 401

@@ -65,6 +65,14 @@ PLATFORM_DEFAULTS: dict[str, Any] = {
             {"id": "g2",          "query": "site:g2.com OR site:capterra.com {subject} reviews"},
         ],
         "max_searches": 12,
+        # Competitor deep-dive (CIR) controls. `cir_modules_max` caps how many
+        # CIR stages run per competitor (the agent picks the meaningful external
+        # sequence; this is a safety ceiling). `deep_dive_max_competitors` caps
+        # roster breadth per run; auto-discovery also targets this many. The
+        # cost guard caps total web-search calls across the whole deep-dive run.
+        "cir_modules_max": 8,
+        "deep_dive_max_competitors": 3,
+        "deep_dive_max_web_searches": 40,
     },
     "scoring": {
         "dimensions": [

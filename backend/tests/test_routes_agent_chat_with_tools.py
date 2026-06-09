@@ -24,6 +24,30 @@ import app.auth  # noqa: F401
 from tests._company_helpers import company_client
 
 
+# ─────────────────────── tenant-isolation guard setup ───────────────────────
+#
+# /v1/agent/chat-with-tools now requires the supplied installation_id to
+# belong to the caller's company (PR #230 closed the same path on
+# connector routes; this surface was the last open install-id gap). The
+# tests below aren't about the guard itself — they're about the tool-use
+# loop — so this helper seeds the bare minimum (a github_installations
+# row bound to the company) so the guard admits the call.
+
+
+def _bind_install(company_id: str, installation_id: int) -> None:
+    """Bind `installation_id` to `company_id` in github_installations so
+    the chat-with-tools ownership check admits the call. Idempotent."""
+    from app import db
+
+    db.upsert_github_installation(
+        installation_id=installation_id,
+        account_id=installation_id,
+        account_login="acme",
+        account_type="Organization",
+        company_id=company_id,
+    )
+
+
 # ─────────────────────── helpers ───────────────────────
 
 
@@ -70,6 +94,7 @@ def _install_anthropic_mock(monkeypatch, responses: list):
 def test_chat_responds_without_calling_tools(isolated_settings, monkeypatch):
     """User asks something the model can answer with no GitHub lookup."""
     ctx = company_client(monkeypatch)
+    _bind_install(ctx.company_id, 1)
     _install_anthropic_mock(
         monkeypatch,
         [_resp("end_turn", [_content_text("Hi! I'm the Sprntly agent.")])],
@@ -94,6 +119,7 @@ def test_chat_dispatches_tool_then_synthesises_answer(
 ):
     """Model returns tool_use → backend dispatches → model returns text."""
     ctx = company_client(monkeypatch)
+    _bind_install(ctx.company_id, 42)
 
     # Patch the github tool dispatch so we don't hit the network.
     import app.agent_tools.registry as reg
@@ -139,6 +165,7 @@ def test_chat_dispatches_tool_then_synthesises_answer(
 def test_chat_passes_installation_id_to_dispatch(isolated_settings, monkeypatch):
     """The installation_id from the request body must flow into dispatch."""
     ctx = company_client(monkeypatch)
+    _bind_install(ctx.company_id, 7777)
     import app.agent_tools.registry as reg
 
     captured = {}
@@ -174,6 +201,7 @@ def test_chat_caps_tool_iterations(isolated_settings, monkeypatch):
     """If the model keeps requesting tools, the loop must bail at the
     configured limit instead of running forever."""
     ctx = company_client(monkeypatch)
+    _bind_install(ctx.company_id, 1)
     import app.agent_tools.registry as reg
 
     monkeypatch.setattr(
@@ -210,6 +238,7 @@ def test_chat_returns_tool_errors_to_model_gracefully(
     """When a tool raises, the loop should still continue — feed the
     error back as a tool_result so the model can recover."""
     ctx = company_client(monkeypatch)
+    _bind_install(ctx.company_id, 1)
     import app.agent_tools.registry as reg
 
     def _raises(name, args, *, installation_id):

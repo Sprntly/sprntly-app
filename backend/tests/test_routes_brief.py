@@ -1,35 +1,75 @@
-"""Tests for /v1/brief routes — covers the dataset-required default change."""
+"""Tests for /v1/brief routes — dataset-required default + tenant isolation.
+
+After the tenant-isolation fix these routes sit behind `require_company`. The
+`dataset` query param (a slug) must resolve to the caller's company; an
+unowned/foreign slug is 404. `/{brief_id}` resolves brief → dataset → company.
+"""
 from __future__ import annotations
 
 
-def test_dataset_query_param_now_required(app_client):
-    # Old API allowed dataset default 'asurion'. Now it must be passed.
-    r = app_client.get("/v1/brief/status")
-    assert r.status_code == 422  # FastAPI validation error
+def _save_brief(db, dataset, insights=None):
+    payload = {"insights": insights or [], "_schema_version": 1}
+    return db.save_brief(dataset, "Week 1", payload, schema_version=1)
 
 
-def test_status_unknown_dataset_is_empty(app_client):
-    r = app_client.get("/v1/brief/status?dataset=ghost")
+def test_dataset_query_param_now_required(tenant_client):
+    # dataset is a required query param — omitting it is a validation error.
+    t = tenant_client.make(slug="acme")
+    r = t.client.get("/v1/brief/status")
+    assert r.status_code == 422
+
+
+def test_status_owned_dataset_is_empty(tenant_client):
+    t = tenant_client.make(slug="acme")
+    r = t.client.get("/v1/brief/status?dataset=acme")
     assert r.status_code == 200
     body = r.json()
-    assert body["dataset"] == "ghost"
+    assert body["dataset"] == "acme"
     assert body["status"] == "empty"
 
 
-def test_current_404_when_no_brief(app_client):
-    r = app_client.get("/v1/brief/current?dataset=ghost")
+def test_status_foreign_dataset_returns_404(tenant_client):
+    """A slug that isn't the caller's company → 404 (no existence disclosure)."""
+    tenant_client.make(slug="company-a")
+    b = tenant_client.make(slug="company-b")
+    assert b.client.get("/v1/brief/status?dataset=company-a").status_code == 404
+
+
+def test_current_404_when_no_brief(tenant_client):
+    t = tenant_client.make(slug="acme")
+    r = t.client.get("/v1/brief/current?dataset=acme")
     assert r.status_code == 404
     detail = r.json()["detail"]
     assert detail["message"] == "No brief generated yet"
 
 
-def test_current_returns_saved_brief(app_client, isolated_settings):
+def test_current_returns_saved_brief(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
     db = isolated_settings["db"]
-    brief_id = db.save_brief("acme", "Week 1", {"insights": []}, schema_version=1)
-    r = app_client.get("/v1/brief/current?dataset=acme")
+    brief_id = _save_brief(db, "acme")
+    r = t.client.get("/v1/brief/current?dataset=acme")
     assert r.status_code == 200
-    body = r.json()
-    assert body["id"] == brief_id
+    assert r.json()["id"] == brief_id
+
+
+def test_current_cross_tenant_returns_404(tenant_client, isolated_settings):
+    """Company B cannot read company A's current brief via A's slug."""
+    tenant_client.make(slug="company-a")
+    db = isolated_settings["db"]
+    _save_brief(db, "company-a")
+    b = tenant_client.make(slug="company-b")
+    assert b.client.get("/v1/brief/current?dataset=company-a").status_code == 404
+
+
+def test_brief_by_id_cross_tenant_returns_404(tenant_client, isolated_settings):
+    """GET /v1/brief/{brief_id} resolves brief → dataset → company; foreign 404."""
+    a = tenant_client.make(slug="company-a")
+    db = isolated_settings["db"]
+    brief_id = _save_brief(db, "company-a")
+    b = tenant_client.make(slug="company-b")
+    assert b.client.get(f"/v1/brief/{brief_id}").status_code == 404
+    # Owner still succeeds.
+    assert a.client.get(f"/v1/brief/{brief_id}").status_code == 200
 
 
 def test_brief_routes_require_auth(unauth_client):

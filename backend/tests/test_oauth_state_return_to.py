@@ -85,9 +85,16 @@ def test_safe_return_to_rejects_unsafe_values(value):
 # ───────────────────────── per-provider state roundtrip ─────────────────────────
 
 
+def _sign_kwargs(name: str) -> dict:
+    """Slack state is per-user and carries user_id; all other providers are
+    company-scoped only."""
+    return {"user_id": "u-1"} if name == "slack" else {}
+
+
 @pytest.mark.parametrize("name,mod,expected_provider", PROVIDERS)
 def test_state_carries_return_to_when_provided(name, mod, expected_provider, isolated_settings):
-    state = mod.sign_oauth_state(company_id="co-acme", return_to="/onboarding/4")
+    state = mod.sign_oauth_state(
+        company_id="co-acme", return_to="/onboarding/4", **_sign_kwargs(name))
     payload = mod.verify_oauth_state(state)
     assert payload["return_to"] == "/onboarding/4"
     assert payload["company_id"] == "co-acme"
@@ -98,7 +105,7 @@ def test_state_carries_return_to_when_provided(name, mod, expected_provider, iso
 def test_state_omits_return_to_when_not_provided(name, mod, _, isolated_settings):
     """Back-compat: when return_to isn't passed, state doesn't carry one
     and verify is happy. Callbacks fall back to /settings in that case."""
-    state = mod.sign_oauth_state(company_id="co-acme")
+    state = mod.sign_oauth_state(company_id="co-acme", **_sign_kwargs(name))
     payload = mod.verify_oauth_state(state)
     # Either key is missing, or key exists but is None — both signal "no return_to".
     assert payload.get("return_to") in (None,)

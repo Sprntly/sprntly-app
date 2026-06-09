@@ -4,16 +4,24 @@ Schema follows KG_Engineering_Spec §3.1.1 and backs design-v4 page 05
 (onboarding North Star picker) + page 09 (dashboard) + Synthesis scoring
 (§4c strategic-alignment anchoring).
 
-Storage: `companies.kpi_tree jsonb` (column from the onboarding migration —
-previously unwired). Version increments on every update; weights across
-primary metrics must sum to ~1.
+Each metric is now a `{metric, description}` pair: a short name plus a
+free-text description that gives the goal-fit classifier richer context.
+The earlier numeric fields (weight / current_value / target_value /
+target_window_days) have been removed from the schema — the description
+replaces them as the unit of strategic context.
+
+Storage: `companies.kpi_tree jsonb` (column from the onboarding migration).
+Reads are tolerant of LEGACY rows that still carry the old numeric fields:
+the models ignore unknown keys and default `description` to "" — no data
+migration is needed (backward-compatible jsonb read). Version increments on
+every save.
 """
 from __future__ import annotations
 
 import logging
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.db.client import require_client
 
@@ -21,22 +29,27 @@ logger = logging.getLogger(__name__)
 
 
 class NorthStar(BaseModel):
+    # Ignore legacy numeric fields (current_value/target_value/…) on read.
+    model_config = ConfigDict(extra="ignore")
+
     metric: str
-    current_value: Optional[float] = None
-    target_value: Optional[float] = None
-    target_window_days: Optional[int] = Field(default=None, gt=0)
+    description: str = ""
 
 
 class PrimaryMetric(BaseModel):
+    # Ignore legacy fields (weight/current_value/target_value) on read.
+    model_config = ConfigDict(extra="ignore")
+
     metric: str
-    current_value: Optional[float] = None
-    target_value: Optional[float] = None
-    weight: float = Field(gt=0, le=1)
+    description: str = ""
 
 
 class SecondarySignal(BaseModel):
+    # Ignore legacy fields (current_value/direction) on read.
+    model_config = ConfigDict(extra="ignore")
+
     metric: str
-    current_value: Optional[float] = None
+    description: str = ""
     direction: Literal["higher_is_better", "lower_is_better"] = "higher_is_better"
 
 
@@ -46,33 +59,53 @@ class KpiTree(BaseModel):
     secondary_signals: list[SecondarySignal] = Field(default_factory=list, max_length=6)
     version: int = 1
 
-    @model_validator(mode="after")
-    def _weights_sum_to_one(self) -> "KpiTree":
-        if self.primary_metrics:
-            total = sum(m.weight for m in self.primary_metrics)
-            if abs(total - 1.0) > 0.01:
-                raise ValueError(
-                    f"primary_metrics weights must sum to 1.0 (got {total:.2f})"
-                )
-        return self
+    @field_validator("north_star", mode="before")
+    @classmethod
+    def _coerce_north_star(cls, v):
+        """Tolerate legacy/hand-edited shapes stored in `companies.kpi_tree`.
+
+        Older rows persisted the north star as a bare string (e.g. "Revenue")
+        rather than a `{metric: ...}` object. Normalize on read: a non-empty
+        string → `{"metric": <string>}`; None/empty/garbage → a safe default
+        metric so the tree parses and goal-fit classification keeps working
+        instead of raising a ValidationError. (No data migration — read-side
+        normalization only.)
+        """
+        if isinstance(v, str):
+            metric = v.strip()
+            return {"metric": metric} if metric else {"metric": "North Star"}
+        if v is None:
+            return {"metric": "North Star"}
+        if isinstance(v, NorthStar):
+            # Already a valid model (e.g. constructed in-process) — pass through.
+            return v
+        if isinstance(v, dict):
+            # An object missing/empty `metric` still needs a usable label.
+            if not str(v.get("metric") or "").strip():
+                return {**v, "metric": "North Star"}
+            return v
+        # Any other shape (number, list, …) → default rather than raise.
+        return {"metric": "North Star"}
 
     def render_for_prompt(self) -> str:
-        """Compact text block for agent prompts (Synthesis judge, DS)."""
-        def n(v: float) -> str:
-            return f"{v:g}"
+        """Compact text block for agent prompts (Synthesis judge, DS).
+
+        Each line is `<metric> — <description>` so the goal-fit classifier
+        reads the PM's own words as the strategic-alignment context. No
+        weights/targets are emitted (they are no longer part of the schema);
+        metrics are treated equally, with the North Star as the primary anchor.
+        """
+        def line(metric: str, description: str) -> str:
+            metric = (metric or "").strip()
+            description = (description or "").strip()
+            return f"{metric} — {description}" if description else metric
+
         ns = self.north_star
-        lines = [f"North star: {ns.metric}"
-                 + (f" — current {n(ns.current_value)}" if ns.current_value is not None else "")
-                 + (f", target {n(ns.target_value)}" if ns.target_value is not None else "")
-                 + (f" within {ns.target_window_days}d" if ns.target_window_days else "")]
+        lines = [f"North star: {line(ns.metric, ns.description)}"]
         for m in self.primary_metrics:
-            lines.append(
-                f"Primary (weight {m.weight:.0%}): {m.metric}"
-                + (f" — current {n(m.current_value)}" if m.current_value is not None else "")
-                + (f", target {n(m.target_value)}" if m.target_value is not None else "")
-            )
+            lines.append(f"Primary: {line(m.metric, m.description)}")
         for s in self.secondary_signals:
-            lines.append(f"Secondary: {s.metric} ({s.direction})")
+            lines.append(f"Secondary: {line(s.metric, s.description)}")
         return "\n".join(lines)
 
 

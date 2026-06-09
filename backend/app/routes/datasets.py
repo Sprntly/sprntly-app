@@ -22,16 +22,37 @@ from fastapi import Depends, APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app import datasets
-from app.auth import require_session
+from app.auth import CompanyContext, require_company
 from app.brief_runner import auto_generate_brief
+from app.config import settings
+from app.db.companies import slug_for_company_id
+from app.deps.ownership import require_owned_dataset
 from app.ingest import UnsupportedFileType, md_filename
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/datasets", tags=["datasets"])
 
+# Strong refs to in-flight background generation tasks (see routes/design_agent.py):
+# without this, the bare create_task result can be garbage-collected mid-run.
+_inflight_tasks: set[asyncio.Task] = set()
+
 # 20 MB hard cap per file. Docx/xlsx/pdf at this size already strain the LLM
 # context window once converted; bigger files are almost always wrong-format.
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+
+def _ensure_owned_dataset(slug: str, company_id: str) -> None:
+    """Tenant gate + lazy registration. `require_owned_dataset` first proves the
+    slug maps to the CALLER'S OWN company (404 otherwise — no cross-tenant
+    disclosure). Onboarding creates the company but not always its `datasets`
+    row, so if the row is missing for this verified-own slug we register it
+    (idempotent insert). This never creates a dataset for a slug the caller
+    doesn't own — the ownership check runs first and 404s on any mismatch.
+    """
+    require_owned_dataset(slug, company_id)
+    from app import db
+    if not db.dataset_exists(slug):
+        db.insert_dataset(slug, slug)
 
 
 class CreateDatasetIn(BaseModel):
@@ -40,14 +61,24 @@ class CreateDatasetIn(BaseModel):
 
 
 @router.get("")
-def list_all(_session: dict = Depends(require_session),):
-    return {"datasets": datasets.list_datasets()}
+def list_all(company: CompanyContext = Depends(require_company)):
+    """List ONLY the caller's company's dataset(s).
+
+    A dataset slug IS a company slug, so the caller's company maps to exactly
+    one owned slug. We filter the full table down to rows the caller owns rather
+    than returning every tenant's datasets (the pre-fix behaviour leaked the
+    full tenant roster). Returns [] when the company has no dataset row yet.
+    """
+    owned_slug = slug_for_company_id(company.company_id)
+    rows = datasets.list_datasets() if owned_slug else []
+    mine = [d for d in rows if d.get("slug") == owned_slug]
+    return {"datasets": mine}
 
 
 @router.post("")
 def create(
     body: CreateDatasetIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     try:
         out = datasets.create_dataset(slug=body.slug, display_name=body.display_name)
@@ -64,13 +95,16 @@ def create(
 async def upload_files(
     slug: str,
     files: Annotated[list[UploadFile], File(description="Source files to ingest")],
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Accept one or more files; convert each to markdown; persist both.
 
     Partial success is acceptable: if 4 of 5 files convert and 1 fails, the
     response includes a per-file result so the frontend can show ✓/✗ on each.
     """
+    # Tenant gate (404 if not the caller's company) + lazily register the
+    # caller's own dataset row if onboarding hasn't created it yet.
+    _ensure_owned_dataset(slug, company.company_id)
     if not datasets.dataset_path(slug).exists():
         # Hit the DB too — folder might exist from a stale dir without a row.
         try:
@@ -113,12 +147,13 @@ async def upload_files(
 @router.get("/{slug}/files")
 def list_files(
     slug: str,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """List source files (raw originals) for a dataset, newest first."""
-    from app import db
-    if not db.dataset_exists(slug):
-        raise HTTPException(404, f"Dataset {slug!r} does not exist")
+    # Tenant gate (404 if not the caller's company) + lazily register the
+    # caller's own dataset row if onboarding hasn't created it yet, so the
+    # Sources page shows an empty list rather than "dataset does not exist".
+    _ensure_owned_dataset(slug, company.company_id)
 
     raw_dir = datasets.raw_path(slug)
     base_dir = datasets.dataset_path(slug)
@@ -164,9 +199,10 @@ def list_files(
 def delete_file(
     slug: str,
     filename: str,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Remove one source file: the raw original plus any matching .md siblings."""
+    require_owned_dataset(slug, company.company_id)
     # Defense in depth — reject anything that isn't a plain basename. FastAPI
     # already prevents path segments in {filename}, but a bare ".." or a
     # dotfile would slip through path validation.
@@ -206,21 +242,37 @@ def delete_file(
 @router.post("/{slug}/generate")
 async def generate(
     slug: str,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
-    """Fire-and-forget brief generation. Frontend polls /v1/brief/status?dataset=slug."""
+    """Fire-and-forget brief generation. Frontend polls /v1/brief/status?dataset=slug.
+
+    Honors BRIEF_ENGINE so a newly-created dataset produces the SAME engine's
+    brief as /regenerate + the scheduler: "synthesis" (default) runs the KG
+    seed-if-empty → run_synthesis path (+ drill-down warming); "legacy" keeps
+    the corpus→Claude auto_generate_brief.
+    """
+    require_owned_dataset(slug, company.company_id)
     from app import db
     if not db.dataset_exists(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")
-    asyncio.create_task(auto_generate_brief(slug))
+    if settings.brief_engine == "synthesis":
+        # Reuse the brief route's synthesis background body (run_synthesis +
+        # warm-drilldowns, error-isolated) so both write paths stay identical.
+        from app.routes.brief import _synthesis_generate_bg
+        task = asyncio.create_task(_synthesis_generate_bg(slug))
+    else:
+        task = asyncio.create_task(auto_generate_brief(slug))
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
     return {"started": True, "dataset": slug}
 
 
 @router.delete("/{slug}")
 def delete(
     slug: str,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
+    require_owned_dataset(slug, company.company_id)
     from app import db
     if not db.delete_dataset(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")

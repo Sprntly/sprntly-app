@@ -31,8 +31,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Annotated
 from urllib.parse import urlencode
+
+import requests
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -41,7 +44,7 @@ from pydantic import BaseModel
 
 from app import db
 from app import datasets as datasets_service
-from app.auth import CompanyContext, require_company, require_session
+from app.auth import CompanyContext, require_company
 from app.config import settings
 from app.connectors import (
     clickup_oauth,
@@ -65,6 +68,7 @@ from app.connectors.tokens import (
     decrypt_token_json,
     encrypt_token_json,
 )
+from app.kg_ingest.auto_sync import kickoff_sync
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +101,53 @@ def _public_connection(row: dict) -> dict:
     }
 
 
+def _visible_connection_rows(company: CompanyContext) -> list[dict]:
+    """Connection rows the CURRENT user may see: every company-scoped
+    provider (shared) plus only THIS user's own Slack row. Other members'
+    per-user Slack rows (and legacy NULL-user Slack rows) are filtered out
+    so one member never sees another's personal Slack."""
+    rows = db.list_connections(company.company_id)
+    out: list[dict] = []
+    for r in rows:
+        if r.get("provider") == slack_oauth.SLACK_PROVIDER:
+            if r.get("user_id") != company.user_id:
+                continue
+        out.append(r)
+    return out
+
+
 @router.get("")
 def list_connections(
     company: CompanyContext = Depends(require_company),
 ):
-    rows = db.list_connections(company.company_id)
+    rows = _visible_connection_rows(company)
     return {"connections": [_public_connection(r) for r in rows]}
+
+
+@router.get("/status")
+def connector_status(
+    company: CompanyContext = Depends(require_company),
+):
+    """Company-scoped sync status for every connected provider.
+
+    Backs the Settings status indicators: per provider, whether it has a
+    background ingest puller and its last_sync_at / last_sync_error stamp
+    (set by the auto-sync-on-connect kickoff and by manual /v1/ingest runs)."""
+    from app.kg_ingest.runner import PULLERS
+
+    rows = _visible_connection_rows(company)
+    out = []
+    for r in rows:
+        provider = r["provider"]
+        out.append({
+            "provider": provider,
+            "status": r["status"],
+            "account_label": r.get("account_label") or r.get("google_email"),
+            "ingestable": provider in PULLERS,
+            "last_sync_at": r.get("last_sync_at"),
+            "last_sync_error": r.get("last_sync_error"),
+        })
+    return {"statuses": out}
 
 
 # ─────────────────────── Start-OAuth (fetch-friendly) ───────────────────────
@@ -237,9 +282,14 @@ def start_oauth(
     if provider == slack_oauth.SLACK_PROVIDER:
         if not slack_oauth.slack_configured():
             raise HTTPException(500, "Slack OAuth is not configured on the server")
+        # Slack is per-user: bind the OAuth round-trip to the connecting
+        # user so the callback stores the bot under THEIR connection, not a
+        # company-shared one.
         url = slack_oauth.authorize_url(
             state=slack_oauth.sign_oauth_state(
-                company_id=company.company_id, return_to=return_to,
+                company_id=company.company_id,
+                user_id=company.user_id,
+                return_to=return_to,
             )
         )
         return {"authorize_url": url}
@@ -273,7 +323,12 @@ def test_connection(
     """
     from datetime import datetime, timezone
 
-    row = db.get_connection(company.company_id, provider)
+    # Slack is per-user: validate THIS user's own connection, never a
+    # company-shared one. Every other provider stays company-scoped.
+    if provider == slack_oauth.SLACK_PROVIDER:
+        row = db.get_slack_connection(company.company_id, company.user_id)
+    else:
+        row = db.get_connection(company.company_id, provider)
     if not row:
         raise HTTPException(404, f"{provider!r} is not connected")
 
@@ -390,7 +445,7 @@ def google_drive_callback(code: str, state: str):
         company_id=company_id,
         provider=google_oauth.GOOGLE_DRIVE_PROVIDER,
         token_encrypted=token_encrypted,
-        scopes=google_oauth.DRIVE_READONLY_SCOPE,
+        scopes=" ".join(google_oauth.DRIVE_SCOPES),
         google_email=email,
         config_json=json.dumps(config),
     )
@@ -460,7 +515,7 @@ def google_drive_sync(
     # Auto-enable the Google Drive input source for this dataset.
     dataset_slug = payload.dataset
     if not dataset_slug:
-        row = db.get_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
+        row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
         if row and row.get("config_json"):
             try:
                 cfg = json.loads(row["config_json"])
@@ -612,7 +667,18 @@ def figma_disconnect(
 
 
 def _figma_access_token(company_id: str) -> str:
-    """Decrypt the stored Figma token. Raises 404 if not connected."""
+    """Return a valid Figma access token for the company, refreshing it
+    first if the stored token is expired or near expiry.
+
+    The stored token JSON is Figma's response (access_token, refresh_token,
+    expires_in) plus an `obtained_at` epoch. We refresh proactively (2 min
+    early) so fetches never silently degrade once the token lapses, persist
+    the refreshed token+refresh+expiry back onto the connection, and return
+    the fresh access token. Mirrors the HubSpot valid-access-token pattern.
+
+    Raises 404 if not connected; raises a clear 502 if a refresh is required
+    but fails (rather than handing back a dead token).
+    """
     row = db.get_connection(company_id, figma_oauth.FIGMA_PROVIDER)
     if not row:
         raise HTTPException(404, "Figma is not connected")
@@ -623,6 +689,40 @@ def _figma_access_token(company_id: str) -> str:
     access_token = token_json.get("access_token")
     if not access_token:
         raise HTTPException(500, "Figma token has no access_token")
+
+    # Refresh proactively if expired / within 2 min of expiry.
+    obtained_at = token_json.get("obtained_at", 0)
+    expires_in = token_json.get("expires_in", 0)
+    refresh_token = token_json.get("refresh_token")
+    if expires_in and time.time() > obtained_at + expires_in - 120:
+        if not refresh_token:
+            raise HTTPException(
+                401, "Figma token expired and no refresh_token — reconnect Figma"
+            )
+        logger.info("Figma token expired for company, refreshing")
+        try:
+            new_tokens = figma_oauth.refresh_access_token(refresh_token)
+        except HTTPException as e:
+            # Don't silently use a dead token — surface a clear error.
+            logger.warning("Figma token refresh failed: %s", e.detail)
+            raise HTTPException(
+                502, "Figma token refresh failed — reconnect Figma"
+            ) from e
+        # Merge fresh values, preserving refresh_token if Figma omits it,
+        # and re-stamp obtained_at so subsequent expiry checks are correct.
+        token_json["access_token"] = new_tokens["access_token"]
+        token_json["refresh_token"] = new_tokens.get("refresh_token", refresh_token)
+        token_json["expires_in"] = new_tokens.get("expires_in", expires_in)
+        token_json["obtained_at"] = int(time.time())
+        try:
+            encrypted = encrypt_token_json(json.dumps(token_json))
+            db.update_connection_tokens(
+                company_id, figma_oauth.FIGMA_PROVIDER, encrypted
+            )
+        except Exception:
+            logger.warning("Failed to persist refreshed Figma token", exc_info=True)
+        access_token = token_json["access_token"]
+
     return access_token
 
 
@@ -659,14 +759,15 @@ class FigmaSyncCorpusIn(BaseModel):
 @router.post("/figma/sync-to-corpus")
 def figma_sync_to_corpus(
     body: FigmaSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Sync Figma file structure and design tokens into the corpus.
 
     Fetches file tree + published styles and writes a markdown summary
-    into DATA_DIR/{dataset}/figma_design_context.md.
+    into DATA_DIR/{dataset}/figma_design_context.md. Company-scoped: uses
+    the caller's company's Figma connection only.
     """
-    token = _figma_access_token()
+    token = _figma_access_token(company.company_id)
 
     # Fetch file structure + styles
     file_data = figma_oauth.fetch_file(token, body.file_key, depth=2)
@@ -740,23 +841,51 @@ def github_callback(
     installation_id: int | None = None,
 ):
     # GitHub re-uses this URL for BOTH the post-OAuth redirect AND the
-    # post-install redirect (when 'Request OAuth during install' is on,
-    # or when the App's Setup URL is left blank). The post-install
-    # redirect has `setup_action` + `installation_id` but no `state`.
-    # If we hit this branch, OAuth has either already completed in a
-    # prior round or wasn't required — just acknowledge and bounce
-    # back to the connectors page with the setup_action carried in the
-    # query so the UI can show 'approval pending' vs 'install complete'.
-    if state is None or not code:
+    # post-install redirect. Two trigger shapes:
+    #   1. Post-OAuth:     ?code=X&state=Y                  (handled below)
+    #   2. Post-install:   ?setup_action=install&installation_id=N[&state=Y]
+    #                      OR ?code=X&setup_action=request
+    # When the install URL we redirected to includes our `state` JWT
+    # (see the install-URL build below), GitHub preserves it through to
+    # the Setup URL — so `return_to` (e.g. /onboarding/6) survives the
+    # round-trip and we can bounce the user back to their original page
+    # instead of always defaulting to /settings.
+    if setup_action or state is None or not code:
         base = (settings.frontend_url or "http://localhost:3000").rstrip("/")
-        params = {"section": "connectors", "connected": "github"}
+        return_to: str | None = None
+        if state:
+            try:
+                payload = github_app.verify_oauth_state(state)
+                rt = payload.get("return_to")
+                if rt and _is_safe_return_to(rt):
+                    return_to = rt
+                # Post-install round-trip: GitHub preserved our signed state
+                # (carrying company_id) through to the Setup URL. This is the
+                # ONE place we know both the installation_id AND the company,
+                # so bind the installation to the caller's company here. The
+                # webhook (no company context) may have created the row first;
+                # we set/overwrite company_id without disturbing other fields.
+                if installation_id is not None and payload.get("company_id"):
+                    _bind_installation_company(
+                        int(installation_id), str(payload["company_id"])
+                    )
+            except HTTPException:
+                # state expired or invalid — fall back to /settings
+                return_to = None
+
+        params = {"connected": "github"}
         if setup_action:
             params["setup_action"] = setup_action
         if installation_id is not None:
             params["installation_id"] = str(installation_id)
-        return RedirectResponse(
-            f"{base}/settings?{urlencode(params)}", status_code=307
-        )
+
+        if return_to:
+            sep = "&" if "?" in return_to else "?"
+            target = f"{base}{return_to}{sep}{urlencode(params)}"
+        else:
+            params["section"] = "connectors"
+            target = f"{base}/settings?{urlencode(params)}"
+        return RedirectResponse(target, status_code=307)
 
     payload = github_app.verify_oauth_state(state)
     company_id = payload["company_id"]
@@ -784,6 +913,9 @@ def github_callback(
         config_json=json.dumps({"user": me}) if me else "{}",
     )
 
+    # Populate the KG immediately — fire-and-forget, never blocks the redirect.
+    kickoff_sync(company_id, github_app.GITHUB_PROVIDER)
+
     # Two-step GitHub auth: OAuth tells us who the user is, but they ALSO
     # need to install the Sprntly App on at least one repo so we have an
     # installation_id (without that, the agent has no repo access — the
@@ -793,22 +925,70 @@ def github_callback(
     # App install page instead of bouncing them back to /settings. The
     # webhook fires on completion and creates the github_installations
     # row; the user lands back at the App's Setup URL (configured in
-    # the App settings on GitHub).
-    if login and not _has_github_install_for(login) and settings.github_app_slug:
+    # the App settings on GitHub) — which should point at this same
+    # /github/callback so the original `state` (carrying return_to) is
+    # threaded all the way through to the post-install branch above.
+    if login and not _has_github_install_for(login, company_id) and settings.github_app_slug:
+        # Include the original state JWT on the install URL so GitHub
+        # preserves it through to the Setup URL redirect. That lets us
+        # bounce the user back to wherever they started (e.g.
+        # /onboarding/6) instead of always /settings.
         install_url = (
             f"https://github.com/apps/{settings.github_app_slug}/installations/new"
+            f"?{urlencode({'state': state})}"
         )
         return RedirectResponse(install_url, status_code=307)
 
     return _build_post_oauth_redirect(payload, github_app.GITHUB_PROVIDER)
 
 
-def _has_github_install_for(account_login: str) -> bool:
-    """True iff a Sprntly App installation already exists for the given
-    GitHub account login. Read-only — webhook handlers populate this
-    table when users install/uninstall the App."""
+def _bind_installation_company(installation_id: int, company_id: str) -> None:
+    """Attach `company_id` to an existing installation row (idempotent).
+
+    Called from the post-install callback — the only flow that knows both the
+    installation_id (from GitHub's Setup-URL redirect) and the company (from the
+    signed state). The webhook may have created the row first with no company;
+    this binds it. If the row doesn't exist yet (webhook hasn't fired), the
+    upsert seeds a minimal row carrying the company so it's never orphaned
+    cross-tenant; the next webhook refresh fills in account details."""
     try:
-        rows = db.list_github_installations() or []
+        existing = db.get_github_installation(installation_id)
+        if existing:
+            db.upsert_github_installation(
+                installation_id=installation_id,
+                account_id=int(existing.get("account_id") or 0),
+                account_login=str(existing.get("account_login") or ""),
+                account_type=str(existing.get("account_type") or "User"),
+                repository_selection=str(
+                    existing.get("repository_selection") or "selected"
+                ),
+                suspended=bool(existing.get("suspended")),
+                permissions=json.loads(existing.get("permissions_json") or "{}"),
+                events=json.loads(existing.get("events_json") or "[]"),
+                company_id=company_id,
+            )
+        else:
+            db.upsert_github_installation(
+                installation_id=installation_id,
+                account_id=0,
+                account_login="",
+                account_type="User",
+                company_id=company_id,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to bind GitHub installation %s to company", installation_id,
+            exc_info=True,
+        )
+
+
+def _has_github_install_for(account_login: str, company_id: str) -> bool:
+    """True iff THIS company already has a Sprntly App installation for the
+    given GitHub account login. Read-only — webhook handlers populate this
+    table when users install/uninstall the App. Company-scoped so one company's
+    install never suppresses another company's install prompt."""
+    try:
+        rows = db.list_github_installations(company_id) or []
     except Exception:
         # Table may not exist in some local-dev / test contexts; be lenient
         # and assume "no install" so we still redirect to the install page.
@@ -831,16 +1011,156 @@ def github_disconnect(
 
 
 @router.get("/github/installations")
-def github_list_installations(_session: dict = Depends(require_session)):
-    return {"installations": db.list_github_installations()}
+def github_list_installations(
+    company: CompanyContext = Depends(require_company),
+):
+    """Installations owned by the caller's company (member-shared).
+
+    Company-scoped: a signed-in user only sees their own company's GitHub
+    installs, never another tenant's. Legacy NULL-company rows are excluded."""
+    return {"installations": db.list_github_installations(company.company_id)}
+
+
+# ─────────── Per-installation repository management ───────────
+#
+# These wrap GitHub's `/user/installations/{id}/repositories` family,
+# which is gated on the USER's OAuth token (not the App JWT). The user
+# can add/remove repos from a "selected repositories" install. For an
+# "all repositories" install GitHub returns 422 and the UI should
+# disable the per-repo toggles (deep-link to GitHub settings instead).
+
+
+def _require_company_owns_installation(installation_id: int, company_id: str) -> None:
+    """404 unless `installation_id` is bound to the caller's company.
+
+    Guards the per-installation repo-management routes (already require_company)
+    so a member of company A can't manipulate company B's installation by
+    guessing its numeric id. Legacy NULL-company installs are also rejected
+    (they must be reconnected to bind a company first)."""
+    if not db.get_github_installation_for_company(installation_id, company_id):
+        raise HTTPException(404, "GitHub installation not found")
+
+
+def _github_user_install_url(installation_id: int, repository_id: int | None = None) -> str:
+    base = (
+        f"https://api.github.com/user/installations/{installation_id}/repositories"
+    )
+    if repository_id is not None:
+        return f"{base}/{repository_id}"
+    return base
+
+
+def _github_user_token_headers(company_id: str) -> dict[str, str]:
+    """User-OAuth Bearer headers for /user/installations/* endpoints."""
+    return {
+        "Authorization": f"Bearer {_github_access_token(company_id)}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+@router.get("/github/installations/{installation_id}/repositories")
+def github_list_install_repos(
+    installation_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """List repositories accessible to this installation, using the
+    connected user's OAuth token (per GitHub's auth rules)."""
+    _require_company_owns_installation(installation_id, company.company_id)
+    r = requests.get(
+        _github_user_install_url(installation_id),
+        headers=_github_user_token_headers(company.company_id),
+        timeout=10,
+    )
+    if not r.ok:
+        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
+    body = r.json() or {}
+    repos = [
+        {
+            "id": x.get("id"),
+            "name": x.get("name"),
+            "full_name": x.get("full_name"),
+            "private": x.get("private"),
+            "html_url": x.get("html_url"),
+            "default_branch": x.get("default_branch"),
+            "description": x.get("description"),
+        }
+        for x in (body.get("repositories") or [])
+    ]
+    return {
+        "installation_id": installation_id,
+        "total": body.get("total_count", len(repos)),
+        "repositories": repos,
+    }
+
+
+@router.put(
+    "/github/installations/{installation_id}/repositories/{repository_id}"
+)
+def github_add_install_repo(
+    installation_id: int,
+    repository_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Add a repo to this installation. 422 if the install is in
+    'all repositories' mode (per-repo control disallowed there)."""
+    _require_company_owns_installation(installation_id, company.company_id)
+    r = requests.put(
+        _github_user_install_url(installation_id, repository_id),
+        headers=_github_user_token_headers(company.company_id),
+        timeout=10,
+    )
+    if r.status_code == 422:
+        raise HTTPException(
+            422,
+            "This installation is set to 'All repositories'. "
+            "Switch it to 'Only select repositories' on GitHub to "
+            "manage repos per-app.",
+        )
+    if not r.ok:
+        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
+    return {"added": True, "installation_id": installation_id, "repository_id": repository_id}
+
+
+@router.delete(
+    "/github/installations/{installation_id}/repositories/{repository_id}"
+)
+def github_remove_install_repo(
+    installation_id: int,
+    repository_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Remove a repo from this installation."""
+    _require_company_owns_installation(installation_id, company.company_id)
+    r = requests.delete(
+        _github_user_install_url(installation_id, repository_id),
+        headers=_github_user_token_headers(company.company_id),
+        timeout=10,
+    )
+    if not r.ok:
+        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
+    return {"removed": True, "installation_id": installation_id, "repository_id": repository_id}
 
 
 @router.get("/github/pull-requests")
 def github_list_open_prs(
     installation_id: int | None = None,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
-    return {"pull_requests": db.list_open_pull_requests(installation_id)}
+    """Open PRs tracked for the caller's company (member-shared).
+
+    Company-scoped. If `installation_id` is given it must belong to the
+    caller's company (else 404), so it can't be used to read another tenant's
+    PRs."""
+    if installation_id is not None and not db.get_github_installation_for_company(
+        installation_id, company.company_id
+    ):
+        raise HTTPException(404, "GitHub installation not found")
+    return {
+        "pull_requests": db.list_open_pull_requests(
+            company.company_id, installation_id
+        )
+    }
 
 
 def _github_access_token(company_id: str) -> str:
@@ -870,6 +1190,49 @@ def github_list_repos(
     return {"repositories": github_app.fetch_user_repos(token, per_page=per_page)}
 
 
+@router.get("/github/accessible-repos")
+def github_list_accessible_repos(
+    company: CompanyContext = Depends(require_company),
+):
+    """Repos the Sprntly App can read, aggregated across every installation
+    owned by the caller's company. Uses each install's App TOKEN, not the
+    OAuth user token — so the list matches what was granted at App-install
+    time, not the OAuth scope (read:user user:email, which is too narrow
+    to enumerate private repos via /user/repos).
+
+    Returns an empty list (never 5xx) when the company has no install or
+    when every install's token-mint / GitHub call fails — the picker UI
+    surfaces that as "no repos accessible" rather than an error toast.
+
+    Company-scoped, member-shared: any member of the company that owns
+    the installation can list the repos."""
+    installs = db.list_github_installations(company.company_id)
+    if not installs:
+        return {"repositories": []}
+    seen: set[str] = set()
+    out: list[dict] = []
+    for install in installs:
+        install_id = install.get("installation_id")
+        if not install_id:
+            continue
+        try:
+            repos = github_app.fetch_installation_repos(int(install_id))
+        except Exception:
+            logger.warning(
+                "accessible-repos: install %s lookup failed",
+                install_id, exc_info=True,
+            )
+            continue
+        for r in repos:
+            fn = r.get("full_name")
+            if not fn or fn in seen:
+                continue
+            seen.add(fn)
+            out.append(r)
+    out.sort(key=lambda r: (r.get("full_name") or "").lower())
+    return {"repositories": out}
+
+
 class GitHubSyncCorpusIn(BaseModel):
     dataset: str
     installation_id: int | None = None
@@ -878,14 +1241,20 @@ class GitHubSyncCorpusIn(BaseModel):
 @router.post("/github/sync-to-corpus")
 def github_sync_to_corpus(
     body: GitHubSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Sync tracked GitHub PRs into the corpus as a markdown file.
 
     Reads open PRs from the github_pull_requests table and writes
     a summary into DATA_DIR/{dataset}/github_active_prs.md.
-    """
-    prs = db.list_open_pull_requests(body.installation_id)
+
+    Company-scoped: only the caller's company's PRs are read. A supplied
+    installation_id must belong to the caller's company (else 404)."""
+    if body.installation_id is not None and not db.get_github_installation_for_company(
+        body.installation_id, company.company_id
+    ):
+        raise HTTPException(404, "GitHub installation not found")
+    prs = db.list_open_pull_requests(company.company_id, body.installation_id)
 
     lines: list[str] = ["# GitHub Active Pull Requests\n"]
     if not prs:
@@ -933,13 +1302,15 @@ def github_sync_to_corpus(
 
 
 @router.get("/sync-status")
-def connector_sync_status(_session: dict = Depends(require_session)):
+def connector_sync_status(
+    company: CompanyContext = Depends(require_company),
+):
     """Summary of all connector sync states + corpus stats.
 
-    Returns per-connector status and per-dataset corpus size.
-    Used for demo dashboards to verify data capture.
+    Returns per-connector status and per-dataset corpus size for the
+    caller's company only. Used for dashboards to verify data capture.
     """
-    connections = db.list_connections()
+    connections = db.list_connections(company.company_id)
     connectors_out = []
     for row in connections:
         config = {}
@@ -1011,6 +1382,8 @@ def clickup_callback(code: str, state: str):
         config_json=json.dumps({"user": user}) if user else "{}",
     )
 
+    kickoff_sync(company_id, clickup_oauth.CLICKUP_PROVIDER)
+
     return _build_post_oauth_redirect(payload, clickup_oauth.CLICKUP_PROVIDER)
 
 
@@ -1060,6 +1433,8 @@ def hubspot_callback(code: str, state: str):
         config_json=json.dumps({"info": info}) if info else "{}",
     )
 
+    kickoff_sync(company_id, hubspot_oauth.HUBSPOT_PROVIDER)
+
     return _build_post_oauth_redirect(payload, hubspot_oauth.HUBSPOT_PROVIDER)
 
 
@@ -1081,17 +1456,18 @@ class HubSpotSyncCorpusIn(BaseModel):
 @router.post("/hubspot/sync")
 def hubspot_sync(
     body: HubSpotSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Sync HubSpot CRM data (contacts, companies, deals) into the corpus.
 
     Fetches data from HubSpot API, converts to markdown, and writes
-    into DATA_DIR/{dataset}/ so it enters the knowledge base.
+    into DATA_DIR/{dataset}/ so it enters the knowledge base. Company-scoped:
+    uses the caller's company's HubSpot connection only.
     """
     from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
 
     try:
-        result = sync_hubspot(body.dataset)
+        result = sync_hubspot(body.dataset, company_id=company.company_id)
     except HubSpotSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()
@@ -1100,13 +1476,13 @@ def hubspot_sync(
 @router.post("/hubspot/sync-to-corpus")
 def hubspot_sync_to_corpus(
     body: HubSpotSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Alias for /hubspot/sync — matches Figma/GitHub sync-to-corpus pattern."""
     from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
 
     try:
-        result = sync_hubspot(body.dataset)
+        result = sync_hubspot(body.dataset, company_id=company.company_id)
     except HubSpotSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()
@@ -1125,6 +1501,9 @@ def hubspot_sync_to_corpus(
 def slack_callback(code: str, state: str):
     payload = slack_oauth.verify_oauth_state(state)
     company_id = payload["company_id"]
+    # Slack is per-user — the owning user rides in the signed state (the
+    # callback has no session). verify_oauth_state guarantees it's present.
+    user_id = payload["user_id"]
     token_json = slack_oauth.exchange_code_for_token(code)
 
     access_token = token_json.get("access_token")
@@ -1149,9 +1528,9 @@ def slack_callback(code: str, state: str):
     except TokenEncryptionError as e:
         raise HTTPException(500, str(e)) from e
 
-    db.upsert_connection(
+    db.upsert_slack_connection(
         company_id=company_id,
-        provider=slack_oauth.SLACK_PROVIDER,
+        user_id=user_id,
         token_encrypted=token_encrypted,
         scopes=token_json.get("scope") or "",
         account_label=str(label),
@@ -1168,17 +1547,18 @@ def slack_callback(code: str, state: str):
 def slack_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
-    row = db.get_connection(company.company_id, slack_oauth.SLACK_PROVIDER)
+    # Disconnect only THIS user's Slack — never another member's.
+    row = db.get_slack_connection(company.company_id, company.user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
-    db.delete_connection(company.company_id, slack_oauth.SLACK_PROVIDER)
+    db.delete_slack_connection(company.company_id, company.user_id)
     return {"deleted": True, "provider": slack_oauth.SLACK_PROVIDER}
 
 
-def _slack_bot_token(company_id: str) -> tuple[str, dict]:
-    """Decrypt and return (bot_token, connection_row) for the company's
+def _slack_bot_token(company_id: str, user_id: str) -> tuple[str, dict]:
+    """Decrypt and return (bot_token, connection_row) for THIS user's own
     Slack connection. 404 if not connected, 500 if the token is unreadable."""
-    row = db.get_connection(company_id, slack_oauth.SLACK_PROVIDER)
+    row = db.get_slack_connection(company_id, user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
     try:
@@ -1202,13 +1582,17 @@ class SlackBotTokenIn(BaseModel):
 @router.post("/slack/apikey")
 def slack_connect_bot_token(
     body: SlackBotTokenIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Connect Slack using a Bot User OAuth Token (xoxb-...).
 
     Alternative to the full OAuth flow — useful when the Slack app is not
     distributed. The user copies the token from api.slack.com/apps →
     Install App → Bot User OAuth Token.
+
+    Per-user + company-scoped: the token is stored under the current
+    session user's own Slack connection (also fixes the prior
+    company-less upsert call).
     """
     token = body.api_key.strip()
     auth_info = slack_oauth.fetch_auth_test(token)
@@ -1239,8 +1623,9 @@ def slack_connect_bot_token(
     except TokenEncryptionError as e:
         raise HTTPException(500, str(e)) from e
 
-    db.upsert_connection(
-        provider=slack_oauth.SLACK_PROVIDER,
+    db.upsert_slack_connection(
+        company_id=company.company_id,
+        user_id=company.user_id,
         token_encrypted=token_encrypted,
         scopes=settings.slack_scopes.replace(",", " "),
         account_label=label,
@@ -1258,8 +1643,8 @@ def slack_list_channels(
     company: CompanyContext = Depends(require_company),
 ):
     """List channels the bot can post into. Backs the channel-picker
-    in the Configure drawer."""
-    token, _row = _slack_bot_token(company.company_id)
+    in the Configure drawer. Resolves THIS user's own Slack."""
+    token, _row = _slack_bot_token(company.company_id, company.user_id)
     return {"channels": slack_oauth.list_channels(token)}
 
 
@@ -1278,16 +1663,16 @@ def slack_save_config(
     company: CompanyContext = Depends(require_company),
 ):
     """Save the user's selected notification-target channel. Stored on
-    the connection row's config so the Comms Agent can read it at
-    post-time without a separate lookup table."""
-    row = db.get_connection(company.company_id, slack_oauth.SLACK_PROVIDER)
+    THIS user's own Slack connection row's config so the Comms Agent can
+    read it at post-time without a separate lookup table."""
+    row = db.get_slack_connection(company.company_id, company.user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
     patch: dict = {"channel_id": body.channel_id.strip()}
     if body.channel_name:
         patch["channel_name"] = body.channel_name.strip()
-    updated = db.patch_connection_config(
-        company.company_id, slack_oauth.SLACK_PROVIDER, patch
+    updated = db.patch_slack_connection_config(
+        company.company_id, company.user_id, patch
     )
     config: dict = {}
     if updated:
@@ -1306,17 +1691,24 @@ class SlackSyncCorpusIn(BaseModel):
 @router.post("/slack/sync-to-corpus")
 def slack_sync_to_corpus(
     body: SlackSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Sync Slack channels, messages, and threads into the corpus.
 
     Fetches data from the Slack API, converts to markdown, and writes
-    into DATA_DIR/{dataset}/ so it enters the knowledge base.
+    into DATA_DIR/{dataset}/ so it enters the knowledge base. Uses THIS
+    user's own Slack bot token (per-user scope; also fixes the prior
+    company-less token lookup).
     """
     from app.connectors.slack_sync import SlackSyncError, sync_slack
 
     try:
-        result = sync_slack(body.dataset, history_days=body.history_days)
+        result = sync_slack(
+            body.dataset,
+            company_id=company.company_id,
+            user_id=company.user_id,
+            history_days=body.history_days,
+        )
     except SlackSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()
@@ -1370,6 +1762,9 @@ def fireflies_connect_apikey(
         account_label=label,
         config_json=json.dumps({"user": user}) if user else "{}",
     )
+
+    kickoff_sync(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
+
     return {
         "ok": True,
         "provider": fireflies_apikey.FIREFLIES_PROVIDER,
@@ -1396,6 +1791,7 @@ _WEBHOOK_HANDLED_EVENTS = {
     "installation",
     "installation_repositories",
     "pull_request",
+    "push",
     "ping",
 }
 
@@ -1470,6 +1866,17 @@ def _handle_installation_repositories_event(payload: dict) -> None:
     )
 
 
+def _handle_push_event(payload: dict) -> None:
+    """A push to a connected repo may have changed its design tokens, so mark
+    any cached design system extracted from that repo stale. The next design
+    generation then re-extracts instead of serving a now-outdated cached row."""
+    repo = payload.get("repository") or {}
+    repo_full_name = str(repo.get("full_name") or "").strip()
+    if not repo_full_name:
+        return
+    db.mark_github_design_systems_stale(repo_full_name)
+
+
 def _handle_pull_request_event(payload: dict) -> None:
     install = payload.get("installation") or {}
     install_id = install.get("id")
@@ -1480,6 +1887,11 @@ def _handle_pull_request_event(payload: dict) -> None:
     state = pr.get("state") or "open"
     if pr.get("merged"):
         state = "merged"
+    # Inherit the tenant from the PR's installation. A PR for an unbound
+    # (legacy NULL-company) installation gets company_id=None and is excluded
+    # from all scoped reads until that installation is reconnected.
+    owner = db.get_github_installation(int(install_id)) or {}
+    company_id = owner.get("company_id")
     db.upsert_github_pull_request(
         installation_id=int(install_id),
         repo_full_name=str(repo.get("full_name") or ""),
@@ -1494,6 +1906,7 @@ def _handle_pull_request_event(payload: dict) -> None:
         body_excerpt=_excerpt(pr.get("body")),
         pr_created_at=pr.get("created_at"),
         pr_updated_at=pr.get("updated_at"),
+        company_id=company_id,
     )
 
 
@@ -1521,6 +1934,8 @@ async def github_webhook(
         _handle_installation_repositories_event(payload)
     elif event == "pull_request":
         _handle_pull_request_event(payload)
+    elif event == "push":
+        _handle_push_event(payload)
     else:
         logger.info("GitHub webhook: ignoring event %s delivery=%s", event, x_github_delivery)
         return {"ok": True, "event": event, "handled": False}

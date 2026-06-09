@@ -7,7 +7,8 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { InterviewLayout } from "../InterviewLayout"
+import { InterviewLayout, useFieldValidation } from "../InterviewLayout"
+import type { FieldCheck } from "../../../lib/onboarding/validation"
 
 const noop = () => {}
 
@@ -33,11 +34,11 @@ describe("InterviewLayout (v4 onboarding shell)", () => {
     expect(html).toContain("preview")
   })
 
-  it("shows the step progress label and an 8-dot indicator", () => {
+  it("shows the step progress label and a 7-dot indicator", () => {
     const html = render({ step: 5 })
-    expect(html).toContain("Step 5 of 8")
+    expect(html).toContain("Step 5 of 7")
     // one dot element per step (match the className attribute, not CSS rules)
-    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(8)
+    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(7)
   })
 
   it("marks done/active dots relative to the current step", () => {
@@ -56,9 +57,45 @@ describe("InterviewLayout (v4 onboarding shell)", () => {
     expect(html).toMatch(/<button[^>]*disabled[^>]*>Continue<\/button>/)
   })
 
+  it("renders an enabled (non-disabled) primary Continue by default", () => {
+    // Regression for the "invisible until hover" bug: the enabled primary
+    // button must render without the disabled attribute and carry the
+    // btn-primary class (which globals.css styles with a dark, opaque bg).
+    const html = render({ onContinue: noop })
+    expect(html).toMatch(/<button[^>]*class="btn btn-primary"[^>]*>Continue<\/button>/)
+    expect(html).not.toMatch(/<button[^>]*disabled[^>]*>Continue<\/button>/)
+  })
+
   it("renders Back and Skip when their handlers are provided", () => {
     const html = render({ onBack: noop, onSkip: noop, skipLabel: "Connect later" })
     expect(html).toContain(">Back<")
     expect(html).toContain("Connect later")
+  })
+})
+
+// Harness exercising the useFieldValidation hook through SSR. The hook owns
+// the per-field error map + first-invalid focus target; its pure core
+// (validateRequired) is covered in onboarding-validation.test.ts. Here we
+// confirm the hook starts clean and exposes a containerRef + validate API.
+function Harness({ checks }: { checks: FieldCheck[] }) {
+  const { errors, validate, clearError, containerRef } = useFieldValidation(
+    () => checks,
+  )
+  return React.createElement(
+    "div",
+    { ref: containerRef, "data-error-count": Object.keys(errors).length },
+    React.createElement("button", { onClick: () => validate() }, "validate"),
+    React.createElement("button", { onClick: () => clearError("x") }, "clear"),
+  )
+}
+
+describe("useFieldValidation", () => {
+  it("starts with no errors before validate runs", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(Harness, {
+        checks: [{ key: "x", valid: false, message: "required" }],
+      }),
+    )
+    expect(html).toContain('data-error-count="0"')
   })
 })

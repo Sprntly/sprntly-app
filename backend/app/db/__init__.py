@@ -36,6 +36,7 @@ from app.db.briefs import (
 # PRDs
 from app.db.prds import (
     complete_prd,
+    complete_prd_2part,
     fail_prd,
     find_existing_prd,
     get_prd,
@@ -81,12 +82,18 @@ from app.db.datasets import (
 # Connections (OAuth)
 from app.db.connections import (
     delete_connection,
+    delete_slack_connection,
     get_connection,
+    get_slack_connection,
     list_connections,
+    list_slack_connections,
     patch_connection_config,
+    patch_slack_connection_config,
     update_connection_sync,
     update_connection_tokens,
+    update_slack_connection_sync,
     upsert_connection,
+    upsert_slack_connection,
 )
 
 # Enterprise input sources
@@ -122,10 +129,14 @@ from app.db.metric_points import (
     upsert_metric_point,
 )
 
+from app.db.design_systems import mark_github_design_systems_stale
+
 # GitHub App (webhook-driven)
 from app.db.github import (
     delete_github_installation,
+    find_github_installation_for_repo,
     get_github_installation,
+    get_github_installation_for_company,
     list_github_installations,
     list_open_pull_requests,
     upsert_github_installation,
@@ -147,6 +158,7 @@ __all__ = [
     "save_brief",
     # prds
     "complete_prd",
+    "complete_prd_2part",
     "fail_prd",
     "find_existing_prd",
     "get_prd",
@@ -184,19 +196,29 @@ __all__ = [
     "upsert_input_source",
     # connections
     "delete_connection",
+    "delete_slack_connection",
     "get_connection",
+    "get_slack_connection",
     "list_connections",
+    "list_slack_connections",
     "patch_connection_config",
+    "patch_slack_connection_config",
     "update_connection_sync",
     "update_connection_tokens",
+    "update_slack_connection_sync",
     "upsert_connection",
+    "upsert_slack_connection",
     # metric points (DS rolling aggregates)
     "distinct_metrics",
     "list_metric_points",
     "upsert_metric_point",
+    # design systems cache
+    "mark_github_design_systems_stale",
     # github (webhook-driven)
     "delete_github_installation",
+    "find_github_installation_for_repo",
     "get_github_installation",
+    "get_github_installation_for_company",
     "list_github_installations",
     "list_open_pull_requests",
     "upsert_github_installation",

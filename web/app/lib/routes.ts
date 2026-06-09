@@ -1,9 +1,35 @@
 import type { ScreenId } from "../types"
+import { ONBOARDING_STEP_COUNT } from "./onboarding/types"
 
 /** Base path for the refresh-stable Design Agent canvas route. The full route
  *  carries the prototype_id (`/design/{prototype_id}`). This is the only
  *  deep-URL screen in the app's otherwise no-deep-URL nav. */
 export const CANVAS_BASE_PATH = "/design"
+
+/** Dedicated full-page prototype generation surface. "Generate Prototype" now
+ *  redirects here (instead of opening the generate modal inline over the PRD).
+ *  The PRD context is carried as a `?prd=<id>` query param; the page kicks off
+ *  generation and, once a prototype_id exists, hands off to the canvas route
+ *  (`/design/{id}`). A static page (no per-id dynamic segment), so it needs no
+ *  generateStaticParams — the query param is read client-side. */
+export const PROTOTYPE_PATH = "/prototype"
+
+/** Build the prototype-page path, threading the PRD context as `?prd=<id>` when
+ *  present. With no PRD it returns the bare `/prototype`. Pure → unit-testable. */
+export function prototypePath(prdId?: number | string | null): string {
+  if (prdId == null || prdId === "") return PROTOTYPE_PATH
+  return `${PROTOTYPE_PATH}?prd=${encodeURIComponent(String(prdId))}`
+}
+
+/** Read the PRD id carried in the prototype page's `?prd=` query param, or null
+ *  when absent / malformed. Accepts the raw value from `useSearchParams().get`
+ *  (string | null). PRD ids are positive integers; anything else → null so the
+ *  page never kicks generation against a bad id. Pure → unit-testable. */
+export function prdIdFromPrototypeSearch(raw: string | null): number | null {
+  if (raw == null || raw === "" || !/^\d+$/.test(raw)) return null
+  const id = Number(raw)
+  return Number.isSafeInteger(id) && id > 0 ? id : null
+}
 
 /** App routes (no basePath). Onboarding uses `/onboarding/[step]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
@@ -14,7 +40,6 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-5": "/onboarding/5",
   "ob-6": "/onboarding/6",
   "ob-7": "/onboarding/7",
-  "ob-8": "/onboarding/8",
   chat: "/",
   brief: "/brief",
   detail: "/evidence",
@@ -30,6 +55,10 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   connectors: "/settings?section=connectors",
   sources: "/sources",
   tickets: "/tickets",
+  // The dedicated full-page prototype generation surface (sidebar nav target).
+  // The "Generate Prototype" entry point redirects here with a ?prd=<id> query
+  // param; the page reads it client-side (no per-id dynamic segment).
+  prototype: PROTOTYPE_PATH,
   // The refresh-stable canvas route. The bare base path; the id-bearing path
   // (`/design/{prototype_id}`) is built by canvasPath() below.
   // pathForScreen("da-canvas") returns this base — canvas navigation goes
@@ -48,6 +77,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/team": "team",
   "/sources": "sources",
   "/tickets": "tickets",
+  [PROTOTYPE_PATH]: "prototype",
   // Inverse for the canvas base path. screenIdFromPathname is left UNCHANGED —
   // it exact-matches, so the bare "/design" resolves to "da-canvas" while the
   // id-bearing "/design/{id}" falls through to "chat" (the canvas is a
@@ -55,7 +85,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   [CANVAS_BASE_PATH]: "da-canvas",
 }
 
-for (let step = 1; step <= 8; step++) {
+for (let step = 1; step <= ONBOARDING_STEP_COUNT; step++) {
   PATH_TO_SCREEN[`/onboarding/${step}`] = `ob-${step}` as ScreenId
 }
 

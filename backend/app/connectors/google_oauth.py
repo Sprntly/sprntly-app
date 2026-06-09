@@ -18,6 +18,20 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+# Google auto-adds openid / userinfo.email / userinfo.profile to the granted
+# set whenever the OAuth client is also a sign-in client (ours is). If we only
+# REQUEST drive.readonly, google-auth-oauthlib raises a "Scope has changed"
+# error at token exchange because the returned set is a superset of what we
+# asked for. Requesting the full set up front makes the requested and granted
+# scopes match, so the exchange succeeds without relying on a relax flag. We
+# also gain the user's verified email straight from the ID token. (The relax
+# env default in app.main is kept as belt-and-suspenders for openid reordering.)
+DRIVE_SCOPES = [
+    DRIVE_READONLY_SCOPE,
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
 GOOGLE_DRIVE_PROVIDER = "google_drive"
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
@@ -48,7 +62,7 @@ def build_flow() -> Flow:
         raise HTTPException(500, "Google OAuth is not configured on the server")
     return Flow.from_client_config(
         _client_config(),
-        scopes=[DRIVE_READONLY_SCOPE],
+        scopes=DRIVE_SCOPES,
         redirect_uri=settings.google_oauth_redirect_uri,
     )
 
@@ -94,11 +108,36 @@ def verify_oauth_state(state: str) -> dict:
 def credentials_from_token_json(token_json: str) -> Credentials:
     return Credentials.from_authorized_user_info(
         json.loads(token_json),
-        scopes=[DRIVE_READONLY_SCOPE],
+        scopes=DRIVE_SCOPES,
     )
 
 
+def email_from_id_token(credentials: Credentials) -> str | None:
+    """Read the verified email out of the OpenID Connect ID token Google
+    returns alongside the access token (we now request the openid +
+    userinfo.email scopes). The ID token is signed by Google and already
+    validated by google-auth during the exchange; for the email claim we
+    decode without re-verifying the signature (no extra network call). Returns
+    None if there's no ID token or no email claim — callers fall back to the
+    Drive `about` lookup."""
+    raw = getattr(credentials, "id_token", None)
+    if not raw:
+        return None
+    try:
+        claims = jwt.decode(raw, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return None
+    email = claims.get("email")
+    return email or None
+
+
 def fetch_google_account_email(credentials: Credentials) -> str | None:
+    # Prefer the email straight from the ID token (no network round-trip,
+    # available now that we request openid + userinfo.email). Fall back to the
+    # Drive about() lookup for tokens minted before this scope change.
+    email = email_from_id_token(credentials)
+    if email:
+        return email
     try:
         service = build("drive", "v3", credentials=credentials, cache_discovery=False)
         about = service.about().get(fields="user").execute()

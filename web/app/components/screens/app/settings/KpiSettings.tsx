@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { KpiTreeEditor, normalizeKpiWeights } from "../../../onboarding/KpiTreeEditor"
+import { KpiTreeEditor, cleanKpiMetrics } from "../../../onboarding/KpiTreeEditor"
 import { KpiTreePreview } from "../../../onboarding/KpiTreePreview"
 import { useWorkspace } from "../../../../context/WorkspaceContext"
 import { saveKpiTree } from "../../../../lib/onboarding/store"
@@ -17,9 +17,10 @@ const NORTH_STAR_HINTS: Record<string, string[]> = {
 export function KpiSettings() {
   const { workspace, loading, refresh } = useWorkspace()
   const [northStar, setNorthStar] = useState("")
+  const [northStarDescription, setNorthStarDescription] = useState("")
   const [metrics, setMetrics] = useState<KpiMetric[]>([
-    { name: "", current_value: "", target_value: "", weight: 0.5 },
-    { name: "", current_value: "", target_value: "", weight: 0.5 },
+    { name: "", description: "" },
+    { name: "", description: "" },
   ])
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -28,12 +29,17 @@ export function KpiSettings() {
   useEffect(() => {
     if (!workspace) return
     setNorthStar(workspace.kpi_tree.north_star)
+    setNorthStarDescription(workspace.kpi_tree.north_star_description)
     if (workspace.kpi_tree.metrics.length) setMetrics(workspace.kpi_tree.metrics)
   }, [workspace])
 
   const hints =
     NORTH_STAR_HINTS[workspace?.industry ?? ""] ?? NORTH_STAR_HINTS.default
-  const tree: KpiTree = { north_star: northStar, metrics: normalizeKpiWeights(metrics) }
+  const tree: KpiTree = {
+    north_star: northStar,
+    north_star_description: northStarDescription,
+    metrics: cleanKpiMetrics(metrics),
+  }
   const namedCount = metrics.filter((m) => m.name.trim()).length
   const canSave = northStar.trim().length > 0 && namedCount >= 2
 
@@ -46,7 +52,8 @@ export function KpiSettings() {
     try {
       const finalTree = {
         north_star: northStar.trim(),
-        metrics: normalizeKpiWeights(metrics),
+        north_star_description: northStarDescription.trim(),
+        metrics: cleanKpiMetrics(metrics),
       }
       await saveKpiTree(workspace.id, finalTree, workspace.onboarding_step)
       await refresh()
@@ -73,14 +80,16 @@ export function KpiSettings() {
     <>
       <SettingsSection
         title="KPI tree"
-        sub="Edits apply to the next Brief and recommendations. Weights are normalized to 100% on save."
+        sub="Edits apply to the next Brief and recommendations. Each metric is a name plus a short description used for goal-fit scoring."
       >
         <form onSubmit={onSave}>
           <KpiTreeEditor
             northStar={northStar}
+            northStarDescription={northStarDescription}
             metrics={metrics}
             hints={hints}
             onNorthStarChange={setNorthStar}
+            onNorthStarDescriptionChange={setNorthStarDescription}
             onMetricsChange={setMetrics}
           />
           {error && <SettingsMessage kind="error">{error}</SettingsMessage>}

@@ -17,15 +17,27 @@ from app.db import (
     find_cached_ask,
     start_cached_ask,
 )
-from app.llm import call_json
+from app.llm import DEFAULT_MODEL, call_json
 from app.prompts import (
     ASK_CACHE_VERSION,
     ASK_SYSTEM,
+    ASK_SYSTEM_KG_ADDENDUM,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
+    ASK_USER_TEMPLATE_WITH_KG,
     PREDEFINED_ASK_PROMPTS,
 )
 
 logger = logging.getLogger(__name__)
+
+# Prompt version stamped onto the Ask decision-log row so the §4d audit spine
+# pins the exact Ask composition (corpus + KG bridge, #18) behind each answer.
+ASK_PROMPT_VERSION = "ask-kg-v1"
+
+# Strong refs to in-flight warm tasks. asyncio holds only a weak reference to a
+# bare create_task result, so without this a fanned-out warm task can be
+# garbage-collected mid-run (the warm silently dies). The done-callback discards
+# each task on completion (mirrors routes/design_agent.py's _inflight_tasks).
+_inflight_tasks: set[asyncio.Task] = set()
 
 
 # Defined inline (and re-defined in routes/ask.py — keep in sync) so the
@@ -67,6 +79,106 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
     )
 
 
+def _retrieve_kg_bundle(enterprise_id: str | None, question: str) -> dict | None:
+    """Best-effort KG retrieval for the Ask question (#18). Returns the bundle
+    or None when there's no tenant context or the KG yields nothing / errors.
+
+    Resilient by construction: a missing tenant, an empty KG, a fake backend
+    with no pgvector, or any read failure all collapse to None so the caller
+    runs the legacy corpus-only path (pre-#18 behaviour)."""
+    if not enterprise_id:
+        return None
+    try:
+        from app.graph.facade import GraphFacade
+        from app.graph.retrieval import retrieve_context
+
+        facade = GraphFacade()
+        bundle = retrieve_context(facade, enterprise_id, question)
+    except Exception:  # noqa: BLE001 — KG must never break Ask
+        logger.exception("Ask KG retrieval failed for enterprise=%s", enterprise_id)
+        return None
+    if not bundle or bundle.get("empty"):
+        return None
+    return bundle
+
+
+def compose_ask_answer(
+    dataset: str,
+    question: str,
+    *,
+    enterprise_id: str | None = None,
+) -> dict:
+    """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
+    graph (#18 — chat answers from the brain, not only the markdown corpus).
+
+    Flow:
+      - Always load the dataset corpus (cacheable prefix; unchanged grounding).
+      - If a tenant (`enterprise_id`) is resolvable AND its KG has relevant
+        signals/entities, retrieve a ranked, budget-capped context bundle and
+        inject it as a "KNOWLEDGE GRAPH CONTEXT" section, with the KG-aware
+        system addendum. Otherwise fall back to corpus-only — identical to the
+        pre-#18 path, including the cache warmer's prompt.
+      - Decision-log the ask (agent="ask", decision_type="answer") with
+        kg_refs = the signal/entity ids that fed the answer.
+
+    Returns the raw response payload (answer/key_points/citations/...); the
+    caller strips citations + logs to ask_log as before."""
+    corpus = load_corpus(dataset)
+    cacheable = f"Corpus:\n\n{corpus.joined()}"
+
+    bundle = _retrieve_kg_bundle(enterprise_id, question)
+
+    if bundle:
+        from app.graph.retrieval import render_context_section
+
+        system = ASK_SYSTEM + ASK_SYSTEM_KG_ADDENDUM
+        user = ASK_USER_TEMPLATE_WITH_KG.format(
+            kg_context=render_context_section(bundle), question=question
+        )
+    else:
+        system = ASK_SYSTEM
+        user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+
+    payload = call_json(
+        system=system,
+        user=user,
+        user_cacheable_prefix=cacheable,
+        schema=_ASK_RESPONSE_SCHEMA,
+        max_tokens=12000,
+    )
+
+    # Decision-log the ask onto the §4d audit spine. Best-effort + tenant-
+    # scoped — only when a tenant resolved (legacy cookie sessions have none).
+    if enterprise_id:
+        try:
+            from app.graph.decision_log import log_agent_decision
+
+            log_agent_decision(
+                enterprise_id=enterprise_id,
+                agent="ask",
+                decision_type="answer",
+                factors={
+                    "dataset": dataset,
+                    "question": question,
+                    "kg_used": bool(bundle),
+                    "kg_signals": len(bundle["signals"]) if bundle else 0,
+                    "kg_themes": len(bundle["themes"]) if bundle else 0,
+                },
+                output={
+                    "key_points": payload.get("key_points", []),
+                    "unanswered": payload.get("unanswered", ""),
+                },
+                model=DEFAULT_MODEL,
+                prompt_version=ASK_PROMPT_VERSION,
+                confidence=payload.get("confidence"),
+                kg_refs=(bundle or {}).get("kg_refs") or [],
+            )
+        except Exception:  # noqa: BLE001 — audit write must not block the answer
+            logger.exception("Ask decision-log write failed for enterprise=%s", enterprise_id)
+
+    return payload
+
+
 async def _warm_one(dataset: str, question: str, sema: asyncio.Semaphore) -> None:
     """Generate + cache the response for a single predefined prompt.
 
@@ -104,7 +216,9 @@ def warm_predefined_asks(dataset: str, sema: asyncio.Semaphore) -> None:
     burst-fire Anthropic on top of brief / evidence / PRD warming.
     """
     for prompt in PREDEFINED_ASK_PROMPTS:
-        asyncio.create_task(_warm_one(dataset, prompt, sema))
+        task = asyncio.create_task(_warm_one(dataset, prompt, sema))
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
 
 
 def warm_brief_dynamic_asks(
@@ -124,4 +238,6 @@ def warm_brief_dynamic_asks(
         if not title:
             continue
         prompt = f"Tell me more about: {title}"
-        asyncio.create_task(_warm_one(dataset, prompt, sema))
+        task = asyncio.create_task(_warm_one(dataset, prompt, sema))
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)

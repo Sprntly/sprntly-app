@@ -1,16 +1,41 @@
-"""Tests for app.prd_runner._run_sync — same shape as evidence_runner tests.
+"""Tests for app.prd_runner — the 2-part PRD generation, now produced by TWO
+CONCURRENT `prd-author` calls instead of one sequential call that emits both
+halves and is then split.
+
+Contract under test:
+  - Part A (human PRD) and Part B (Implementation Spec) are produced by TWO
+    separate `gateway.llm_call` invocations, both bound to skill='prd-author'
+    (METHOD + version pin preserved), each steered to one half via a per-part
+    directive in the prompt.
+  - The two calls run CONCURRENTLY (wall-clock ~max, not sum) — asserted with a
+    threading.Barrier the two mocked calls must both reach before either
+    returns, and via a sequential-vs-concurrent timing check.
+  - Part A output → payload_md; Part B output → llm_part.
+  - Part B empty (degenerate) still renders payload_md (Part A alone is valid).
+  - Part B CALL failure → PRD still completes with Part A + empty llm_part, and
+    the failure is logged (not silent), Part A failure fails the whole PRD.
+  - The generation is decision-logged with the prd-author skill hash pinned and
+    has_llm_part accurate.
+
+The runner generates via `gateway.llm_call(skill="prd-author", ...)`. These
+tests mock at the gateway/llm seam: most patch `prd_runner.llm_call`; a couple
+let the REAL gateway run and patch `app.llm.call_md` to assert the prd-author
+METHOD reaches the prompt and its content-hash reaches the decision log.
 
 New rows are written with variant='v2' by the route; the runner itself
-doesn't touch variant — it just produces markdown and calls
-`complete_prd` against the existing row.
+doesn't touch variant — it produces the two parts and calls
+`complete_prd_2part` against the existing row.
 """
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 
 import pytest
 
 from app import prd_runner
+from app.graph.gateway import LLMResult
 
 
 def _seed_corpus(data_dir, dataset="asurion", body="corpus body"):
@@ -32,77 +57,453 @@ def _seed_brief(db_mod, dataset="asurion", insights=None):
     )
 
 
-def test_run_sync_happy_path_completes_prd(
-    isolated_settings, fake_llm, monkeypatch
-):
+def _llm_result(output, model="claude-sonnet-4-6", prompt_version="prd-author-v1"):
+    return LLMResult(
+        output=output, model=model, prompt_version=prompt_version,
+        input_tokens=10, output_tokens=5, cache_read_input_tokens=0,
+        cache_creation_input_tokens=0, cost_usd=0.001, latency_ms=5,
+        stop_reason="end_turn",
+    )
+
+
+# Realistic single-half outputs the two concurrent calls each return.
+_PART_A = (
+    "# Surface — Ship the thing\n\n"
+    "# Part A — Product Requirements Document (human-readable)\n"
+    "## 1. Problem & evidence\nUsers can't X.\n"
+)
+_PART_B = (
+    "# Part B — Implementation Spec (LLM-readable / agent-executable)\n"
+    "## B0. Available artifacts\nWHEN x THE SYSTEM SHALL y.\n"
+)
+
+
+def _two_call_mock(part_a=_PART_A, part_b=_PART_B, captured=None):
+    """A `llm_call` stub that returns Part A or Part B based on the call's
+    `purpose`, recording each call's kwargs into `captured` (a list)."""
+    captured = [] if captured is None else captured
+
+    def _call(**kwargs):
+        captured.append(kwargs)
+        if kwargs.get("purpose") == "generate_prd_part_b":
+            return _llm_result(part_b)
+        return _llm_result(part_a)
+
+    return _call, captured
+
+
+def _start_prd(db_mod, brief_id, title="t", insight_index=0):
+    return db_mod.start_prd(
+        brief_id=brief_id, insight_index=insight_index, title=title,
+        template_version=1, variant="v2",
+    )
+
+
+# ── two-call structure ───────────────────────────────────────────────────
+
+def test_run_sync_makes_two_separate_llm_calls(isolated_settings, monkeypatch):
+    """Part A and Part B are produced by TWO distinct gateway invocations."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
-    prd_id = db_mod.start_prd(
-        brief_id=brief_id,
-        insight_index=0,
-        title="t",
-        template_version=1,
-        variant="v2",
-    )
-    monkeypatch.setattr(prd_runner, "call_md", lambda **kw: "# PRD body")
+    prd_id = _start_prd(db_mod, brief_id)
 
+    call, captured = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    assert len(captured) == 2
+    purposes = {c["purpose"] for c in captured}
+    assert purposes == {"generate_prd_part_a", "generate_prd_part_b"}
+
+
+def test_both_calls_bind_prd_author_skill(isolated_settings, monkeypatch):
+    """BOTH calls keep skill='prd-author' so the METHOD + version pin apply to
+    each half."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    assert all(c["skill"] == "prd-author" for c in captured)
+    assert all(c["agent"] == "prd" for c in captured)
+
+
+def test_calls_carry_distinct_part_directives(isolated_settings, monkeypatch):
+    """Each call is steered to exactly one half via a distinct directive — the
+    'only Part A' / 'only Part B' instruction that achieves single-part output
+    while keeping the same skill binding."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    by_purpose = {c["purpose"]: c for c in captured}
+    a_input = by_purpose["generate_prd_part_a"]["input"]
+    b_input = by_purpose["generate_prd_part_b"]["input"]
+    # Part-A call directs ONLY Part A and forbids Part B + the separator.
+    assert "ONLY Part A" in a_input
+    assert "do NOT emit the `---`" in a_input
+    # Part-B call directs ONLY Part B.
+    assert "ONLY Part B" in b_input
+    # Distinct directives — not the same prompt twice.
+    assert a_input != b_input
+
+
+def test_both_calls_share_same_insight_and_evidence(isolated_settings, monkeypatch):
+    """Coherence: both calls receive the SAME insight + grounding so the two
+    halves derive from the same brief."""
+    _seed_corpus(isolated_settings["data_dir"], body="UNIQUE_CORPUS_MARK")
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(
+        db_mod, insights=[{"title": "Insight A", "subtitle": "UNIQUE_INSIGHT_MARK"}]
+    )
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    for c in captured:
+        assert "UNIQUE_INSIGHT_MARK" in c["input"]
+        assert "UNIQUE_CORPUS_MARK" in c["input"]
+        # The full template structure rides along to both.
+        assert "Part B" in c["input"]
+
+
+# ── concurrency ──────────────────────────────────────────────────────────
+
+def test_two_calls_run_concurrently_barrier(isolated_settings, monkeypatch):
+    """Both calls are issued before EITHER completes: a 2-party barrier inside
+    the mock only releases if both threads reach it together. If the runner ran
+    them sequentially the barrier would time out (BrokenBarrierError)."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    barrier = threading.Barrier(2, timeout=5)
+
+    def _call(**kwargs):
+        # Blocks until BOTH part-calls have entered — proving concurrency.
+        barrier.wait()
+        if kwargs.get("purpose") == "generate_prd_part_b":
+            return _llm_result(_PART_B)
+        return _llm_result(_PART_A)
+
+    monkeypatch.setattr(prd_runner, "llm_call", _call)
+    # Would raise BrokenBarrierError on timeout if calls were sequential.
     prd_runner._run_sync(prd_id, brief_id, 0)
 
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
-    assert row["payload_md"] == "# PRD body"
-    assert row["title"] == "Insight A"
-    assert row["variant"] == "v2"
 
 
-def test_run_sync_passes_canonical_prompt_and_template(
-    isolated_settings, fake_llm, monkeypatch
-):
-    """The canonical runner must use the semantic-block prompt + template
-    that was promoted from v2 — `:::tldr` is in the template and
-    'semantic blocks' is in the system prompt."""
+def test_wall_clock_is_max_not_sum(isolated_settings, monkeypatch):
+    """Each call sleeps; concurrent wall-clock is ~max(A,B), well under A+B."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
-    prd_id = db_mod.start_prd(
-        brief_id=brief_id,
-        insight_index=0,
-        title="t",
-        template_version=1,
-        variant="v2",
-    )
+    prd_id = _start_prd(db_mod, brief_id)
 
-    captured: dict = {}
+    delay = 0.4
 
-    def _capture(**kwargs):
-        captured.update(kwargs)
-        return "# md"
+    def _call(**kwargs):
+        time.sleep(delay)
+        if kwargs.get("purpose") == "generate_prd_part_b":
+            return _llm_result(_PART_B)
+        return _llm_result(_PART_A)
 
-    monkeypatch.setattr(prd_runner, "call_md", _capture)
+    monkeypatch.setattr(prd_runner, "llm_call", _call)
+    t0 = time.monotonic()
+    prd_runner._run_sync(prd_id, brief_id, 0)
+    elapsed = time.monotonic() - t0
+
+    # Sequential would be ~2*delay; concurrent ~1*delay. Assert clearly under
+    # the sum with margin.
+    assert elapsed < 2 * delay - 0.1, f"elapsed={elapsed:.3f}s not concurrent"
+
+
+# ── assembly + storage ───────────────────────────────────────────────────
+
+def test_run_sync_stores_both_parts(isolated_settings, monkeypatch):
+    """Part A (human) → payload_md; Part B (LLM) → llm_part column."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, _ = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
     prd_runner._run_sync(prd_id, brief_id, 0)
 
-    assert "semantic blocks" in captured["system"]
-    assert ":::tldr" in captured["user"]
+    row = db_mod.get_prd(prd_id)
+    assert row["status"] == "ready"
+    assert "Part A — Product Requirements Document" in row["payload_md"]
+    assert "Users can't X." in row["payload_md"]
+    # Part B is stored separately, not in the human-rendered payload.
+    assert "Part B — Implementation Spec" not in row["payload_md"]
+    assert "Part B — Implementation Spec" in row["llm_part"]
+    assert "WHEN x THE SYSTEM SHALL y." in row["llm_part"]
 
 
-def test_run_sync_uses_fallback_title(isolated_settings, fake_llm, monkeypatch):
+def test_run_sync_part_a_renders_as_before(isolated_settings, monkeypatch):
+    """Frontend-compat: payload_md is the human PRD only, no separator artifacts;
+    get_prd_rendered returns the same."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, _ = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    payload = db_mod.get_prd(prd_id)["payload_md"]
+    assert payload.startswith("# Surface")
+    assert not payload.rstrip().endswith("---")
+    rendered = db_mod.get_prd_rendered(prd_id)
+    assert rendered["payload_md"] == payload
+
+
+def test_run_sync_uses_fallback_title(isolated_settings, monkeypatch):
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod, insights=[{}])
-    prd_id = db_mod.start_prd(
-        brief_id=brief_id,
-        insight_index=0,
-        title="placeholder",
-        template_version=1,
-        variant="v2",
-    )
-    monkeypatch.setattr(prd_runner, "call_md", lambda **kw: "# md")
+    prd_id = _start_prd(db_mod, brief_id, title="placeholder")
+
+    call, _ = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+    assert db_mod.get_prd(prd_id)["title"] == "Insight #1"
+
+
+# ── Part-B degenerate / failure resilience ───────────────────────────────
+
+def test_part_b_empty_still_renders_payload(isolated_settings, monkeypatch):
+    """Part B comes back empty → payload_md (Part A) still renders, llm_part
+    empty, PRD ready — mirrors the old degenerate-output resilience."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, _ = _two_call_mock(part_b="")
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    row = db_mod.get_prd(prd_id)
+    assert row["status"] == "ready"
+    assert "Users can't X." in row["payload_md"]
+    assert (row["llm_part"] or "") == ""
+
+
+def test_part_b_call_failure_completes_with_part_a(isolated_settings, monkeypatch):
+    """Part B CALL raises → PRD STILL completes with Part A + empty llm_part
+    (not failed) — prefer completion over hard-failing the whole PRD."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    def _call(**kwargs):
+        if kwargs.get("purpose") == "generate_prd_part_b":
+            raise RuntimeError("part B exploded")
+        return _llm_result(_PART_A)
+
+    monkeypatch.setattr(prd_runner, "llm_call", _call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    row = db_mod.get_prd(prd_id)
+    assert row["status"] == "ready"
+    assert "Users can't X." in row["payload_md"]
+    assert (row["llm_part"] or "") == ""
+
+
+def test_part_b_failure_is_logged_not_silent(isolated_settings, monkeypatch, caplog):
+    """The Part-B failure must be LOGGED (audit), never silently dropped."""
+    import logging
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    def _call(**kwargs):
+        if kwargs.get("purpose") == "generate_prd_part_b":
+            raise RuntimeError("part B exploded")
+        return _llm_result(_PART_A)
+
+    monkeypatch.setattr(prd_runner, "llm_call", _call)
+    with caplog.at_level(logging.ERROR, logger="app.prd_runner"):
+        prd_runner._run_sync(prd_id, brief_id, 0)
+
+    assert any("Part B" in r.message and "exploded" in r.message
+               for r in caplog.records)
+
+
+def test_part_a_failure_fails_whole_prd(isolated_settings, monkeypatch):
+    """Part A is required: if its call fails, the WHOLE PRD fails (not a
+    half-complete row)."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    def _call(**kwargs):
+        if kwargs.get("purpose") == "generate_prd_part_a":
+            raise RuntimeError("part A exploded")
+        return _llm_result(_PART_B)
+
+    monkeypatch.setattr(prd_runner, "llm_call", _call)
+    asyncio.run(prd_runner.generate_prd(prd_id, brief_id, 0))
+
+    row = db_mod.get_prd(prd_id)
+    assert row["status"] == "failed"
+    assert "part A exploded" in (row["error"] or "")
+
+
+# ── decision-log + version pin ───────────────────────────────────────────
+
+def test_decision_log_pins_skill_hash_and_has_llm_part(isolated_settings, monkeypatch):
+    """The generate_prd decision row pins prompt_version (+prd-author@<hash>),
+    sets has_llm_part=True when Part B was produced."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    from app.skills.loader import get_skill
+    skill_hash = get_skill("prd-author").content_hash
+
+    # Let the REAL gateway run; patch only the model seam (call_md) so the
+    # gateway computes the `+prd-author@<hash>` prompt_version itself.
+    import app.graph.gateway as gw
+
+    def _call_md(**kw):
+        # The gateway folds the per-part directive into the system prompt; emit
+        # the matching half so both columns populate.
+        if "ONLY Part B" in kw.get("system", "") or "Part B" in kw.get("user", ""):
+            return _PART_B
+        return _PART_A
+
+    monkeypatch.setattr(gw, "call_md", _call_md)
+    monkeypatch.setattr(prd_runner, "company_id_for_slug", lambda _slug: "co-test")
 
     prd_runner._run_sync(prd_id, brief_id, 0)
-    row = db_mod.get_prd(prd_id)
-    assert row["title"] == "Insight #1"
 
+    sup = isolated_settings["supabase"]
+    rows = sup.table("agent_decision_log").select("*").execute().data
+    gen = [r for r in rows if r["decision_type"] == "generate_prd"]
+    assert len(gen) == 1
+    pv = gen[0]["prompt_version"]
+    assert "prd-author" in pv
+    assert skill_hash in pv
+    assert gen[0]["factors"]["has_llm_part"] is True
+    assert gen[0]["factors"]["part_b_error"] is None
+    # Two llm_call telemetry rows (one per part) are logged by the gateway.
+    assert sum(1 for r in rows if r["decision_type"] == "llm_call") == 2
+
+
+def test_decision_log_has_llm_part_false_on_empty_b(isolated_settings, monkeypatch):
+    """has_llm_part is accurate: False when Part B was empty."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, _ = _two_call_mock(part_b="")
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    monkeypatch.setattr(prd_runner, "company_id_for_slug", lambda _slug: "co-test")
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    sup = isolated_settings["supabase"]
+    rows = sup.table("agent_decision_log").select("*").execute().data
+    gen = [r for r in rows if r["decision_type"] == "generate_prd"]
+    assert len(gen) == 1
+    assert gen[0]["factors"]["has_llm_part"] is False
+
+
+def test_decision_log_records_part_b_error(isolated_settings, monkeypatch):
+    """When Part B's call failed, the decision row records the error (audit),
+    has_llm_part=False, and the PRD still completed."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    def _call(**kwargs):
+        if kwargs.get("purpose") == "generate_prd_part_b":
+            raise RuntimeError("part B exploded")
+        return _llm_result(_PART_A)
+
+    monkeypatch.setattr(prd_runner, "llm_call", _call)
+    monkeypatch.setattr(prd_runner, "company_id_for_slug", lambda _slug: "co-test")
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    sup = isolated_settings["supabase"]
+    rows = sup.table("agent_decision_log").select("*").execute().data
+    gen = [r for r in rows if r["decision_type"] == "generate_prd"]
+    assert len(gen) == 1
+    assert "part B exploded" in (gen[0]["factors"]["part_b_error"] or "")
+    assert gen[0]["factors"]["has_llm_part"] is False
+
+
+def test_real_gateway_prepends_method_to_both_calls(isolated_settings, monkeypatch):
+    """End-to-end through the real gateway: the prd-author METHOD (its SKILL.md)
+    is prepended to the system prompt of BOTH part-calls."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    systems: list[str] = []
+
+    def _call_md(**kwargs):
+        systems.append(kwargs["system"])
+        if "ONLY Part B" in kwargs["user"]:
+            return _PART_B
+        return _PART_A
+
+    import app.graph.gateway as gw
+    monkeypatch.setattr(gw, "call_md", _call_md)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    assert len(systems) == 2
+    for sys_prompt in systems:
+        assert "METHOD (skill: prd-author" in sys_prompt
+        assert "PRD Author" in sys_prompt           # from SKILL.md
+        assert "Sprntly's PRD agent" in sys_prompt  # agent layer, after method
+
+    row = db_mod.get_prd(prd_id)
+    assert "Part A" in row["payload_md"]
+    assert "Part B" in row["llm_part"]
+
+
+# ── back-compat: _split_2part retained ───────────────────────────────────
+
+def test_split_2part_still_available_for_backcompat(isolated_settings):
+    """_split_2part is kept for any caller still holding a combined document."""
+    combined = _PART_A + "\n---\n" + _PART_B
+    part_a, part_b = prd_runner._split_2part(combined)
+    assert "Part A — Product Requirements Document" in part_a
+    assert "Part B — Implementation Spec" in part_b
+
+
+def test_split_2part_degenerate_single_part(isolated_settings):
+    part_a, part_b = prd_runner._split_2part("# Just a PRD\nbody only")
+    assert part_a == "# Just a PRD\nbody only"
+    assert part_b == ""
+
+
+# ── error paths (unchanged contract) ─────────────────────────────────────
 
 def test_run_sync_missing_brief_raises(isolated_settings):
     with pytest.raises(RuntimeError):
@@ -120,18 +521,12 @@ def test_generate_prd_records_failure_in_db(isolated_settings, monkeypatch):
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
-    prd_id = db_mod.start_prd(
-        brief_id=brief_id,
-        insight_index=0,
-        title="t",
-        template_version=1,
-        variant="v2",
-    )
+    prd_id = _start_prd(db_mod, brief_id)
 
     def _boom(**_kw):
         raise ValueError("LLM exploded")
 
-    monkeypatch.setattr(prd_runner, "call_md", _boom)
+    monkeypatch.setattr(prd_runner, "llm_call", _boom)
     asyncio.run(prd_runner.generate_prd(prd_id, brief_id, 0))
 
     row = db_mod.get_prd(prd_id)

@@ -8,7 +8,6 @@ import {
   Onboarding5,
   Onboarding6,
   Onboarding7,
-  Onboarding8,
 } from "../../../components/screens/onboarding"
 
 const STEPS: Record<string, React.ComponentType> = {
@@ -19,7 +18,6 @@ const STEPS: Record<string, React.ComponentType> = {
   "5": Onboarding5,
   "6": Onboarding6,
   "7": Onboarding7,
-  "8": Onboarding8,
 }
 
 export function OnboardingStep({ step }: { step: string }) {

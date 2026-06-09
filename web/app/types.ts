@@ -6,7 +6,6 @@ export type ScreenId =
   | "ob-5"
   | "ob-6"
   | "ob-7"
-  | "ob-8"
   | "chat"
   | "brief"
   | "detail"
@@ -19,6 +18,9 @@ export type ScreenId =
   | "connectors"
   | "sources"
   | "tickets"
+  // The dedicated full-page prototype generation surface ("Generate Prototype"
+  // redirects here instead of opening the generate modal inline over the PRD).
+  | "prototype"
   // The post-generation Design Agent canvas — the one refresh-stable deep-URL
   // screen (`/design/{prototype_id}`). Layered on top of the existing no-deep-URL
   // nav; see lib/routes.ts canvasPath / prototypeIdFromCanvasPath.
@@ -32,7 +34,6 @@ export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-5",
   "ob-6",
   "ob-7",
-  "ob-8",
 ]
 
 export const APP_SCREENS: ScreenId[] = [
@@ -50,18 +51,18 @@ export const APP_SCREENS: ScreenId[] = [
   // the dormant ConnectorsScreen.tsx (salvaged in commit D).
   "sources",
   "tickets",
+  "prototype",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-1": "Setup · Step 1 of 8",
-  "ob-2": "Setup · Step 2 of 8",
-  "ob-3": "Setup · Step 3 of 8",
-  "ob-4": "Setup · Step 4 of 8",
-  "ob-5": "Setup · Step 5 of 8",
-  "ob-6": "Setup · Step 6 of 8",
-  "ob-7": "Setup · Step 7 of 8",
-  "ob-8": "Setup · Step 8 of 8",
+  "ob-1": "Setup · Step 1 of 7",
+  "ob-2": "Setup · Step 2 of 7",
+  "ob-3": "Setup · Step 3 of 7",
+  "ob-4": "Setup · Step 4 of 7",
+  "ob-5": "Setup · Step 5 of 7",
+  "ob-6": "Setup · Step 6 of 7",
+  "ob-7": "Setup · Step 7 of 7",
   chat: "Home",
   brief: "Weekly brief",
   detail: "Evidence",
@@ -74,6 +75,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   connectors: "Connectors",
   sources: "Sources",
   tickets: "Tickets",
+  prototype: "Prototype",
   // The canvas renders as a full-screen overlay (its own breadcrumb), so this
   // chrome title is never actually shown; present only for Record<ScreenId>
   // completeness.

@@ -65,7 +65,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "briefs":               {"payload"},
     "ask_log":              {"citations"},
     "cached_asks":          {"response"},
-    "companies":            {"coworker_names", "kpi_tree"},
+    "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context"},
     "connections":          {"config"},
     "github_installations": {"permissions", "events"},
     # ---- KG foundation (jsonb + array + vector columns; the fake JSON-encodes) ----
@@ -119,6 +119,9 @@ class _Query:
         self._cols: str = "*"
         self._eqs: list[tuple[str, Any]] = []
         self._ins: list[tuple[str, list]] = []
+        self._raw_where: list[str] = []
+        self._raw_args: list = []
+        self._negate_next: bool = False
         self._order: tuple[str, bool] | None = None
         self._limit: int | None = None
         self._values: list[dict] = []
@@ -164,6 +167,25 @@ class _Query:
         self._ins.append((col, list(vals)))
         return self
 
+    @property
+    def not_(self) -> "_Query":
+        """Negate the next filter. Mirrors supabase-py's `.not_.is_(...)`."""
+        self._negate_next = True
+        return self
+
+    def is_(self, col: str, val: Any) -> "_Query":
+        """`.is_(col, "null")` → `col IS NULL`; with `.not_` → `IS NOT NULL`.
+        Only the NULL form is needed by callers."""
+        negate = getattr(self, "_negate_next", False)
+        self._negate_next = False
+        if isinstance(val, str) and val.lower() == "null":
+            self._raw_where.append(f"{col} IS {'NOT ' if negate else ''}NULL")
+        else:
+            op = "IS NOT" if negate else "IS"
+            self._raw_where.append(f"{col} {op} ?")
+            self._raw_args.append(val)
+        return self
+
     def order(self, col: str, desc: bool = False) -> "_Query":
         self._order = (col, desc)
         return self
@@ -188,6 +210,9 @@ class _Query:
             placeholders = ",".join("?" for _ in vals)
             parts.append(f"{col} IN ({placeholders})")
             args.extend(vals)
+        for raw in self._raw_where:
+            parts.append(raw)
+        args.extend(self._raw_args)
         if not parts:
             return "", args
         return " WHERE " + " AND ".join(parts), args

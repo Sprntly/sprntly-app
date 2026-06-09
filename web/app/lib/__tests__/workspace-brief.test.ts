@@ -21,7 +21,11 @@ const workspace: WorkspaceCompany = {
   recent_decisions: null,
   dead_ends: [],
   biggest_risk: null,
-  kpi_tree: { north_star: "WAU", metrics: [{ name: "Activation", weight: 1, current_value: "40%", target_value: "55%" }] },
+  kpi_tree: {
+    north_star: "WAU",
+    north_star_description: "Weekly active users in a 7-day window",
+    metrics: [{ name: "Activation", description: "Reach value by week 2" }],
+  },
   feature_flags: DEFAULT_FEATURE_FLAGS,
   notification_settings: {},
   onboarding_step: 8,
@@ -34,6 +38,11 @@ describe("buildWorkspaceContextMarkdown", () => {
     expect(md).toContain("Sprntly Inc")
     expect(md).toContain("Sprntly Platform")
     expect(md).toContain("WAU")
+    expect(md).toContain("Weekly active users in a 7-day window")
+    expect(md).toContain("Activation — Reach value by week 2")
     expect(md).toContain("Grow activation")
+    // No weights / numeric metric values leak into the brief context.
+    expect(md).not.toContain("weight")
+    expect(md).not.toContain("%")
   })
 })

@@ -20,6 +20,11 @@ export function KpiTreePreview({ tree }: { tree: KpiTree }) {
             <div className="kpi-node kpi-node-root">
               <div className="kpi-node-label">North star</div>
               <div className="kpi-node-value">{tree.north_star}</div>
+              {tree.north_star_description.trim() && (
+                <div className="kpi-meta">
+                  <span>{tree.north_star_description}</span>
+                </div>
+              )}
             </div>
           )}
           {metrics.length > 0 && (
@@ -28,12 +33,10 @@ export function KpiTreePreview({ tree }: { tree: KpiTree }) {
                 <div key={`${m.name}-${i}`} className="kpi-node">
                   <div className="kpi-node-row">
                     <span className="kpi-node-value">{m.name}</span>
-                    <span className="kpi-weight">{Math.round(m.weight * 100)}%</span>
                   </div>
-                  {(m.current_value || m.target_value) && (
+                  {m.description.trim() && (
                     <div className="kpi-meta">
-                      {m.current_value && <span>Now: {m.current_value}</span>}
-                      {m.target_value && <span>Target: {m.target_value}</span>}
+                      <span>{m.description}</span>
                     </div>
                   )}
                 </div>

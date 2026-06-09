@@ -15,6 +15,7 @@ import {
   fetchWorkspaceForUser,
 } from "../lib/onboarding/store"
 import type { UserProfile, WorkspaceCompany } from "../lib/onboarding/types"
+import type { AnalyzeWebsiteResponse } from "../lib/api"
 
 type OnboardingCtx = {
   loading: boolean
@@ -22,6 +23,13 @@ type OnboardingCtx = {
   workspace: WorkspaceCompany | null
   refresh: () => Promise<void>
   setWorkspace: (w: WorkspaceCompany | null) => void
+  /**
+   * Best-effort website-analysis result, stashed by step 1's background
+   * analyze call and read by later steps (business context, success
+   * metrics). `null` while pending / never run; may carry `ok: false`.
+   */
+  websiteAnalysis: AnalyzeWebsiteResponse | null
+  setWebsiteAnalysis: (a: AnalyzeWebsiteResponse | null) => void
 }
 
 const Ctx = createContext<OnboardingCtx | null>(null)
@@ -31,6 +39,8 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [workspace, setWorkspace] = useState<WorkspaceCompany | null>(null)
+  const [websiteAnalysis, setWebsiteAnalysis] =
+    useState<AnalyzeWebsiteResponse | null>(null)
 
   const refresh = useCallback(async () => {
     if (auth.kind !== "authed") {
@@ -57,8 +67,16 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
   }, [refresh])
 
   const value = useMemo(
-    () => ({ loading, profile, workspace, refresh, setWorkspace }),
-    [loading, profile, workspace, refresh],
+    () => ({
+      loading,
+      profile,
+      workspace,
+      refresh,
+      setWorkspace,
+      websiteAnalysis,
+      setWebsiteAnalysis,
+    }),
+    [loading, profile, workspace, refresh, websiteAnalysis],
   )
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

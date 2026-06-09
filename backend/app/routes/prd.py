@@ -16,14 +16,14 @@ it returns any row by id regardless of variant so old bookmarks keep
 resolving.
 """
 import asyncio
+import logging
 
 from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth import require_session
+from app.auth import CompanyContext, require_company
 from app.db import (
     find_existing_prd,
-    get_brief_by_id,
     get_prd_rendered,
     start_prd,
 )
@@ -34,12 +34,21 @@ from app.db.prds import (
     save_prd_version,
     update_prd_content,
 )
+from app.deps.ownership import require_owned_brief, require_owned_prd
 from app.prd_runner import generate_prd
 from app.prompts import PRD_TEMPLATE_VERSION
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/prd", tags=["prd"])
 
 _VARIANT = "v2"
+
+# Strong refs to in-flight background generation tasks. asyncio holds only a
+# weak reference to a bare create_task result, so without this the task can be
+# garbage-collected mid-run and the row would be stuck 'generating'. The
+# done-callback discards each task on completion (mirrors routes/design_agent.py).
+_inflight_tasks: set[asyncio.Task] = set()
 
 
 class GenerateIn(BaseModel):
@@ -51,7 +60,7 @@ class GenerateIn(BaseModel):
 @router.post("/generate")
 async def generate(
     body: GenerateIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Kick off PRD generation in the background.
 
@@ -59,9 +68,9 @@ async def generate(
     already exists for (brief, insight) and `force` is false, returns
     the existing row.
     """
-    brief = get_brief_by_id(body.brief_id)
-    if not brief:
-        raise HTTPException(404, f"brief_id={body.brief_id} not found")
+    # Tenant gate: the body's brief_id must belong to the caller's company
+    # (404 on mismatch — no cross-tenant existence disclosure).
+    brief = require_owned_brief(body.brief_id, company.company_id)
     insights = brief.get("insights") or []
     if not (0 <= body.insight_index < len(insights)):
         raise HTTPException(
@@ -91,7 +100,11 @@ async def generate(
         template_version=PRD_TEMPLATE_VERSION,
         variant=_VARIANT,
     )
-    asyncio.create_task(generate_prd(prd_id, body.brief_id, body.insight_index))
+    task = asyncio.create_task(
+        generate_prd(prd_id, body.brief_id, body.insight_index)
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
     return {
         "prd_id": prd_id,
         "status": "generating",
@@ -103,9 +116,10 @@ async def generate(
 @router.get("/{prd_id}")
 def get(
     prd_id: int,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
-    """Fetch a PRD row by id."""
+    """Fetch a PRD row by id (only if it belongs to the caller's company)."""
+    require_owned_prd(prd_id, company.company_id)
     row = get_prd_rendered(prd_id)
     if not row:
         raise HTTPException(404, "PRD not found")
@@ -124,17 +138,21 @@ class PrdUpdateIn(BaseModel):
 def update(
     prd_id: int,
     body: PrdUpdateIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Save PRD edits to Supabase. Auto-creates a version snapshot."""
-    row = get_prd(prd_id)
-    if not row:
-        raise HTTPException(404, "PRD not found")
+    row = require_owned_prd(prd_id, company.company_id)
     # Save current content as a version before overwriting
     try:
         save_prd_version(prd_id, row.get("title", ""), row.get("payload_md", ""), saved_by="auto")
     except Exception:
-        pass  # version table may not exist yet — don't block the save
+        # Non-blocking: a failed snapshot must not fail the save. But don't
+        # swallow it silently — a lost auto-version is the user's undo point
+        # vanishing, so surface it in the logs (e.g. version table missing).
+        logger.warning(
+            "auto-version snapshot failed for prd_id=%s — proceeding with save "
+            "(undo point not captured)", prd_id, exc_info=True,
+        )
     updated = update_prd_content(prd_id, body.title, body.payload_md)
     return updated
 
@@ -149,12 +167,10 @@ class PrdVersionSaveIn(BaseModel):
 def create_version(
     prd_id: int,
     body: PrdVersionSaveIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Explicitly save a named version of the PRD."""
-    row = get_prd(prd_id)
-    if not row:
-        raise HTTPException(404, "PRD not found")
+    require_owned_prd(prd_id, company.company_id)
     version = save_prd_version(prd_id, body.title, body.payload_md, saved_by=body.label)
     return version
 
@@ -162,9 +178,10 @@ def create_version(
 @router.get("/{prd_id}/versions")
 def get_versions(
     prd_id: int,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """List all versions of a PRD, newest first."""
+    require_owned_prd(prd_id, company.company_id)
     return list_prd_versions(prd_id)
 
 
@@ -172,9 +189,10 @@ def get_versions(
 def restore_version(
     prd_id: int,
     version_id: int,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Restore a PRD to a specific version."""
+    require_owned_prd(prd_id, company.company_id)
     result = restore_prd_version(prd_id, version_id)
     if not result:
         raise HTTPException(404, "Version not found")

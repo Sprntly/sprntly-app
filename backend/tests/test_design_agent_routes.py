@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.auth import CompanyContext
@@ -86,6 +88,13 @@ def env(isolated_settings, monkeypatch):
     # Gate ON by default; individual gate tests flip/clear it. Read at request
     # time, so no reload needed when a test changes it.
     monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    import importlib as _il
+    import app.config as _config_mod
+    _il.reload(_config_mod)
+    import app.connectors.tokens as _tokens_mod
+    _il.reload(_tokens_mod)
 
     import app.db.prototypes as proto_mod
     importlib.reload(proto_mod)            # rebind require_client -> reloaded client
@@ -142,6 +151,18 @@ def _stub_generate(monkeypatch, routes_mod, *, status="complete", iters=1, raise
 
     monkeypatch.setattr(routes_mod, "generate_prototype", _fake)
     return calls
+
+
+def _seed_github_connection(env, *, token: str = "gho_company") -> None:
+    from app.connectors.tokens import encrypt_token_json
+
+    env.db.upsert_connection(
+        company_id=_TEST_COMPANY_ID,
+        provider="github",
+        token_encrypted=encrypt_token_json(json.dumps({"access_token": token})),
+        scopes="read:user user:email",
+        account_label="@company-user",
+    )
 
 
 # ─── Creation (AC #1) ─────────────────────────────────────────────────────
@@ -740,13 +761,35 @@ def test_by_prd_two_segment_resolves(env, client):
     assert client.get("/v1/design-agent/by-prd/76").status_code == 404
 
 
+def test_by_prd_registered_exactly_once(env):
+    # Regression: a duplicate, identical get_by_prd definition once registered the
+    # same GET /by-prd/{prd_id} route twice (duplicate operation ids / redundant
+    # registration). There must be exactly ONE GET route at that path.
+    matches = [
+        r for r in env.main.app.router.routes
+        if getattr(r, "path", None) == "/v1/design-agent/by-prd/{prd_id}"
+        and "GET" in getattr(r, "methods", set())
+    ]
+    assert len(matches) == 1, f"expected one /by-prd route, found {len(matches)}"
+    # Operation ids across the router are unique (a duplicate op id breaks the
+    # generated OpenAPI client).
+    op_ids = [
+        r.operation_id for r in env.main.app.router.routes
+        if getattr(r, "operation_id", None)
+    ]
+    assert len(op_ids) == len(set(op_ids))
+
+
 # ─── Connected-repo identifier threaded into generation ─────────────────────
 #
 # The Generate modal lets a user pick one of their connected GitHub repos. That
 # repo full_name ("org/repo") threads through the request body → the background
 # generation task → the scaffold prompt as a single "existing codebase to match"
-# context line. It is prompt context ONLY: no file fetch, no clone, and NO new
-# agent tool (the action-tool registry stays at the fixed six).
+# context line. When we can match the repo owner to a known GitHub App
+# installation, generation also snapshots that installation id on the prototype
+# row for the future codebase design-system extractor. There is still no file
+# fetch, no clone, and NO new agent tool (the action-tool registry stays at the
+# fixed six).
 
 
 def _scaffold_user_text(calls: list[dict]) -> str:
@@ -759,6 +802,19 @@ def test_generate_accepts_github_repo(env, client, monkeypatch):
     # shape — the field is additive and optional.
     _stub_generate(monkeypatch, env.routes)
     _seed_prd(env.db)
+    _seed_github_connection(env)
+    monkeypatch.setattr(
+        env.routes.github_app,
+        "fetch_user_repos",
+        lambda token, per_page=100: [{"full_name": "org/repo"}],
+    )
+    env.db.upsert_github_installation(
+        installation_id=12345,
+        account_id=99,
+        account_login="org",
+        account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
+    )
     resp = client.post(
         "/v1/design-agent/generate",
         json={"prd_id": 1, "github_repo": "org/repo"},
@@ -767,6 +823,95 @@ def test_generate_accepts_github_repo(env, client, monkeypatch):
     body = resp.json()
     assert body["status"] == "generating"
     assert isinstance(body["prototype_id"], int)
+    persisted = env.proto.get_prototype(
+        prototype_id=body["prototype_id"],
+        workspace_id=_TEST_COMPANY_ID,
+    )
+    assert persisted["github_installation_id"] == 12345
+
+
+def test_generate_does_not_persist_installation_without_company_github_connection(
+    env, client, monkeypatch
+):
+    _stub_generate(monkeypatch, env.routes)
+    _seed_prd(env.db)
+    env.db.upsert_github_installation(
+        installation_id=12345,
+        account_id=99,
+        account_login="org",
+        account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
+    )
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": 1, "github_repo": "org/repo"},
+    )
+    assert resp.status_code == 200, resp.text
+    persisted = env.proto.get_prototype(
+        prototype_id=resp.json()["prototype_id"],
+        workspace_id=_TEST_COMPANY_ID,
+    )
+    assert persisted["github_installation_id"] is None
+
+
+def test_generate_does_not_persist_installation_for_inaccessible_repo(
+    env, client, monkeypatch
+):
+    _stub_generate(monkeypatch, env.routes)
+    _seed_prd(env.db)
+    _seed_github_connection(env)
+    monkeypatch.setattr(
+        env.routes.github_app,
+        "fetch_user_repos",
+        lambda token, per_page=100: [{"full_name": "org/other-repo"}],
+    )
+    env.db.upsert_github_installation(
+        installation_id=12345,
+        account_id=99,
+        account_login="org",
+        account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
+    )
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": 1, "github_repo": "org/repo"},
+    )
+    assert resp.status_code == 200, resp.text
+    persisted = env.proto.get_prototype(
+        prototype_id=resp.json()["prototype_id"],
+        workspace_id=_TEST_COMPANY_ID,
+    )
+    assert persisted["github_installation_id"] is None
+
+
+def test_generate_leaves_github_installation_null_when_repo_owner_not_installed(
+    env, client, monkeypatch
+):
+    _stub_generate(monkeypatch, env.routes)
+    _seed_prd(env.db)
+    _seed_github_connection(env)
+    monkeypatch.setattr(
+        env.routes.github_app,
+        "fetch_user_repos",
+        lambda token, per_page=100: [{"full_name": "org/repo"}],
+    )
+    env.db.upsert_github_installation(
+        installation_id=12345,
+        account_id=99,
+        account_login="other-org",
+        account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
+    )
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": 1, "github_repo": "org/repo"},
+    )
+    assert resp.status_code == 200, resp.text
+    persisted = env.proto.get_prototype(
+        prototype_id=resp.json()["prototype_id"],
+        workspace_id=_TEST_COMPANY_ID,
+    )
+    assert persisted["github_installation_id"] is None
 
 
 def test_scaffold_user_renders_codebase_block_when_repo_present():
@@ -812,9 +957,10 @@ async def test_github_repo_threads_to_generate_prototype(env, monkeypatch):
     await env.routes._run_generation_bg(
         prototype_id=pid, workspace_id="app", prd_id=prd_id,
         target_platform="both", instructions="", figma_file_key=None,
-        github_repo="org/repo",
+        github_repo="org/repo", github_installation_id=12345,
     )
     assert calls[0]["github_repo"] == "org/repo"
+    assert calls[0]["github_installation_id"] == 12345
     assert "Existing codebase to match: org/repo" in _scaffold_user_text(calls)
 
 

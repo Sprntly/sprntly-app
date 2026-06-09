@@ -10,7 +10,7 @@ import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useWorkspace } from "../../context/WorkspaceContext"
-import { canvasResolveTarget } from "../../lib/routes"
+import { canvasResolveTarget, prototypePath } from "../../lib/routes"
 import { GenerateModal } from "../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../design-agent/PostGenerationResult"
@@ -35,7 +35,7 @@ const SAFETY_MAX_MS = 6.5 * 60 * 1000
 
 export function ApproveModal() {
   const router = useRouter()
-  const { activeModal, openModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas, showToast } =
+  const { activeModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas, showToast } =
     useNavigation()
   const { content } = useContent()
   // The workspace hydration gate for the canvas resolver.
@@ -465,9 +465,15 @@ export function ApproveModal() {
       }
       return
     }
-    // Hand the generate modal's visibility to the navigation modal union; this
-    // swaps the "approve" modal out for "generate".
-    openModal("generate")
+    // "Generate Prototype" now REDIRECTS to the dedicated /prototype page
+    // (carrying the PRD context as ?prd=<id>) instead of opening the generate
+    // modal inline over the PRD. Close this modal first so it does not linger
+    // over the new route. The generate panel + loading screen + canvas hand-off
+    // all live on /prototype now (the inline GenerateModal subtree below stays
+    // mounted only as forward-compat / the loading-overlay host — it is no longer
+    // opened from this flow via the navigation modal union's generate member).
+    closeModal()
+    router.push(prototypePath(prd?.prd_id ?? null))
   }
 
   const handleTicketClick = () => {

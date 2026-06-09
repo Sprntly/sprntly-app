@@ -308,6 +308,45 @@ export type UploadFilesResponse = {
   errors: { filename: string; error: string }[]
 }
 
+// ---- onboarding website analysis -------------------------------------------
+
+/** A suggested success metric: a short name plus a free-text description. */
+export type SuggestedMetric = {
+  metric: string
+  description: string
+}
+
+/**
+ * Response from POST /v1/onboarding/analyze-website. The endpoint ALWAYS
+ * returns HTTP 200; `ok: false` (with a `reason`) means analysis degraded
+ * gracefully and the UI should fall back to manual entry. All inferred
+ * fields are best-effort and may be null even when `ok` is true.
+ */
+export type AnalyzeWebsiteResponse = {
+  ok: boolean
+  reason: string | null
+  url: string
+  industry: string | null
+  sub_vertical: string | null
+  business_type: string | null
+  stage: string | null
+  business_context: string
+  suggested_metrics: SuggestedMetric[]
+  provenance: string
+  business_context_version: number | null
+}
+
+export const onboardingApi = {
+  /**
+   * Analyze a product website to infer industry / business type / stage and
+   * draft a business-context blurb + suggested metrics. Best-effort: the
+   * backend always answers 200, signalling failure via `ok: false`. Company
+   * is taken from the JWT (Depends(require_company)) — no slug needed.
+   */
+  analyzeWebsite: (url: string) =>
+    api.post<AnalyzeWebsiteResponse>("/v1/onboarding/analyze-website", { url }),
+}
+
 export const companiesApi = {
   list: () =>
     api
@@ -399,6 +438,16 @@ export type GitHubInstallation = {
   suspended?: boolean
 }
 
+export type GitHubInstallRepo = {
+  id: number
+  name: string
+  full_name: string
+  private: boolean | null
+  html_url: string
+  default_branch: string | null
+  description: string | null
+}
+
 export type GoogleDriveSyncResult = {
   dataset: string
   folder_id: string
@@ -476,9 +525,39 @@ export const connectorsApi = {
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
     ),
+  /** Repos the Sprntly App was granted access to during install,
+   * aggregated across every installation owned by the caller's company.
+   * Use this (not listGithubRepos) for any picker UI — listGithubRepos
+   * uses the OAuth user token + `read:user user:email` scope which can't
+   * enumerate private repos and returns empty for users with no public
+   * repos under their login. */
+  listAccessibleGithubRepos: () =>
+    api.get<{ repositories: GitHubRepo[] }>(
+      `/v1/connectors/github/accessible-repos`,
+    ),
   listGithubInstallations: () =>
     api.get<{ installations: GitHubInstallation[] }>(
       `/v1/connectors/github/installations`,
+    ),
+  listGithubInstallRepos: (installationId: number) =>
+    api.get<{
+      installation_id: number
+      total: number
+      repositories: GitHubInstallRepo[]
+    }>(
+      `/v1/connectors/github/installations/${installationId}/repositories`,
+    ),
+  addGithubInstallRepo: (installationId: number, repositoryId: number) =>
+    api.put<{ added: true; installation_id: number; repository_id: number }>(
+      `/v1/connectors/github/installations/${installationId}/repositories/${repositoryId}`,
+    ),
+  removeGithubInstallRepo: (installationId: number, repositoryId: number) =>
+    api.delete<{
+      removed: true
+      installation_id: number
+      repository_id: number
+    }>(
+      `/v1/connectors/github/installations/${installationId}/repositories/${repositoryId}`,
     ),
 
   // ---- ClickUp -------------------------------------------------------------

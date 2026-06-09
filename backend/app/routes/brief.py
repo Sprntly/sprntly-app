@@ -1,21 +1,58 @@
 import asyncio
+import logging
 
 from fastapi import Depends, APIRouter, HTTPException
 
-from app.auth import require_session
-from app.brief_runner import auto_generate_brief, get_status
+from app.auth import CompanyContext, require_company
+from app.brief_runner import auto_generate_brief, get_status, warm_synthesis_drilldowns
+from app.config import settings
 from app.corpus import load_corpus
-from app.db import get_brief_by_id, get_current_brief, save_brief
+from app.db import get_current_brief, save_brief
+from app.deps.ownership import require_owned_brief, require_owned_dataset
 from app.llm import call_json
 from app.prompts import BRIEF_SCHEMA_VERSION, BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
+from app.synthesis_brief import generate_brief_for
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/brief", tags=["brief"])
+
+# Strong refs to in-flight background brief-generation tasks (see the note in
+# routes/design_agent.py): without this, the bare create_task result can be
+# garbage-collected mid-run and the regenerate would silently die.
+_inflight_tasks: set[asyncio.Task] = set()
+
+
+def _track(task: asyncio.Task) -> asyncio.Task:
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return task
+
+
+async def _synthesis_generate_bg(dataset: str) -> None:
+    """Background body for /regenerate under the synthesis engine.
+
+    Mirrors auto_generate_brief's posture: seed-if-empty + run_synthesis runs
+    off the event loop (it makes blocking LLM/Supabase calls); failures are
+    logged, never raised — the service keeps serving the prior cached brief.
+    run_synthesis save_brief()s the new brief, so /current picks it up.
+    """
+    try:
+        await asyncio.to_thread(generate_brief_for, dataset)
+        logger.info("Synthesis brief generated for %s", dataset)
+    except Exception:  # noqa: BLE001 — fire-and-forget; prior brief stays
+        logger.exception("Synthesis brief generation failed for %s", dataset)
+        return
+    # Parity with the legacy auto_generate_brief: warm the per-insight
+    # drill-downs so the first click is instant. Error-isolated inside the
+    # helper, so it can never undo the brief we just generated.
+    warm_synthesis_drilldowns(dataset)
 
 
 @router.get("/current")
 def current(
     dataset: str,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Return the latest cached brief for a dataset.
 
@@ -23,6 +60,8 @@ def current(
     auto-generation status (`empty | generating | failed`). Frontend can
     poll `/v1/brief/status` while this is anything other than `ready`.
     """
+    # Tenant gate: the dataset slug must resolve to the caller's company.
+    require_owned_dataset(dataset, company.company_id)
     brief = get_current_brief(dataset)
     if brief:
         return brief
@@ -32,7 +71,7 @@ def current(
 @router.get("/status")
 def status(
     dataset: str,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Lightweight poll endpoint for the frontend.
 
@@ -42,45 +81,69 @@ def status(
       - "failed": last attempt failed (see `error`); will retry on service restart
       - "empty": nothing has been attempted yet
     """
+    require_owned_dataset(dataset, company.company_id)
     return {"dataset": dataset, **get_status(dataset)}
 
 
 @router.post("/regenerate")
 async def regenerate(
     dataset: str,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Force a fresh brief generation in the background. Returns immediately.
 
     Use case: API key was just fixed, want to retry without restarting the
     service. Existing cached brief (if any) stays in place until the new
     generation completes successfully.
+
+    Engine selection (BRIEF_ENGINE): "synthesis" (default) runs the KG
+    seed-if-empty → run_synthesis path; "legacy" keeps the placeholder
+    corpus→Claude path. Response contract is identical either way.
     """
-    asyncio.create_task(auto_generate_brief(dataset))
+    require_owned_dataset(dataset, company.company_id)
+    if settings.brief_engine == "synthesis":
+        _track(asyncio.create_task(_synthesis_generate_bg(dataset)))
+    else:
+        _track(asyncio.create_task(auto_generate_brief(dataset)))
     return {"started": True, "dataset": dataset}
 
 
 @router.get("/{brief_id}")
 def by_id(
     brief_id: int,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
-    brief = get_brief_by_id(brief_id)
-    if not brief:
-        raise HTTPException(404, "Brief not found")
-    return brief
+    # require_owned_brief resolves brief → dataset → company and 404s on
+    # mismatch (or a missing brief), returning the brief row on success.
+    return require_owned_brief(brief_id, company.company_id)
 
 
 @router.post("/generate")
 def generate(
     dataset: str,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Synchronously generate a fresh brief and return it.
 
     Note: invokes Claude. Costs tokens. Blocks until done (~30s). Use
     /v1/brief/regenerate for fire-and-forget behavior instead.
+
+    Engine selection (BRIEF_ENGINE): "synthesis" (default) runs the KG
+    seed-if-empty → run_synthesis path (which save_brief()s the result); we
+    then read it back to preserve the {brief_id, **payload} response shape.
+    "legacy" keeps the placeholder corpus→Claude path.
     """
+    require_owned_dataset(dataset, company.company_id)
+    if settings.brief_engine == "synthesis":
+        try:
+            payload = generate_brief_for(dataset)
+        except ValueError as e:
+            # Unknown dataset/company or an empty KG even after seeding.
+            raise HTTPException(409, str(e)) from e
+        saved = get_current_brief(dataset)
+        brief_id = saved.get("id") if saved else None
+        return {"brief_id": brief_id, **payload}
+
     corpus = load_corpus(dataset)
     try:
         from app.signal_fusion import fuse_signals

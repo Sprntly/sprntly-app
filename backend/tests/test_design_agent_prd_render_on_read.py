@@ -28,7 +28,18 @@ import importlib
 
 import pytest
 
+from tests.conftest import (
+    _bearer_header,
+    _enable_supabase_bearer,
+    _seed_company_membership,
+)
+
 _UPDATES_HEADING = "## Design Agent updates"
+
+# The company slug `_seed_company_membership` seeds for the default test user;
+# the GET /v1/prd/{id} ownership chain (prd → brief → brief.dataset slug →
+# company) resolves to this company when the brief's dataset equals this slug.
+_OWNED_DATASET = "slug-co-test"
 
 
 # ─── fixtures ──────────────────────────────────────────────────────────────
@@ -56,10 +67,46 @@ def rendered_env(isolated_settings):
     return db_mod, prds_mod, patches_mod, export_mod, routes_mod
 
 
-def _make_prd(db_mod, *, body: str = "# PRD body") -> int:
-    """Create a ready v2 PRD with the given raw payload_md; return its id."""
+@pytest.fixture
+def owned_prd_client(rendered_env, isolated_settings, monkeypatch):
+    """A Supabase-bearer-authed TestClient whose company OWNS the brief the test
+    PRD hangs off, for the GET /v1/prd/{id} integration tests after the
+    tenant-isolation fix (the route now gates on require_company + ownership via
+    prd → brief → dataset-slug → company).
+
+    Seeds the default company membership (slug `_OWNED_DATASET`) and a brief in
+    that dataset, exposes the brief_id so the test can attach its PRD to it, and
+    returns a client carrying the owning user's bearer token.
+    """
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+
+    _enable_supabase_bearer(monkeypatch)
+    _seed_company_membership(isolated_settings["supabase"])
+
+    db_mod = rendered_env[0]
+    brief_id = db_mod.save_brief(
+        dataset=_OWNED_DATASET,
+        week_label="Week 1",
+        payload={"insights": [], "_schema_version": 1},
+        schema_version=1,
+    )
+    client = TestClient(main_mod.app)
+    client.headers.update(_bearer_header())
+    return SimpleNamespace(client=client, brief_id=brief_id)
+
+
+def _make_prd(db_mod, *, body: str = "# PRD body", brief_id: int = 1) -> int:
+    """Create a ready v2 PRD with the given raw payload_md; return its id.
+
+    `brief_id` defaults to 1 for the direct get_prd_rendered unit tests (which
+    never hit the route gate). The route-integration tests pass a brief_id that
+    is owned by the caller's company so require_owned_prd resolves.
+    """
     prd_id = db_mod.start_prd(
-        brief_id=1, insight_index=0, title="t", template_version=1, variant="v2"
+        brief_id=brief_id, insight_index=0, title="t", template_version=1, variant="v2"
     )
     db_mod.complete_prd(prd_id, title="t", md=body)
     return prd_id
@@ -239,14 +286,16 @@ def test_get_prd_rendered_deterministic(rendered_env):
 # ─── GET /v1/prd/{id} integration (AC3) ────────────────────────────────────
 
 
-def test_get_prd_endpoint_returns_folded_payload(rendered_env, app_client):
+def test_get_prd_endpoint_returns_folded_payload(rendered_env, owned_prd_client):
     # AC3 — GET /v1/prd/{id} returns the folded payload when an applied patch
     # exists; response shape otherwise identical (same id/status/variant keys).
+    # The PRD hangs off a brief owned by the caller's company so the route's
+    # require_company + ownership gate resolves for the legitimate owner.
     db_mod, *_ = rendered_env
-    prd_id = _make_prd(db_mod, body="# PRD body")
+    prd_id = _make_prd(db_mod, body="# PRD body", brief_id=owned_prd_client.brief_id)
     _seed_patch(prd_id=prd_id, patch_md="ENDPOINT FOLDED PATCH")
 
-    resp = app_client.get(f"/v1/prd/{prd_id}")
+    resp = owned_prd_client.client.get(f"/v1/prd/{prd_id}")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["id"] == prd_id
@@ -256,12 +305,12 @@ def test_get_prd_endpoint_returns_folded_payload(rendered_env, app_client):
     assert "ENDPOINT FOLDED PATCH" in body["payload_md"]
 
 
-def test_get_prd_endpoint_no_patches_returns_raw(rendered_env, app_client):
+def test_get_prd_endpoint_no_patches_returns_raw(rendered_env, owned_prd_client):
     # AC3 — no applied patches → raw body, shape unchanged.
     db_mod, *_ = rendered_env
-    prd_id = _make_prd(db_mod, body="# PRD body")
+    prd_id = _make_prd(db_mod, body="# PRD body", brief_id=owned_prd_client.brief_id)
 
-    resp = app_client.get(f"/v1/prd/{prd_id}")
+    resp = owned_prd_client.client.get(f"/v1/prd/{prd_id}")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["payload_md"] == "# PRD body"
