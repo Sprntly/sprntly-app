@@ -55,6 +55,45 @@ def test_create_dataset_requires_display_name(isolated_settings):
         ds.create_dataset("acme", "")
 
 
+def test_seed_onboarding_context_renders_metric_and_description(isolated_settings):
+    ds = _datasets_module(isolated_settings)
+    ds.create_dataset("acme", "Acme")
+    kpi_tree = {
+        "north_star": {"metric": "Weekly Active Technicians",
+                       "description": "Technicians active in a 7-day window."},
+        "primary_metrics": [
+            {"metric": "Net revenue retention",
+             "description": "Expansion minus churn on existing accounts."},
+        ],
+        "secondary_signals": [
+            {"metric": "Day-30 activation", "description": "Reach value by day 30."},
+        ],
+    }
+    path = ds.seed_onboarding_context(
+        "acme", company_name="Acme", product_name="P", industry="SaaS",
+        kpi_tree=kpi_tree,
+    )
+    text = Path(path).read_text()
+    assert "**North Star:** Weekly Active Technicians — Technicians active" in text
+    assert "- Net revenue retention — Expansion minus churn" in text
+    assert "- Day-30 activation — Reach value by day 30." in text
+    # No raw dict repr and no stale supporting_metrics/name key leakage.
+    assert "{'metric'" not in text
+    assert "{\"metric\"" not in text
+
+
+def test_seed_onboarding_context_handles_legacy_string_north_star(isolated_settings):
+    ds = _datasets_module(isolated_settings)
+    ds.create_dataset("acme", "Acme")
+    path = ds.seed_onboarding_context(
+        "acme", kpi_tree={"north_star": "Revenue",
+                          "primary_metrics": [{"metric": "NRR"}]},
+    )
+    text = Path(path).read_text()
+    assert "**North Star:** Revenue" in text
+    assert "- NRR" in text
+
+
 def test_ingest_file_writes_raw_and_md(isolated_settings):
     ds = _datasets_module(isolated_settings)
     ds.create_dataset("acme", "Acme")

@@ -18,6 +18,7 @@ function render(override: Partial<SuccessMetricsViewProps> = {}): string {
     productName: "Acme",
     industry: "B2B SaaS",
     northStar: "",
+    northStarDescription: "",
     supporting: [],
     customMetric: "",
     northStarHints: ["Net revenue retention", "Weekly active teams"],
@@ -25,8 +26,10 @@ function render(override: Partial<SuccessMetricsViewProps> = {}): string {
     errors: {},
     error: null,
     onChangeNorthStar: noop,
+    onChangeNorthStarDescription: noop,
     onPickNorthStar: noop,
     onToggleSupporting: noop,
+    onChangeSupportingDescription: noop,
     onChangeCustomMetric: noop,
     onAddCustom: noop,
   }
@@ -67,9 +70,39 @@ describe("SuccessMetricsView — North Star + supporting metrics", () => {
   })
 
   it("marks selected supporting chips and counts them", () => {
-    const html = render({ supporting: ["Weekly active users"] })
+    const html = render({ supporting: [{ name: "Weekly active users", description: "" }] })
     expect(html).toContain("selected")
     expect(html).toContain("1 supporting metric")
+  })
+})
+
+describe("SuccessMetricsView — metric descriptions, no numeric inputs", () => {
+  it("renders a North Star description textarea", () => {
+    const html = render()
+    expect(html).toContain("<textarea")
+    expect(html).toContain("Describe what this metric means")
+  })
+
+  it("renders a description textarea + label for each selected supporting metric", () => {
+    const html = render({
+      supporting: [
+        { name: "Activation rate (week 2)", description: "Reach value fast." },
+      ],
+    })
+    expect(html).toContain('data-metric="Activation rate (week 2)"')
+    expect(html).toContain("Reach value fast.")
+    expect(html).toContain("Describe what this metric means and why it matters")
+  })
+
+  it("renders NO weight / current-value / target-value inputs", () => {
+    const html = render({
+      supporting: [{ name: "Activation rate (week 2)", description: "" }],
+    })
+    expect(html).not.toContain('type="number"')
+    expect(html).not.toContain("Weight")
+    expect(html).not.toContain("Current (optional)")
+    expect(html).not.toContain("Target (optional)")
+    expect(html).not.toContain("placeholder=\"Weight\"")
   })
 
   it("surfaces a North Star validation error", () => {

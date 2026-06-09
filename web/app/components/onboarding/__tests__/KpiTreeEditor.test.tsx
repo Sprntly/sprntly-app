@@ -11,8 +11,8 @@ import { KpiTreeEditor } from "../KpiTreeEditor"
 import type { KpiMetric } from "../../../lib/onboarding/types"
 
 const metrics: KpiMetric[] = [
-  { name: "", current_value: "", target_value: "", weight: 0.5 },
-  { name: "", current_value: "", target_value: "", weight: 0.5 },
+  { name: "", description: "" },
+  { name: "", description: "" },
 ]
 
 function render(
@@ -52,5 +52,23 @@ describe("KpiTreeEditor error states", () => {
     const html = render({ metricsError: "Add at least two supporting metrics." })
     expect(html).toContain("Add at least two supporting metrics.")
     expect(html).toContain("field-error")
+  })
+})
+
+describe("KpiTreeEditor — description inputs, no numeric inputs", () => {
+  it("renders a description textarea per metric and for the north star", () => {
+    const html = render()
+    // One textarea for the north star + one per metric (2) = 3.
+    const textareas = html.match(/<textarea/g) ?? []
+    expect(textareas.length).toBe(3)
+    expect(html).toContain("Describe what this metric means")
+  })
+
+  it("renders NO weight / current / target inputs", () => {
+    const html = render()
+    expect(html).not.toContain('type="number"')
+    expect(html).not.toContain("Weight")
+    expect(html).not.toContain("Current (optional)")
+    expect(html).not.toContain("Target (optional)")
   })
 })

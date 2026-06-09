@@ -4,7 +4,7 @@ import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
-import { KpiTreeEditor, normalizeKpiWeights } from "../../onboarding/KpiTreeEditor"
+import { KpiTreeEditor, cleanKpiMetrics } from "../../onboarding/KpiTreeEditor"
 import { KpiTreePreview } from "../../onboarding/KpiTreePreview"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import type { KpiMetric } from "../../../lib/onboarding/types"
@@ -23,9 +23,10 @@ export function Onboarding2() {
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
   const [northStar, setNorthStar] = useState("")
+  const [northStarDescription, setNorthStarDescription] = useState("")
   const [metrics, setMetrics] = useState<KpiMetric[]>([
-    { name: "", current_value: "", target_value: "", weight: 0.5 },
-    { name: "", current_value: "", target_value: "", weight: 0.5 },
+    { name: "", description: "" },
+    { name: "", description: "" },
   ])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -34,12 +35,17 @@ export function Onboarding2() {
     if (!workspace) return
     const tree = workspace.kpi_tree
     setNorthStar(tree.north_star)
+    setNorthStarDescription(tree.north_star_description)
     if (tree.metrics.length) setMetrics(tree.metrics)
   }, [workspace])
 
   const hints =
     NORTH_STAR_HINTS[workspace?.industry ?? ""] ?? NORTH_STAR_HINTS.default
-  const tree = { north_star: northStar, metrics: normalizeKpiWeights(metrics) }
+  const tree = {
+    north_star: northStar,
+    north_star_description: northStarDescription,
+    metrics: cleanKpiMetrics(metrics),
+  }
   const namedMetrics = metrics.filter((m) => m.name.trim())
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(
@@ -63,7 +69,11 @@ export function Onboarding2() {
     setSaving(true)
     setError(null)
     try {
-      const finalTree = { north_star: northStar.trim(), metrics: normalizeKpiWeights(metrics) }
+      const finalTree = {
+        north_star: northStar.trim(),
+        north_star_description: northStarDescription.trim(),
+        metrics: cleanKpiMetrics(metrics),
+      }
       const updated = await saveKpiTree(workspace.id, finalTree, andContinue ? 3 : workspace.onboarding_step)
       setWorkspace(updated)
       if (andContinue) router.push("/onboarding/3")
@@ -89,7 +99,7 @@ export function Onboarding2() {
       step={2}
       eyebrow="KPI tree construction"
       title="Define what success looks like"
-      agentMessage="This is the most critical step — your KPI tree governs every future recommendation. I'll help you pick a north star and 2–4 supporting metrics with weights that sum to 100%."
+      agentMessage="This is the most critical step — your KPI tree governs every future recommendation. I'll help you pick a north star and 2–4 supporting metrics, each with a short description that gives the agent context for goal-fit scoring."
       rightPane={<KpiTreePreview tree={tree} />}
       onBack={() => router.push("/onboarding/1")}
       onContinue={() => persist(true)}
@@ -105,12 +115,14 @@ export function Onboarding2() {
       {error && <div className="ob-form-error">{error}</div>}
       <KpiTreeEditor
         northStar={northStar}
+        northStarDescription={northStarDescription}
         metrics={metrics}
         hints={hints}
         onNorthStarChange={(v) => {
           setNorthStar(v)
           clearError("northStar")
         }}
+        onNorthStarDescriptionChange={setNorthStarDescription}
         onMetricsChange={(m) => {
           setMetrics(m)
           clearError("metrics")

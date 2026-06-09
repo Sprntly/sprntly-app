@@ -290,11 +290,46 @@ def _kpi_tree(version=1):
     from app.kpi_tree import KpiTree, NorthStar, PrimaryMetric
     return KpiTree(
         north_star=NorthStar(metric="Weekly Active Technicians",
-                             current_value=5310, target_value=7500),
+                             description="Technicians active in a 7-day window."),
         primary_metrics=[PrimaryMetric(metric="Net revenue retention",
-                                       current_value=0.96, weight=1.0)],
+                                       description="Expansion minus churn on existing accounts.")],
         version=version,
     )
+
+
+def _legacy_kpi_tree(version=1):
+    """A legacy row shape (weights/current/target) parsed via model_validate —
+    extra numeric keys are ignored; goal-fit must work with no KeyError."""
+    from app.kpi_tree import KpiTree
+    return KpiTree.model_validate({
+        "north_star": {"metric": "Weekly Active Technicians",
+                       "current_value": 5310, "target_value": 7500,
+                       "target_window_days": 90},
+        "primary_metrics": [{"metric": "Net revenue retention",
+                             "current_value": 0.96, "target_value": 1.10, "weight": 1.0}],
+        "secondary_signals": [{"metric": "Day-30 activation", "current_value": 0.61}],
+        "version": version,
+    })
+
+
+def test_classify_theme_fit_works_with_legacy_tree(facade):
+    """Goal-fit classification runs on a legacy tree (old numeric fields) with
+    no KeyError on weight/current_value, and the prompt carries no weights."""
+    from app.synthesis import scoring
+
+    tc = _theme_conv(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 1)])
+    captured = {}
+
+    def fake_llm(**kw):
+        captured["input"] = kw["input"]
+        return _llm_result({"fit": "high", "reasoning": "moves NRR"})
+
+    with patch.object(scoring, "llm_call", fake_llm):
+        fit = scoring.classify_theme_fit(facade, "ent-A", tc, _legacy_kpi_tree())
+
+    assert fit == "high"
+    assert "Weekly Active Technicians" in captured["input"]
+    assert "weight" not in captured["input"].lower()
 
 
 def _theme_conv(facade, ent, label, specs):

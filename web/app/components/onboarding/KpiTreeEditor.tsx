@@ -4,29 +4,30 @@ import type { KpiMetric } from "../../lib/onboarding/types"
 
 type Props = {
   northStar: string
+  northStarDescription?: string
   metrics: KpiMetric[]
   hints?: string[]
   onNorthStarChange: (v: string) => void
+  onNorthStarDescriptionChange?: (v: string) => void
   onMetricsChange: (metrics: KpiMetric[]) => void
   northStarError?: string
   metricsError?: string
 }
 
-export function normalizeKpiWeights(metrics: KpiMetric[]): KpiMetric[] {
-  const filled = metrics.filter((m) => m.name.trim())
-  const sum = filled.reduce((a, m) => a + (m.weight || 0), 0)
-  if (sum <= 0) {
-    const even = filled.length ? 1 / filled.length : 0
-    return filled.map((m) => ({ ...m, weight: even }))
-  }
-  return filled.map((m) => ({ ...m, weight: (m.weight || 0) / sum }))
+/** Drop blank metrics; metrics are equal (no weights anymore). */
+export function cleanKpiMetrics(metrics: KpiMetric[]): KpiMetric[] {
+  return metrics
+    .filter((m) => m.name.trim())
+    .map((m) => ({ name: m.name.trim(), description: (m.description ?? "").trim() }))
 }
 
 export function KpiTreeEditor({
   northStar,
+  northStarDescription = "",
   metrics,
   hints = [],
   onNorthStarChange,
+  onNorthStarDescriptionChange,
   onMetricsChange,
   northStarError,
   metricsError,
@@ -37,10 +38,7 @@ export function KpiTreeEditor({
 
   function addMetric() {
     if (metrics.length >= 4) return
-    onMetricsChange([
-      ...metrics,
-      { name: "", current_value: "", target_value: "", weight: 0.25 },
-    ])
+    onMetricsChange([...metrics, { name: "", description: "" }])
   }
 
   return (
@@ -57,6 +55,14 @@ export function KpiTreeEditor({
           <div className="ob-hints">Suggestions: {hints.join(" · ")}</div>
         )}
         {northStarError && <p className="field-error">{northStarError}</p>}
+        <textarea
+          className="input"
+          placeholder="Describe what this metric means and why it matters (context for goal-fit scoring)"
+          value={northStarDescription}
+          rows={2}
+          maxLength={400}
+          onChange={(e) => onNorthStarDescriptionChange?.(e.target.value)}
+        />
       </div>
       <div className={`field ${metricsError ? "has-error" : ""}`} data-field="metrics">
         <label className="field-label">Supporting metrics (2–4) *</label>
@@ -68,30 +74,14 @@ export function KpiTreeEditor({
               value={m.name}
               onChange={(e) => updateMetric(i, { name: e.target.value })}
             />
-            <div className="ob-metric-row">
-              <input
-                className="input"
-                placeholder="Current (optional)"
-                value={m.current_value ?? ""}
-                onChange={(e) => updateMetric(i, { current_value: e.target.value })}
-              />
-              <input
-                className="input"
-                placeholder="Target (optional)"
-                value={m.target_value ?? ""}
-                onChange={(e) => updateMetric(i, { target_value: e.target.value })}
-              />
-              <input
-                className="input"
-                type="number"
-                min={0}
-                max={1}
-                step={0.05}
-                placeholder="Weight"
-                value={m.weight}
-                onChange={(e) => updateMetric(i, { weight: Number(e.target.value) })}
-              />
-            </div>
+            <textarea
+              className="input"
+              placeholder="Describe what this metric means and why it matters"
+              value={m.description ?? ""}
+              rows={2}
+              maxLength={400}
+              onChange={(e) => updateMetric(i, { description: e.target.value })}
+            />
           </div>
         ))}
         {metrics.length < 4 && (

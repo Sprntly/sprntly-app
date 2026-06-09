@@ -246,14 +246,33 @@ def seed_onboarding_context(
         lines.append(f"**Industry:** {industry}")
     if kpi_tree:
         lines.append("\n## KPIs")
-        north_star = kpi_tree.get("north_star") or kpi_tree.get("northStar")
-        if north_star:
-            lines.append(f"**North Star Metric:** {north_star}")
-        for metric in kpi_tree.get("supporting_metrics", kpi_tree.get("supportingMetrics", [])):
-            name = metric.get("name", "")
-            weight = metric.get("weight", "")
-            if name:
-                lines.append(f"- {name}" + (f" ({weight}%)" if weight else ""))
+
+        def _fmt(metric: str, description: str) -> str:
+            metric = (metric or "").strip()
+            description = (description or "").strip()
+            return f"{metric} — {description}" if description else metric
+
+        # The north star is stored as a {metric, description} object; tolerate
+        # the legacy bare-string shape too.
+        north_star = kpi_tree.get("north_star")
+        if isinstance(north_star, dict):
+            ns_text = _fmt(north_star.get("metric", ""), north_star.get("description", ""))
+        else:
+            ns_text = str(north_star or "").strip()
+        if ns_text:
+            lines.append(f"**North Star:** {ns_text}")
+
+        # Supporting metrics live under primary_metrics + secondary_signals;
+        # each is a {metric, description} object.
+        supporting = list(kpi_tree.get("primary_metrics") or []) + list(
+            kpi_tree.get("secondary_signals") or []
+        )
+        for metric in supporting:
+            if not isinstance(metric, dict):
+                continue
+            text = _fmt(metric.get("metric", ""), metric.get("description", ""))
+            if text:
+                lines.append(f"- {text}")
     if strategic_context:
         lines.append(f"\n## Strategic Context\n\n{strategic_context}")
 

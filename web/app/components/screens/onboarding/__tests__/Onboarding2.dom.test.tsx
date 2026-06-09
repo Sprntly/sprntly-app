@@ -53,7 +53,7 @@ function makeWorkspace(over: Partial<WorkspaceCompany> = {}): WorkspaceCompany {
     recent_decisions: null,
     dead_ends: [],
     biggest_risk: null,
-    kpi_tree: { north_star: "", metrics: [] },
+    kpi_tree: { north_star: "", north_star_description: "", metrics: [] },
     feature_flags: {
       weekly_brief: true,
       on_demand_analysis: true,

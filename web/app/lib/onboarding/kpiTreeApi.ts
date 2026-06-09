@@ -2,104 +2,83 @@
  * Client + builder for the backend KPI tree (design-v4 onboarding page 05).
  *
  * The backend owns the canonical KPI-tree schema (backend/app/kpi_tree.py):
- *   north_star      { metric, current_value?, target_value?, target_window_days? }
- *   primary_metrics [ ≤4, weight in (0,1], weights sum to 1.0 ]
- *   secondary_signals [ ≤6, direction higher|lower_is_better ]
+ *   north_star      { metric, description }
+ *   primary_metrics [ ≤4, { metric, description } ]
+ *   secondary_signals [ ≤6, { metric, description } ]
  *
- * Page 05 captures a North Star (just the metric string) plus up to 6
- * supporting metrics the PM picks/writes. We map them onto the backend
- * shape: the first ≤4 supporting metrics become weighted primary_metrics
- * (evenly weighted so they sum to 1.0); any remainder (≤6) become
- * secondary_signals (default higher_is_better). This keeps the picker UI
- * simple while satisfying the backend validator.
+ * Each metric is a name plus a free-text description that feeds the goal-fit
+ * classifier as richer context. There are no weights / current / target values.
+ *
+ * Page 05 captures a North Star (metric + description) plus up to 6 supporting
+ * metrics (each metric + description) the PM picks/writes. We map the first ≤4
+ * supporting metrics onto primary_metrics and any remainder (≤6) onto
+ * secondary_signals.
  */
 import { api } from "../api"
 
-export type KpiNorthStar = {
+export type KpiMetricEntry = {
   metric: string
-  current_value?: number | null
-  target_value?: number | null
-  target_window_days?: number | null
-}
-
-export type KpiPrimaryMetric = {
-  metric: string
-  current_value?: number | null
-  target_value?: number | null
-  weight: number
-}
-
-export type KpiSecondarySignal = {
-  metric: string
-  current_value?: number | null
-  direction: "higher_is_better" | "lower_is_better"
+  description: string
 }
 
 export type KpiTreePayload = {
-  north_star: KpiNorthStar
-  primary_metrics: KpiPrimaryMetric[]
-  secondary_signals: KpiSecondarySignal[]
+  north_star: KpiMetricEntry
+  primary_metrics: KpiMetricEntry[]
+  secondary_signals: KpiMetricEntry[]
+}
+
+/** A supporting metric in page-05 form state: a name + free-text description. */
+export type SupportingMetric = {
+  name: string
+  description: string
 }
 
 export const MAX_PRIMARY_METRICS = 4
 export const MAX_SECONDARY_SIGNALS = 6
 
-/** Even weights for n metrics that sum to exactly 1.0 (last absorbs rounding). */
-export function evenWeights(n: number): number[] {
-  if (n <= 0) return []
-  const base = Math.floor((1 / n) * 100) / 100
-  const weights = Array.from({ length: n }, () => base)
-  const drift = Math.round((1 - base * n) * 100) / 100
-  weights[n - 1] = Math.round((weights[n - 1] + drift) * 100) / 100
-  return weights
-}
-
 /**
  * Build the backend payload from page-05 form state.
  *
- * @param northStar   the North Star metric name
- * @param supporting  ordered supporting-metric names (deduped, trimmed)
+ * @param northStar             the North Star metric name
+ * @param northStarDescription  free-text context for the North Star
+ * @param supporting            ordered supporting metrics (name + description)
  */
 export function buildKpiTreePayload(
   northStar: string,
-  supporting: string[],
+  northStarDescription: string,
+  supporting: SupportingMetric[],
 ): KpiTreePayload {
   const ns = northStar.trim()
-  const clean = supporting.map((s) => s.trim()).filter(Boolean)
-  // Drop duplicates and anything equal to the North Star.
+  // Drop blanks and anything whose name duplicates the North Star / an earlier
+  // entry (case-insensitive on the metric name).
   const seen = new Set<string>([ns.toLowerCase()])
-  const unique: string[] = []
-  for (const s of clean) {
-    const key = s.toLowerCase()
+  const unique: KpiMetricEntry[] = []
+  for (const s of supporting) {
+    const metric = s.name.trim()
+    if (!metric) continue
+    const key = metric.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
-    unique.push(s)
+    unique.push({ metric, description: s.description.trim() })
   }
 
-  const primaryNames = unique.slice(0, MAX_PRIMARY_METRICS)
-  const secondaryNames = unique.slice(
-    MAX_PRIMARY_METRICS,
-    MAX_PRIMARY_METRICS + MAX_SECONDARY_SIGNALS,
-  )
-  const weights = evenWeights(primaryNames.length)
-
   return {
-    north_star: { metric: ns },
-    primary_metrics: primaryNames.map((metric, i) => ({
-      metric,
-      weight: weights[i],
-    })),
-    secondary_signals: secondaryNames.map((metric) => ({
-      metric,
-      direction: "higher_is_better" as const,
-    })),
+    north_star: { metric: ns, description: northStarDescription.trim() },
+    primary_metrics: unique.slice(0, MAX_PRIMARY_METRICS),
+    secondary_signals: unique.slice(
+      MAX_PRIMARY_METRICS,
+      MAX_PRIMARY_METRICS + MAX_SECONDARY_SIGNALS,
+    ),
   }
 }
 
 /** Has the form captured enough to persist? (North Star + ≥1 supporting.) */
-export function canSaveKpiTree(northStar: string, supporting: string[]): boolean {
+export function canSaveKpiTree(
+  northStar: string,
+  supporting: SupportingMetric[],
+): boolean {
   if (!northStar.trim()) return false
-  return supporting.some((s) => s.trim().length > 0)
+  return supporting.some((s) => s.name.trim().length > 0)
 }
 
 export const kpiTreeApi = {
