@@ -174,7 +174,7 @@ def _resolve_github_installation_id_for_repo(
     if not any(r.get("full_name") == repo_full_name for r in repos):
         return None
     try:
-        install = find_github_installation_for_repo(repo_full_name)
+        install = find_github_installation_for_repo(repo_full_name, company_id)
     except Exception:
         logger.info("design_agent.github_installation_resolve_failed")
         return None

@@ -813,6 +813,7 @@ def test_generate_accepts_github_repo(env, client, monkeypatch):
         account_id=99,
         account_login="org",
         account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
     )
     resp = client.post(
         "/v1/design-agent/generate",
@@ -839,6 +840,7 @@ def test_generate_does_not_persist_installation_without_company_github_connectio
         account_id=99,
         account_login="org",
         account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
     )
     resp = client.post(
         "/v1/design-agent/generate",
@@ -868,6 +870,7 @@ def test_generate_does_not_persist_installation_for_inaccessible_repo(
         account_id=99,
         account_login="org",
         account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
     )
     resp = client.post(
         "/v1/design-agent/generate",
@@ -897,6 +900,7 @@ def test_generate_leaves_github_installation_null_when_repo_owner_not_installed(
         account_id=99,
         account_login="other-org",
         account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
     )
     resp = client.post(
         "/v1/design-agent/generate",

@@ -327,6 +327,7 @@ CREATE INDEX workspace_invites_company_id_idx ON workspace_invites (company_id);
 
 CREATE TABLE github_installations (
     installation_id      INTEGER PRIMARY KEY,
+    company_id           TEXT,
     account_id           INTEGER NOT NULL,
     account_login        TEXT NOT NULL,
     account_type         TEXT NOT NULL,
@@ -340,6 +341,7 @@ CREATE TABLE github_installations (
 
 CREATE TABLE github_pull_requests (
     installation_id INTEGER NOT NULL,
+    company_id      TEXT,
     repo_full_name  TEXT NOT NULL,
     pr_number       INTEGER NOT NULL,
     title           TEXT NOT NULL,
