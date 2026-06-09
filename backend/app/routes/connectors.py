@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Annotated
 from urllib.parse import urlencode
 
@@ -43,7 +44,7 @@ from pydantic import BaseModel
 
 from app import db
 from app import datasets as datasets_service
-from app.auth import CompanyContext, require_company, require_session
+from app.auth import CompanyContext, require_company
 from app.config import settings
 from app.connectors import (
     clickup_oauth,
@@ -666,7 +667,18 @@ def figma_disconnect(
 
 
 def _figma_access_token(company_id: str) -> str:
-    """Decrypt the stored Figma token. Raises 404 if not connected."""
+    """Return a valid Figma access token for the company, refreshing it
+    first if the stored token is expired or near expiry.
+
+    The stored token JSON is Figma's response (access_token, refresh_token,
+    expires_in) plus an `obtained_at` epoch. We refresh proactively (2 min
+    early) so fetches never silently degrade once the token lapses, persist
+    the refreshed token+refresh+expiry back onto the connection, and return
+    the fresh access token. Mirrors the HubSpot valid-access-token pattern.
+
+    Raises 404 if not connected; raises a clear 502 if a refresh is required
+    but fails (rather than handing back a dead token).
+    """
     row = db.get_connection(company_id, figma_oauth.FIGMA_PROVIDER)
     if not row:
         raise HTTPException(404, "Figma is not connected")
@@ -677,6 +689,40 @@ def _figma_access_token(company_id: str) -> str:
     access_token = token_json.get("access_token")
     if not access_token:
         raise HTTPException(500, "Figma token has no access_token")
+
+    # Refresh proactively if expired / within 2 min of expiry.
+    obtained_at = token_json.get("obtained_at", 0)
+    expires_in = token_json.get("expires_in", 0)
+    refresh_token = token_json.get("refresh_token")
+    if expires_in and time.time() > obtained_at + expires_in - 120:
+        if not refresh_token:
+            raise HTTPException(
+                401, "Figma token expired and no refresh_token — reconnect Figma"
+            )
+        logger.info("Figma token expired for company, refreshing")
+        try:
+            new_tokens = figma_oauth.refresh_access_token(refresh_token)
+        except HTTPException as e:
+            # Don't silently use a dead token — surface a clear error.
+            logger.warning("Figma token refresh failed: %s", e.detail)
+            raise HTTPException(
+                502, "Figma token refresh failed — reconnect Figma"
+            ) from e
+        # Merge fresh values, preserving refresh_token if Figma omits it,
+        # and re-stamp obtained_at so subsequent expiry checks are correct.
+        token_json["access_token"] = new_tokens["access_token"]
+        token_json["refresh_token"] = new_tokens.get("refresh_token", refresh_token)
+        token_json["expires_in"] = new_tokens.get("expires_in", expires_in)
+        token_json["obtained_at"] = int(time.time())
+        try:
+            encrypted = encrypt_token_json(json.dumps(token_json))
+            db.update_connection_tokens(
+                company_id, figma_oauth.FIGMA_PROVIDER, encrypted
+            )
+        except Exception:
+            logger.warning("Failed to persist refreshed Figma token", exc_info=True)
+        access_token = token_json["access_token"]
+
     return access_token
 
 
@@ -713,14 +759,15 @@ class FigmaSyncCorpusIn(BaseModel):
 @router.post("/figma/sync-to-corpus")
 def figma_sync_to_corpus(
     body: FigmaSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Sync Figma file structure and design tokens into the corpus.
 
     Fetches file tree + published styles and writes a markdown summary
-    into DATA_DIR/{dataset}/figma_design_context.md.
+    into DATA_DIR/{dataset}/figma_design_context.md. Company-scoped: uses
+    the caller's company's Figma connection only.
     """
-    token = _figma_access_token()
+    token = _figma_access_token(company.company_id)
 
     # Fetch file structure + styles
     file_data = figma_oauth.fetch_file(token, body.file_key, depth=2)
@@ -1212,13 +1259,15 @@ def github_sync_to_corpus(
 
 
 @router.get("/sync-status")
-def connector_sync_status(_session: dict = Depends(require_session)):
+def connector_sync_status(
+    company: CompanyContext = Depends(require_company),
+):
     """Summary of all connector sync states + corpus stats.
 
-    Returns per-connector status and per-dataset corpus size.
-    Used for demo dashboards to verify data capture.
+    Returns per-connector status and per-dataset corpus size for the
+    caller's company only. Used for dashboards to verify data capture.
     """
-    connections = db.list_connections()
+    connections = db.list_connections(company.company_id)
     connectors_out = []
     for row in connections:
         config = {}
@@ -1364,17 +1413,18 @@ class HubSpotSyncCorpusIn(BaseModel):
 @router.post("/hubspot/sync")
 def hubspot_sync(
     body: HubSpotSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Sync HubSpot CRM data (contacts, companies, deals) into the corpus.
 
     Fetches data from HubSpot API, converts to markdown, and writes
-    into DATA_DIR/{dataset}/ so it enters the knowledge base.
+    into DATA_DIR/{dataset}/ so it enters the knowledge base. Company-scoped:
+    uses the caller's company's HubSpot connection only.
     """
     from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
 
     try:
-        result = sync_hubspot(body.dataset)
+        result = sync_hubspot(body.dataset, company_id=company.company_id)
     except HubSpotSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()
@@ -1383,13 +1433,13 @@ def hubspot_sync(
 @router.post("/hubspot/sync-to-corpus")
 def hubspot_sync_to_corpus(
     body: HubSpotSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Alias for /hubspot/sync — matches Figma/GitHub sync-to-corpus pattern."""
     from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
 
     try:
-        result = sync_hubspot(body.dataset)
+        result = sync_hubspot(body.dataset, company_id=company.company_id)
     except HubSpotSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()

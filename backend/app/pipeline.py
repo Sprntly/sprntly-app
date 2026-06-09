@@ -145,9 +145,12 @@ async def _sync_slack(dataset: str) -> dict[str, Any]:
 
 
 async def _sync_hubspot(dataset: str) -> dict[str, Any]:
-    from app.connectors.hubspot_sync import sync_hubspot
-    result = await asyncio.to_thread(sync_hubspot, dataset)
-    return result.to_dict()
+    # HubSpot sync is company-scoped: sync_hubspot needs a company_id to
+    # resolve a specific company's HubSpot token. The company-level pipeline
+    # run carries only a dataset (no company context), so corpus sync is
+    # driven from the company-scoped route (POST /hubspot/sync) instead.
+    # Skip here rather than guess an owner.
+    return {"status": "skipped", "reason": "hubspot_sync_is_company_scoped"}
 
 
 async def _stage_agents(dataset: str) -> dict[str, Any]:
