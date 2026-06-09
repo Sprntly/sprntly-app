@@ -150,7 +150,7 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         />
         <NavItem screen="detail" icon={<IconEvidence />} label="Evidence" />
         <NavItem screen="prd" icon={<IconPrd />} label="PRD" />
-        <NavItem screen="tickets" icon={<IconTickets />} label="Tickets" />
+        <NavItem screen="tickets" icon={<IconTickets />} label="Project Management" />
         <div className="sb-spacer" />
 
         <div className="sb-section-title">Workspace</div>
