@@ -751,3 +751,20 @@ def test_website_absent_or_unconvertible_neutrals_keep_defaults():
     assert c.surface == base.surface
     assert c.border == base.border
     assert c.muted == base.muted
+
+
+def test_website_elevation_hint_sets_or_keeps_token():
+    """A recognized elevation hint drives the token; an absent or unknown hint
+    leaves the baseline in place so an unreadable site is not misreported."""
+    web = WebExtractor()
+
+    def elevation(hint):
+        return web.normalize(
+            RawSignals(provider="web", ref="x", signals=_web_sample(elevation_hint=hint))
+        ).tokens.elevation_style
+
+    assert elevation("shadows") == "shadows"
+    assert elevation("borders") == "borders"
+    base = DesignSystem().tokens.elevation_style
+    assert elevation("") == base
+    assert elevation("sparkles") == base

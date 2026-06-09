@@ -60,6 +60,7 @@ class WebsiteDesignSystem(TypedDict):
     surface_color: str            # computed background of a representative raised card/section
     border_color: str             # computed border-color of a visibly-bordered element
     muted_color: str              # computed color of a secondary/muted text element
+    elevation_hint: str           # "shadows" / "borders" / "" — how a card separates from the page
 
 
 # Single ``page.evaluate()`` sampler. Returns a raw dict; missing elements yield
@@ -170,6 +171,23 @@ _SAMPLER_JS = r"""
   const mutedElCs = cs(mutedEl);
   if (mutedElCs && mutedElCs.color) mutedColor = mutedElCs.color;
 
+  // Elevation signal: how the representative card/section separates from the
+  // page — a real box-shadow reads as "shadows", a visible border as "borders".
+  // Empty when neither is detectable, so the token keeps its default.
+  let elevationHint = '';
+  const cardEl = document.querySelector('[class*="card" i], section, article');
+  const cardCs = cs(cardEl);
+  if (cardCs) {
+    const shadow = cardCs.boxShadow;
+    const bWidth = parseFloat(cardCs.borderTopWidth || cardCs.borderWidth || '0') || 0;
+    const bColor = cardCs.borderTopColor || cardCs.borderColor || '';
+    if (shadow && shadow !== 'none') {
+      elevationHint = 'shadows';
+    } else if (bWidth > 0 && bColor && !isTransparent(bColor)) {
+      elevationHint = 'borders';
+    }
+  }
+
   return {
     primary_color: primaryColor,
     background_color: bodyCs ? bodyCs.backgroundColor : '',
@@ -182,6 +200,7 @@ _SAMPLER_JS = r"""
     surface_color: surfaceColor,
     border_color: borderColor,
     muted_color: mutedColor,
+    elevation_hint: elevationHint,
   };
 }
 """
@@ -235,6 +254,7 @@ def _map_sample(raw: dict | None) -> WebsiteDesignSystem:
         surface_color=(raw.get("surface_color") or "").strip(),
         border_color=(raw.get("border_color") or "").strip(),
         muted_color=(raw.get("muted_color") or "").strip(),
+        elevation_hint=(raw.get("elevation_hint") or "").strip(),
     )
 
 

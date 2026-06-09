@@ -126,6 +126,7 @@ async def test_extract_returns_expected_sample_fields(monkeypatch):
         "surface_color",
         "border_color",
         "muted_color",
+        "elevation_hint",
     }
     assert ds["primary_color"] == "rgb(37, 99, 235)"
     assert ds["background_color"] == "rgb(255, 255, 255)"
@@ -538,6 +539,7 @@ async def test_extract_load_path_returns_design_system(monkeypatch):
         "surface_color",
         "border_color",
         "muted_color",
+        "elevation_hint",
     }
     assert ds["primary_color"] == "rgb(37, 99, 235)"
     assert ds["heading_font_family"] == "Inter"

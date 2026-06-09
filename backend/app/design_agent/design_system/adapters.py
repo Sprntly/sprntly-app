@@ -515,6 +515,12 @@ class WebExtractor:
             radius_convention=_radius_convention(s.get("border_radius_convention")),
             spacing_scale=_spacing_samples_to_scale(s.get("spacing_scale_samples")),
         )
+        # Reconcile the elevation token with the observed border-vs-shadow usage.
+        # Only a recognized hint overrides the default; anything else is left
+        # alone so an unreadable site keeps the baseline.
+        elevation_hint = (s.get("elevation_hint") or "").strip()
+        if elevation_hint in ("shadows", "borders"):
+            tokens.elevation_style = elevation_hint
         # Website signals are inferred from sampled computed styles, not from a
         # documented design system. A usable brand color plus a heading font is
         # the sampler's own confidence floor; meeting it here too keeps the
