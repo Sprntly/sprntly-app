@@ -42,20 +42,6 @@ _KNOWN_WEB_FONTS = {
 }
 
 _HEX_RE = re.compile(r"#(?:[0-9a-fA-F]{6})\b")
-_JS_HEX_PAIR_RE = re.compile(
-    r"['\"]?([A-Za-z][A-Za-z0-9_-]*)['\"]?\s*:\s*['\"](#[0-9a-fA-F]{6})['\"]"
-)
-_CSS_VAR_RE = re.compile(r"--([A-Za-z0-9_-]+)\s*:\s*([^;{}]+);")
-_FONT_DECL_RE = re.compile(r"font-family\s*:\s*([^;{}]+);", re.IGNORECASE)
-_FONT_TOKEN_RE = re.compile(
-    r"['\"]?([A-Za-z][A-Za-z0-9_-]*)['\"]?\s*:\s*(?:\[)?['\"]([^'\"\]]+)['\"]"
-)
-_SIZE_PAIR_RE = re.compile(
-    r"['\"]?([A-Za-z0-9][A-Za-z0-9_-]*)['\"]?\s*:\s*['\"]([0-9.]+(?:px|rem))['\"]"
-)
-_SHADOW_PAIR_RE = re.compile(
-    r"['\"]?([A-Za-z][A-Za-z0-9_-]*)['\"]?\s*:\s*['\"]([^'\"]*(?:rgba?\(|#[0-9a-fA-F]{3,6})[^'\"]*)['\"]"
-)
 
 _GITHUB_DESIGN_FILES = (
     "tailwind.config.ts",
@@ -92,44 +78,6 @@ _GITHUB_MAX_UI_FILES = 12
 _GITHUB_MAX_UI_FILE_BYTES = 96_000
 _GITHUB_EXPLICIT_FILE_BYTES = 128_000
 
-_TAILWIND_COLORS = {
-    "slate": "#64748b",
-    "gray": "#6b7280",
-    "zinc": "#71717a",
-    "neutral": "#737373",
-    "stone": "#78716c",
-    "red": "#ef4444",
-    "orange": "#f97316",
-    "amber": "#f59e0b",
-    "yellow": "#eab308",
-    "lime": "#84cc16",
-    "green": "#22c55e",
-    "emerald": "#10b981",
-    "teal": "#14b8a6",
-    "cyan": "#06b6d4",
-    "sky": "#0ea5e9",
-    "blue": "#3b82f6",
-    "indigo": "#6366f1",
-    "violet": "#8b5cf6",
-    "purple": "#a855f7",
-    "fuchsia": "#d946ef",
-    "pink": "#ec4899",
-    "rose": "#f43f5e",
-    "white": "#ffffff",
-    "black": "#000000",
-}
-
-_TAILWIND_COLOR_CLASS_RE = re.compile(
-    r"\b(?:bg|text|border|ring|from|to)-([a-z]+)(?:-\d{2,3})?\b"
-)
-_TAILWIND_RADIUS_RE = re.compile(r"\brounded(?:-(none|sm|md|lg|xl|2xl|3xl|full))?\b")
-_TAILWIND_SPACING_RE = re.compile(r"\b(?:p|px|py|pt|pr|pb|pl|gap|space-x|space-y|m|mx|my)-(\d+)\b")
-_TAILWIND_SHADOW_RE = re.compile(r"\bshadow(?:-(sm|md|lg|xl|2xl|none))?\b")
-_TAILWIND_WEIGHT_RE = re.compile(r"\bfont-(medium|semibold|bold)\b")
-_TAILWIND_TEXT_SIZE_RE = re.compile(r"\btext-(xs|sm|base|lg|xl|2xl|3xl)\b")
-_EXPORT_COMPONENT_RE = re.compile(
-    r"\b(?:function|const)\s+([A-Z][A-Za-z0-9]*)|\bexport\s+\{\s*([A-Z][A-Za-z0-9]*)"
-)
 
 
 def _luminance(hex_color: str) -> float:
@@ -162,20 +110,6 @@ def _repo_ref_parts(ref: str) -> tuple[str, str | None]:
         return cleaned, None
     repo, branch = cleaned.split("@", 1)
     return repo.strip(), branch.strip() or None
-
-
-def _parse_px_or_rem(value: str | None) -> int | None:
-    if not value:
-        return None
-    v = value.strip().lower()
-    try:
-        if v.endswith("px"):
-            return int(round(float(v[:-2])))
-        if v.endswith("rem"):
-            return int(round(float(v[:-3]) * 16))
-    except ValueError:
-        return None
-    return None
 
 
 def _first_known_font(values: list[str]) -> str | None:
