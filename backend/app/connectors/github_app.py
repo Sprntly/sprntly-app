@@ -344,6 +344,48 @@ def fetch_user_repos(access_token: str, per_page: int = 50) -> list[dict[str, An
     ]
 
 
+def fetch_installation_repos(
+    installation_id: int, per_page: int = 100
+) -> list[dict[str, Any]]:
+    """Repos this installation can read, using the App INSTALLATION token.
+
+    GitHub endpoint: GET /installation/repositories. Unlike /user/repos
+    (which is OAuth-token-gated and scope-limited), this returns exactly
+    the repos the App was granted access to during install — which is
+    what users actually expect to see in the prototype picker.
+
+    Returns the same trimmed shape as fetch_user_repos so callers can
+    treat the two interchangeably.
+    """
+    resp = requests.get(
+        f"{GITHUB_API_BASE}/installation/repositories",
+        headers=headers_for_installation(installation_id),
+        params={"per_page": per_page},
+        timeout=20,
+    )
+    if not resp.ok:
+        logger.warning(
+            "GitHub /installation/repositories failed for install %s: %s %s",
+            installation_id, resp.status_code, resp.text[:200],
+        )
+        # Honest empty rather than raise — one bad install in an aggregate
+        # call shouldn't sink the whole list.
+        return []
+    raw = (resp.json() or {}).get("repositories") or []
+    return [
+        {
+            "full_name": r.get("full_name"),
+            "name": r.get("name"),
+            "private": bool(r.get("private")),
+            "html_url": r.get("html_url"),
+            "default_branch": r.get("default_branch"),
+            "description": r.get("description"),
+            "updated_at": r.get("updated_at"),
+        }
+        for r in raw
+    ]
+
+
 def _api_get(access_token: str, path: str, params: dict | None = None,
              *, accept: str = "application/vnd.github+json", timeout: int = 20):
     """GET against the GitHub REST API with a bearer token. Returns the

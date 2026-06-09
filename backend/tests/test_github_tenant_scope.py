@@ -382,3 +382,141 @@ def test_webhook_pr_inherits_company_from_installation(github_env):
 
     prs = db.list_open_pull_requests(company_a)
     assert [p["pr_number"] for p in prs] == [1]  # legacy PR #2 excluded
+
+
+# ─────────────────────── /github/accessible-repos ────────────────────────
+#
+# New endpoint that lists repos the Sprntly App can read, aggregated
+# across all installations owned by the caller's company. Uses the
+# App installation TOKEN (not the user OAuth token) so it works for any
+# company member, not just the original installer. This is what the
+# Generate Prototype modal needs — the old /github/repos endpoint went
+# via the OAuth user-token + `read:user user:email` scopes, which
+# returned empty for users without public repos under that login.
+
+
+def test_accessible_repos_empty_when_no_installation(github_env, monkeypatch):
+    """Company has no GitHub install at all → empty list, not 500."""
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get("/v1/connectors/github/accessible-repos")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"repositories": []}
+
+
+def test_accessible_repos_aggregates_across_company_installs(
+    github_env, monkeypatch
+):
+    """One install, two repos visible to the App → both surface."""
+    from unittest.mock import MagicMock, patch
+
+    ctx = company_client(monkeypatch)
+    _seed_install(installation_id=11, company_id=ctx.company_id, login="acme")
+
+    fake = MagicMock(ok=True, status_code=200)
+    fake.json.return_value = {
+        "total_count": 2,
+        "repositories": [
+            {
+                "full_name": "acme/web",
+                "name": "web",
+                "private": False,
+                "html_url": "https://github.com/acme/web",
+                "default_branch": "main",
+                "description": "the web app",
+            },
+            {
+                "full_name": "acme/api",
+                "name": "api",
+                "private": True,
+                "html_url": "https://github.com/acme/api",
+                "default_branch": "main",
+                "description": None,
+            },
+        ],
+    }
+    # Patch BOTH the App-token mint (so we don't sign a real JWT in test) and
+    # the HTTP call to GitHub.
+    with patch(
+        "app.connectors.github_app.get_installation_token", return_value="ghs_x"
+    ), patch(
+        "app.connectors.github_app.requests.get", return_value=fake
+    ):
+        r = ctx.client.get("/v1/connectors/github/accessible-repos")
+    assert r.status_code == 200, r.text
+    full_names = sorted(x["full_name"] for x in r.json()["repositories"])
+    assert full_names == ["acme/api", "acme/web"]
+
+
+def test_accessible_repos_cross_tenant_returns_empty(github_env, monkeypatch):
+    """Caller's company has no install. Another company's install exists
+    and has repos. The caller must see NOTHING — not 'install exists for
+    someone else', not a generic error, just an empty list."""
+    ctx = company_client(monkeypatch)
+    other_company = seed_company(user_id="other-" + uuid.uuid4().hex[:6], slug="globex")
+    _seed_install(installation_id=99, company_id=other_company, login="globex")
+
+    # No mock for the GitHub call — if the route tried to fetch globex's repos
+    # it would hit the real network and fail. The route must not try.
+    r = ctx.client.get("/v1/connectors/github/accessible-repos")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"repositories": []}
+
+
+def test_accessible_repos_visible_to_invited_member(github_env, monkeypatch):
+    """Company connector model: any member of the company that owns the
+    install sees the install's repos — not just the original installer."""
+    from unittest.mock import MagicMock, patch
+
+    # Set up the first member (this is the installer).
+    ctx_a = company_client(monkeypatch)
+    _seed_install(installation_id=33, company_id=ctx_a.company_id, login="acme")
+
+    # Add a SECOND user to the same company (the invited teammate).
+    from app.db.client import require_client
+
+    teammate_id = "teammate-" + uuid.uuid4().hex[:6]
+    require_client().table("company_members").insert(
+        {
+            "id": uuid.uuid4().hex,
+            "company_id": ctx_a.company_id,
+            "user_id": teammate_id,
+            "role": "member",
+        }
+    ).execute()
+    teammate_headers = supabase_bearer(teammate_id)
+
+    fake = MagicMock(ok=True, status_code=200)
+    fake.json.return_value = {
+        "total_count": 1,
+        "repositories": [
+            {
+                "full_name": "acme/web",
+                "name": "web",
+                "private": False,
+                "html_url": "https://github.com/acme/web",
+                "default_branch": "main",
+                "description": "",
+            },
+        ],
+    }
+    with patch(
+        "app.connectors.github_app.get_installation_token", return_value="ghs_x"
+    ), patch(
+        "app.connectors.github_app.requests.get", return_value=fake
+    ):
+        r = ctx_a.client.get(
+            "/v1/connectors/github/accessible-repos", headers=teammate_headers
+        )
+    assert r.status_code == 200, r.text
+    assert [x["full_name"] for x in r.json()["repositories"]] == ["acme/web"]
+
+
+def test_accessible_repos_requires_auth(github_env, monkeypatch):
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+
+    setup_supabase_auth(monkeypatch)
+    company_client(monkeypatch)  # ensures reload happened
+    anon = TestClient(main_mod.app)
+    r = anon.get("/v1/connectors/github/accessible-repos")
+    assert r.status_code == 401
