@@ -272,8 +272,33 @@ export async function updateWorkspace(
   return rowToCompany(data as Record<string, unknown>, product)
 }
 
+/**
+ * Serialize the workspace KpiTree (north_star + flat metrics) into the backend
+ * canonical `companies.kpi_tree` shape: a `{ metric, description }` north star
+ * plus primary_metrics (first ≤4) and secondary_signals (remainder). Each
+ * metric is `{ metric, description }` only — no weights / current / target.
+ */
+export function serializeKpiTree(tree: KpiTree): Record<string, unknown> {
+  const named = tree.metrics.filter((m) => m.name.trim().length > 0)
+  const toEntry = (m: { name: string; description: string }) => ({
+    metric: m.name.trim(),
+    description: m.description.trim(),
+  })
+  return {
+    north_star: {
+      metric: tree.north_star.trim(),
+      description: tree.north_star_description.trim(),
+    },
+    primary_metrics: named.slice(0, 4).map(toEntry),
+    secondary_signals: named.slice(4, 10).map(toEntry),
+  }
+}
+
 export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 3) {
-  return updateWorkspace(companyId, { kpi_tree: tree, onboarding_step: nextStep })
+  return updateWorkspace(companyId, {
+    kpi_tree: serializeKpiTree(tree),
+    onboarding_step: nextStep,
+  })
 }
 
 export async function saveStrategicContext(

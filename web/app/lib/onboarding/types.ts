@@ -1,12 +1,13 @@
 export type KpiMetric = {
   name: string
-  current_value?: string
-  target_value?: string
-  weight: number
+  /** Free-text context for goal-fit scoring (replaces the old numeric fields). */
+  description: string
 }
 
 export type KpiTree = {
   north_star: string
+  /** Free-text context for the North Star metric. */
+  north_star_description: string
   metrics: KpiMetric[]
 }
 
@@ -111,26 +112,56 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
 export const ONBOARDING_STEP_COUNT = 8
 
 export function emptyKpiTree(): KpiTree {
-  return { north_star: "", metrics: [] }
+  return { north_star: "", north_star_description: "", metrics: [] }
 }
 
+/**
+ * Parse a stored `companies.kpi_tree` jsonb into the workspace KpiTree shape.
+ *
+ * The canonical stored shape is the backend's: a `north_star` object plus
+ * `primary_metrics` + `secondary_signals`, each `{ metric, description }`.
+ * We flatten primaries + signals into a single ordered `metrics` list. Both
+ * legacy shapes are tolerated on read:
+ *   - `north_star` as a bare string (pre-object rows), and
+ *   - the old workspace `{ north_star: string, metrics: [{ name, weight, … }] }`
+ *     shape — the extra numeric fields are simply ignored.
+ */
 export function parseKpiTree(raw: unknown): KpiTree {
   if (!raw || typeof raw !== "object") return emptyKpiTree()
   const o = raw as Record<string, unknown>
-  return {
-    north_star: typeof o.north_star === "string" ? o.north_star : "",
-    metrics: Array.isArray(o.metrics)
-      ? o.metrics.map((m) => {
-          const x = m as Record<string, unknown>
-          return {
-            name: String(x.name ?? ""),
-            current_value: x.current_value != null ? String(x.current_value) : undefined,
-            target_value: x.target_value != null ? String(x.target_value) : undefined,
-            weight: Number(x.weight) || 0,
-          }
-        })
-      : [],
+
+  // North star: object { metric, description } | bare string | legacy string.
+  let northStar = ""
+  let northStarDescription = ""
+  const ns = o.north_star
+  if (typeof ns === "string") {
+    northStar = ns
+  } else if (ns && typeof ns === "object") {
+    const x = ns as Record<string, unknown>
+    northStar = String(x.metric ?? "")
+    northStarDescription = String(x.description ?? "")
   }
+
+  const toMetric = (m: unknown): KpiMetric => {
+    const x = (m ?? {}) as Record<string, unknown>
+    // New shape uses `metric`; the old workspace shape used `name`.
+    return {
+      name: String(x.metric ?? x.name ?? ""),
+      description: String(x.description ?? ""),
+    }
+  }
+
+  let metrics: KpiMetric[] = []
+  if (Array.isArray(o.primary_metrics) || Array.isArray(o.secondary_signals)) {
+    const primary = Array.isArray(o.primary_metrics) ? o.primary_metrics : []
+    const secondary = Array.isArray(o.secondary_signals) ? o.secondary_signals : []
+    metrics = [...primary, ...secondary].map(toMetric)
+  } else if (Array.isArray(o.metrics)) {
+    metrics = o.metrics.map(toMetric)
+  }
+  metrics = metrics.filter((m) => m.name.trim().length > 0)
+
+  return { north_star: northStar, north_star_description: northStarDescription, metrics }
 }
 
 export function parseFeatureFlags(raw: unknown): FeatureFlags {

@@ -273,14 +273,17 @@ def test_kpi_tree_garbage_north_star_defaults_no_raise():
         assert t.north_star.metric  # always parses to a usable label
 
 
-def test_kpi_tree_valid_object_north_star_unchanged():
+def test_kpi_tree_valid_object_north_star_ignores_legacy_fields():
     from app.kpi_tree import KpiTree
 
+    # Legacy rows carry a numeric current_value on the north star; the model
+    # now parses the object and IGNORES the old field (description defaults).
     t = KpiTree.model_validate(
         {"north_star": {"metric": "Weekly Active Users", "current_value": 10}}
     )
     assert t.north_star.metric == "Weekly Active Users"
-    assert t.north_star.current_value == 10
+    assert t.north_star.description == ""
+    assert "current_value" not in t.north_star.model_dump()
 
 
 def test_load_kpi_tree_legacy_string_degrades_gracefully(isolated_settings):

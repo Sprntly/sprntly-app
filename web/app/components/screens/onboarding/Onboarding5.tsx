@@ -11,6 +11,7 @@ import {
   kpiTreeApi,
   MAX_PRIMARY_METRICS,
   MAX_SECONDARY_SIGNALS,
+  type SupportingMetric,
 } from "../../../lib/onboarding/kpiTreeApi"
 
 /**
@@ -72,15 +73,18 @@ export type SuccessMetricsViewProps = {
   productName: string
   industry: string
   northStar: string
-  supporting: string[]
+  northStarDescription: string
+  supporting: SupportingMetric[]
   customMetric: string
   northStarHints: string[]
   supportingHints: string[]
   errors: Record<string, string | undefined>
   error: string | null
   onChangeNorthStar: (value: string) => void
+  onChangeNorthStarDescription: (value: string) => void
   onPickNorthStar: (value: string) => void
   onToggleSupporting: (metric: string) => void
+  onChangeSupportingDescription: (metric: string, description: string) => void
   onChangeCustomMetric: (value: string) => void
   onAddCustom: () => void
 }
@@ -93,6 +97,7 @@ export function SuccessMetricsView({
   productName,
   industry,
   northStar,
+  northStarDescription,
   supporting,
   customMetric,
   northStarHints,
@@ -100,12 +105,15 @@ export function SuccessMetricsView({
   errors,
   error,
   onChangeNorthStar,
+  onChangeNorthStarDescription,
   onPickNorthStar,
   onToggleSupporting,
+  onChangeSupportingDescription,
   onChangeCustomMetric,
   onAddCustom,
 }: SuccessMetricsViewProps) {
   const selectedCount = supporting.length
+  const selectedNames = supporting.map((m) => m.name)
 
   return (
     <>
@@ -141,6 +149,14 @@ export function SuccessMetricsView({
             </button>
           ))}
         </div>
+        <textarea
+          className="input ob-metric-desc"
+          value={northStarDescription}
+          onChange={(e) => onChangeNorthStarDescription(e.target.value)}
+          placeholder="Describe what this metric means and why it matters (context for goal-fit scoring)"
+          rows={2}
+          maxLength={400}
+        />
       </div>
 
       <div className="field">
@@ -153,13 +169,13 @@ export function SuccessMetricsView({
             <button
               key={m}
               type="button"
-              className={`metric-chip ${supporting.includes(m) ? "selected" : ""}`}
+              className={`metric-chip ${selectedNames.includes(m) ? "selected" : ""}`}
               onClick={() => onToggleSupporting(m)}
             >
               {m}
             </button>
           ))}
-          {supporting
+          {selectedNames
             .filter((m) => !supportingHints.includes(m))
             .map((m) => (
               <button
@@ -199,6 +215,23 @@ export function SuccessMetricsView({
           {selectedCount} supporting metric{selectedCount === 1 ? "" : "s"}{" "}
           selected · suggestions tailored to your industry
         </p>
+        {supporting.length > 0 && (
+          <div className="ob-metric-desc-list">
+            {supporting.map((m) => (
+              <div key={m.name} className="ob-metric-desc-block" data-metric={m.name}>
+                <label className="ob-metric-desc-label">{m.name}</label>
+                <textarea
+                  className="input ob-metric-desc"
+                  value={m.description}
+                  onChange={(e) => onChangeSupportingDescription(m.name, e.target.value)}
+                  placeholder="Describe what this metric means and why it matters"
+                  rows={2}
+                  maxLength={400}
+                />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <style jsx>{`
@@ -231,6 +264,22 @@ export function SuccessMetricsView({
           color: var(--muted);
           margin: 10px 0 0;
         }
+        .ob-metric-desc {
+          width: 100%;
+          margin-top: 10px;
+          resize: vertical;
+        }
+        .ob-metric-desc-list {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          margin-top: 14px;
+        }
+        .ob-metric-desc-label {
+          display: block;
+          font-size: 13px;
+          font-weight: 600;
+        }
       `}</style>
     </>
   )
@@ -240,7 +289,8 @@ export function Onboarding5() {
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
   const [northStar, setNorthStar] = useState("")
-  const [supporting, setSupporting] = useState<string[]>([])
+  const [northStarDescription, setNorthStarDescription] = useState("")
+  const [supporting, setSupporting] = useState<SupportingMetric[]>([])
   const [customMetric, setCustomMetric] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -249,8 +299,13 @@ export function Onboarding5() {
     if (!workspace) return
     const tree = workspace.kpi_tree
     if (tree.north_star) setNorthStar(tree.north_star)
+    if (tree.north_star_description) setNorthStarDescription(tree.north_star_description)
     if (tree.metrics.length) {
-      setSupporting(tree.metrics.map((m) => m.name).filter(Boolean))
+      setSupporting(
+        tree.metrics
+          .filter((m) => m.name)
+          .map((m) => ({ name: m.name, description: m.description ?? "" })),
+      )
     }
   }, [workspace])
 
@@ -273,16 +328,25 @@ export function Onboarding5() {
 
   function toggleSupporting(metric: string) {
     setSupporting((prev) => {
-      if (prev.includes(metric)) return prev.filter((m) => m !== metric)
+      if (prev.some((m) => m.name === metric)) {
+        return prev.filter((m) => m.name !== metric)
+      }
       if (prev.length >= MAX_SUPPORTING) return prev
-      return [...prev, metric]
+      return [...prev, { name: metric, description: "" }]
     })
+  }
+
+  function changeSupportingDescription(metric: string, description: string) {
+    setSupporting((prev) =>
+      prev.map((m) => (m.name === metric ? { ...m, description } : m)),
+    )
   }
 
   function addCustom() {
     const m = customMetric.trim()
-    if (!m || supporting.includes(m) || supporting.length >= MAX_SUPPORTING) return
-    setSupporting((prev) => [...prev, m])
+    if (!m || supporting.some((s) => s.name === m) || supporting.length >= MAX_SUPPORTING)
+      return
+    setSupporting((prev) => [...prev, { name: m, description: "" }])
     setCustomMetric("")
   }
 
@@ -292,7 +356,9 @@ export function Onboarding5() {
     if (!validate().ok) return
     setSaving(true)
     try {
-      await kpiTreeApi.put(buildKpiTreePayload(northStar, supporting))
+      await kpiTreeApi.put(
+        buildKpiTreePayload(northStar, northStarDescription, supporting),
+      )
       const updated = await advanceOnboardingStep(workspace.id, 6)
       const product = updated.product ?? workspace.product
       setWorkspace({ ...updated, product })
@@ -339,7 +405,7 @@ export function Onboarding5() {
                 <strong>North Star:</strong> {northStar}
               </li>
               {previewMetrics.map((m) => (
-                <li key={m}>{m}</li>
+                <li key={m.name}>{m.name}</li>
               ))}
             </ul>
           )}
@@ -354,6 +420,7 @@ export function Onboarding5() {
           productName={productName}
           industry={industry}
           northStar={northStar}
+          northStarDescription={northStarDescription}
           supporting={supporting}
           customMetric={customMetric}
           northStarHints={northStarHints}
@@ -364,8 +431,10 @@ export function Onboarding5() {
             setNorthStar(value)
             clearError("northStar")
           }}
+          onChangeNorthStarDescription={setNorthStarDescription}
           onPickNorthStar={setNorthStar}
           onToggleSupporting={toggleSupporting}
+          onChangeSupportingDescription={changeSupportingDescription}
           onChangeCustomMetric={setCustomMetric}
           onAddCustom={addCustom}
         />

@@ -19,10 +19,14 @@ export function buildWorkspaceContextMarkdown(workspace: WorkspaceCompany): stri
     workspace.tech_stack?.length ? `Tech stack: ${workspace.tech_stack.join(", ")}` : "",
     "",
     "## KPI tree",
-    `North star: ${workspace.kpi_tree.north_star || "—"}`,
+    `North star: ${workspace.kpi_tree.north_star || "—"}${
+      workspace.kpi_tree.north_star_description.trim()
+        ? ` — ${workspace.kpi_tree.north_star_description.trim()}`
+        : ""
+    }`,
     ...workspace.kpi_tree.metrics.map(
       (m) =>
-        `- ${m.name}${m.current_value ? ` (current: ${m.current_value})` : ""}${m.target_value ? ` → target: ${m.target_value}` : ""} — weight ${Math.round(m.weight * 100)}%`,
+        `- ${m.name}${m.description.trim() ? ` — ${m.description.trim()}` : ""}`,
     ),
     "",
     workspace.okrs ? `## OKRs / priorities\n${workspace.okrs}` : "",
