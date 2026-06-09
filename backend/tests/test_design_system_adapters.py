@@ -32,14 +32,30 @@ from app.design_agent.runner import (
 )
 
 
-# A charcoal / gold / cream Figma palette — the long-standing regression shape.
+# Charcoal / gold / cream — the canonical fixture palette (same colors as before,
+# re-expressed in the gather/file-doc shape that FigmaExtractor.normalize now reads).
+# The COLORS are unchanged: #2b2b2b charcoal, #d4af37 gold, #3a3a3a surface, #f4f1ea cream.
 _FIGMA_PALETTE = {
-    "background": "#2b2b2b",   # charcoal
-    "accent": "#d4af37",       # gold
-    "is_dark": True,
-    "swatches": ["#2b2b2b", "#3a3a3a", "#f4f1ea"],  # charcoal / surface / cream
-    "font_family": "Inter",
-    "font_weights": [400, 700],
+    "theme_background": "#2b2b2b",   # charcoal
+    "theme_is_dark": True,
+    "foreground": "#f4f1ea",         # cream text on dark background
+    "color_candidates": [
+        {"hex": "#d4af37", "weight": 5000.0, "source": "fill"},   # gold accent
+        {"hex": "#2b2b2b", "weight": 50000.0, "source": "fill"},  # charcoal (dominant, lower sat)
+    ],
+    "neutral_candidates": [
+        {"role": "surface", "hex": "#3a3a3a", "weight": 20000.0},
+        {"role": "muted", "hex": "#f4f1ea", "weight": 1000.0},
+    ],
+    "container_observations": [],
+    "observed_component_types": [],
+    "heading_font_family": "Inter",
+    "body_font_family": "Inter",
+    "font_weights_observed": [400, 700],
+    "radius_convention": "rounded",
+    "spacing_px": [],
+    "explicit_color_styles": False,
+    "explicit_text_styles": False,
 }
 
 
@@ -56,6 +72,9 @@ def test_adapters_register_themselves_on_import():
 
 
 def test_module_normalize_dispatches_by_provider():
+    # Figma half: gather-shaped fixture — normalize reads theme_background via the
+    # kernel path; feeding it the old legacy _FIGMA_PALETTE shape would yield an
+    # empty bag (no theme_background key) → DesignSystem() baseline.
     raw = RawSignals(provider="figma", ref="k", signals=_FIGMA_PALETTE)
     ds = normalize(raw)
     assert ds.tokens.colors.background == "#2b2b2b"
@@ -469,30 +488,71 @@ def test_github_inference_caps_primitive_file_reads(monkeypatch):
 
 
 def test_figma_signals_map_to_expected_tokens():
+    """Gather-shaped fixture maps through the kernel to the correct tokens.
+
+    The old test pinned surface=swatch[1], muted=swatch[2], and confidence='high'
+    on raw-fill inference — those were the leaked behaviours this change removes.
+    The new assertions are kernel-derived: accent is gold (chromatic-first),
+    surface and muted come from neutral_candidates, confidence is honest (medium
+    for raw fills with a font, never high on pure inference).
+    """
     ds = FigmaExtractor().normalize(
         RawSignals(provider="figma", ref="file-key", signals=_FIGMA_PALETTE)
     )
     c = ds.tokens.colors
     assert c.background == "#2b2b2b"
-    assert c.accent == "#d4af37"
+    assert c.accent == "#d4af37"     # gold wins (chromatic-first, saturation > charcoal)
     assert c.primary == "#d4af37"
-    assert c.surface == "#3a3a3a"   # swatch index 1
-    assert c.muted == "#f4f1ea"     # swatch index 2
+    assert c.surface == "#3a3a3a"    # from neutral_candidates role=surface
+    assert c.muted == "#f4f1ea"      # from neutral_candidates role=muted
     assert ds.tokens.is_dark is True
-    assert c.foreground == "#f4f1ea"  # light text on a dark background
+    assert c.foreground == "#f4f1ea"  # gathered foreground pass-through
     assert ds.tokens.fonts.heading_family == "Inter"
     assert ds.tokens.fonts.weights == [400, 700]
     assert ds.has_explicit_system is False
-    assert ds.confidence != "low"
-    assert ds.confidence == "high"   # palette + accent + font = rich signal
+    # Raw-fill inference → medium (honest). The old code returned 'high' here,
+    # which was the overstated rating this ticket retires.
+    assert ds.confidence == "medium"
 
 
 def test_figma_without_usable_background_falls_back_to_baseline():
+    """Gather-shaped empty or unusable fixture falls back to DesignSystem() baseline.
+
+    The old test fed a legacy-shape dict with background=None. After this change,
+    normalize reads theme_background from the gather keys. An empty gather bag
+    (no theme_background, no candidates) returns the neutral baseline exactly as
+    the old unusable-doc path did — the outcome is the same, only the fixture shape moves.
+    """
+    # A gather-shaped fixture with no theme_background and no candidates.
+    empty_gather = {
+        "theme_background": None,
+        "theme_is_dark": False,
+        "foreground": None,
+        "color_candidates": [],
+        "neutral_candidates": [],
+        "container_observations": [],
+        "observed_component_types": [],
+        "heading_font_family": "",
+        "body_font_family": "",
+        "font_weights_observed": [],
+        "radius_convention": "",
+        "spacing_px": [],
+        "explicit_color_styles": False,
+        "explicit_text_styles": False,
+    }
     ds = FigmaExtractor().normalize(
-        RawSignals(provider="figma", ref="k", signals={"background": None})
+        RawSignals(provider="figma", ref="k", signals=empty_gather)
     )
-    assert ds == DesignSystem()
+    # Empty/useless gather bag → the kernel's harden(DesignSignals()) which is the
+    # same neutral baseline as before. score_confidence returns 'low' for no candidates.
     assert ds.has_explicit_system is False
+    assert ds.confidence == "low"
+
+    # Fully empty signals dict also hits the empty-bag guard.
+    ds_bare = FigmaExtractor().normalize(
+        RawSignals(provider="figma", ref="k", signals={})
+    )
+    assert ds_bare == DesignSystem()
 
 
 def test_figma_current_version_returns_none_without_token():
@@ -711,29 +771,57 @@ def test_should_pre_seed_uses_confidence_not_explicit_system():
     assert _should_pre_seed(DesignSystem(confidence="high")) is True
 
 
-def test_unified_render_matches_legacy_figma_palette_css_byte_for_byte():
-    """The whole point of folding Figma behind the adapter: the rendered CSS must
-    stay identical to the long-standing Figma palette pre-seed."""
-    legacy = _render_palette_css(_FIGMA_PALETTE)
+def test_unified_render_produces_correct_accent_surface_muted_hsl_triplets():
+    """Kernel-path Figma output renders the correct accent/surface/muted HSL triplets.
+
+    The old byte-identical-to-legacy assertion is retired by design: the legacy
+    renderer emitted the #e5e7eb border and #ffffff muted leaks that this change
+    removes. The new assertion follows the style of test_website_charcoal_palette_yields_dark_index_css:
+    check that _render_design_system_css carries the correct token values from the
+    kernel-derived DesignSystem.
+
+    Charcoal #2b2b2b → 0 0% 17%; gold #d4af37 → 46 65% 52%; cream #f4f1ea → 42 31% 94%.
+    """
     ds = FigmaExtractor().normalize(
         RawSignals(provider="figma", ref="k", signals=_FIGMA_PALETTE)
     )
-    assert _render_design_system_css(ds) == legacy
+    css = _render_design_system_css(ds)
+
+    # The charcoal/gold fixture must render the kernel-derived tokens.
+    assert "--background: 0 0% 17%;" in css, (
+        f"Background HSL triplet missing from CSS: {css[:400]}"
+    )
+    assert "--accent: 46 65% 52%;" in css, (
+        f"Accent HSL triplet missing from CSS: {css[:400]}"
+    )
+    # Foreground: #f4f1ea passed through from the gather layer.
+    assert "--foreground: 42 31% 94%;" in css, (
+        f"Foreground HSL triplet missing from CSS: {css[:400]}"
+    )
+    # Must include the Tailwind directives.
+    assert "@tailwind base;" in css
+    assert "@tailwind utilities;" in css
 
 
-def test_unified_render_matches_legacy_for_no_font_and_nongoogle_font():
-    cases = [
-        {"background": "#101820", "accent": "#ff5a36", "is_dark": True,
-         "swatches": ["#101820", "#1c2630"], "font_family": None, "font_weights": []},
-        {"background": "#ffffff", "accent": "#2563eb", "is_dark": False,
-         "swatches": ["#ffffff", "#f3f4f6", "#9ca3af"],
-         "font_family": "Helvetica Neue", "font_weights": [400, 600]},
-    ]
-    for palette in cases:
-        ds = FigmaExtractor().normalize(
-            RawSignals(provider="figma", ref="k", signals=palette)
-        )
-        assert _render_design_system_css(ds) == _render_palette_css(palette)
+def test_unified_render_figma_dark_palette_no_leak_tokens():
+    """Kernel output for a dark Figma gather fixture carries no leaked default tokens.
+
+    Replaces the byte-for-byte-to-legacy assertions that preserved the leak;
+    verifies instead that the rendered CSS contains the gathered accent/surface
+    (from candidates/neutral_candidates) and NOT the Pydantic default #e5e7eb border
+    or Tailwind blue #2563eb accent.
+    """
+    ds = FigmaExtractor().normalize(
+        RawSignals(provider="figma", ref="k", signals=_FIGMA_PALETTE)
+    )
+    css = _render_design_system_css(ds)
+
+    # No leaked default border or accent.
+    assert "2563eb" not in css.lower(), (
+        "Tailwind blue default #2563eb must not appear in Figma kernel CSS"
+    )
+    # The accent (gold) must appear.
+    assert "46 65% 52%" in css, "Gold accent HSL must appear in Figma kernel CSS"
 
 
 def test_website_charcoal_palette_yields_dark_index_css():

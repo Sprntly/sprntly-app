@@ -30,7 +30,6 @@ import pytest
 from app.design_agent.design_system.figma_gather import gather_figma_signals
 from app.design_agent.design_system.adapters import FigmaExtractor
 from app.design_agent.design_system.extractors import RawSignals
-from app.design_agent.tools import _extract_palette_summary
 
 
 # ── Fixture helpers ──────────────────────────────────────────────────────────
@@ -920,32 +919,27 @@ def test_node_walk_cap_bounds_large_documents():
     assert len(result["container_observations"]) <= 200
 
 
-# ── AC12: Legacy parity (regression guard) ────────────────────────────────────
+# ── Extraction path uses only gather keys (no legacy summary) ────────────────
 
 
-def test_extract_raw_signals_keeps_legacy_summary_keys_byte_equal():
-    """Merged signals carry _extract_palette_summary's exact legacy keys;
-    and the normalize output for the charcoal/gold doc is unchanged.
+def test_extract_raw_signals_emits_only_rich_gather_keys():
+    """extract_raw_signals now returns only the rich gather keys from gather_figma_signals.
 
-    This verifies that the disjoint-key merge never overwrites legacy values.
+    The legacy palette-summary keys (background, accent, is_dark, swatches,
+    font_family, font_weights) were removed from extract_raw_signals because
+    FigmaExtractor.normalize now reads the gather keys through the shared kernel.
+    _extract_palette_summary still exists in tools.py for the in-loop fetch_figma
+    tool payload, but it is no longer called during design-system extraction.
+
+    This replaces test_extract_raw_signals_keeps_legacy_summary_keys_byte_equal,
+    which asserted the old disjoint-key merge contract. That contract is retired
+    because the legacy keys are no longer present in the merged output — asserting
+    their presence would be a dodge rather than a genuine regression guard. The
+    correct contract is the opposite: legacy keys must NOT appear in the extraction
+    path output.
     """
-    # Build a Figma document that the legacy summary can walk.
     dark_fill = _hex_fill("#2b2b2b")
     gold_fill = _hex_fill("#d4af37")
-    text_child = {
-        "id": "text1",
-        "type": "TEXT",
-        "fills": [_hex_fill("#f4f1ea")],
-        "style": {"fontFamily": "Inter", "fontWeight": 400},
-        "children": [],
-    }
-    text_child2 = {
-        "id": "text2",
-        "type": "TEXT",
-        "fills": [_hex_fill("#f4f1ea")],
-        "style": {"fontFamily": "Inter", "fontWeight": 700},
-        "children": [],
-    }
     accent_rect = {
         "id": "accent",
         "type": "RECTANGLE",
@@ -958,37 +952,23 @@ def test_extract_raw_signals_keeps_legacy_summary_keys_byte_equal():
         "type": "FRAME",
         "absoluteBoundingBox": _bbox(1440.0, 900.0),
         "fills": [dark_fill],
-        "children": [accent_rect, text_child, text_child2],
+        "children": [accent_rect],
     }
     file_doc = {"document": {"children": [_page_with_frames([top_frame])]}}
 
-    # What _extract_palette_summary produces (the legacy baseline).
-    legacy = _extract_palette_summary(file_doc)
-
-    # What FigmaExtractor produces (merged signals).
     raw = FigmaExtractor().extract_raw_signals("file-key", file_doc=file_doc)
-    merged = raw.signals
+    signals = raw.signals
 
-    # Every legacy key must be present and byte-equal.
-    for key in ("background", "accent", "is_dark", "swatches", "font_family", "font_weights"):
-        assert key in merged, f"Legacy key '{key}' missing from merged signals"
-        assert merged[key] == legacy.get(key), (
-            f"Legacy key '{key}' mismatch: {merged[key]!r} != {legacy.get(key)!r}"
+    # Legacy keys must NOT be present in the extraction-path output.
+    legacy_keys = ("background", "accent", "is_dark", "swatches", "font_family", "font_weights")
+    for key in legacy_keys:
+        assert key not in signals, (
+            f"Legacy key '{key}' must NOT appear in extract_raw_signals output after this change; "
+            f"found it in: {set(signals.keys())}"
         )
 
-    # Rich keys must also be present (not checked for value here, just presence).
+    # Rich gather keys must all be present.
     for key in _WELL_FORMED_KEYS:
-        assert key in merged, f"Rich key '{key}' missing from merged signals"
-
-    # normalize output must be unchanged — the legacy Figma normalize reads only
-    # the legacy keys so adding rich keys must not alter it.
-    from app.design_agent.design_system.extractors import normalize
-    from app.design_agent.design_system.extractors import RawSignals as RS
-    legacy_raw = RS(provider="figma", ref="k", signals=legacy)
-    merged_raw = RS(provider="figma", ref="k", signals=merged)
-
-    legacy_ds = normalize(legacy_raw)
-    merged_ds = normalize(merged_raw)
-    assert legacy_ds == merged_ds, (
-        "normalize() output changed after adding rich gather keys — legacy parity broken"
-    )
+        assert key in signals, (
+            f"Rich key '{key}' missing from extract_raw_signals output; got: {set(signals.keys())}"
+        )

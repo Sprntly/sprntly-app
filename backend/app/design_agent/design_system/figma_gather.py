@@ -318,18 +318,17 @@ def gather_figma_signals(
 ) -> dict[str, Any]:
     """Walk a fetched Figma document and produce the rich gather dict.
 
-    The output merges alongside the byte-unchanged legacy ``_extract_palette_summary``
-    keys in ``FigmaExtractor.extract_raw_signals``.  The two key sets are disjoint
-    by construction: legacy keys are ``background, accent, is_dark, swatches,
-    font_family, font_weights``; this function emits ``theme_background,
-    theme_is_dark, foreground, ...`` so ``{**legacy, **rich}`` performs no
-    overwrite and legacy values are preserved verbatim (AC12).
+    The output keys (``theme_background``, ``theme_is_dark``, ``foreground``,
+    ``color_candidates``, ``neutral_candidates``, ``container_observations``,
+    ``observed_component_types``, typography, radius, spacing, and the two
+    ``explicit_*`` provenance flags) feed ``FigmaExtractor.normalize``, which
+    folds them through the shared hardening kernel.
 
     No network I/O, no LLM calls, no ``requests`` / ``figma_oauth`` / ``anthropic``
-    imports.  Deterministic for a fixed input (AC1).
+    imports.  Deterministic for a fixed input.
 
     Graceful degradation: any missing field in the Figma payload yields an empty
-    family (empty list, ``""``, ``None``) rather than raising (B-1 / AC13 / AC14a).
+    family (empty list, ``""``, ``None``) rather than raising.
     """
     # Import COMPONENT_HINTS lazily to avoid a circular top-level import.
     # We need them as a set for O(1) lookups and a tuple for the regex walk.

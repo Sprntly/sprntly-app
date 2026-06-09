@@ -566,6 +566,12 @@ def _extract_top_level_frames(file_doc: dict, frame_ids: list[str]) -> list[dict
 def _extract_palette_summary(file_doc: dict) -> dict:
     """Walk the Figma document tree and extract the dominant fill palette.
 
+    NOTE: This function's sole remaining consumer is the in-loop Figma
+    fetch-tool payload (_exec_fetch_figma), which returns its output as the
+    "palette" key for the agent's fetch_figma tool. It is NOT used by
+    design-system extraction — FigmaExtractor.normalize now reads the rich
+    gather keys from gather_figma_signals through the shared kernel.
+
     Returns a dict with:
       - background: hex of the most common large-area dark/light fill
       - accent: hex of the least-common (likely interactive/highlight) fill

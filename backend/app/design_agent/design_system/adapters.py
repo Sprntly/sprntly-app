@@ -208,10 +208,11 @@ def _walk_json(value):
 class FigmaExtractor:
     """Adapter for a connected Figma file.
 
-    `extract_raw_signals` wraps the existing `_extract_palette_summary` walk over
-    a fetched Figma document; `normalize` folds its background / accent / swatches
-    / typography into `DesignSystem` tokens. The source reference is the Figma
-    file key.
+    `extract_raw_signals` captures the rich gather signals from an
+    already-fetched Figma document into a `RawSignals` bag. `normalize` folds
+    those gather keys into a `DesignSignals` object and returns `harden(signals)`
+    — no inline accent / neutral / confidence decision remains here. The source
+    reference is the Figma file key.
     """
 
     category = "design_tool"
@@ -258,36 +259,29 @@ class FigmaExtractor:
         return None
 
     def extract_raw_signals(self, ref: str, file_doc: dict | None = None) -> RawSignals:
-        """Capture the dominant palette + typography from an already-fetched
-        Figma document into a ``RawSignals`` bag.
+        """Capture rich gather signals from an already-fetched Figma document.
 
         The document is fetched by the caller (it owns the access token and the
         page-depth budget) and passed in as ``file_doc``.
 
-        The returned ``signals`` dict merges TWO disjoint key sets:
-
-        **Legacy keys** (from ``_extract_palette_summary``, kept byte-unchanged):
-            ``background, accent, is_dark, swatches, font_family, font_weights``
-
-        **Rich gather keys** (from ``gather_figma_signals``):
+        The returned ``signals`` dict carries the rich gather keys from
+        ``gather_figma_signals``:
             ``theme_background, theme_is_dark, foreground, color_candidates,
             neutral_candidates, container_observations, observed_component_types,
             heading_font_family, body_font_family, font_weights_observed,
             radius_convention, spacing_px, explicit_color_styles,
             explicit_text_styles``
 
-        The two sets are disjoint by construction: ``gather_figma_signals``
-        deliberately uses ``theme_background`` / ``theme_is_dark`` (not
-        ``background`` / ``is_dark``) so ``{**legacy, **rich}`` never overwrites
-        a legacy key.  H2-02 reads the rich keys; existing code reads the legacy
-        keys.  Both families are correct and neither shadows the other (AC12).
+        The legacy palette-summary keys (``background``, ``accent``, ``is_dark``,
+        ``swatches``, ``font_family``, ``font_weights``) were removed here because
+        ``normalize`` now reads the gather keys through the shared kernel. The
+        duplicate accent/palette heuristic still lives in ``tools.py`` for the
+        in-loop Figma fetch-tool payload — it is not deleted, just no longer
+        consumed by design-system extraction.
         """
-        from app.design_agent.tools import _extract_palette_summary
         from app.design_agent.design_system.figma_gather import gather_figma_signals
 
         doc = file_doc or {}
-        # Legacy summary — kept byte-unchanged.
-        legacy = _extract_palette_summary(doc) or {}
 
         # Obtain the optional Variables document only when we have an access token.
         variables_doc: dict | None = None
@@ -302,62 +296,151 @@ class FigmaExtractor:
             except Exception:
                 variables_doc = None
 
-        # Rich gather keys — disjoint from legacy keys (see docstring).
-        rich = gather_figma_signals(doc, variables_doc=variables_doc)
-
-        # Merge: disjoint sets guarantee no legacy key is overwritten.
-        signals = {**legacy, **rich}
+        signals = gather_figma_signals(doc, variables_doc=variables_doc)
         return RawSignals(provider=self.provider, ref=ref, signals=signals)
 
     def normalize(self, raw: RawSignals) -> DesignSystem:
-        """Fold a Figma palette summary into the common `DesignSystem` shape."""
-        s = raw.signals or {}
-        background = s.get("background")
-        accent = s.get("accent")
-        is_dark = bool(s.get("is_dark"))
+        """Fold Figma gather signals into the common DesignSystem shape via the shared kernel.
 
-        if not _is_hex(background):
-            # No usable palette — neutral baseline, low confidence.
+        Constructs a DesignSignals object from the gather keys in raw.signals and
+        returns harden(signals) directly. No inline accent / neutral / elevation /
+        inventory / confidence decision is made here; all heuristics live in the
+        kernel (hardening.py). Nothing is assigned on the returned DesignSystem
+        after harden — harden is the sole assembler.
+
+        An empty gather bag (the unusable-doc sentinel) returns the neutral
+        baseline DesignSystem so callers always receive a complete object.
+        """
+        from app.design_agent.design_system.hardening import harden, pick_accent, _saturation_of
+        from app.design_agent.design_system.signals import (
+            ColorCandidate,
+            ContainerObservation,
+            DesignSignals,
+            FieldFlags,
+            NeutralCandidate,
+            TypographySignals,
+        )
+
+        s = raw.signals or {}
+        if not s:
             return DesignSystem()
 
-        foreground = "#f4f1ea" if is_dark else "#1a1a1a"
-        primary = accent if _is_hex(accent) else background
-        # Surface / muted mirror the runner's swatch heuristic so the rendered
-        # CSS stays identical to the long-standing Figma pre-seed. Note we use the
-        # ORIGINAL (un-filtered) swatch ordering for surface/muted indexing so the
-        # second/third swatch lands exactly where the legacy renderer put it.
-        raw_swatches = s.get("swatches") or []
-        surface = raw_swatches[1] if len(raw_swatches) > 1 else background
-        muted = raw_swatches[2] if len(raw_swatches) > 2 else surface
-
-        font_family = s.get("font_family")
-        weights = [int(w) for w in (s.get("font_weights") or []) if isinstance(w, (int, float))]
-        fonts = Fonts()
-        if font_family:
-            fonts = Fonts(
-                heading_family=font_family,
-                body_family=font_family,
-                weights=weights or Fonts().weights,
+        # Color candidates: saturation computed via the kernel's HSL formula
+        # (_saturation_of in hardening.py). Never use tools.py:_saturation — that
+        # function uses a different (max-min)/max formula and must not be used for
+        # accent selection. Forgetting saturation leaves it at the 0.0 default and
+        # causes pick_accent to degrade to weight-only, ignoring chromatic-ness.
+        candidates: list[ColorCandidate] = [
+            ColorCandidate(
+                hex=c["hex"],
+                weight=float(c.get("weight") or 0.0),
+                saturation=_saturation_of(c["hex"]),
             )
+            for c in (s.get("color_candidates") or [])
+            if c.get("hex")
+        ]
 
-        colors = Colors(
-            background=background,
-            foreground=foreground,
-            surface=surface if _is_hex(surface) else background,
-            primary=primary,
-            accent=primary,
-            muted=muted if _is_hex(muted) else (surface if _is_hex(surface) else background),
-            border=Colors().border,
+        neutral_list: list[NeutralCandidate] = [
+            NeutralCandidate(
+                role=n["role"],
+                hex=n["hex"],
+                weight=float(n.get("weight") or 0.0),
+            )
+            for n in (s.get("neutral_candidates") or [])
+            if n.get("role") in ("surface", "border", "muted") and n.get("hex")
+        ]
+
+        container_list: list[ContainerObservation] = [
+            ContainerObservation(
+                has_border=bool(o.get("has_border")),
+                has_shadow=bool(o.get("has_shadow")),
+            )
+            for o in (s.get("container_observations") or [])
+        ]
+
+        observed_types = [str(t) for t in (s.get("observed_component_types") or [])]
+
+        heading = (s.get("heading_font_family") or "").strip()
+        body = (s.get("body_font_family") or "").strip()
+        weights = [
+            int(w) for w in (s.get("font_weights_observed") or [])
+            if isinstance(w, (int, float))
+        ]
+        radius_conv = (s.get("radius_convention") or "").strip()
+        typography = TypographySignals(
+            heading_family=heading,
+            body_family=body,
+            weights=weights,
+            radius_convention=radius_conv,
         )
-        # Figma signals here are inferred from fills and typography, not from a
-        # documented design system. A real palette plus typography is a richer
-        # signal than a palette alone.
-        confidence = "high" if (font_family and accent) else "medium"
-        return DesignSystem(
-            tokens=Tokens(colors=colors, is_dark=is_dark, fonts=fonts),
-            has_explicit_system=False,
-            confidence=confidence,
+
+        # Non-heuristic pass-throughs. Background and foreground map straight;
+        # the kernel's harden() handles absent values via NON-assignment.
+        background_hex = s.get("theme_background") or ""
+        is_dark = bool(s.get("theme_is_dark"))
+
+        # Foreground rule: use the gathered dominant text-node fill when present;
+        # else derive from the background theme when present; else absent ("").
+        raw_foreground = s.get("foreground")
+        if raw_foreground:
+            foreground_hex = raw_foreground
+        elif background_hex:
+            foreground_hex = "#f4f1ea" if is_dark else "#1a1a1a"
+        else:
+            foreground_hex = ""
+
+        spacing_scale = [
+            int(p) for p in (s.get("spacing_px") or [])
+            if isinstance(p, (int, float)) and int(p) > 0
+        ]
+
+        # Honest provenance flags drive score_confidence.
+        # explicit.accent and explicit.neutrals both require explicit_color_styles
+        # AND the corresponding gathered list to be non-empty — if published colour
+        # styles resolve but none route to neutral roles, explicit.neutrals is False.
+        # explicit.typography requires published text styles (explicit_text_styles).
+        # gathered.* reflect what the kernel can actually pick (non-empty lists).
+        # Every explicit.X=True also implies gathered.X=True.
+        has_explicit_colors = bool(s.get("explicit_color_styles"))
+        has_explicit_text = bool(s.get("explicit_text_styles"))
+
+        explicit = FieldFlags(
+            accent=has_explicit_colors and bool(candidates),
+            neutrals=has_explicit_colors and bool(neutral_list),
+            typography=has_explicit_text,
+            elevation=False,   # no explicit elevation source in the gather layer
+            inventory=False,   # component inventory is always inferred, not explicit
         )
+        gathered = FieldFlags(
+            accent=pick_accent(candidates) is not None,
+            typography=bool(heading),
+            neutrals=bool(neutral_list),
+            elevation=bool(container_list),
+            inventory=bool(observed_types),
+        )
+        # If a flag is explicit it must also be gathered.
+        if explicit.accent:
+            gathered.accent = True
+        if explicit.neutrals:
+            gathered.neutrals = True
+        if explicit.typography:
+            gathered.typography = True
+
+        signals = DesignSignals(
+            color_candidates=candidates,
+            neutral_candidates=neutral_list,
+            container_observations=container_list,
+            observed_component_types=observed_types,
+            typography=typography,
+            is_dark=is_dark,
+            background_hex=background_hex,
+            foreground_hex=foreground_hex,
+            spacing_scale=spacing_scale,
+            gathered=gathered,
+            explicit=explicit,
+            provider="figma",
+        )
+        return harden(signals)  # sole assembler — no field assigned on the result after this
 
 
 # ─── Website ──────────────────────────────────────────────────────────────
