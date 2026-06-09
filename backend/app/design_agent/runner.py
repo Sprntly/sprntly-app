@@ -489,6 +489,20 @@ def _render_design_brief_block(ds: "DesignSystem | None") -> str | None:
     )
 
 
+def _reconcile_elevation_with_separation(ds) -> None:
+    """Keep the deterministic elevation token from contradicting the design
+    brief's separation language. The brief judges how surfaces separate across
+    the whole page, so when it is decisive the token follows it; "both" subsumes
+    either treatment, so the sampler's prevalence answer is left untouched.
+    """
+    separation = ds.component_language.separation
+    if separation == "borders":
+        ds.tokens.elevation_style = "borders"
+    elif separation == "shadows":
+        ds.tokens.elevation_style = "shadows"
+    # "both": keep whatever the sampler's prevalence count already chose.
+
+
 def _resolve_design_system(
     *,
     company_id: str | None,
@@ -563,6 +577,10 @@ def _resolve_design_system(
                         generate_component_language,
                     )
                     ds.component_language = generate_component_language(ds)
+                    # The brief's separation is the richer cross-page signal;
+                    # align the elevation token with it so the deterministic
+                    # token never contradicts the brief it ships beside.
+                    _reconcile_elevation_with_separation(ds)
                 except Exception:
                     pass  # best-effort; leave the deterministic default
 
