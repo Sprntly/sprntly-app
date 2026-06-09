@@ -34,7 +34,8 @@ Returns a plain ``dict`` with exactly these keys (all always present):
     explicit_text_styles  – bool
 
 Key design decisions that must not be changed here:
-- B6: NO saturation computation, NO saturation threshold.
+- All colours go in as candidates; saturation is never computed or
+  thresholded here — the kernel decides chromatic-vs-neutral downstream.
 - ``round(c * 255)`` for new-path hex conversion (not the legacy ``int()``).
 - 5 000-node outer cap; 200-container-observation inner cap — independent.
 """
@@ -141,7 +142,7 @@ def _name_to_neutral_role(name: str) -> str | None:
       ``background|surface|card|sheet|canvas`` → "surface"
       anything else (including unrecognised names) → None (i.e. color_candidate)
 
-    Routing is by name ONLY — never by saturation (B6).
+    Routing is by name ONLY — never by saturation.
     """
     tokens = re.split(r"[/\s\-_]", name.lower())
     for token in tokens:

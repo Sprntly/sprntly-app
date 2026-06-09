@@ -83,7 +83,8 @@ def test_normalize_builds_design_signals_and_hardens():
     """normalize constructs a DesignSignals bag and returns harden(signals).
 
     The result must equal calling harden() on the same signals independently,
-    and no field is assigned on the DesignSystem after harden (D1 contract).
+    and no field is assigned on the DesignSystem after harden — the kernel is
+    the sole assembler.
     """
     s = _gather()
     ds = _normalize(s)
@@ -193,7 +194,7 @@ def test_published_styles_earn_high_and_explicit_system():
 
 def test_published_color_only_lands_medium_not_high():
     """Published colour styles without neutral-named styles and without text styles
-    must land medium, not high (three-way AND for high — S-4).
+    must land medium, not high (high requires all three explicit flags together).
 
     explicit.accent=True but explicit.neutrals=False (no neutral-named style candidates
     in neutral_candidates) and explicit.typography=False → score_confidence returns medium.
@@ -299,7 +300,7 @@ def test_charcoal_gold_output_has_no_default_leaks():
     assert c.primary != "#2563eb"
 
 
-# ── AC7: B6 — monochrome file keeps largest neutral as accent ────────────────
+# ── AC7: monochrome file keeps largest neutral as accent ─────────────────────
 
 
 def test_monochrome_file_keeps_largest_neutral_accent_at_medium():

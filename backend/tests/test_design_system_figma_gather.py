@@ -5,7 +5,7 @@ These tests cover:
   - Graceful degradation when depth-10 truncates consumer nodes or other fields.
   - The fallback ladder: Variables → styles → raw fills.
   - Area × usage weighting (not frequency).
-  - B6: no saturation filtering — monochrome files still emit color candidates.
+  - No saturation filtering — monochrome files still emit color candidates.
   - Dominant-theme board selection.
   - Neutral routing: surface / border / muted.
   - Container observations: border/shadow flags, 200-observation cap.
@@ -154,7 +154,7 @@ def test_gather_module_is_pure_and_llm_free():
                     )
 
     # Confirm no saturation COMPUTATION (function call or comparison) is present.
-    # The word may appear in comments/docstrings explaining the B6 rule, but no
+    # The word may appear in comments/docstrings explaining the no-filter rule, but no
     # live code should compute or threshold on saturation.
     # We check that there is no assignment or function-call pattern involving saturation.
     for node in ast.walk(tree):
@@ -495,11 +495,11 @@ def test_weight_is_area_times_usage_not_frequency():
     )
 
 
-# ── AC6: B6 — no saturation pre-filter ──────────────────────────────────────
+# ── AC6: no saturation pre-filter ───────────────────────────────────────────
 
 
 def test_monochrome_file_emits_neutral_color_candidates():
-    """Near-black + grays only. color_candidates must be non-empty (B6)."""
+    """Near-black + grays only. color_candidates must be non-empty."""
     near_black = _solid_fill(0.05, 0.05, 0.05)   # #0d0d0d
     gray_rect = {
         "id": "gray",
