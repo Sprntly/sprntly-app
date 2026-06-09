@@ -645,3 +645,12 @@ def test_sampler_js_emits_component_counts():
     js = website._SAMPLER_JS
     assert "component_counts" in js
     assert "componentSelectors" in js
+
+
+def test_sampler_js_counts_elevation_prevalence():
+    """Lock the count-based elevation signal against regression (the in-page JS
+    is proven by the live re-extraction): the sampler tallies shadow vs border
+    prevalence across containers rather than trusting the first one."""
+    js = website._SAMPLER_JS
+    assert "shadowCount" in js
+    assert "borderCount" in js

@@ -196,21 +196,33 @@ _SAMPLER_JS = r"""
   const mutedElCs = cs(mutedEl);
   if (mutedElCs && mutedElCs.color) mutedColor = mutedElCs.color;
 
-  // Elevation signal: how the representative card/section separates from the
-  // page — a real box-shadow reads as "shadows", a visible border as "borders".
-  // Empty when neither is detectable, so the token keeps its default.
+  // Elevation signal: how containers separate from the page. Sample a bounded
+  // set of cards/sections and count how many use a real box-shadow vs a visible
+  // border, then pick whichever is more prevalent. Counting across containers
+  // (rather than trusting the first one) avoids calling a mixed site "shadows"
+  // just because the first container happens to carry a shadow. A tie — or
+  // borders ahead — reads as "borders"; "" when neither is observed so the
+  // token keeps its default.
   let elevationHint = '';
-  const cardEl = document.querySelector('[class*="card" i], section, article');
-  const cardCs = cs(cardEl);
-  if (cardCs) {
-    const shadow = cardCs.boxShadow;
-    const bWidth = parseFloat(cardCs.borderTopWidth || cardCs.borderWidth || '0') || 0;
-    const bColor = cardCs.borderTopColor || cardCs.borderColor || '';
-    if (shadow && shadow !== 'none') {
-      elevationHint = 'shadows';
-    } else if (bWidth > 0 && bColor && !isTransparent(bColor)) {
-      elevationHint = 'borders';
-    }
+  let shadowCount = 0;
+  let borderCount = 0;
+  let scanned = 0;
+  const ELEVATION_SCAN_CAP = 40;
+  for (const el of document.querySelectorAll('[class*="card" i], section, article')) {
+    if (scanned >= ELEVATION_SCAN_CAP) break;
+    const elCs = cs(el);
+    if (!elCs) continue;
+    scanned++;
+    const shadow = elCs.boxShadow;
+    const bWidth = parseFloat(elCs.borderTopWidth || elCs.borderWidth || '0') || 0;
+    const bColor = elCs.borderTopColor || elCs.borderColor || '';
+    if (shadow && shadow !== 'none') shadowCount++;
+    if (bWidth > 0 && bColor && !isTransparent(bColor)) borderCount++;
+  }
+  if (shadowCount > 0 || borderCount > 0) {
+    // Strictly more shadows reads as shadows; otherwise (borders ahead or tied)
+    // reads as borders.
+    elevationHint = shadowCount > borderCount ? 'shadows' : 'borders';
   }
 
   // Component inventory: count how many of a known set of UI primitive types
