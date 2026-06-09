@@ -205,6 +205,9 @@ CREATE TABLE cached_asks (
     generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- slug PRIMARY KEY mirrors the prod UNIQUE on datasets.slug
+-- (20260608160000_datasets_slug_unique.sql); a duplicate INSERT raises
+-- IntegrityError here, which insert_dataset treats as "already exists".
 CREATE TABLE datasets (
     slug         TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,

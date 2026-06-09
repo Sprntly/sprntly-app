@@ -16,6 +16,7 @@ it returns any row by id regardless of variant so old bookmarks keep
 resolving.
 """
 import asyncio
+import logging
 
 from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -36,6 +37,8 @@ from app.db.prds import (
 from app.deps.ownership import require_owned_brief, require_owned_prd
 from app.prd_runner import generate_prd
 from app.prompts import PRD_TEMPLATE_VERSION
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/prd", tags=["prd"])
 
@@ -143,7 +146,13 @@ def update(
     try:
         save_prd_version(prd_id, row.get("title", ""), row.get("payload_md", ""), saved_by="auto")
     except Exception:
-        pass  # version table may not exist yet — don't block the save
+        # Non-blocking: a failed snapshot must not fail the save. But don't
+        # swallow it silently — a lost auto-version is the user's undo point
+        # vanishing, so surface it in the logs (e.g. version table missing).
+        logger.warning(
+            "auto-version snapshot failed for prd_id=%s — proceeding with save "
+            "(undo point not captured)", prd_id, exc_info=True,
+        )
     updated = update_prd_content(prd_id, body.title, body.payload_md)
     return updated
 

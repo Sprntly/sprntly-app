@@ -27,7 +27,7 @@ from app.corpus import load_corpus
 from app.db.companies import company_id_for_slug, slug_for_company_id
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
-from app.synthesis.agent import run_synthesis
+from app.synthesis.agent import EmptyKnowledgeGraphError, run_synthesis
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +171,12 @@ def generate_all_synthesis_briefs() -> None:
         try:
             generate_brief_for(slug)
             warm_synthesis_drilldowns(slug)
+        except EmptyKnowledgeGraphError:
+            # Benign: this company simply has no themes/signals yet (nothing
+            # ingested). Not a failure — log at INFO so the startup pass isn't
+            # full of false errors.
+            logger.info("synthesis startup: skipping %s — KG has no themes "
+                        "with signals yet", slug)
         except Exception:  # noqa: BLE001 — per-company isolation
             logger.exception("synthesis startup: brief generation failed for %s",
                              slug)

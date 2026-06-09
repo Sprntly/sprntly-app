@@ -37,8 +37,9 @@ def upsert_backlog_item(
     A re-run of the sequencer refreshes rank/score/reasoning in place and bumps
     updated_at; the user-owned `status` is intentionally NOT overwritten so a
     re-sequence never silently resets a 'done'/'dismissed'/'in_progress' item
-    back to 'backlog'. `id`/`created_at` are only honored on first insert (the
-    upsert's ON CONFLICT update sets the listed columns only).
+    back to 'backlog'. `created_at` is intentionally omitted from the payload so
+    the DB default sets it once on first insert and a re-upsert can't overwrite
+    it; `id` is only used for the first insert (ON CONFLICT keeps the existing).
     """
     cli = client or require_client()
     now = utc_now()
@@ -54,7 +55,6 @@ def upsert_backlog_item(
             "score": float(score),
             "reasoning": reasoning,
             "updated_at": now,
-            "created_at": now,
         },
         on_conflict="enterprise_id,theme_id",
     ).execute()
