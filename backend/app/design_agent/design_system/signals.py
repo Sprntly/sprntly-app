@@ -78,7 +78,10 @@ class DesignSignals(BaseModel):
     provenance only.
     """
 
-    chromatic_candidates: list[ColorCandidate] = Field(default_factory=list)
+    # All CTA colour candidates (chromatic AND neutral). Saturation is a
+    # per-candidate attribute, NOT a membership filter — chromatic-ness is
+    # decided downstream in pick_accent, not by what's allowed into this list.
+    color_candidates: list[ColorCandidate] = Field(default_factory=list)
     neutral_candidates: list[NeutralCandidate] = Field(default_factory=list)
     container_observations: list[ContainerObservation] = Field(default_factory=list)
     observed_component_types: list[str] = Field(default_factory=list)

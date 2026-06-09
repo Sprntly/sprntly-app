@@ -28,7 +28,7 @@ from app.design_agent.design_system.signals import (
 
 def test_default_design_signals_constructs():
     sig = DesignSignals()
-    assert sig.chromatic_candidates == []
+    assert sig.color_candidates == []
     assert sig.neutral_candidates == []
     assert sig.container_observations == []
     assert sig.observed_component_types == []
@@ -67,7 +67,7 @@ def test_container_observation_defaults_false():
 
 def test_round_trips_through_dump_and_validate():
     original = DesignSignals(
-        chromatic_candidates=[
+        color_candidates=[
             ColorCandidate(hex="#0e6b4f", weight=1.0, saturation=0.77),
             ColorCandidate(hex="#123456", weight=0.5, saturation=0.4),
         ],
@@ -174,7 +174,7 @@ def test_module_has_no_io_side_effects():
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "", f"importing signals leaked: {result.stdout.strip()}"
     # Constructing instances performs no I/O — it simply builds.
-    DesignSignals(chromatic_candidates=[ColorCandidate(hex="#0e6b4f")])
+    DesignSignals(color_candidates=[ColorCandidate(hex="#0e6b4f")])
 
 
 def test_no_baked_design_token_colors_in_source():
