@@ -109,7 +109,65 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   claude_code_handoff: false,
 }
 
-export const ONBOARDING_STEP_COUNT = 7
+/**
+ * The semantic slugs of the numbered onboarding steps, in flow order. This is
+ * the single source of truth for the onboarding route order:
+ *
+ *   1. business-info  → BusinessInfo  (company + product + website)
+ *      [analyzing]    → Analyzing     (unnumbered loader — NOT in this list)
+ *   2. metrics        → Metrics       (the metrics-tree page)
+ *   3. connectors     → Connectors
+ *   4. coworkers      → Coworkers
+ *   5. first-brief    → FirstBrief
+ *
+ * The `analyzing` interstitial is deliberately absent: it is an unnumbered,
+ * transient route excluded from the progress dots and the step count.
+ *
+ * `onboarding_step` (the integer DB column) is the 1-based INDEX into this
+ * array. Use `slugForStep` / `stepForSlug` to convert, and `clampStep` to keep
+ * persisted values (including stale ones from the old 7-step flow) in range.
+ */
+export const ONBOARDING_STEP_SLUGS = [
+  "business-info",
+  "metrics",
+  "connectors",
+  "coworkers",
+  "first-brief",
+] as const
+
+export type OnboardingStepSlug = (typeof ONBOARDING_STEP_SLUGS)[number]
+
+export const ONBOARDING_STEP_COUNT = ONBOARDING_STEP_SLUGS.length
+
+/** The unnumbered loader route between business-info (1) and metrics (2). */
+export const ONBOARDING_ANALYZING_SLUG = "analyzing"
+
+/** True for a valid numbered-step slug (excludes `analyzing`). */
+export function isOnboardingStepSlug(slug: string): slug is OnboardingStepSlug {
+  return (ONBOARDING_STEP_SLUGS as readonly string[]).includes(slug)
+}
+
+/**
+ * Clamp a persisted 1-based `onboarding_step` into [1, ONBOARDING_STEP_COUNT].
+ * Existing users mid-old-flow may carry step=6/7 (the old 7-step order); those
+ * land on the last valid step rather than crashing. Non-finite / <1 values
+ * clamp up to 1.
+ */
+export function clampStep(step: number): number {
+  if (!Number.isFinite(step)) return 1
+  return Math.min(Math.max(Math.trunc(step), 1), ONBOARDING_STEP_COUNT)
+}
+
+/** 1-based step index → its slug (clamped). */
+export function slugForStep(step: number): OnboardingStepSlug {
+  return ONBOARDING_STEP_SLUGS[clampStep(step) - 1]
+}
+
+/** Slug → its 1-based step index, or null when it isn't a numbered step. */
+export function stepForSlug(slug: string): number | null {
+  const i = (ONBOARDING_STEP_SLUGS as readonly string[]).indexOf(slug)
+  return i === -1 ? null : i + 1
+}
 
 export function emptyKpiTree(): KpiTree {
   return { north_star: "", north_star_description: "", metrics: [] }
