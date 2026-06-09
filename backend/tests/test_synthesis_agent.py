@@ -88,6 +88,130 @@ def test_convergence_skips_superseded(facade):
     assert out[0].signal_count == 1   # superseded excluded
 
 
+# ---------- convergence dedup of multi-edge signals (BUG: double-count) ----------
+
+def _seed_signal_with_edges(facade, ent, theme, source_type, kind, props, age_days,
+                            edge_types):
+    """Write ONE signal wired to `theme` via several relationship rows. Returns
+    the signal. Models the real-world case where a signal AFFECTS and PRESSURES
+    the same theme (two edges, one source signal)."""
+    from app.graph.types import Relationship, Signal
+    now = datetime.now(timezone.utc)
+    sig = Signal(enterprise_id=ent, source_type=source_type, kind=kind,
+                 content=f"{kind} via {'+'.join(edge_types)}", properties=props,
+                 valid_at=now - timedelta(days=age_days))
+    facade.write_signal(ent, sig)
+    for et in edge_types:
+        facade.write_relationship(ent, Relationship(
+            enterprise_id=ent, type=et, source_kind="signal",
+            source_id=sig.id, target_kind="entity", target_id=theme.id))
+    return sig
+
+
+def _single_theme(facade, ent, label):
+    from app.graph.types import Entity
+    theme = Entity(enterprise_id=ent, type="theme", canonical_label=label)
+    facade.create_entity(ent, theme)
+    return theme
+
+
+def test_convergence_dedups_double_edged_signal_revenue_and_count(facade):
+    """A signal wired to a theme via TWO edges (AFFECTS + PRESSURES) must count
+    ONCE in revenue / signal_count / effective_weight — not twice."""
+    from app.synthesis.convergence import compute_convergence
+
+    theme = _single_theme(facade, "ent-A", "SSO")
+    _seed_signal_with_edges(facade, "ent-A", theme, "revenue", "deal_blocker",
+                            {"revenue_at_risk_usd": 500000}, 1,
+                            ["AFFECTS", "PRESSURES"])
+    out = compute_convergence(facade, "ent-A")
+    assert len(out) == 1
+    tc = out[0]
+    assert tc.signal_count == 1                 # not 2
+    assert tc.revenue_at_stake_usd == 500000    # not 1_000_000
+
+
+def test_convergence_double_edged_matches_single_edge_totals(facade):
+    """The doubled-edge scenario yields the SAME totals as the single-edge one:
+    revenue, signal_count, and effective_weight are identical."""
+    from app.synthesis.convergence import compute_convergence
+
+    # Two themes, same signal data: one wired by 1 edge, one wired by 3 edges.
+    single = _single_theme(facade, "ent-A", "single_edge")
+    _seed_signal_with_edges(facade, "ent-A", single, "revenue", "deal_blocker",
+                            {"revenue_at_risk_usd": 500000}, 1, ["AFFECTS"])
+    triple = _single_theme(facade, "ent-A", "triple_edge")
+    _seed_signal_with_edges(facade, "ent-A", triple, "revenue", "deal_blocker",
+                            {"revenue_at_risk_usd": 500000}, 1,
+                            ["AFFECTS", "PRESSURES", "REQUESTS"])
+
+    by_label = {t.theme_label: t for t in compute_convergence(facade, "ent-A")}
+    a, b = by_label["single_edge"], by_label["triple_edge"]
+    assert a.signal_count == b.signal_count == 1
+    assert a.revenue_at_stake_usd == b.revenue_at_stake_usd == 500000
+    assert a.effective_weight == pytest.approx(b.effective_weight)
+    assert a.base_score == pytest.approx(b.base_score)
+
+
+def test_convergence_dedup_weight_over_distinct_signals(facade):
+    """effective_weight (and the base_score severity term) is computed over
+    DISTINCT signals: a single double-edged signal weighs the same as if it had
+    one edge."""
+    from app.synthesis.convergence import compute_convergence
+
+    theme = _single_theme(facade, "ent-A", "t")
+    sig = _seed_signal_with_edges(facade, "ent-A", theme, "revenue", "deal_blocker",
+                                  {}, 0, ["AFFECTS", "PRESSURES"])
+    out = compute_convergence(facade, "ent-A")
+    tc = out[0]
+    # fresh revenue signal: confidence*weight*recency, single instance
+    assert tc.effective_weight == pytest.approx(sig.confidence * sig.weight)
+    assert tc.signal_count == 1
+
+
+def test_convergence_dedup_breadth_unchanged(facade):
+    """Dedup must not collapse distinct signals: two different signals on a theme
+    still give breadth/count of 2 even if one of them is double-edged."""
+    from app.synthesis.convergence import compute_convergence
+
+    theme = _single_theme(facade, "ent-A", "t")
+    _seed_signal_with_edges(facade, "ent-A", theme, "revenue", "deal_blocker",
+                            {"revenue_at_risk_usd": 100000}, 1, ["AFFECTS", "PRESSURES"])
+    _seed_signal_with_edges(facade, "ent-A", theme, "customer_voice",
+                            "feature_request", {}, 2, ["REQUESTS"])
+    out = compute_convergence(facade, "ent-A")
+    tc = out[0]
+    assert tc.signal_count == 2
+    assert tc.breadth == 2
+    assert tc.revenue_at_stake_usd == 100000
+
+
+def test_convergence_dedup_evidence_listed_once(facade):
+    """The evidence list for a theme carries each distinct signal once, even when
+    that signal reaches the theme via multiple edges."""
+    from app.synthesis.convergence import compute_convergence
+
+    theme = _single_theme(facade, "ent-A", "t")
+    sig = _seed_signal_with_edges(facade, "ent-A", theme, "revenue", "deal_blocker",
+                                  {}, 0, ["AFFECTS", "PRESSURES", "REQUESTS"])
+    out = compute_convergence(facade, "ent-A")
+    ev_ids = [e["signal_id"] for e in out[0].evidence]
+    assert ev_ids.count(sig.id) == 1
+    assert len(ev_ids) == 1
+
+
+def test_convergence_dedup_competitor_pressure_counted_once(facade):
+    """A competitor-pressure signal reaching a theme by two edges bumps
+    competitor_pressure once, not twice."""
+    from app.synthesis.convergence import compute_convergence
+
+    theme = _single_theme(facade, "ent-A", "t")
+    _seed_signal_with_edges(facade, "ent-A", theme, "customer_voice",
+                            "competitor_move", {}, 0, ["PRESSURES", "AFFECTS"])
+    out = compute_convergence(facade, "ent-A")
+    assert out[0].competitor_pressure == 1
+
+
 # ---------- extractor ----------
 
 _EXTRACTED = {
@@ -541,3 +665,91 @@ def test_no_tree_path_factors_neutral_no_classification(facade, isolated_setting
     for c in rank["factors"]["candidates"]:
         assert c["goal_factor"] == 1.0
         assert c["goal_adjusted_score"] == c["base_score"]
+
+
+# ---------- provenance pinning: rank decision logs the gateway's returned
+# prompt_version (carrying the skill hash), not the bare module constant -------
+
+# The gateway appends `+<skill_id>@<hash>` to prompt_version when a skill binds;
+# the decision log MUST record that returned value so the §4d audit row pins the
+# exact method/skill version behind the ranking call.
+_SKILL_PINNED_VERSION = "synthesis-brief-v1+prioritize@deadbeef"
+
+
+def _ranked_for(theme_id):
+    return {**_RANKED, "insights": [{**_RANKED["insights"][0], "theme_id": theme_id}]}
+
+
+def _run_synthesis_with_pinned_gateway(facade, isolated_settings,
+                                       returned_version=_SKILL_PINNED_VERSION):
+    """Run synthesis with the gateway mocked to return `returned_version` as the
+    LLMResult.prompt_version (mirrors the real gateway's `+skill@hash` suffix).
+    Returns the persisted rank decision-log row."""
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+
+    def fake_llm(**kw):
+        # the OUTGOING call still passes the bare constant in; the gateway is
+        # what appends the suffix and returns it on the result.
+        assert kw["prompt_version"] == synth.PROMPT_VERSION
+        return LLMResult(
+            output=_ranked_for(theme.id), model="claude-sonnet-4-6",
+            prompt_version=returned_version, input_tokens=10, output_tokens=5,
+            cache_read_input_tokens=0, cache_creation_input_tokens=0,
+            cost_usd=0.001, latency_ms=5, stop_reason="end_turn",
+        )
+
+    with patch.object(synth, "llm_call", fake_llm):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    logs = isolated_settings["supabase"].table("agent_decision_log").select("*") \
+        .eq("enterprise_id", "ent-A").execute().data
+    return next(r for r in logs if r["decision_type"] == "rank")
+
+
+def test_rank_decision_log_pins_gateway_returned_prompt_version(
+        facade, isolated_settings):
+    """The top-level prompt_version on the rank decision-log row is the gateway's
+    RETURNED result.prompt_version (with the skill hash), not the bare constant."""
+    from app.synthesis import agent as synth
+
+    rank = _run_synthesis_with_pinned_gateway(facade, isolated_settings)
+    assert rank["prompt_version"] == _SKILL_PINNED_VERSION
+    assert rank["prompt_version"] != synth.PROMPT_VERSION
+    assert "+prioritize@deadbeef" in rank["prompt_version"]
+
+
+def test_rank_decision_log_factors_prompt_version_pins_skill_hash(
+        facade, isolated_settings):
+    """The factors['prompt_version'] mirror also carries the gateway's returned
+    version, so the audit JSON itself records the bound skill."""
+    rank = _run_synthesis_with_pinned_gateway(facade, isolated_settings)
+    assert rank["factors"]["prompt_version"] == _SKILL_PINNED_VERSION
+    assert "+prioritize@deadbeef" in rank["factors"]["prompt_version"]
+
+
+def test_rank_decision_log_prompt_version_matches_result(facade, isolated_settings):
+    """Top-level and factors prompt_version agree — both pin the same returned
+    version (no split-brain between the row and its factors blob)."""
+    custom = "synthesis-brief-v1+prioritize@cafef00d"
+    rank = _run_synthesis_with_pinned_gateway(
+        facade, isolated_settings, returned_version=custom)
+    assert rank["prompt_version"] == custom
+    assert rank["factors"]["prompt_version"] == custom
+
+
+def test_rank_decision_log_carries_skill_hash_not_bare_constant(
+        facade, isolated_settings):
+    """Regression: with a skill bound, neither the row nor its factors may fall
+    back to the bare module constant (that would lose the method/skill version)."""
+    from app.synthesis import agent as synth
+
+    rank = _run_synthesis_with_pinned_gateway(facade, isolated_settings)
+    assert rank["prompt_version"] != synth.PROMPT_VERSION
+    assert rank["factors"]["prompt_version"] != synth.PROMPT_VERSION
+    # the bound-skill suffix is the differentiator
+    assert rank["prompt_version"].endswith("@deadbeef")
