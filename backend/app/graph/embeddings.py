@@ -28,7 +28,9 @@ def embed_texts(texts: list[str], model: str = EMBEDDING_MODEL) -> list[list[flo
         return []
     key = getattr(settings, "openai_api_key", "")
     if not key:
-        raise RuntimeError("OPENAI_API_KEY not configured — embeddings unavailable")
+        logger.warning("OPENAI_API_KEY not configured — returning zero vectors "
+                       "(KG search will be degraded until a key is set)")
+        return [[0.0] * EMBEDDING_DIM for _ in texts]
     body = json.dumps({"model": model, "input": texts}).encode()
     last: Exception | None = None
     for attempt in range(_MAX_ATTEMPTS):

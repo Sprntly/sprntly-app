@@ -13,7 +13,9 @@ import { useContent } from "../../../context/ContentContext"
 import { PrdSections } from "../../shared/PrdSections"
 import { DesignAgentLauncher } from "../../design-agent/DesignAgentLauncher"
 import { PostGenerationResult } from "../../design-agent/PostGenerationResult"
-import { designAgentApi, prdApi, type PrototypeRecord } from "../../../lib/api"
+import { useCompany } from "../../../context/CompanyContext"
+import { ApiError, designAgentApi, prdApi, type PrototypeRecord } from "../../../lib/api"
+import { markdownToPrdState } from "../../../lib/prd-adapter"
 import { runDesignAgentGeneration } from "../../../lib/runDesignAgentGeneration"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
@@ -92,8 +94,33 @@ type PrdVersion = { id: number; prd_id: number; version_number: number; title: s
 
 export function PrdScreen() {
   const { goTo, openModal, shareMenuOpen, setShareMenuOpen, showToast } = useNavigation()
-  const { content } = useContent()
+  const { content, setContent } = useContent()
+  const { activeCompany } = useCompany()
   const prd = content.prd
+
+  const [prdLoading, setPrdLoading] = useState(false)
+
+  // Auto-load the latest PRD on mount if content.prd is empty (e.g. after refresh)
+  useEffect(() => {
+    if (prd || !activeCompany) return
+    let cancelled = false
+    setPrdLoading(true)
+    prdApi.latest(activeCompany).then((record) => {
+      if (cancelled || !record.payload_md) return
+      setContent({
+        prd: {
+          ...markdownToPrdState(record.payload_md),
+          prd_id: record.id,
+          figma_file_key: undefined,
+        },
+      })
+    }).catch((e) => {
+      if (e instanceof ApiError && e.status === 404) return
+    }).finally(() => {
+      if (!cancelled) setPrdLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [prd, activeCompany, setContent])
 
   const bodyRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -181,11 +208,18 @@ export function PrdScreen() {
           </>
         ) : (
           <div className="prd-body" style={{ minHeight: 280 }}>
-            <EmptyPane
-              title="No PRD draft loaded"
-              hint="When your LLM generates a mini-PRD, assign `content.prd` with `metaLine`, `title`, and `sections`. Toolbar actions stay available for future wiring."
-              placeholders={0}
-            />
+            {prdLoading ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 32, color: "var(--ink-2)" }}>
+                <span className="prd-loader" aria-hidden />
+                Loading PRD…
+              </div>
+            ) : (
+              <EmptyPane
+                title="No PRD draft loaded"
+                hint="Generate a PRD from the Weekly Brief by selecting an insight and clicking Generate PRD."
+                placeholders={0}
+              />
+            )}
           </div>
         )}
 

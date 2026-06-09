@@ -1335,6 +1335,12 @@
   .prd-tool-divider { width: 1px; height: 14px; background: var(--line-strong); margin: 0 4px; }
   .prd-status { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
   .prd-body { padding: 40px 56px 48px; outline: none; }
+  .prd-loader {
+    width: 20px; height: 20px; border: 2px solid var(--line);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: prd-spin 0.8s linear infinite; flex-shrink: 0;
+  }
+  @keyframes prd-spin { to { transform: rotate(360deg); } }
   .prd-body strong { color: var(--ink); font-weight: 700; }
   .prd-body em { font-style: italic; color: var(--ink-2); }
   .prd-body code {
