@@ -259,16 +259,55 @@ class FigmaExtractor:
 
     def extract_raw_signals(self, ref: str, file_doc: dict | None = None) -> RawSignals:
         """Capture the dominant palette + typography from an already-fetched
-        Figma document into a `RawSignals` bag.
+        Figma document into a ``RawSignals`` bag.
 
         The document is fetched by the caller (it owns the access token and the
-        page-depth budget) and passed in as `file_doc`. We reuse the existing
-        `_extract_palette_summary` rather than re-walking the tree.
+        page-depth budget) and passed in as ``file_doc``.
+
+        The returned ``signals`` dict merges TWO disjoint key sets:
+
+        **Legacy keys** (from ``_extract_palette_summary``, kept byte-unchanged):
+            ``background, accent, is_dark, swatches, font_family, font_weights``
+
+        **Rich gather keys** (from ``gather_figma_signals``):
+            ``theme_background, theme_is_dark, foreground, color_candidates,
+            neutral_candidates, container_observations, observed_component_types,
+            heading_font_family, body_font_family, font_weights_observed,
+            radius_convention, spacing_px, explicit_color_styles,
+            explicit_text_styles``
+
+        The two sets are disjoint by construction: ``gather_figma_signals``
+        deliberately uses ``theme_background`` / ``theme_is_dark`` (not
+        ``background`` / ``is_dark``) so ``{**legacy, **rich}`` never overwrites
+        a legacy key.  H2-02 reads the rich keys; existing code reads the legacy
+        keys.  Both families are correct and neither shadows the other (AC12).
         """
         from app.design_agent.tools import _extract_palette_summary
+        from app.design_agent.design_system.figma_gather import gather_figma_signals
 
-        summary = _extract_palette_summary(file_doc or {}) or {}
-        return RawSignals(provider=self.provider, ref=ref, signals=summary)
+        doc = file_doc or {}
+        # Legacy summary — kept byte-unchanged.
+        legacy = _extract_palette_summary(doc) or {}
+
+        # Obtain the optional Variables document only when we have an access token.
+        variables_doc: dict | None = None
+        access_token = (
+            getattr(self, "figma_access_token", None)
+            or getattr(self, "access_token", None)
+        )
+        if access_token and ref:
+            try:
+                from app.connectors.figma_oauth import fetch_file_variables
+                variables_doc = fetch_file_variables(access_token, ref)
+            except Exception:
+                variables_doc = None
+
+        # Rich gather keys — disjoint from legacy keys (see docstring).
+        rich = gather_figma_signals(doc, variables_doc=variables_doc)
+
+        # Merge: disjoint sets guarantee no legacy key is overwritten.
+        signals = {**legacy, **rich}
+        return RawSignals(provider=self.provider, ref=ref, signals=signals)
 
     def normalize(self, raw: RawSignals) -> DesignSystem:
         """Fold a Figma palette summary into the common `DesignSystem` shape."""
