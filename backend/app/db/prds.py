@@ -154,6 +154,35 @@ def get_prd_rendered(prd_id: int) -> dict | None:
 
 
 @retry_on_disconnect
+def latest_prd_for_dataset(dataset: str) -> dict | None:
+    """Most recent ready PRD whose brief belongs to `dataset`."""
+    c = require_client()
+    # Find the latest brief for this dataset, then the latest ready PRD for it.
+    brief_resp = (
+        c.table("briefs")
+        .select("id")
+        .eq("dataset", dataset)
+        .eq("is_current", True)
+        .order("generated_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not brief_resp.data:
+        return None
+    brief_id = brief_resp.data[0]["id"]
+    resp = (
+        c.table("prds")
+        .select("*")
+        .eq("brief_id", brief_id)
+        .eq("status", "ready")
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+@retry_on_disconnect
 def find_existing_prd(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:

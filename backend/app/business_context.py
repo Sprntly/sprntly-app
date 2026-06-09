@@ -306,12 +306,19 @@ class BusinessContext(BaseModel):
 # --------------------------------------------------------------------------- #
 def load_business_context(enterprise_id: str) -> Optional[BusinessContext]:
     """Read the company's business context; None if unset/empty/invalid."""
-    r = (
-        require_client().table("companies")
-        .select("business_context")
-        .eq("id", enterprise_id)
-        .execute()
-    )
+    try:
+        r = (
+            require_client().table("companies")
+            .select("business_context")
+            .eq("id", enterprise_id)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — column may not exist yet (migration pending)
+        logger.warning(
+            "business_context column unavailable for %s (migration pending?); "
+            "skipping", enterprise_id, exc_info=True,
+        )
+        return None
     if not r.data:
         return None
     raw = r.data[0].get("business_context") or {}

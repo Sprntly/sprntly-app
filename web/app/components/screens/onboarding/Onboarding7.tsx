@@ -1,73 +1,110 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
+import { useAuth } from "../../../lib/auth"
+import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { KpiTreePreview } from "../../onboarding/KpiTreePreview"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep } from "../../../lib/onboarding/store"
+import { completeOnboarding } from "../../../lib/onboarding/store"
+import { briefToContentPatch } from "../../../lib/brief-adapter"
+import type { Brief } from "../../../lib/api"
 import {
-  canLaunchWorkspace,
-  COWORKERS,
-  coworkersApi,
-  emptyCoworkerNames,
-  type CoworkerNames,
-  type CoworkerSlot,
-} from "../../../lib/onboarding/coworkersApi"
+  briefPreviewInsight,
+  ensureDatasetForWorkspace,
+  fetchBriefWhenReady,
+  pollBriefStatus,
+  seedWorkspaceContextFiles,
+  startBriefGeneration,
+} from "../../../lib/workspace-brief"
+import { useContent } from "../../../context/ContentContext"
 
-/**
- * Onboarding page 07 (design-v4) — "Introducing your AI coworkers."
- *
- * Four specialists join the workspace: Product / Design / Data Science /
- * Admin. The user names each one — the name is how the coworker signs its
- * work in chats, briefs, and comments. Names persist to the backend
- * (PUT /v1/company/coworkers). "Launch workspace" advances to step 8,
- * where the first Brief is generated.
- */
+type GenPhase =
+  | { kind: "idle" }
+  | { kind: "preparing" }
+  | { kind: "generating"; message: string }
+  | { kind: "ready"; brief: Brief }
+  | { kind: "failed"; error: string }
+
 export function Onboarding7() {
-  const { workspace, setWorkspace, loading } = useOnboarding()
+  const auth = useAuth()
+  const { workspace, loading } = useOnboarding()
+  const { setContent } = useContent()
   const router = useRouter()
-  const [names, setNames] = useState<CoworkerNames>(emptyCoworkerNames())
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [finishing, setFinishing] = useState(false)
+  const [phase, setPhase] = useState<GenPhase>({ kind: "idle" })
+  const startedRef = useRef(false)
+
+  const runGeneration = useCallback(async () => {
+    if (!workspace) return
+    setPhase({ kind: "preparing" })
+    try {
+      await ensureDatasetForWorkspace(workspace)
+      setPhase({ kind: "generating", message: "Saving your workspace context…" })
+      await seedWorkspaceContextFiles(workspace)
+
+      const existing = await fetchBriefWhenReady(workspace.slug)
+      if (existing) {
+        setContent(briefToContentPatch(existing))
+        setPhase({ kind: "ready", brief: existing })
+        return
+      }
+
+      setPhase({ kind: "generating", message: "Generating your first Brief…" })
+      await startBriefGeneration(workspace.slug)
+
+      const finalStatus = await pollBriefStatus(workspace.slug, {
+        onTick: (s) => {
+          if (s.status === "generating") {
+            setPhase({ kind: "generating", message: "Sprntly is analyzing your context…" })
+          }
+        },
+      })
+
+      if (finalStatus.status === "failed") {
+        setPhase({
+          kind: "failed",
+          error: finalStatus.error || "Brief generation failed. You can add data sources and try again from Home.",
+        })
+        return
+      }
+
+      const brief = await fetchBriefWhenReady(workspace.slug)
+      if (brief) {
+        setContent(briefToContentPatch(brief))
+        setPhase({ kind: "ready", brief })
+      } else {
+        setPhase({
+          kind: "failed",
+          error: "Brief is still processing. Enter Sprntly and check the Weekly Brief in a few minutes.",
+        })
+      }
+    } catch (e) {
+      setPhase({
+        kind: "failed",
+        error: e instanceof Error ? e.message : "Could not start brief generation.",
+      })
+    }
+  }, [workspace, setContent])
 
   useEffect(() => {
-    if (!workspace?.id) return
-    void coworkersApi
-      .get()
-      .then((n) => setNames({ ...emptyCoworkerNames(), ...n }))
-      .catch(() => {})
-  }, [workspace?.id])
+    if (!workspace || startedRef.current) return
+    startedRef.current = true
+    void runGeneration()
+  }, [workspace, runGeneration])
 
-  const { errors, validate, clearError, containerRef } = useFieldValidation(
-    () =>
-      COWORKERS.map((c) => ({
-        key: c.slot,
-        valid: names[c.slot].trim().length > 0,
-        message: `Give your ${c.label.toLowerCase()} a name.`,
-      })),
-  )
-
-  function setName(slot: CoworkerSlot, value: string) {
-    setNames((prev) => ({ ...prev, [slot]: value }))
-    clearError(slot)
-  }
-
-  const canLaunch = canLaunchWorkspace(names)
-
-  async function launch() {
-    if (!workspace) return
-    setError(null)
-    if (!validate().ok) return
-    setSaving(true)
+  async function finish() {
+    if (!workspace || auth.kind !== "authed") return
+    setFinishing(true)
     try {
-      await coworkersApi.put(names)
-      const updated = await advanceOnboardingStep(workspace.id, 8)
-      setWorkspace(updated)
-      router.push("/onboarding/8")
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't save coworker names.")
+      await completeOnboarding(workspace.id, auth.user.id)
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("sprntly_active_company", workspace.slug)
+      }
+      router.replace("/")
     } finally {
-      setSaving(false)
+      setFinishing(false)
     }
   }
 
@@ -81,118 +118,112 @@ export function Onboarding7() {
 
   if (loading || !workspace) return <div className="ob-shell">Loading…</div>
 
-  const namedCount = COWORKERS.filter((c) => names[c.slot].trim()).length
+  const preview =
+    phase.kind === "ready" ? briefPreviewInsight(phase.brief) : null
 
   return (
     <InterviewLayout
       step={7}
-      eyebrow="Saved"
-      title="Introducing your AI coworkers. Give them a name."
-      agentMessage="Three specialists plus an Admin join your workspace. You can give them a task, ask them questions, or @mention them — and their name is how they'll sign their work in chats, briefs, and comments."
-      rightPane={
-        <div>
-          <div className="ob-preview-label">Your coworkers</div>
-          <p className="ob-stat-lg">
-            {namedCount} of {COWORKERS.length} named
-          </p>
+      eyebrow="First Brief preview"
+      title={
+        phase.kind === "ready"
+          ? "Your first Brief is ready"
+          : phase.kind === "failed"
+            ? "Almost there"
+            : "Preparing your first Brief"
+      }
+      agentMessage={
+        phase.kind === "ready"
+          ? "Here's the top finding from your first Brief — ranked against your KPI tree. You can drill into the full Brief from Home."
+          : phase.kind === "generating" || phase.kind === "preparing"
+            ? "We're using your onboarding context to generate a first Brief. This usually takes one to two minutes."
+            : phase.kind === "failed"
+              ? "You can still enter Sprntly. Add analytics or upload sources under Sources to enrich the next Brief."
+              : "Starting brief generation…"
+      }
+      rightPane={<KpiTreePreview tree={workspace.kpi_tree} />}
+      onBack={() => router.push("/onboarding/6")}
+      onContinue={finish}
+      continueLabel={phase.kind === "ready" ? "Enter Sprntly →" : "Enter Sprntly anyway →"}
+      loading={finishing}
+      continueDisabled={phase.kind === "preparing" || phase.kind === "generating"}
+    >
+      {phase.kind === "preparing" || phase.kind === "generating" ? (
+        <div className="ob-brief-status">
+          <div className="ob-brief-spinner" aria-hidden />
+          <p>{phase.kind === "generating" ? phase.message : "Preparing your workspace…"}</p>
+        </div>
+      ) : null}
+
+      {phase.kind === "failed" && (
+        <div className="ob-form-error" role="alert">
+          {phase.error}
+          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => void runGeneration()}>
+              Retry generation
+            </button>
+            <Link href="/sources" className="btn btn-ghost btn-sm">
+              Add sources →
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {preview && (
+        <div className="ob-brief-preview ob-brief-preview-live">
+          <div className="ob-brief-label">{preview.tag}</div>
+          <h3 className="ob-brief-title">{preview.headline}</h3>
+          {preview.subtitle && <p className="ob-brief-body">{preview.subtitle}</p>}
+          {phase.kind === "ready" && (
+            <p className="ob-brief-meta">
+              Week: {phase.brief.week_label || "This week"} · {phase.brief.insights.length} findings
+            </p>
+          )}
+        </div>
+      )}
+
+      {!preview && phase.kind !== "generating" && phase.kind !== "preparing" && (
+        <div className="ob-brief-preview">
+          <div className="ob-brief-label">Workspace summary</div>
           <ul className="ob-preview-list">
-            {COWORKERS.map((c) => (
-              <li key={c.slot}>
-                {names[c.slot].trim() || c.label}
-              </li>
-            ))}
+            <li>Company: {workspace.display_name}</li>
+            {workspace.product?.name && <li>Product: {workspace.product.name}</li>}
+            <li>North star: {workspace.kpi_tree.north_star || "—"}</li>
           </ul>
         </div>
-      }
-      onBack={() => router.push("/onboarding/6")}
-      onContinue={launch}
-      continueLabel="Launch workspace"
-      loading={saving}
-    >
-      <div ref={containerRef}>
-      {error && <div className="ob-form-error">{error}</div>}
-
-      <div className="ob-coworker-list">
-        {COWORKERS.map((c) => (
-          <div
-            key={c.slot}
-            className={`ob-coworker-row cw-${c.color}`}
-            data-field={c.slot}
-          >
-            <div className="ob-coworker-meta">
-              <div className="ob-coworker-label">{c.label}</div>
-              <div className="ob-coworker-blurb">{c.blurb}</div>
-              {errors[c.slot] && <p className="field-error">{errors[c.slot]}</p>}
-            </div>
-            <input
-              className={`input ob-coworker-input ${errors[c.slot] ? "has-error" : ""}`}
-              value={names[c.slot]}
-              onChange={(e) => setName(c.slot, e.target.value)}
-              placeholder={c.placeholder}
-              maxLength={40}
-              aria-label={`Name for ${c.label}`}
-            />
-          </div>
-        ))}
-      </div>
-
-      <p className="ob-launch-note">
-        {namedCount} of {COWORKERS.length} named ·{" "}
-        {canLaunch ? "ready to launch" : "name each coworker to launch"}
-      </p>
-      </div>
+      )}
 
       <style jsx>{`
-        .ob-coworker-list {
+        .ob-brief-status {
           display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-        .ob-coworker-row {
-          display: grid;
-          grid-template-columns: 1fr 180px;
-          gap: 14px;
           align-items: center;
-          padding: 16px 18px;
-          border: 1px solid var(--line);
-          border-left: 3px solid var(--accent);
-          border-radius: 12px;
+          gap: 12px;
+          padding: 16px;
           background: var(--surface-2);
-        }
-        .cw-pm {
-          border-left-color: var(--accent);
-        }
-        .cw-pd {
-          border-left-color: #2a6ec8;
-        }
-        .cw-ds {
-          border-left-color: #634ab0;
-        }
-        .cw-admin {
-          border-left-color: var(--ink-3);
-        }
-        .ob-coworker-label {
-          font-weight: 600;
+          border-radius: 10px;
           font-size: 14px;
+          color: var(--ink-2);
         }
-        .ob-coworker-blurb {
-          font-size: 12px;
-          color: var(--ink-3);
-          margin-top: 2px;
-          line-height: 1.4;
+        .ob-brief-spinner {
+          width: 22px;
+          height: 22px;
+          border: 2px solid var(--line);
+          border-top-color: var(--accent);
+          border-radius: 50%;
+          animation: ob-spin 0.8s linear infinite;
+          flex-shrink: 0;
         }
-        .ob-coworker-input {
-          font-family: var(--font-mono, monospace);
+        @keyframes ob-spin {
+          to { transform: rotate(360deg); }
         }
-        .ob-launch-note {
+        .ob-brief-preview-live {
+          border: 1px solid var(--accent);
+          background: var(--accent-soft, rgba(15, 111, 78, 0.06));
+        }
+        .ob-brief-meta {
           font-size: 12px;
           color: var(--muted);
-          margin: 16px 0 0;
-        }
-        @media (max-width: 560px) {
-          .ob-coworker-row {
-            grid-template-columns: 1fr;
-          }
+          margin-top: 12px;
         }
       `}</style>
     </InterviewLayout>

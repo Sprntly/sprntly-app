@@ -3,82 +3,52 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
-import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
-import { KpiTreeEditor, cleanKpiMetrics } from "../../onboarding/KpiTreeEditor"
-import { KpiTreePreview } from "../../onboarding/KpiTreePreview"
+import { InterviewLayout } from "../../onboarding/InterviewLayout"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import type { KpiMetric } from "../../../lib/onboarding/types"
-import { markSkippedFields } from "../../../lib/onboarding/store"
-import { saveKpiTree } from "../../../lib/onboarding/store"
+import { markSkippedFields, saveStrategicContext } from "../../../lib/onboarding/store"
 
-const NORTH_STAR_HINTS: Record<string, string[]> = {
-  "B2B SaaS": ["Net revenue retention", "Weekly active teams", "Activation rate"],
-  B2C: ["DAU/MAU ratio", "Day-30 retention", "Conversion rate"],
-  Fintech: ["Transaction volume", "Fraud rate", "NRR"],
-  default: ["Day-30 retention", "NRR", "Weekly active users"],
-}
-
+/**
+ * Onboarding page 02 — "What are you optimizing for right now?"
+ *
+ * The strategic-context step: current OKRs / priorities, recent decisions,
+ * known dead ends, and the biggest risk. NO success metrics here — those
+ * live on the consolidated metrics step (page 04).
+ */
 export function Onboarding2() {
   const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
-  const [northStar, setNorthStar] = useState("")
-  const [northStarDescription, setNorthStarDescription] = useState("")
-  const [metrics, setMetrics] = useState<KpiMetric[]>([
-    { name: "", description: "" },
-    { name: "", description: "" },
-  ])
+  const [okrs, setOkrs] = useState("")
+  const [recentDecisions, setRecentDecisions] = useState("")
+  const [deadEnds, setDeadEnds] = useState("")
+  const [biggestRisk, setBiggestRisk] = useState("")
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!workspace) return
-    const tree = workspace.kpi_tree
-    setNorthStar(tree.north_star)
-    setNorthStarDescription(tree.north_star_description)
-    if (tree.metrics.length) setMetrics(tree.metrics)
+    setOkrs(workspace.okrs ?? "")
+    setRecentDecisions(workspace.recent_decisions ?? "")
+    setDeadEnds((workspace.dead_ends ?? []).join(", "))
+    setBiggestRisk(workspace.biggest_risk ?? "")
   }, [workspace])
 
-  const hints =
-    NORTH_STAR_HINTS[workspace?.industry ?? ""] ?? NORTH_STAR_HINTS.default
-  const tree = {
-    north_star: northStar,
-    north_star_description: northStarDescription,
-    metrics: cleanKpiMetrics(metrics),
-  }
-  const namedMetrics = metrics.filter((m) => m.name.trim())
-
-  const { errors, validate, clearError, containerRef } = useFieldValidation(
-    () => [
-      {
-        key: "northStar",
-        valid: northStar.trim().length > 0,
-        message: "Name your north star metric.",
-      },
-      {
-        key: "metrics",
-        valid: namedMetrics.length >= 2,
-        message: "Add at least two supporting metrics.",
-      },
-    ],
-  )
-
-  async function persist(andContinue: boolean) {
-    if (!workspace) return
-    if (andContinue && !validate().ok) return
+  async function save(nextStep: number, skipped: string[] = []) {
+    if (!workspace || auth.kind !== "authed") return
     setSaving(true)
-    setError(null)
     try {
-      const finalTree = {
-        north_star: northStar.trim(),
-        north_star_description: northStarDescription.trim(),
-        metrics: cleanKpiMetrics(metrics),
-      }
-      const updated = await saveKpiTree(workspace.id, finalTree, andContinue ? 3 : workspace.onboarding_step)
+      if (skipped.length) await markSkippedFields(auth.user.id, skipped)
+      const updated = await saveStrategicContext(
+        workspace.id,
+        {
+          okrs,
+          recent_decisions: recentDecisions || null,
+          dead_ends: deadEnds.split(",").map((s) => s.trim()).filter(Boolean),
+          biggest_risk: biggestRisk || null,
+        },
+        nextStep,
+      )
       setWorkspace(updated)
-      if (andContinue) router.push("/onboarding/3")
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't save KPI tree.")
+      router.push(`/onboarding/${nextStep}`)
     } finally {
       setSaving(false)
     }
@@ -97,40 +67,50 @@ export function Onboarding2() {
   return (
     <InterviewLayout
       step={2}
-      eyebrow="KPI tree construction"
-      title="Define what success looks like"
-      agentMessage="This is the most critical step — your KPI tree governs every future recommendation. I'll help you pick a north star and 2–4 supporting metrics, each with a short description that gives the agent context for goal-fit scoring."
-      rightPane={<KpiTreePreview tree={tree} />}
+      eyebrow="Strategic context"
+      title="What are you optimizing for right now?"
+      agentMessage="OKRs and current priorities weight my recommendations. Dead ends and recent decisions prevent me from re-suggesting paths you've already ruled out."
+      rightPane={
+        <PreviewCard okrs={okrs} risk={biggestRisk} deadEnds={deadEnds} />
+      }
       onBack={() => router.push("/onboarding/1")}
-      onContinue={() => persist(true)}
-      onSkip={async () => {
-        if (auth.kind === "authed") {
-          await markSkippedFields(auth.user.id, ["kpi_tree"])
-        }
-        router.push("/onboarding/3")
-      }}
+      onContinue={() => save(3)}
+      onSkip={() => save(3, ["okrs", "recent_decisions", "dead_ends", "biggest_risk"])}
       loading={saving}
     >
-      <div ref={containerRef}>
-      {error && <div className="ob-form-error">{error}</div>}
-      <KpiTreeEditor
-        northStar={northStar}
-        northStarDescription={northStarDescription}
-        metrics={metrics}
-        hints={hints}
-        onNorthStarChange={(v) => {
-          setNorthStar(v)
-          clearError("northStar")
-        }}
-        onNorthStarDescriptionChange={setNorthStarDescription}
-        onMetricsChange={(m) => {
-          setMetrics(m)
-          clearError("metrics")
-        }}
-        northStarError={errors.northStar}
-        metricsError={errors.metrics}
-      />
+      <div className="field">
+        <label className="field-label">Current OKRs / strategic priorities</label>
+        <textarea className="textarea" rows={4} maxLength={1000} value={okrs} onChange={(e) => setOkrs(e.target.value)} placeholder="What is the team focused on this quarter?" />
+      </div>
+      <div className="field">
+        <label className="field-label">Recent major decisions (optional)</label>
+        <textarea className="textarea" rows={3} value={recentDecisions} onChange={(e) => setRecentDecisions(e.target.value)} placeholder="Features shipped, experiments run, pivots…" />
+      </div>
+      <div className="field">
+        <label className="field-label">Known dead ends (optional)</label>
+        <input className="input" value={deadEnds} onChange={(e) => setDeadEnds(e.target.value)} placeholder="Comma-separated areas not to pursue" />
+      </div>
+      <div className="field">
+        <label className="field-label">Biggest risk / uncertainty (optional)</label>
+        <textarea className="textarea" rows={2} maxLength={500} value={biggestRisk} onChange={(e) => setBiggestRisk(e.target.value)} />
       </div>
     </InterviewLayout>
+  )
+}
+
+function PreviewCard({ okrs, risk, deadEnds }: { okrs: string; risk: string; deadEnds: string }) {
+  return (
+    <div>
+      <div className="ob-preview-label">Strategic context</div>
+      {!okrs && !risk && !deadEnds ? (
+        <p className="ob-preview-empty">Themes extracted from your answers will appear here.</p>
+      ) : (
+        <ul className="ob-preview-list">
+          {okrs && <li><strong>Priorities:</strong> {okrs.slice(0, 120)}{okrs.length > 120 ? "…" : ""}</li>}
+          {risk && <li><strong>Risk:</strong> {risk}</li>}
+          {deadEnds && <li><strong>Exclusions:</strong> {deadEnds}</li>}
+        </ul>
+      )}
+    </div>
   )
 }

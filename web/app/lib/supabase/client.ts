@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import { fetchWorkspaceForUser } from "../onboarding/store"
+import { ONBOARDING_STEP_COUNT } from "../onboarding/types"
 
 let browserClient: SupabaseClient | null = null
 
@@ -89,14 +90,14 @@ export async function postLoginPath(): Promise<string> {
       const fresh = await fetchWorkspaceForUser(user.id)
       if (fresh) {
         if (fresh.onboarding_completed_at) return "/"
-        const step = Math.min(Math.max(fresh.onboarding_step, 1), 8)
+        const step = Math.min(Math.max(fresh.onboarding_step, 1), ONBOARDING_STEP_COUNT)
         return `/onboarding/${step}`
       }
     }
     return "/onboarding/1"
   }
   if (workspace.onboarding_completed_at) return "/"
-  const step = Math.min(Math.max(workspace.onboarding_step, 1), 8)
+  const step = Math.min(Math.max(workspace.onboarding_step, 1), ONBOARDING_STEP_COUNT)
   return `/onboarding/${step}`
 }
 

@@ -2,369 +2,502 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
-import { useAuth } from "../../../lib/auth"
-import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
-import { companiesApi, type UploadFilesResponse } from "../../../lib/api"
+import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
+import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
+import type { SuggestedMetric } from "../../../lib/api"
+import {
+  buildKpiTreePayload,
+  canSaveKpiTree,
+  kpiTreeApi,
+  MAX_PRIMARY_METRICS,
+  MAX_SECONDARY_SIGNALS,
+  type SupportingMetric,
+} from "../../../lib/onboarding/kpiTreeApi"
 
 /**
- * Onboarding page 04 (design-v4) — "Share your business context."
+ * Onboarding page 04 — "Success metrics" (single consolidated step; merges the
+ * old KPI-tree + success-metrics pages into one).
  *
- * A "share context" step: drag-drop docs/decks, paste raw text, or add
- * links. Everything the PM provides becomes business context — the lens
- * every agent reasons through. Uploads (and the synthesized paste/links
- * file) are ingested into the company corpus via the same path the Sources
- * screen uses (POST /v1/datasets/{slug}/files); from there the brief +
- * business_context doc pick them up. Optional — Skip moves on to product.
+ * Renders the website-analysis `suggested_metrics` as SELECTABLE options (each
+ * showing metric + description), lets the user add their own {metric,
+ * description}, and shows the predicted industry + business_type as ALWAYS
+ * editable dropdowns (pre-filled from the analysis; the user can override
+ * anytime). On save we persist the confirmed industry/business_type to the
+ * company and the selected + custom metrics to the KPI tree
+ * (PUT /v1/company/kpi-tree).
  */
 
-// Mirrors the Sources screen's accepted extensions so a single backend
-// ingest path handles everything the PM drops here.
-const SUPPORTED_EXT = [".docx", ".xlsx", ".csv", ".pdf", ".txt", ".md"]
+const MAX_SUPPORTING = MAX_PRIMARY_METRICS + MAX_SECONDARY_SIGNALS
 
-export type StagedDoc = {
-  /** Stable client id for list keys. */
-  id: string
-  name: string
-  size: number
+// Fallback North Star suggestions, tailored loosely by industry, shown when
+// the website analysis didn't return suggested metrics.
+const NORTH_STAR_SUGGESTIONS: Record<string, string[]> = {
+  Healthtech: [
+    "Day-30 active clinicians per deployment",
+    "Weekly active clinicians",
+    "Net revenue retention",
+  ],
+  "B2B SaaS": ["Net revenue retention", "Weekly active teams", "Activation rate"],
+  B2C: ["Day-30 retention", "DAU/MAU ratio", "Conversion rate"],
+  Fintech: ["Transaction volume", "Net revenue retention", "Activated accounts"],
+  default: ["Weekly active users", "Day-30 retention", "Net revenue retention"],
 }
 
-export type ContextUploadViewProps = {
-  staged: StagedDoc[]
-  pastedText: string
-  links: string
-  uploading: boolean
+export type MetricsSetupViewProps = {
+  industry: string
+  businessType: string
+  northStar: string
+  northStarDescription: string
+  northStarHints: string[]
+  /** Suggested metrics from the website analysis (may be empty). */
+  suggestedMetrics: SuggestedMetric[]
+  /** Selected supporting metrics (from suggestions and/or added by hand). */
+  supporting: SupportingMetric[]
+  customMetric: string
+  customDescription: string
+  errors: Record<string, string | undefined>
   error: string | null
-  result: UploadFilesResponse | null
-  dragging: boolean
-  hasAnything: boolean
-  onPickFiles: (files: FileList | File[] | null) => void
-  onRemoveStaged: (id: string) => void
-  onChangePastedText: (v: string) => void
-  onChangeLinks: (v: string) => void
-  onDragStateChange: (dragging: boolean) => void
-  onDrop: (files: FileList | null) => void
+  onChangeIndustry: (value: string) => void
+  onChangeBusinessType: (value: string) => void
+  onChangeNorthStar: (value: string) => void
+  onChangeNorthStarDescription: (value: string) => void
+  onPickNorthStar: (value: string) => void
+  onToggleSuggested: (metric: SuggestedMetric) => void
+  onChangeSupportingDescription: (metric: string, description: string) => void
+  onChangeCustomMetric: (value: string) => void
+  onChangeCustomDescription: (value: string) => void
+  onAddCustom: () => void
 }
 
 /**
  * Pure presentational view (props only, no hooks) so it renders to static
  * markup in tests — the established onboarding View pattern.
  */
-export function ContextUploadView({
-  staged,
-  pastedText,
-  links,
-  uploading,
+export function MetricsSetupView({
+  industry,
+  businessType,
+  northStar,
+  northStarDescription,
+  northStarHints,
+  suggestedMetrics,
+  supporting,
+  customMetric,
+  customDescription,
+  errors,
   error,
-  result,
-  dragging,
-  onPickFiles,
-  onRemoveStaged,
-  onChangePastedText,
-  onChangeLinks,
-  onDragStateChange,
-  onDrop,
-}: ContextUploadViewProps) {
+  onChangeIndustry,
+  onChangeBusinessType,
+  onChangeNorthStar,
+  onChangeNorthStarDescription,
+  onPickNorthStar,
+  onToggleSuggested,
+  onChangeSupportingDescription,
+  onChangeCustomMetric,
+  onChangeCustomDescription,
+  onAddCustom,
+}: MetricsSetupViewProps) {
+  const selectedNames = supporting.map((m) => m.name)
+  const isSelected = (name: string) => selectedNames.includes(name)
+
   return (
     <>
-      {error && (
-        <div className="ob-form-error" role="alert">
-          {error}
+      {error && <div className="ob-form-error">{error}</div>}
+
+      <div className="ob-predicted-grid">
+        <div className="field" data-field="industry">
+          <label className="field-label">Industry</label>
+          <p className="field-hint">Predicted from your website — change if it&apos;s off.</p>
+          <select
+            className="input"
+            value={industry}
+            onChange={(e) => onChangeIndustry(e.target.value)}
+            aria-label="Industry"
+          >
+            {INDUSTRIES.map((i) => (
+              <option key={i}>{i}</option>
+            ))}
+          </select>
         </div>
-      )}
+        <div className="field" data-field="businessType">
+          <label className="field-label">Business type</label>
+          <p className="field-hint">Predicted from your website — change if it&apos;s off.</p>
+          <select
+            className="input"
+            value={businessType}
+            onChange={(e) => onChangeBusinessType(e.target.value)}
+            aria-label="Business type"
+          >
+            {BUSINESS_TYPES.map((b) => (
+              <option key={b}>{b}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className={`field ${errors.northStar ? "has-error" : ""}`} data-field="northStar">
+        <label className="field-label">Primary metric — your North Star *</label>
+        <input
+          className="input"
+          value={northStar}
+          onChange={(e) => onChangeNorthStar(e.target.value)}
+          placeholder="The one metric that best captures product value"
+        />
+        {errors.northStar && <p className="field-error">{errors.northStar}</p>}
+        <div className="ob-ns-hints">
+          <span className="ob-ns-hints-label">Common for {industry || "your stage"}:</span>
+          {northStarHints.map((h) => (
+            <button
+              key={h}
+              type="button"
+              className="metric-chip"
+              onClick={() => onPickNorthStar(h)}
+            >
+              {h}
+            </button>
+          ))}
+        </div>
+        <textarea
+          className="input ob-metric-desc"
+          value={northStarDescription}
+          onChange={(e) => onChangeNorthStarDescription(e.target.value)}
+          placeholder="Describe what this metric means and why it matters (context for goal-fit scoring)"
+          rows={2}
+          maxLength={400}
+        />
+      </div>
 
       <div className="field">
-        <label className="field-label">Documents &amp; decks</label>
-        <p className="field-hint">
-          Strategy docs, decks, research, PRDs — anything that explains how the
-          business thinks. Becomes the context every agent reasons through.
-        </p>
-        <label
-          className={`ob-ctx-dropzone${dragging ? " ob-ctx-dropzone--drag" : ""}`}
-          onDragOver={(e) => {
-            e.preventDefault()
-            onDragStateChange(true)
-          }}
-          onDragLeave={() => onDragStateChange(false)}
-          onDrop={(e) => {
-            e.preventDefault()
-            onDragStateChange(false)
-            onDrop(e.dataTransfer?.files ?? null)
-          }}
-        >
+        <label className="field-label">Suggested supporting metrics</label>
+        {suggestedMetrics.length > 0 ? (
+          <>
+            <p className="field-hint">
+              Drafted from your website — select the ones that fit.
+            </p>
+            <ul className="ob-suggested-list">
+              {suggestedMetrics.map((m) => {
+                const sel = isSelected(m.metric)
+                return (
+                  <li key={m.metric}>
+                    <button
+                      type="button"
+                      className={`ob-suggested-card ${sel ? "selected" : ""}`}
+                      aria-pressed={sel}
+                      data-metric={m.metric}
+                      onClick={() => onToggleSuggested(m)}
+                    >
+                      <span className="ob-suggested-check" aria-hidden>
+                        {sel ? "✓" : "+"}
+                      </span>
+                      <span className="ob-suggested-body">
+                        <span className="ob-suggested-name">{m.metric}</span>
+                        {m.description && (
+                          <span className="ob-suggested-desc">{m.description}</span>
+                        )}
+                      </span>
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          </>
+        ) : (
+          <p className="field-hint ob-no-suggestions">
+            No suggestions yet — add your own metrics below.
+          </p>
+        )}
+      </div>
+
+      <div className="field">
+        <label className="field-label">Add your own</label>
+        <div className="ob-custom-metric">
           <input
-            type="file"
-            multiple
-            accept={SUPPORTED_EXT.join(",")}
-            onChange={(e) => onPickFiles(e.target.files)}
-            disabled={uploading}
+            className="input"
+            value={customMetric}
+            onChange={(e) => onChangeCustomMetric(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault()
+                onAddCustom()
+              }
+            }}
+            placeholder="Metric name"
+            maxLength={80}
+            aria-label="Custom metric name"
           />
-          <span>
-            {uploading
-              ? "Uploading…"
-              : "Click to choose files or drag-and-drop (.docx, .xlsx, .csv, .pdf, .txt, .md)"}
-          </span>
-        </label>
-
-        {staged.length > 0 && (
-          <ul className="ob-ctx-staged">
-            {staged.map((d) => (
-              <li key={d.id} className="ob-ctx-staged-row">
-                <span className="ob-ctx-staged-name" title={d.name}>
-                  {d.name}
-                </span>
-                <button
-                  type="button"
-                  className="ob-ctx-staged-remove"
-                  aria-label={`Remove ${d.name}`}
-                  onClick={() => onRemoveStaged(d.id)}
-                  disabled={uploading}
-                >
-                  Remove
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        {result && (result.ingested.length > 0 || result.errors.length > 0) && (
-          <ul className="ob-ctx-results">
-            {result.ingested.map((f) => (
-              <li key={`ok-${f.filename}`} className="ob-ctx-result ob-ctx-result--ok">
-                <span aria-hidden>✓</span> {f.filename}
-              </li>
-            ))}
-            {result.errors.map((e) => (
-              <li key={`err-${e.filename}`} className="ob-ctx-result ob-ctx-result--err">
-                <span aria-hidden>✗</span> {e.filename} — {e.error}
-              </li>
-            ))}
-          </ul>
-        )}
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={onAddCustom}
+            disabled={!customMetric.trim() || supporting.length >= MAX_SUPPORTING}
+          >
+            Add
+          </button>
+        </div>
+        <textarea
+          className="input ob-metric-desc"
+          value={customDescription}
+          onChange={(e) => onChangeCustomDescription(e.target.value)}
+          placeholder="Describe what this metric means and why it matters (optional)"
+          rows={2}
+          maxLength={400}
+          aria-label="Custom metric description"
+        />
       </div>
 
       <div className="field">
-        <label className="field-label">Paste context (optional)</label>
-        <p className="field-hint">
-          Drop in notes, a positioning blurb, or anything that didn&apos;t fit a
-          file. Saved alongside your documents.
+        <p className="ob-metric-count">
+          {supporting.length} supporting metric{supporting.length === 1 ? "" : "s"} selected
         </p>
-        <textarea
-          className="input ob-ctx-textarea"
-          value={pastedText}
-          onChange={(e) => onChangePastedText(e.target.value)}
-          rows={5}
-          placeholder="Who you serve, what you sell, how you win…"
-        />
-      </div>
-
-      <div className="field">
-        <label className="field-label">Links (optional)</label>
-        <p className="field-hint">One per line — docs, decks, or pages worth reading.</p>
-        <textarea
-          className="input ob-ctx-textarea"
-          value={links}
-          onChange={(e) => onChangeLinks(e.target.value)}
-          rows={3}
-          placeholder={"https://yourcompany.com/about\nhttps://docs.google.com/…"}
-        />
+        {supporting.length > 0 && (
+          <div className="ob-metric-desc-list">
+            {supporting.map((m) => (
+              <div key={m.name} className="ob-metric-desc-block" data-metric={m.name}>
+                <label className="ob-metric-desc-label">{m.name}</label>
+                <textarea
+                  className="input ob-metric-desc"
+                  value={m.description}
+                  onChange={(e) => onChangeSupportingDescription(m.name, e.target.value)}
+                  placeholder="Describe what this metric means and why it matters"
+                  rows={2}
+                  maxLength={400}
+                />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <style jsx>{`
-        .ob-ctx-dropzone {
+        .ob-predicted-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 14px;
+        }
+        @media (max-width: 560px) {
+          .ob-predicted-grid {
+            grid-template-columns: 1fr;
+          }
+        }
+        .ob-ns-hints {
           display: flex;
+          flex-wrap: wrap;
           align-items: center;
-          justify-content: center;
-          text-align: center;
-          min-height: 96px;
-          padding: 18px;
-          margin-top: 8px;
-          border: 1.5px dashed var(--line);
-          border-radius: 12px;
-          background: var(--surface-2);
+          gap: 8px;
+          margin-top: 10px;
+        }
+        .ob-ns-hints-label {
+          font-size: 12px;
           color: var(--muted);
-          font-size: 13px;
+        }
+        .ob-suggested-list {
+          list-style: none;
+          margin: 8px 0 0;
+          padding: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .ob-suggested-card {
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+          width: 100%;
+          text-align: left;
+          padding: 12px 14px;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--surface);
           cursor: pointer;
           transition: border-color 0.15s, background 0.15s;
         }
-        .ob-ctx-dropzone:hover {
+        .ob-suggested-card:hover {
           border-color: var(--accent);
         }
-        .ob-ctx-dropzone--drag {
+        .ob-suggested-card.selected {
           border-color: var(--accent);
-          background: var(--surface);
+          background: var(--accent-soft, rgba(15, 111, 78, 0.06));
         }
-        .ob-ctx-dropzone input {
-          display: none;
-        }
-        .ob-ctx-staged {
-          list-style: none;
-          margin: 12px 0 0;
-          padding: 0;
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-        .ob-ctx-staged-row {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          padding: 8px 12px;
-          border: 1px solid var(--line);
-          border-radius: 8px;
-          background: var(--surface);
-          font-size: 13px;
-        }
-        .ob-ctx-staged-name {
-          flex: 1;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-        .ob-ctx-staged-remove {
-          background: none;
-          border: none;
-          color: var(--muted);
-          font-size: 12px;
-          cursor: pointer;
-          padding: 0;
-        }
-        .ob-ctx-staged-remove:hover {
-          color: var(--ink);
-        }
-        .ob-ctx-results {
-          list-style: none;
-          margin: 12px 0 0;
-          padding: 0;
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-          font-size: 12.5px;
-        }
-        .ob-ctx-result--ok {
+        .ob-suggested-check {
+          font-weight: 600;
           color: var(--accent);
+          flex-shrink: 0;
         }
-        .ob-ctx-result--err {
-          color: var(--danger, #c0392b);
+        .ob-suggested-body {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
         }
-        .ob-ctx-textarea {
+        .ob-suggested-name {
+          font-size: 14px;
+          font-weight: 600;
+        }
+        .ob-suggested-desc {
+          font-size: 12.5px;
+          color: var(--ink-3);
+          line-height: 1.4;
+        }
+        .ob-custom-metric {
+          display: flex;
+          gap: 8px;
+        }
+        .ob-custom-metric :global(.input) {
+          flex: 1;
+        }
+        .ob-metric-count {
+          font-size: 12px;
+          color: var(--muted);
+          margin: 0;
+        }
+        .ob-metric-desc {
           width: 100%;
+          margin-top: 10px;
           resize: vertical;
-          font-family: inherit;
-          line-height: 1.5;
+        }
+        .ob-metric-desc-list {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          margin-top: 14px;
+        }
+        .ob-metric-desc-label {
+          display: block;
+          font-size: 13px;
+          font-weight: 600;
         }
       `}</style>
     </>
   )
 }
 
-// Build the markdown body from pasted text + links. Returns null when
-// there's nothing to send. Pure + string-only so it's unit-testable in the
-// node test env (no Blob/File runtime needed).
-export function buildPastedContextBody(
-  pastedText: string,
-  links: string,
-): string | null {
-  const text = pastedText.trim()
-  const linkList = links
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)
-  if (!text && linkList.length === 0) return null
-
-  const parts: string[] = ["# Onboarding context"]
-  if (text) parts.push("\n## Pasted notes\n\n" + text)
-  if (linkList.length > 0) {
-    parts.push("\n## Links\n\n" + linkList.map((l) => `- ${l}`).join("\n"))
-  }
-  return parts.join("\n") + "\n"
-}
-
-// Wrap the body into a file so it rides the same corpus-ingest path as
-// uploaded documents (rather than needing a separate backend endpoint).
-export function buildPastedContextFile(
-  pastedText: string,
-  links: string,
-): File | null {
-  const body = buildPastedContextBody(pastedText, links)
-  if (body === null) return null
-  return new File([body], "onboarding-context.md", { type: "text/markdown" })
-}
-
 export function Onboarding4() {
-  const auth = useAuth()
-  const { workspace, setWorkspace, loading } = useOnboarding()
+  const { workspace, setWorkspace, websiteAnalysis, loading } = useOnboarding()
   const router = useRouter()
-
-  const [stagedFiles, setStagedFiles] = useState<File[]>([])
-  const [pastedText, setPastedText] = useState("")
-  const [links, setLinks] = useState("")
-  const [uploading, setUploading] = useState(false)
-  const [dragging, setDragging] = useState(false)
+  const [industry, setIndustry] = useState<string>(INDUSTRIES[0])
+  const [businessType, setBusinessType] = useState<string>(BUSINESS_TYPES[0])
+  const [northStar, setNorthStar] = useState("")
+  const [northStarDescription, setNorthStarDescription] = useState("")
+  const [supporting, setSupporting] = useState<SupportingMetric[]>([])
+  const [customMetric, setCustomMetric] = useState("")
+  const [customDescription, setCustomDescription] = useState("")
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [result, setResult] = useState<UploadFilesResponse | null>(null)
+  // Once the user touches the industry/business-type dropdowns we stop
+  // overwriting their choice when a late analysis result arrives.
+  const [industryTouched, setIndustryTouched] = useState(false)
+  const [businessTypeTouched, setBusinessTypeTouched] = useState(false)
 
-  const staged: StagedDoc[] = useMemo(
-    () =>
-      stagedFiles.map((f, i) => ({
-        id: `${f.name}-${f.size}-${i}`,
-        name: f.name,
-        size: f.size,
-      })),
-    [stagedFiles],
+  // Seed industry / business type from the saved company first, then from the
+  // website analysis (which may arrive later) — but never clobber a value the
+  // user has already changed by hand.
+  useEffect(() => {
+    if (industryTouched) return
+    const fromWs = workspace?.industry
+    const fromAnalysis = websiteAnalysis?.industry
+    const next = fromWs || fromAnalysis
+    if (next && INDUSTRIES.includes(next as (typeof INDUSTRIES)[number])) {
+      setIndustry(next)
+    } else if (next) {
+      // Inferred value outside our option list → fall back to "Other".
+      setIndustry("Other")
+    }
+  }, [workspace?.industry, websiteAnalysis?.industry, industryTouched])
+
+  useEffect(() => {
+    if (businessTypeTouched) return
+    const fromWs = workspace?.business_type
+    const fromAnalysis = websiteAnalysis?.business_type
+    const next = fromWs || fromAnalysis
+    if (next && BUSINESS_TYPES.includes(next as (typeof BUSINESS_TYPES)[number])) {
+      setBusinessType(next)
+    }
+  }, [workspace?.business_type, websiteAnalysis?.business_type, businessTypeTouched])
+
+  // Hydrate any KPI tree already saved on the workspace.
+  useEffect(() => {
+    if (!workspace) return
+    const tree = workspace.kpi_tree
+    if (tree.north_star) setNorthStar(tree.north_star)
+    if (tree.north_star_description) setNorthStarDescription(tree.north_star_description)
+    if (tree.metrics.length) {
+      setSupporting(
+        tree.metrics
+          .filter((m) => m.name)
+          .map((m) => ({ name: m.name, description: m.description ?? "" })),
+      )
+    }
+  }, [workspace])
+
+  const suggestedMetrics = websiteAnalysis?.suggested_metrics ?? []
+  const northStarHints =
+    NORTH_STAR_SUGGESTIONS[industry] ?? NORTH_STAR_SUGGESTIONS.default
+
+  const { errors, validate, clearError, containerRef } = useFieldValidation(
+    () => [
+      {
+        key: "northStar",
+        valid: canSaveKpiTree(northStar, supporting),
+        message: "Set a North Star metric to anchor your KPI tree.",
+      },
+    ],
   )
 
-  const hasAnything =
-    stagedFiles.length > 0 || pastedText.trim().length > 0 || links.trim().length > 0
-
-  function addFiles(picked: FileList | File[] | null) {
-    if (!picked) return
-    const list = Array.from(picked)
-    if (list.length === 0) return
-    setStagedFiles((prev) => {
-      const seen = new Set(prev.map((f) => `${f.name}-${f.size}`))
-      const next = list.filter((f) => !seen.has(`${f.name}-${f.size}`))
-      return [...prev, ...next]
+  function toggleSuggested(metric: SuggestedMetric) {
+    setSupporting((prev) => {
+      if (prev.some((m) => m.name === metric.metric)) {
+        return prev.filter((m) => m.name !== metric.metric)
+      }
+      if (prev.length >= MAX_SUPPORTING) return prev
+      return [...prev, { name: metric.metric, description: metric.description ?? "" }]
     })
   }
 
-  function removeStaged(id: string) {
-    setStagedFiles((prev) => prev.filter((_, i) => `${prev[i].name}-${prev[i].size}-${i}` !== id))
+  function changeSupportingDescription(metric: string, description: string) {
+    setSupporting((prev) =>
+      prev.map((m) => (m.name === metric ? { ...m, description } : m)),
+    )
   }
 
-  // Upload everything to the company corpus, then advance to step 5.
-  async function persist(skip: boolean) {
-    if (!workspace || auth.kind !== "authed") return
+  function addCustom() {
+    const m = customMetric.trim()
+    if (!m || supporting.some((s) => s.name === m) || supporting.length >= MAX_SUPPORTING)
+      return
+    setSupporting((prev) => [...prev, { name: m, description: customDescription.trim() }])
+    setCustomMetric("")
+    setCustomDescription("")
+  }
+
+  async function persist() {
+    if (!workspace) return
     setError(null)
-    setResult(null)
-    setUploading(true)
+    if (!validate().ok) return
+    setSaving(true)
     try {
-      if (skip || !hasAnything) {
-        await markSkippedFields(auth.user.id, ["business_context_upload"])
-      } else {
-        const pasted = buildPastedContextFile(pastedText, links)
-        const toUpload = [...stagedFiles]
-        if (pasted) toUpload.push(pasted)
-        if (toUpload.length > 0) {
-          const r = await companiesApi.uploadFiles(workspace.slug, toUpload)
-          setResult(r)
-          if (r.errors.length > 0 && r.ingested.length === 0) {
-            setError("None of your files could be ingested. Check the formats and try again.")
-            setUploading(false)
-            return
-          }
-        }
-      }
+      // 1) Confirmed industry / business type → company.
+      await updateWorkspace(workspace.id, {
+        industry,
+        business_type: businessType,
+      })
+      // 2) Selected + custom metrics → KPI tree (canonical config entity).
+      await kpiTreeApi.put(
+        buildKpiTreePayload(northStar, northStarDescription, supporting),
+      )
       const updated = await advanceOnboardingStep(workspace.id, 5)
-      setWorkspace(updated)
+      const product = updated.product ?? workspace.product
+      setWorkspace({ ...updated, product })
       router.push("/onboarding/5")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't save your context.")
+      setError(e instanceof Error ? e.message : "Couldn't save your metrics.")
     } finally {
-      setUploading(false)
+      setSaving(false)
     }
   }
+
+  const previewMetrics = useMemo(
+    () => supporting.slice(0, MAX_SUPPORTING),
+    [supporting],
+  )
 
   // Redirect when there's no workspace to anchor the step. Done in an effect
   // (not during render) so navigation never fires as a render side-effect —
@@ -376,64 +509,73 @@ export function Onboarding4() {
 
   if (loading || !workspace) return <div className="ob-shell">Loading…</div>
 
-  const docCount = stagedFiles.length
-  const extras =
-    (pastedText.trim() ? 1 : 0) +
-    links
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean).length
-
   return (
     <InterviewLayout
       step={4}
       eyebrow="Saved · auto-saves after every step"
-      title="Share your business context"
-      agentMessage="Hand me whatever explains how your business thinks — strategy docs, decks, notes, or links. It becomes the lens every agent reasons through. Skip if you'd rather I draft it from your website and connectors."
+      title="Set your success metrics"
+      agentMessage="Success metrics anchor the whole workspace. I've drafted suggestions and predicted your industry from your website — confirm what fits, add your own, and set the North Star they all ladder up to."
       rightPane={
         <div>
-          <div className="ob-preview-label">What you&apos;re sharing</div>
-          {!hasAnything ? (
+          <div className="ob-preview-label">Success metrics</div>
+          {!northStar ? (
             <p className="ob-preview-empty">
-              Drop in documents, paste notes, or add links. Everything here
-              becomes your business context.
+              Set a North Star and supporting metrics to see your KPI tree take
+              shape.
             </p>
           ) : (
             <ul className="ob-preview-list">
               <li>
-                <strong>{docCount}</strong> document{docCount === 1 ? "" : "s"}
+                <strong>North Star:</strong> {northStar}
               </li>
-              <li>
-                <strong>{extras}</strong> pasted note{extras === 1 ? "" : "s"} / link
-                {extras === 1 ? "" : "s"}
-              </li>
+              {previewMetrics.map((m) => (
+                <li key={m.name}>{m.name}</li>
+              ))}
             </ul>
           )}
         </div>
       }
       onBack={() => router.push("/onboarding/3")}
-      onContinue={() => persist(false)}
-      onSkip={() => persist(true)}
-      continueLabel={hasAnything ? "Continue" : "Continue without context"}
-      skipLabel="Skip for now"
-      loading={uploading}
+      onContinue={persist}
+      loading={saving}
     >
-      <ContextUploadView
-        staged={staged}
-        pastedText={pastedText}
-        links={links}
-        uploading={uploading}
-        error={error}
-        result={result}
-        dragging={dragging}
-        hasAnything={hasAnything}
-        onPickFiles={addFiles}
-        onRemoveStaged={removeStaged}
-        onChangePastedText={setPastedText}
-        onChangeLinks={setLinks}
-        onDragStateChange={setDragging}
-        onDrop={addFiles}
-      />
+      <div ref={containerRef}>
+        <MetricsSetupView
+          industry={industry}
+          businessType={businessType}
+          northStar={northStar}
+          northStarDescription={northStarDescription}
+          northStarHints={northStarHints}
+          suggestedMetrics={suggestedMetrics}
+          supporting={supporting}
+          customMetric={customMetric}
+          customDescription={customDescription}
+          errors={errors}
+          error={error}
+          onChangeIndustry={(value) => {
+            setIndustryTouched(true)
+            setIndustry(value)
+          }}
+          onChangeBusinessType={(value) => {
+            setBusinessTypeTouched(true)
+            setBusinessType(value)
+          }}
+          onChangeNorthStar={(value) => {
+            setNorthStar(value)
+            clearError("northStar")
+          }}
+          onChangeNorthStarDescription={setNorthStarDescription}
+          onPickNorthStar={(value) => {
+            setNorthStar(value)
+            clearError("northStar")
+          }}
+          onToggleSuggested={toggleSuggested}
+          onChangeSupportingDescription={changeSupportingDescription}
+          onChangeCustomMetric={setCustomMetric}
+          onChangeCustomDescription={setCustomDescription}
+          onAddCustom={addCustom}
+        />
+      </div>
     </InterviewLayout>
   )
 }

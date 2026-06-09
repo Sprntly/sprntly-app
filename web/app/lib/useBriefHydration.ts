@@ -56,6 +56,7 @@ export function useBriefHydration(company: string = "asurion"): HydrationState {
     }
 
     async function pollUntilReady(): Promise<void> {
+      let autoTriggered = false
       while (!cancelled.current && Date.now() - start < MAX_POLL_MS) {
         try {
           const s = await briefApi.status(company)
@@ -67,6 +68,21 @@ export function useBriefHydration(company: string = "asurion"): HydrationState {
           if (s.status === "failed") {
             setState({ kind: "failed", error: s.error || "Brief generation failed" })
             return
+          }
+          if (s.status === "empty" && !autoTriggered) {
+            // No brief and nothing in progress — kick off background
+            // generation so the user doesn't have to do it manually.
+            autoTriggered = true
+            setState({ kind: "generating" })
+            try {
+              await briefApi.regenerate(company)
+            } catch {
+              // regenerate failed (e.g. 404 dataset not found) — stop polling
+              setState({ kind: "empty" })
+              return
+            }
+            await sleep(POLL_MS)
+            continue
           }
           if (s.status === "generating" || s.status === "empty") {
             setState({ kind: "generating" })

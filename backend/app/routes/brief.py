@@ -4,13 +4,14 @@ import logging
 from fastapi import Depends, APIRouter, HTTPException
 
 from app.auth import CompanyContext, require_company
-from app.brief_runner import auto_generate_brief, get_status, warm_synthesis_drilldowns
+from app.brief_runner import auto_generate_brief, get_status, set_status, warm_synthesis_drilldowns
 from app.config import settings
 from app.corpus import load_corpus
 from app.db import get_current_brief, save_brief
 from app.deps.ownership import require_owned_brief, require_owned_dataset
 from app.llm import call_json
 from app.prompts import BRIEF_SCHEMA_VERSION, BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
+from app.synthesis.agent import EmptyKnowledgeGraphError
 from app.synthesis_brief import generate_brief_for
 
 logger = logging.getLogger(__name__)
@@ -37,10 +38,22 @@ async def _synthesis_generate_bg(dataset: str) -> None:
     logged, never raised — the service keeps serving the prior cached brief.
     run_synthesis save_brief()s the new brief, so /current picks it up.
     """
+    set_status(dataset, "generating")
     try:
         await asyncio.to_thread(generate_brief_for, dataset)
+        set_status(dataset, "ready")
         logger.info("Synthesis brief generated for %s", dataset)
+    except EmptyKnowledgeGraphError:
+        # Benign: new company with no data yet. Mark failed with a helpful
+        # message so the frontend can tell the user what to do.
+        set_status(dataset, "failed",
+                   error="No data to generate a brief from yet — upload files "
+                         "or connect a data source, then regenerate.")
+        logger.info("Synthesis brief skipped for %s — KG empty after seeding", dataset)
+        return
     except Exception:  # noqa: BLE001 — fire-and-forget; prior brief stays
+        set_status(dataset, "failed",
+                   error="Brief generation failed — check server logs.")
         logger.exception("Synthesis brief generation failed for %s", dataset)
         return
     # Parity with the legacy auto_generate_brief: warm the per-insight

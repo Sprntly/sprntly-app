@@ -1,121 +1,135 @@
-// View tests for onboarding step 04 — "Share your business context."
-// renderToStaticMarkup pattern (node-env, no jsdom, no hooks): the stateful
-// container wires hooks, while ContextUploadView is pure and renders to
-// static markup directly. buildPastedContextBody is a pure helper tested
-// alongside it.
+// View tests for onboarding step 04 — "Set your success metrics" (the single
+// consolidated metrics page). renderToStaticMarkup pattern (node-env, no
+// jsdom, no hooks): the stateful container wires hooks, while MetricsSetupView
+// is pure and renders to static markup directly.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import {
-  ContextUploadView,
-  buildPastedContextBody,
-  type ContextUploadViewProps,
-  type StagedDoc,
-} from "../Onboarding4"
-import type { UploadFilesResponse } from "../../../../lib/api"
+import { MetricsSetupView, type MetricsSetupViewProps } from "../Onboarding4"
+import type { SuggestedMetric } from "../../../../lib/api"
 
 function noop() {}
 
-function render(override: Partial<ContextUploadViewProps> = {}): string {
-  const defaults: ContextUploadViewProps = {
-    staged: [],
-    pastedText: "",
-    links: "",
-    uploading: false,
+const SUGGESTED: SuggestedMetric[] = [
+  { metric: "Reconciled volume", description: "Total $ reconciled / week." },
+  { metric: "Active accounts", description: "Accounts with a live sync." },
+]
+
+function render(override: Partial<MetricsSetupViewProps> = {}): string {
+  const defaults: MetricsSetupViewProps = {
+    industry: "Fintech",
+    businessType: "Marketplace",
+    northStar: "",
+    northStarDescription: "",
+    northStarHints: ["Net revenue retention", "Activated accounts"],
+    suggestedMetrics: SUGGESTED,
+    supporting: [],
+    customMetric: "",
+    customDescription: "",
+    errors: {},
     error: null,
-    result: null,
-    dragging: false,
-    hasAnything: false,
-    onPickFiles: noop,
-    onRemoveStaged: noop,
-    onChangePastedText: noop,
-    onChangeLinks: noop,
-    onDragStateChange: noop,
-    onDrop: noop,
+    onChangeIndustry: noop,
+    onChangeBusinessType: noop,
+    onChangeNorthStar: noop,
+    onChangeNorthStarDescription: noop,
+    onPickNorthStar: noop,
+    onToggleSuggested: noop,
+    onChangeSupportingDescription: noop,
+    onChangeCustomMetric: noop,
+    onChangeCustomDescription: noop,
+    onAddCustom: noop,
   }
   return renderToStaticMarkup(
-    React.createElement(ContextUploadView, { ...defaults, ...override }),
+    React.createElement(MetricsSetupView, { ...defaults, ...override }),
   )
 }
 
-describe("ContextUploadView — upload area", () => {
-  it("renders a drag-and-drop file area with the supported extensions", () => {
+describe("MetricsSetupView — suggested metrics (selectable)", () => {
+  it("renders each suggested metric with its description as a selectable option", () => {
     const html = render()
-    expect(html).toContain("ob-ctx-dropzone")
-    expect(html).toContain("drag-and-drop")
-    expect(html).toContain(".pdf")
-    expect(html).toContain(".docx")
-    // accepts the corpus-supported formats on the input
-    expect(html).toMatch(/accept="[^"]*\.pdf/)
+    expect(html).toContain("Suggested supporting metrics")
+    expect(html).toContain("Reconciled volume")
+    expect(html).toContain("Total $ reconciled / week.")
+    expect(html).toContain("Active accounts")
+    // selectable buttons carry aria-pressed
+    expect(html).toContain('aria-pressed="false"')
+    expect(html).toContain('data-metric="Reconciled volume"')
   })
 
-  it("offers the documents, paste-text, and links inputs", () => {
-    const html = render()
-    expect(html).toContain("Documents")
-    expect(html).toContain("Paste context")
-    expect(html).toContain("Links")
-    // two optional textareas (paste + links)
-    expect((html.match(/<textarea/g) ?? []).length).toBe(2)
+  it("marks a suggested metric as selected when it's in `supporting`", () => {
+    const html = render({
+      supporting: [{ name: "Reconciled volume", description: "Total $ reconciled / week." }],
+    })
+    expect(html).toContain('aria-pressed="true"')
+    expect(html).toContain("1 supporting metric selected")
   })
 
-  it("shows the uploading state on the dropzone", () => {
-    expect(render({ uploading: true })).toContain("Uploading…")
+  it("falls back to an add-your-own prompt when there are NO suggestions", () => {
+    const html = render({ suggestedMetrics: [] })
+    expect(html).toContain("No suggestions yet")
+    expect(html).toContain("Add your own")
   })
 })
 
-describe("ContextUploadView — staged + results", () => {
-  it("lists staged documents with a remove control each", () => {
-    const staged: StagedDoc[] = [
-      { id: "a-1-0", name: "strategy.pdf", size: 1 },
-      { id: "b-2-1", name: "deck.pptx", size: 2 },
-    ]
-    const html = render({ staged })
-    expect(html).toContain("strategy.pdf")
-    expect(html).toContain("deck.pptx")
-    expect((html.match(/Remove [^<]+/g) ?? []).length).toBeGreaterThanOrEqual(2)
+describe("MetricsSetupView — add your own", () => {
+  it("renders the custom metric name + description inputs and an Add button", () => {
+    const html = render()
+    expect(html).toContain("Add your own")
+    expect(html).toContain('aria-label="Custom metric name"')
+    expect(html).toContain('aria-label="Custom metric description"')
+    expect(html).toContain(">Add</button>")
   })
 
-  it("surfaces ingest results (ok + error rows)", () => {
-    const result: UploadFilesResponse = {
-      slug: "acme",
-      ingested: [{ filename: "strategy.pdf", md_path: "x", md_chars: 10 }],
-      errors: [{ filename: "broken.xyz", error: "unsupported" }],
-    }
-    const html = render({ result })
-    expect(html).toContain("strategy.pdf")
-    expect(html).toContain("broken.xyz")
-    expect(html).toContain("unsupported")
+  it("disables Add when the custom name is empty", () => {
+    const html = render({ customMetric: "" })
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Add<\/button>/)
+  })
+})
+
+describe("MetricsSetupView — editable industry / business-type dropdowns", () => {
+  it("renders BOTH as <select> dropdowns pre-filled with the predicted values", () => {
+    const html = render({ industry: "Fintech", businessType: "Marketplace" })
+    expect(html).toContain('aria-label="Industry"')
+    expect(html).toContain('aria-label="Business type"')
+    // pre-filled selection surfaces as the selected option
+    expect(html).toMatch(/<option[^>]*selected[^>]*>Fintech<\/option>/)
+    expect(html).toMatch(/<option[^>]*selected[^>]*>Marketplace<\/option>/)
+    // and they're editable (not disabled / not read-only text)
+    expect(html).not.toMatch(/<select[^>]*disabled/)
+    expect(html).toContain("Predicted from your website")
+  })
+})
+
+describe("MetricsSetupView — North Star", () => {
+  it("renders the required North Star input with industry-tailored hints", () => {
+    const html = render()
+    expect(html).toContain("your North Star")
+    expect(html).toContain("Common for Fintech")
+    expect(html).toContain("Net revenue retention")
+  })
+
+  it("surfaces a North Star validation error", () => {
+    const html = render({
+      errors: { northStar: "Set a North Star metric to anchor your KPI tree." },
+    })
+    expect(html).toContain("Set a North Star metric to anchor your KPI tree.")
+    expect(html).toContain("has-error")
+  })
+
+  it("renders a description textarea for each selected supporting metric", () => {
+    const html = render({
+      supporting: [{ name: "Reconciled volume", description: "Weekly total." }],
+    })
+    expect(html).toContain('data-metric="Reconciled volume"')
+    expect(html).toContain("Weekly total.")
   })
 
   it("renders an error banner when error is set", () => {
-    const html = render({ error: "Upload failed" })
-    expect(html).toContain("Upload failed")
-    expect(html).toContain('role="alert"')
-  })
-})
-
-describe("buildPastedContextBody — paste/links → corpus markdown", () => {
-  it("returns null when there's nothing to send (skip path)", () => {
-    expect(buildPastedContextBody("", "")).toBeNull()
-    expect(buildPastedContextBody("   ", "\n  \n")).toBeNull()
-  })
-
-  it("builds markdown from pasted text without a links section", () => {
-    const text = buildPastedContextBody("we serve clinicians", "")
-    expect(text).not.toBeNull()
-    expect(text).toContain("## Pasted notes")
-    expect(text).toContain("we serve clinicians")
-    expect(text).not.toContain("## Links")
-  })
-
-  it("includes links as a bulleted list and drops blank lines", () => {
-    const text = buildPastedContextBody("", "https://a.com\n\n  https://b.com  \n")
-    expect(text).toContain("## Links")
-    expect(text).toContain("- https://a.com")
-    expect(text).toContain("- https://b.com")
-    expect(text).not.toContain("## Pasted notes")
+    const html = render({ error: "Save failed" })
+    expect(html).toContain("ob-form-error")
+    expect(html).toContain("Save failed")
   })
 })

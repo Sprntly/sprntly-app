@@ -1,4 +1,5 @@
 import type { ScreenId } from "../types"
+import { ONBOARDING_STEP_COUNT } from "./onboarding/types"
 
 /** Base path for the refresh-stable Design Agent canvas route. The full route
  *  carries the prototype_id (`/design/{prototype_id}`). This is the only
@@ -39,7 +40,6 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-5": "/onboarding/5",
   "ob-6": "/onboarding/6",
   "ob-7": "/onboarding/7",
-  "ob-8": "/onboarding/8",
   chat: "/",
   brief: "/brief",
   detail: "/evidence",
@@ -85,7 +85,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   [CANVAS_BASE_PATH]: "da-canvas",
 }
 
-for (let step = 1; step <= 8; step++) {
+for (let step = 1; step <= ONBOARDING_STEP_COUNT; step++) {
   PATH_TO_SCREEN[`/onboarding/${step}`] = `ob-${step}` as ScreenId
 }
 

@@ -18,6 +18,7 @@ from typing import Any
 
 from app import db
 from app.config import settings
+from app.db.companies import company_id_for_slug
 from app.db.pipeline_runs import (
     complete_run,
     create_run,
@@ -92,14 +93,39 @@ async def run_full_pipeline(
 
 
 async def _stage_sync_connectors(dataset: str) -> dict[str, Any]:
-    """Stage 1: Sync all active connectors in parallel."""
+    """Stage 1: Sync all active connectors in parallel.
+
+    Issue #218 fix: pre-fix this called `db.list_connections()` with no
+    args (broken signature → TypeError → caught by a bare `except` and
+    silently returned "skipped/no connections"). Now we resolve the
+    dataset slug → company_id and call the scoped helper; unknown slugs
+    return a typed skipped status, real errors are logged and surfaced
+    as an error status instead of being swallowed.
+    """
     t0 = time.time()
     results: dict[str, Any] = {}
 
+    company_id = company_id_for_slug(dataset)
+    if not company_id:
+        return {
+            "status": "skipped",
+            "reason": "no_company_for_slug",
+            "duration_s": round(time.time() - t0, 1),
+        }
+
     try:
-        connections = db.list_connections()
-    except Exception:
-        return {"status": "skipped", "reason": "no connections", "duration_s": 0}
+        connections = db.list_connections(company_id)
+    except Exception as exc:  # noqa: BLE001 — log + surface, never swallow
+        logger.exception(
+            "_stage_sync_connectors: list_connections failed for %s/%s",
+            dataset, company_id,
+        )
+        return {
+            "status": "error",
+            "reason": "list_connections_failed",
+            "error": str(exc),
+            "duration_s": round(time.time() - t0, 1),
+        }
 
     active = [c for c in connections if c.get("status") == "active"]
     if not active:

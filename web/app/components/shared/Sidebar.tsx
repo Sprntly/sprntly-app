@@ -155,7 +155,7 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
             ("prototype") → /prototype with no PRD context; the in-PRD "Generate
             Prototype" entry threads the ?prd=<id> param instead. */}
         <NavItem screen="prototype" icon={<IconSparkle />} label="Prototype" />
-        <NavItem screen="tickets" icon={<IconTickets />} label="Tickets" />
+        <NavItem screen="tickets" icon={<IconTickets />} label="Project Management" />
         <div className="sb-spacer" />
 
         <div className="sb-section-title">Workspace</div>

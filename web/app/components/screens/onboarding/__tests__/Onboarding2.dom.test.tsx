@@ -1,12 +1,10 @@
 // @vitest-environment jsdom
 //
-// Container-level mount test for onboarding step 02 — "Define what success
-// looks like." The sibling view tests render only pure sub-views via
-// renderToStaticMarkup, so they never exercise the stateful Onboarding2
-// container and miss container-level crashes (the production "Application
-// error: a client-side exception has occurred"). This file mounts the real
-// default container under jsdom with mocked auth/onboarding/router so a
-// render-time throw is caught.
+// Container-level mount test for onboarding step 02 — "What are you optimizing
+// for right now?" (the strategic-context step, moved here in the restructure).
+// Asserts the optimizing-for fields render and that NO success-metric inputs
+// appear on this page. Mounts the real container under jsdom with mocked
+// auth/onboarding/router so a render-time throw is caught.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -26,98 +24,54 @@ vi.mock("../../../../context/OnboardingContext", () => ({
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   markSkippedFields: vi.fn(),
-  saveKpiTree: vi.fn(),
+  saveStrategicContext: vi.fn(),
 }))
 
 import { Onboarding2 } from "../Onboarding2"
-import type { WorkspaceCompany } from "../../../../lib/onboarding/types"
-
-// A loaded workspace matching the real Workspace type, as the context yields
-// it mid-onboarding (step 2).
-function makeWorkspace(over: Partial<WorkspaceCompany> = {}): WorkspaceCompany {
-  return {
-    id: "ws-1",
-    slug: "acme",
-    display_name: "Acme",
-    product_description: null,
-    product: null,
-    industry: "B2B SaaS",
-    stage: "Seed",
-    business_type: "SaaS",
-    team_size: null,
-    engineering_capacity: null,
-    pm_engineer_ratio: null,
-    competitors: [],
-    tech_stack: [],
-    okrs: null,
-    recent_decisions: null,
-    dead_ends: [],
-    biggest_risk: null,
-    kpi_tree: { north_star: "", north_star_description: "", metrics: [] },
-    feature_flags: {
-      weekly_brief: true,
-      on_demand_analysis: true,
-      auto_prd_generation: true,
-      engineer_agent: false,
-      research_agent: false,
-      on_call_agent: false,
-      claude_code_handoff: false,
-    },
-    notification_settings: {},
-    onboarding_step: 2,
-    onboarding_completed_at: null,
-    ...over,
-  }
-}
+import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
 })
 
-describe("Onboarding2 (container) — mounts without crashing", () => {
-  it("renders the KPI-tree step for a loaded workspace", () => {
+describe("Onboarding2 (container) — optimizing-for step", () => {
+  it("renders the optimizing-for fields for a loaded workspace", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
-    onboardingMock.mockReturnValue({
-      loading: false,
-      profile: null,
-      workspace: makeWorkspace(),
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({ workspace: makeWorkspace({ onboarding_step: 2 }) }),
+    )
 
     render(React.createElement(Onboarding2))
-    expect(screen.getByText("Define what success looks like")).not.toBeNull()
+    expect(screen.getByText("What are you optimizing for right now?")).not.toBeNull()
+    expect(screen.getByText(/Current OKRs/)).not.toBeNull()
+    expect(screen.getByText(/Biggest risk/)).not.toBeNull()
+  })
+
+  it("shows NO success-metric / North Star inputs on this page", () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({ workspace: makeWorkspace({ onboarding_step: 2 }) }),
+    )
+
+    const { container } = render(React.createElement(Onboarding2))
+    expect(container.textContent).not.toContain("North Star")
+    expect(container.textContent).not.toContain("Supporting metrics")
+    expect(container.textContent).not.toContain("success metrics")
   })
 
   it("shows the loading shell while the workspace is loading", () => {
     authMock.mockReturnValue({ kind: "loading" })
-    onboardingMock.mockReturnValue({
-      loading: true,
-      profile: null,
-      workspace: null,
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({ loading: true, workspace: null }),
+    )
     render(React.createElement(Onboarding2))
     expect(screen.getByText("Loading…")).not.toBeNull()
   })
 
   it("redirects to step 1 from an EFFECT (never during render) when there is no workspace", () => {
-    // Regression for the client-side exception: the prior code called
-    // router.replace() during render when loading had finished with no
-    // workspace. Navigating as a render side-effect throws in React 19
-    // (update-while-rendering) and surfaces as the production error boundary.
-    // The fix moves the redirect into an effect and renders the loading shell
-    // meanwhile — so this mount stays crash-free.
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
-    onboardingMock.mockReturnValue({
-      loading: false,
-      profile: null,
-      workspace: null,
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     const errors: unknown[] = []
     const spy = vi
