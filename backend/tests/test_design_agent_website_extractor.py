@@ -106,8 +106,8 @@ def _install(monkeypatch, handles):
 
 # --- Creation / happy path -------------------------------------------------
 
-async def test_extract_returns_eight_field_design_system(monkeypatch):
-    """AC1: mocked page -> dict with all 8 keys, values mapped from evaluate()."""
+async def test_extract_returns_expected_sample_fields(monkeypatch):
+    """AC1: mocked page -> dict with all expected keys, values mapped from evaluate()."""
     h = _build_fake()
     _install(monkeypatch, h)
 
@@ -123,6 +123,11 @@ async def test_extract_returns_eight_field_design_system(monkeypatch):
         "border_radius_convention",
         "spacing_scale_samples",
         "logo_url",
+        "surface_color",
+        "border_color",
+        "muted_color",
+        "elevation_hint",
+        "component_counts",
     }
     assert ds["primary_color"] == "rgb(37, 99, 235)"
     assert ds["background_color"] == "rgb(255, 255, 255)"
@@ -512,7 +517,7 @@ async def test_goto_uses_wait_until_load(monkeypatch):
 
 async def test_extract_load_path_returns_design_system(monkeypatch):
     """P7-08 creation (AC6): a resolving goto (no side-effect) on the load path +
-    a valid sampler return yields a confident 8-field design system — the
+    a valid sampler return yields a confident full design system — the
     preserve-functionality contract (tester proto-54 Plotline success behaviour).
     "Reachable fixture site" = the scriptable fake page whose goto resolves."""
     h = _build_fake()  # goto_side_effect=None -> resolves; _GOOD_RAW sampler return
@@ -532,6 +537,11 @@ async def test_extract_load_path_returns_design_system(monkeypatch):
         "border_radius_convention",
         "spacing_scale_samples",
         "logo_url",
+        "surface_color",
+        "border_color",
+        "muted_color",
+        "elevation_hint",
+        "component_counts",
     }
     assert ds["primary_color"] == "rgb(37, 99, 235)"
     assert ds["heading_font_family"] == "Inter"
@@ -558,3 +568,89 @@ async def test_extract_load_path_timeout_still_floors(monkeypatch, caplog):
     assert "confident=False" in blob
     assert "reason=timeout" in blob
     assert "error_class=TimeoutError" in blob
+
+
+# --- Accent convertibility floor + broadened CTA sampler -------------------
+
+def test_below_confidence_transparent_primary_is_treated_as_absent():
+    """A transparent CTA fill does not convert to a usable hex, so it counts as
+    no primary at all — the sampler must floor to the None sentinel rather than
+    leak a default accent downstream."""
+    ds = website._map_sample(
+        {"primary_color": "rgba(0, 0, 0, 0)", "heading_font_family": "Inter"}
+    )
+    assert website._below_confidence(ds) is True
+
+
+def test_below_confidence_solid_primary_with_heading_passes():
+    """A solid, convertible primary plus a heading font clears the floor."""
+    ds = website._map_sample(
+        {"primary_color": "rgb(14, 107, 79)", "heading_font_family": "Inter"}
+    )
+    assert website._below_confidence(ds) is False
+
+
+async def test_extract_transparent_primary_floors_to_none(monkeypatch):
+    """End to end: a sample whose only primary is transparent returns the None
+    sentinel (the caller then shows the manual color-picker floor)."""
+    raw = dict(_GOOD_RAW, primary_color="rgba(0, 0, 0, 0)")
+    h = _build_fake(evaluate_return=raw)
+    _install(monkeypatch, h)
+
+    ds = await website.extract_website_design_system("https://example.com")
+
+    assert ds is None
+
+
+def test_sampler_js_broadens_cta_candidates_and_guards_transparency():
+    """Lock the sampler's CTA breadth + transparency guard against silent
+    regression (the in-page JS itself is proven by the live re-extraction)."""
+    js = website._SAMPLER_JS
+    assert 'role="button"' in js
+    assert "cta" in js.lower()
+    assert "isTransparent" in js
+
+
+def test_sampler_js_prefers_chromatic_cta_over_monochrome():
+    """Lock the saturation-first CTA ranking against regression (the in-page JS
+    itself is proven by the live re-extraction): a monochrome button fill must
+    not outrank the brand color simply because it is larger."""
+    js = website._SAMPLER_JS
+    assert "saturationOf" in js
+    assert "SAT_THRESHOLD" in js
+
+
+def test_map_sample_defaults_absent_neutrals_to_empty():
+    """Neutral keys absent from the raw evaluate() dict map to empty strings so
+    the adapter falls back to its defaults rather than crashing."""
+    ds = website._map_sample(
+        {"primary_color": "rgb(1, 2, 3)", "heading_font_family": "Inter"}
+    )
+    assert ds["surface_color"] == ""
+    assert ds["border_color"] == ""
+    assert ds["muted_color"] == ""
+
+
+def test_map_sample_defaults_absent_component_counts_to_empty():
+    """An absent component_counts key maps to an empty dict."""
+    ds = website._map_sample(
+        {"primary_color": "rgb(1, 2, 3)", "heading_font_family": "Inter"}
+    )
+    assert ds["component_counts"] == {}
+
+
+def test_sampler_js_emits_component_counts():
+    """Lock the DOM component counting against regression (the in-page JS is
+    proven by the live re-extraction)."""
+    js = website._SAMPLER_JS
+    assert "component_counts" in js
+    assert "componentSelectors" in js
+
+
+def test_sampler_js_counts_elevation_prevalence():
+    """Lock the count-based elevation signal against regression (the in-page JS
+    is proven by the live re-extraction): the sampler tallies shadow vs border
+    prevalence across containers rather than trusting the first one."""
+    js = website._SAMPLER_JS
+    assert "shadowCount" in js
+    assert "borderCount" in js

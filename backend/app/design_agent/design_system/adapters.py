@@ -487,6 +487,19 @@ class WebExtractor:
             colors.primary = primary
             colors.accent = primary
 
+        # Neutral tones sampled from real surfaces. Each falls back to the
+        # baseline default when the site has no usable value, so a partial
+        # sample never produces a broken color.
+        surface = _css_color_to_hex(s.get("surface_color"))
+        if surface:
+            colors.surface = surface
+        border = _css_color_to_hex(s.get("border_color"))
+        if border:
+            colors.border = border
+        muted = _css_color_to_hex(s.get("muted_color"))
+        if muted:
+            colors.muted = muted
+
         heading = (s.get("heading_font_family") or "").strip()
         body = (s.get("body_font_family") or "").strip()
         fonts = Fonts()
@@ -502,13 +515,29 @@ class WebExtractor:
             radius_convention=_radius_convention(s.get("border_radius_convention")),
             spacing_scale=_spacing_samples_to_scale(s.get("spacing_scale_samples")),
         )
+        # Reconcile the elevation token with the observed border-vs-shadow usage.
+        # Only a recognized hint overrides the default; anything else is left
+        # alone so an unreadable site keeps the baseline.
+        elevation_hint = (s.get("elevation_hint") or "").strip()
+        if elevation_hint in ("shadows", "borders"):
+            tokens.elevation_style = elevation_hint
         # Website signals are inferred from sampled computed styles, not from a
         # documented design system. A usable brand color plus a heading font is
         # the sampler's own confidence floor; meeting it here too keeps the
         # signal honest.
         has_system = bool(primary and heading)
+        # Component inventory: keep only known primitive types with a positive
+        # count, sorted. A type list only — never component code — matching the
+        # codebase adapter's inventory contract.
+        counts = s.get("component_counts") or {}
+        inventory = sorted(
+            name
+            for name, count in counts.items()
+            if name in _COMPONENT_HINTS and isinstance(count, int) and count > 0
+        )
         return DesignSystem(
             tokens=tokens,
+            component_inventory=inventory,
             has_explicit_system=False,
             confidence="medium" if has_system else "low",
         )

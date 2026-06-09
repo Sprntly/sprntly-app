@@ -711,3 +711,83 @@ def test_website_charcoal_palette_yields_dark_index_css():
     assert "--background: 0 0% 17%;" in css
     assert "--accent: 46 65% 52%;" in css
     assert "--foreground: 42 31% 94%;" in css  # light text derived from dark bg
+
+
+def test_website_neutral_colors_map_to_tokens():
+    """Sampled surface / border / muted tones fold into the palette tokens."""
+    ds = WebExtractor().normalize(
+        RawSignals(
+            provider="web",
+            ref="x",
+            signals=_web_sample(
+                surface_color="#fafaf7",
+                border_color="#e8e5dd",
+                muted_color="#5a5751",
+            ),
+        )
+    )
+    c = ds.tokens.colors
+    assert c.surface == "#fafaf7"
+    assert c.border == "#e8e5dd"
+    assert c.muted == "#5a5751"
+
+
+def test_website_absent_or_unconvertible_neutrals_keep_defaults():
+    """Empty, transparent, or unparseable neutral samples leave the baseline
+    defaults in place rather than emitting a broken color."""
+    ds = WebExtractor().normalize(
+        RawSignals(
+            provider="web",
+            ref="x",
+            signals=_web_sample(
+                surface_color="",
+                border_color="rgba(0, 0, 0, 0)",
+                muted_color="not-a-color",
+            ),
+        )
+    )
+    c = ds.tokens.colors
+    base = DesignSystem().tokens.colors
+    assert c.surface == base.surface
+    assert c.border == base.border
+    assert c.muted == base.muted
+
+
+def test_website_elevation_hint_sets_or_keeps_token():
+    """A recognized elevation hint drives the token; an absent or unknown hint
+    leaves the baseline in place so an unreadable site is not misreported."""
+    web = WebExtractor()
+
+    def elevation(hint):
+        return web.normalize(
+            RawSignals(provider="web", ref="x", signals=_web_sample(elevation_hint=hint))
+        ).tokens.elevation_style
+
+    assert elevation("shadows") == "shadows"
+    assert elevation("borders") == "borders"
+    base = DesignSystem().tokens.elevation_style
+    assert elevation("") == base
+    assert elevation("sparkles") == base
+
+
+def test_website_component_counts_populate_inventory():
+    """Known primitive types with a positive count become the inventory, sorted;
+    unknown types and zero counts are dropped."""
+    ds = WebExtractor().normalize(
+        RawSignals(
+            provider="web",
+            ref="x",
+            signals=_web_sample(
+                component_counts={"button": 14, "card": 62, "badge": 0, "bogus": 5},
+            ),
+        )
+    )
+    assert ds.component_inventory == ["button", "card"]
+
+
+def test_website_absent_component_counts_yields_empty_inventory():
+    """No component_counts at all yields an empty inventory (still honest)."""
+    ds = WebExtractor().normalize(
+        RawSignals(provider="web", ref="x", signals=_web_sample())
+    )
+    assert ds.component_inventory == []
