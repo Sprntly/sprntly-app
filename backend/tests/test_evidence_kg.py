@@ -129,6 +129,69 @@ def test_find_hypothesis_none_when_no_match(facade):
     assert _find_hypothesis(facade, "ent-A", "nope", "no such title") is None
 
 
+# ---------- shared resolver: Evidence and PRD ground on the SAME hypothesis ----------
+#
+# evidence_kg._find_hypothesis and graph.retrieval used to be SEPARATE resolvers
+# that diverged on the no-theme_id path (evidence title-fell-back, PRD bailed).
+# They are now ONE shared resolver — these pin that single source of truth and the
+# aligned no-theme_id behavior so Evidence and PRD can never drift apart.
+
+
+def test_evidence_resolver_delegates_to_shared_retrieval_resolver():
+    # The evidence resolver IS the retrieval one — same function object reached
+    # via the thin wrapper, so there is exactly one resolution implementation.
+    import app.evidence_kg as ek
+    from app.graph.retrieval import resolve_insight_hypothesis
+
+    # The wrapper imports the shared resolver function-locally; assert the symbol
+    # it would call is the canonical one (no duplicate body in evidence_kg).
+    import inspect
+    src = inspect.getsource(ek._find_hypothesis)
+    assert "resolve_insight_hypothesis" in src
+    assert callable(resolve_insight_hypothesis)
+
+
+def test_evidence_and_prd_resolve_same_hypothesis_by_theme(facade):
+    # Given one insight (with theme_id), Evidence and PRD resolve the IDENTICAL
+    # hypothesis Entity.
+    from app.evidence_kg import _find_hypothesis
+    from app.graph.retrieval import resolve_insight_hypothesis
+
+    theme, hyp, _ = _seed_theme_hypothesis(facade)
+    title = "SSO gap blocks $1.4M in deals"
+    ev = _find_hypothesis(facade, "ent-A", theme.id, title)
+    prd = resolve_insight_hypothesis(facade, "ent-A", theme.id, title)
+    assert ev is not None and prd is not None
+    assert ev.id == prd.id == hyp.id
+
+
+def test_evidence_and_prd_agree_on_no_theme_id_title_fallback(facade):
+    # The previously-divergent path: insight carries NO theme_id but its title
+    # matches a hypothesis label. BOTH resolvers must now title-fall-back to the
+    # SAME hypothesis (the safer aligned behavior), never one resolving and the
+    # other bailing.
+    from app.evidence_kg import _find_hypothesis
+    from app.graph.retrieval import resolve_insight_hypothesis
+
+    _, hyp, _ = _seed_theme_hypothesis(facade)
+    title = "SSO gap blocks $1.4M in deals"
+    ev = _find_hypothesis(facade, "ent-A", None, title)
+    prd = resolve_insight_hypothesis(facade, "ent-A", None, title)
+    assert ev is not None and prd is not None
+    assert ev.id == prd.id == hyp.id
+
+
+def test_shared_resolver_no_theme_id_no_title_match_is_none_for_both(facade):
+    # No theme_id AND no title match → both bail (empty trail), never a blind
+    # corpus guess. Aligned across Evidence and PRD.
+    from app.evidence_kg import _find_hypothesis
+    from app.graph.retrieval import resolve_insight_hypothesis
+
+    _seed_theme_hypothesis(facade)
+    assert _find_hypothesis(facade, "ent-A", None, "unrelated title") is None
+    assert resolve_insight_hypothesis(facade, "ent-A", None, "unrelated title") is None
+
+
 # ---------- evidence trail assembly ----------
 
 def test_trail_unions_supports_and_convergence_signals(facade):
@@ -343,10 +406,13 @@ def test_generate_evidence_kg_records_failure(isolated_settings, monkeypatch):
 
 # ---------- route dispatch by brief_engine ----------
 
-def test_route_dispatches_to_kg_under_synthesis(app_client, isolated_settings,
+def test_route_dispatches_to_kg_under_synthesis(tenant_client, isolated_settings,
                                                  monkeypatch):
     """Default engine = synthesis → POST /generate schedules the KG runner."""
     from app.routes import evidence as evidence_route
+    # Seed a company whose slug == the brief's dataset so require_owned_brief
+    # resolves the brief to the caller's company.
+    t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod, dataset="acme")
 
@@ -357,18 +423,19 @@ def test_route_dispatches_to_kg_under_synthesis(app_client, isolated_settings,
     monkeypatch.setattr(evidence_route, "generate_evidence",
                         lambda *a, **k: scheduled.__setitem__("runner", "legacy"))
 
-    resp = app_client.post("/v1/evidence/generate",
-                           json={"brief_id": brief_id, "insight_index": 0})
+    resp = t.client.post("/v1/evidence/generate",
+                         json={"brief_id": brief_id, "insight_index": 0})
     assert resp.status_code == 200
     assert resp.json()["status"] in ("generating", "ready")
 
 
 def test_route_dispatches_to_legacy_under_legacy_engine(
-    app_client, isolated_settings, monkeypatch
+    tenant_client, isolated_settings, monkeypatch
 ):
     from app.config import settings
     from app.routes import evidence as evidence_route
     monkeypatch.setattr(settings, "brief_engine", "legacy")
+    t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod, dataset="acme")
 
@@ -380,8 +447,8 @@ def test_route_dispatches_to_legacy_under_legacy_engine(
     monkeypatch.setattr(evidence_route, "generate_evidence_kg", fake_kg)
     monkeypatch.setattr(evidence_route, "generate_evidence", fake_legacy)
 
-    resp = app_client.post("/v1/evidence/generate",
-                           json={"brief_id": brief_id, "insight_index": 0})
+    resp = t.client.post("/v1/evidence/generate",
+                         json={"brief_id": brief_id, "insight_index": 0})
     assert resp.status_code == 200
     # Let the scheduled task run so we can observe which runner was chosen.
     import time

@@ -408,13 +408,33 @@ class WebExtractor:
 
         try:
             from app.connectors import figma_oauth
+            from app.net_guard import UnsafeURLError, assert_public_url
 
-            resp = figma_oauth.requests.head(
-                url,
-                timeout=10,
-                allow_redirects=True,
-            )
-            if not resp.ok:
+            # SSRF guard: validate the user-supplied website URL before the
+            # HEAD leaves the process, and re-validate every redirect hop
+            # by hand (auto-redirect disabled) so a redirect to an internal
+            # host is refused. An unsafe URL floors to None like any failure.
+            try:
+                current = url
+                resp = None
+                for _ in range(6):  # initial request + up to 5 redirects
+                    assert_public_url(current)
+                    resp = figma_oauth.requests.head(
+                        current,
+                        timeout=10,
+                        allow_redirects=False,
+                    )
+                    location = getattr(resp, "headers", {}).get("Location") or \
+                        getattr(resp, "headers", {}).get("location")
+                    if getattr(resp, "is_redirect", False) and location:
+                        from urllib.parse import urljoin
+
+                        current = urljoin(current, location)
+                        continue
+                    break
+            except UnsafeURLError:
+                return None
+            if resp is None or not resp.ok:
                 return None
             headers = getattr(resp, "headers", {}) or {}
 

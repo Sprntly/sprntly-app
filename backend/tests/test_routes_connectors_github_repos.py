@@ -54,13 +54,24 @@ def github_env(isolated_settings, monkeypatch):
 
 
 def _seed_github_oauth(*, company_id: str) -> None:
-    """Seed a github connection row with an encrypted user OAuth token."""
+    """Seed a github connection row with an encrypted user OAuth token, plus
+    the installation rows these tests address (12345, 99) bound to the company
+    so the per-installation routes' ownership check passes."""
     seed_connection(
         company_id=company_id,
         provider="github",
         token_blob={"access_token": "gho_USER_TOKEN", "token_type": "bearer"},
         label="@octocat",
     )
+    from app import db
+    for install_id in (12345, 99):
+        db.upsert_github_installation(
+            installation_id=install_id,
+            account_id=1,
+            account_login="octocat",
+            account_type="User",
+            company_id=company_id,
+        )
 
 
 # ─────────────────────── GET repositories ───────────────────────

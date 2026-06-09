@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
+import pytest
+
 import app.main as main_mod
 import app.routes.brief as brief_routes
 import app.routes.datasets as datasets_routes
@@ -21,6 +23,17 @@ import app.synthesis_brief as sb
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def app_client(tenant_client):
+    """Tenant-authed client for the route-driven tests here. After the
+    tenant-isolation fix the brief/datasets routes require `require_company`,
+    so a legacy-cookie client would 403. The route tests all operate on the
+    "acme" dataset slug, so we seed a company whose slug == "acme" (company id
+    "co-1", matching the direct `_seed_company(... company_id="co-1", slug="acme")`
+    calls those tests already make) and authenticate as a member of it."""
+    return tenant_client.make(slug="acme", user_id="user-acme", company_id="co-1").client
 
 def _seed_company(db, *, company_id: str, slug: str) -> None:
     """Insert a companies row so slug↔company_id resolution works."""
@@ -93,15 +106,15 @@ def test_generate_synthesis_then_current_reads_back(app_client, isolated_setting
     assert r.json()["_generated_by"] == "synthesis_agent"
 
 
-def test_generate_synthesis_unknown_company_returns_409(app_client, monkeypatch):
+def test_generate_unowned_dataset_returns_404(app_client, monkeypatch):
+    # After the tenant-isolation fix, a dataset slug that isn't the caller's
+    # company is rejected by the ownership gate (404) before generate_brief_for
+    # is ever reached — the gate supersedes the old unknown-company 409.
     _set_engine(monkeypatch, "synthesis")
-
-    def _raise(slug):
-        raise ValueError("No company for slug 'ghost'")
-
-    with patch.object(brief_routes, "generate_brief_for", side_effect=_raise):
+    with patch.object(brief_routes, "generate_brief_for") as gen:
         r = app_client.post("/v1/brief/generate?dataset=ghost")
-    assert r.status_code == 409
+    assert r.status_code == 404
+    gen.assert_not_called()
 
 
 # ── /regenerate — synthesis engine path ─────────────────────────────────────

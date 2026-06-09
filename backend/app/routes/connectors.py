@@ -489,7 +489,7 @@ def google_drive_sync(
     # Auto-enable the Google Drive input source for this dataset.
     dataset_slug = payload.dataset
     if not dataset_slug:
-        row = db.get_connection(google_oauth.GOOGLE_DRIVE_PROVIDER)
+        row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
         if row and row.get("config_json"):
             try:
                 cfg = json.loads(row["config_json"])
@@ -787,6 +787,16 @@ def github_callback(
                 rt = payload.get("return_to")
                 if rt and _is_safe_return_to(rt):
                     return_to = rt
+                # Post-install round-trip: GitHub preserved our signed state
+                # (carrying company_id) through to the Setup URL. This is the
+                # ONE place we know both the installation_id AND the company,
+                # so bind the installation to the caller's company here. The
+                # webhook (no company context) may have created the row first;
+                # we set/overwrite company_id without disturbing other fields.
+                if installation_id is not None and payload.get("company_id"):
+                    _bind_installation_company(
+                        int(installation_id), str(payload["company_id"])
+                    )
             except HTTPException:
                 # state expired or invalid — fall back to /settings
                 return_to = None
@@ -846,7 +856,7 @@ def github_callback(
     # the App settings on GitHub) — which should point at this same
     # /github/callback so the original `state` (carrying return_to) is
     # threaded all the way through to the post-install branch above.
-    if login and not _has_github_install_for(login) and settings.github_app_slug:
+    if login and not _has_github_install_for(login, company_id) and settings.github_app_slug:
         # Include the original state JWT on the install URL so GitHub
         # preserves it through to the Setup URL redirect. That lets us
         # bounce the user back to wherever they started (e.g.
@@ -860,12 +870,53 @@ def github_callback(
     return _build_post_oauth_redirect(payload, github_app.GITHUB_PROVIDER)
 
 
-def _has_github_install_for(account_login: str) -> bool:
-    """True iff a Sprntly App installation already exists for the given
-    GitHub account login. Read-only — webhook handlers populate this
-    table when users install/uninstall the App."""
+def _bind_installation_company(installation_id: int, company_id: str) -> None:
+    """Attach `company_id` to an existing installation row (idempotent).
+
+    Called from the post-install callback — the only flow that knows both the
+    installation_id (from GitHub's Setup-URL redirect) and the company (from the
+    signed state). The webhook may have created the row first with no company;
+    this binds it. If the row doesn't exist yet (webhook hasn't fired), the
+    upsert seeds a minimal row carrying the company so it's never orphaned
+    cross-tenant; the next webhook refresh fills in account details."""
     try:
-        rows = db.list_github_installations() or []
+        existing = db.get_github_installation(installation_id)
+        if existing:
+            db.upsert_github_installation(
+                installation_id=installation_id,
+                account_id=int(existing.get("account_id") or 0),
+                account_login=str(existing.get("account_login") or ""),
+                account_type=str(existing.get("account_type") or "User"),
+                repository_selection=str(
+                    existing.get("repository_selection") or "selected"
+                ),
+                suspended=bool(existing.get("suspended")),
+                permissions=json.loads(existing.get("permissions_json") or "{}"),
+                events=json.loads(existing.get("events_json") or "[]"),
+                company_id=company_id,
+            )
+        else:
+            db.upsert_github_installation(
+                installation_id=installation_id,
+                account_id=0,
+                account_login="",
+                account_type="User",
+                company_id=company_id,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to bind GitHub installation %s to company", installation_id,
+            exc_info=True,
+        )
+
+
+def _has_github_install_for(account_login: str, company_id: str) -> bool:
+    """True iff THIS company already has a Sprntly App installation for the
+    given GitHub account login. Read-only — webhook handlers populate this
+    table when users install/uninstall the App. Company-scoped so one company's
+    install never suppresses another company's install prompt."""
+    try:
+        rows = db.list_github_installations(company_id) or []
     except Exception:
         # Table may not exist in some local-dev / test contexts; be lenient
         # and assume "no install" so we still redirect to the install page.
@@ -888,8 +939,14 @@ def github_disconnect(
 
 
 @router.get("/github/installations")
-def github_list_installations(_session: dict = Depends(require_session)):
-    return {"installations": db.list_github_installations()}
+def github_list_installations(
+    company: CompanyContext = Depends(require_company),
+):
+    """Installations owned by the caller's company (member-shared).
+
+    Company-scoped: a signed-in user only sees their own company's GitHub
+    installs, never another tenant's. Legacy NULL-company rows are excluded."""
+    return {"installations": db.list_github_installations(company.company_id)}
 
 
 # ─────────── Per-installation repository management ───────────
@@ -899,6 +956,17 @@ def github_list_installations(_session: dict = Depends(require_session)):
 # can add/remove repos from a "selected repositories" install. For an
 # "all repositories" install GitHub returns 422 and the UI should
 # disable the per-repo toggles (deep-link to GitHub settings instead).
+
+
+def _require_company_owns_installation(installation_id: int, company_id: str) -> None:
+    """404 unless `installation_id` is bound to the caller's company.
+
+    Guards the per-installation repo-management routes (already require_company)
+    so a member of company A can't manipulate company B's installation by
+    guessing its numeric id. Legacy NULL-company installs are also rejected
+    (they must be reconnected to bind a company first)."""
+    if not db.get_github_installation_for_company(installation_id, company_id):
+        raise HTTPException(404, "GitHub installation not found")
 
 
 def _github_user_install_url(installation_id: int, repository_id: int | None = None) -> str:
@@ -926,6 +994,7 @@ def github_list_install_repos(
 ):
     """List repositories accessible to this installation, using the
     connected user's OAuth token (per GitHub's auth rules)."""
+    _require_company_owns_installation(installation_id, company.company_id)
     r = requests.get(
         _github_user_install_url(installation_id),
         headers=_github_user_token_headers(company.company_id),
@@ -963,6 +1032,7 @@ def github_add_install_repo(
 ):
     """Add a repo to this installation. 422 if the install is in
     'all repositories' mode (per-repo control disallowed there)."""
+    _require_company_owns_installation(installation_id, company.company_id)
     r = requests.put(
         _github_user_install_url(installation_id, repository_id),
         headers=_github_user_token_headers(company.company_id),
@@ -989,6 +1059,7 @@ def github_remove_install_repo(
     company: CompanyContext = Depends(require_company),
 ):
     """Remove a repo from this installation."""
+    _require_company_owns_installation(installation_id, company.company_id)
     r = requests.delete(
         _github_user_install_url(installation_id, repository_id),
         headers=_github_user_token_headers(company.company_id),
@@ -1002,9 +1073,22 @@ def github_remove_install_repo(
 @router.get("/github/pull-requests")
 def github_list_open_prs(
     installation_id: int | None = None,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
-    return {"pull_requests": db.list_open_pull_requests(installation_id)}
+    """Open PRs tracked for the caller's company (member-shared).
+
+    Company-scoped. If `installation_id` is given it must belong to the
+    caller's company (else 404), so it can't be used to read another tenant's
+    PRs."""
+    if installation_id is not None and not db.get_github_installation_for_company(
+        installation_id, company.company_id
+    ):
+        raise HTTPException(404, "GitHub installation not found")
+    return {
+        "pull_requests": db.list_open_pull_requests(
+            company.company_id, installation_id
+        )
+    }
 
 
 def _github_access_token(company_id: str) -> str:
@@ -1042,14 +1126,20 @@ class GitHubSyncCorpusIn(BaseModel):
 @router.post("/github/sync-to-corpus")
 def github_sync_to_corpus(
     body: GitHubSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Sync tracked GitHub PRs into the corpus as a markdown file.
 
     Reads open PRs from the github_pull_requests table and writes
     a summary into DATA_DIR/{dataset}/github_active_prs.md.
-    """
-    prs = db.list_open_pull_requests(body.installation_id)
+
+    Company-scoped: only the caller's company's PRs are read. A supplied
+    installation_id must belong to the caller's company (else 404)."""
+    if body.installation_id is not None and not db.get_github_installation_for_company(
+        body.installation_id, company.company_id
+    ):
+        raise HTTPException(404, "GitHub installation not found")
+    prs = db.list_open_pull_requests(company.company_id, body.installation_id)
 
     lines: list[str] = ["# GitHub Active Pull Requests\n"]
     if not prs:
@@ -1663,6 +1753,11 @@ def _handle_pull_request_event(payload: dict) -> None:
     state = pr.get("state") or "open"
     if pr.get("merged"):
         state = "merged"
+    # Inherit the tenant from the PR's installation. A PR for an unbound
+    # (legacy NULL-company) installation gets company_id=None and is excluded
+    # from all scoped reads until that installation is reconnected.
+    owner = db.get_github_installation(int(install_id)) or {}
+    company_id = owner.get("company_id")
     db.upsert_github_pull_request(
         installation_id=int(install_id),
         repo_full_name=str(repo.get("full_name") or ""),
@@ -1677,6 +1772,7 @@ def _handle_pull_request_event(payload: dict) -> None:
         body_excerpt=_excerpt(pr.get("body")),
         pr_created_at=pr.get("created_at"),
         pr_updated_at=pr.get("updated_at"),
+        company_id=company_id,
     )
 
 

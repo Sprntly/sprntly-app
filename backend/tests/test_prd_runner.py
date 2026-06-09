@@ -203,6 +203,9 @@ def test_run_sync_decision_logs_skill_and_hash(isolated_settings, monkeypatch):
     # prompt_version itself.
     import app.graph.gateway as gw
     monkeypatch.setattr(gw, "call_md", lambda **kw: _TWO_PART)
+    # A brief's dataset maps to a company; the decision log is keyed by that
+    # company UUID (and skipped when a dataset owns no company).
+    monkeypatch.setattr(prd_runner, "company_id_for_slug", lambda _slug: "co-test")
 
     prd_runner._run_sync(prd_id, brief_id, 0)
 

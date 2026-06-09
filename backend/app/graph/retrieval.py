@@ -278,35 +278,58 @@ def _trail_signal_payload(signal: Signal, *, edge_type: str) -> dict:
     }
 
 
-def _resolve_hypothesis(
+def resolve_insight_hypothesis(
     facade: GraphFacade,
     enterprise_id: str,
     theme_id: Optional[str],
     insight_title: Optional[str],
 ) -> Optional[Any]:
-    """Find the hypothesis Entity the synthesis agent wrote for this insight.
+    """The SINGLE resolver from a brief insight to its hypothesis Entity.
 
-    Match is on `properties.theme_id` (the synthesis linkage). When several
-    hypotheses address the same theme (multiple brief weeks, or two insights on
-    one theme), prefer the one whose canonical_label matches the insight title,
-    then the most recently written. Returns None when nothing matches — the
-    caller then degrades to a theme-only trail (or to corpus)."""
-    if not theme_id:
-        return None
+    Both the PRD trail (this module) and the Evidence page (`evidence_kg`) call
+    THIS function, so they always ground on the SAME hypothesis for a given
+    insight — previously the two had separate resolvers that diverged on the
+    missing-`theme_id` path and could drift further apart.
+
+    Resolution order (the synthesis agent writes one hypothesis Entity per
+    insight, copying the insight's `theme_id` into `properties.theme_id` and the
+    insight title into `canonical_label`):
+      1. Primary key: `properties.theme_id == theme_id`. Among matches, prefer
+         the one whose `canonical_label` matches the insight title, then the most
+         recently written (a theme can recur across weekly briefs).
+      2. No `theme_id` on the insight: fall back to a `canonical_label` match on
+         the insight title (the safer behavior — a title-keyed hypothesis is the
+         right grounding when the theme link is absent). With neither a theme_id
+         nor a title, there is nothing to match → None (empty trail), never a
+         blind corpus guess.
+    Returns None when nothing matches; the caller degrades to a theme-only trail
+    or to the corpus. Best-effort: a failed KG read returns None, never raises."""
     try:
         hyps = facade.query_entities(enterprise_id, type="hypothesis")
     except Exception as exc:  # noqa: BLE001 — trail read must not hard-fail
         logger.info("evidence trail: query hypotheses failed (%s)", exc)
         return None
-    matches = [h for h in hyps if (h.properties or {}).get("theme_id") == theme_id]
+    if not hyps:
+        return None
+    matches: list[Any] = []
+    if theme_id:
+        matches = [h for h in hyps if (h.properties or {}).get("theme_id") == theme_id]
+        if matches and insight_title:
+            titled = [h for h in matches if h.canonical_label == insight_title[:200]]
+            if titled:
+                matches = titled
+    # No theme_id (or no theme match): title fallback so Evidence and PRD agree.
+    if not matches and insight_title:
+        matches = [h for h in hyps if h.canonical_label == insight_title[:200]]
     if not matches:
         return None
-    if insight_title:
-        titled = [h for h in matches if h.canonical_label == insight_title[:200]]
-        if titled:
-            matches = titled
     matches.sort(key=lambda h: h.transaction_at, reverse=True)
     return matches[0]
+
+
+# Back-compat alias for the module-internal call site (and any importers that
+# referenced the old private name); the shared resolver above is canonical.
+_resolve_hypothesis = resolve_insight_hypothesis
 
 
 def _theme_id_for_insight(insight: dict) -> Optional[str]:
@@ -356,7 +379,7 @@ def insight_evidence_trail(
 
     # 1) SUPPORTS signals — the direct backing the synthesis agent wired to the
     #    hypothesis. These are the strongest evidence for the insight.
-    hyp = _resolve_hypothesis(facade, enterprise_id, theme_id, insight_title)
+    hyp = resolve_insight_hypothesis(facade, enterprise_id, theme_id, insight_title)
     hyp_out: Optional[dict] = None
     if hyp is not None:
         hyp_out = {

@@ -479,20 +479,6 @@ def test_compose_ask_answer_empty_kg_falls_back_to_corpus_only(
 # ─────────────────────────── route: POST /v1/ask ───────────────────────────
 
 
-@pytest.fixture
-def _override_optional_company(isolated_settings, monkeypatch):
-    """Override resolve_company_optional on the live app so the Ask route runs
-    with a resolved tenant. Returns the enterprise id. Cleans up after."""
-    import app.main as main_mod
-    from app.auth import CompanyContext, resolve_company_optional
-
-    main_mod.app.dependency_overrides[resolve_company_optional] = lambda: CompanyContext(
-        company_id="co-route", role="member", user_id="u1"
-    )
-    yield "co-route"
-    main_mod.app.dependency_overrides.pop(resolve_company_optional, None)
-
-
 def _seed_corpus(data_dir, dataset="asurion", body="some corpus body"):
     ds = data_dir / dataset
     ds.mkdir(exist_ok=True)
@@ -500,8 +486,13 @@ def _seed_corpus(data_dir, dataset="asurion", body="some corpus body"):
 
 
 def test_ask_route_uses_kg_context_when_signals_exist(
-    app_client, isolated_settings, fake_llm, _override_optional_company
+    tenant_client, isolated_settings, fake_llm
 ):
+    # The Ask route now requires a company (require_company) AND the dataset slug
+    # must resolve to that company (require_owned_dataset). Seed a company whose
+    # slug == the dataset, then seed KG signals under that company's id so the
+    # resolved tenant's graph carries them into the answer.
+    t = tenant_client.make(slug="asurion")
     _seed_corpus(isolated_settings["data_dir"])
     fake_llm["payload"] = {
         "answer": "grounded", "key_points": [], "citations": [], "confidence": 0.8,
@@ -512,13 +503,13 @@ def test_ask_route_uses_kg_context_when_signals_exist(
     facade = GraphFacade()
     theme, _ = _seed_theme_with_signals(
         facade,
-        "co-route",
+        t.company_id,
         "Pipeline",
         [("revenue", "deal_blocker", "Acme blocked on SSO", {}, 0)],
     )
 
     with _patch_embed(), _patch_candidates([(theme, 0.9)]):
-        resp = app_client.post(
+        resp = t.client.post(
             "/v1/ask", json={"question": "How is my pipeline?", "dataset": "asurion"}
         )
     assert resp.status_code == 200
@@ -529,15 +520,19 @@ def test_ask_route_uses_kg_context_when_signals_exist(
 
 
 def test_ask_route_corpus_only_for_legacy_session(
-    app_client, isolated_settings, fake_llm
+    tenant_client, isolated_settings, fake_llm
 ):
-    """No company override → resolve_company_optional returns None (legacy
-    cookie session) → corpus-only, response shape unchanged."""
+    """When the resolved company's KG is EMPTY (no signals seeded), the Ask route
+    falls back to corpus-only — response shape unchanged. This is the pre-#18
+    corpus-only behaviour, now reached via a resolved-but-empty tenant rather than
+    an unresolved legacy session (the route requires a company after the
+    tenant-isolation fix)."""
+    t = tenant_client.make(slug="asurion")
     _seed_corpus(isolated_settings["data_dir"])
     fake_llm["payload"] = {
         "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
     }
-    resp = app_client.post(
+    resp = t.client.post(
         "/v1/ask", json={"question": "What is churn?", "dataset": "asurion"}
     )
     assert resp.status_code == 200

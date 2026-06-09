@@ -234,17 +234,21 @@ def test_github_authorize_redirects_to_github(github_env, monkeypatch):
     assert "state=" in loc
 
 
-def _seed_github_install(*, account_login: str, installation_id: int = 12345) -> None:
-    """Seed a github_installations row for the given login. Mimics what the
-    'installation' webhook would have created when the user installed the
-    Sprntly App on a repo. Used to test the OAuth-callback branching:
-    if an install exists for the OAuth'd user → redirect to /settings;
-    if not → redirect to the App install URL."""
+def _seed_github_install(
+    *, account_login: str, company_id: str, installation_id: int = 12345
+) -> None:
+    """Seed a github_installations row for the given login, bound to a company.
+    Mimics an install already reconnected/bound to the caller's company. Used
+    to test the OAuth-callback branching: if a company-bound install exists for
+    the OAuth'd user → redirect to /settings; if not → redirect to the App
+    install URL. The binding matters — `_has_github_install_for` is now
+    company-scoped, so an unbound (NULL-company) install would not count."""
     from app.db.client import require_client
 
     require_client().table("github_installations").upsert(
         {
             "installation_id": installation_id,
+            "company_id": company_id,
             "account_id": 42,
             "account_login": account_login,
             "account_type": "User",
@@ -267,7 +271,7 @@ def test_github_callback_with_existing_install_redirects_to_settings(
         "scope": "read:user,user:email",
     }
     fake_user = {"login": "octocat", "id": 1, "email": "octo@cat.dev"}
-    _seed_github_install(account_login="octocat")
+    _seed_github_install(account_login="octocat", company_id=ctx.company_id)
 
     state = github_app.sign_oauth_state(company_id=ctx.company_id)
     with patch("app.routes.connectors.github_app.exchange_code_for_token", return_value=fake_token), \

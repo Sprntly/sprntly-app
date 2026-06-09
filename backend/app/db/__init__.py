@@ -128,7 +128,9 @@ from app.db.design_systems import mark_github_design_systems_stale
 # GitHub App (webhook-driven)
 from app.db.github import (
     delete_github_installation,
+    find_github_installation_for_repo,
     get_github_installation,
+    get_github_installation_for_company,
     list_github_installations,
     list_open_pull_requests,
     upsert_github_installation,
@@ -202,7 +204,9 @@ __all__ = [
     "mark_github_design_systems_stale",
     # github (webhook-driven)
     "delete_github_installation",
+    "find_github_installation_for_repo",
     "get_github_installation",
+    "get_github_installation_for_company",
     "list_github_installations",
     "list_open_pull_requests",
     "upsert_github_installation",

@@ -761,6 +761,25 @@ def test_by_prd_two_segment_resolves(env, client):
     assert client.get("/v1/design-agent/by-prd/76").status_code == 404
 
 
+def test_by_prd_registered_exactly_once(env):
+    # Regression: a duplicate, identical get_by_prd definition once registered the
+    # same GET /by-prd/{prd_id} route twice (duplicate operation ids / redundant
+    # registration). There must be exactly ONE GET route at that path.
+    matches = [
+        r for r in env.main.app.router.routes
+        if getattr(r, "path", None) == "/v1/design-agent/by-prd/{prd_id}"
+        and "GET" in getattr(r, "methods", set())
+    ]
+    assert len(matches) == 1, f"expected one /by-prd route, found {len(matches)}"
+    # Operation ids across the router are unique (a duplicate op id breaks the
+    # generated OpenAPI client).
+    op_ids = [
+        r.operation_id for r in env.main.app.router.routes
+        if getattr(r, "operation_id", None)
+    ]
+    assert len(op_ids) == len(set(op_ids))
+
+
 # ─── Connected-repo identifier threaded into generation ─────────────────────
 #
 # The Generate modal lets a user pick one of their connected GitHub repos. That
@@ -794,6 +813,7 @@ def test_generate_accepts_github_repo(env, client, monkeypatch):
         account_id=99,
         account_login="org",
         account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
     )
     resp = client.post(
         "/v1/design-agent/generate",
@@ -820,6 +840,7 @@ def test_generate_does_not_persist_installation_without_company_github_connectio
         account_id=99,
         account_login="org",
         account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
     )
     resp = client.post(
         "/v1/design-agent/generate",
@@ -849,6 +870,7 @@ def test_generate_does_not_persist_installation_for_inaccessible_repo(
         account_id=99,
         account_login="org",
         account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
     )
     resp = client.post(
         "/v1/design-agent/generate",
@@ -878,6 +900,7 @@ def test_generate_leaves_github_installation_null_when_repo_owner_not_installed(
         account_id=99,
         account_login="other-org",
         account_type="Organization",
+        company_id=_TEST_COMPANY_ID,
     )
     resp = client.post(
         "/v1/design-agent/generate",

@@ -16,6 +16,9 @@ test_design_system_cache_flow.py.
 from __future__ import annotations
 
 import base64
+import socket
+
+import pytest
 
 from app.connectors import figma_oauth
 from app.design_agent.design_system.adapters import FigmaExtractor, GithubExtractor, WebExtractor
@@ -568,6 +571,20 @@ class _FakeWebResp:
     def __init__(self, headers: dict[str, str] | None = None, ok: bool = True):
         self.ok = ok
         self.headers = headers or {}
+        self.is_redirect = False
+
+
+@pytest.fixture(autouse=True)
+def _allow_public_dns(monkeypatch):
+    """WebExtractor.current_version now runs the SSRF guard (app.net_guard),
+    which resolves the website host via getaddrinfo before the HEAD. These tests
+    use ``acme.com`` and don't mock DNS, so stub resolution to a public IP. The
+    guard's reject/allow logic itself is covered in test_net_guard.py. Harmless
+    to the Figma/GitHub adapter tests, which never call the guard."""
+    def _public(host, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr("app.net_guard.socket.getaddrinfo", _public)
 
 
 def test_website_current_version_returns_etag(monkeypatch):
@@ -576,7 +593,8 @@ def test_website_current_version_returns_etag(monkeypatch):
     def _fake_head(url, **kwargs):
         calls.append(url)
         assert kwargs["timeout"] == 10
-        assert kwargs["allow_redirects"] is True
+        # SSRF guard: auto-redirect is disabled so each hop can be re-validated.
+        assert kwargs["allow_redirects"] is False
         return _FakeWebResp(
             {"ETag": '"site-v1"', "Last-Modified": "Sun, 07 Jun 2026 12:00:00 GMT"}
         )

@@ -65,23 +65,16 @@ def _find_hypothesis(
 ) -> Optional[Entity]:
     """Resolve the insight to its hypothesis Entity.
 
-    Primary key is `properties.theme_id` (set by run_synthesis). When the
-    insight carries no theme_id we fall back to a canonical_label match on the
-    insight title (run_synthesis sets the hypothesis label to the insight
-    title). Most-recently-written hypothesis wins on ties (a theme can recur
-    across weekly briefs)."""
-    hyps = facade.query_entities(enterprise_id, type="hypothesis")
-    if not hyps:
-        return None
-    matches: list[Entity] = []
-    if theme_id:
-        matches = [h for h in hyps if h.properties.get("theme_id") == theme_id]
-    if not matches and insight_title:
-        matches = [h for h in hyps if h.canonical_label == insight_title[:200]]
-    if not matches:
-        return None
-    matches.sort(key=lambda h: h.transaction_at, reverse=True)
-    return matches[0]
+    Delegates to the ONE shared resolver (`graph.retrieval.resolve_insight_
+    hypothesis`) so the Evidence page and the PRD trail always ground on the
+    SAME hypothesis for a given insight — including the no-`theme_id` path (both
+    title-fall-back, else empty). Kept as a thin wrapper so the module-internal
+    call sites (and tests) keep their name; the resolution logic lives in one
+    place. Imported function-locally to avoid a load-time import cycle (retrieval
+    pulls in graph types that re-enter through the facade)."""
+    from app.graph.retrieval import resolve_insight_hypothesis
+
+    return resolve_insight_hypothesis(facade, enterprise_id, theme_id, insight_title)
 
 
 def _signal_to_trail_item(sig: Signal, edge_type: str) -> dict:

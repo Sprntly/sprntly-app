@@ -156,15 +156,43 @@ def enqueue_iteration(
 
 def dequeue_next(*, prototype_id: int, workspace_id: str) -> dict[str, Any] | None:
     """Mark the OLDEST pending row 'running' (stamp `started_at`) and return it;
-    None when no pending rows remain. Workspace-filtered.
+    None when no pending rows remain OR a row is ALREADY running for this
+    prototype. Workspace-filtered.
 
-    Single-worker: a select-oldest-then-update is sufficient. Horizontal scaling
-    would need `SELECT ... FOR UPDATE SKIP LOCKED` — out of scope for the
-    single-uvicorn deploy (BUILD.md §6). The serial-drain discipline
-    (`drain_iteration_queue` awaits each run before chaining the next) keeps at
-    most one row 'running' per prototype.
+    Concurrency guard (the load-bearing invariant — AD11 "at most one iteration
+    running per prototype"): the route fires a fresh `drain_iteration_queue` on
+    EVERY enqueue. Without this guard, enqueuing iteration #2 while #1 is still
+    running would let the new drain pick up #2's pending row and run it CONCURRENTLY
+    with #1 — two runs mutating the same prototype bundle (lost update). So before
+    promoting a pending row we check for an existing 'running' row for this
+    prototype and no-op (return None) when one exists. The serial drain chains the
+    next row only AFTER the current one is marked done/failed, so the guard clears
+    naturally and the queue still drains to completion.
+
+    DB-level (not just an in-process lock) so it is correct across workers. A
+    single-worker deploy (BUILD.md §6) means the select-running-then-select-pending
+    -then-update window is not a real race today; horizontal scaling would still
+    want `SELECT ... FOR UPDATE SKIP LOCKED`, but the running-row guard already
+    makes a second concurrent drain a no-op instead of a duplicate run.
     """
     c = require_client()
+    running = (
+        c.table(_TABLE).select("id")
+        .eq("prototype_id", prototype_id)
+        .eq("workspace_id", workspace_id)
+        .eq("status", "running")
+        .limit(1)
+        .execute()
+    )
+    if running.data:
+        # An iteration is already running for this prototype; a second concurrent
+        # drain must not start another. The in-flight run chains the next row when
+        # it finishes, so the queue still drains.
+        logger.info(
+            "iteration_dequeue_skipped_running prototype_id=%s running_id=%s",
+            prototype_id, running.data[0]["id"],
+        )
+        return None
     resp = (
         c.table(_TABLE).select("*")
         .eq("prototype_id", prototype_id)
