@@ -82,29 +82,53 @@ _SAMPLER_JS = r"""
   // default accent downstream, so it never wins here.
   const isTransparent = (c) =>
     !c || c === 'transparent' || /rgba\([^)]*,\s*0(\.0+)?\s*\)/.test(c);
+  // Saturation of a color in [0,1] — how chromatic it is. A brand color is
+  // chromatic; a black / white / gray button fill is near-zero. Used so a
+  // common monochrome button cannot outrank the real brand color on size.
+  const saturationOf = (c) => {
+    let r, g, b;
+    const m = (c || '').match(/rgba?\(([^)]+)\)/i);
+    if (m) {
+      [r, g, b] = m[1].split(',').map((x) => parseFloat(x));
+    } else if (c && c[0] === '#' && c.length >= 7) {
+      r = parseInt(c.slice(1, 3), 16);
+      g = parseInt(c.slice(3, 5), 16);
+      b = parseInt(c.slice(5, 7), 16);
+    } else {
+      return 0;
+    }
+    if ([r, g, b].some((v) => Number.isNaN(v))) return 0;
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    if (max === min) return 0;
+    const l = (max + min) / 2;
+    return (max - min) / (1 - Math.abs(2 * l - 1));
+  };
+  const SAT_THRESHOLD = 0.15;
   const ctaSelector =
     'button, [role="button"], a[class*="btn" i], a[class*="cta" i], a[class*="button" i]';
-  let primaryBtn = null;
-  let bestArea = 0;
-  let bestTop = Infinity;
+  // Collect every visible, non-transparent candidate with its fill + size.
+  const candidates = [];
   for (const el of document.querySelectorAll(ctaSelector)) {
     const rect = el.getBoundingClientRect();
     const area = rect.width * rect.height;
     if (area <= 0) continue;                       // not laid out / zero-area
     const elCs = getComputedStyle(el);
     if (elCs.visibility === 'hidden' || elCs.display === 'none') continue;
-    if (isTransparent(elCs.backgroundColor)) continue;  // unfilled / ghost CTA
-    // Prefer the larger filled candidate; on a tie prefer the one higher up the
-    // page (closer to the top of the viewport — likelier the hero CTA).
-    if (area > bestArea || (area === bestArea && rect.top < bestTop)) {
-      bestArea = area;
-      bestTop = rect.top;
-      primaryBtn = el;
-    }
+    const bg = elCs.backgroundColor;
+    if (isTransparent(bg)) continue;               // unfilled / ghost CTA
+    candidates.push({ el, area, top: rect.top, sat: saturationOf(bg) });
   }
-  // Fall back to the largest <button> of any kind only if nothing filled
-  // qualified. Its color is convertibility-checked on the Python side, so a
-  // transparent fallback cannot pass the confidence floor.
+  // Largest by area, breaking ties toward the candidate higher up the page
+  // (likelier the hero CTA).
+  const pickLargest = (list) =>
+    list.sort((a, b) => (b.area - a.area) || (a.top - b.top))[0] || null;
+  // Prefer a chromatic brand color; only if none qualifies fall back to the
+  // largest neutral fill, then to the largest plain <button>.
+  const chosen =
+    pickLargest(candidates.filter((c) => c.sat >= SAT_THRESHOLD)) ||
+    pickLargest(candidates);
+  let primaryBtn = chosen ? chosen.el : null;
   if (!primaryBtn) {
     let maxArea = 0;
     for (const b of document.querySelectorAll('button')) {

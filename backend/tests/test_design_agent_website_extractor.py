@@ -609,6 +609,15 @@ def test_sampler_js_broadens_cta_candidates_and_guards_transparency():
     assert "isTransparent" in js
 
 
+def test_sampler_js_prefers_chromatic_cta_over_monochrome():
+    """Lock the saturation-first CTA ranking against regression (the in-page JS
+    itself is proven by the live re-extraction): a monochrome button fill must
+    not outrank the brand color simply because it is larger."""
+    js = website._SAMPLER_JS
+    assert "saturationOf" in js
+    assert "SAT_THRESHOLD" in js
+
+
 def test_map_sample_defaults_absent_neutrals_to_empty():
     """Neutral keys absent from the raw evaluate() dict map to empty strings so
     the adapter falls back to its defaults rather than crashing."""
