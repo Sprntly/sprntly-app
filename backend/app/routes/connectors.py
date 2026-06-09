@@ -1190,6 +1190,49 @@ def github_list_repos(
     return {"repositories": github_app.fetch_user_repos(token, per_page=per_page)}
 
 
+@router.get("/github/accessible-repos")
+def github_list_accessible_repos(
+    company: CompanyContext = Depends(require_company),
+):
+    """Repos the Sprntly App can read, aggregated across every installation
+    owned by the caller's company. Uses each install's App TOKEN, not the
+    OAuth user token — so the list matches what was granted at App-install
+    time, not the OAuth scope (read:user user:email, which is too narrow
+    to enumerate private repos via /user/repos).
+
+    Returns an empty list (never 5xx) when the company has no install or
+    when every install's token-mint / GitHub call fails — the picker UI
+    surfaces that as "no repos accessible" rather than an error toast.
+
+    Company-scoped, member-shared: any member of the company that owns
+    the installation can list the repos."""
+    installs = db.list_github_installations(company.company_id)
+    if not installs:
+        return {"repositories": []}
+    seen: set[str] = set()
+    out: list[dict] = []
+    for install in installs:
+        install_id = install.get("installation_id")
+        if not install_id:
+            continue
+        try:
+            repos = github_app.fetch_installation_repos(int(install_id))
+        except Exception:
+            logger.warning(
+                "accessible-repos: install %s lookup failed",
+                install_id, exc_info=True,
+            )
+            continue
+        for r in repos:
+            fn = r.get("full_name")
+            if not fn or fn in seen:
+                continue
+            seen.add(fn)
+            out.append(r)
+    out.sort(key=lambda r: (r.get("full_name") or "").lower())
+    return {"repositories": out}
+
+
 class GitHubSyncCorpusIn(BaseModel):
     dataset: str
     installation_id: int | None = None

@@ -525,6 +525,16 @@ export const connectorsApi = {
     api.get<{ repositories: GitHubRepo[] }>(
       `/v1/connectors/github/repos?per_page=${encodeURIComponent(String(perPage))}`,
     ),
+  /** Repos the Sprntly App was granted access to during install,
+   * aggregated across every installation owned by the caller's company.
+   * Use this (not listGithubRepos) for any picker UI — listGithubRepos
+   * uses the OAuth user token + `read:user user:email` scope which can't
+   * enumerate private repos and returns empty for users with no public
+   * repos under their login. */
+  listAccessibleGithubRepos: () =>
+    api.get<{ repositories: GitHubRepo[] }>(
+      `/v1/connectors/github/accessible-repos`,
+    ),
   listGithubInstallations: () =>
     api.get<{ installations: GitHubInstallation[] }>(
       `/v1/connectors/github/installations`,
