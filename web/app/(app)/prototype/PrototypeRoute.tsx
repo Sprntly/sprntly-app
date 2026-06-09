@@ -26,7 +26,7 @@
 //
 // Lives in the (app) group → behind AuthGate, matching the canvas route: this is
 // an authed internal authoring surface.
-import { useState } from "react"
+import { useState, useRef } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
@@ -34,6 +34,22 @@ import { canvasPath, prdIdFromPrototypeSearch } from "../../lib/routes"
 import { GenerateModal } from "../../components/design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../../components/design-agent/GenerationLoadingScreen"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
+
+/** Pure: build the modal onClose handler that is safe to capture as a closure.
+ *  Navigation only fires when no generation is in flight. The loading state is
+ *  read via a getter (in the real component: `() => genLoadingRef.current`) so
+ *  the closure always sees the live value rather than the stale value captured at
+ *  render time — a ref read is immune to React's closure-over-state timing.
+ *  Exported for unit testing without a DOM (Node env, no jsdom needed).
+ */
+export function buildGatedOnClose(
+  getLoading: () => boolean,
+  navigate: () => void,
+): () => void {
+  return () => {
+    if (!getLoading()) navigate()
+  }
+}
 
 /** Pure: resolve the figma_file_key to seed the generate panel with, given the
  *  URL's prd id and the PRD currently loaded in ContentContext. Returns the
@@ -59,6 +75,10 @@ export function PrototypeRoute() {
   const prdId = prdIdFromPrototypeSearch(search.get("prd"))
   const figmaFileKey = figmaKeyForPrototype(prdId, content.prd)
 
+  // Ref-backed loading flag: read live inside the onClose closure so the
+  // callback never captures a stale false from the render before kickoff.
+  const genLoadingRef = useRef(false)
+
   // Full-screen loading-overlay visibility + the prototype_id known once the
   // generate POST returns (lets the loading screen subscribe to the SSE stream).
   const [genLoading, setGenLoading] = useState(false)
@@ -75,6 +95,7 @@ export function PrototypeRoute() {
     setGenFigmaKey(ctx?.figmaFileKey ?? null)
     setGenGithubRepo(ctx?.githubRepo ?? null)
     setGenProtoId(null)
+    genLoadingRef.current = true
     setGenLoading(true)
   }
 
@@ -84,6 +105,7 @@ export function PrototypeRoute() {
   // / no result, just dismiss the overlay; the panel stays so the user can retry
   // (runGenerateFlow already toasted the failure).
   const handleGenDone = (result?: DesignAgentGenResult) => {
+    genLoadingRef.current = false
     setGenLoading(false)
     if (result?.ok && result.prototype) {
       router.push(canvasPath(result.prototype.id))
@@ -114,7 +136,10 @@ export function PrototypeRoute() {
           rendered as the always-open panel on this dedicated page. */}
       <GenerateModal
         open
-        onClose={() => router.push("/prd")}
+        onClose={buildGatedOnClose(
+          () => genLoadingRef.current,
+          () => router.push("/prd"),
+        )}
         prdId={prdId}
         figmaFileKey={figmaFileKey}
         onGenStart={handleGenStart}
