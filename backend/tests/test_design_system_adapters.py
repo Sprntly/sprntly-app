@@ -768,3 +768,26 @@ def test_website_elevation_hint_sets_or_keeps_token():
     base = DesignSystem().tokens.elevation_style
     assert elevation("") == base
     assert elevation("sparkles") == base
+
+
+def test_website_component_counts_populate_inventory():
+    """Known primitive types with a positive count become the inventory, sorted;
+    unknown types and zero counts are dropped."""
+    ds = WebExtractor().normalize(
+        RawSignals(
+            provider="web",
+            ref="x",
+            signals=_web_sample(
+                component_counts={"button": 14, "card": 62, "badge": 0, "bogus": 5},
+            ),
+        )
+    )
+    assert ds.component_inventory == ["button", "card"]
+
+
+def test_website_absent_component_counts_yields_empty_inventory():
+    """No component_counts at all yields an empty inventory (still honest)."""
+    ds = WebExtractor().normalize(
+        RawSignals(provider="web", ref="x", signals=_web_sample())
+    )
+    assert ds.component_inventory == []

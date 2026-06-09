@@ -127,6 +127,7 @@ async def test_extract_returns_expected_sample_fields(monkeypatch):
         "border_color",
         "muted_color",
         "elevation_hint",
+        "component_counts",
     }
     assert ds["primary_color"] == "rgb(37, 99, 235)"
     assert ds["background_color"] == "rgb(255, 255, 255)"
@@ -540,6 +541,7 @@ async def test_extract_load_path_returns_design_system(monkeypatch):
         "border_color",
         "muted_color",
         "elevation_hint",
+        "component_counts",
     }
     assert ds["primary_color"] == "rgb(37, 99, 235)"
     assert ds["heading_font_family"] == "Inter"
@@ -627,3 +629,19 @@ def test_map_sample_defaults_absent_neutrals_to_empty():
     assert ds["surface_color"] == ""
     assert ds["border_color"] == ""
     assert ds["muted_color"] == ""
+
+
+def test_map_sample_defaults_absent_component_counts_to_empty():
+    """An absent component_counts key maps to an empty dict."""
+    ds = website._map_sample(
+        {"primary_color": "rgb(1, 2, 3)", "heading_font_family": "Inter"}
+    )
+    assert ds["component_counts"] == {}
+
+
+def test_sampler_js_emits_component_counts():
+    """Lock the DOM component counting against regression (the in-page JS is
+    proven by the live re-extraction)."""
+    js = website._SAMPLER_JS
+    assert "component_counts" in js
+    assert "componentSelectors" in js

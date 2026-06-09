@@ -61,6 +61,7 @@ class WebsiteDesignSystem(TypedDict):
     border_color: str             # computed border-color of a visibly-bordered element
     muted_color: str              # computed color of a secondary/muted text element
     elevation_hint: str           # "shadows" / "borders" / "" — how a card separates from the page
+    component_counts: dict[str, int]  # type name -> count of likely instances found in the DOM
 
 
 # Single ``page.evaluate()`` sampler. Returns a raw dict; missing elements yield
@@ -212,6 +213,40 @@ _SAMPLER_JS = r"""
     }
   }
 
+  // Component inventory: count how many of a known set of UI primitive types
+  // appear, by tag / role / class heuristics. Counts only — never any element
+  // content. Each count is capped so the result object stays small.
+  const componentSelectors = {
+    accordion: '[class*="accordion" i]',
+    alert: '[role="alert"], [class*="alert" i]',
+    avatar: '[class*="avatar" i]',
+    badge: '[class*="badge" i], [class*="chip" i]',
+    button: 'button, [role="button"], [class*="btn" i]',
+    card: '[class*="card" i]',
+    checkbox: 'input[type="checkbox"], [role="checkbox"]',
+    dialog: 'dialog, [role="dialog"]',
+    drawer: '[class*="drawer" i]',
+    dropdown: '[class*="dropdown" i]',
+    form: 'form',
+    input: 'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), [class*="input" i]',
+    menu: '[role="menu"], [class*="menu" i]',
+    modal: '[class*="modal" i]',
+    popover: '[class*="popover" i]',
+    select: 'select, [role="listbox"], [class*="select" i]',
+    sheet: '[class*="sheet" i]',
+    table: 'table, [role="table"]',
+    tabs: '[role="tablist"], [role="tab"], [class*="tab" i]',
+    textarea: 'textarea',
+    toast: '[class*="toast" i]',
+    tooltip: '[role="tooltip"], [class*="tooltip" i]',
+  };
+  const componentCounts = {};
+  for (const type in componentSelectors) {
+    let n = 0;
+    try { n = document.querySelectorAll(componentSelectors[type]).length; } catch (e) { n = 0; }
+    if (n > 0) componentCounts[type] = Math.min(n, 999);
+  }
+
   return {
     primary_color: primaryColor,
     background_color: bodyCs ? bodyCs.backgroundColor : '',
@@ -225,6 +260,7 @@ _SAMPLER_JS = r"""
     border_color: borderColor,
     muted_color: mutedColor,
     elevation_hint: elevationHint,
+    component_counts: componentCounts,
   };
 }
 """
@@ -279,6 +315,7 @@ def _map_sample(raw: dict | None) -> WebsiteDesignSystem:
         border_color=(raw.get("border_color") or "").strip(),
         muted_color=(raw.get("muted_color") or "").strip(),
         elevation_hint=(raw.get("elevation_hint") or "").strip(),
+        component_counts=dict(raw.get("component_counts") or {}),
     )
 
 

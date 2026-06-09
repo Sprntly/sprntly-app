@@ -526,8 +526,18 @@ class WebExtractor:
         # the sampler's own confidence floor; meeting it here too keeps the
         # signal honest.
         has_system = bool(primary and heading)
+        # Component inventory: keep only known primitive types with a positive
+        # count, sorted. A type list only — never component code — matching the
+        # codebase adapter's inventory contract.
+        counts = s.get("component_counts") or {}
+        inventory = sorted(
+            name
+            for name, count in counts.items()
+            if name in _COMPONENT_HINTS and isinstance(count, int) and count > 0
+        )
         return DesignSystem(
             tokens=tokens,
+            component_inventory=inventory,
             has_explicit_system=False,
             confidence="medium" if has_system else "low",
         )
