@@ -36,6 +36,15 @@ PROMPT_VERSION = "synthesis-brief-v1"
 MAX_CANDIDATES = 8   # themes sent to the LLM judge
 MAX_INSIGHTS = 5     # spec: 3–5 ranked recommendations
 
+
+class EmptyKnowledgeGraphError(ValueError):
+    """Raised when synthesis runs against a company whose KG has no themes with
+    signals yet. This is an expected, benign condition (a company with no data
+    ingested), not a genuine failure — callers should treat it as a skip, not an
+    error. Subclasses ValueError so existing `except ValueError` callers are
+    unaffected.
+    """
+
 _BRIEF_SCHEMA = {
     "type": "object",
     "properties": {
@@ -144,7 +153,7 @@ def run_synthesis(
     """Generate + persist a KG-driven brief. Returns the brief payload."""
     convergence = compute_convergence(facade, enterprise_id)
     if not convergence:
-        raise ValueError(
+        raise EmptyKnowledgeGraphError(
             "Knowledge graph has no themes with signals for this enterprise — "
             "run extraction/seeding first"
         )
