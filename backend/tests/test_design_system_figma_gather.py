@@ -28,6 +28,7 @@ from typing import Any
 import pytest
 
 from app.design_agent.design_system.figma_gather import (
+    _color_dict_to_hex,
     _frame_background_hex,
     gather_figma_signals,
 )
@@ -1179,28 +1180,355 @@ def test_light_canvas_picks_dark_foreground_over_light_text():
 
 
 def test_foreground_falls_back_to_area_when_no_background():
-    """When no theme_background is resolved, foreground falls back to the highest-area
-    text fill (the original behaviour — no background to compute contrast against).
+    """When there is no frame/page background AND no content fills, the area-based
+    foreground path is the only path available.
+
+    This test exercises a completely empty frame (no children, no page backgroundColor)
+    so that color_candidates is empty after the ladder.  Layer 4 cannot fire (no
+    color candidates).  theme_background stays None and foreground stays None.
+
+    The scenario that previously tested "highest-area text wins with no background"
+    is no longer valid: text fills are now also tracked as raw content fills, so they
+    become color_candidates and trigger the layer-4 backstop.  In that scenario the
+    contrast-aware path takes over (see test_layer4_backstop_fires_when_all_frames_
+    and_page_are_transparent for the content-fill backstop test and
+    test_plotline_scenario_page_canvas_dark_foreground_off_white for the foreground
+    cascade).
     """
-    high_area_hex = "#888888"
-    low_area_hex = "#f4f1ea"
-
-    high_area_text = _text_node("Inter", 400, high_area_hex, area=2000.0)
-    low_area_text = _text_node("Inter", 700, low_area_hex, area=500.0)
-
-    # Frame with no background (no fills, no backgroundColor) — theme-neutral.
+    # Completely empty frame — no children, no fills, no page backgroundColor.
     frame_no_bg = {
         "id": "no-bg",
         "type": "FRAME",
         "absoluteBoundingBox": _bbox(1440.0, 900.0),
         "fills": [],
-        "children": [high_area_text, low_area_text],
+        "children": [],
     }
     file_doc = _doc([_page_with_frames([frame_no_bg])])
     result = gather_figma_signals(file_doc)
 
-    assert result["theme_background"] is None
-    assert result["foreground"] == high_area_hex, (
-        f"Without a background, highest-area text fill ({high_area_hex}) should win; "
-        f"got {result['foreground']}"
+    # No content → no color candidates → layer 4 cannot fire → theme_background None.
+    assert result["theme_background"] is None, (
+        f"Empty frame with no content fills must leave theme_background None; "
+        f"got {result['theme_background']}"
+    )
+    # No text fills → foreground also None.
+    assert result["foreground"] is None, (
+        f"No text fills → foreground must be None; got {result['foreground']}"
+    )
+
+
+# ── _color_dict_to_hex helper ─────────────────────────────────────────────────
+
+
+def test_color_dict_to_hex_opaque_dict_returns_hex():
+    """A fully-opaque {r,g,b,a} dict (components 0..1) converts to #rrggbb."""
+    # Plotline page canvas: {0.118, 0.118, 0.118, a:1} → #1e1e1e
+    result = _color_dict_to_hex({"r": 0.118, "g": 0.118, "b": 0.118, "a": 1.0})
+    assert result is not None
+    assert result.startswith("#")
+    assert len(result) == 7
+    # round(0.118 * 255) = round(30.09) = 30 = 0x1e
+    assert result == "#1e1e1e"
+
+
+def test_color_dict_to_hex_alpha_zero_returns_none():
+    """Alpha 0 (transparent) must return None regardless of r,g,b values."""
+    assert _color_dict_to_hex({"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0}) is None
+    assert _color_dict_to_hex({"r": 1.0, "g": 1.0, "b": 1.0, "a": 0.0}) is None
+
+
+def test_color_dict_to_hex_non_dict_returns_none():
+    """Non-dict inputs return None without raising."""
+    assert _color_dict_to_hex(None) is None
+    assert _color_dict_to_hex("not a dict") is None
+    assert _color_dict_to_hex(42) is None
+
+
+# ── Layer 3: page/canvas backgroundColor fallback ─────────────────────────────
+
+
+def test_transparent_frame_on_dark_page_canvas_classifies_dark():
+    """The Plotline shape: frame fills=[white invisible], frame backgroundColor alpha=0,
+    page backgroundColor = {0.118, 0.118, 0.118, a:1.0} (#1e1e1e).
+
+    Layers 1 and 2 return None (transparent frame).  Layer 3 reads the page canvas
+    backgroundColor and resolves #1e1e1e.  The result: is_dark=True, theme_background
+    in the dark family (luminance < 128).
+    """
+    frame = {
+        "id": "plotline-frame",
+        "type": "FRAME",
+        "absoluteBoundingBox": {"x": 0, "y": 0, "width": 1210.0, "height": 1214.0},
+        # Invisible fill — layer 1 skips it.
+        "fills": [_solid_fill(1.0, 1.0, 1.0, visible=False)],
+        # Alpha 0 — layer 2 skips it.
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0},
+        "children": [],
+    }
+    page = {
+        "id": "page1",
+        "type": "CANVAS",
+        # Layer 3 target: opaque dark canvas.
+        "backgroundColor": {"r": 0.118, "g": 0.118, "b": 0.118, "a": 1.0},
+        "children": [frame],
+    }
+    file_doc = {"document": {"children": [page]}}
+    result = gather_figma_signals(file_doc)
+
+    assert result["theme_is_dark"] is True, (
+        "Transparent frame on a dark page canvas must classify as dark"
+    )
+    assert result["theme_background"] is not None
+    # Accept any dark-family hex (luminance < 128), not a pinned value.
+    from app.design_agent.design_system.figma_gather import _luminance
+    assert _luminance(result["theme_background"]) < 128, (
+        f"theme_background {result['theme_background']} must be in the dark family "
+        f"(luminance < 128); got luminance {_luminance(result['theme_background']):.1f}"
+    )
+    # Confirm the specific resolved hex is #1e1e1e (round(0.118*255)=30=0x1e).
+    assert result["theme_background"] == "#1e1e1e", (
+        f"Expected #1e1e1e from page canvas {{'r':0.118,'g':0.118,'b':0.118,'a':1}}; "
+        f"got {result['theme_background']}"
+    )
+
+
+def test_layer3_does_not_fire_when_frame_has_opaque_fill():
+    """A frame with a visible opaque fill is unchanged by the page-canvas fallback.
+
+    Layer 1 resolves the frame fill; layer 3 must never override it.
+    This test proves existing frames-with-fills are unaffected.
+    """
+    # Frame: visible dark fill (layer 1 wins).
+    frame = _frame_node(
+        "dark-frame",
+        fills=[_solid_fill(0.1, 0.1, 0.1)],  # dark fill wins
+        bbox_w=1440.0,
+        bbox_h=900.0,
+    )
+    # Page has a light canvas — if layer 3 fired incorrectly it would override.
+    page = {
+        "id": "page1",
+        "type": "CANVAS",
+        "backgroundColor": {"r": 0.95, "g": 0.95, "b": 0.95, "a": 1.0},  # light
+        "children": [frame],
+    }
+    file_doc = {"document": {"children": [page]}}
+    result = gather_figma_signals(file_doc)
+
+    # Frame fill is dark → must classify dark, ignoring the light page canvas.
+    assert result["theme_is_dark"] is True, (
+        "Frame with visible dark fill must classify dark even when page canvas is light"
+    )
+    expected_hex = f"#{round(0.1*255):02x}{round(0.1*255):02x}{round(0.1*255):02x}"
+    assert result["theme_background"] == expected_hex, (
+        f"theme_background must come from the frame fill ({expected_hex}), "
+        f"not the page canvas; got {result['theme_background']}"
+    )
+
+
+def test_layer3_does_not_fire_when_frame_has_opaque_background_color():
+    """A frame with an opaque backgroundColor is resolved by layer 2; layer 3 is skipped."""
+    frame = {
+        "id": "f1",
+        "type": "FRAME",
+        "absoluteBoundingBox": _bbox(1440.0, 900.0),
+        "fills": [],  # no visible fill
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0},  # black, opaque
+        "children": [],
+    }
+    page = {
+        "id": "page1",
+        "type": "CANVAS",
+        "backgroundColor": {"r": 0.95, "g": 0.95, "b": 0.95, "a": 1.0},  # light page
+        "children": [frame],
+    }
+    file_doc = {"document": {"children": [page]}}
+    result = gather_figma_signals(file_doc)
+
+    assert result["theme_is_dark"] is True, (
+        "Frame with opaque black backgroundColor must classify dark (layer 2 wins)"
+    )
+    assert result["theme_background"] == "#000000", (
+        f"Expected #000000 from frame backgroundColor; got {result['theme_background']}"
+    )
+
+
+def test_transparent_frame_on_light_page_canvas_classifies_light():
+    """A transparent frame on a light page canvas must classify as light.
+
+    Guards against false-dark when the page background happens to be light.
+    """
+    frame = {
+        "id": "f1",
+        "type": "FRAME",
+        "absoluteBoundingBox": _bbox(1440.0, 900.0),
+        "fills": [],
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0},  # transparent
+        "children": [],
+    }
+    page = {
+        "id": "page1",
+        "type": "CANVAS",
+        "backgroundColor": {"r": 0.97, "g": 0.97, "b": 0.97, "a": 1.0},  # near-white
+        "children": [frame],
+    }
+    file_doc = {"document": {"children": [page]}}
+    result = gather_figma_signals(file_doc)
+
+    assert result["theme_is_dark"] is False, (
+        "Transparent frame on a light page canvas must classify as light, not dark"
+    )
+    assert result["theme_background"] is not None
+    from app.design_agent.design_system.figma_gather import _luminance
+    assert _luminance(result["theme_background"]) >= 128, (
+        f"theme_background from a light page canvas must have luminance >= 128; "
+        f"got {result['theme_background']} (lum={_luminance(result['theme_background']):.1f})"
+    )
+
+
+# ── Layer 4: content-fill backstop ───────────────────────────────────────────
+
+
+def test_layer4_backstop_fires_when_all_frames_and_page_are_transparent():
+    """When every frame and page has a transparent background, the largest-area
+    content fill is used as the backstop background.
+
+    This is the last resort for files with no explicit Figma background property.
+    Layer 4 must fire and set theme_background to the highest-weight color candidate.
+    """
+    dark_fill = _hex_fill("#1a1a1a")  # large area → becomes backstop
+    accent_fill = _hex_fill("#d4af37")
+
+    large_dark_rect = {
+        "id": "large-dark",
+        "type": "RECTANGLE",
+        "absoluteBoundingBox": _bbox(500.0, 400.0),  # area = 200 000
+        "fills": [dark_fill],
+        "children": [],
+    }
+    small_accent_rect = {
+        "id": "small-accent",
+        "type": "RECTANGLE",
+        "absoluteBoundingBox": _bbox(50.0, 50.0),  # area = 2 500
+        "fills": [accent_fill],
+        "children": [],
+    }
+    # Fully transparent frame — no fill, no backgroundColor, no page canvas color.
+    frame = {
+        "id": "transparent-frame",
+        "type": "FRAME",
+        "absoluteBoundingBox": _bbox(1440.0, 900.0),
+        "fills": [],
+        # No backgroundColor key at all.
+        "children": [large_dark_rect, small_accent_rect],
+    }
+    # Page with no backgroundColor.
+    page = {"id": "page1", "type": "CANVAS", "children": [frame]}
+    file_doc = {"document": {"children": [page]}}
+    result = gather_figma_signals(file_doc)
+
+    # Layer 4 must have fired: theme_background is the highest-weight fill.
+    assert result["theme_background"] is not None, (
+        "Layer 4 backstop must set theme_background when layers 1-3 all return None"
+    )
+    assert result["theme_background"] == "#1a1a1a", (
+        f"Largest-area fill (#1a1a1a, area=200000) must win the backstop; "
+        f"got {result['theme_background']}"
+    )
+    assert result["theme_is_dark"] is True, (
+        "Backstop hex #1a1a1a is dark (luminance < 128) → theme_is_dark must be True"
+    )
+
+
+def test_layer4_does_not_fire_when_layer3_resolves():
+    """When layer 3 (page canvas) resolves a background, layer 4 must not override it.
+
+    This is the Plotline production path: layer 3 fires, layer 4 is skipped.
+    """
+    dark_fill = _hex_fill("#d4af37")  # a light-ish accent fill; if layer 4 ran it
+    # could win — but layer 3 should win and this content fill must not become
+    # the background.
+
+    accent_rect = {
+        "id": "accent",
+        "type": "RECTANGLE",
+        "absoluteBoundingBox": _bbox(600.0, 400.0),  # large area
+        "fills": [dark_fill],
+        "children": [],
+    }
+    frame = {
+        "id": "f1",
+        "type": "FRAME",
+        "absoluteBoundingBox": _bbox(1440.0, 900.0),
+        "fills": [],
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0},  # transparent
+        "children": [accent_rect],
+    }
+    page = {
+        "id": "page1",
+        "type": "CANVAS",
+        "backgroundColor": {"r": 0.118, "g": 0.118, "b": 0.118, "a": 1.0},  # dark canvas
+        "children": [frame],
+    }
+    file_doc = {"document": {"children": [page]}}
+    result = gather_figma_signals(file_doc)
+
+    # Layer 3 resolves the page canvas #1e1e1e; layer 4 must not override it.
+    assert result["theme_background"] == "#1e1e1e", (
+        f"Layer 3 should resolve page canvas #1e1e1e; layer 4 must not override; "
+        f"got {result['theme_background']}"
+    )
+    assert result["theme_is_dark"] is True
+
+
+# ── Plotline full scenario: foreground cascades to off-white on dark canvas ───
+
+
+def test_plotline_scenario_page_canvas_dark_foreground_off_white():
+    """End-to-end Plotline scenario with page canvas as background source.
+
+    Frame: invisible fill, alpha-0 backgroundColor (layers 1+2 yield None).
+    Page canvas: {0.118, 0.118, 0.118, a:1} → #1e1e1e via layer 3.
+    Text fills: off-white (#f4f1ea, smaller area) + mid-gray (#8a93a0, larger area).
+
+    Expected:
+      - theme_is_dark = True
+      - theme_background in dark family (#1e1e1e)
+      - foreground = off-white (highest contrast vs dark canvas, not highest area)
+    """
+    off_white = "#f4f1ea"  # luminance ≈ 237 — high contrast on dark
+    mid_gray = "#8a93a0"   # luminance ≈ 143 — lower contrast
+
+    off_white_text = _text_node("Inter", 700, off_white, area=800.0)
+    mid_gray_text = _text_node("Inter", 400, mid_gray, area=1200.0)  # higher area
+
+    frame = {
+        "id": "plotline-frame",
+        "type": "FRAME",
+        "absoluteBoundingBox": {"x": 0, "y": 0, "width": 1210.0, "height": 1214.0},
+        "fills": [_solid_fill(1.0, 1.0, 1.0, visible=False)],
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0},  # transparent
+        "children": [off_white_text, mid_gray_text],
+    }
+    page = {
+        "id": "page1",
+        "type": "CANVAS",
+        "backgroundColor": {"r": 0.118, "g": 0.118, "b": 0.118, "a": 1.0},
+        "children": [frame],
+    }
+    file_doc = {"document": {"children": [page]}}
+    result = gather_figma_signals(file_doc)
+
+    _assert_well_formed(result)
+    assert result["theme_is_dark"] is True, (
+        "Plotline scenario must resolve dark (layer 3 page canvas = #1e1e1e)"
+    )
+    assert result["theme_background"] == "#1e1e1e", (
+        f"theme_background must be #1e1e1e (page canvas); got {result['theme_background']}"
+    )
+    assert result["foreground"] == off_white, (
+        f"Dark canvas must select highest-contrast text (off-white {off_white}), "
+        f"not highest-area mid-gray ({mid_gray}); got {result['foreground']}.  "
+        f"The contrast-aware foreground rule cascades for free once theme_background "
+        f"is correctly resolved — no separate foreground fix was applied."
     )

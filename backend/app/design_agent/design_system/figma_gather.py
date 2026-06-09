@@ -83,8 +83,25 @@ def _first_visible_solid_hex(fills: list | None) -> str | None:
     return None
 
 
+def _color_dict_to_hex(d: object) -> str | None:
+    """Convert a Figma ``{r, g, b, a}`` color dict (components in 0..1) to #rrggbb.
+
+    Returns the hex string when ``d`` is a dict with alpha > 0.  Returns None when
+    the dict is absent, malformed, or fully transparent (alpha 0).  A transparent
+    color carries no visual information so it is never useful as a background signal.
+    """
+    if not isinstance(d, dict):
+        return None
+    if (d.get("a") or 0.0) <= 0:
+        return None
+    r = round((d.get("r") or 0.0) * 255)
+    g = round((d.get("g") or 0.0) * 255)
+    b = round((d.get("b") or 0.0) * 255)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 def _frame_background_hex(frame: dict) -> str | None:
-    """Resolve a frame's background hex, trying fills first then backgroundColor.
+    """Resolve a frame's own background hex (fills or frame-level backgroundColor).
 
     Figma files sometimes carry their canvas background exclusively in the frame's
     ``backgroundColor`` property (a ``{r, g, b, a}`` dict with components in 0..1)
@@ -94,21 +111,19 @@ def _frame_background_hex(frame: dict) -> str | None:
     black).  Without the fallback the black canvas is invisible to the classifier
     and the file is mis-classified as light.
 
+    This function covers only the frame itself (layers 1 and 2 of the full
+    background-resolution chain).  The caller is responsible for trying the
+    page/canvas backgroundColor as layer 3 when this returns None.
+
     Precedence:
       1. First visible SOLID fill (unchanged existing behaviour — fills still win).
-      2. ``backgroundColor`` with alpha > 0 (the new fallback for the case above).
+      2. ``backgroundColor`` with alpha > 0 (fallback for invisible-fills case).
       3. ``None`` — alpha 0 or absent means genuinely transparent / no canvas.
     """
     hx = _first_visible_solid_hex(frame.get("fills"))
     if hx:
         return hx
-    bg = frame.get("backgroundColor")
-    if isinstance(bg, dict) and (bg.get("a") or 0.0) > 0:
-        r = round((bg.get("r") or 0.0) * 255)
-        g = round((bg.get("g") or 0.0) * 255)
-        b = round((bg.get("b") or 0.0) * 255)
-        return f"#{r:02x}{g:02x}{b:02x}"
-    return None
+    return _color_dict_to_hex(frame.get("backgroundColor"))
 
 
 def _luminance(hex_color: str) -> float:
@@ -210,7 +225,15 @@ def _dominant_board_class(pages: list[dict]) -> tuple[str, bool, set[str]]:
             w = bbox.get("width") or 0.0
             h = bbox.get("height") or 0.0
             area = float(w) * float(h)
-            bg_hex = _frame_background_hex(frame)
+            # Layer 1 + 2: frame's own fills and backgroundColor.
+            # Layer 3: fall back to the page/canvas backgroundColor when the frame
+            # itself is fully transparent.  This is the Plotline case: a single
+            # top-level frame whose backgroundColor has alpha=0 sits on a page
+            # canvas with backgroundColor={0.118, 0.118, 0.118, a:1} (#1e1e1e).
+            # The page dict is already in scope here, so no extra fetch is needed.
+            bg_hex = _frame_background_hex(frame) or _color_dict_to_hex(
+                page.get("backgroundColor")
+            )
             if bg_hex is None:
                 continue  # theme-neutral frame, gathered unconditionally by caller
             frame_id = frame.get("id", "")
@@ -690,6 +713,21 @@ def gather_figma_signals(
         result["neutral_candidates"].append({
             "role": "surface", "hex": dominant_bg_hex, "weight": 0.0
         })
+
+    # Layer 4 backstop: if layers 1-3 all produced no background (transparent frame
+    # on a transparent page, or a file with no top-level frames at all), fall back to
+    # the highest-weight color candidate as the background.  This is a last-resort
+    # signal for files that carry no explicit Figma background property anywhere.
+    # It must NOT override a background already resolved by layers 1-3.
+    if not result["theme_background"] and result["color_candidates"]:
+        backstop_hex = max(result["color_candidates"], key=lambda c: c["weight"])["hex"]
+        result["theme_background"] = backstop_hex
+        result["theme_is_dark"] = _luminance(backstop_hex) < 128
+
+    # Refresh dominant_bg_hex: it was read from result["theme_background"] before the
+    # backstop could set it, so re-read it now so the foreground contrast block below
+    # uses the final resolved value.
+    dominant_bg_hex = result["theme_background"]
 
     # Foreground: pick the text fill with the highest luminance contrast against the
     # resolved canvas background.  This ensures a dark canvas yields the lightest
