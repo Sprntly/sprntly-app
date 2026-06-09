@@ -109,9 +109,13 @@ def refresh_access_token(token_json: dict[str, Any]) -> dict[str, Any]:
     return token_json
 
 
-def _get_valid_access_token() -> tuple[str, dict[str, Any]]:
-    """Decrypt stored token, refresh if expired, return (access_token, token_json)."""
-    row = db.get_connection(HUBSPOT_PROVIDER)
+def _get_valid_access_token(company_id: str) -> tuple[str, dict[str, Any]]:
+    """Decrypt stored token, refresh if expired, return (access_token, token_json).
+
+    Company-scoped: reads/refreshes the HubSpot connection owned by
+    `company_id` only.
+    """
+    row = db.get_connection(company_id, HUBSPOT_PROVIDER)
     if not row:
         raise HTTPException(404, "HubSpot is not connected")
 
@@ -134,7 +138,7 @@ def _get_valid_access_token() -> tuple[str, dict[str, Any]]:
         # Persist refreshed token
         try:
             encrypted = encrypt_token_json(json.dumps(token_json))
-            db.update_connection_tokens(HUBSPOT_PROVIDER, encrypted)
+            db.update_connection_tokens(company_id, HUBSPOT_PROVIDER, encrypted)
         except Exception:
             logger.warning("Failed to persist refreshed HubSpot token", exc_info=True)
         access_token = token_json["access_token"]
@@ -343,14 +347,15 @@ def deals_to_markdown(deals: list[dict[str, Any]]) -> str:
 # ───── Sync orchestrator ─────
 
 
-def sync_hubspot(dataset: str) -> SyncResult:
+def sync_hubspot(dataset: str, *, company_id: str) -> SyncResult:
     """Full sync: fetch contacts, companies, deals → write markdown to corpus.
 
-    Returns a SyncResult with counts and any errors.
+    Company-scoped: reads and updates the HubSpot connection owned by
+    `company_id` only. Returns a SyncResult with counts and any errors.
     """
     result = SyncResult(dataset=dataset)
 
-    access_token, _ = _get_valid_access_token()
+    access_token, _ = _get_valid_access_token(company_id)
     corpus_dir = settings.data_path / dataset
     corpus_dir.mkdir(parents=True, exist_ok=True)
 
@@ -393,7 +398,9 @@ def sync_hubspot(dataset: str) -> SyncResult:
     # Update sync status on connection
     try:
         error_msg = "; ".join(result.errors) if result.errors else None
-        db.update_connection_sync(HUBSPOT_PROVIDER, error=error_msg)
+        db.update_connection_sync(
+            company_id, HUBSPOT_PROVIDER, last_sync_error=error_msg
+        )
     except Exception:
         logger.warning("Failed to update HubSpot sync status", exc_info=True)
 
