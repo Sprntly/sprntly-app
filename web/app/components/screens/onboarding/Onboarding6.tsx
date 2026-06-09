@@ -1,101 +1,71 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { useAuth } from "../../../lib/auth"
-import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
-import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
-import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
-import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
+import { advanceOnboardingStep } from "../../../lib/onboarding/store"
 import {
-  categoryTitle,
-  hasRequiredConnector,
-  isLastCategory,
-  nextStep,
-  toggleSelection,
-  wizardCategories,
-} from "../../../lib/onboarding/connectorsWizard"
+  canLaunchWorkspace,
+  COWORKERS,
+  coworkersApi,
+  emptyCoworkerNames,
+  type CoworkerNames,
+  type CoworkerSlot,
+} from "../../../lib/onboarding/coworkersApi"
 
 /**
- * Onboarding page 06 (design-v4) — "Connect your tools."
+ * Onboarding page 06 — "Introducing your AI coworkers."
  *
- * A categorized SEQUENTIAL wizard: the PM works one connector category at
- * a time — "each one opens the next" — with Skip / Done·next per category.
- * Categories + connectors come from CONNECTOR_CATALOG so this tracks the
- * Settings page automatically. At least one Analytics source is required
- * before Continue; live OAuth/API-key wiring happens in Settings after
- * onboarding (selections here pre-stage intent).
+ * Four specialists join the workspace: Product / Design / Data Science /
+ * Admin. The user names each one — the name is how the coworker signs its
+ * work in chats, briefs, and comments. Names persist to the backend
+ * (PUT /v1/company/coworkers). "Launch workspace" advances to step 8,
+ * where the first Brief is generated.
  */
 export function Onboarding6() {
-  const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
-  const categories = useMemo(() => wizardCategories(), [])
-  const [catStep, setCatStep] = useState(0)
-  const [connected, setConnected] = useState<Set<string>>(new Set())
-  const [connections, setConnections] = useState<ConnectionSummary[]>([])
-  const [modalProvider, setModalProvider] = useState<string | null>(null)
-  const [planned, setPlanned] = useState<Set<string>>(new Set())
+  const [names, setNames] = useState<CoworkerNames>(emptyCoworkerNames())
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!workspace?.id) return
-    void connectorsApi
-      .list()
-      .then((r) => {
-        const ids = new Set<string>()
-        setConnections(r.connections)
-        for (const c of r.connections) {
-          if (c.status === "active") ids.add(c.provider)
-        }
-        setConnected(ids)
-      })
+    void coworkersApi
+      .get()
+      .then((n) => setNames({ ...emptyCoworkerNames(), ...n }))
       .catch(() => {})
   }, [workspace?.id])
 
-  const selected = useMemo(() => {
-    const s = new Set<string>()
-    connected.forEach((id) => s.add(id))
-    planned.forEach((id) => s.add(id))
-    return s
-  }, [connected, planned])
+  const { errors, validate, clearError, containerRef } = useFieldValidation(
+    () =>
+      COWORKERS.map((c) => ({
+        key: c.slot,
+        valid: names[c.slot].trim().length > 0,
+        message: `Give your ${c.label.toLowerCase()} a name.`,
+      })),
+  )
 
-  const hasAnalytics = hasRequiredConnector(selected)
-
-  function toggle(id: string) {
-    if (connected.has(id)) return // live connections aren't togglable here
-    if (CONNECTOR_IDS_CONNECTABLE.has(id)) {
-      setModalProvider(id) // real connect via the shared modal
-      return
-    }
-    setPlanned((prev) => toggleSelection(prev, id))
+  function setName(slot: CoworkerSlot, value: string) {
+    setNames((prev) => ({ ...prev, [slot]: value }))
+    clearError(slot)
   }
 
-  function reloadConnections() {
-    void connectorsApi.list().then((r) => {
-      setConnections(r.connections)
-      const ids = new Set<string>()
-      for (const c of r.connections) {
-        if (c.status === "active") ids.add(c.provider)
-      }
-      setConnected(ids)
-    })
-  }
+  const canLaunch = canLaunchWorkspace(names)
 
-  function advanceCategory() {
-    setCatStep((s) => nextStep(s))
-  }
-
-  async function go(skipped: boolean) {
-    if (!workspace || auth.kind !== "authed") return
+  async function launch() {
+    if (!workspace) return
+    setError(null)
+    if (!validate().ok) return
     setSaving(true)
     try {
-      if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
+      await coworkersApi.put(names)
       const updated = await advanceOnboardingStep(workspace.id, 7)
       setWorkspace(updated)
       router.push("/onboarding/7")
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't save coworker names.")
     } finally {
       setSaving(false)
     }
@@ -111,161 +81,120 @@ export function Onboarding6() {
 
   if (loading || !workspace) return <div className="ob-shell">Loading…</div>
 
-  const cat = categories[catStep]
-  const onLast = isLastCategory(catStep)
-  const selectedNames: string[] = []
-  for (const c of categories) {
-    for (const item of c.items) {
-      if (selected.has(item.id)) selectedNames.push(item.name)
-    }
-  }
+  const namedCount = COWORKERS.filter((c) => names[c.slot].trim()).length
 
   return (
     <InterviewLayout
       step={6}
       eyebrow="Saved"
-      title="Connect your tools"
-      agentMessage="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
+      title="Introducing your AI coworkers. Give them a name."
+      agentMessage="Three specialists plus an Admin join your workspace. You can give them a task, ask them questions, or @mention them — and their name is how they'll sign their work in chats, briefs, and comments."
       rightPane={
         <div>
-          <div className="ob-preview-label">Connection status</div>
-          <p className="ob-stat-lg">{selectedNames.length} selected</p>
+          <div className="ob-preview-label">Your coworkers</div>
+          <p className="ob-stat-lg">
+            {namedCount} of {COWORKERS.length} named
+          </p>
           <ul className="ob-preview-list">
-            {selectedNames.map((n, i) => {
-              const item = categories
-                .flatMap((c) => c.items)
-                .find((it) => it.name === n)
-              const isLive = item ? connected.has(item.id) : false
-              return (
-                <li key={`${n}-${i}`}>
-                  {isLive ? "✓" : "○"} {n}
-                </li>
-              )
-            })}
+            {COWORKERS.map((c) => (
+              <li key={c.slot}>
+                {names[c.slot].trim() || c.label}
+              </li>
+            ))}
           </ul>
         </div>
       }
       onBack={() => router.push("/onboarding/5")}
-      onContinue={() => go(false)}
-      onSkip={() => go(true)}
-      continueDisabled={!hasAnalytics}
-      continueLabel={hasAnalytics ? "Continue" : "Connect Analytics to continue"}
-      skipLabel="Connect later"
+      onContinue={launch}
+      continueLabel="Launch workspace"
       loading={saving}
     >
-      <div className="ob-wiz-progress">
-        Step {catStep + 1} of {categories.length} · {cat.title}
+      <div ref={containerRef}>
+      {error && <div className="ob-form-error">{error}</div>}
+
+      <div className="ob-coworker-list">
+        {COWORKERS.map((c) => (
+          <div
+            key={c.slot}
+            className={`ob-coworker-row cw-${c.color}`}
+            data-field={c.slot}
+          >
+            <div className="ob-coworker-meta">
+              <div className="ob-coworker-label">{c.label}</div>
+              <div className="ob-coworker-blurb">{c.blurb}</div>
+              {errors[c.slot] && <p className="field-error">{errors[c.slot]}</p>}
+            </div>
+            <input
+              className={`input ob-coworker-input ${errors[c.slot] ? "has-error" : ""}`}
+              value={names[c.slot]}
+              onChange={(e) => setName(c.slot, e.target.value)}
+              placeholder={c.placeholder}
+              maxLength={40}
+              aria-label={`Name for ${c.label}`}
+            />
+          </div>
+        ))}
       </div>
 
-      <div className="ob-conn-group">
-        <div className="ob-group-title">{categoryTitle(cat)}</div>
-        {cat.subtitle && <p className="ob-conn-cat-sub">{cat.subtitle}</p>}
-        <div className="ob-conn-grid">
-          {cat.items.map((item) => {
-            const live = connected.has(item.id)
-            const sel = selected.has(item.id)
-            return (
-              <button
-                key={item.id}
-                type="button"
-                className={`ob-conn-card ${sel ? "connected" : ""}`}
-                onClick={() => toggle(item.id)}
-              >
-                <span
-                  className="ob-conn-logo"
-                  style={{ background: item.logoColor ?? "var(--ink)" }}
-                  aria-hidden
-                >
-                  {item.logoText ?? item.name.charAt(0)}
-                </span>
-                <span className="ob-conn-name">{item.name}</span>
-                {live && <span className="ob-conn-badge">Live</span>}
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="ob-wiz-actions">
-          {!onLast ? (
-            <>
-              <button type="button" className="btn btn-ghost btn-sm" onClick={advanceCategory}>
-                Skip
-              </button>
-              <button type="button" className="btn btn-sm" onClick={advanceCategory}>
-                Done · next
-              </button>
-            </>
-          ) : (
-            <span className="ob-wiz-done-note">
-              Last category — use Continue below to finish.
-            </span>
-          )}
-        </div>
-      </div>
-
-      <p className="ob-conn-note">
-        OAuth and API-key connections are configured in Settings → Connectors
-        after onboarding. Selections here pre-stage what you intend to wire up.
+      <p className="ob-launch-note">
+        {namedCount} of {COWORKERS.length} named ·{" "}
+        {canLaunch ? "ready to launch" : "name each coworker to launch"}
       </p>
+      </div>
 
       <style jsx>{`
-        .ob-wiz-progress {
-          font-size: 11px;
-          text-transform: uppercase;
-          letter-spacing: 0.1em;
-          color: var(--muted);
-          margin-bottom: 14px;
-        }
-        .ob-conn-cat-sub {
-          font-size: 13px;
-          color: var(--ink-3);
-          margin: 0 0 12px;
-        }
-        .ob-conn-group :global(.ob-conn-card) {
+        .ob-coworker-list {
           display: flex;
-          align-items: center;
+          flex-direction: column;
+          gap: 12px;
         }
-        .ob-conn-logo {
-          display: inline-flex;
+        .ob-coworker-row {
+          display: grid;
+          grid-template-columns: 1fr 180px;
+          gap: 14px;
           align-items: center;
-          justify-content: center;
-          width: 22px;
-          height: 22px;
-          border-radius: 6px;
-          color: #fff;
-          font-size: 12px;
+          padding: 16px 18px;
+          border: 1px solid var(--line);
+          border-left: 3px solid var(--accent);
+          border-radius: 12px;
+          background: var(--surface-2);
+        }
+        .cw-pm {
+          border-left-color: var(--accent);
+        }
+        .cw-pd {
+          border-left-color: #2a6ec8;
+        }
+        .cw-ds {
+          border-left-color: #634ab0;
+        }
+        .cw-admin {
+          border-left-color: var(--ink-3);
+        }
+        .ob-coworker-label {
           font-weight: 600;
-          margin-right: 8px;
-          flex-shrink: 0;
+          font-size: 14px;
         }
-        .ob-wiz-actions {
-          display: flex;
-          gap: 8px;
-          margin-top: 16px;
-          align-items: center;
+        .ob-coworker-blurb {
+          font-size: 12px;
+          color: var(--ink-3);
+          margin-top: 2px;
+          line-height: 1.4;
         }
-        .ob-wiz-done-note {
+        .ob-coworker-input {
+          font-family: var(--font-mono, monospace);
+        }
+        .ob-launch-note {
           font-size: 12px;
           color: var(--muted);
+          margin: 16px 0 0;
+        }
+        @media (max-width: 560px) {
+          .ob-coworker-row {
+            grid-template-columns: 1fr;
+          }
         }
       `}</style>
-      <ConnectorConnectModal
-        providerId={modalProvider}
-        activeCompany={workspace.slug}
-        connection={
-          connections.find((c) => c.provider === modalProvider) ?? null
-        }
-        returnTo="/onboarding/6"
-        onClose={() => setModalProvider(null)}
-        onConnected={() => {
-          setModalProvider(null)
-          reloadConnections()
-        }}
-        onSkipForLater={() => {
-          if (modalProvider) setPlanned((prev) => toggleSelection(prev, modalProvider))
-          setModalProvider(null)
-        }}
-      />
     </InterviewLayout>
   )
 }

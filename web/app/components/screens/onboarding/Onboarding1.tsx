@@ -9,30 +9,24 @@ import {
   validateProductWebsite,
   normalizeProductWebsite,
 } from "../../../lib/onboarding/product-helpers"
-import {
-  BUSINESS_TYPES,
-  INDUSTRIES,
-  STAGES,
-  TECH_STACK_OPTIONS,
-} from "../../../lib/onboarding/types"
+import { STAGES, TECH_STACK_OPTIONS } from "../../../lib/onboarding/types"
 import {
   createWorkspace,
   markSkippedFields,
   updateWorkspace,
   upsertPrimaryProduct,
 } from "../../../lib/onboarding/store"
+import { onboardingApi } from "../../../lib/api"
 
 export function Onboarding1() {
   const auth = useAuth()
-  const { workspace, refresh, setWorkspace, loading } = useOnboarding()
+  const { workspace, refresh, setWorkspace, setWebsiteAnalysis, loading } =
+    useOnboarding()
   const router = useRouter()
   const [companyName, setCompanyName] = useState("")
   const [productName, setProductName] = useState("")
   const [productWebsite, setProductWebsite] = useState("")
-  const [industry, setIndustry] = useState("B2B SaaS")
-  const [industryOther, setIndustryOther] = useState("")
   const [stage, setStage] = useState("Growth")
-  const [businessType, setBusinessType] = useState("SaaS")
   const [teamSize, setTeamSize] = useState("")
   const [techStack, setTechStack] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
@@ -43,18 +37,13 @@ export function Onboarding1() {
     setCompanyName(workspace.display_name)
     setProductName(workspace.product?.name ?? workspace.display_name)
     setProductWebsite(workspace.product?.website ?? "")
-    setIndustry(workspace.industry ?? "B2B SaaS")
     setStage(workspace.stage ?? "Growth")
-    setBusinessType(workspace.business_type ?? "SaaS")
     if (workspace.team_size) setTeamSize(String(workspace.team_size))
     setTechStack(workspace.tech_stack ?? [])
   }, [workspace])
 
-  const resolvedIndustry = industry === "Other" ? industryOther.trim() : industry
   const canContinue =
-    companyName.trim().length > 0 &&
-    productName.trim().length > 0 &&
-    resolvedIndustry.length > 0
+    companyName.trim().length > 0 && productName.trim().length > 0
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(
     () => [
@@ -68,13 +57,23 @@ export function Onboarding1() {
         valid: productName.trim().length > 0,
         message: "Enter your primary product name.",
       },
-      {
-        key: "industry",
-        valid: resolvedIndustry.length > 0,
-        message: "Tell us your industry.",
-      },
     ],
   )
+
+  // Kick off website analysis in the BACKGROUND. Never blocks navigation and
+  // never throws into the save flow — the endpoint always answers 200, and we
+  // additionally swallow transport failures so onboarding completes even when
+  // analysis never returns. The result is stashed on the onboarding context
+  // for later steps (business context, success metrics) to read.
+  function startWebsiteAnalysis(website: string | null) {
+    if (!website) return
+    void onboardingApi
+      .analyzeWebsite(website)
+      .then((res) => setWebsiteAnalysis(res))
+      .catch(() => {
+        /* best-effort: leave analysis null → manual fallback downstream */
+      })
+  }
 
   async function save(andContinue: boolean) {
     if (auth.kind !== "authed") return
@@ -92,18 +91,14 @@ export function Onboarding1() {
         companyName,
         productName,
         productWebsite: website,
-        industry: resolvedIndustry,
         stage,
-        businessType,
         teamSize: teamSize ? Number(teamSize) : null,
         techStack,
       }
       if (workspace) {
         const updated = await updateWorkspace(workspace.id, {
           display_name: companyPayload.companyName.trim(),
-          industry: companyPayload.industry,
           stage: companyPayload.stage,
-          business_type: companyPayload.businessType,
           team_size: companyPayload.teamSize,
           tech_stack: companyPayload.techStack,
           onboarding_step: andContinue ? 2 : workspace.onboarding_step,
@@ -120,6 +115,8 @@ export function Onboarding1() {
         })
         setWorkspace(created)
       }
+      // Fire-and-forget; intentionally NOT awaited so navigation isn't blocked.
+      startWebsiteAnalysis(website)
       if (andContinue) router.push("/onboarding/2")
       else await refresh()
     } catch (e) {
@@ -147,7 +144,7 @@ export function Onboarding1() {
       step={1}
       eyebrow="Company & product context"
       title="Tell me about your company and product"
-      agentMessage="A company can have multiple products over time — we'll start with your primary product. Company name, product name, and where you are in your journey seed your Knowledge Graph workspace."
+      agentMessage="A company can have multiple products over time — we'll start with your primary product. Drop in your website and I'll read it in the background to pre-fill your industry, business type, and context as we go."
       rightPane={
         <PreviewCard
           title="Workspace preview"
@@ -155,7 +152,6 @@ export function Onboarding1() {
             companyName && `Company: ${companyName}`,
             productName && `Product: ${productName}`,
             productWebsite && `Website: ${productWebsite}`,
-            resolvedIndustry && `Industry: ${resolvedIndustry}`,
             stage && `Stage: ${stage}`,
           ].filter(Boolean) as string[]}
         />
@@ -205,36 +201,10 @@ export function Onboarding1() {
           placeholder="https://yourproduct.com"
           autoComplete="url"
         />
-      </div>
-      <div className={`field ${errors.industry ? "has-error" : ""}`} data-field="industry">
-        <label className="field-label">Industry *</label>
-        <select
-          className="input"
-          value={industry}
-          onChange={(e) => {
-            setIndustry(e.target.value)
-            clearError("industry")
-          }}
-        >
-          {INDUSTRIES.map((i) => (
-            <option key={i}>
-              {i}
-            </option>
-          ))}
-        </select>
-        {industry === "Other" && (
-          <input
-            className="input"
-            style={{ marginTop: 8 }}
-            value={industryOther}
-            onChange={(e) => {
-              setIndustryOther(e.target.value)
-              clearError("industry")
-            }}
-            placeholder="Your industry"
-          />
-        )}
-        {errors.industry && <p className="field-error">{errors.industry}</p>}
+        <p className="field-hint">
+          We&apos;ll read this to draft your industry, business type, and
+          context — you can confirm or change everything later.
+        </p>
       </div>
       <div className="field">
         <label className="field-label">Stage *</label>
@@ -246,16 +216,6 @@ export function Onboarding1() {
             </label>
           ))}
         </div>
-      </div>
-      <div className="field">
-        <label className="field-label">Business type *</label>
-        <select className="input" value={businessType} onChange={(e) => setBusinessType(e.target.value)}>
-          {BUSINESS_TYPES.map((b) => (
-            <option key={b}>
-              {b}
-            </option>
-          ))}
-        </select>
       </div>
       <div className="field">
         <label className="field-label">Team size (optional)</label>

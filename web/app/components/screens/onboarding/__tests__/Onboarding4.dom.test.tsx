@@ -1,150 +1,178 @@
 // @vitest-environment jsdom
 //
-// Container-level mount test for onboarding step 04 — "Share your business
-// context." The sibling Onboarding4.test.tsx renders only the pure
-// ContextUploadView via renderToStaticMarkup, so it never exercises the
-// stateful Onboarding4 container and misses container-level crashes (the
-// production "Application error: a client-side exception has occurred" on
-// /onboarding/4). This file mounts the real default container under jsdom
-// with mocked auth/onboarding/router so a render-time throw is caught.
+// Container-level mount test for onboarding step 04 — the consolidated success-
+// metrics page. Asserts: suggested metrics render selectable, add-your-own
+// works, the industry/business-type dropdowns are pre-filled from analysis yet
+// editable, and Save persists the confirmed industry/business-type to the
+// company AND the metrics to the KPI tree. Plus the redirect-in-effect safety.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
-import { cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-// Hooks + API the container depends on are mocked so the mount is
-// deterministic and offline. Paths resolve relative to this test file.
-const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
+const updateWorkspaceMock = vi.fn()
+const advanceStepMock = vi.fn()
+const kpiPutMock = vi.fn()
 
-vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
 }))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
-  advanceOnboardingStep: vi.fn(),
-  markSkippedFields: vi.fn(),
+  updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
+  advanceOnboardingStep: (...a: unknown[]) => advanceStepMock(...a),
 }))
-vi.mock("../../../../lib/api", () => ({
-  companiesApi: { uploadFiles: vi.fn() },
-}))
+vi.mock("../../../../lib/onboarding/kpiTreeApi", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../lib/onboarding/kpiTreeApi")>()
+  return {
+    ...actual,
+    kpiTreeApi: { put: (...a: unknown[]) => kpiPutMock(...a) },
+  }
+})
 
 import { Onboarding4 } from "../Onboarding4"
-import type { WorkspaceCompany } from "../../../../lib/onboarding/types"
-
-// A loaded workspace matching the real Workspace type, as the context yields
-// it mid-onboarding (step 4): product not yet captured (null), industry set.
-function makeWorkspace(over: Partial<WorkspaceCompany> = {}): WorkspaceCompany {
-  return {
-    id: "ws-1",
-    slug: "acme",
-    display_name: "Acme",
-    product_description: null,
-    product: null,
-    industry: "B2B SaaS",
-    stage: "Seed",
-    business_type: "SaaS",
-    team_size: null,
-    engineering_capacity: null,
-    pm_engineer_ratio: null,
-    competitors: [],
-    tech_stack: [],
-    okrs: null,
-    recent_decisions: null,
-    dead_ends: [],
-    biggest_risk: null,
-    kpi_tree: { north_star: "", north_star_description: "", metrics: [] },
-    feature_flags: {
-      weekly_brief: true,
-      on_demand_analysis: true,
-      auto_prd_generation: true,
-      engineer_agent: false,
-      research_agent: false,
-      on_call_agent: false,
-      claude_code_handoff: false,
-    },
-    notification_settings: {},
-    onboarding_step: 4,
-    onboarding_completed_at: null,
-    ...over,
-  }
-}
+import { makeWorkspace, makeAnalysis, makeOnboardingCtx } from "./fixtures"
 
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
 })
 
-describe("Onboarding4 (container) — mounts without crashing", () => {
-  it("renders the context-upload step for a loaded workspace", () => {
-    authMock.mockReturnValue({
-      kind: "authed",
-      user: { id: "u-1" },
-      session: {},
-    })
-    onboardingMock.mockReturnValue({
-      loading: false,
-      profile: null,
-      workspace: makeWorkspace(),
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
-
-    // Regression: this mount threw in production. It must render the step.
+describe("Onboarding4 (container) — consolidated metrics", () => {
+  it("renders suggested metrics as selectable options", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 4 }),
+        websiteAnalysis: makeAnalysis(),
+      }),
+    )
     render(React.createElement(Onboarding4))
-    expect(screen.getByText("Share your business context")).not.toBeNull()
-    expect(screen.getByText(/Documents/)).not.toBeNull()
+    expect(screen.getByText("Set your success metrics")).not.toBeNull()
+    expect(screen.getByText("Reconciled volume")).not.toBeNull()
+    const cards = document.querySelectorAll(".ob-suggested-card")
+    expect(cards.length).toBe(2)
   })
 
-  it("renders for a workspace whose product/industry are still null (mid-onboarding)", () => {
-    // Step 4 runs before product/industry are captured, so the loaded
-    // workspace legitimately has product: null / industry: null. The mount
-    // must not throw on these.
-    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
-    onboardingMock.mockReturnValue({
-      loading: false,
-      profile: null,
-      workspace: makeWorkspace({ product: null, industry: null }),
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+  it("pre-fills industry/business-type dropdowns from analysis yet keeps them editable", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        // workspace carries no industry yet → comes from analysis
+        workspace: makeWorkspace({ onboarding_step: 4, industry: null, business_type: null }),
+        websiteAnalysis: makeAnalysis({ industry: "Fintech", business_type: "Marketplace" }),
+      }),
+    )
     render(React.createElement(Onboarding4))
-    expect(screen.getByText("Share your business context")).not.toBeNull()
+    const industrySel = document.querySelector(
+      'select[aria-label="Industry"]',
+    ) as HTMLSelectElement
+    const bizSel = document.querySelector(
+      'select[aria-label="Business type"]',
+    ) as HTMLSelectElement
+    expect(industrySel.value).toBe("Fintech")
+    expect(bizSel.value).toBe("Marketplace")
+    expect(industrySel.disabled).toBe(false)
+    // user can override
+    fireEvent.change(industrySel, { target: { value: "Healthtech" } })
+    expect(
+      (document.querySelector('select[aria-label="Industry"]') as HTMLSelectElement).value,
+    ).toBe("Healthtech")
+  })
+
+  it("adds a custom metric via Add your own", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 4 }),
+        websiteAnalysis: makeAnalysis(),
+      }),
+    )
+    render(React.createElement(Onboarding4))
+    const nameInput = document.querySelector(
+      'input[aria-label="Custom metric name"]',
+    ) as HTMLInputElement
+    fireEvent.change(nameInput, { target: { value: "Gross margin" } })
+    const addBtn = Array.from(document.querySelectorAll("button")).find(
+      (b) => b.textContent === "Add",
+    ) as HTMLButtonElement
+    fireEvent.click(addBtn)
+    expect(screen.getByText("1 supporting metric selected")).not.toBeNull()
+    expect(screen.getByText("Gross margin")).not.toBeNull()
+  })
+
+  it("persists confirmed industry/business-type to the company AND metrics to the KPI tree on save", async () => {
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 5 }))
+    advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 5 }))
+    kpiPutMock.mockResolvedValue({ ok: true, version: 2 })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 4, industry: null, business_type: null }),
+        websiteAnalysis: makeAnalysis({ industry: "Fintech", business_type: "Marketplace" }),
+      }),
+    )
+    render(React.createElement(Onboarding4))
+
+    // North Star is required to save.
+    const ns = document.querySelector(
+      'input[placeholder="The one metric that best captures product value"]',
+    ) as HTMLInputElement
+    fireEvent.change(ns, { target: { value: "Reconciled volume" } })
+
+    // select a suggested metric
+    const card = document.querySelector(".ob-suggested-card") as HTMLButtonElement
+    fireEvent.click(card)
+
+    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /continue/i.test(b.textContent ?? ""),
+    ) as HTMLButtonElement
+    await act(async () => {
+      continueBtn.click()
+    })
+
+    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
+      industry: "Fintech",
+      business_type: "Marketplace",
+    })
+    expect(kpiPutMock).toHaveBeenCalledTimes(1)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/5")
+  })
+
+  it("works on the graceful-degrade path (analysis ok:false → manual entry)", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 4, industry: null, business_type: null }),
+        websiteAnalysis: makeAnalysis({
+          ok: false,
+          reason: "blocked_url",
+          industry: null,
+          business_type: null,
+          business_context: "",
+          suggested_metrics: [],
+        }),
+      }),
+    )
+    render(React.createElement(Onboarding4))
+    // no suggestions → manual fallback prompt, dropdowns still present + editable
+    expect(screen.getByText(/No suggestions yet/)).not.toBeNull()
+    const industrySel = document.querySelector(
+      'select[aria-label="Industry"]',
+    ) as HTMLSelectElement
+    expect(industrySel).not.toBeNull()
+    expect(industrySel.disabled).toBe(false)
   })
 
   it("shows the loading shell while the workspace is loading", () => {
-    authMock.mockReturnValue({ kind: "loading" })
-    onboardingMock.mockReturnValue({
-      loading: true,
-      profile: null,
-      workspace: null,
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ loading: true, workspace: null }))
     render(React.createElement(Onboarding4))
     expect(screen.getByText("Loading…")).not.toBeNull()
   })
 
   it("redirects to step 1 from an EFFECT (never during render) when there is no workspace", () => {
-    // Regression for the client-side exception: the prior code called
-    // router.replace() during render when loading had finished with no
-    // workspace. Navigating as a render side-effect throws in React 19
-    // (update-while-rendering) and surfaces as the production error
-    // boundary. The fix moves the redirect into an effect and renders the
-    // loading shell meanwhile — so this mount stays crash-free.
-    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
-    onboardingMock.mockReturnValue({
-      loading: false,
-      profile: null,
-      workspace: null,
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     const errors: unknown[] = []
     const spy = vi
@@ -153,8 +181,6 @@ describe("Onboarding4 (container) — mounts without crashing", () => {
     render(React.createElement(Onboarding4))
     spy.mockRestore()
 
-    // Redirect fired (from the effect, after commit), shell shown, and React
-    // logged no "update a component while rendering" / act warnings.
     expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/1")
     expect(screen.getByText("Loading…")).not.toBeNull()
     const sideEffectInRender = errors

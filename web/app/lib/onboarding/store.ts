@@ -197,9 +197,11 @@ export async function createWorkspace(input: {
   companyName: string
   productName: string
   productWebsite?: string | null
-  industry: string
+  /** Optional on create — Claude infers it from the website; confirmed later. */
+  industry?: string | null
   stage: string
-  businessType: string
+  /** Optional on create — Claude infers it from the website; confirmed later. */
+  businessType?: string | null
   teamSize?: number | null
   engineeringCapacity?: number | null
   pmEngineerRatio?: string | null
@@ -220,9 +222,9 @@ export async function createWorkspace(input: {
         created_by: input.userId,
         slug: trySlug,
         display_name: input.companyName.trim(),
-        industry: input.industry,
+        industry: input.industry ?? null,
         stage: input.stage,
-        business_type: input.businessType,
+        business_type: input.businessType ?? null,
         team_size: input.teamSize ?? null,
         engineering_capacity: input.engineeringCapacity ?? null,
         pm_engineer_ratio: input.pmEngineerRatio?.trim() || null,
@@ -294,7 +296,7 @@ export function serializeKpiTree(tree: KpiTree): Record<string, unknown> {
   }
 }
 
-export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 3) {
+export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 5) {
   return updateWorkspace(companyId, {
     kpi_tree: serializeKpiTree(tree),
     onboarding_step: nextStep,
@@ -309,7 +311,7 @@ export async function saveStrategicContext(
     dead_ends?: string[]
     biggest_risk?: string | null
   },
-  nextStep = 4,
+  nextStep = 3,
 ) {
   return updateWorkspace(companyId, {
     okrs: input.okrs?.trim() || null,
@@ -345,11 +347,11 @@ export async function completeOnboarding(companyId: string, userId: string) {
   const now = new Date().toISOString()
   await supabase
     .from("companies")
-    .update({ onboarding_step: 8, onboarding_completed_at: now })
+    .update({ onboarding_step: 7, onboarding_completed_at: now })
     .eq("id", companyId)
   await supabase
     .from("profiles")
-    .update({ onboarding_step: 8, onboarding_completed_at: now })
+    .update({ onboarding_step: 7, onboarding_completed_at: now })
     .eq("id", userId)
 }
 
