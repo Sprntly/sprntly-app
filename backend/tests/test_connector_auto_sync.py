@@ -122,7 +122,7 @@ def test_github_callback_kicks_off_sync(isolated_settings, monkeypatch):
                         lambda tj: "{}")
     monkeypatch.setattr(conn_route.db, "upsert_connection", lambda **kw: {"id": "c1"})
     # already-installed so the callback takes the normal redirect path
-    monkeypatch.setattr(conn_route, "_has_github_install_for", lambda login: True)
+    monkeypatch.setattr(conn_route, "_has_github_install_for", lambda login, company_id: True)
 
     calls = []
     monkeypatch.setattr(conn_route, "kickoff_sync",
