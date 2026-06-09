@@ -27,7 +27,10 @@ from typing import Any
 
 import pytest
 
-from app.design_agent.design_system.figma_gather import gather_figma_signals
+from app.design_agent.design_system.figma_gather import (
+    _frame_background_hex,
+    gather_figma_signals,
+)
 from app.design_agent.design_system.adapters import FigmaExtractor
 from app.design_agent.design_system.extractors import RawSignals
 
@@ -972,3 +975,232 @@ def test_extract_raw_signals_emits_only_rich_gather_keys():
         assert key in signals, (
             f"Rich key '{key}' missing from extract_raw_signals output; got: {set(signals.keys())}"
         )
+
+
+# ── Frame background resolver: fills precedence + backgroundColor fallback ───
+
+
+def test_frame_background_hex_visible_fill_takes_precedence():
+    """When fills contains a visible SOLID fill, that hex is returned regardless
+    of any backgroundColor on the frame.  The fills path is unchanged.
+    """
+    frame = {
+        "fills": [_solid_fill(0.9, 0.9, 0.9)],  # near-white visible fill
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0},  # black — must be ignored
+    }
+    result = _frame_background_hex(frame)
+    expected = f"#{round(0.9*255):02x}{round(0.9*255):02x}{round(0.9*255):02x}"
+    assert result == expected, (
+        f"Visible fill should win over backgroundColor; got {result}, expected {expected}"
+    )
+
+
+def test_frame_background_hex_uses_background_color_when_fills_invisible():
+    """The Plotline case: fills=[white invisible] + backgroundColor=black.
+    _frame_background_hex must return the backgroundColor hex (#000000), not None.
+    """
+    frame = {
+        "fills": [_solid_fill(1.0, 1.0, 1.0, visible=False)],  # invisible white
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0},  # pure black
+    }
+    result = _frame_background_hex(frame)
+    assert result == "#000000", (
+        f"Should fall back to backgroundColor (#000000) when fills are invisible; got {result}"
+    )
+
+
+def test_frame_background_hex_uses_background_color_when_fills_empty():
+    """When fills is empty, backgroundColor with alpha > 0 must be used."""
+    frame = {
+        "fills": [],
+        "backgroundColor": {"r": 0.067, "g": 0.067, "b": 0.086, "a": 1.0},  # dark near-black
+    }
+    result = _frame_background_hex(frame)
+    # round(0.067*255)=17, round(0.067*255)=17, round(0.086*255)=22
+    assert result is not None
+    assert result.startswith("#")
+    assert len(result) == 7
+
+
+def test_frame_background_hex_alpha_zero_returns_none():
+    """A backgroundColor with alpha 0 is genuinely transparent and must return None.
+    A fully transparent frame is theme-neutral: neither light nor dark.
+    """
+    frame = {
+        "fills": [],
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0},  # transparent black
+    }
+    assert _frame_background_hex(frame) is None, (
+        "Alpha-0 backgroundColor must return None (genuinely transparent frame)"
+    )
+
+
+def test_frame_background_hex_no_background_color_returns_none():
+    """When there are no visible fills and no backgroundColor, None is returned."""
+    frame = {"fills": []}
+    assert _frame_background_hex(frame) is None
+
+    frame_invisible = {"fills": [_solid_fill(1.0, 1.0, 1.0, visible=False)]}
+    assert _frame_background_hex(frame_invisible) is None
+
+
+# ── Dark-canvas single-frame classification (the Plotline scenario) ───────────
+
+
+def test_dominant_board_class_dark_frame_via_background_color():
+    """A single frame with invisible fills + black backgroundColor is classified as dark.
+
+    Before the fix, this frame was dropped as theme-neutral because
+    _first_visible_solid_hex returned None on its invisible-white fills.
+    After the fix, _frame_background_hex finds the black backgroundColor and the
+    frame drives is_dark=True + theme_background=#000000.
+    """
+    # Simulate the Plotline case: 1210×1214 ≈ 1.47M area, invisible white fill, black bg.
+    frame = {
+        "id": "call-sheet-builder-1",
+        "type": "FRAME",
+        "absoluteBoundingBox": {"x": 0, "y": 0, "width": 1210.0, "height": 1214.0},
+        "fills": [_solid_fill(1.0, 1.0, 1.0, visible=False)],
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0},
+        "children": [],
+    }
+    page = {"id": "page1", "type": "CANVAS", "children": [frame]}
+    file_doc = {"document": {"children": [page]}}
+    result = gather_figma_signals(file_doc)
+
+    assert result["theme_is_dark"] is True, (
+        "Single black-backgroundColor frame must classify as dark (is_dark=True)"
+    )
+    assert result["theme_background"] == "#000000", (
+        f"theme_background must be #000000; got {result['theme_background']}"
+    )
+
+
+def test_existing_visible_fill_frames_classify_unchanged():
+    """Frames WITH a visible solid fill are still classified correctly (regression guard).
+
+    A light frame (visible white fill) → light; a dark frame (visible dark fill) → dark.
+    The backgroundColor fallback must not interfere with the fills path.
+    """
+    # Light frame: visible near-white fill, dark backgroundColor (ignored because fill wins).
+    light_frame = _frame_node(
+        "light",
+        fills=[_solid_fill(0.95, 0.95, 0.95)],
+        bbox_w=1440.0,
+        bbox_h=900.0,
+    )
+    light_frame["backgroundColor"] = {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}
+
+    file_doc_light = _doc([_page_with_frames([light_frame])])
+    result_light = gather_figma_signals(file_doc_light)
+    assert result_light["theme_is_dark"] is False, "Visible light fill must still classify light"
+    assert result_light["theme_background"] is not None
+
+    # Dark frame: visible near-black fill.
+    dark_frame = _frame_node(
+        "dark",
+        fills=[_solid_fill(0.1, 0.1, 0.1)],
+        bbox_w=1440.0,
+        bbox_h=900.0,
+    )
+    file_doc_dark = _doc([_page_with_frames([dark_frame])])
+    result_dark = gather_figma_signals(file_doc_dark)
+    assert result_dark["theme_is_dark"] is True, "Visible dark fill must still classify dark"
+
+
+# ── Contrast-aware foreground selection ──────────────────────────────────────
+
+
+def test_dark_canvas_picks_light_foreground_over_mid_gray():
+    """On a dark canvas the contrast-aware rule picks the lightest gathered text fill.
+
+    Scenario: two text fills on a black canvas — a light off-white (#f4f1ea, high
+    contrast) and a mid-gray (#8a93a0, low contrast).  The off-white covers slightly
+    less pixel area.  The old area-based rule would have picked the mid-gray; the
+    contrast-aware rule picks the off-white because it has greater luminance distance
+    from the black background.
+    """
+    off_white = "#f4f1ea"  # luminance ≈ 237 — high contrast on black
+    mid_gray = "#8a93a0"   # luminance ≈ 143 — low contrast on black
+
+    # mid_gray covers more area (higher-weight text) to exercise the contrast override.
+    off_white_text = _text_node("Inter", 700, off_white, area=800.0)
+    mid_gray_text = _text_node("Inter", 400, mid_gray, area=1200.0)
+
+    # Dark frame via backgroundColor (the Plotline shape).
+    top_frame = {
+        "id": "dark-canvas",
+        "type": "FRAME",
+        "absoluteBoundingBox": _bbox(1440.0, 900.0),
+        "fills": [_solid_fill(1.0, 1.0, 1.0, visible=False)],  # invisible white
+        "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0},  # black canvas
+        "children": [off_white_text, mid_gray_text],
+    }
+    file_doc = _doc([_page_with_frames([top_frame])])
+    result = gather_figma_signals(file_doc)
+
+    assert result["theme_is_dark"] is True
+    assert result["foreground"] == off_white, (
+        f"Dark canvas must select highest-contrast text fill ({off_white}); "
+        f"got {result['foreground']}.  The mid-gray ({mid_gray}) has higher area "
+        f"but lower contrast and must not win."
+    )
+
+
+def test_light_canvas_picks_dark_foreground_over_light_text():
+    """On a light canvas the contrast-aware rule picks the darkest gathered text fill.
+
+    Scenario: a near-white canvas with two text fills — dark charcoal (#1a1a1a, high
+    contrast) and a light muted color (#c0c0c0, low contrast).  The charcoal covers
+    less area than the light muted, but higher luminance distance wins.
+    """
+    charcoal = "#1a1a1a"
+    light_muted = "#c0c0c0"
+
+    charcoal_text = _text_node("Inter", 700, charcoal, area=600.0)
+    light_text = _text_node("Inter", 400, light_muted, area=900.0)
+
+    top_frame = _frame_node(
+        "light-canvas",
+        fills=[_solid_fill(0.97, 0.97, 0.97)],  # near-white visible fill
+        children=[charcoal_text, light_text],
+        bbox_w=1440.0,
+        bbox_h=900.0,
+    )
+    file_doc = _doc([_page_with_frames([top_frame])])
+    result = gather_figma_signals(file_doc)
+
+    assert result["theme_is_dark"] is False
+    assert result["foreground"] == charcoal, (
+        f"Light canvas must select highest-contrast text fill ({charcoal}); "
+        f"got {result['foreground']}.  Light muted ({light_muted}) has higher area "
+        f"but lower contrast and must not win."
+    )
+
+
+def test_foreground_falls_back_to_area_when_no_background():
+    """When no theme_background is resolved, foreground falls back to the highest-area
+    text fill (the original behaviour — no background to compute contrast against).
+    """
+    high_area_hex = "#888888"
+    low_area_hex = "#f4f1ea"
+
+    high_area_text = _text_node("Inter", 400, high_area_hex, area=2000.0)
+    low_area_text = _text_node("Inter", 700, low_area_hex, area=500.0)
+
+    # Frame with no background (no fills, no backgroundColor) — theme-neutral.
+    frame_no_bg = {
+        "id": "no-bg",
+        "type": "FRAME",
+        "absoluteBoundingBox": _bbox(1440.0, 900.0),
+        "fills": [],
+        "children": [high_area_text, low_area_text],
+    }
+    file_doc = _doc([_page_with_frames([frame_no_bg])])
+    result = gather_figma_signals(file_doc)
+
+    assert result["theme_background"] is None
+    assert result["foreground"] == high_area_hex, (
+        f"Without a background, highest-area text fill ({high_area_hex}) should win; "
+        f"got {result['foreground']}"
+    )

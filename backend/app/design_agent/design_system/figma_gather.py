@@ -83,6 +83,34 @@ def _first_visible_solid_hex(fills: list | None) -> str | None:
     return None
 
 
+def _frame_background_hex(frame: dict) -> str | None:
+    """Resolve a frame's background hex, trying fills first then backgroundColor.
+
+    Figma files sometimes carry their canvas background exclusively in the frame's
+    ``backgroundColor`` property (a ``{r, g, b, a}`` dict with components in 0..1)
+    while keeping the ``fills`` list empty or containing only invisible entries.
+    A prominent example: a dark-mode file whose single top-level frame has
+    ``fills=[{white, visible:false}]`` and ``backgroundColor={0,0,0,1}`` (pure
+    black).  Without the fallback the black canvas is invisible to the classifier
+    and the file is mis-classified as light.
+
+    Precedence:
+      1. First visible SOLID fill (unchanged existing behaviour — fills still win).
+      2. ``backgroundColor`` with alpha > 0 (the new fallback for the case above).
+      3. ``None`` — alpha 0 or absent means genuinely transparent / no canvas.
+    """
+    hx = _first_visible_solid_hex(frame.get("fills"))
+    if hx:
+        return hx
+    bg = frame.get("backgroundColor")
+    if isinstance(bg, dict) and (bg.get("a") or 0.0) > 0:
+        r = round((bg.get("r") or 0.0) * 255)
+        g = round((bg.get("g") or 0.0) * 255)
+        b = round((bg.get("b") or 0.0) * 255)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    return None
+
+
 def _luminance(hex_color: str) -> float:
     """Perceptual luminance of a #rrggbb string (ITU-R BT.601 weights)."""
     r = int(hex_color[1:3], 16)
@@ -182,7 +210,7 @@ def _dominant_board_class(pages: list[dict]) -> tuple[str, bool, set[str]]:
             w = bbox.get("width") or 0.0
             h = bbox.get("height") or 0.0
             area = float(w) * float(h)
-            bg_hex = _first_visible_solid_hex(frame.get("fills"))
+            bg_hex = _frame_background_hex(frame)
             if bg_hex is None:
                 continue  # theme-neutral frame, gathered unconditionally by caller
             frame_id = frame.get("id", "")
@@ -663,9 +691,21 @@ def gather_figma_signals(
             "role": "surface", "hex": dominant_bg_hex, "weight": 0.0
         })
 
-    # Secondary TEXT fills (not the dominant text color) → muted.
+    # Foreground: pick the text fill with the highest luminance contrast against the
+    # resolved canvas background.  This ensures a dark canvas yields the lightest
+    # gathered text (not a low-contrast mid-gray that happens to cover more area),
+    # and a light canvas yields the darkest gathered text.  When no background is
+    # known, fall back to the highest-area text fill (the original behaviour).
+    # Secondary fills (all others) route to neutral_candidates as muted.
     if text_fill_area:
-        dominant_text_hex = max(text_fill_area, key=lambda h: text_fill_area[h])
+        if dominant_bg_hex:
+            bg_lum = _luminance(dominant_bg_hex)
+            dominant_text_hex = max(
+                text_fill_area,
+                key=lambda h: abs(_luminance(h) - bg_lum),
+            )
+        else:
+            dominant_text_hex = max(text_fill_area, key=lambda h: text_fill_area[h])
         result["foreground"] = dominant_text_hex
         for hx, area in text_fill_area.items():
             if hx != dominant_text_hex:
