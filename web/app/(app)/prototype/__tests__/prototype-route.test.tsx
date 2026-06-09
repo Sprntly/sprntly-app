@@ -16,7 +16,7 @@ import {
   pathForScreen,
   screenIdFromPathname,
 } from "../../../lib/routes"
-import { figmaKeyForPrototype } from "../PrototypeRoute"
+import { figmaKeyForPrototype, buildGatedOnClose } from "../PrototypeRoute"
 
 // Repo test convention: components carry no `import React`; expose it globally.
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -75,6 +75,56 @@ describe("prototype route — nav registration", () => {
   it("does not disturb the existing nav (prd / chat unchanged)", () => {
     expect(screenIdFromPathname("/prd")).toBe("prd")
     expect(screenIdFromPathname("/")).toBe("chat")
+  })
+})
+
+// Regression: the post-kickoff auto-close from runGenerateFlow must NOT navigate
+// to /prd. GenerateModal captures onClose at submit time when genLoading is still
+// false (stale closure), so the gate reads from a ref rather than state.
+// buildGatedOnClose models this: getLoading is a live-read getter (ref.current),
+// navigate is the router.push("/prd") side-effect.
+describe("prototype route — gated onClose (buildGatedOnClose)", () => {
+  it("does NOT navigate when generation is in flight (ref true at call time)", () => {
+    // Simulate: generation has kicked off (ref set to true), then GenerateModal
+    // fires its auto-close callback. The closure was formed before kickoff but
+    // reads the getter live — should suppress navigation.
+    let loading = false
+    const navigate = { called: false, fn() { this.called = true } }
+    const onClose = buildGatedOnClose(() => loading, () => navigate.fn())
+
+    loading = true   // genLoadingRef.current = true (set in handleGenStart)
+    onClose()        // auto-close fired by runGenerateFlow post-kickoff
+
+    expect(navigate.called).toBe(false)
+  })
+
+  it("DOES navigate to /prd when no generation is in flight (explicit cancel before kickoff)", () => {
+    // Simulate: user clicks the explicit X / cancel button before generation
+    // starts. genLoadingRef is still false — navigation should proceed.
+    let loading = false
+    const navigateCalls: string[] = []
+    const onClose = buildGatedOnClose(() => loading, () => navigateCalls.push("/prd"))
+
+    onClose()   // user cancels before hitting Generate
+
+    expect(navigateCalls).toEqual(["/prd"])
+  })
+
+  it("DOES navigate to /prd after generation completes (ref reset to false in handleGenDone)", () => {
+    // Simulate the full lifecycle: kickoff → done → user closes the panel.
+    // genLoadingRef is set back to false in handleGenDone before the success
+    // push, so a subsequent close (e.g. panel still mounted on failure) can route.
+    let loading = false
+    const navigateCalls: string[] = []
+    const onClose = buildGatedOnClose(() => loading, () => navigateCalls.push("/prd"))
+
+    loading = true   // handleGenStart
+    onClose()        // (suppressed — generation in flight)
+    expect(navigateCalls).toHaveLength(0)
+
+    loading = false  // handleGenDone resets the ref
+    onClose()        // now safe to navigate
+    expect(navigateCalls).toEqual(["/prd"])
   })
 })
 

@@ -255,17 +255,70 @@ def _resolve_figma_access_token(figma_file_key: str | None, workspace_id: str) -
         return None
 
 
+def _hex_to_hsl_channels(hex_str: str) -> str:
+    """Convert a #rrggbb hex colour to an HSL channel triplet string.
+
+    Returns space-separated values suitable for a CSS custom property consumed
+    by hsl(var(--token)), e.g. "220 13% 18%". Hue is an integer 0–360;
+    saturation and lightness are integer percents.
+    """
+    h = hex_str.lstrip("#")
+    r = int(h[0:2], 16) / 255.0
+    g = int(h[2:4], 16) / 255.0
+    b = int(h[4:6], 16) / 255.0
+
+    cmax = max(r, g, b)
+    cmin = min(r, g, b)
+    delta = cmax - cmin
+
+    lightness = (cmax + cmin) / 2.0
+    saturation = 0.0 if delta == 0 else delta / (1.0 - abs(2.0 * lightness - 1.0))
+
+    if delta == 0:
+        hue = 0.0
+    elif cmax == r:
+        hue = 60.0 * (((g - b) / delta) % 6)
+    elif cmax == g:
+        hue = 60.0 * ((b - r) / delta + 2)
+    else:
+        hue = 60.0 * ((r - g) / delta + 4)
+
+    return f"{round(hue)} {round(saturation * 100)}% {round(lightness * 100)}%"
+
+
+def _blend(fg_hex: str, bg_hex: str, alpha: float) -> str:
+    """Blend a foreground colour over a background at the given opacity.
+
+    Returns the resulting solid #rrggbb. Used to derive solid border/muted
+    colours instead of appending an alpha suffix to a hex token — alpha
+    suffixes produce invalid CSS when the value is consumed via hsl(var(--border))
+    because the hsl() function has no alpha slot in that usage.
+    """
+    def _parse(h: str):
+        h = h.lstrip("#")
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+    fr, fg_c, fb = _parse(fg_hex)
+    br, bg_c, bb = _parse(bg_hex)
+    rr = round(alpha * fr + (1.0 - alpha) * br)
+    rg = round(alpha * fg_c + (1.0 - alpha) * bg_c)
+    rb = round(alpha * fb + (1.0 - alpha) * bb)
+    return f"#{rr:02x}{rg:02x}{rb:02x}"
+
+
 def _render_palette_css(palette: dict) -> str:
-    """Generate a minimal CSS file pre-seeding the design source palette.
+    """Generate src/index.css pre-seeding the extracted design palette.
 
-    Called ONCE before `generate_prototype`'s agent loop starts. The file is
-    written into `virtual_fs["src/index.css"]` so it is already on disk when
-    the agent's first `write` call fires. This guarantees the palette is the
-    starting point — the agent cannot start from stock Tailwind defaults and
-    then ignore a palette instruction it received only inside the tool result.
+    Produces a drop-in replacement for prototype-runtime/src/index.css that
+    preserves the scaffold's contract: Tailwind directives first, then an
+    @layer base :root block with HSL channel triplets for every semantic token,
+    then the @layer base apply rules. All token values are HSL channel triplets
+    (e.g. "220 13% 18%") so that tailwind.config.ts can consume them correctly
+    via hsl(var(--token)).
 
-    The agent prompt (§5 DESIGN SYSTEM) instructs the agent to `view`
-    `src/index.css` first and to use `var(--background)` etc. in all
+    Called once before the agent loop starts so the agent always sees the
+    brand's tokens when it views src/index.css. The agent prompt instructs the
+    agent to view src/index.css first and to use var(--background) etc. in all
     components rather than hardcoded Tailwind palette classes.
     """
     bg = palette.get("background", "#ffffff")
@@ -276,11 +329,11 @@ def _render_palette_css(palette: dict) -> str:
     # Derive foreground from is_dark (light text on dark bg, dark text on light bg)
     fg = "#f4f1ea" if is_dark else "#1a1a1a"
 
-    # Find a surface color: second-most-common swatch, or bg
+    # Surface: second-most-common swatch, or background
     surface = swatches[1] if len(swatches) > 1 else bg
 
-    # muted: third swatch or similar
-    muted = swatches[2] if len(swatches) > 2 else surface
+    # Muted background: third swatch, or surface
+    muted_bg = swatches[2] if len(swatches) > 2 else surface
 
     font_family = palette.get("font_family")
     font_weights = palette.get("font_weights") or [400, 700]
@@ -303,31 +356,66 @@ def _render_palette_css(palette: dict) -> str:
         # Non-Google font — use it optimistically in the stack (may fall through)
         font_stack = f'"{font_family}", ui-sans-serif, system-ui, sans-serif'
 
-    return f"""{font_import}/* Design source palette — generated from Figma file */
+    # Primary foreground: black on dark palette (accent is bright), white on light
+    primary_fg_hex = "#000000" if is_dark else "#ffffff"
+
+    # Muted foreground: blend fg over bg at 0xaa/255 ≈ 0.667 opacity.
+    # We derive a solid colour rather than appending an alpha suffix because
+    # tailwind.config.ts consumes these via hsl(var(--token)) with no alpha slot.
+    muted_fg_hex = _blend(fg, bg, 0xAA / 255)
+
+    # Border and input: same blend logic at 0x22/255 ≈ 0.133 opacity
+    border_hex = _blend(fg, bg, 0x22 / 255)
+
+    # Convert every colour to HSL channel triplets (no hsl() wrapper, no #)
+    bg_h = _hex_to_hsl_channels(bg)
+    fg_h = _hex_to_hsl_channels(fg)
+    surface_h = _hex_to_hsl_channels(surface)
+    primary_h = _hex_to_hsl_channels(accent)
+    primary_fg_h = _hex_to_hsl_channels(primary_fg_hex)
+    muted_bg_h = _hex_to_hsl_channels(muted_bg)
+    muted_fg_h = _hex_to_hsl_channels(muted_fg_hex)
+    border_h = _hex_to_hsl_channels(border_hex)
+
+    return f"""{font_import}@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design source palette — pre-seeded from the extracted design system */
 /* DO NOT replace the :root block; use var(--background) etc. in all components */
-:root {{
-  --background: {bg};
-  --foreground: {fg};
-  --card: {surface};
-  --card-foreground: {fg};
-  --primary: {accent};
-  --primary-foreground: {"#000000" if is_dark else "#ffffff"};
-  --secondary: {surface};
-  --secondary-foreground: {fg};
-  --muted: {muted};
-  --muted-foreground: {fg}aa;
-  --accent: {accent};
-  --accent-foreground: {"#000000" if is_dark else "#ffffff"};
-  --border: {fg}22;
-  --input: {fg}22;
-  --ring: {accent};
-  --font-sans: {font_stack};
+@layer base {{
+  :root {{
+    --background: {bg_h};
+    --foreground: {fg_h};
+    --card: {surface_h};
+    --card-foreground: {fg_h};
+    --popover: {surface_h};
+    --popover-foreground: {fg_h};
+    --primary: {primary_h};
+    --primary-foreground: {primary_fg_h};
+    --secondary: {surface_h};
+    --secondary-foreground: {fg_h};
+    --muted: {muted_bg_h};
+    --muted-foreground: {muted_fg_h};
+    --accent: {primary_h};
+    --accent-foreground: {primary_fg_h};
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: {border_h};
+    --input: {border_h};
+    --ring: {primary_h};
+    --radius: 0.5rem;
+    --font-sans: {font_stack};
+  }}
 }}
 
-body {{
-  background-color: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans);
+@layer base {{
+  * {{
+    @apply border-border;
+  }}
+  body {{
+    @apply bg-background text-foreground;
+  }}
 }}
 """
 
