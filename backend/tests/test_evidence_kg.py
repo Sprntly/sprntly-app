@@ -406,10 +406,13 @@ def test_generate_evidence_kg_records_failure(isolated_settings, monkeypatch):
 
 # ---------- route dispatch by brief_engine ----------
 
-def test_route_dispatches_to_kg_under_synthesis(app_client, isolated_settings,
+def test_route_dispatches_to_kg_under_synthesis(tenant_client, isolated_settings,
                                                  monkeypatch):
     """Default engine = synthesis → POST /generate schedules the KG runner."""
     from app.routes import evidence as evidence_route
+    # Seed a company whose slug == the brief's dataset so require_owned_brief
+    # resolves the brief to the caller's company.
+    t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod, dataset="acme")
 
@@ -420,18 +423,19 @@ def test_route_dispatches_to_kg_under_synthesis(app_client, isolated_settings,
     monkeypatch.setattr(evidence_route, "generate_evidence",
                         lambda *a, **k: scheduled.__setitem__("runner", "legacy"))
 
-    resp = app_client.post("/v1/evidence/generate",
-                           json={"brief_id": brief_id, "insight_index": 0})
+    resp = t.client.post("/v1/evidence/generate",
+                         json={"brief_id": brief_id, "insight_index": 0})
     assert resp.status_code == 200
     assert resp.json()["status"] in ("generating", "ready")
 
 
 def test_route_dispatches_to_legacy_under_legacy_engine(
-    app_client, isolated_settings, monkeypatch
+    tenant_client, isolated_settings, monkeypatch
 ):
     from app.config import settings
     from app.routes import evidence as evidence_route
     monkeypatch.setattr(settings, "brief_engine", "legacy")
+    t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod, dataset="acme")
 
@@ -443,8 +447,8 @@ def test_route_dispatches_to_legacy_under_legacy_engine(
     monkeypatch.setattr(evidence_route, "generate_evidence_kg", fake_kg)
     monkeypatch.setattr(evidence_route, "generate_evidence", fake_legacy)
 
-    resp = app_client.post("/v1/evidence/generate",
-                           json={"brief_id": brief_id, "insight_index": 0})
+    resp = t.client.post("/v1/evidence/generate",
+                         json={"brief_id": brief_id, "insight_index": 0})
     assert resp.status_code == 200
     # Let the scheduled task run so we can observe which runner was chosen.
     import time
