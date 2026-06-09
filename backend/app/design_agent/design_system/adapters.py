@@ -487,6 +487,19 @@ class WebExtractor:
             colors.primary = primary
             colors.accent = primary
 
+        # Neutral tones sampled from real surfaces. Each falls back to the
+        # baseline default when the site has no usable value, so a partial
+        # sample never produces a broken color.
+        surface = _css_color_to_hex(s.get("surface_color"))
+        if surface:
+            colors.surface = surface
+        border = _css_color_to_hex(s.get("border_color"))
+        if border:
+            colors.border = border
+        muted = _css_color_to_hex(s.get("muted_color"))
+        if muted:
+            colors.muted = muted
+
         heading = (s.get("heading_font_family") or "").strip()
         body = (s.get("body_font_family") or "").strip()
         fonts = Fonts()

@@ -106,8 +106,8 @@ def _install(monkeypatch, handles):
 
 # --- Creation / happy path -------------------------------------------------
 
-async def test_extract_returns_eight_field_design_system(monkeypatch):
-    """AC1: mocked page -> dict with all 8 keys, values mapped from evaluate()."""
+async def test_extract_returns_expected_sample_fields(monkeypatch):
+    """AC1: mocked page -> dict with all expected keys, values mapped from evaluate()."""
     h = _build_fake()
     _install(monkeypatch, h)
 
@@ -123,6 +123,9 @@ async def test_extract_returns_eight_field_design_system(monkeypatch):
         "border_radius_convention",
         "spacing_scale_samples",
         "logo_url",
+        "surface_color",
+        "border_color",
+        "muted_color",
     }
     assert ds["primary_color"] == "rgb(37, 99, 235)"
     assert ds["background_color"] == "rgb(255, 255, 255)"
@@ -512,7 +515,7 @@ async def test_goto_uses_wait_until_load(monkeypatch):
 
 async def test_extract_load_path_returns_design_system(monkeypatch):
     """P7-08 creation (AC6): a resolving goto (no side-effect) on the load path +
-    a valid sampler return yields a confident 8-field design system — the
+    a valid sampler return yields a confident full design system — the
     preserve-functionality contract (tester proto-54 Plotline success behaviour).
     "Reachable fixture site" = the scriptable fake page whose goto resolves."""
     h = _build_fake()  # goto_side_effect=None -> resolves; _GOOD_RAW sampler return
@@ -532,6 +535,9 @@ async def test_extract_load_path_returns_design_system(monkeypatch):
         "border_radius_convention",
         "spacing_scale_samples",
         "logo_url",
+        "surface_color",
+        "border_color",
+        "muted_color",
     }
     assert ds["primary_color"] == "rgb(37, 99, 235)"
     assert ds["heading_font_family"] == "Inter"
@@ -599,3 +605,14 @@ def test_sampler_js_broadens_cta_candidates_and_guards_transparency():
     assert 'role="button"' in js
     assert "cta" in js.lower()
     assert "isTransparent" in js
+
+
+def test_map_sample_defaults_absent_neutrals_to_empty():
+    """Neutral keys absent from the raw evaluate() dict map to empty strings so
+    the adapter falls back to its defaults rather than crashing."""
+    ds = website._map_sample(
+        {"primary_color": "rgb(1, 2, 3)", "heading_font_family": "Inter"}
+    )
+    assert ds["surface_color"] == ""
+    assert ds["border_color"] == ""
+    assert ds["muted_color"] == ""

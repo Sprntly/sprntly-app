@@ -57,6 +57,9 @@ class WebsiteDesignSystem(TypedDict):
     border_radius_convention: str  # button computed border-radius (px string)
     spacing_scale_samples: list[str]  # computed padding samples from button + header/nav
     logo_url: str | None          # best-effort: header img src or og:image; None if absent
+    surface_color: str            # computed background of a representative raised card/section
+    border_color: str             # computed border-color of a visibly-bordered element
+    muted_color: str              # computed color of a secondary/muted text element
 
 
 # Single ``page.evaluate()`` sampler. Returns a raw dict; missing elements yield
@@ -136,6 +139,37 @@ _SAMPLER_JS = r"""
     if (og && og.content) logoUrl = og.content;
   }
 
+  // Representative raised surface: the first card/section whose background
+  // differs from the body's. Recovers a warm/cool surface tone the body color
+  // alone misses. Reuses the isTransparent guard defined above.
+  let surfaceColor = '';
+  const bodyBg = bodyCs ? bodyCs.backgroundColor : '';
+  for (const el of document.querySelectorAll('[class*="card" i], section, article')) {
+    const elCs = cs(el);
+    if (!elCs) continue;
+    const bg = elCs.backgroundColor;
+    if (bg && bg !== bodyBg && !isTransparent(bg)) { surfaceColor = bg; break; }
+  }
+
+  // Border tone: the border-color of the first element with a visible border
+  // (non-zero width, non-transparent color).
+  let borderColor = '';
+  for (const el of document.querySelectorAll(
+    '[class*="card" i], section, article, button, input, table, td, th, hr'
+  )) {
+    const elCs = cs(el);
+    if (!elCs) continue;
+    const width = parseFloat(elCs.borderTopWidth || elCs.borderWidth || '0') || 0;
+    const bc = elCs.borderTopColor || elCs.borderColor || '';
+    if (width > 0 && bc && !isTransparent(bc)) { borderColor = bc; break; }
+  }
+
+  // Muted text tone: a secondary / muted text element's color.
+  let mutedColor = '';
+  const mutedEl = document.querySelector('[class*="muted" i], [class*="secondary" i], p');
+  const mutedElCs = cs(mutedEl);
+  if (mutedElCs && mutedElCs.color) mutedColor = mutedElCs.color;
+
   return {
     primary_color: primaryColor,
     background_color: bodyCs ? bodyCs.backgroundColor : '',
@@ -145,6 +179,9 @@ _SAMPLER_JS = r"""
     border_radius_convention: btnCs ? btnCs.borderRadius : '',
     spacing_scale_samples: spacing,
     logo_url: logoUrl,
+    surface_color: surfaceColor,
+    border_color: borderColor,
+    muted_color: mutedColor,
   };
 }
 """
@@ -195,6 +232,9 @@ def _map_sample(raw: dict | None) -> WebsiteDesignSystem:
         border_radius_convention=(raw.get("border_radius_convention") or "").strip(),
         spacing_scale_samples=[s for s in spacing if s],
         logo_url=raw.get("logo_url") or None,
+        surface_color=(raw.get("surface_color") or "").strip(),
+        border_color=(raw.get("border_color") or "").strip(),
+        muted_color=(raw.get("muted_color") or "").strip(),
     )
 
 
