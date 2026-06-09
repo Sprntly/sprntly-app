@@ -759,6 +759,72 @@ def _enable_supabase_bearer(monkeypatch) -> None:
 
 
 @pytest.fixture
+def tenant_client(fake_llm, isolated_settings, monkeypatch):
+    """A Supabase-bearer-authed TestClient bound to a seeded company whose slug
+    is controllable, for the legacy dataset/id-keyed route suites after the
+    tenant-isolation fix (require_session → require_company).
+
+    Returns a SimpleNamespace with:
+      - `make(slug, user_id=...)` → seed a company with that slug + membership,
+        and return a TestClient already carrying that user's Bearer header. The
+        dataset slug used by briefs/prds/asks MUST equal the company slug for the
+        ownership chain (dataset slug → company) to resolve to the caller.
+      - `bearer(user_id)` → an Authorization header dict for an arbitrary user.
+
+    Composes on `fake_llm`/`isolated_settings` (the same in-memory fake Supabase
+    + reloaded app the legacy suites already use), and patches the bearer secret
+    onto the live `app.auth.settings` so require_company verifies minted tokens."""
+    from types import SimpleNamespace
+
+    import app.main as main_mod
+    from app.db.client import require_client
+
+    _enable_supabase_bearer(monkeypatch)
+
+    def _seed(slug: str, user_id: str, company_id: str | None) -> str:
+        import uuid as _uuid
+
+        c = require_client()
+        existing = c.table("companies").select("id").eq("slug", slug).execute().data
+        if existing:
+            company_id = existing[0]["id"]
+        else:
+            company_id = company_id or _uuid.uuid4().hex
+            c.table("companies").insert(
+                {"id": company_id, "slug": slug, "display_name": slug.title()}
+            ).execute()
+        c.table("company_members").insert(
+            {
+                "id": f"cm-{company_id}-{user_id}",
+                "company_id": company_id,
+                "user_id": user_id,
+                "role": "owner",
+            }
+        ).execute()
+        if not c.table("profiles").select("id").eq("id", user_id).execute().data:
+            c.table("profiles").insert({"id": user_id}).execute()
+        return company_id
+
+    def make(
+        slug: str, user_id: str | None = None, company_id: str | None = None
+    ) -> SimpleNamespace:
+        import uuid as _uuid
+
+        uid = user_id or ("user-" + _uuid.uuid4().hex[:8])
+        company_id = _seed(slug, uid, company_id)
+        client = TestClient(main_mod.app)
+        client.headers["Authorization"] = f"Bearer {_mint_supabase_token(uid)}"
+        return SimpleNamespace(
+            client=client, company_id=company_id, user_id=uid, slug=slug
+        )
+
+    return SimpleNamespace(
+        make=make,
+        bearer=lambda uid: {"Authorization": f"Bearer {_mint_supabase_token(uid)}"},
+    )
+
+
+@pytest.fixture
 def company_client(env, isolated_settings, monkeypatch) -> TestClient:
     """Sync TestClient authed via a Supabase Bearer JWT + a seeded company membership
     (the require_company path). Drop-in replacement for the legacy cookie-login

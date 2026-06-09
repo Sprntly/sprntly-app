@@ -267,8 +267,19 @@ def env(isolated_settings, monkeypatch):
 
 
 def _seed_prd(db_mod, *, body: str) -> int:
+    # After the tenant-isolation fix, GET /v1/prd/{id} resolves ownership via
+    # prd → brief → brief.dataset (slug) → company. Attach the PRD to a brief
+    # whose dataset == the seeded company's slug (`slug-<_TEST_COMPANY_ID>`, the
+    # slug `_seed_company_membership` mints) so the gate resolves for the caller.
+    brief_id = db_mod.save_brief(
+        dataset=f"slug-{_TEST_COMPANY_ID}",
+        week_label="Week 1",
+        payload={"insights": [], "_schema_version": 1},
+        schema_version=1,
+    )
     prd_id = db_mod.start_prd(
-        brief_id=1, insight_index=0, title="Smoke", template_version=1, variant="v2"
+        brief_id=brief_id, insight_index=0, title="Smoke",
+        template_version=1, variant="v2",
     )
     db_mod.complete_prd(prd_id, title="Smoke PRD", md=body)
     return prd_id

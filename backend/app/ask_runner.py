@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 # pins the exact Ask composition (corpus + KG bridge, #18) behind each answer.
 ASK_PROMPT_VERSION = "ask-kg-v1"
 
+# Strong refs to in-flight warm tasks. asyncio holds only a weak reference to a
+# bare create_task result, so without this a fanned-out warm task can be
+# garbage-collected mid-run (the warm silently dies). The done-callback discards
+# each task on completion (mirrors routes/design_agent.py's _inflight_tasks).
+_inflight_tasks: set[asyncio.Task] = set()
+
 
 # Defined inline (and re-defined in routes/ask.py — keep in sync) so the
 # warmer can run independent of the route module being imported first.
@@ -210,7 +216,9 @@ def warm_predefined_asks(dataset: str, sema: asyncio.Semaphore) -> None:
     burst-fire Anthropic on top of brief / evidence / PRD warming.
     """
     for prompt in PREDEFINED_ASK_PROMPTS:
-        asyncio.create_task(_warm_one(dataset, prompt, sema))
+        task = asyncio.create_task(_warm_one(dataset, prompt, sema))
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
 
 
 def warm_brief_dynamic_asks(
@@ -230,4 +238,6 @@ def warm_brief_dynamic_asks(
         if not title:
             continue
         prompt = f"Tell me more about: {title}"
-        asyncio.create_task(_warm_one(dataset, prompt, sema))
+        task = asyncio.create_task(_warm_one(dataset, prompt, sema))
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
