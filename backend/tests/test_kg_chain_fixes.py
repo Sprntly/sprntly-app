@@ -208,8 +208,9 @@ def test_call_md_stream_retries_on_transient(isolated_settings, patch_client, mo
 
 
 def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
-    """End-to-end-ish: prd_runner._run_sync drives the gateway, which streams
-    the prd-author call; the 2-part split + completion still works."""
+    """End-to-end-ish: prd_runner._run_sync drives the gateway via TWO
+    concurrent prd-author calls (one per part); each emits its own half and
+    completion stores Part A → human_md, Part B → llm_part."""
     import app.prd_runner as pr
 
     brief = {
@@ -227,8 +228,10 @@ def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
 
     def fake_llm(**kw):
         captured.update(kw)
+        output = ("IMPL SPEC BODY" if kw.get("purpose") == "generate_prd_part_b"
+                  else "HUMAN PRD BODY")
         return SimpleNamespace(
-            output="HUMAN PRD BODY\n---\nIMPL SPEC BODY",
+            output=output,
             model="m", prompt_version="prd-author-v1+prd-author@abc",
         )
 

@@ -257,19 +257,23 @@ def test_generate_via_prd_author_skill_through_canonical_path(
     brief_id = _save_brief_with_insights(db_mod, dataset="acme")
 
     captured: dict = {}
-    two_part = (
+    # Two-call generation: each call returns only its assigned half, keyed by
+    # the call's purpose (Part A vs Part B).
+    part_a = (
         "# Claims — Move deductible upfront\n\n"
         "# Part A — Product Requirements Document (human-readable)\n"
         "## 1. Problem & evidence\n57% abandon.\n"
-        "\n---\n"
+    )
+    part_b = (
         "# Part B — Implementation Spec (LLM-readable / agent-executable)\n"
         "WHEN x THE SYSTEM SHALL y.\n"
     )
 
     def _capture(**kwargs):
         captured.update(kwargs)
+        output = part_b if kwargs.get("purpose") == "generate_prd_part_b" else part_a
         return LLMResult(
-            output=two_part, model="claude-sonnet-4-6",
+            output=output, model="claude-sonnet-4-6",
             prompt_version=kwargs["prompt_version"] + "+prd-author@abc123",
             input_tokens=1, output_tokens=1, cache_read_input_tokens=0,
             cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=1,

@@ -115,6 +115,9 @@ def _llm_result(output, model="claude-sonnet-4-6", prompt_version="prd-author-v1
     )
 
 
+# Generation is now TWO concurrent prd-author calls. _TWO_PART is kept as a
+# generic output for tests that only assert on the call INPUT / decision-log
+# (both part-calls receive the same input shape, so either's output is fine).
 _TWO_PART = (
     "# Surface — Ship the thing\n\n"
     "# Part A — Product Requirements Document (human-readable)\n"
@@ -123,6 +126,23 @@ _TWO_PART = (
     "# Part B — Implementation Spec (LLM-readable / agent-executable)\n"
     "## B0. Available artifacts\nWHEN x THE SYSTEM SHALL y.\n"
 )
+
+_PART_A = (
+    "# Surface — Ship the thing\n\n"
+    "# Part A — Product Requirements Document (human-readable)\n"
+    "## 1. Problem & evidence\nUsers can't X.\n"
+)
+_PART_B = (
+    "# Part B — Implementation Spec (LLM-readable / agent-executable)\n"
+    "## B0. Available artifacts\nWHEN x THE SYSTEM SHALL y.\n"
+)
+
+
+def _two_call(**kwargs):
+    """Part-aware llm_call stub: returns only the half this call asks for."""
+    if kwargs.get("purpose") == "generate_prd_part_b":
+        return _llm_result(_PART_B)
+    return _llm_result(_PART_A)
 
 COMPANY_ID = "co-prd-kg"
 SLUG = "asurion"
@@ -435,7 +455,7 @@ def test_prd_2part_split_and_storage_unchanged_on_kg(isolated_settings, facade, 
     Part B → llm_part, status ready."""
     db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
 
-    monkeypatch.setattr(prd_runner, "llm_call", lambda **kw: _llm_result(_TWO_PART))
+    monkeypatch.setattr(prd_runner, "llm_call", _two_call)
     prd_runner._run_sync(prd_id, brief_id, 0)
 
     row = db_mod.get_prd(prd_id)
