@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useFieldValidation } from "../../onboarding/InterviewLayout"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
@@ -8,7 +8,7 @@ import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
 import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
 import type { SuggestedMetric } from "../../../lib/api"
-import { Check, InfoCircle, Plus, Sparkles } from "../../auth/icons"
+import { Check, InfoCircle, Plus, Sparkles, Trash } from "../../auth/icons"
 import {
   buildKpiTreePayload,
   canSaveKpiTree,
@@ -23,13 +23,17 @@ import {
  * kept as Onboarding4 to avoid churning the other-PR-owned screens). Restyled
  * to the v4 `.metric-tree` design.
  *
- * Renders the website-analysis `suggested_metrics` as SELECTABLE metric-tree
- * cards (metric + description in the title), lets the user add their own
- * {metric, description} via `.metric-other`, and shows the predicted industry +
- * business_type as ALWAYS-editable dropdowns (pre-filled from the analysis; the
- * user can override anytime, guarded by a `touched` flag). On save we persist
- * the confirmed industry/business_type to the company and the selected + custom
- * metrics to the KPI tree (PUT /v1/company/kpi-tree).
+ * The website-analysis `suggested_metrics` are PRE-SELECTED on load (all of
+ * them seed `supporting` once, via a ref guard mirroring the industry/business
+ * touched-guards) and render as selectable suggestion chips. The selected
+ * supporting metrics live INSIDE the metric-tree as `.mt-targets` branching off
+ * the North-Star `.mt-source` — each target shows the metric name, an editable
+ * description, and a delete control. The user can also add their own
+ * {metric, description} via `.metric-other`. Industry + business_type show as
+ * ALWAYS-editable dropdowns (pre-filled from the analysis; the user can
+ * override anytime, guarded by a `touched` flag). On save we persist the
+ * confirmed industry/business_type to the company and the supporting metrics to
+ * the KPI tree (PUT /v1/company/kpi-tree).
  *
  * The analysis is now produced by the BLOCKING `/onboarding/analyzing`
  * interstitial that precedes this page, so by the time we render the result is
@@ -73,6 +77,7 @@ export type MetricsSetupViewProps = {
   onPickNorthStar: (value: string) => void
   onToggleSuggested: (metric: SuggestedMetric) => void
   onChangeSupportingDescription: (metric: string, description: string) => void
+  onRemoveSupporting: (metric: string) => void
   onChangeCustomMetric: (value: string) => void
   onChangeCustomDescription: (value: string) => void
   onAddCustom: () => void
@@ -101,6 +106,7 @@ export function MetricsSetupView({
   onPickNorthStar,
   onToggleSuggested,
   onChangeSupportingDescription,
+  onRemoveSupporting,
   onChangeCustomMetric,
   onChangeCustomDescription,
   onAddCustom,
@@ -193,8 +199,56 @@ export function MetricsSetupView({
             <div className="mt-source-dot" />
             <div className="mt-source-lbl">Primary leads to…</div>
           </div>
-          {suggestedMetrics.length > 0 ? (
-            <div className="mt-targets" id="suggestedMetrics">
+
+          {/* Selected supporting metrics ARE the tree targets: name + editable
+              description + delete, branching off the North-Star source. */}
+          {supporting.length > 0 ? (
+            <div className="mt-targets mt-targets-cards" id="supportingMetrics">
+              {supporting.map((m, i) => (
+                <div
+                  key={m.name}
+                  className="mt-target"
+                  data-metric={m.name}
+                  style={{ ["--d" as string]: `${0.05 * (i + 1)}s` }}
+                >
+                  <button
+                    type="button"
+                    className="mt-target-del"
+                    aria-label={`Remove ${m.name}`}
+                    onClick={() => onRemoveSupporting(m.name)}
+                  >
+                    <Trash style={{ width: 14, height: 14 }} aria-hidden />
+                  </button>
+                  <div className="mt-target-name">
+                    <span className="mt-ic" aria-hidden>
+                      <Sparkles style={{ width: 12, height: 12 }} />
+                    </span>
+                    {m.name}
+                  </div>
+                  <textarea
+                    className="inp"
+                    value={m.description}
+                    onChange={(e) => onChangeSupportingDescription(m.name, e.target.value)}
+                    placeholder="Describe what this metric means and why it matters"
+                    rows={2}
+                    maxLength={400}
+                    aria-label={`Description for ${m.name}`}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-targets-empty">
+              {suggestedMetrics.length > 0
+                ? "No supporting metrics yet — pick a suggestion below or add your own."
+                : "No suggestions yet — add your own metrics below."}
+            </p>
+          )}
+
+          {/* Suggestion chips: selecting toggles a metric in/out of the targets
+              above. A chip is "sel" when its metric is currently a target. */}
+          {suggestedMetrics.length > 0 && (
+            <div className="mt-targets" id="suggestedMetrics" style={{ marginTop: 16 }}>
               {suggestedMetrics.map((m, i) => {
                 const sel = isSelected(m.metric)
                 return (
@@ -220,10 +274,6 @@ export function MetricsSetupView({
                 )
               })}
             </div>
-          ) : (
-            <p className="onb-field-hint" style={{ textAlign: "center" }}>
-              No suggestions yet — add your own metrics below.
-            </p>
           )}
         </div>
 
@@ -274,24 +324,6 @@ export function MetricsSetupView({
             {supporting.length === 1 ? "" : "s"} selected
           </span>
         </div>
-
-        {supporting.length > 0 && (
-          <div>
-            {supporting.map((m) => (
-              <div key={m.name} className="metric-desc-block" data-metric={m.name}>
-                <label className="metric-desc-l">{m.name}</label>
-                <textarea
-                  className="inp"
-                  value={m.description}
-                  onChange={(e) => onChangeSupportingDescription(m.name, e.target.value)}
-                  placeholder="Describe what this metric means and why it matters"
-                  rows={2}
-                  maxLength={400}
-                />
-              </div>
-            ))}
-          </div>
-        )}
       </div>
     </>
   )
@@ -313,6 +345,11 @@ export function Onboarding4() {
   // overwriting their choice when a late analysis result arrives.
   const [industryTouched, setIndustryTouched] = useState(false)
   const [businessTypeTouched, setBusinessTypeTouched] = useState(false)
+  // The supporting-metrics list is seeded exactly once — either from a KPI tree
+  // already saved on the workspace, or (failing that) from the website-analysis
+  // suggestions (all pre-selected). After the first seed this ref stays true so
+  // a late re-render never re-adds a metric the user has since edited/deleted.
+  const supportingSeeded = useRef(false)
 
   // Seed industry / business type from the saved company first, then from the
   // website analysis (which may arrive later) — but never clobber a value the
@@ -347,6 +384,9 @@ export function Onboarding4() {
     if (tree.north_star) setNorthStar(tree.north_star)
     if (tree.north_star_description) setNorthStarDescription(tree.north_star_description)
     if (tree.metrics.length) {
+      // A previously-saved tree is the source of truth — adopt it and mark the
+      // supporting list as seeded so the suggestion seed below won't run.
+      supportingSeeded.current = true
       setSupporting(
         tree.metrics
           .filter((m) => m.name)
@@ -356,6 +396,24 @@ export function Onboarding4() {
   }, [workspace])
 
   const suggestedMetrics = websiteAnalysis?.suggested_metrics ?? []
+
+  // Pre-select ALL website-analysis suggestions on load: the user starts with
+  // every suggested metric already in their supporting list. Guarded by
+  // `supportingSeeded` (mirrors the industry/business-type touched-guards) so it
+  // runs at most once and never clobbers the user's later edits/deletions — and
+  // skipped entirely if a saved KPI tree already hydrated the list above. With
+  // no suggestions the list stays empty and the tree shows its empty state.
+  useEffect(() => {
+    if (supportingSeeded.current) return
+    if (suggestedMetrics.length === 0) return
+    supportingSeeded.current = true
+    setSupporting(
+      suggestedMetrics
+        .filter((m) => m.metric)
+        .slice(0, MAX_SUPPORTING)
+        .map((m) => ({ name: m.metric, description: m.description ?? "" })),
+    )
+  }, [suggestedMetrics])
   const northStarHints =
     NORTH_STAR_SUGGESTIONS[industry] ?? NORTH_STAR_SUGGESTIONS.default
 
@@ -383,6 +441,14 @@ export function Onboarding4() {
     setSupporting((prev) =>
       prev.map((m) => (m.name === metric ? { ...m, description } : m)),
     )
+  }
+
+  // Remove a supporting metric. Because the suggestion chips derive their
+  // selected state from `supporting`, removing a metric that matches a
+  // suggestion also un-selects its chip (re-addable); a custom metric just
+  // drops. The `.metric-count` stays in sync since it reads `supporting.length`.
+  function removeSupporting(metric: string) {
+    setSupporting((prev) => prev.filter((m) => m.name !== metric))
   }
 
   function addCustom() {
@@ -483,6 +549,7 @@ export function Onboarding4() {
           }}
           onToggleSuggested={toggleSuggested}
           onChangeSupportingDescription={changeSupportingDescription}
+          onRemoveSupporting={removeSupporting}
           onChangeCustomMetric={setCustomMetric}
           onChangeCustomDescription={setCustomDescription}
           onAddCustom={addCustom}
