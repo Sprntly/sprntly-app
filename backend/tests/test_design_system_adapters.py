@@ -672,12 +672,24 @@ def test_unified_render_matches_legacy_for_no_font_and_nongoogle_font():
 
 def test_website_charcoal_palette_yields_dark_index_css():
     """A website-sourced dark palette pre-seeds the same dark CSS a Figma source
-    would — the Scenario B parity win."""
+    would — the Scenario B parity win.
+
+    Colours are now rendered as HSL channel triplets so tailwind.config.ts can
+    consume them via hsl(var(--token)). The three Tailwind directives must also
+    be present and must precede the :root block so Tailwind compiles correctly.
+    """
     ds = WebExtractor().normalize(
         RawSignals(provider="web", ref="x",
                    signals=_web_sample(background_color="#2b2b2b", primary_color="#d4af37"))
     )
     css = _render_design_system_css(ds)
-    assert "--background: #2b2b2b;" in css
-    assert "--accent: #d4af37;" in css
-    assert "--foreground: #f4f1ea;" in css  # light text derived from dark bg
+    # Tailwind directives must be present and appear before :root
+    assert "@tailwind base;" in css
+    assert "@tailwind components;" in css
+    assert "@tailwind utilities;" in css
+    assert css.index("@tailwind base;") < css.index(":root")
+    # Colours rendered as HSL channel triplets (#2b2b2b→"0 0% 17%", #d4af37→"46 65% 52%",
+    # foreground #f4f1ea→"42 31% 94%" derived from is_dark=True)
+    assert "--background: 0 0% 17%;" in css
+    assert "--accent: 46 65% 52%;" in css
+    assert "--foreground: 42 31% 94%;" in css  # light text derived from dark bg

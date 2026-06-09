@@ -98,9 +98,12 @@ def test_rich_website_extraction_matches_unified_css_and_tokens():
     ds = _new_design_system(sample)
     css_vars = _css_vars(_render_design_system_css(ds))
 
-    assert css_vars["primary"] == "#2563eb"
-    assert css_vars["accent"] == "#2563eb"
-    assert css_vars["background"] == "#0b0f19"
+    # CSS variables are now HSL channel triplets so tailwind.config.ts can
+    # consume them via hsl(var(--token)). The raw hex is preserved on the
+    # DesignSystem model; only the rendered CSS changes format.
+    assert css_vars["primary"] == "221 83% 53%"   # #2563eb
+    assert css_vars["accent"] == "221 83% 53%"    # #2563eb
+    assert css_vars["background"] == "223 39% 7%"  # #0b0f19
     assert css_vars["font-sans"] == '"Inter", ui-sans-serif, system-ui, sans-serif'
     assert ds.tokens.colors.primary == "#2563eb"
     assert legacy["primary"] == "rgb(37,99,235)"
@@ -125,9 +128,11 @@ def test_minimal_website_extraction_matches_unified_css_and_tokens():
     ds = _new_design_system(sample)
     css_vars = _css_vars(_render_design_system_css(ds))
 
-    assert css_vars["primary"] == legacy["primary"] == "#3b82f6"
-    assert css_vars["accent"] == "#3b82f6"
-    assert css_vars["background"] == "#ffffff"
+    # CSS variables are now HSL channel triplets; the raw hex lives on the model.
+    assert legacy["primary"] == "#3b82f6"
+    assert css_vars["primary"] == "217 91% 60%"   # #3b82f6
+    assert css_vars["accent"] == "217 91% 60%"    # #3b82f6
+    assert css_vars["background"] == "0 0% 100%"  # #ffffff
     assert css_vars["font-sans"] == '"Poppins", ui-sans-serif, system-ui, sans-serif'
     assert ds.tokens.fonts.heading_family == legacy["heading_font"] == "Poppins"
     assert ds.tokens.radius_convention == legacy["radius"] == "pill"
