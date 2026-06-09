@@ -10,6 +10,7 @@ import {
   COWORKERS,
   coworkersApi,
   emptyCoworkerNames,
+  withCoworkerDefaults,
   type CoworkerNames,
   type CoworkerSlot,
 } from "../../../lib/onboarding/coworkersApi"
@@ -42,8 +43,8 @@ export function Onboarding6() {
     () =>
       COWORKERS.map((c) => ({
         key: c.slot,
-        valid: names[c.slot].trim().length > 0,
-        message: `Give your ${c.label.toLowerCase()} a name.`,
+        valid: true,  // naming is optional — blanks get a default name on launch
+        message: "",
       })),
   )
 
@@ -60,7 +61,7 @@ export function Onboarding6() {
     if (!validate().ok) return
     setSaving(true)
     try {
-      await coworkersApi.put(names)
+      await coworkersApi.put(withCoworkerDefaults(names))
       const updated = await advanceOnboardingStep(workspace.id, 7)
       setWorkspace(updated)
       router.push("/onboarding/7")

@@ -76,6 +76,24 @@ export function canLaunchWorkspace(names: CoworkerNames): boolean {
   return COWORKER_SLOTS.every((slot) => names[slot].trim().length > 0)
 }
 
+/** Sensible default names so coworker naming is OPTIONAL: any slot the user
+ *  leaves blank is named for them on launch. */
+export const DEFAULT_COWORKER_NAMES: CoworkerNames = {
+  pm: "Atlas",
+  pd: "Juno",
+  ds: "Vera",
+  admin: "Ada",
+}
+
+/** Fill any empty/whitespace slot with its default name. */
+export function withCoworkerDefaults(names: CoworkerNames): CoworkerNames {
+  const out = { ...names }
+  for (const slot of COWORKER_SLOTS) {
+    if (!out[slot] || !out[slot].trim()) out[slot] = DEFAULT_COWORKER_NAMES[slot]
+  }
+  return out
+}
+
 export const coworkersApi = {
   get: () =>
     api

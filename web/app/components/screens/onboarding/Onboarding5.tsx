@@ -11,7 +11,6 @@ import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
 import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
 import {
   categoryTitle,
-  hasRequiredConnector,
   isLastCategory,
   nextStep,
   toggleSelection,
@@ -61,8 +60,6 @@ export function Onboarding5() {
     planned.forEach((id) => s.add(id))
     return s
   }, [connected, planned])
-
-  const hasAnalytics = hasRequiredConnector(selected)
 
   function toggle(id: string) {
     if (connected.has(id)) return // live connections aren't togglable here
@@ -148,8 +145,7 @@ export function Onboarding5() {
       onBack={() => router.push("/onboarding/4")}
       onContinue={() => go(false)}
       onSkip={() => go(true)}
-      continueDisabled={!hasAnalytics}
-      continueLabel={hasAnalytics ? "Continue" : "Connect Analytics to continue"}
+      continueLabel="Continue"
       skipLabel="Connect later"
       loading={saving}
     >
