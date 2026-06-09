@@ -22,6 +22,7 @@ from typing import TypedDict
 from urllib.parse import urlsplit
 
 from app.net_guard import UnsafeURLError, assert_public_url
+from app.design_agent.design_system.adapters import _css_color_to_hex
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,11 @@ class WebsiteDesignSystem(TypedDict):
     border_radius_convention: str  # button computed border-radius (px string)
     spacing_scale_samples: list[str]  # computed padding samples from button + header/nav
     logo_url: str | None          # best-effort: header img src or og:image; None if absent
+    surface_color: str            # computed background of a representative raised card/section
+    border_color: str             # computed border-color of a visibly-bordered element
+    muted_color: str              # computed color of a secondary/muted text element
+    elevation_hint: str           # "shadows" / "borders" / "" — how a card separates from the page
+    component_counts: dict[str, int]  # type name -> count of likely instances found in the DOM
 
 
 # Single ``page.evaluate()`` sampler. Returns a raw dict; missing elements yield
@@ -70,18 +76,77 @@ _SAMPLER_JS = r"""
   const h1 = document.querySelector('h1');
   const h1Cs = cs(h1);
 
-  // Largest visible <button> = the primary action.
-  let primaryBtn = null;
-  let maxArea = 0;
-  for (const b of document.querySelectorAll('button')) {
-    const area = b.offsetWidth * b.offsetHeight;
-    if (area > maxArea) { maxArea = area; primaryBtn = b; }
+  // Primary action = the most prominent filled call-to-action. Real CTAs are
+  // often links styled as buttons (not <button>s), and the biggest <button> can
+  // be a transparent icon/ghost button — so search a broader set and skip
+  // anything invisible or transparent-filled. A transparent fill would leak a
+  // default accent downstream, so it never wins here.
+  const isTransparent = (c) =>
+    !c || c === 'transparent' || /rgba\([^)]*,\s*0(\.0+)?\s*\)/.test(c);
+  // Saturation of a color in [0,1] — how chromatic it is. A brand color is
+  // chromatic; a black / white / gray button fill is near-zero. Used so a
+  // common monochrome button cannot outrank the real brand color on size.
+  const saturationOf = (c) => {
+    let r, g, b;
+    const m = (c || '').match(/rgba?\(([^)]+)\)/i);
+    if (m) {
+      [r, g, b] = m[1].split(',').map((x) => parseFloat(x));
+    } else if (c && c[0] === '#' && c.length >= 7) {
+      r = parseInt(c.slice(1, 3), 16);
+      g = parseInt(c.slice(3, 5), 16);
+      b = parseInt(c.slice(5, 7), 16);
+    } else {
+      return 0;
+    }
+    if ([r, g, b].some((v) => Number.isNaN(v))) return 0;
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    if (max === min) return 0;
+    const l = (max + min) / 2;
+    return (max - min) / (1 - Math.abs(2 * l - 1));
+  };
+  const SAT_THRESHOLD = 0.15;
+  const ctaSelector =
+    'button, [role="button"], a[class*="btn" i], a[class*="cta" i], a[class*="button" i]';
+  // Collect every visible, non-transparent candidate with its fill + size.
+  const candidates = [];
+  for (const el of document.querySelectorAll(ctaSelector)) {
+    const rect = el.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    if (area <= 0) continue;                       // not laid out / zero-area
+    const elCs = getComputedStyle(el);
+    if (elCs.visibility === 'hidden' || elCs.display === 'none') continue;
+    const bg = elCs.backgroundColor;
+    if (isTransparent(bg)) continue;               // unfilled / ghost CTA
+    candidates.push({ el, area, top: rect.top, sat: saturationOf(bg) });
+  }
+  // Largest by area, breaking ties toward the candidate higher up the page
+  // (likelier the hero CTA).
+  const pickLargest = (list) =>
+    list.sort((a, b) => (b.area - a.area) || (a.top - b.top))[0] || null;
+  // Prefer a chromatic brand color; only if none qualifies fall back to the
+  // largest neutral fill, then to the largest plain <button>.
+  const chosen =
+    pickLargest(candidates.filter((c) => c.sat >= SAT_THRESHOLD)) ||
+    pickLargest(candidates);
+  let primaryBtn = chosen ? chosen.el : null;
+  if (!primaryBtn) {
+    let maxArea = 0;
+    for (const b of document.querySelectorAll('button')) {
+      const area = b.offsetWidth * b.offsetHeight;
+      if (area > maxArea) { maxArea = area; primaryBtn = b; }
+    }
   }
   const btnCs = cs(primaryBtn);
 
-  // Primary color: prefer the button's background-color, fall back to its text color.
+  // Primary color: the button's fill when it has one, else its text color (a
+  // ghost button's text often carries the brand accent).
   let primaryColor = '';
-  if (btnCs) { primaryColor = btnCs.backgroundColor || btnCs.color || ''; }
+  if (btnCs) {
+    primaryColor = (!isTransparent(btnCs.backgroundColor)
+      ? btnCs.backgroundColor
+      : (btnCs.color || ''));
+  }
 
   // Spacing scale: button padding + header/nav padding.
   const spacing = [];
@@ -100,6 +165,100 @@ _SAMPLER_JS = r"""
     if (og && og.content) logoUrl = og.content;
   }
 
+  // Representative raised surface: the first card/section whose background
+  // differs from the body's. Recovers a warm/cool surface tone the body color
+  // alone misses. Reuses the isTransparent guard defined above.
+  let surfaceColor = '';
+  const bodyBg = bodyCs ? bodyCs.backgroundColor : '';
+  for (const el of document.querySelectorAll('[class*="card" i], section, article')) {
+    const elCs = cs(el);
+    if (!elCs) continue;
+    const bg = elCs.backgroundColor;
+    if (bg && bg !== bodyBg && !isTransparent(bg)) { surfaceColor = bg; break; }
+  }
+
+  // Border tone: the border-color of the first element with a visible border
+  // (non-zero width, non-transparent color).
+  let borderColor = '';
+  for (const el of document.querySelectorAll(
+    '[class*="card" i], section, article, button, input, table, td, th, hr'
+  )) {
+    const elCs = cs(el);
+    if (!elCs) continue;
+    const width = parseFloat(elCs.borderTopWidth || elCs.borderWidth || '0') || 0;
+    const bc = elCs.borderTopColor || elCs.borderColor || '';
+    if (width > 0 && bc && !isTransparent(bc)) { borderColor = bc; break; }
+  }
+
+  // Muted text tone: a secondary / muted text element's color.
+  let mutedColor = '';
+  const mutedEl = document.querySelector('[class*="muted" i], [class*="secondary" i], p');
+  const mutedElCs = cs(mutedEl);
+  if (mutedElCs && mutedElCs.color) mutedColor = mutedElCs.color;
+
+  // Elevation signal: how containers separate from the page. Sample a bounded
+  // set of cards/sections and count how many use a real box-shadow vs a visible
+  // border, then pick whichever is more prevalent. Counting across containers
+  // (rather than trusting the first one) avoids calling a mixed site "shadows"
+  // just because the first container happens to carry a shadow. A tie — or
+  // borders ahead — reads as "borders"; "" when neither is observed so the
+  // token keeps its default.
+  let elevationHint = '';
+  let shadowCount = 0;
+  let borderCount = 0;
+  let scanned = 0;
+  const ELEVATION_SCAN_CAP = 40;
+  for (const el of document.querySelectorAll('[class*="card" i], section, article')) {
+    if (scanned >= ELEVATION_SCAN_CAP) break;
+    const elCs = cs(el);
+    if (!elCs) continue;
+    scanned++;
+    const shadow = elCs.boxShadow;
+    const bWidth = parseFloat(elCs.borderTopWidth || elCs.borderWidth || '0') || 0;
+    const bColor = elCs.borderTopColor || elCs.borderColor || '';
+    if (shadow && shadow !== 'none') shadowCount++;
+    if (bWidth > 0 && bColor && !isTransparent(bColor)) borderCount++;
+  }
+  if (shadowCount > 0 || borderCount > 0) {
+    // Strictly more shadows reads as shadows; otherwise (borders ahead or tied)
+    // reads as borders.
+    elevationHint = shadowCount > borderCount ? 'shadows' : 'borders';
+  }
+
+  // Component inventory: count how many of a known set of UI primitive types
+  // appear, by tag / role / class heuristics. Counts only — never any element
+  // content. Each count is capped so the result object stays small.
+  const componentSelectors = {
+    accordion: '[class*="accordion" i]',
+    alert: '[role="alert"], [class*="alert" i]',
+    avatar: '[class*="avatar" i]',
+    badge: '[class*="badge" i], [class*="chip" i]',
+    button: 'button, [role="button"], [class*="btn" i]',
+    card: '[class*="card" i]',
+    checkbox: 'input[type="checkbox"], [role="checkbox"]',
+    dialog: 'dialog, [role="dialog"]',
+    drawer: '[class*="drawer" i]',
+    dropdown: '[class*="dropdown" i]',
+    form: 'form',
+    input: 'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), [class*="input" i]',
+    menu: '[role="menu"], [class*="menu" i]',
+    modal: '[class*="modal" i]',
+    popover: '[class*="popover" i]',
+    select: 'select, [role="listbox"], [class*="select" i]',
+    sheet: '[class*="sheet" i]',
+    table: 'table, [role="table"]',
+    tabs: '[role="tablist"], [role="tab"], [class*="tab" i]',
+    textarea: 'textarea',
+    toast: '[class*="toast" i]',
+    tooltip: '[role="tooltip"], [class*="tooltip" i]',
+  };
+  const componentCounts = {};
+  for (const type in componentSelectors) {
+    let n = 0;
+    try { n = document.querySelectorAll(componentSelectors[type]).length; } catch (e) { n = 0; }
+    if (n > 0) componentCounts[type] = Math.min(n, 999);
+  }
+
   return {
     primary_color: primaryColor,
     background_color: bodyCs ? bodyCs.backgroundColor : '',
@@ -109,6 +268,11 @@ _SAMPLER_JS = r"""
     border_radius_convention: btnCs ? btnCs.borderRadius : '',
     spacing_scale_samples: spacing,
     logo_url: logoUrl,
+    surface_color: surfaceColor,
+    border_color: borderColor,
+    muted_color: mutedColor,
+    elevation_hint: elevationHint,
+    component_counts: componentCounts,
   };
 }
 """
@@ -128,12 +292,21 @@ def _first_family(font_family: str) -> str:
 
 
 def _below_confidence(ds: WebsiteDesignSystem) -> bool:
-    """Below-confidence = no primary color sampled OR no heading font family
-    detected. Either alone yields output too generic to justify the Chromium
-    cost — the manual color-picker floor (P5-02) is strictly better in that
+    """Below-confidence = no usable primary color sampled OR no heading font
+    family detected. Either alone yields output too generic to justify the
+    Chromium cost — the manual color-picker floor is strictly better in that
     case, so the caller is told to fall back via the ``None`` sentinel.
+
+    A primary color that does not convert to a usable hex (transparent or
+    unparseable) counts as absent: a ghost/transparent CTA fill must not pass
+    the floor and leak a default accent into the tokens downstream. This mirrors
+    the convertibility check ``WebExtractor.normalize`` applies, so the sampler's
+    own confidence gate and the adapter's stay consistent.
     """
-    return (not ds["primary_color"]) or (not ds["heading_font_family"])
+    usable_primary = bool(ds["primary_color"]) and (
+        _css_color_to_hex(ds["primary_color"]) is not None
+    )
+    return (not usable_primary) or (not ds["heading_font_family"])
 
 
 def _map_sample(raw: dict | None) -> WebsiteDesignSystem:
@@ -150,6 +323,11 @@ def _map_sample(raw: dict | None) -> WebsiteDesignSystem:
         border_radius_convention=(raw.get("border_radius_convention") or "").strip(),
         spacing_scale_samples=[s for s in spacing if s],
         logo_url=raw.get("logo_url") or None,
+        surface_color=(raw.get("surface_color") or "").strip(),
+        border_color=(raw.get("border_color") or "").strip(),
+        muted_color=(raw.get("muted_color") or "").strip(),
+        elevation_hint=(raw.get("elevation_hint") or "").strip(),
+        component_counts=dict(raw.get("component_counts") or {}),
     )
 
 
