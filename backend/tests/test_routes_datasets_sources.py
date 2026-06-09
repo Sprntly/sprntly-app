@@ -191,3 +191,30 @@ def test_delete_file_then_list_reflects_removal(client):
     r2 = client.get("/v1/datasets/acme/files")
     body = r2.json()
     assert [f["filename"] for f in body["files"]] == ["b.txt"]
+
+
+def test_list_files_autocreates_owned_dataset_when_missing(tenant_client, monkeypatch):
+    """Owned company whose `datasets` row doesn't exist yet (new onboarding
+    creates the company but not the row) → list_files lazily registers it and
+    returns 200, NOT 'dataset does not exist' 404."""
+    from app import db
+    created = {}
+    monkeypatch.setattr(db, "dataset_exists", lambda slug: False)
+    monkeypatch.setattr(db, "insert_dataset", lambda slug, dn: created.setdefault("slug", slug))
+    c = tenant_client.make(slug="acme").client
+    r = c.get("/v1/datasets/acme/files")
+    assert r.status_code == 200
+    assert created.get("slug") == "acme"  # auto-registered the caller's own dataset
+
+
+def test_list_files_unowned_slug_still_404_no_autocreate(tenant_client, monkeypatch):
+    """The lazy-create must NEVER fire for a slug the caller doesn't own — the
+    ownership gate 404s first, so no cross-tenant dataset is ever created."""
+    from app import db
+    created = {}
+    monkeypatch.setattr(db, "dataset_exists", lambda slug: False)
+    monkeypatch.setattr(db, "insert_dataset", lambda slug, dn: created.setdefault("slug", slug))
+    c = tenant_client.make(slug="acme").client
+    r = c.get("/v1/datasets/ghost/files")   # ghost is not the caller's company
+    assert r.status_code == 404
+    assert "slug" not in created  # gate ran before any create
