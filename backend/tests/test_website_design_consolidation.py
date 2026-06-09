@@ -58,7 +58,14 @@ def _legacy_expected(sample: dict[str, Any] | None, manual=None) -> dict[str, An
             "spacing": Tokens().spacing_scale,
         }
 
-    primary = sample.get("primary_color")
+    primary = next(
+        (
+            c.get("color")
+            for c in (sample.get("color_candidates") or [])
+            if _legacy_usable_color(c.get("color"))
+        ),
+        None,
+    )
     expected: dict[str, Any] = {
         "explicit": True,
         "heading_font": sample.get("heading_font_family"),
@@ -86,7 +93,9 @@ def _new_design_system(sample: dict[str, Any] | None) -> DesignSystem:
 
 def test_rich_website_extraction_matches_unified_css_and_tokens():
     sample = {
-        "primary_color": "rgb(37,99,235)",
+        "color_candidates": [
+            {"color": "rgb(37,99,235)", "area": 8000, "saturation": 0.7}
+        ],
         "background_color": "#0b0f19",
         "heading_font_family": "Inter",
         "body_font_family": "Roboto",
@@ -117,7 +126,9 @@ def test_rich_website_extraction_matches_unified_css_and_tokens():
 
 def test_minimal_website_extraction_matches_unified_css_and_tokens():
     sample = {
-        "primary_color": "#3b82f6",
+        "color_candidates": [
+            {"color": "#3b82f6", "area": 8000, "saturation": 0.7}
+        ],
         "background_color": "#ffffff",
         "heading_font_family": "Poppins",
         "body_font_family": "Poppins",

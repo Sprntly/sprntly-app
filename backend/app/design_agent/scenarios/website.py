@@ -49,7 +49,13 @@ _CHROMIUM_ARGS = ["--disable-dev-shm-usage", "--no-sandbox"]
 
 
 class WebsiteDesignSystem(TypedDict):
-    primary_color: str            # hex or rgb() string sampled from the largest visible button
+    # Candidate lists — the sampler is a dumb emitter. It collects observations
+    # and the Python kernel (harden) makes every decision. Colours are carried
+    # RAW (rgb()/rgba()/hex); hex conversion happens on the Python side.
+    color_candidates: list[dict]   # [{color, area, saturation}, ...] — visible filled CTAs
+    neutral_candidates: list[dict]     # [{role, color, area}, ...] — role ∈ surface/border/muted
+    container_observations: list[dict]  # [{has_border, has_shadow}, ...] — bounded card/section scan
+    observed_component_types: list[str]  # lower-case type names with count>0 (names only, no counts)
     background_color: str         # body computed background-color
     heading_font_family: str      # h1 computed font-family (first family in the stack)
     heading_size_scale: str       # h1 computed font-size (px string, e.g. "48px")
@@ -57,11 +63,6 @@ class WebsiteDesignSystem(TypedDict):
     border_radius_convention: str  # button computed border-radius (px string)
     spacing_scale_samples: list[str]  # computed padding samples from button + header/nav
     logo_url: str | None          # best-effort: header img src or og:image; None if absent
-    surface_color: str            # computed background of a representative raised card/section
-    border_color: str             # computed border-color of a visibly-bordered element
-    muted_color: str              # computed color of a secondary/muted text element
-    elevation_hint: str           # "shadows" / "borders" / "" — how a card separates from the page
-    component_counts: dict[str, int]  # type name -> count of likely instances found in the DOM
 
 
 # Single ``page.evaluate()`` sampler. Returns a raw dict; missing elements yield
@@ -76,16 +77,13 @@ _SAMPLER_JS = r"""
   const h1 = document.querySelector('h1');
   const h1Cs = cs(h1);
 
-  // Primary action = the most prominent filled call-to-action. Real CTAs are
-  // often links styled as buttons (not <button>s), and the biggest <button> can
-  // be a transparent icon/ghost button — so search a broader set and skip
-  // anything invisible or transparent-filled. A transparent fill would leak a
-  // default accent downstream, so it never wins here.
+  // The sampler is a DUMB EMITTER. It collects candidate observations and makes
+  // NO decisions — the Python kernel (harden) picks accent, neutrals, elevation,
+  // and inventory. Colours are emitted RAW; hex conversion happens Python-side.
   const isTransparent = (c) =>
     !c || c === 'transparent' || /rgba\([^)]*,\s*0(\.0+)?\s*\)/.test(c);
-  // Saturation of a color in [0,1] — how chromatic it is. A brand color is
-  // chromatic; a black / white / gray button fill is near-zero. Used so a
-  // common monochrome button cannot outrank the real brand color on size.
+  // Saturation of a color in [0,1] — how chromatic it is. Computed here per CTA
+  // fill and carried on each candidate; the kernel uses it to drop neutrals.
   const saturationOf = (c) => {
     let r, g, b;
     const m = (c || '').match(/rgba?\(([^)]+)\)/i);
@@ -105,11 +103,16 @@ _SAMPLER_JS = r"""
     const l = (max + min) / 2;
     return (max - min) / (1 - Math.abs(2 * l - 1));
   };
-  const SAT_THRESHOLD = 0.15;
   const ctaSelector =
     'button, [role="button"], a[class*="btn" i], a[class*="cta" i], a[class*="button" i]';
-  // Collect every visible, non-transparent candidate with its fill + size.
-  const candidates = [];
+  // Chromatic candidates: every visible, non-transparent FILLED CTA, emitted
+  // with its raw fill, rendered area, and saturation. No winner is picked here.
+  // We also keep a PARALLEL, local-only list that carries the element handle +
+  // top offset for each candidate, used solely to pick the measurement target
+  // below (the emitted objects stay {color, area, saturation} — no DOM handles).
+  const SAT_THRESHOLD = 0.15;
+  const colorCandidates = [];
+  const measureCandidates = [];
   for (const el of document.querySelectorAll(ctaSelector)) {
     const rect = el.getBoundingClientRect();
     const area = rect.width * rect.height;
@@ -118,42 +121,43 @@ _SAMPLER_JS = r"""
     if (elCs.visibility === 'hidden' || elCs.display === 'none') continue;
     const bg = elCs.backgroundColor;
     if (isTransparent(bg)) continue;               // unfilled / ghost CTA
-    candidates.push({ el, area, top: rect.top, sat: saturationOf(bg) });
+    const sat = saturationOf(bg);
+    colorCandidates.push({ color: bg, area: area, saturation: sat });
+    measureCandidates.push({ el: el, area: area, top: rect.top, sat: sat });
   }
-  // Largest by area, breaking ties toward the candidate higher up the page
-  // (likelier the hero CTA).
+
+  // Primary button is chosen the same way the kernel will choose the accent
+  // (largest chromatic CTA, with fallbacks), but used HERE only to measure
+  // padding + border-radius — the accent decision itself still flows through the
+  // emitted color_candidates list to the kernel. Padding and radius are
+  // non-heuristic pass-through measurements, so reproducing the old primary
+  // selection locally is what keeps the live extraction byte-identical.
   const pickLargest = (list) =>
     list.sort((a, b) => (b.area - a.area) || (a.top - b.top))[0] || null;
-  // Prefer a chromatic brand color; only if none qualifies fall back to the
-  // largest neutral fill, then to the largest plain <button>.
   const chosen =
-    pickLargest(candidates.filter((c) => c.sat >= SAT_THRESHOLD)) ||
-    pickLargest(candidates);
+    pickLargest(measureCandidates.filter((c) => c.sat >= SAT_THRESHOLD)) ||
+    pickLargest(measureCandidates);
   let primaryBtn = chosen ? chosen.el : null;
   if (!primaryBtn) {
-    let maxArea = 0;
+    // Fallback: the largest plain <button> by rendered area.
+    let best = null, bestArea = -1;
     for (const b of document.querySelectorAll('button')) {
-      const area = b.offsetWidth * b.offsetHeight;
-      if (area > maxArea) { maxArea = area; primaryBtn = b; }
+      const a = b.offsetWidth * b.offsetHeight;
+      if (a > bestArea) { bestArea = a; best = b; }
     }
+    primaryBtn = best;
   }
   const btnCs = cs(primaryBtn);
 
-  // Primary color: the button's fill when it has one, else its text color (a
-  // ghost button's text often carries the brand accent).
-  let primaryColor = '';
-  if (btnCs) {
-    primaryColor = (!isTransparent(btnCs.backgroundColor)
-      ? btnCs.backgroundColor
-      : (btnCs.color || ''));
-  }
-
-  // Spacing scale: button padding + header/nav padding.
+  // Spacing scale: primary-button padding + header/nav padding.
   const spacing = [];
   if (btnCs && btnCs.padding) spacing.push(btnCs.padding);
   const nav = document.querySelector('header, nav');
   const navCs = cs(nav);
   if (navCs && navCs.padding) spacing.push(navCs.padding);
+
+  // Border radius convention: the primary button's border-radius.
+  const radiusConvention = btnCs ? btnCs.borderRadius : '';
 
   // Logo: header img src, else og:image meta. Best-effort, null if absent.
   let logoUrl = null;
@@ -165,21 +169,24 @@ _SAMPLER_JS = r"""
     if (og && og.content) logoUrl = og.content;
   }
 
-  // Representative raised surface: the first card/section whose background
-  // differs from the body's. Recovers a warm/cool surface tone the body color
-  // alone misses. Reuses the isTransparent guard defined above.
-  let surfaceColor = '';
+  // Neutral candidates: ONE per role, using today's exact first-found selection
+  // so the kernel's pick is byte-identical. Only push a role when one is found.
+  const neutralCandidates = [];
+
+  // surface = first card/section/article bg differing from body bg, non-transparent.
   const bodyBg = bodyCs ? bodyCs.backgroundColor : '';
   for (const el of document.querySelectorAll('[class*="card" i], section, article')) {
     const elCs = cs(el);
     if (!elCs) continue;
     const bg = elCs.backgroundColor;
-    if (bg && bg !== bodyBg && !isTransparent(bg)) { surfaceColor = bg; break; }
+    if (bg && bg !== bodyBg && !isTransparent(bg)) {
+      const rect = el.getBoundingClientRect();
+      neutralCandidates.push({ role: 'surface', color: bg, area: rect.width * rect.height });
+      break;
+    }
   }
 
-  // Border tone: the border-color of the first element with a visible border
-  // (non-zero width, non-transparent color).
-  let borderColor = '';
+  // border = first element with a visible border (non-zero width, non-transparent).
   for (const el of document.querySelectorAll(
     '[class*="card" i], section, article, button, input, table, td, th, hr'
   )) {
@@ -187,25 +194,24 @@ _SAMPLER_JS = r"""
     if (!elCs) continue;
     const width = parseFloat(elCs.borderTopWidth || elCs.borderWidth || '0') || 0;
     const bc = elCs.borderTopColor || elCs.borderColor || '';
-    if (width > 0 && bc && !isTransparent(bc)) { borderColor = bc; break; }
+    if (width > 0 && bc && !isTransparent(bc)) {
+      const rect = el.getBoundingClientRect();
+      neutralCandidates.push({ role: 'border', color: bc, area: rect.width * rect.height });
+      break;
+    }
   }
 
-  // Muted text tone: a secondary / muted text element's color.
-  let mutedColor = '';
+  // muted = a secondary / muted text element's color.
   const mutedEl = document.querySelector('[class*="muted" i], [class*="secondary" i], p');
   const mutedElCs = cs(mutedEl);
-  if (mutedElCs && mutedElCs.color) mutedColor = mutedElCs.color;
+  if (mutedElCs && mutedElCs.color) {
+    const rect = mutedEl.getBoundingClientRect();
+    neutralCandidates.push({ role: 'muted', color: mutedElCs.color, area: rect.width * rect.height });
+  }
 
-  // Elevation signal: how containers separate from the page. Sample a bounded
-  // set of cards/sections and count how many use a real box-shadow vs a visible
-  // border, then pick whichever is more prevalent. Counting across containers
-  // (rather than trusting the first one) avoids calling a mixed site "shadows"
-  // just because the first container happens to carry a shadow. A tie — or
-  // borders ahead — reads as "borders"; "" when neither is observed so the
-  // token keeps its default.
-  let elevationHint = '';
-  let shadowCount = 0;
-  let borderCount = 0;
+  // Container observations: a bounded scan of cards/sections, emitting the raw
+  // border/shadow treatment per container. The kernel tallies prevalence.
+  const containerObservations = [];
   let scanned = 0;
   const ELEVATION_SCAN_CAP = 40;
   for (const el of document.querySelectorAll('[class*="card" i], section, article')) {
@@ -216,18 +222,13 @@ _SAMPLER_JS = r"""
     const shadow = elCs.boxShadow;
     const bWidth = parseFloat(elCs.borderTopWidth || elCs.borderWidth || '0') || 0;
     const bColor = elCs.borderTopColor || elCs.borderColor || '';
-    if (shadow && shadow !== 'none') shadowCount++;
-    if (bWidth > 0 && bColor && !isTransparent(bColor)) borderCount++;
-  }
-  if (shadowCount > 0 || borderCount > 0) {
-    // Strictly more shadows reads as shadows; otherwise (borders ahead or tied)
-    // reads as borders.
-    elevationHint = shadowCount > borderCount ? 'shadows' : 'borders';
+    const hasShadow = !!(shadow && shadow !== 'none');
+    const hasBorder = bWidth > 0 && !!bColor && !isTransparent(bColor);
+    containerObservations.push({ has_border: hasBorder, has_shadow: hasShadow });
   }
 
-  // Component inventory: count how many of a known set of UI primitive types
-  // appear, by tag / role / class heuristics. Counts only — never any element
-  // content. Each count is capped so the result object stays small.
+  // Component inventory: which of a known set of UI primitive types appear, by
+  // tag / role / class heuristics. NAMES only — no counts, no element content.
   const componentSelectors = {
     accordion: '[class*="accordion" i]',
     alert: '[role="alert"], [class*="alert" i]',
@@ -252,27 +253,25 @@ _SAMPLER_JS = r"""
     toast: '[class*="toast" i]',
     tooltip: '[role="tooltip"], [class*="tooltip" i]',
   };
-  const componentCounts = {};
+  const observedComponentTypes = [];
   for (const type in componentSelectors) {
     let n = 0;
     try { n = document.querySelectorAll(componentSelectors[type]).length; } catch (e) { n = 0; }
-    if (n > 0) componentCounts[type] = Math.min(n, 999);
+    if (n > 0) observedComponentTypes.push(type);
   }
 
   return {
-    primary_color: primaryColor,
+    color_candidates: colorCandidates,
+    neutral_candidates: neutralCandidates,
+    container_observations: containerObservations,
+    observed_component_types: observedComponentTypes,
     background_color: bodyCs ? bodyCs.backgroundColor : '',
     heading_font_family: h1Cs ? h1Cs.fontFamily : '',
     heading_size_scale: h1Cs ? h1Cs.fontSize : '',
     body_font_family: bodyCs ? bodyCs.fontFamily : '',
-    border_radius_convention: btnCs ? btnCs.borderRadius : '',
+    border_radius_convention: radiusConvention,
     spacing_scale_samples: spacing,
     logo_url: logoUrl,
-    surface_color: surfaceColor,
-    border_color: borderColor,
-    muted_color: mutedColor,
-    elevation_hint: elevationHint,
-    component_counts: componentCounts,
   };
 }
 """
@@ -292,30 +291,35 @@ def _first_family(font_family: str) -> str:
 
 
 def _below_confidence(ds: WebsiteDesignSystem) -> bool:
-    """Below-confidence = no usable primary color sampled OR no heading font
-    family detected. Either alone yields output too generic to justify the
-    Chromium cost — the manual color-picker floor is strictly better in that
-    case, so the caller is told to fall back via the ``None`` sentinel.
+    """Below-confidence = NO chromatic candidate converts to a usable hex OR no
+    heading font family detected. Either alone yields output too generic to
+    justify the Chromium cost — the manual color-picker floor is strictly better
+    in that case, so the caller is told to fall back via the ``None`` sentinel.
 
-    A primary color that does not convert to a usable hex (transparent or
-    unparseable) counts as absent: a ghost/transparent CTA fill must not pass
-    the floor and leak a default accent into the tokens downstream. This mirrors
-    the convertibility check ``WebExtractor.normalize`` applies, so the sampler's
-    own confidence gate and the adapter's stay consistent.
+    Convertibility only: a candidate that does not convert to a usable hex
+    (transparent or unparseable) does not count. We do NOT apply a saturation
+    filter here — saturation filtering is the kernel's job, so an all-monochrome
+    but convertible site flows through to ``normalize``, which downgrades it.
     """
-    usable_primary = bool(ds["primary_color"]) and (
-        _css_color_to_hex(ds["primary_color"]) is not None
+    usable = any(
+        _css_color_to_hex(c.get("color")) is not None
+        for c in ds["color_candidates"]
     )
-    return (not usable_primary) or (not ds["heading_font_family"])
+    return (not usable) or (not ds["heading_font_family"])
 
 
 def _map_sample(raw: dict | None) -> WebsiteDesignSystem:
-    """Map the raw ``page.evaluate()`` dict onto the typed 8-field design
-    system, defending against missing keys / ``None`` values."""
+    """Map the raw ``page.evaluate()`` dict onto the typed design system,
+    defending against missing keys / ``None`` values. Candidate lists default to
+    ``[]``; raw candidate dicts are carried THROUGH (colour conversion is the
+    kernel's job in ``normalize``, not here)."""
     raw = raw or {}
     spacing = raw.get("spacing_scale_samples") or []
     return WebsiteDesignSystem(
-        primary_color=(raw.get("primary_color") or "").strip(),
+        color_candidates=list(raw.get("color_candidates") or []),
+        neutral_candidates=list(raw.get("neutral_candidates") or []),
+        container_observations=list(raw.get("container_observations") or []),
+        observed_component_types=list(raw.get("observed_component_types") or []),
         background_color=(raw.get("background_color") or "").strip(),
         heading_font_family=_first_family(raw.get("heading_font_family") or ""),
         heading_size_scale=(raw.get("heading_size_scale") or "").strip(),
@@ -323,11 +327,6 @@ def _map_sample(raw: dict | None) -> WebsiteDesignSystem:
         border_radius_convention=(raw.get("border_radius_convention") or "").strip(),
         spacing_scale_samples=[s for s in spacing if s],
         logo_url=raw.get("logo_url") or None,
-        surface_color=(raw.get("surface_color") or "").strip(),
-        border_color=(raw.get("border_color") or "").strip(),
-        muted_color=(raw.get("muted_color") or "").strip(),
-        elevation_hint=(raw.get("elevation_hint") or "").strip(),
-        component_counts=dict(raw.get("component_counts") or {}),
     )
 
 

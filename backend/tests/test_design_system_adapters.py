@@ -502,10 +502,58 @@ def test_figma_current_version_returns_none_without_token():
 # ─── Website mapping ─────────────────────────────────────────────────────
 
 
-def _web_sample(**over) -> dict:
+def _web_sample(
+    *,
+    primary_color: str = "rgb(37,99,235)",
+    background_color: str = "#0b0f19",
+    surface_color: str | None = None,
+    border_color: str | None = None,
+    muted_color: str | None = None,
+    elevation_hint: str | None = None,
+    component_counts: dict | None = None,
+    **over,
+) -> dict:
+    """Build a NEW-shape (candidate-list) web sample from convenience kwargs.
+
+    The sampler is now a dumb emitter; the kernel decides. This helper translates
+    the legacy single-value kwargs (``primary_color``, ``surface_color``, …) into
+    the candidate lists the sampler emits today, so the parity intent of each test
+    is preserved against the new data path. ``primary_color`` becomes one chromatic
+    candidate (saturation 0.6 so it survives the kernel's chromatic floor); each
+    neutral becomes one role candidate; ``elevation_hint`` expands to a consistent
+    container-observation set; ``component_counts`` becomes an observed-type list.
+    """
+    chromatic: list[dict] = []
+    if primary_color:
+        chromatic.append({"color": primary_color, "area": 8000, "saturation": 0.6})
+
+    neutrals: list[dict] = []
+    if surface_color is not None:
+        neutrals.append({"role": "surface", "color": surface_color, "area": 5000})
+    if border_color is not None:
+        neutrals.append({"role": "border", "color": border_color, "area": 100})
+    if muted_color is not None:
+        neutrals.append({"role": "muted", "color": muted_color, "area": 50})
+
+    containers: list[dict] = []
+    if elevation_hint == "shadows":
+        containers = [{"has_border": False, "has_shadow": True}] * 3
+    elif elevation_hint == "borders":
+        containers = [{"has_border": True, "has_shadow": False}] * 3
+    # "" / unknown / None -> no observations -> kernel leaves the default.
+
+    observed_types: list[str] = []
+    if component_counts:
+        observed_types = [
+            name for name, count in component_counts.items() if count and count > 0
+        ]
+
     base = {
-        "primary_color": "rgb(37,99,235)",
-        "background_color": "#0b0f19",
+        "color_candidates": chromatic,
+        "neutral_candidates": neutrals,
+        "container_observations": containers,
+        "observed_component_types": observed_types,
+        "background_color": background_color,
         "heading_font_family": "Inter",
         "body_font_family": "Roboto",
         "border_radius_convention": "8px",
@@ -733,8 +781,12 @@ def test_website_neutral_colors_map_to_tokens():
 
 
 def test_website_absent_or_unconvertible_neutrals_keep_defaults():
-    """Empty, transparent, or unparseable neutral samples leave the baseline
-    defaults in place rather than emitting a broken color."""
+    """Empty, transparent, or unparseable neutral samples do not emit a broken
+    color: surface and muted fall back to the baseline. Border is the one
+    documented exception — when no border candidate is gathered but a foreground
+    exists, the kernel derives the border from the foreground (blend-over-white),
+    a gathered relative rather than the bare baseline; the gate site has a real
+    border candidate so this derivation is not exercised there."""
     ds = WebExtractor().normalize(
         RawSignals(
             provider="web",
@@ -749,8 +801,11 @@ def test_website_absent_or_unconvertible_neutrals_keep_defaults():
     c = ds.tokens.colors
     base = DesignSystem().tokens.colors
     assert c.surface == base.surface
-    assert c.border == base.border
     assert c.muted == base.muted
+    # Border: no gathered candidate -> kernel derives it from the (light, dark-bg)
+    # foreground via blend-over-white. A real #rrggbb, never a broken color.
+    assert c.border != "rgba(0, 0, 0, 0)"
+    assert c.border.startswith("#") and len(c.border) == 7
 
 
 def test_website_elevation_hint_sets_or_keeps_token():

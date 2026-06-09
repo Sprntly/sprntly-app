@@ -468,79 +468,100 @@ class WebExtractor:
     def normalize(self, raw: RawSignals) -> DesignSystem:
         """Fold a website sample into the common `DesignSystem` shape.
 
+        The sampler is a dumb emitter of candidate lists; every decision lives in
+        the shared kernel. This method GATHERS the raw candidates into a
+        `DesignSignals` bag and returns `harden(signals)` — no inline accent /
+        neutral / elevation / inventory / confidence decision is made here, and
+        nothing is post-decorated onto the DesignSystem after harden.
+
         An empty bag (the low-confidence / failure case) yields the neutral
         baseline so callers always get a complete object.
         """
+        from app.design_agent.design_system.hardening import harden, pick_accent
+        from app.design_agent.design_system.signals import (
+            ColorCandidate,
+            ContainerObservation,
+            DesignSignals,
+            FieldFlags,
+            NeutralCandidate,
+            TypographySignals,
+        )
+
         s = raw.signals or {}
         if not s:
             return DesignSystem()
 
-        primary = _css_color_to_hex(s.get("primary_color"))
         background = _css_color_to_hex(s.get("background_color"))
         is_dark = bool(background and _luminance(background) < 128)
 
-        colors = Colors()
-        if background:
-            colors.background = background
-            colors.foreground = "#f4f1ea" if is_dark else "#1a1a1a"
-        if primary:
-            colors.primary = primary
-            colors.accent = primary
+        # Chromatic candidates: convert each raw colour; drop non-convertible.
+        chromatic_list: list[ColorCandidate] = []
+        for c in s.get("color_candidates") or []:
+            hx = _css_color_to_hex(c.get("color"))
+            if hx:
+                chromatic_list.append(
+                    ColorCandidate(
+                        hex=hx,
+                        weight=float(c.get("area") or 0.0),
+                        saturation=float(c.get("saturation") or 0.0),
+                    )
+                )
 
-        # Neutral tones sampled from real surfaces. Each falls back to the
-        # baseline default when the site has no usable value, so a partial
-        # sample never produces a broken color.
-        surface = _css_color_to_hex(s.get("surface_color"))
-        if surface:
-            colors.surface = surface
-        border = _css_color_to_hex(s.get("border_color"))
-        if border:
-            colors.border = border
-        muted = _css_color_to_hex(s.get("muted_color"))
-        if muted:
-            colors.muted = muted
+        # Neutral candidates: convert each raw colour; keep only valid roles.
+        neutral_list: list[NeutralCandidate] = []
+        for n in s.get("neutral_candidates") or []:
+            hx = _css_color_to_hex(n.get("color"))
+            if hx and n.get("role") in ("surface", "border", "muted"):
+                neutral_list.append(
+                    NeutralCandidate(
+                        role=n["role"],
+                        hex=hx,
+                        weight=float(n.get("area") or 0.0),
+                    )
+                )
+
+        # Container observations for elevation derivation.
+        container_list = [
+            ContainerObservation(
+                has_border=bool(o.get("has_border")),
+                has_shadow=bool(o.get("has_shadow")),
+            )
+            for o in (s.get("container_observations") or [])
+        ]
 
         heading = (s.get("heading_font_family") or "").strip()
-        body = (s.get("body_font_family") or "").strip()
-        fonts = Fonts()
-        if heading:
-            fonts.heading_family = heading
-        if body:
-            fonts.body_family = body
-
-        tokens = Tokens(
-            colors=colors,
-            is_dark=is_dark,
-            fonts=fonts,
+        typography = TypographySignals(
+            heading_family=heading,
+            body_family=(s.get("body_font_family") or "").strip(),
             radius_convention=_radius_convention(s.get("border_radius_convention")),
+        )
+
+        observed_types = [str(t) for t in (s.get("observed_component_types") or [])]
+
+        gathered = FieldFlags(
+            accent=pick_accent(chromatic_list) is not None,
+            typography=bool(heading),
+            neutrals=bool(neutral_list),
+            elevation=bool(container_list),
+            inventory=bool(observed_types),
+        )
+
+        signals = DesignSignals(
+            color_candidates=chromatic_list,
+            neutral_candidates=neutral_list,
+            container_observations=container_list,
+            observed_component_types=observed_types,
+            typography=typography,
+            is_dark=is_dark,
+            background_hex=background or "",
+            # Non-heuristic foreground pass-through (today's exact rule).
+            foreground_hex=("#f4f1ea" if is_dark else "#1a1a1a") if background else "",
             spacing_scale=_spacing_samples_to_scale(s.get("spacing_scale_samples")),
+            gathered=gathered,
+            explicit=FieldFlags(),
+            provider="web",
         )
-        # Reconcile the elevation token with the observed border-vs-shadow usage.
-        # Only a recognized hint overrides the default; anything else is left
-        # alone so an unreadable site keeps the baseline.
-        elevation_hint = (s.get("elevation_hint") or "").strip()
-        if elevation_hint in ("shadows", "borders"):
-            tokens.elevation_style = elevation_hint
-        # Website signals are inferred from sampled computed styles, not from a
-        # documented design system. A usable brand color plus a heading font is
-        # the sampler's own confidence floor; meeting it here too keeps the
-        # signal honest.
-        has_system = bool(primary and heading)
-        # Component inventory: keep only known primitive types with a positive
-        # count, sorted. A type list only — never component code — matching the
-        # codebase adapter's inventory contract.
-        counts = s.get("component_counts") or {}
-        inventory = sorted(
-            name
-            for name, count in counts.items()
-            if name in _COMPONENT_HINTS and isinstance(count, int) and count > 0
-        )
-        return DesignSystem(
-            tokens=tokens,
-            component_inventory=inventory,
-            has_explicit_system=False,
-            confidence="medium" if has_system else "low",
-        )
+        return harden(signals)
 
 
 # ─── GitHub/codebase ────────────────────────────────────────────────────────

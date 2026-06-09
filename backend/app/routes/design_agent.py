@@ -1110,8 +1110,11 @@ def _website_design_system_block(
         "Match this visual identity in the prototype."
     ]
 
-    primary = sample.get("primary_color")
-    if _is_usable_color(primary):
+    has_usable_accent = any(
+        _is_usable_color(c.get("color"))
+        for c in (sample.get("color_candidates") or [])
+    )
+    if has_usable_accent:
         parts.append(f"Primary color: {tokens.colors.primary}.")
     elif manual_design is not None:
         parts.append(
