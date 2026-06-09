@@ -3,7 +3,7 @@
  * company, renders one `GithubRepoPicker` per install. Same component
  * is mounted by:
  *   - ConfigureConnectorDrawer (the settings "Configure" drawer)
- *   - ConnectorConnectModal via Onboarding6 (the onboarding flow)
+ *   - ConnectorConnectModal via the onboarding connectors step
  *
  * Most users will have one installation; this handles 0-or-many cleanly.
  */

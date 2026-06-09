@@ -26,7 +26,7 @@ vi.mock("../../../../lib/api", () => ({
   onboardingApi: { analyzeWebsite: (...a: unknown[]) => analyzeWebsiteMock(...a) },
 }))
 
-import { OnboardingAnalyzing } from "../OnboardingAnalyzing"
+import { Analyzing } from "../Analyzing"
 import { makeWorkspace, makeAnalysis, makeOnboardingCtx } from "./fixtures"
 
 function withWebsite(over: Record<string, unknown> = {}) {
@@ -51,11 +51,11 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe("OnboardingAnalyzing (interstitial)", () => {
+describe("Analyzing (interstitial)", () => {
   it("renders the gathering-information loader with a spinner", () => {
     analyzeWebsiteMock.mockReturnValue(new Promise(() => {})) // never resolves
     onboardingMock.mockReturnValue(withWebsite())
-    const { container } = render(React.createElement(OnboardingAnalyzing))
+    const { container } = render(React.createElement(Analyzing))
     expect(
       screen.getByText("Gathering information about your business"),
     ).not.toBeNull()
@@ -67,7 +67,7 @@ describe("OnboardingAnalyzing (interstitial)", () => {
     const setWebsiteAnalysis = vi.fn()
     onboardingMock.mockReturnValue(withWebsite({ setWebsiteAnalysis }))
     await act(async () => {
-      render(React.createElement(OnboardingAnalyzing))
+      render(React.createElement(Analyzing))
     })
     expect(analyzeWebsiteMock).toHaveBeenCalledTimes(1)
     expect(analyzeWebsiteMock).toHaveBeenCalledWith("https://acme.com")
@@ -79,19 +79,19 @@ describe("OnboardingAnalyzing (interstitial)", () => {
     const setWebsiteAnalysis = vi.fn()
     onboardingMock.mockReturnValue(withWebsite({ setWebsiteAnalysis }))
     await act(async () => {
-      render(React.createElement(OnboardingAnalyzing))
+      render(React.createElement(Analyzing))
     })
     expect(setWebsiteAnalysis).toHaveBeenCalledWith(analysis)
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/2")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
   })
 
   it("on transport FAILURE: still advances to the metrics page (manual fallback)", async () => {
     analyzeWebsiteMock.mockRejectedValue(new Error("network down"))
     onboardingMock.mockReturnValue(withWebsite())
     await act(async () => {
-      render(React.createElement(OnboardingAnalyzing))
+      render(React.createElement(Analyzing))
     })
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/2")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
   })
 
   it("on ok:false (degraded): still advances to the metrics page", async () => {
@@ -106,20 +106,20 @@ describe("OnboardingAnalyzing (interstitial)", () => {
     const setWebsiteAnalysis = vi.fn()
     onboardingMock.mockReturnValue(withWebsite({ setWebsiteAnalysis }))
     await act(async () => {
-      render(React.createElement(OnboardingAnalyzing))
+      render(React.createElement(Analyzing))
     })
     expect(setWebsiteAnalysis).toHaveBeenCalledWith(degraded)
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/2")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
   })
 
   it("advances exactly ONCE even if both the promise and the timeout could fire", async () => {
     analyzeWebsiteMock.mockResolvedValue(makeAnalysis())
     onboardingMock.mockReturnValue(withWebsite())
     await act(async () => {
-      render(React.createElement(OnboardingAnalyzing))
+      render(React.createElement(Analyzing))
     })
     const toMetrics = routerMock.replace.mock.calls.filter(
-      (c) => c[0] === "/onboarding/2",
+      (c) => c[0] === "/onboarding/metrics",
     )
     expect(toMetrics).toHaveLength(1)
   })
@@ -128,12 +128,12 @@ describe("OnboardingAnalyzing (interstitial)", () => {
     vi.useFakeTimers()
     analyzeWebsiteMock.mockReturnValue(new Promise(() => {})) // hangs forever
     onboardingMock.mockReturnValue(withWebsite())
-    render(React.createElement(OnboardingAnalyzing))
-    expect(routerMock.replace).not.toHaveBeenCalledWith("/onboarding/2")
+    render(React.createElement(Analyzing))
+    expect(routerMock.replace).not.toHaveBeenCalledWith("/onboarding/metrics")
     await act(async () => {
       vi.advanceTimersByTime(12_000)
     })
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/2")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
   })
 
   it("with NO website: skips analysis and advances straight to metrics", async () => {
@@ -143,10 +143,10 @@ describe("OnboardingAnalyzing (interstitial)", () => {
       }),
     )
     await act(async () => {
-      render(React.createElement(OnboardingAnalyzing))
+      render(React.createElement(Analyzing))
     })
     expect(analyzeWebsiteMock).not.toHaveBeenCalled()
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/2")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
   })
 
   it("with NO workspace: redirects back to step 1 from an effect (never during render)", () => {
@@ -156,10 +156,10 @@ describe("OnboardingAnalyzing (interstitial)", () => {
     const spy = vi
       .spyOn(console, "error")
       .mockImplementation((...args) => errors.push(args[0]))
-    render(React.createElement(OnboardingAnalyzing))
+    render(React.createElement(Analyzing))
     spy.mockRestore()
 
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/1")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/business-info")
     const sideEffectInRender = errors
       .map(String)
       .filter((m) => /while rendering a different component|Cannot update a component/.test(m))

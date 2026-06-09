@@ -7,8 +7,7 @@ import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
 import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
-import type { SuggestedMetric } from "../../../lib/api"
-import { Check, InfoCircle, Plus, Sparkles, Trash } from "../../auth/icons"
+import { InfoCircle, Plus, Sparkles, Trash } from "../../auth/icons"
 import {
   buildKpiTreePayload,
   canSaveKpiTree,
@@ -19,17 +18,17 @@ import {
 } from "../../../lib/onboarding/kpiTreeApi"
 
 /**
- * Onboarding metrics page (route /onboarding/2 in the new flow; component name
- * kept as Onboarding4 to avoid churning the other-PR-owned screens). Restyled
+ * Onboarding metrics page (route /onboarding/metrics in the new flow). Restyled
  * to the v4 `.metric-tree` design.
  *
- * The website-analysis `suggested_metrics` are PRE-SELECTED on load (all of
- * them seed `supporting` once, via a ref guard mirroring the industry/business
- * touched-guards) and render as selectable suggestion chips. The selected
- * supporting metrics live INSIDE the metric-tree as `.mt-targets` branching off
- * the North-Star `.mt-source` — each target shows the metric name, an editable
- * description, and a delete control. The user can also add their own
- * {metric, description} via `.metric-other`. Industry + business_type show as
+ * The website-analysis `suggested_metrics` are PRE-SEEDED on load (all of them
+ * seed `supporting` once, via a ref guard mirroring the industry/business
+ * touched-guards). The seeded supporting metrics live INSIDE the metric-tree as
+ * `.mt-targets` branching off the North-Star `.mt-source` — each target shows
+ * the metric name, an editable description, and a delete control. The user can
+ * also add their own {metric, description} via `.metric-other` ("write your
+ * own"), and re-add any deleted metric the same way. Industry + business_type
+ * show as
  * ALWAYS-editable dropdowns (pre-filled from the analysis; the user can
  * override anytime, guarded by a `touched` flag). On save we persist the
  * confirmed industry/business_type to the company and the supporting metrics to
@@ -62,9 +61,7 @@ export type MetricsSetupViewProps = {
   northStar: string
   northStarDescription: string
   northStarHints: string[]
-  /** Suggested metrics from the website analysis (may be empty). */
-  suggestedMetrics: SuggestedMetric[]
-  /** Selected supporting metrics (from suggestions and/or added by hand). */
+  /** Supporting metrics (pre-seeded from the website analysis and/or added by hand). */
   supporting: SupportingMetric[]
   customMetric: string
   customDescription: string
@@ -75,7 +72,6 @@ export type MetricsSetupViewProps = {
   onChangeNorthStar: (value: string) => void
   onChangeNorthStarDescription: (value: string) => void
   onPickNorthStar: (value: string) => void
-  onToggleSuggested: (metric: SuggestedMetric) => void
   onChangeSupportingDescription: (metric: string, description: string) => void
   onRemoveSupporting: (metric: string) => void
   onChangeCustomMetric: (value: string) => void
@@ -93,7 +89,6 @@ export function MetricsSetupView({
   northStar,
   northStarDescription,
   northStarHints,
-  suggestedMetrics,
   supporting,
   customMetric,
   customDescription,
@@ -104,16 +99,12 @@ export function MetricsSetupView({
   onChangeNorthStar,
   onChangeNorthStarDescription,
   onPickNorthStar,
-  onToggleSuggested,
   onChangeSupportingDescription,
   onRemoveSupporting,
   onChangeCustomMetric,
   onChangeCustomDescription,
   onAddCustom,
 }: MetricsSetupViewProps) {
-  const selectedNames = supporting.map((m) => m.name)
-  const isSelected = (name: string) => selectedNames.includes(name)
-
   return (
     <>
       {error && <div className="onb-form-error">{error}</div>}
@@ -239,41 +230,8 @@ export function MetricsSetupView({
             </div>
           ) : (
             <p className="mt-targets-empty">
-              {suggestedMetrics.length > 0
-                ? "No supporting metrics yet — pick a suggestion below or add your own."
-                : "No suggestions yet — add your own metrics below."}
+              No supporting metrics yet — add your own below.
             </p>
-          )}
-
-          {/* Suggestion chips: selecting toggles a metric in/out of the targets
-              above. A chip is "sel" when its metric is currently a target. */}
-          {suggestedMetrics.length > 0 && (
-            <div className="mt-targets" id="suggestedMetrics" style={{ marginTop: 16 }}>
-              {suggestedMetrics.map((m, i) => {
-                const sel = isSelected(m.metric)
-                return (
-                  <button
-                    key={m.metric}
-                    type="button"
-                    className={`metric mt-suggested ${sel ? "sel" : ""}`}
-                    style={{ ["--d" as string]: `${0.05 * (i + 1)}s` }}
-                    aria-pressed={sel}
-                    data-metric={m.metric}
-                    title={m.description || undefined}
-                    onClick={() => onToggleSuggested(m)}
-                  >
-                    <span className="mt-ic" aria-hidden>
-                      {sel ? (
-                        <Check style={{ width: 12, height: 12 }} />
-                      ) : (
-                        <Sparkles style={{ width: 12, height: 12 }} />
-                      )}
-                    </span>
-                    {m.metric}
-                  </button>
-                )
-              })}
-            </div>
           )}
         </div>
 
@@ -329,7 +287,7 @@ export function MetricsSetupView({
   )
 }
 
-export function Onboarding4() {
+export function Metrics() {
   const { workspace, setWorkspace, websiteAnalysis, loading } = useOnboarding()
   const router = useRouter()
   const [industry, setIndustry] = useState<string>(INDUSTRIES[0])
@@ -427,26 +385,15 @@ export function Onboarding4() {
     ],
   )
 
-  function toggleSuggested(metric: SuggestedMetric) {
-    setSupporting((prev) => {
-      if (prev.some((m) => m.name === metric.metric)) {
-        return prev.filter((m) => m.name !== metric.metric)
-      }
-      if (prev.length >= MAX_SUPPORTING) return prev
-      return [...prev, { name: metric.metric, description: metric.description ?? "" }]
-    })
-  }
-
   function changeSupportingDescription(metric: string, description: string) {
     setSupporting((prev) =>
       prev.map((m) => (m.name === metric ? { ...m, description } : m)),
     )
   }
 
-  // Remove a supporting metric. Because the suggestion chips derive their
-  // selected state from `supporting`, removing a metric that matches a
-  // suggestion also un-selects its chip (re-addable); a custom metric just
-  // drops. The `.metric-count` stays in sync since it reads `supporting.length`.
+  // Remove a supporting metric from the tree. A removed metric can always be
+  // re-added by hand via "write your own". The `.metric-count` stays in sync
+  // since it reads `supporting.length`.
   function removeSupporting(metric: string) {
     setSupporting((prev) => prev.filter((m) => m.name !== metric))
   }
@@ -475,11 +422,11 @@ export function Onboarding4() {
       await kpiTreeApi.put(
         buildKpiTreePayload(northStar, northStarDescription, supporting),
       )
-      // Next numbered step is the optimizing-for page (route 3).
+      // Next numbered step is connectors (index 3 in ONBOARDING_STEP_SLUGS).
       const updated = await advanceOnboardingStep(workspace.id, 3)
       const product = updated.product ?? workspace.product
       setWorkspace({ ...updated, product })
-      router.push("/onboarding/3")
+      router.push("/onboarding/connectors")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your metrics.")
     } finally {
@@ -492,7 +439,7 @@ export function Onboarding4() {
   // that path surfaces in production as a client-side exception / error
   // boundary. Render returns the loading shell until the redirect lands.
   useEffect(() => {
-    if (!loading && !workspace) router.replace("/onboarding/1")
+    if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
@@ -506,13 +453,13 @@ export function Onboarding4() {
           Set your success <em>metrics.</em>
         </>
       }
-      subtitle="Success metrics anchor the whole workspace. We've drafted suggestions and predicted your business from your website — confirm what fits, add your own, and set the North Star they all ladder up to."
+      subtitle="Success metrics anchor the whole workspace. We've drafted a starting set and predicted your business from your website — edit or remove what doesn't fit, add your own, and set the North Star they all ladder up to."
       footerMeta={
         northStar
           ? `North Star + ${supporting.length} supporting metric${supporting.length === 1 ? "" : "s"} captured`
           : "Set a North Star to continue"
       }
-      onBack={() => router.push("/onboarding/1")}
+      onBack={() => router.push("/onboarding/business-info")}
       onContinue={persist}
       continueDisabled={saving}
       loading={saving}
@@ -524,7 +471,6 @@ export function Onboarding4() {
           northStar={northStar}
           northStarDescription={northStarDescription}
           northStarHints={northStarHints}
-          suggestedMetrics={suggestedMetrics}
           supporting={supporting}
           customMetric={customMetric}
           customDescription={customDescription}
@@ -547,7 +493,6 @@ export function Onboarding4() {
             setNorthStar(value)
             clearError("northStar")
           }}
-          onToggleSuggested={toggleSuggested}
           onChangeSupportingDescription={changeSupportingDescription}
           onRemoveSupporting={removeSupporting}
           onChangeCustomMetric={setCustomMetric}

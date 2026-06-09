@@ -26,12 +26,12 @@ import {
  * navigates to the blocking `/onboarding/analyzing` interstitial, which awaits
  * the analysis before forwarding to the metrics step. This keeps the analysis
  * result deterministic for the metrics page while never trapping the user (the
- * interstitial always proceeds — see OnboardingAnalyzing).
+ * interstitial always proceeds — see Analyzing).
  *
  * This page deliberately renders NO metric fields — those live on the metrics
  * step that follows the interstitial.
  */
-export function Onboarding1() {
+export function BusinessInfo() {
   const auth = useAuth()
   const { workspace, refresh, setWorkspace, loading } = useOnboarding()
   const router = useRouter()

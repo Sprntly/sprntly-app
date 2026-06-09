@@ -1,22 +1,21 @@
-// View tests for onboarding step 04 — "Set your success metrics" (the single
-// consolidated metrics page). renderToStaticMarkup pattern (node-env, no
+// View tests for the onboarding metrics page — "Set your success metrics" (the
+// single consolidated metrics page). renderToStaticMarkup pattern (node-env, no
 // jsdom, no hooks): the stateful container wires hooks, while MetricsSetupView
 // is pure and renders to static markup directly.
+//
+// NOTE: the suggestion-CHIP row was removed in the semantic-routes refactor.
+// Metrics are now pre-seeded directly as tree-target cards (edit + delete) and
+// re-added via "write your own"; there are no selectable suggestion chips, so
+// these tests assert there is NO chip surface.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { MetricsSetupView, type MetricsSetupViewProps } from "../Onboarding4"
-import type { SuggestedMetric } from "../../../../lib/api"
+import { MetricsSetupView, type MetricsSetupViewProps } from "../Metrics"
 
 function noop() {}
-
-const SUGGESTED: SuggestedMetric[] = [
-  { metric: "Reconciled volume", description: "Total $ reconciled / week." },
-  { metric: "Active accounts", description: "Accounts with a live sync." },
-]
 
 function render(override: Partial<MetricsSetupViewProps> = {}): string {
   const defaults: MetricsSetupViewProps = {
@@ -25,7 +24,6 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
     northStar: "",
     northStarDescription: "",
     northStarHints: ["Net revenue retention", "Activated accounts"],
-    suggestedMetrics: SUGGESTED,
     supporting: [],
     customMetric: "",
     customDescription: "",
@@ -36,7 +34,6 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
     onChangeNorthStar: noop,
     onChangeNorthStarDescription: noop,
     onPickNorthStar: noop,
-    onToggleSuggested: noop,
     onChangeSupportingDescription: noop,
     onRemoveSupporting: noop,
     onChangeCustomMetric: noop,
@@ -48,33 +45,20 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
   )
 }
 
-describe("MetricsSetupView — suggested metrics (selectable, metric-tree)", () => {
-  it("renders each suggested metric in the metric-tree as a selectable option", () => {
-    const html = render()
-    expect(html).toContain("Supporting metrics")
-    expect(html).toContain("metric-tree")
-    expect(html).toContain("mt-suggested")
-    expect(html).toContain("Reconciled volume")
-    // description is carried as the option's title (hover) text
-    expect(html).toContain('title="Total $ reconciled / week."')
-    expect(html).toContain("Active accounts")
-    // selectable buttons carry aria-pressed
-    expect(html).toContain('aria-pressed="false"')
-    expect(html).toContain('data-metric="Reconciled volume"')
-  })
-
-  it("marks a suggested metric's chip as selected when it's in `supporting`", () => {
+describe("MetricsSetupView — NO suggestion chips", () => {
+  it("renders no selectable suggestion-chip surface", () => {
     const html = render({
-      supporting: [{ name: "Reconciled volume", description: "Total $ reconciled / week." }],
+      supporting: [{ name: "Reconciled volume", description: "Weekly total." }],
     })
-    expect(html).toContain('aria-pressed="true"')
-    expect(html).toContain("metric mt-suggested sel")
-    expect(html).toContain("1</strong> supporting metric selected")
+    // The chip row + its toggle affordance are gone entirely.
+    expect(html).not.toContain("mt-suggested")
+    expect(html).not.toContain("aria-pressed")
+    expect(html).not.toContain('id="suggestedMetrics"')
   })
 
-  it("falls back to an add-your-own prompt when there are NO suggestions", () => {
-    const html = render({ suggestedMetrics: [] })
-    expect(html).toContain("No suggestions yet")
+  it("shows an add-your-own prompt when nothing is seeded yet", () => {
+    const html = render({ supporting: [] })
+    expect(html).toContain("No supporting metrics yet")
     expect(html).toContain("Or write your own")
   })
 })

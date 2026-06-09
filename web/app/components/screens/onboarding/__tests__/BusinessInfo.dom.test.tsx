@@ -38,7 +38,7 @@ vi.mock("../../../../lib/api", () => ({
   onboardingApi: { analyzeWebsite: (...a: unknown[]) => analyzeWebsiteMock(...a) },
 }))
 
-import { Onboarding1 } from "../Onboarding1"
+import { BusinessInfo } from "../BusinessInfo"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 afterEach(() => {
@@ -46,12 +46,12 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("Onboarding1 (container) — Company page", () => {
+describe("BusinessInfo (container) — Company page", () => {
   it("renders the new .onb-card design and the company heading", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
-    const { container } = render(React.createElement(Onboarding1))
+    const { container } = render(React.createElement(BusinessInfo))
     expect(container.querySelector(".onb-card")).not.toBeNull()
     expect(container.querySelector(".onb-shell")).not.toBeNull()
     expect(screen.getByText(/get to know your/i)).not.toBeNull()
@@ -61,7 +61,7 @@ describe("Onboarding1 (container) — Company page", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
-    const { container } = render(React.createElement(Onboarding1))
+    const { container } = render(React.createElement(BusinessInfo))
     // The metric tree and North-Star/supporting-metric UI live on the metrics
     // step, NOT here.
     expect(container.querySelector(".metric-tree")).toBeNull()
@@ -77,7 +77,7 @@ describe("Onboarding1 (container) — Company page", () => {
     createWorkspaceMock.mockResolvedValue(makeWorkspace())
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
-    render(React.createElement(Onboarding1))
+    render(React.createElement(BusinessInfo))
 
     const inputs = document.querySelectorAll("input.inp")
     // company name, product name (website is the url input)
@@ -105,7 +105,7 @@ describe("Onboarding1 (container) — Company page", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
-    render(React.createElement(Onboarding1))
+    render(React.createElement(BusinessInfo))
     const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
       /continue/i.test(b.textContent ?? ""),
     ) as HTMLButtonElement
@@ -119,7 +119,7 @@ describe("Onboarding1 (container) — Company page", () => {
   it("shows the loading shell while the workspace is loading", () => {
     authMock.mockReturnValue({ kind: "loading" })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ loading: true, workspace: null }))
-    render(React.createElement(Onboarding1))
+    render(React.createElement(BusinessInfo))
     expect(screen.getByText("Loading…")).not.toBeNull()
   })
 })
