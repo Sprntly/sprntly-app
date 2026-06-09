@@ -31,7 +31,10 @@ class ColorCandidate(BaseModel):
     hex: str                      # lower-case #rrggbb (gather layer normalizes)
     weight: float = 0.0           # source-comparable prominence (web: rendered area;
                                   #   figma: bbox-area x usage; github: usage count)
-    saturation: float = 0.0       # [0,1] chromatic-ness; kernel drops neutrals by this
+    saturation: float = 0.0       # [0,1] HSL saturation — informational/provenance only;
+                                  #   the chromatic gate in pick_accent now uses _chroma_of
+                                  #   (absolute chroma), NOT this field. Do not reintroduce
+                                  #   a saturation-based chromatic gate.
 
 
 class NeutralCandidate(BaseModel):
@@ -91,7 +94,7 @@ class DesignSignals(BaseModel):
     # DesignSystem without deciding anything. They live here (not in per-source
     # post-decoration of normalize) so harden() is the SOLE assembler of the
     # DesignSystem — otherwise web/figma/github each re-implement the same
-    # post-decoration, the exact 3x duplication this workstream removes.
+    # post-decoration, the exact 3x duplication the shared kernel removes.
     background_hex: str = ""       # surface/page background; "" = absent
     foreground_hex: str = ""       # primary text color; "" = absent. NON-heuristic
                                    #   pass-through (web derives it from is_dark today:

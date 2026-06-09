@@ -28,14 +28,64 @@ from .signals import (
 # so the kernel keeps its no-anthropic-import property.
 from .adapters import _COMPONENT_HINTS, _is_hex, _normalize_hex
 
-# Chromatic-ness floor. A candidate at or above this saturation is treated as a
-# real brand color; below it is a neutral that must never win the accent slot.
-# Ported from website.py:108.
+# Chromatic-ness floor for the HSL-saturation helper (informational metadata).
+# No longer used as the chromatic gate in pick_accent — that gate now uses the
+# absolute-chroma threshold CHROMA_THRESHOLD below, which is stable at luminance
+# extremes. SAT_THRESHOLD is kept here because _saturation_of is still part of
+# the public surface and removing the constant would break callers that reference
+# it directly (e.g. the existing test suite imports it).
 SAT_THRESHOLD = 0.15
+
+# Absolute-chroma floor for accent selection. A candidate with (max-min)/255 at
+# or above this value is treated as a real brand color; below it is a near-neutral
+# that must never win the accent slot. Calibrated against the measured real-file
+# set: chromatic colours score >= 0.365 (green, gold, orange); tinted near-blacks
+# and near-whites score <= 0.047 — a clean gap of ~0.32 makes the threshold
+# insensitive to minor calibration drift.
+CHROMA_THRESHOLD = 0.10
+
+
+def _rgb_channels(color: str) -> tuple[float, float, float] | None:
+    """Parse a color string into raw 0-255 float channels (r, g, b).
+
+    Accepts ``#rrggbb``, ``rgb(r,g,b)``, or ``rgba(r,g,b,a)``. Returns None on
+    anything unparseable. Shared by ``_saturation_of`` and ``_chroma_of`` so
+    the two helpers can never drift on parsing.
+    """
+    if not color:
+        return None
+    c = color.strip().lower()
+    r = g = b = None
+    if c.startswith(("rgb(", "rgba(")) and "(" in c and ")" in c:
+        inner = c[c.index("(") + 1 : c.rindex(")")]
+        parts = [p.strip() for p in inner.split(",")]
+        if len(parts) >= 3:
+            try:
+                r, g, b = (float(parts[i]) for i in range(3))
+            except ValueError:
+                return None
+    elif c.startswith("#") and len(c) >= 7:
+        try:
+            r = int(c[1:3], 16)
+            g = int(c[3:5], 16)
+            b = int(c[5:7], 16)
+        except ValueError:
+            return None
+    else:
+        return None
+    if r is None or g is None or b is None:
+        return None
+    return (float(r), float(g), float(b))
 
 
 def _saturation_of(color: str) -> float:
-    """Faithful Python port of the JS `saturationOf` HSL formula (website.py:89-107).
+    """Faithful Python port of the JS ``saturationOf`` HSL formula (website.py:89-107).
+
+    Returns the HSL saturation in [0, inf) — informational metadata used for
+    logging and provenance. The chromatic gate in ``pick_accent`` now uses
+    ``_chroma_of`` (absolute chroma), NOT this HSL saturation, because the HSL
+    formula inflates saturation at luminance extremes (near-black / near-white).
+    Do NOT reintroduce a saturation-based chromatic gate here or in pick_accent.
 
     Accepts ``#rrggbb``, ``rgb(r,g,b)``, or ``rgba(r,g,b,a)``. Parses r,g,b; if
     max == min returns 0.0; else L = (max+min)/2 on 0..1 and returns
@@ -46,29 +96,10 @@ def _saturation_of(color: str) -> float:
     deliberately NOT tools.py:_saturation, which uses a different (max-min)/max
     formula and must not be used for accent selection.
     """
-    if not color:
+    channels = _rgb_channels(color)
+    if channels is None:
         return 0.0
-    c = color.strip().lower()
-    r = g = b = None
-    if c.startswith(("rgb(", "rgba(")) and "(" in c and ")" in c:
-        inner = c[c.index("(") + 1 : c.rindex(")")]
-        parts = [p.strip() for p in inner.split(",")]
-        if len(parts) >= 3:
-            try:
-                r, g, b = (float(parts[i]) for i in range(3))
-            except ValueError:
-                return 0.0
-    elif c.startswith("#") and len(c) >= 7:
-        try:
-            r = int(c[1:3], 16)
-            g = int(c[3:5], 16)
-            b = int(c[5:7], 16)
-        except ValueError:
-            return 0.0
-    else:
-        return 0.0
-    if r is None or g is None or b is None:
-        return 0.0
+    r, g, b = channels
     r /= 255.0
     g /= 255.0
     b /= 255.0
@@ -80,15 +111,40 @@ def _saturation_of(color: str) -> float:
     return (mx - mn) / (1 - abs(2 * lum - 1))
 
 
+def _chroma_of(color: str) -> float:
+    """Absolute chroma (max-min)/255 on the raw 0-255 channels.
+
+    Stable at luminance extremes, unlike HSL saturation: a tinted near-black or
+    near-white has a small raw channel spread regardless of luminance, so it
+    correctly scores near-zero here even though the HSL formula would inflate its
+    saturation. This is the function that drives the chromatic gate in
+    ``pick_accent``; ``_saturation_of`` is informational metadata only.
+
+    Accepts ``#rrggbb``, ``rgb(r,g,b)``, or ``rgba(r,g,b,a)``; parse is shared
+    with ``_saturation_of`` via ``_rgb_channels`` so the two never drift.
+    Returns 0.0 on anything unparseable.
+    """
+    channels = _rgb_channels(color)
+    if channels is None:
+        return 0.0
+    r, g, b = channels
+    return (max(r, g, b) - min(r, g, b)) / 255.0
+
+
 def pick_accent(candidates: list[ColorCandidate]) -> str | None:
     """Accent selection — chromatic-first, else largest neutral (website.py port).
 
-    Keep candidates whose carried saturation >= SAT_THRESHOLD (chromatic). If any
-    chromatic candidate exists, rank those by weight desc and return the top hex.
-    If NONE is chromatic but candidates exist, fall back to the highest-weight
-    candidate regardless of saturation (a monochrome-branded site's real near-
-    black/near-white accent — today's behaviour). Return None ONLY when there are
-    no candidates at all; the caller then leaves the baseline + downgrades.
+    Keep candidates whose absolute chroma (max-min)/255 >= CHROMA_THRESHOLD
+    (chromatic). If any chromatic candidate exists, rank those by weight desc and
+    return the top hex. If NONE is chromatic but candidates exist, fall back to
+    the highest-weight candidate regardless of chroma (a monochrome-branded site's
+    real near-black/near-white accent — today's behaviour). Return None ONLY when
+    there are no candidates at all; the caller then leaves the baseline + downgrades.
+
+    The gate uses absolute chroma via ``_chroma_of``, NOT the carried
+    ``ColorCandidate.saturation`` (HSL). HSL saturation is inflated at luminance
+    extremes, causing tinted near-blacks to falsely pass as chromatic; absolute
+    chroma is stable at those extremes.
 
     Note: the JS tie-break by top-of-page position is not reproducible here since
     ColorCandidate carries no `top` field — an accepted edge. Python's max returns
@@ -96,7 +152,7 @@ def pick_accent(candidates: list[ColorCandidate]) -> str | None:
     """
     if not candidates:
         return None
-    chromatic = [c for c in candidates if c.saturation >= SAT_THRESHOLD]
+    chromatic = [c for c in candidates if _chroma_of(c.hex) >= CHROMA_THRESHOLD]
     pool = chromatic or candidates
     return max(pool, key=lambda c: c.weight).hex
 
@@ -191,7 +247,7 @@ def score_confidence(signals: DesignSignals) -> Literal["high", "medium", "low"]
 def harden(signals: DesignSignals) -> DesignSystem:
     """Compose a finished `DesignSystem` from normalized signals.
 
-    harden is the SOLE assembler (D1): pass-throughs map straight with no
+    harden is the SOLE assembler: pass-throughs map straight with no
     decisions; the heuristics live in the helper functions above. Every absent
     field is left at the model default by NON-assignment — never written with a
     baked baseline literal.
