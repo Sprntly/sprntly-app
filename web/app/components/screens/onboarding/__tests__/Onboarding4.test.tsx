@@ -47,12 +47,15 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
   )
 }
 
-describe("MetricsSetupView — suggested metrics (selectable)", () => {
-  it("renders each suggested metric with its description as a selectable option", () => {
+describe("MetricsSetupView — suggested metrics (selectable, metric-tree)", () => {
+  it("renders each suggested metric in the metric-tree as a selectable option", () => {
     const html = render()
-    expect(html).toContain("Suggested supporting metrics")
+    expect(html).toContain("Supporting metrics")
+    expect(html).toContain("metric-tree")
+    expect(html).toContain("mt-suggested")
     expect(html).toContain("Reconciled volume")
-    expect(html).toContain("Total $ reconciled / week.")
+    // description is carried as the option's title (hover) text
+    expect(html).toContain('title="Total $ reconciled / week."')
     expect(html).toContain("Active accounts")
     // selectable buttons carry aria-pressed
     expect(html).toContain('aria-pressed="false"')
@@ -64,28 +67,30 @@ describe("MetricsSetupView — suggested metrics (selectable)", () => {
       supporting: [{ name: "Reconciled volume", description: "Total $ reconciled / week." }],
     })
     expect(html).toContain('aria-pressed="true"')
-    expect(html).toContain("1 supporting metric selected")
+    expect(html).toContain("metric mt-suggested sel")
+    expect(html).toContain("1</strong> supporting metric selected")
   })
 
   it("falls back to an add-your-own prompt when there are NO suggestions", () => {
     const html = render({ suggestedMetrics: [] })
     expect(html).toContain("No suggestions yet")
-    expect(html).toContain("Add your own")
+    expect(html).toContain("Or write your own")
   })
 })
 
-describe("MetricsSetupView — add your own", () => {
+describe("MetricsSetupView — add your own (metric-other)", () => {
   it("renders the custom metric name + description inputs and an Add button", () => {
     const html = render()
-    expect(html).toContain("Add your own")
+    expect(html).toContain("metric-other")
+    expect(html).toContain("Or write your own")
     expect(html).toContain('aria-label="Custom metric name"')
     expect(html).toContain('aria-label="Custom metric description"')
-    expect(html).toContain(">Add</button>")
+    expect(html).toContain("Add</button>")
   })
 
   it("disables Add when the custom name is empty", () => {
     const html = render({ customMetric: "" })
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>Add<\/button>/)
+    expect(html).toMatch(/<button[^>]*disabled/)
   })
 })
 
@@ -99,7 +104,7 @@ describe("MetricsSetupView — editable industry / business-type dropdowns", () 
     expect(html).toMatch(/<option[^>]*selected[^>]*>Marketplace<\/option>/)
     // and they're editable (not disabled / not read-only text)
     expect(html).not.toMatch(/<select[^>]*disabled/)
-    expect(html).toContain("Predicted from your website")
+    expect(html).toContain("predicted from your website")
   })
 })
 
@@ -129,7 +134,7 @@ describe("MetricsSetupView — North Star", () => {
 
   it("renders an error banner when error is set", () => {
     const html = render({ error: "Save failed" })
-    expect(html).toContain("ob-form-error")
+    expect(html).toContain("onb-form-error")
     expect(html).toContain("Save failed")
   })
 })

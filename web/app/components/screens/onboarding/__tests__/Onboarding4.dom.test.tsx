@@ -44,25 +44,27 @@ afterEach(() => {
 })
 
 describe("Onboarding4 (container) — consolidated metrics", () => {
-  it("renders suggested metrics as selectable options", () => {
+  it("renders suggested metrics as selectable metric-tree options", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        workspace: makeWorkspace({ onboarding_step: 4 }),
+        workspace: makeWorkspace({ onboarding_step: 2 }),
         websiteAnalysis: makeAnalysis(),
       }),
     )
-    render(React.createElement(Onboarding4))
-    expect(screen.getByText("Set your success metrics")).not.toBeNull()
+    const { container } = render(React.createElement(Onboarding4))
+    expect(screen.getByText(/Set your success/i)).not.toBeNull()
     expect(screen.getByText("Reconciled volume")).not.toBeNull()
-    const cards = document.querySelectorAll(".ob-suggested-card")
+    const cards = container.querySelectorAll(".metric.mt-suggested")
     expect(cards.length).toBe(2)
+    // metric-tree is the page's selectable suggestion surface
+    expect(container.querySelector(".metric-tree")).not.toBeNull()
   })
 
   it("pre-fills industry/business-type dropdowns from analysis yet keeps them editable", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         // workspace carries no industry yet → comes from analysis
-        workspace: makeWorkspace({ onboarding_step: 4, industry: null, business_type: null }),
+        workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: null }),
         websiteAnalysis: makeAnalysis({ industry: "Fintech", business_type: "Marketplace" }),
       }),
     )
@@ -86,7 +88,7 @@ describe("Onboarding4 (container) — consolidated metrics", () => {
   it("adds a custom metric via Add your own", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        workspace: makeWorkspace({ onboarding_step: 4 }),
+        workspace: makeWorkspace({ onboarding_step: 2 }),
         websiteAnalysis: makeAnalysis(),
       }),
     )
@@ -96,20 +98,22 @@ describe("Onboarding4 (container) — consolidated metrics", () => {
     ) as HTMLInputElement
     fireEvent.change(nameInput, { target: { value: "Gross margin" } })
     const addBtn = Array.from(document.querySelectorAll("button")).find(
-      (b) => b.textContent === "Add",
+      (b) => (b.textContent ?? "").trim() === "Add",
     ) as HTMLButtonElement
     fireEvent.click(addBtn)
-    expect(screen.getByText("1 supporting metric selected")).not.toBeNull()
+    // count text is split across a <strong> node: "1" + " supporting metric selected"
+    const count = document.querySelector(".metric-count") as HTMLElement
+    expect(count.textContent).toContain("1 supporting metric selected")
     expect(screen.getByText("Gross margin")).not.toBeNull()
   })
 
-  it("persists confirmed industry/business-type to the company AND metrics to the KPI tree on save", async () => {
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 5 }))
-    advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 5 }))
+  it("persists confirmed industry/business-type to the company AND metrics to the KPI tree on save, then advances to step 3", async () => {
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
+    advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
     kpiPutMock.mockResolvedValue({ ok: true, version: 2 })
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        workspace: makeWorkspace({ onboarding_step: 4, industry: null, business_type: null }),
+        workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: null }),
         websiteAnalysis: makeAnalysis({ industry: "Fintech", business_type: "Marketplace" }),
       }),
     )
@@ -122,7 +126,7 @@ describe("Onboarding4 (container) — consolidated metrics", () => {
     fireEvent.change(ns, { target: { value: "Reconciled volume" } })
 
     // select a suggested metric
-    const card = document.querySelector(".ob-suggested-card") as HTMLButtonElement
+    const card = document.querySelector(".metric.mt-suggested") as HTMLButtonElement
     fireEvent.click(card)
 
     const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
@@ -137,14 +141,15 @@ describe("Onboarding4 (container) — consolidated metrics", () => {
       business_type: "Marketplace",
     })
     expect(kpiPutMock).toHaveBeenCalledTimes(1)
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/5")
+    // New flow: metrics page advances to the optimizing-for step (route 3).
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/3")
   })
 
   it("works on the graceful-degrade path (analysis ok:false → manual entry)", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        workspace: makeWorkspace({ onboarding_step: 4, industry: null, business_type: null }),
+        workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: null }),
         websiteAnalysis: makeAnalysis({
           ok: false,
           reason: "blocked_url",
