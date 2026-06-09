@@ -136,9 +136,12 @@ async def _stage_sync_connectors(dataset: str) -> dict[str, Any]:
 
 
 async def _sync_slack(dataset: str) -> dict[str, Any]:
-    from app.connectors.slack_sync import sync_slack
-    result = await asyncio.to_thread(sync_slack, dataset)
-    return result.to_dict()
+    # Slack is per-user now: sync_slack needs (company_id, user_id) to
+    # resolve a specific user's bot token. The company-level pipeline run
+    # has no single user to act as, so corpus sync is driven from the
+    # per-user route (POST /slack/sync-to-corpus) instead. Skip here rather
+    # than guess an owner.
+    return {"status": "skipped", "reason": "slack_sync_is_per_user"}
 
 
 async def _sync_hubspot(dataset: str) -> dict[str, Any]:

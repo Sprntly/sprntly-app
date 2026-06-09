@@ -85,12 +85,13 @@ class SyncResult:
 # ───── Token helpers ─────
 
 
-def _get_valid_access_token() -> str:
-    """Decrypt stored Slack bot token and return it.
+def _get_valid_access_token(company_id: str, user_id: str) -> str:
+    """Decrypt THIS user's stored Slack bot token and return it.
 
+    Slack is per-user, so the token is resolved by (company_id, user_id).
     Slack bot tokens (xoxb-...) do not expire, so no refresh logic needed.
     """
-    row = db.get_connection(SLACK_PROVIDER)
+    row = db.get_slack_connection(company_id, user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
 
@@ -408,11 +409,19 @@ def channels_summary_to_markdown(
 # ───── Sync orchestrator ─────
 
 
-def sync_slack(dataset: str, history_days: int = DEFAULT_HISTORY_DAYS) -> SyncResult:
+def sync_slack(
+    dataset: str,
+    *,
+    company_id: str,
+    user_id: str,
+    history_days: int = DEFAULT_HISTORY_DAYS,
+) -> SyncResult:
     """Full sync: fetch channels + messages + threads → write markdown to corpus.
 
     Args:
         dataset: The dataset slug to write corpus files into.
+        company_id: Tenant the sync runs for.
+        user_id: The user whose own Slack connection is used (per-user).
         history_days: How many days of history to fetch (default 90).
 
     Returns:
@@ -420,7 +429,7 @@ def sync_slack(dataset: str, history_days: int = DEFAULT_HISTORY_DAYS) -> SyncRe
     """
     result = SyncResult(dataset=dataset)
 
-    access_token = _get_valid_access_token()
+    access_token = _get_valid_access_token(company_id, user_id)
     corpus_dir = settings.data_path / dataset
     corpus_dir.mkdir(parents=True, exist_ok=True)
 
@@ -527,16 +536,20 @@ def sync_slack(dataset: str, history_days: int = DEFAULT_HISTORY_DAYS) -> SyncRe
         logger.error("Failed to write slack_channels.md: %s", exc, exc_info=True)
 
     # 6. Update sync status + auto-enable input source
-    _update_sync_status(result)
+    _update_sync_status(result, company_id=company_id, user_id=user_id)
 
     return result
 
 
-def _update_sync_status(result: SyncResult) -> None:
-    """Update connection sync timestamp and enable input source."""
+def _update_sync_status(
+    result: SyncResult, *, company_id: str, user_id: str
+) -> None:
+    """Update THIS user's Slack connection sync timestamp and enable input source."""
     try:
         error_msg = "; ".join(result.errors) if result.errors else None
-        db.update_connection_sync(SLACK_PROVIDER, last_sync_error=error_msg)
+        db.update_slack_connection_sync(
+            company_id, user_id, last_sync_error=error_msg
+        )
     except Exception:
         logger.warning("Failed to update Slack sync status", exc_info=True)
 
