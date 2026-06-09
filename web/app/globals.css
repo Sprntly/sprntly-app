@@ -10853,6 +10853,82 @@
     line-height: 1.5;
   }
 
+  /* Selected supporting metrics rendered as tree targets (source → targets). */
+  .mt-targets.mt-targets-cards {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .mt-target {
+    position: relative;
+    display: block;
+    padding: 12px 38px 12px 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    background: var(--surface-2);
+    animation: mtTargetIn 0.3s ease both;
+  }
+
+  @keyframes mtTargetIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  .mt-target-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .mt-target-name .mt-ic {
+    color: var(--accent-hover);
+    display: inline-flex;
+  }
+
+  .mt-target textarea.inp {
+    resize: vertical;
+    line-height: 1.5;
+    width: 100%;
+  }
+
+  .mt-target-del {
+    position: absolute;
+    top: 9px;
+    right: 9px;
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+    opacity: 0.5;
+    transition: all 0.12s;
+  }
+
+  .mt-target-del:hover,
+  .mt-target-del:focus-visible {
+    opacity: 1;
+    color: var(--red, #c0392b);
+    border-color: var(--line-strong);
+    background: var(--surface-1, rgba(0, 0, 0, 0.03));
+  }
+
+  .mt-targets-empty {
+    text-align: center;
+    color: var(--ink-3);
+    font-size: 12px;
+    padding: 8px 0;
+  }
+
   /* Analyzing interstitial (blocking loader). */
   .onb-analyzing {
     display: flex;

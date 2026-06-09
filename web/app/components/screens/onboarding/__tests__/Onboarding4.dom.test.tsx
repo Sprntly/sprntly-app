@@ -44,7 +44,7 @@ afterEach(() => {
 })
 
 describe("Onboarding4 (container) — consolidated metrics", () => {
-  it("renders suggested metrics as selectable metric-tree options", () => {
+  it("renders suggested metrics as selectable metric-tree chips", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         workspace: makeWorkspace({ onboarding_step: 2 }),
@@ -53,11 +53,143 @@ describe("Onboarding4 (container) — consolidated metrics", () => {
     )
     const { container } = render(React.createElement(Onboarding4))
     expect(screen.getByText(/Set your success/i)).not.toBeNull()
-    expect(screen.getByText("Reconciled volume")).not.toBeNull()
+    expect(
+      container.querySelector('.metric.mt-suggested[data-metric="Reconciled volume"]'),
+    ).not.toBeNull()
     const cards = container.querySelectorAll(".metric.mt-suggested")
     expect(cards.length).toBe(2)
     // metric-tree is the page's selectable suggestion surface
     expect(container.querySelector(".metric-tree")).not.toBeNull()
+  })
+
+  it("pre-selects ALL suggested metrics into the supporting list on load (rendered as tree targets)", () => {
+    const analysis = makeAnalysis()
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 2 }),
+        websiteAnalysis: analysis,
+      }),
+    )
+    const { container } = render(React.createElement(Onboarding4))
+    const n = analysis.suggested_metrics.length
+    // every suggestion is now a tree target...
+    const targets = container.querySelectorAll(".mt-target")
+    expect(targets.length).toBe(n)
+    // ...and every chip is selected (sel + aria-pressed)
+    const selectedChips = container.querySelectorAll('.metric.mt-suggested[aria-pressed="true"]')
+    expect(selectedChips.length).toBe(n)
+    // count reflects N
+    const count = container.querySelector(".metric-count") as HTMLElement
+    expect(count.textContent).toContain(`${n} supporting metric`)
+    // targets live in the tree, not a separate bottom block
+    expect(container.querySelector(".metric-desc-block")).toBeNull()
+    expect(container.querySelector(".metric-tree .mt-targets-cards")).not.toBeNull()
+  })
+
+  it("seeding does NOT clobber a user deletion on re-render", () => {
+    const ctx = makeOnboardingCtx({
+      workspace: makeWorkspace({ onboarding_step: 2 }),
+      websiteAnalysis: makeAnalysis(),
+    })
+    onboardingMock.mockReturnValue(ctx)
+    const { container, rerender } = render(React.createElement(Onboarding4))
+    const n = (ctx.websiteAnalysis as ReturnType<typeof makeAnalysis>).suggested_metrics.length
+
+    // delete the first target
+    const del = container.querySelector(".mt-target .mt-target-del") as HTMLButtonElement
+    fireEvent.click(del)
+    expect(container.querySelectorAll(".mt-target").length).toBe(n - 1)
+
+    // a re-render (same analysis) must not re-seed the deleted metric back in
+    rerender(React.createElement(Onboarding4))
+    expect(container.querySelectorAll(".mt-target").length).toBe(n - 1)
+  })
+
+  it("delete removes a metric, decrements the count, and un-selects its chip (re-addable)", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 2 }),
+        websiteAnalysis: makeAnalysis(),
+      }),
+    )
+    const { container } = render(React.createElement(Onboarding4))
+    const count = () => (container.querySelector(".metric-count") as HTMLElement).textContent ?? ""
+    expect(count()).toContain("2 supporting metric")
+
+    // delete "Reconciled volume"
+    const del = container.querySelector(
+      '.mt-target[data-metric="Reconciled volume"] .mt-target-del',
+    ) as HTMLButtonElement
+    fireEvent.click(del)
+    expect(count()).toContain("1 supporting metric")
+    expect(
+      container.querySelector('.mt-target[data-metric="Reconciled volume"]'),
+    ).toBeNull()
+
+    // its chip is now un-selected and can be re-added
+    const chip = container.querySelector(
+      '.metric.mt-suggested[data-metric="Reconciled volume"]',
+    ) as HTMLButtonElement
+    expect(chip.getAttribute("aria-pressed")).toBe("false")
+    fireEvent.click(chip)
+    expect(count()).toContain("2 supporting metric")
+    expect(
+      container.querySelector('.mt-target[data-metric="Reconciled volume"]'),
+    ).not.toBeNull()
+  })
+
+  it("custom add then delete works, and deleting to empty shows the targets empty state", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        // no suggestions → start empty
+        workspace: makeWorkspace({ onboarding_step: 2 }),
+        websiteAnalysis: makeAnalysis({ suggested_metrics: [] }),
+      }),
+    )
+    const { container } = render(React.createElement(Onboarding4))
+    expect(container.querySelector(".mt-targets-empty")).not.toBeNull()
+
+    // add a custom metric → it appears as a tree target
+    const nameInput = document.querySelector(
+      'input[aria-label="Custom metric name"]',
+    ) as HTMLInputElement
+    fireEvent.change(nameInput, { target: { value: "Gross margin" } })
+    const addBtn = Array.from(document.querySelectorAll("button")).find(
+      (b) => (b.textContent ?? "").trim() === "Add",
+    ) as HTMLButtonElement
+    fireEvent.click(addBtn)
+    expect(
+      container.querySelector('.mt-target[data-metric="Gross margin"]'),
+    ).not.toBeNull()
+
+    // delete it → back to the empty state
+    const del = container.querySelector(
+      '.mt-target[data-metric="Gross margin"] .mt-target-del',
+    ) as HTMLButtonElement
+    fireEvent.click(del)
+    expect(container.querySelector(".mt-target")).toBeNull()
+    expect(container.querySelector(".mt-targets-empty")).not.toBeNull()
+  })
+
+  it("editing a target's description updates it", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 2 }),
+        websiteAnalysis: makeAnalysis(),
+      }),
+    )
+    const { container } = render(React.createElement(Onboarding4))
+    const ta = container.querySelector(
+      'textarea[aria-label="Description for Reconciled volume"]',
+    ) as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: "Edited description." } })
+    expect(
+      (
+        container.querySelector(
+          'textarea[aria-label="Description for Reconciled volume"]',
+        ) as HTMLTextAreaElement
+      ).value,
+    ).toBe("Edited description.")
   })
 
   it("pre-fills industry/business-type dropdowns from analysis yet keeps them editable", () => {
@@ -85,14 +217,15 @@ describe("Onboarding4 (container) — consolidated metrics", () => {
     ).toBe("Healthtech")
   })
 
-  it("adds a custom metric via Add your own", () => {
+  it("adds a custom metric via Add your own (appended as a new tree target)", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
+        // no suggestions → start from an empty supporting list
         workspace: makeWorkspace({ onboarding_step: 2 }),
-        websiteAnalysis: makeAnalysis(),
+        websiteAnalysis: makeAnalysis({ suggested_metrics: [] }),
       }),
     )
-    render(React.createElement(Onboarding4))
+    const { container } = render(React.createElement(Onboarding4))
     const nameInput = document.querySelector(
       'input[aria-label="Custom metric name"]',
     ) as HTMLInputElement
@@ -104,7 +237,10 @@ describe("Onboarding4 (container) — consolidated metrics", () => {
     // count text is split across a <strong> node: "1" + " supporting metric selected"
     const count = document.querySelector(".metric-count") as HTMLElement
     expect(count.textContent).toContain("1 supporting metric selected")
-    expect(screen.getByText("Gross margin")).not.toBeNull()
+    // appears immediately as a tree target
+    expect(
+      container.querySelector('.mt-target[data-metric="Gross margin"]'),
+    ).not.toBeNull()
   })
 
   it("persists confirmed industry/business-type to the company AND metrics to the KPI tree on save, then advances to step 3", async () => {
@@ -117,17 +253,20 @@ describe("Onboarding4 (container) — consolidated metrics", () => {
         websiteAnalysis: makeAnalysis({ industry: "Fintech", business_type: "Marketplace" }),
       }),
     )
-    render(React.createElement(Onboarding4))
+    const { container } = render(React.createElement(Onboarding4))
 
     // North Star is required to save.
     const ns = document.querySelector(
       'input[placeholder="The one metric that best captures product value"]',
     ) as HTMLInputElement
-    fireEvent.change(ns, { target: { value: "Reconciled volume" } })
+    fireEvent.change(ns, { target: { value: "Net revenue retention" } })
 
-    // select a suggested metric
-    const card = document.querySelector(".metric.mt-suggested") as HTMLButtonElement
-    fireEvent.click(card)
+    // The 2 suggested metrics are pre-seeded; delete one so we persist exactly
+    // the post-edit set (the remaining "Active connected accounts").
+    const del = container.querySelector(
+      '.mt-target[data-metric="Reconciled volume"] .mt-target-del',
+    ) as HTMLButtonElement
+    fireEvent.click(del)
 
     const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
       /continue/i.test(b.textContent ?? ""),
@@ -141,6 +280,15 @@ describe("Onboarding4 (container) — consolidated metrics", () => {
       business_type: "Marketplace",
     })
     expect(kpiPutMock).toHaveBeenCalledTimes(1)
+    // persists EXACTLY the post-edit supporting set (the deleted one is gone).
+    const payload = kpiPutMock.mock.calls[0][0] as {
+      primary_metrics: { metric: string }[]
+      secondary_signals: { metric: string }[]
+    }
+    const persistedNames = [...payload.primary_metrics, ...payload.secondary_signals].map(
+      (m) => m.metric,
+    )
+    expect(persistedNames).toEqual(["Active connected accounts"])
     // New flow: metrics page advances to the optimizing-for step (route 3).
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/3")

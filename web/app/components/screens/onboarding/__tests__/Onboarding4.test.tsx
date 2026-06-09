@@ -38,6 +38,7 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
     onPickNorthStar: noop,
     onToggleSuggested: noop,
     onChangeSupportingDescription: noop,
+    onRemoveSupporting: noop,
     onChangeCustomMetric: noop,
     onChangeCustomDescription: noop,
     onAddCustom: noop,
@@ -62,7 +63,7 @@ describe("MetricsSetupView — suggested metrics (selectable, metric-tree)", () 
     expect(html).toContain('data-metric="Reconciled volume"')
   })
 
-  it("marks a suggested metric as selected when it's in `supporting`", () => {
+  it("marks a suggested metric's chip as selected when it's in `supporting`", () => {
     const html = render({
       supporting: [{ name: "Reconciled volume", description: "Total $ reconciled / week." }],
     })
@@ -75,6 +76,35 @@ describe("MetricsSetupView — suggested metrics (selectable, metric-tree)", () 
     const html = render({ suggestedMetrics: [] })
     expect(html).toContain("No suggestions yet")
     expect(html).toContain("Or write your own")
+  })
+})
+
+describe("MetricsSetupView — selected metrics render as tree targets", () => {
+  it("renders each selected supporting metric as a tree target with name, editable description, and a delete control", () => {
+    const html = render({
+      supporting: [{ name: "Reconciled volume", description: "Weekly total." }],
+    })
+    // targets live inside the metric-tree (source → targets), not a separate block
+    expect(html).toContain("metric-tree")
+    expect(html).toContain('class="mt-targets mt-targets-cards"')
+    expect(html).toContain('class="mt-target"')
+    expect(html).toContain('data-metric="Reconciled volume"')
+    // name + editable description textarea
+    expect(html).toContain("Reconciled volume")
+    expect(html).toContain('aria-label="Description for Reconciled volume"')
+    expect(html).toContain("Weekly total.")
+    // delete control
+    expect(html).toContain('aria-label="Remove Reconciled volume"')
+    expect(html).toMatch(/<button[^>]*type="button"[^>]*aria-label="Remove Reconciled volume"/)
+    // the old separate bottom cards section is gone
+    expect(html).not.toContain("metric-desc-block")
+  })
+
+  it("shows a targets empty state (not the bottom cards) when nothing is selected", () => {
+    const html = render({ supporting: [] })
+    expect(html).toContain("mt-targets-empty")
+    expect(html).not.toContain('class="mt-target"')
+    expect(html).toContain("0</strong> supporting metrics selected")
   })
 })
 
