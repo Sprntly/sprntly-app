@@ -41,6 +41,20 @@ _inflight_tasks: set[asyncio.Task] = set()
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
+def _ensure_owned_dataset(slug: str, company_id: str) -> None:
+    """Tenant gate + lazy registration. `require_owned_dataset` first proves the
+    slug maps to the CALLER'S OWN company (404 otherwise — no cross-tenant
+    disclosure). Onboarding creates the company but not always its `datasets`
+    row, so if the row is missing for this verified-own slug we register it
+    (idempotent insert). This never creates a dataset for a slug the caller
+    doesn't own — the ownership check runs first and 404s on any mismatch.
+    """
+    require_owned_dataset(slug, company_id)
+    from app import db
+    if not db.dataset_exists(slug):
+        db.insert_dataset(slug, slug)
+
+
 class CreateDatasetIn(BaseModel):
     slug: str
     display_name: str
@@ -88,8 +102,9 @@ async def upload_files(
     Partial success is acceptable: if 4 of 5 files convert and 1 fails, the
     response includes a per-file result so the frontend can show ✓/✗ on each.
     """
-    # Tenant gate: the slug must map to the caller's company (404 otherwise).
-    require_owned_dataset(slug, company.company_id)
+    # Tenant gate (404 if not the caller's company) + lazily register the
+    # caller's own dataset row if onboarding hasn't created it yet.
+    _ensure_owned_dataset(slug, company.company_id)
     if not datasets.dataset_path(slug).exists():
         # Hit the DB too — folder might exist from a stale dir without a row.
         try:
@@ -135,10 +150,10 @@ def list_files(
     company: CompanyContext = Depends(require_company),
 ):
     """List source files (raw originals) for a dataset, newest first."""
-    require_owned_dataset(slug, company.company_id)
-    from app import db
-    if not db.dataset_exists(slug):
-        raise HTTPException(404, f"Dataset {slug!r} does not exist")
+    # Tenant gate (404 if not the caller's company) + lazily register the
+    # caller's own dataset row if onboarding hasn't created it yet, so the
+    # Sources page shows an empty list rather than "dataset does not exist".
+    _ensure_owned_dataset(slug, company.company_id)
 
     raw_dir = datasets.raw_path(slug)
     base_dir = datasets.dataset_path(slug)
