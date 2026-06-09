@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 # SQLite-compatible translation of
-# supabase/migrations/20260607000000_design_systems.sql.
+# supabase/migrations/20260607000001_design_systems.sql.
 _DESIGN_SYSTEMS_DDL = """
 CREATE TABLE design_systems (
     id                  TEXT PRIMARY KEY,
@@ -43,7 +43,7 @@ CREATE INDEX design_systems_company_id_idx ON design_systems (company_id);
 
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
-    / "supabase" / "migrations" / "20260607000000_design_systems.sql"
+    / "supabase" / "migrations" / "20260607000001_design_systems.sql"
 )
 
 
@@ -94,7 +94,7 @@ def _migration_sql_only() -> str:
 
 def test_migration_file_exists():
     assert _MIGRATION_PATH.exists()
-    assert _MIGRATION_PATH.name == "20260607000000_design_systems.sql"
+    assert _MIGRATION_PATH.name == "20260607000001_design_systems.sql"
 
 
 def test_migration_is_idempotent_by_construction():
