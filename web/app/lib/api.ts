@@ -308,6 +308,45 @@ export type UploadFilesResponse = {
   errors: { filename: string; error: string }[]
 }
 
+// ---- onboarding website analysis -------------------------------------------
+
+/** A suggested success metric: a short name plus a free-text description. */
+export type SuggestedMetric = {
+  metric: string
+  description: string
+}
+
+/**
+ * Response from POST /v1/onboarding/analyze-website. The endpoint ALWAYS
+ * returns HTTP 200; `ok: false` (with a `reason`) means analysis degraded
+ * gracefully and the UI should fall back to manual entry. All inferred
+ * fields are best-effort and may be null even when `ok` is true.
+ */
+export type AnalyzeWebsiteResponse = {
+  ok: boolean
+  reason: string | null
+  url: string
+  industry: string | null
+  sub_vertical: string | null
+  business_type: string | null
+  stage: string | null
+  business_context: string
+  suggested_metrics: SuggestedMetric[]
+  provenance: string
+  business_context_version: number | null
+}
+
+export const onboardingApi = {
+  /**
+   * Analyze a product website to infer industry / business type / stage and
+   * draft a business-context blurb + suggested metrics. Best-effort: the
+   * backend always answers 200, signalling failure via `ok: false`. Company
+   * is taken from the JWT (Depends(require_company)) — no slug needed.
+   */
+  analyzeWebsite: (url: string) =>
+    api.post<AnalyzeWebsiteResponse>("/v1/onboarding/analyze-website", { url }),
+}
+
 export const companiesApi = {
   list: () =>
     api

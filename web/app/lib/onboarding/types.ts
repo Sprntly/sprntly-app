@@ -109,7 +109,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   claude_code_handoff: false,
 }
 
-export const ONBOARDING_STEP_COUNT = 8
+export const ONBOARDING_STEP_COUNT = 7
 
 export function emptyKpiTree(): KpiTree {
   return { north_star: "", north_star_description: "", metrics: [] }

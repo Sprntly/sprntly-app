@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 //
-// Container-level mount test for onboarding step 03 — "What are you
-// optimizing for right now?" Mounts the real default container under jsdom
-// with mocked auth/onboarding/router so a render-time throw is caught — the
-// View-pattern tests never exercise the stateful container and miss the
-// production "Application error: a client-side exception has occurred".
+// Container-level mount test for onboarding step 03 — "Share your business
+// context." The restructure moved the context-upload step here and added a
+// paste box pre-filled from the website-analysis blurb. This file asserts the
+// prefill behaviour (present when analysis returned, editable, empty when
+// absent) and the redirect-in-effect safety. Mounts the real container under
+// jsdom with mocked auth/onboarding/router/store/api.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -23,47 +24,19 @@ vi.mock("../../../../context/OnboardingContext", () => ({
 }))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
+  advanceOnboardingStep: vi.fn(),
   markSkippedFields: vi.fn(),
-  saveStrategicContext: vi.fn(),
+}))
+vi.mock("../../../../lib/api", () => ({
+  companiesApi: { uploadFiles: vi.fn() },
 }))
 
 import { Onboarding3 } from "../Onboarding3"
-import type { WorkspaceCompany } from "../../../../lib/onboarding/types"
+import { makeWorkspace, makeAnalysis, makeOnboardingCtx } from "./fixtures"
 
-function makeWorkspace(over: Partial<WorkspaceCompany> = {}): WorkspaceCompany {
-  return {
-    id: "ws-1",
-    slug: "acme",
-    display_name: "Acme",
-    product_description: null,
-    product: null,
-    industry: "B2B SaaS",
-    stage: "Seed",
-    business_type: "SaaS",
-    team_size: null,
-    engineering_capacity: null,
-    pm_engineer_ratio: null,
-    competitors: [],
-    tech_stack: [],
-    okrs: null,
-    recent_decisions: null,
-    dead_ends: [],
-    biggest_risk: null,
-    kpi_tree: { north_star: "", north_star_description: "", metrics: [] },
-    feature_flags: {
-      weekly_brief: true,
-      on_demand_analysis: true,
-      auto_prd_generation: true,
-      engineer_agent: false,
-      research_agent: false,
-      on_call_agent: false,
-      claude_code_handoff: false,
-    },
-    notification_settings: {},
-    onboarding_step: 3,
-    onboarding_completed_at: null,
-    ...over,
-  }
+function pasteBox(): HTMLTextAreaElement {
+  // First textarea on the page is the paste-context box.
+  return document.querySelector("textarea.ob-ctx-textarea") as HTMLTextAreaElement
 }
 
 afterEach(() => {
@@ -71,43 +44,90 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("Onboarding3 (container) — mounts without crashing", () => {
-  it("renders the strategic-context step for a loaded workspace", () => {
+describe("Onboarding3 (container) — business context with prefill", () => {
+  it("renders the context-upload step for a loaded workspace", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
-    onboardingMock.mockReturnValue({
-      loading: false,
-      profile: null,
-      workspace: makeWorkspace(),
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
-
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({ workspace: makeWorkspace({ onboarding_step: 3 }) }),
+    )
     render(React.createElement(Onboarding3))
-    expect(screen.getByText("What are you optimizing for right now?")).not.toBeNull()
+    expect(screen.getByText("Share your business context")).not.toBeNull()
+    expect(screen.getByText(/Documents/)).not.toBeNull()
+  })
+
+  it("pre-fills the paste box from the analysis business_context and shows the hint", () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 3 }),
+        websiteAnalysis: makeAnalysis({
+          business_context: "Acme reconciles payments for SMBs.",
+        }),
+      }),
+    )
+    render(React.createElement(Onboarding3))
+    expect(pasteBox().value).toBe("Acme reconciles payments for SMBs.")
+    expect(screen.getByText(/Drafted from your website/)).not.toBeNull()
+  })
+
+  it("keeps the prefilled context editable (user can clear/replace it)", () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 3 }),
+        websiteAnalysis: makeAnalysis({ business_context: "Drafted blurb." }),
+      }),
+    )
+    render(React.createElement(Onboarding3))
+    const box = pasteBox()
+    expect(box.value).toBe("Drafted blurb.")
+    fireEvent.change(box, { target: { value: "My own context." } })
+    expect(pasteBox().value).toBe("My own context.")
+    // hint disappears once the user edits the box
+    expect(screen.queryByText(/Drafted from your website/)).toBeNull()
+  })
+
+  it("leaves the paste box EMPTY when analysis hasn't returned (no block)", () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 3 }),
+        websiteAnalysis: null,
+      }),
+    )
+    render(React.createElement(Onboarding3))
+    expect(pasteBox().value).toBe("")
+    expect(screen.queryByText(/Drafted from your website/)).toBeNull()
+  })
+
+  it("does NOT prefill from a graceful-degrade analysis with an empty blurb", () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 3 }),
+        websiteAnalysis: makeAnalysis({
+          ok: false,
+          reason: "unreachable_or_empty",
+          business_context: "",
+          suggested_metrics: [],
+        }),
+      }),
+    )
+    render(React.createElement(Onboarding3))
+    expect(pasteBox().value).toBe("")
+    expect(screen.queryByText(/Drafted from your website/)).toBeNull()
   })
 
   it("shows the loading shell while the workspace is loading", () => {
     authMock.mockReturnValue({ kind: "loading" })
-    onboardingMock.mockReturnValue({
-      loading: true,
-      profile: null,
-      workspace: null,
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ loading: true, workspace: null }))
     render(React.createElement(Onboarding3))
     expect(screen.getByText("Loading…")).not.toBeNull()
   })
 
   it("redirects to step 1 from an EFFECT (never during render) when there is no workspace", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
-    onboardingMock.mockReturnValue({
-      loading: false,
-      profile: null,
-      workspace: null,
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     const errors: unknown[] = []
     const spy = vi

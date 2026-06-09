@@ -131,7 +131,7 @@ describe("non-canvas routes unchanged (test_non_canvas_routes_unchanged)", () =>
     ["/team", "team"],
     ["/sources", "sources"],
     ["/onboarding/1", "ob-1"],
-    ["/onboarding/8", "ob-8"],
+    ["/onboarding/7", "ob-7"],
     // connectors standalone route removed in commit A — still falls through.
     ["/connectors", "chat"],
     // unknown paths still fall through to chat.

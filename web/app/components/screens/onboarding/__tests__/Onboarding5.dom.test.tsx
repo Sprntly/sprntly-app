@@ -1,12 +1,9 @@
 // @vitest-environment jsdom
 //
-// Container-level mount test for onboarding step 05 — "Set your success
-// metrics." The sibling Onboarding5.test.tsx renders only the pure
-// SuccessMetricsView via renderToStaticMarkup, so it never exercises the
-// stateful Onboarding5 container and misses container-level crashes (the
-// production "Application error: a client-side exception has occurred"). This
-// file mounts the real default container under jsdom with mocked
-// onboarding/router so a render-time throw is caught.
+// Container-level mount test for onboarding step 05 — "Connect your tools."
+// (Connectors moved here from step 6 in the restructure.) Mounts the real
+// container under jsdom with mocked auth/onboarding/router/api so a render-time
+// throw is caught.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -15,95 +12,51 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
+const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 
+vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
 }))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   advanceOnboardingStep: vi.fn(),
+  markSkippedFields: vi.fn(),
+}))
+vi.mock("../../../../lib/api", () => ({
+  connectorsApi: { list: vi.fn().mockResolvedValue({ connections: [] }) },
 }))
 
 import { Onboarding5 } from "../Onboarding5"
-import type { WorkspaceCompany } from "../../../../lib/onboarding/types"
-
-function makeWorkspace(over: Partial<WorkspaceCompany> = {}): WorkspaceCompany {
-  return {
-    id: "ws-1",
-    slug: "acme",
-    display_name: "Acme",
-    product_description: null,
-    product: null,
-    industry: "B2B SaaS",
-    stage: "Seed",
-    business_type: "SaaS",
-    team_size: null,
-    engineering_capacity: null,
-    pm_engineer_ratio: null,
-    competitors: [],
-    tech_stack: [],
-    okrs: null,
-    recent_decisions: null,
-    dead_ends: [],
-    biggest_risk: null,
-    kpi_tree: { north_star: "", north_star_description: "", metrics: [] },
-    feature_flags: {
-      weekly_brief: true,
-      on_demand_analysis: true,
-      auto_prd_generation: true,
-      engineer_agent: false,
-      research_agent: false,
-      on_call_agent: false,
-      claude_code_handoff: false,
-    },
-    notification_settings: {},
-    onboarding_step: 5,
-    onboarding_completed_at: null,
-    ...over,
-  }
-}
+import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
 })
 
-describe("Onboarding5 (container) — mounts without crashing", () => {
-  it("renders the success-metrics step for a loaded workspace", () => {
-    onboardingMock.mockReturnValue({
-      loading: false,
-      profile: null,
-      workspace: makeWorkspace(),
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
-
+describe("Onboarding5 (container) — connectors", () => {
+  it("renders the connectors step for a loaded workspace", () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({ workspace: makeWorkspace({ onboarding_step: 5 }) }),
+    )
     render(React.createElement(Onboarding5))
-    expect(screen.getByText("Set your success metrics")).not.toBeNull()
+    expect(screen.getByText("Connect your tools")).not.toBeNull()
   })
 
   it("shows the loading shell while the workspace is loading", () => {
-    onboardingMock.mockReturnValue({
-      loading: true,
-      profile: null,
-      workspace: null,
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+    authMock.mockReturnValue({ kind: "loading" })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ loading: true, workspace: null }))
     render(React.createElement(Onboarding5))
     expect(screen.getByText("Loading…")).not.toBeNull()
   })
 
   it("redirects to step 1 from an EFFECT (never during render) when there is no workspace", () => {
-    onboardingMock.mockReturnValue({
-      loading: false,
-      profile: null,
-      workspace: null,
-      refresh: vi.fn(),
-      setWorkspace: vi.fn(),
-    })
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     const errors: unknown[] = []
     const spy = vi
