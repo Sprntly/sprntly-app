@@ -10,8 +10,8 @@ import { onboardingApi } from "../../../lib/api"
  *
  * This is a TRANSIENT, UNNUMBERED route (`/onboarding/analyzing`): it is not in
  * ONBOARDING_SCREENS, it is not back-navigable, and it is excluded from the
- * progress-dot count (it renders no dots). It sits between the Company page
- * (step 1) and the Metrics page (route /onboarding/2).
+ * progress-dot count (it renders no dots). It sits between the business-info
+ * page (step 1) and the metrics page (`/onboarding/metrics`).
  *
  * On mount it AWAITS the website analysis (POST /v1/onboarding/analyze-website),
  * stashes the result on OnboardingContext, then forwards to the metrics page.
@@ -31,7 +31,7 @@ import { onboardingApi } from "../../../lib/api"
 // hangs past its own server timeout.
 const ANALYZE_TIMEOUT_MS = 12_000
 
-export function OnboardingAnalyzing() {
+export function Analyzing() {
   const { workspace, setWebsiteAnalysis, loading } = useOnboarding()
   const router = useRouter()
   const forwardedRef = useRef(false)
@@ -42,14 +42,14 @@ export function OnboardingAnalyzing() {
   function forward() {
     if (forwardedRef.current) return
     forwardedRef.current = true
-    router.replace("/onboarding/2")
+    router.replace("/onboarding/metrics")
   }
 
-  // No workspace to anchor the flow → bounce back to step 1 (in an effect, so
-  // navigation never fires during render).
+  // No workspace to anchor the flow → bounce back to the first step (in an
+  // effect, so navigation never fires during render).
   useEffect(() => {
     if (!loading && !workspace) {
-      router.replace("/onboarding/1")
+      router.replace("/onboarding/business-info")
     }
   }, [loading, workspace, router])
 

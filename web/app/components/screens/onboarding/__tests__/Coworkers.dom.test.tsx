@@ -34,7 +34,7 @@ vi.mock("../../../../lib/onboarding/coworkersApi", async (importOriginal) => {
   }
 })
 
-import { Onboarding6 } from "../Onboarding6"
+import { Coworkers } from "../Coworkers"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 afterEach(() => {
@@ -42,12 +42,12 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("Onboarding6 (container) — coworkers", () => {
+describe("Coworkers (container) — coworkers", () => {
   it("renders the coworkers step for a loaded workspace", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({ workspace: makeWorkspace({ onboarding_step: 6 }) }),
     )
-    render(React.createElement(Onboarding6))
+    render(React.createElement(Coworkers))
     expect(
       screen.getByText("Introducing your AI coworkers. Give them a name."),
     ).not.toBeNull()
@@ -55,7 +55,7 @@ describe("Onboarding6 (container) — coworkers", () => {
 
   it("shows the loading shell while the workspace is loading", () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx({ loading: true, workspace: null }))
-    render(React.createElement(Onboarding6))
+    render(React.createElement(Coworkers))
     expect(screen.getByText("Loading…")).not.toBeNull()
   })
 
@@ -66,10 +66,10 @@ describe("Onboarding6 (container) — coworkers", () => {
     const spy = vi
       .spyOn(console, "error")
       .mockImplementation((...args) => errors.push(args[0]))
-    render(React.createElement(Onboarding6))
+    render(React.createElement(Coworkers))
     spy.mockRestore()
 
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/1")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/business-info")
     expect(screen.getByText("Loading…")).not.toBeNull()
     const sideEffectInRender = errors
       .map(String)

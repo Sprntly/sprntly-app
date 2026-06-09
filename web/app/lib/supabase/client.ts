@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import { fetchWorkspaceForUser } from "../onboarding/store"
-import { ONBOARDING_STEP_COUNT } from "../onboarding/types"
+import { slugForStep, ONBOARDING_STEP_SLUGS } from "../onboarding/types"
 
 let browserClient: SupabaseClient | null = null
 
@@ -90,15 +90,15 @@ export async function postLoginPath(): Promise<string> {
       const fresh = await fetchWorkspaceForUser(user.id)
       if (fresh) {
         if (fresh.onboarding_completed_at) return "/"
-        const step = Math.min(Math.max(fresh.onboarding_step, 1), ONBOARDING_STEP_COUNT)
-        return `/onboarding/${step}`
+        // slugForStep clamps the (possibly stale 7-step) index into range and
+        // maps it to its semantic slug.
+        return `/onboarding/${slugForStep(fresh.onboarding_step)}`
       }
     }
-    return "/onboarding/1"
+    return `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
   }
   if (workspace.onboarding_completed_at) return "/"
-  const step = Math.min(Math.max(workspace.onboarding_step, 1), ONBOARDING_STEP_COUNT)
-  return `/onboarding/${step}`
+  return `/onboarding/${slugForStep(workspace.onboarding_step)}`
 }
 
 async function tryAutoAcceptInvite(): Promise<boolean> {

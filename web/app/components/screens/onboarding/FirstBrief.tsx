@@ -27,7 +27,7 @@ type GenPhase =
   | { kind: "ready"; brief: Brief }
   | { kind: "failed"; error: string }
 
-export function Onboarding7() {
+export function FirstBrief() {
   const auth = useAuth()
   const { workspace, loading } = useOnboarding()
   const { setContent } = useContent()
@@ -113,7 +113,7 @@ export function Onboarding7() {
   // that path surfaces in production as a client-side exception / error
   // boundary. Render returns the loading shell until the redirect lands.
   useEffect(() => {
-    if (!loading && !workspace) router.replace("/onboarding/1")
+    if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
 
   if (loading || !workspace) return <div className="ob-shell">Loading…</div>
@@ -123,7 +123,7 @@ export function Onboarding7() {
 
   return (
     <InterviewLayout
-      step={7}
+      step={5}
       eyebrow="First Brief preview"
       title={
         phase.kind === "ready"
@@ -142,7 +142,7 @@ export function Onboarding7() {
               : "Starting brief generation…"
       }
       rightPane={<KpiTreePreview tree={workspace.kpi_tree} />}
-      onBack={() => router.push("/onboarding/6")}
+      onBack={() => router.push("/onboarding/coworkers")}
       onContinue={finish}
       continueLabel={phase.kind === "ready" ? "Enter Sprntly →" : "Enter Sprntly anyway →"}
       loading={finishing}

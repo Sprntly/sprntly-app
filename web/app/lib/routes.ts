@@ -1,5 +1,8 @@
 import type { ScreenId } from "../types"
-import { ONBOARDING_STEP_COUNT } from "./onboarding/types"
+import {
+  ONBOARDING_ANALYZING_SLUG,
+  ONBOARDING_STEP_SLUGS,
+} from "./onboarding/types"
 
 /** Base path for the refresh-stable Design Agent canvas route. The full route
  *  carries the prototype_id (`/design/{prototype_id}`). This is the only
@@ -31,15 +34,14 @@ export function prdIdFromPrototypeSearch(raw: string | null): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null
 }
 
-/** App routes (no basePath). Onboarding uses `/onboarding/[step]`. */
+/** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
-  "ob-1": "/onboarding/1",
-  "ob-2": "/onboarding/2",
-  "ob-3": "/onboarding/3",
-  "ob-4": "/onboarding/4",
-  "ob-5": "/onboarding/5",
-  "ob-6": "/onboarding/6",
-  "ob-7": "/onboarding/7",
+  "ob-business-info": "/onboarding/business-info",
+  "ob-metrics": "/onboarding/metrics",
+  "ob-connectors": "/onboarding/connectors",
+  "ob-coworkers": "/onboarding/coworkers",
+  "ob-first-brief": "/onboarding/first-brief",
+  "ob-analyzing": `/onboarding/${ONBOARDING_ANALYZING_SLUG}`,
   chat: "/",
   brief: "/brief",
   detail: "/evidence",
@@ -85,9 +87,12 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   [CANVAS_BASE_PATH]: "da-canvas",
 }
 
-for (let step = 1; step <= ONBOARDING_STEP_COUNT; step++) {
-  PATH_TO_SCREEN[`/onboarding/${step}`] = `ob-${step}` as ScreenId
+// Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).
+for (const slug of ONBOARDING_STEP_SLUGS) {
+  PATH_TO_SCREEN[`/onboarding/${slug}`] = `ob-${slug}` as ScreenId
 }
+// The unnumbered loader route resolves to its own ScreenId.
+PATH_TO_SCREEN[`/onboarding/${ONBOARDING_ANALYZING_SLUG}`] = "ob-analyzing"
 
 /** Normalize pathname from `usePathname()` (strip trailing slash). */
 export function normalizePathname(pathname: string | null): string {

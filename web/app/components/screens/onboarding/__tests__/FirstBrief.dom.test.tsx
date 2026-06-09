@@ -42,7 +42,7 @@ vi.mock("../../../../lib/workspace-brief", () => ({
   startBriefGeneration: vi.fn().mockResolvedValue(undefined),
 }))
 
-import { Onboarding7 } from "../Onboarding7"
+import { FirstBrief } from "../FirstBrief"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 afterEach(() => {
@@ -50,20 +50,20 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("Onboarding7 (container) — first brief", () => {
+describe("FirstBrief (container) — first brief", () => {
   it("renders the first-Brief step for a loaded workspace", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({ workspace: makeWorkspace({ onboarding_step: 7 }) }),
     )
-    render(React.createElement(Onboarding7))
+    render(React.createElement(FirstBrief))
     expect(screen.getByText("Preparing your first Brief")).not.toBeNull()
   })
 
   it("shows the loading shell while the workspace is loading", () => {
     authMock.mockReturnValue({ kind: "loading" })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ loading: true, workspace: null }))
-    render(React.createElement(Onboarding7))
+    render(React.createElement(FirstBrief))
     expect(screen.getByText("Loading…")).not.toBeNull()
   })
 
@@ -75,10 +75,10 @@ describe("Onboarding7 (container) — first brief", () => {
     const spy = vi
       .spyOn(console, "error")
       .mockImplementation((...args) => errors.push(args[0]))
-    render(React.createElement(Onboarding7))
+    render(React.createElement(FirstBrief))
     spy.mockRestore()
 
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/1")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/business-info")
     expect(screen.getByText("Loading…")).not.toBeNull()
     const sideEffectInRender = errors
       .map(String)

@@ -1,8 +1,10 @@
 import { generateSlug } from "../onboard-helpers"
 import { getSupabase } from "../supabase/client"
 import {
+  clampStep,
   DEFAULT_FEATURE_FLAGS,
   emptyKpiTree,
+  ONBOARDING_STEP_COUNT,
   parseFeatureFlags,
   parseKpiTree,
   type FeatureFlags,
@@ -52,7 +54,9 @@ function rowToCompany(
       row.notification_settings && typeof row.notification_settings === "object"
         ? (row.notification_settings as Record<string, unknown>)
         : {},
-    onboarding_step: Number(row.onboarding_step) || 1,
+    // Clamp the persisted step into the new 5-step range so existing users mid
+    // the old 7-step flow (step 6/7) resume on a valid step instead of crashing.
+    onboarding_step: clampStep(Number(row.onboarding_step) || 1),
     onboarding_completed_at: (row.onboarding_completed_at as string | null) ?? null,
   }
 }
@@ -296,10 +300,13 @@ export function serializeKpiTree(tree: KpiTree): Record<string, unknown> {
   }
 }
 
-export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 5) {
+// `nextStep` defaults to connectors (index 3 — the step after metrics, index 2),
+// but every caller currently passes the current step explicitly to avoid moving
+// the resume marker during a Settings edit.
+export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 3) {
   return updateWorkspace(companyId, {
     kpi_tree: serializeKpiTree(tree),
-    onboarding_step: nextStep,
+    onboarding_step: clampStep(nextStep),
   })
 }
 
@@ -311,23 +318,28 @@ export async function saveStrategicContext(
     dead_ends?: string[]
     biggest_risk?: string | null
   },
-  nextStep = 3,
+  // The strategic-context onboarding page was removed; this only persists from
+  // the (dormant) Settings pane now, which passes the current step explicitly.
+  nextStep: number = ONBOARDING_STEP_COUNT,
 ) {
   return updateWorkspace(companyId, {
     okrs: input.okrs?.trim() || null,
     recent_decisions: input.recent_decisions?.trim() || null,
     dead_ends: input.dead_ends ?? [],
     biggest_risk: input.biggest_risk?.trim() || null,
-    onboarding_step: nextStep,
+    onboarding_step: clampStep(nextStep),
   })
 }
 
 export async function saveFeatureFlags(
   companyId: string,
   flags: FeatureFlags,
-  nextStep = 6,
+  nextStep: number = ONBOARDING_STEP_COUNT,
 ) {
-  return updateWorkspace(companyId, { feature_flags: flags, onboarding_step: nextStep })
+  return updateWorkspace(companyId, {
+    feature_flags: flags,
+    onboarding_step: clampStep(nextStep),
+  })
 }
 
 export async function markSkippedFields(userId: string, fields: string[]) {
@@ -339,19 +351,23 @@ export async function markSkippedFields(userId: string, fields: string[]) {
 }
 
 export async function advanceOnboardingStep(companyId: string, step: number) {
-  return updateWorkspace(companyId, { onboarding_step: step })
+  // `step` is a 1-based index into ONBOARDING_STEP_SLUGS; clamp so a caller can
+  // never persist an out-of-range marker the resume logic would then crash on.
+  return updateWorkspace(companyId, { onboarding_step: clampStep(step) })
 }
 
 export async function completeOnboarding(companyId: string, userId: string) {
   const supabase = getSupabase()
   const now = new Date().toISOString()
+  // Park the step at the final numbered step on completion (the new flow's last
+  // index). `onboarding_completed_at` is what actually gates entry into the app.
   await supabase
     .from("companies")
-    .update({ onboarding_step: 7, onboarding_completed_at: now })
+    .update({ onboarding_step: ONBOARDING_STEP_COUNT, onboarding_completed_at: now })
     .eq("id", companyId)
   await supabase
     .from("profiles")
-    .update({ onboarding_step: 7, onboarding_completed_at: now })
+    .update({ onboarding_step: ONBOARDING_STEP_COUNT, onboarding_completed_at: now })
     .eq("id", userId)
 }
 

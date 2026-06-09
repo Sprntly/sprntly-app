@@ -93,7 +93,7 @@ export function WorkspaceSettings() {
     return (
       <SettingsSection title="Workspace" sub="Complete onboarding to create your workspace.">
         <p className="settings-placeholder">
-          <a href="/onboarding/1">Continue onboarding →</a>
+          <a href="/onboarding/business-info">Continue onboarding →</a>
         </p>
       </SettingsSection>
     )

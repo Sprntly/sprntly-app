@@ -1,5 +1,7 @@
 "use client"
 
+import { useEffect } from "react"
+import { useRouter } from "next/navigation"
 import {
   BusinessInfo,
   Metrics,
@@ -55,7 +57,17 @@ const BY_SLUG: Record<string, React.ComponentType> = Object.fromEntries(
 )
 
 export function OnboardingStep({ slug }: { slug: string }) {
+  const router = useRouter()
   const Screen = BY_SLUG[slug]
+
+  // Unknown slug → bounce to the first step. Done in an effect (never as a
+  // render side-effect) so navigation doesn't fire during render. This is the
+  // client-side safety net that complements the server redirect in page.tsx
+  // (which the static export can't run for non-prerendered params).
+  useEffect(() => {
+    if (!Screen) router.replace(`/onboarding/${ONBOARDING_STEP_SLUGS[0]}`)
+  }, [Screen, router])
+
   if (!Screen) {
     return null
   }

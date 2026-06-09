@@ -16,15 +16,15 @@ import {
 } from "../../../lib/onboarding/coworkersApi"
 
 /**
- * Onboarding page 06 — "Introducing your AI coworkers."
+ * Onboarding "coworkers" step — "Introducing your AI coworkers."
  *
  * Four specialists join the workspace: Product / Design / Data Science /
  * Admin. The user names each one — the name is how the coworker signs its
  * work in chats, briefs, and comments. Names persist to the backend
- * (PUT /v1/company/coworkers). "Launch workspace" advances to step 8,
- * where the first Brief is generated.
+ * (PUT /v1/company/coworkers). "Launch workspace" advances to the first-brief
+ * step, where the first Brief is generated.
  */
-export function Onboarding6() {
+export function Coworkers() {
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
   const [names, setNames] = useState<CoworkerNames>(emptyCoworkerNames())
@@ -62,9 +62,10 @@ export function Onboarding6() {
     setSaving(true)
     try {
       await coworkersApi.put(withCoworkerDefaults(names))
-      const updated = await advanceOnboardingStep(workspace.id, 7)
+      // Next numbered step is first-brief (index 5 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 5)
       setWorkspace(updated)
-      router.push("/onboarding/7")
+      router.push("/onboarding/first-brief")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save coworker names.")
     } finally {
@@ -77,7 +78,7 @@ export function Onboarding6() {
   // that path surfaces in production as a client-side exception / error
   // boundary. Render returns the loading shell until the redirect lands.
   useEffect(() => {
-    if (!loading && !workspace) router.replace("/onboarding/1")
+    if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
 
   if (loading || !workspace) return <div className="ob-shell">Loading…</div>
@@ -86,7 +87,7 @@ export function Onboarding6() {
 
   return (
     <InterviewLayout
-      step={6}
+      step={4}
       eyebrow="Saved"
       title="Introducing your AI coworkers. Give them a name."
       agentMessage="Three specialists plus an Admin join your workspace. You can give them a task, ask them questions, or @mention them — and their name is how they'll sign their work in chats, briefs, and comments."
@@ -105,7 +106,7 @@ export function Onboarding6() {
           </ul>
         </div>
       }
-      onBack={() => router.push("/onboarding/5")}
+      onBack={() => router.push("/onboarding/connectors")}
       onContinue={launch}
       continueLabel="Launch workspace"
       loading={saving}

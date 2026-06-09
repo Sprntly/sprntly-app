@@ -29,7 +29,7 @@ vi.mock("../../../../lib/api", () => ({
   connectorsApi: { list: vi.fn().mockResolvedValue({ connections: [] }) },
 }))
 
-import { Onboarding5 } from "../Onboarding5"
+import { Connectors } from "../Connectors"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 afterEach(() => {
@@ -37,20 +37,20 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("Onboarding5 (container) — connectors", () => {
+describe("Connectors (container) — connectors", () => {
   it("renders the connectors step for a loaded workspace", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({ workspace: makeWorkspace({ onboarding_step: 5 }) }),
     )
-    render(React.createElement(Onboarding5))
+    render(React.createElement(Connectors))
     expect(screen.getByText("Connect your tools")).not.toBeNull()
   })
 
   it("shows the loading shell while the workspace is loading", () => {
     authMock.mockReturnValue({ kind: "loading" })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ loading: true, workspace: null }))
-    render(React.createElement(Onboarding5))
+    render(React.createElement(Connectors))
     expect(screen.getByText("Loading…")).not.toBeNull()
   })
 
@@ -62,10 +62,10 @@ describe("Onboarding5 (container) — connectors", () => {
     const spy = vi
       .spyOn(console, "error")
       .mockImplementation((...args) => errors.push(args[0]))
-    render(React.createElement(Onboarding5))
+    render(React.createElement(Connectors))
     spy.mockRestore()
 
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/1")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/business-info")
     expect(screen.getByText("Loading…")).not.toBeNull()
     const sideEffectInRender = errors
       .map(String)

@@ -100,7 +100,7 @@ export function CompanySwitcher({ activeSlug, onSwitch }: Props) {
     if (!workspace) {
       return (
         <div className="ds-wrap" style={{ padding: "4px 12px 12px" }}>
-          <Link href="/onboarding/1" className="ds-onboard-link">
+          <Link href="/onboarding/business-info" className="ds-onboard-link">
             Finish onboarding →
           </Link>
           <style jsx>{`

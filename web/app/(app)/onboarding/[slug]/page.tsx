@@ -1,18 +1,25 @@
-import { notFound } from "next/navigation"
+import { redirect } from "next/navigation"
+import { ONBOARDING_STEP_SLUGS, isOnboardingStepSlug } from "../../../lib/onboarding/types"
 import { OnboardingStep } from "./OnboardingStep"
 
+/**
+ * Prerender one static page per numbered onboarding slug. The `analyzing`
+ * interstitial is NOT listed here — it has its own (sibling) route folder.
+ */
 export function generateStaticParams() {
-  return ["1", "2", "3", "4", "5", "6", "7"].map((step) => ({ step }))
+  return ONBOARDING_STEP_SLUGS.map((slug) => ({ slug }))
 }
 
 export default async function OnboardingStepPage({
   params,
 }: {
-  params: Promise<{ step: string }>
+  params: Promise<{ slug: string }>
 }) {
-  const { step } = await params
-  if (!["1", "2", "3", "4", "5", "6", "7"].includes(step)) {
-    notFound()
+  const { slug } = await params
+  // Unknown slug → send the user to the first step rather than a hard 404, so a
+  // stale/typo'd onboarding URL still lands them somewhere they can continue.
+  if (!isOnboardingStepSlug(slug)) {
+    redirect(`/onboarding/${ONBOARDING_STEP_SLUGS[0]}`)
   }
-  return <OnboardingStep step={step} />
+  return <OnboardingStep slug={slug} />
 }

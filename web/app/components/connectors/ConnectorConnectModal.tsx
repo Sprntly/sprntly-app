@@ -270,7 +270,7 @@ type Props = {
   /** Live connection (matching the providerId), if any. */
   connection: ConnectionSummary | null
   /** Where the OAuth callback should bounce the user back to.
-   *  Onboarding passes /onboarding/4 so the user lands in the same step. */
+   *  Onboarding passes /onboarding/connectors so the user lands in the same step. */
   returnTo: string
   /** Fired when the user dismisses the modal. */
   onClose: () => void
