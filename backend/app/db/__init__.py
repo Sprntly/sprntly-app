@@ -82,12 +82,18 @@ from app.db.datasets import (
 # Connections (OAuth)
 from app.db.connections import (
     delete_connection,
+    delete_slack_connection,
     get_connection,
+    get_slack_connection,
     list_connections,
+    list_slack_connections,
     patch_connection_config,
+    patch_slack_connection_config,
     update_connection_sync,
     update_connection_tokens,
+    update_slack_connection_sync,
     upsert_connection,
+    upsert_slack_connection,
 )
 
 # Enterprise input sources
@@ -190,12 +196,18 @@ __all__ = [
     "upsert_input_source",
     # connections
     "delete_connection",
+    "delete_slack_connection",
     "get_connection",
+    "get_slack_connection",
     "list_connections",
+    "list_slack_connections",
     "patch_connection_config",
+    "patch_slack_connection_config",
     "update_connection_sync",
     "update_connection_tokens",
+    "update_slack_connection_sync",
     "upsert_connection",
+    "upsert_slack_connection",
     # metric points (DS rolling aggregates)
     "distinct_metrics",
     "list_metric_points",

@@ -30,6 +30,11 @@ from fastapi.testclient import TestClient
 
 SUPABASE_JWT_SECRET = "test-supabase-jwt-secret"
 
+# Fallback user for seed_connection(provider="slack") when a test doesn't
+# pass user_id explicitly. Tests that drive a route should pass the
+# client's own ctx.user_id so the per-user lookup resolves.
+_TEST_USER_ID_DEFAULT = "test-user"
+
 
 def setup_supabase_auth(monkeypatch) -> None:
     """Set SUPABASE_JWT_SECRET and reload app.config + app.auth so
@@ -77,14 +82,29 @@ def seed_connection(
     provider: str,
     token_blob: dict,
     label: str = "alice@co.com",
+    user_id: str | None = None,
 ) -> None:
-    """Insert an already-encrypted connection row for the company."""
+    """Insert an already-encrypted connection row for the company.
+
+    Slack is per-user: pass `user_id` to seed it under that user's own
+    connection (defaults to the company's standard test user). Every other
+    provider stays company-scoped and ignores user_id."""
     import json
 
     from app import db
     from app.connectors.tokens import encrypt_token_json
 
     enc = encrypt_token_json(json.dumps(token_blob))
+    if provider == "slack":
+        db.upsert_slack_connection(
+            company_id=company_id,
+            user_id=user_id or _TEST_USER_ID_DEFAULT,
+            token_encrypted=enc,
+            scopes="",
+            account_label=label,
+            config_json="{}",
+        )
+        return
     db.upsert_connection(
         company_id=company_id,
         provider=provider,

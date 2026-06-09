@@ -64,10 +64,11 @@ def test_slack_configured_reflects_env(slack_env, monkeypatch):
 
 def test_sign_verify_oauth_state_round_trip(slack_env):
     from app.connectors import slack_oauth
-    token = slack_oauth.sign_oauth_state(company_id="ws-x")
+    token = slack_oauth.sign_oauth_state(company_id="ws-x", user_id="u-1")
     payload = slack_oauth.verify_oauth_state(token)
     assert payload["provider"] == "slack"
     assert payload["company_id"] == "ws-x"
+    assert payload["user_id"] == "u-1"
 
 
 def test_verify_oauth_state_rejects_wrong_provider(slack_env):
@@ -210,7 +211,9 @@ def test_start_oauth_slack_500_when_not_configured(isolated_settings, monkeypatc
 def test_callback_stores_connection_with_team_name_label(slack_env, monkeypatch):
     ctx = company_client(monkeypatch)
     from app.connectors import slack_oauth
-    state = slack_oauth.sign_oauth_state(company_id=ctx.company_id)
+    state = slack_oauth.sign_oauth_state(
+        company_id=ctx.company_id, user_id=ctx.user_id
+    )
 
     mock_resp = MagicMock()
     mock_resp.ok = True
@@ -257,7 +260,9 @@ def test_callback_rejects_wrong_state(slack_env, monkeypatch):
 def test_callback_400_when_slack_returns_ok_false(slack_env, monkeypatch):
     ctx = company_client(monkeypatch)
     from app.connectors import slack_oauth
-    state = slack_oauth.sign_oauth_state(company_id=ctx.company_id)
+    state = slack_oauth.sign_oauth_state(
+        company_id=ctx.company_id, user_id=ctx.user_id
+    )
 
     mock_resp = MagicMock()
     mock_resp.ok = True  # HTTP 200 with ok=false
@@ -275,6 +280,7 @@ def test_delete_slack_disconnects(slack_env, monkeypatch):
     ctx = company_client(monkeypatch)
     seed_connection(
         company_id=ctx.company_id,
+        user_id=ctx.user_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real", "team_id": "T1"},
         label="Meridian",
@@ -419,6 +425,7 @@ def test_channels_route_lists_channels(slack_env, monkeypatch):
     ctx = company_client(monkeypatch)
     seed_connection(
         company_id=ctx.company_id,
+        user_id=ctx.user_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real"},
         label="Meridian",
@@ -468,6 +475,7 @@ def test_config_route_persists_selected_channel(slack_env, monkeypatch):
     ctx = company_client(monkeypatch)
     seed_connection(
         company_id=ctx.company_id,
+        user_id=ctx.user_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real"},
         label="Meridian",
@@ -495,6 +503,7 @@ def test_config_route_rejects_empty_channel_id(slack_env, monkeypatch):
     ctx = company_client(monkeypatch)
     seed_connection(
         company_id=ctx.company_id,
+        user_id=ctx.user_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real"},
     )
@@ -521,6 +530,7 @@ def test_test_endpoint_dispatches_to_team_info(slack_env, monkeypatch):
     ctx = company_client(monkeypatch)
     seed_connection(
         company_id=ctx.company_id,
+        user_id=ctx.user_id,
         provider="slack",
         token_blob={"access_token": "xoxb-real"},
         label="Meridian",

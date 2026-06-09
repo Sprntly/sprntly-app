@@ -82,8 +82,6 @@ def upsert_connection(
     existing = get_connection(company_id, provider)
     now = utc_now()
     payload = {
-        _owner_column(): company_id,
-        "provider": provider,
         "status": status,
         "google_email": google_email,
         "account_label": account_label,
@@ -93,12 +91,26 @@ def upsert_connection(
         "last_sync_error": None,
         "updated_at": now,
     }
-    if not existing:
-        payload["id"] = uuid.uuid4().hex
-        payload["created_at"] = now
-    c.table("connections").upsert(
-        payload, on_conflict=f"{_owner_column()},provider"
-    ).execute()
+    # Insert-or-update by hand. The company-scoped uniqueness is now a
+    # PARTIAL index (where provider <> 'slack', see migration
+    # 20260608000000_slack_per_user.sql), which an on_conflict=(cols)
+    # target does not match. The get_connection above tells us the path.
+    if existing:
+        (
+            c.table("connections")
+            .update(payload)
+            .eq(_owner_column(), company_id)
+            .eq("provider", provider)
+            .execute()
+        )
+    else:
+        payload.update({
+            "id": uuid.uuid4().hex,
+            _owner_column(): company_id,
+            "provider": provider,
+            "created_at": now,
+        })
+        c.table("connections").insert(payload).execute()
     row = get_connection(company_id, provider)
     assert row is not None
     return row
@@ -202,5 +214,180 @@ def update_connection_sync(
         )
         .eq(_owner_column(), company_id)
         .eq("provider", provider)
+        .execute()
+    )
+
+
+# ─────────────────────────── Slack: per-user ───────────────────────────
+#
+# Slack is the one connector that is personal to each user rather than
+# shared across the company: each user installs the bot into their own
+# Slack and picks their own channel, so notifications/DMs land in the
+# right person's workspace and one member can never read or disconnect
+# another member's Slack.
+#
+# These accessors mirror the company-scoped helpers above but additionally
+# key on `user_id`. The company-scoped get_connection/upsert_connection
+# remain untouched and continue to serve every other provider. NULL-user
+# (legacy) Slack rows are never returned by these reads — those users
+# reconnect through the per-user flow.
+
+SLACK_PROVIDER = "slack"
+
+
+def get_slack_connection(company_id: str, user_id: str) -> dict | None:
+    """Return the Slack connection owned by `user_id` within `company_id`,
+    or None. Legacy rows with user_id IS NULL are excluded."""
+    c = require_client()
+    resp = (
+        c.table("connections")
+        .select("*")
+        .eq(_owner_column(), company_id)
+        .eq("user_id", user_id)
+        .eq("provider", SLACK_PROVIDER)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        return None
+    return _to_legacy_shape(resp.data[0])
+
+
+def list_slack_connections(company_id: str) -> list[dict]:
+    """All per-user Slack connections within a company — one row per user
+    who connected their own Slack. Used by notification/brief delivery to
+    fan out to each recipient's own workspace. Legacy NULL-user rows are
+    excluded (no owner to deliver to)."""
+    c = require_client()
+    resp = (
+        c.table("connections")
+        .select("*")
+        .eq(_owner_column(), company_id)
+        .eq("provider", SLACK_PROVIDER)
+        .not_.is_("user_id", "null")
+        .order("user_id", desc=False)
+        .execute()
+    )
+    return [_to_legacy_shape(r) for r in (resp.data or [])]
+
+
+def upsert_slack_connection(
+    *,
+    company_id: str,
+    user_id: str,
+    token_encrypted: str,
+    scopes: str,
+    account_label: str | None = None,
+    config_json: str = "{}",
+    status: str = "active",
+) -> dict:
+    """Insert/update the Slack connection owned by `user_id` in `company_id`.
+    Conflict target is (company_id, user_id, provider) so two users in one
+    company can each hold their own Slack row."""
+    c = require_client()
+    try:
+        config_obj: Any = json.loads(config_json) if config_json else {}
+    except (TypeError, ValueError):
+        config_obj = {}
+
+    existing = get_slack_connection(company_id, user_id)
+    now = utc_now()
+    payload = {
+        "status": status,
+        "account_label": account_label,
+        "scopes": scopes,
+        "token_json_encrypted": token_encrypted,
+        "config": config_obj,
+        "last_sync_error": None,
+        "updated_at": now,
+    }
+    # Insert-or-update by hand rather than ON CONFLICT: the Slack
+    # uniqueness is a PARTIAL index (where provider = 'slack'), which the
+    # plain on_conflict=(cols) target does not match. The (company_id,
+    # user_id, provider) read above already tells us which path to take.
+    if existing:
+        (
+            c.table("connections")
+            .update(payload)
+            .eq(_owner_column(), company_id)
+            .eq("user_id", user_id)
+            .eq("provider", SLACK_PROVIDER)
+            .execute()
+        )
+    else:
+        payload.update({
+            "id": uuid.uuid4().hex,
+            _owner_column(): company_id,
+            "user_id": user_id,
+            "provider": SLACK_PROVIDER,
+            "created_at": now,
+        })
+        c.table("connections").insert(payload).execute()
+    row = get_slack_connection(company_id, user_id)
+    assert row is not None
+    return row
+
+
+def delete_slack_connection(company_id: str, user_id: str) -> bool:
+    """Delete only this user's Slack connection. Other members' Slack rows
+    in the same company are untouched."""
+    c = require_client()
+    resp = (
+        c.table("connections")
+        .delete()
+        .eq(_owner_column(), company_id)
+        .eq("user_id", user_id)
+        .eq("provider", SLACK_PROVIDER)
+        .execute()
+    )
+    return bool(resp.count) if resp.count is not None else True
+
+
+def patch_slack_connection_config(
+    company_id: str, user_id: str, config: dict
+) -> dict | None:
+    """Merge keys into this user's Slack connection config (jsonb)."""
+    existing = get_slack_connection(company_id, user_id)
+    if not existing:
+        return None
+    current: dict = {}
+    try:
+        current = json.loads(existing.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        current = {}
+    current.update(config)
+    c = require_client()
+    (
+        c.table("connections")
+        .update({"config": current, "updated_at": utc_now()})
+        .eq(_owner_column(), company_id)
+        .eq("user_id", user_id)
+        .eq("provider", SLACK_PROVIDER)
+        .execute()
+    )
+    return get_slack_connection(company_id, user_id)
+
+
+def update_slack_connection_sync(
+    company_id: str,
+    user_id: str,
+    *,
+    last_sync_at: str | None = None,
+    last_sync_error: str | None = None,
+) -> None:
+    now = utc_now()
+    c = require_client()
+    (
+        c.table("connections")
+        .update(
+            {
+                "last_sync_at": last_sync_at or now,
+                "last_sync_error": last_sync_error,
+                "updated_at": now,
+            }
+        )
+        .eq(_owner_column(), company_id)
+        .eq("user_id", user_id)
+        .eq("provider", SLACK_PROVIDER)
         .execute()
     )

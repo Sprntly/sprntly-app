@@ -257,6 +257,12 @@ CREATE TABLE connections (
     product_id           TEXT,
     company_name         TEXT,
     product_name         TEXT,
+    -- Slack is PER-USER (each user's own bot/channel); every other
+    -- provider is company-scoped + member-shared. user_id is NULL for
+    -- company-scoped rows and set for Slack rows (see migration
+    -- 20260608000000_slack_per_user.sql). The two partial unique indexes
+    -- below mirror that split.
+    user_id              TEXT,
     provider             TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'active',
     google_email         TEXT,
@@ -267,10 +273,14 @@ CREATE TABLE connections (
     last_sync_at         TEXT,
     last_sync_error      TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (company_id, provider)
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE UNIQUE INDEX connections_company_provider_non_slack_key
+    ON connections (company_id, provider) WHERE provider <> 'slack';
+CREATE UNIQUE INDEX connections_company_user_slack_key
+    ON connections (company_id, user_id, provider) WHERE provider = 'slack';
 CREATE INDEX connections_company_id_idx ON connections (company_id);
+CREATE INDEX connections_user_id_idx ON connections (user_id);
 CREATE INDEX connections_workspace_id_idx ON connections (workspace_id);
 CREATE INDEX connections_product_id_idx   ON connections (product_id);
 

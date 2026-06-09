@@ -88,11 +88,17 @@ def authorize_url(state: str, scopes: str | None = None) -> str:
 
 
 def sign_oauth_state(
-    *, company_id: str, return_to: str | None = None,
+    *, company_id: str, user_id: str, return_to: str | None = None,
 ) -> str:
     """Mint a signed state JWT that binds the OAuth round-trip to a
-    specific company. The callback (which has no user session) trusts
-    only this signature to know which company gets the new token.
+    specific company AND the connecting user. The callback (which has no
+    user session) trusts only this signature to know which company + user
+    gets the new token.
+
+    Slack is per-user: the bot install belongs to the individual who
+    started the flow, not the whole company, so `user_id` rides in the
+    signed state and is the only trusted source of the owning user at
+    callback time.
 
     `return_to` is an optional relative path the callback redirects
     to instead of the default /settings?section=connectors."""
@@ -100,6 +106,7 @@ def sign_oauth_state(
     payload = {
         "provider": SLACK_PROVIDER,
         "company_id": company_id,
+        "user_id": user_id,
         "return_to": return_to,
         "nonce": uuid.uuid4().hex,
         "iat": now,
@@ -117,6 +124,8 @@ def verify_oauth_state(state: str) -> dict:
         raise HTTPException(400, "OAuth state provider mismatch")
     if not payload.get("company_id"):
         raise HTTPException(400, "OAuth state missing company_id")
+    if not payload.get("user_id"):
+        raise HTTPException(400, "OAuth state missing user_id")
     return payload
 
 

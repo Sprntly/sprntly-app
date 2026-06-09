@@ -100,11 +100,26 @@ def _public_connection(row: dict) -> dict:
     }
 
 
+def _visible_connection_rows(company: CompanyContext) -> list[dict]:
+    """Connection rows the CURRENT user may see: every company-scoped
+    provider (shared) plus only THIS user's own Slack row. Other members'
+    per-user Slack rows (and legacy NULL-user Slack rows) are filtered out
+    so one member never sees another's personal Slack."""
+    rows = db.list_connections(company.company_id)
+    out: list[dict] = []
+    for r in rows:
+        if r.get("provider") == slack_oauth.SLACK_PROVIDER:
+            if r.get("user_id") != company.user_id:
+                continue
+        out.append(r)
+    return out
+
+
 @router.get("")
 def list_connections(
     company: CompanyContext = Depends(require_company),
 ):
-    rows = db.list_connections(company.company_id)
+    rows = _visible_connection_rows(company)
     return {"connections": [_public_connection(r) for r in rows]}
 
 
@@ -119,7 +134,7 @@ def connector_status(
     (set by the auto-sync-on-connect kickoff and by manual /v1/ingest runs)."""
     from app.kg_ingest.runner import PULLERS
 
-    rows = db.list_connections(company.company_id)
+    rows = _visible_connection_rows(company)
     out = []
     for r in rows:
         provider = r["provider"]
@@ -266,9 +281,14 @@ def start_oauth(
     if provider == slack_oauth.SLACK_PROVIDER:
         if not slack_oauth.slack_configured():
             raise HTTPException(500, "Slack OAuth is not configured on the server")
+        # Slack is per-user: bind the OAuth round-trip to the connecting
+        # user so the callback stores the bot under THEIR connection, not a
+        # company-shared one.
         url = slack_oauth.authorize_url(
             state=slack_oauth.sign_oauth_state(
-                company_id=company.company_id, return_to=return_to,
+                company_id=company.company_id,
+                user_id=company.user_id,
+                return_to=return_to,
             )
         )
         return {"authorize_url": url}
@@ -302,7 +322,12 @@ def test_connection(
     """
     from datetime import datetime, timezone
 
-    row = db.get_connection(company.company_id, provider)
+    # Slack is per-user: validate THIS user's own connection, never a
+    # company-shared one. Every other provider stays company-scoped.
+    if provider == slack_oauth.SLACK_PROVIDER:
+        row = db.get_slack_connection(company.company_id, company.user_id)
+    else:
+        row = db.get_connection(company.company_id, provider)
     if not row:
         raise HTTPException(404, f"{provider!r} is not connected")
 
@@ -1383,6 +1408,9 @@ def hubspot_sync_to_corpus(
 def slack_callback(code: str, state: str):
     payload = slack_oauth.verify_oauth_state(state)
     company_id = payload["company_id"]
+    # Slack is per-user — the owning user rides in the signed state (the
+    # callback has no session). verify_oauth_state guarantees it's present.
+    user_id = payload["user_id"]
     token_json = slack_oauth.exchange_code_for_token(code)
 
     access_token = token_json.get("access_token")
@@ -1407,9 +1435,9 @@ def slack_callback(code: str, state: str):
     except TokenEncryptionError as e:
         raise HTTPException(500, str(e)) from e
 
-    db.upsert_connection(
+    db.upsert_slack_connection(
         company_id=company_id,
-        provider=slack_oauth.SLACK_PROVIDER,
+        user_id=user_id,
         token_encrypted=token_encrypted,
         scopes=token_json.get("scope") or "",
         account_label=str(label),
@@ -1426,17 +1454,18 @@ def slack_callback(code: str, state: str):
 def slack_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
-    row = db.get_connection(company.company_id, slack_oauth.SLACK_PROVIDER)
+    # Disconnect only THIS user's Slack — never another member's.
+    row = db.get_slack_connection(company.company_id, company.user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
-    db.delete_connection(company.company_id, slack_oauth.SLACK_PROVIDER)
+    db.delete_slack_connection(company.company_id, company.user_id)
     return {"deleted": True, "provider": slack_oauth.SLACK_PROVIDER}
 
 
-def _slack_bot_token(company_id: str) -> tuple[str, dict]:
-    """Decrypt and return (bot_token, connection_row) for the company's
+def _slack_bot_token(company_id: str, user_id: str) -> tuple[str, dict]:
+    """Decrypt and return (bot_token, connection_row) for THIS user's own
     Slack connection. 404 if not connected, 500 if the token is unreadable."""
-    row = db.get_connection(company_id, slack_oauth.SLACK_PROVIDER)
+    row = db.get_slack_connection(company_id, user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
     try:
@@ -1460,13 +1489,17 @@ class SlackBotTokenIn(BaseModel):
 @router.post("/slack/apikey")
 def slack_connect_bot_token(
     body: SlackBotTokenIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Connect Slack using a Bot User OAuth Token (xoxb-...).
 
     Alternative to the full OAuth flow — useful when the Slack app is not
     distributed. The user copies the token from api.slack.com/apps →
     Install App → Bot User OAuth Token.
+
+    Per-user + company-scoped: the token is stored under the current
+    session user's own Slack connection (also fixes the prior
+    company-less upsert call).
     """
     token = body.api_key.strip()
     auth_info = slack_oauth.fetch_auth_test(token)
@@ -1497,8 +1530,9 @@ def slack_connect_bot_token(
     except TokenEncryptionError as e:
         raise HTTPException(500, str(e)) from e
 
-    db.upsert_connection(
-        provider=slack_oauth.SLACK_PROVIDER,
+    db.upsert_slack_connection(
+        company_id=company.company_id,
+        user_id=company.user_id,
         token_encrypted=token_encrypted,
         scopes=settings.slack_scopes.replace(",", " "),
         account_label=label,
@@ -1516,8 +1550,8 @@ def slack_list_channels(
     company: CompanyContext = Depends(require_company),
 ):
     """List channels the bot can post into. Backs the channel-picker
-    in the Configure drawer."""
-    token, _row = _slack_bot_token(company.company_id)
+    in the Configure drawer. Resolves THIS user's own Slack."""
+    token, _row = _slack_bot_token(company.company_id, company.user_id)
     return {"channels": slack_oauth.list_channels(token)}
 
 
@@ -1536,16 +1570,16 @@ def slack_save_config(
     company: CompanyContext = Depends(require_company),
 ):
     """Save the user's selected notification-target channel. Stored on
-    the connection row's config so the Comms Agent can read it at
-    post-time without a separate lookup table."""
-    row = db.get_connection(company.company_id, slack_oauth.SLACK_PROVIDER)
+    THIS user's own Slack connection row's config so the Comms Agent can
+    read it at post-time without a separate lookup table."""
+    row = db.get_slack_connection(company.company_id, company.user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
     patch: dict = {"channel_id": body.channel_id.strip()}
     if body.channel_name:
         patch["channel_name"] = body.channel_name.strip()
-    updated = db.patch_connection_config(
-        company.company_id, slack_oauth.SLACK_PROVIDER, patch
+    updated = db.patch_slack_connection_config(
+        company.company_id, company.user_id, patch
     )
     config: dict = {}
     if updated:
@@ -1564,17 +1598,24 @@ class SlackSyncCorpusIn(BaseModel):
 @router.post("/slack/sync-to-corpus")
 def slack_sync_to_corpus(
     body: SlackSyncCorpusIn,
-    _session: dict = Depends(require_session),
+    company: CompanyContext = Depends(require_company),
 ):
     """Sync Slack channels, messages, and threads into the corpus.
 
     Fetches data from the Slack API, converts to markdown, and writes
-    into DATA_DIR/{dataset}/ so it enters the knowledge base.
+    into DATA_DIR/{dataset}/ so it enters the knowledge base. Uses THIS
+    user's own Slack bot token (per-user scope; also fixes the prior
+    company-less token lookup).
     """
     from app.connectors.slack_sync import SlackSyncError, sync_slack
 
     try:
-        result = sync_slack(body.dataset, history_days=body.history_days)
+        result = sync_slack(
+            body.dataset,
+            company_id=company.company_id,
+            user_id=company.user_id,
+            history_days=body.history_days,
+        )
     except SlackSyncError as e:
         raise HTTPException(400, str(e)) from e
     return result.to_dict()
