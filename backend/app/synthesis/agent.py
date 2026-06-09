@@ -272,7 +272,7 @@ def run_synthesis(
 
     # Legacy-schema brief payload → existing BriefScreen renders unchanged.
     now = datetime.now(timezone.utc)
-    week_label = f"Week of {now.strftime('%B %-d, %Y')}"
+    week_label = f"Week of {now.strftime('%B')} {now.day}, {now.year}"
     brief = {
         "week_label": week_label,
         "summary_headline": payload.get("summary_headline", ""),

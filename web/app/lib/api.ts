@@ -741,6 +741,8 @@ export const prdApi = {
     }),
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
   get: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
+  /** Fetch the latest ready PRD for a dataset/company slug. 404 if none. */
+  latest: (dataset: string) => api.get<PrdRecord>(`/v1/prd/latest?dataset=${encodeURIComponent(dataset)}`),
   /** Old name retained for compatibility. */
   byId: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
   /** Save PRD edits (title + markdown). Auto-creates a version snapshot. */

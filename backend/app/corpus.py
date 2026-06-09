@@ -2,9 +2,12 @@
 as plain strings for inclusion in LLM prompts. No vector store yet — at this
 size (single dataset, ~50KB) just feed everything in.
 """
+import logging
 from dataclasses import dataclass
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -38,7 +41,14 @@ def load_corpus(dataset: str = "asurion") -> Corpus:
     for p in sorted(base.glob("*.md")):
         if p.name.startswith("_"):
             continue
-        docs.append(CorpusDoc(name=p.stem, path=str(p), text=p.read_text(encoding="utf-8")))
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, ValueError):
+            # Fall back to latin-1 (never fails) for files with non-UTF-8 bytes
+            # (e.g. smart quotes, em-dashes from pasted Word/PDF content).
+            logger.warning("Corpus file %s is not valid UTF-8, falling back to latin-1", p.name)
+            text = p.read_text(encoding="latin-1")
+        docs.append(CorpusDoc(name=p.stem, path=str(p), text=text))
     if not docs:
         raise RuntimeError(f"No corpus docs found for dataset {dataset!r}")
     return Corpus(dataset=dataset, docs=tuple(docs))

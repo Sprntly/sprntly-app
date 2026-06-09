@@ -69,6 +69,19 @@ def get_status(dataset: str) -> dict:
     return out
 
 
+def set_status(dataset: str, status: str, *, error: str | None = None) -> None:
+    """Update the in-memory brief generation status for a dataset.
+
+    Used by both the legacy and synthesis brief generation paths so the
+    frontend poll endpoint (/v1/brief/status) always reflects progress.
+    """
+    _status[dataset] = status
+    if error is not None:
+        _errors[dataset] = error[:300]
+    elif dataset in _errors:
+        _errors.pop(dataset, None)
+
+
 def _run_sync(dataset: str) -> None:
     corpus = load_corpus(dataset)
 

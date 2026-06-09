@@ -29,12 +29,13 @@ from app.db import (
 )
 from app.db.prds import (
     get_prd,
+    latest_prd_for_dataset,
     list_prd_versions,
     restore_prd_version,
     save_prd_version,
     update_prd_content,
 )
-from app.deps.ownership import require_owned_brief, require_owned_prd
+from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
 from app.prd_runner import generate_prd
 from app.prompts import PRD_TEMPLATE_VERSION
 
@@ -111,6 +112,24 @@ async def generate(
         "title": title,
         "variant": _VARIANT,
     }
+
+
+@router.get("/latest")
+def latest(
+    dataset: str,
+    company: CompanyContext = Depends(require_company),
+):
+    """Return the most recent ready PRD for a dataset (company slug).
+
+    Used by the PRD screen to auto-load the last generated PRD on refresh
+    instead of showing an empty pane.
+    """
+    require_owned_dataset(dataset, company.company_id)
+    row = latest_prd_for_dataset(dataset)
+    if not row:
+        raise HTTPException(404, "No PRD found for this workspace")
+    rendered = get_prd_rendered(row["id"])
+    return rendered or row
 
 
 @router.get("/{prd_id}")
