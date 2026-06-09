@@ -74,7 +74,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   team: "Team",
   connectors: "Connectors",
   sources: "Sources",
-  tickets: "Tickets",
+  tickets: "Project Management",
   prototype: "Prototype",
   // The canvas renders as a full-screen overlay (its own breadcrumb), so this
   // chrome title is never actually shown; present only for Record<ScreenId>

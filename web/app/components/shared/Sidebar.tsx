@@ -27,7 +27,7 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
   const { currentScreen, goTo, sidebarCollapsed, toggleSidebar } = useNavigation()
   const { content } = useContent()
   const auth = useAuth()
-  const { profile } = useWorkspace()
+  const { profile, workspace } = useWorkspace()
   const signingOutRef = useRef(false)
   const [signingOut, setSigningOut] = useState(false)
 
@@ -42,6 +42,27 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
       setSigningOut(false)
     }
   }, [auth])
+
+  const RailItem = ({
+    screen,
+    icon,
+    label,
+  }: {
+    screen: ScreenId
+    icon: React.ReactNode
+    label: string
+  }) => (
+    <button
+      type="button"
+      className={`sb-rail-item${currentScreen === screen ? " active" : ""}`}
+      title={label}
+      onClick={() => goTo(screen)}
+      aria-label={label}
+    >
+      {icon}
+      <span className="nav-tooltip">{label} </span>
+    </button>
+  )
 
   const NavItem = ({
     screen,
@@ -80,8 +101,95 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
       .slice(0, 2)
       .toUpperCase()
 
+  // First character of the company/workspace display name for the rail logo
+  const companyInitial = (workspace?.display_name ?? workspace?.product?.name ?? "S").charAt(0).toUpperCase()
+
+  /* ── Collapsed: icon-only rail (design default) ── */
+  if (sidebarCollapsed) {
+    return (
+      <aside className="sidebar sidebar--collapsed">
+        {/* Logo + expand */}
+        <div className="sb-rail-header">
+          <div className="sb-rail-logo" title={content.homeHeadline ?? "Sprntly"}>
+            <span className="sb-rail-logo-text">{companyInitial}</span>
+          </div>
+          <button
+            type="button"
+            className="sb-rail-expand"
+            onClick={toggleSidebar}
+            title="Expand sidebar"
+            aria-label="Expand sidebar"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <g stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none">
+                <polyline points="7 6 11 12 7 18" />
+                <polyline points="12 6 16 12 12 18" />
+              </g>
+            </svg>
+          </button>
+        </div>
+
+        {/* New chat */}
+        <button
+          type="button"
+          className="sb-rail-new"
+          title="New chat"
+          aria-label="New chat"
+          onClick={() => goTo("chat")}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+        </button>
+
+        {/* Main nav icons */}
+        <div className="sb-rail-nav">
+          <RailItem screen="chat" icon={<IconHome />} label="Home" />
+          <RailItem screen="brief" icon={<IconBrief />} label="Weekly brief" />
+          <RailItem screen="detail" icon={<IconEvidence />} label="Evidence" />
+          <RailItem screen="prd" icon={<IconPrd />} label="PRD" />
+          <RailItem screen="prototype" icon={<IconSparkle />} label="Prototype" />
+          <RailItem screen="tickets" icon={<IconTickets />} label="Project Management" />
+        </div>
+
+        <div className="sb-rail-spacer" />
+
+        {/* Bottom icons */}
+        <div className="sb-rail-bottom">
+          <RailItem screen="sources" icon={<IconSources />} label="Sources" />
+          <RailItem screen="settings" icon={<IconSettings />} label="Settings" />
+        </div>
+        <div className="divider-nav"></div>
+        {/* User avatar */}
+        <div className="sb-rail-user">
+          <button
+            type="button"
+            className="sb-rail-avatar"
+            title={`${displayName} · Sign out`}
+            onClick={() => void handleSignOut()}
+            disabled={signingOut}
+          >
+            {initials}
+          </button>
+          <button
+            type="button"
+            className="sb-rail-signout"
+            onClick={() => void handleSignOut()}
+            disabled={signingOut}
+            title="Sign out"
+            aria-label="Sign out"
+          >
+            <SignOutIcon />
+          </button>
+        </div>
+      </aside>
+    )
+  }
+
+  /* ── Expanded: full sidebar ── */
   return (
-    <aside className={`sidebar${sidebarCollapsed ? " sidebar--collapsed" : ""}`}>
+    <aside className="sidebar">
       <div className="sb-top">
         <div className="sb-header">
           <div className="sb-brand">
@@ -94,42 +202,25 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
             className="sb-collapse-btn"
             onClick={toggleSidebar}
             aria-expanded={!sidebarCollapsed}
-            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label="Collapse sidebar"
           >
-            {sidebarCollapsed ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-                {/* Double chevron right — expand */}
-                <g
-                  stroke="currentColor"
-                  strokeWidth="1.75"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                >
-                  <polyline points="7 6 11 12 7 18" />
-                  <polyline points="12 6 16 12 12 18" />
-                </g>
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-                {/* Double chevron left — collapse */}
-                <g
-                  stroke="currentColor"
-                  strokeWidth="1.75"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                >
-                  <polyline points="17 6 13 12 17 18" />
-                  <polyline points="12 6 8 12 12 18" />
-                </g>
-              </svg>
-            )}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <g
+                stroke="currentColor"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              >
+                <polyline points="17 6 13 12 17 18" />
+                <polyline points="12 6 8 12 12 18" />
+              </g>
+            </svg>
           </button>
         </div>
       </div>
 
-      {activeCompany && onSwitchCompany && !sidebarCollapsed && (
+      {activeCompany && onSwitchCompany && (
         <CompanySwitcher activeSlug={activeCompany} onSwitch={onSwitchCompany} />
       )}
 
@@ -151,17 +242,12 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         />
         <NavItem screen="detail" icon={<IconEvidence />} label="Evidence" />
         <NavItem screen="prd" icon={<IconPrd />} label="PRD" />
-        {/* Dedicated full-page prototype surface (v4 nav). Goes through goTo
-            ("prototype") → /prototype with no PRD context; the in-PRD "Generate
-            Prototype" entry threads the ?prd=<id> param instead. */}
         <NavItem screen="prototype" icon={<IconSparkle />} label="Prototype" />
         <NavItem screen="tickets" icon={<IconTickets />} label="Project Management" />
         <div className="sb-spacer" />
 
         <div className="sb-section-title">Workspace</div>
         <NavItem screen="sources" icon={<IconSources />} label="Sources" />
-        {/* Connectors NavItem removed in commit A — Settings → Connectors
-            is the sole surface per the sprntly_Design-3 reset. */}
         <NavItem screen="settings" icon={<IconSettings />} label="Settings" />
       </div>
 
