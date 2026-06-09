@@ -5,6 +5,10 @@ __pycache__/
 venv/
 .env
 .env.local
+.env.personal
+.env.prod
+.env.personal.local
+.env.prod.local
 *.log
 .DS_Store
 .idea/
