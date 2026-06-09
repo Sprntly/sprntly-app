@@ -172,4 +172,50 @@ describe("createWorkspace slug generation", () => {
     // Did not retry on a non-23505 error.
     expect(insertedSlugs).toHaveLength(1)
   })
+
+  // RLS precondition (see migration 20260608130000_company_members_rls_first_owner):
+  // the company_members INSERT policy only allows the first-owner insert when the
+  // companies row already exists (created_by = self, 0 members). createWorkspace
+  // MUST therefore insert the companies row BEFORE the company_members row. If this
+  // ordering ever regresses, the policy would reject legitimate onboarding inserts.
+  it("inserts the companies row before the company_members row (first-owner RLS order)", async () => {
+    const insertOrder: string[] = []
+    const orig = supabaseStub.from
+    vi.spyOn(supabaseStub, "from").mockImplementation((table: string) => {
+      if (table === "companies") {
+        return {
+          insert: (row: Record<string, unknown>) => {
+            insertOrder.push("companies")
+            insertedSlugs.push(String(row.slug))
+            return { select: () => ({ single: async () => ({
+              data: { id: "company-1", slug: row.slug, created_by: row.created_by },
+              error: null,
+            }) }) }
+          },
+        }
+      }
+      if (table === "company_members") {
+        const result = Promise.resolve({ error: null }) as Promise<{ error: null }> &
+          Record<string, unknown>
+        return {
+          insert: (row: Record<string, unknown>) => {
+            insertOrder.push("company_members")
+            // The first-owner row is the creator as owner.
+            expect(row.user_id).toBe("user-1")
+            expect(row.role).toBe("owner")
+            return result
+          },
+        }
+      }
+      return makeGenericBuilder()
+    })
+
+    await createWorkspace(baseInput("Acme"))
+
+    const companiesIdx = insertOrder.indexOf("companies")
+    const memberIdx = insertOrder.indexOf("company_members")
+    expect(companiesIdx).toBeGreaterThanOrEqual(0)
+    expect(memberIdx).toBeGreaterThan(companiesIdx)
+    supabaseStub.from = orig
+  })
 })
