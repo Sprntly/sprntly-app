@@ -5,7 +5,9 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
-import { ApiError, askApi, type AskResponse } from "../../lib/api"
+import { ApiError, askApi, briefApi, prdApi, type AskResponse } from "../../lib/api"
+import { markdownToPrdState } from "../../lib/prd-adapter"
+import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
 import { IconSendUp, IconSparkle } from "./app-icons"
@@ -23,6 +25,7 @@ type AiLayout = "side" | "bottom"
 export function AIBar() {
   const {
     currentScreen,
+    goTo,
     aiBarValue,
     setAIBarValue,
     showToast,
@@ -40,6 +43,11 @@ export function AIBar() {
   const [lastReply, setLastReply] = useState<AskResponse | null>(null)
   const [askError, setAskError] = useState<string | null>(null)
   const [lastSubmittedQuestion, setLastSubmittedQuestion] = useState<string | null>(null)
+
+  // Agent command state — for "generate PRD", "create tickets", etc.
+  type AgentAction = { kind: "prd"; prdId: number; title: string; message: string }
+  const [agentAction, setAgentAction] = useState<AgentAction | null>(null)
+  const [agentWorking, setAgentWorking] = useState(false)
   const [layout, setLayout] = useState<AiLayout>(() =>
     typeof window !== "undefined" && window.matchMedia("(min-width: 901px)").matches ? "side" : "bottom",
   )
@@ -207,16 +215,76 @@ export function AIBar() {
     requestAnimationFrame(() => textareaRef.current?.focus())
   }
 
+  /** Detect agent commands like "generate PRD" */
+  const isPrdCommand = (q: string) =>
+    /\b(generate|create|write|draft|make)\b.*\bprd\b/i.test(q)
+
+  const handlePrdCommand = useCallback(async () => {
+    expandAiPanel()
+    setAgentWorking(true)
+    setAgentAction(null)
+    setLastReply(null)
+    setAskError(null)
+    setAIBarValue("")
+    const ta = textareaRef.current
+    if (ta) { ta.style.height = "auto"; ta.style.height = `${AI_TEXTAREA_MIN_PX}px` }
+
+    try {
+      // Try to get the current brief's top insight to generate a PRD from
+      const brief = await briefApi.current(activeCompany)
+      const insights = brief.insights || []
+      if (!insights.length) {
+        setAskError("No brief insights available yet. Generate a Weekly Brief first.")
+        return
+      }
+      // Use the first (top-ranked) insight
+      const insightIndex = 0
+      const insight = insights[insightIndex]
+
+      const result = await runPrdGeneration({
+        briefId: brief.id,
+        insightIndex,
+      })
+
+      if (!result.ok) {
+        setAskError(result.message)
+        return
+      }
+
+      setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex } })
+      setAgentAction({
+        kind: "prd",
+        prdId: result.prd.prd_id,
+        title: result.prd.title,
+        message: `Drafted the PRD from the "${insight.title}" insight. Opened it on the right — fully editable, auto-saving. **Goal:** ${insight.recommendation?.slice(0, 120) || insight.title}.`,
+      })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "PRD generation failed"
+      setAskError(msg)
+    } finally {
+      setAgentWorking(false)
+    }
+  }, [activeCompany, expandAiPanel, setAIBarValue, setContent])
+
   const submitAsk = useCallback(async () => {
     const q = aiBarValue.trim()
     if (q.length < 3) {
       showToast("Question too short", "Use at least 3 characters.")
       return
     }
+
+    // Detect agent commands
+    if (isPrdCommand(q)) {
+      setLastSubmittedQuestion(q)
+      void handlePrdCommand()
+      return
+    }
+
     expandAiPanel()
     setSubmitting(true)
     setAskError(null)
     setLastReply(null)
+    setAgentAction(null)
     setLastSubmittedQuestion(q)
     try {
       const res = await askApi.ask(q, activeCompany)
@@ -273,6 +341,7 @@ export function AIBar() {
     aiBarValue,
     content.conversations,
     expandAiPanel,
+    handlePrdCommand,
     setAIBarValue,
     setContent,
     showToast,
@@ -287,7 +356,7 @@ export function AIBar() {
 
   if (!showAIBar || !context) return null
 
-  const showReplyBlock = submitting || askError != null || lastReply != null
+  const showReplyBlock = submitting || agentWorking || askError != null || lastReply != null || agentAction != null
   const isSide = layout === "side"
   const showCollapsedRail = isSide && aiPanelCollapsed
 
@@ -400,10 +469,41 @@ export function AIBar() {
                       <div className="ai-bar-reply-question-text">{lastSubmittedQuestion}</div>
                     </div>
                   ) : null}
-                  {submitting ? (
-                    <AssistantThinkingSkeleton compact />
+                  {submitting || agentWorking ? (
+                    <div>
+                      <div className="ai-bar-agent-label">
+                        <IconSparkle size={14} />
+                        <span>PM Agent</span>
+                        <span className="ai-bar-agent-badge">PM AGENT</span>
+                        <span className="ai-bar-agent-status">{agentWorking ? "generating PRD…" : "thinking…"}</span>
+                      </div>
+                      <AssistantThinkingSkeleton compact />
+                    </div>
                   ) : askError ? (
                     <div className="ai-bar-reply-error">{askError}</div>
+                  ) : agentAction ? (
+                    <div className="ai-bar-agent-reply">
+                      <div className="ai-bar-agent-label">
+                        <IconSparkle size={14} />
+                        <span>PM Agent</span>
+                        <span className="ai-bar-agent-badge">PM AGENT</span>
+                        <span className="ai-bar-agent-status">PRD draft ready</span>
+                      </div>
+                      <p className="ai-bar-agent-message">{agentAction.message}</p>
+                      <div className="ai-bar-agent-actions">
+                        <button type="button" className="ai-bar-agent-btn ai-bar-agent-btn--primary" onClick={() => goTo("prd")}>
+                          Open PRD
+                        </button>
+                        <button type="button" className="ai-bar-agent-btn" onClick={() => goTo("tickets")}>
+                          Create tickets
+                        </button>
+                        <button type="button" className="ai-bar-agent-btn" onClick={() => {
+                          if (content.prd) goTo("prototype")
+                        }}>
+                          Generate prototype
+                        </button>
+                      </div>
+                    </div>
                   ) : lastReply ? (
                     <AskReplyBody reply={lastReply} animateIn simulateTyping omitCitations />
                   ) : null}

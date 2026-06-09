@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { AppLayout } from "./AppLayout"
+import { IconSortAscendingLetters, IconAdjustments, IconFilter, IconPlus, IconUpload, IconSparkles } from "@tabler/icons-react"
 import { EmptyPane } from "../../shared/EmptyPane"
 
 export type InternalTicket = {
@@ -54,7 +55,7 @@ const COLUMNS: InternalTicket["status"][] = ["Backlog", "In progress", "In revie
 const CATEGORIES = ["Product", "Design", "Backend", "Frontend", "AI", "Infra", "Analytics", "CS"]
 
 const COL_DOT: Record<string, string> = {
-  Backlog: "#9CA3AF", "In progress": "#F59E0B", "In review": "#8B5CF6", Done: "#10B981",
+  Backlog: "#AAB3AE", "In progress": "#2a6ec8", "In review": "#c16a0b", Done: "#179463",
 }
 
 const PRIORITY_LABELS: Record<string, string> = {
@@ -66,11 +67,11 @@ const PRIORITY_STYLE: Record<string, { bg: string; color: string }> = {
   P2: { bg: "#DBEAFE", color: "#2563EB" }, P3: { bg: "#F3F4F6", color: "#6B7280" },
 }
 
-const CAT_STYLE: Record<string, { bg: string; color: string }> = {
-  Product: { bg: "#DBF1E7", color: "#0E6E49" }, Design: { bg: "#DBF1E7", color: "#0E6E49" },
-  Backend: { bg: "#D1FAE5", color: "#065F46" }, Frontend: { bg: "#EDE9FE", color: "#6D28D9" },
-  AI: { bg: "#FEF3C7", color: "#92400E" }, Infra: { bg: "#DBEAFE", color: "#1E40AF" },
-  Analytics: { bg: "#E0E7FF", color: "#3730A3" }, CS: { bg: "#DBEAFE", color: "#1E40AF" },
+const CAT_STYLE: Record<string, { bg: string; color: string; bordercolor: string }> = {
+  Product: { bg: "#DBF1E7", color: "#0E6E49", bordercolor: "#9BDcc1" }, Design: { bg: "#DBF1E7", color: "#0E6E49", bordercolor: "#9BDcc1" },
+  Backend: { bg: "#D1FAE5", color: "#065F46", bordercolor: "#9BDcc1" }, Frontend: { bg: "#EDE9FE", color: "#6D28D9", bordercolor: "#BDABE0" },
+  AI: { bg: "#FEF3C7", color: "#92400E", bordercolor: "#F0BF73" }, Infra: { bg: "#DBEAFE", color: "#1E40AF", bordercolor: "#9BDcc1" },
+  Analytics: { bg: "#E0E7FF", color: "#3730A3", bordercolor: "#BDABE0" }, CS: { bg: "#DBEAFE", color: "#1E40AF", bordercolor: "#9CBDEA" },
 }
 
 const TAG_STYLE: Record<string, { bg: string; color: string }> = {
@@ -83,8 +84,8 @@ function initials(name: string): string {
 }
 
 const selectStyle: React.CSSProperties = {
-  fontSize: 12.5, padding: "4px 8px", borderRadius: 6,
-  border: "1px solid var(--line-strong, #D5D3CC)", background: "var(--surface, #fff)", cursor: "pointer",
+  fontSize: 12.5, padding: "3px 10px", borderRadius: 6,
+  border: "1px solid var(--line-strong, #D5D3CC)", background: "#fff", cursor: "pointer",
 }
 
 const inputStyle: React.CSSProperties = {
@@ -94,7 +95,7 @@ const inputStyle: React.CSSProperties = {
 
 const toolBtnStyle: React.CSSProperties = {
   fontSize: 12, padding: "5px 10px", background: "var(--surface-2, #F4F1EA)",
-  border: "1px solid var(--line, #E8E6E0)", borderRadius: 7, color: "var(--ink-2, #5A5853)", cursor: "pointer",
+  border: "1px solid var(--line, #E8E6E0)", borderRadius: 17, color: "var(--ink-2, #5A5853)", cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
 }
 
 // ── Add Ticket Modal ──
@@ -180,19 +181,19 @@ function KanbanCard({ ticket, onDragStart, onClick, isDone, isSelected }: {
       style={{
         background: "#fff", borderRadius: 10,
         border: isSelected ? "2px solid var(--accent, #179463)" : "1px solid var(--line, #E8E6E0)",
-        padding: isSelected ? "13px 15px" : "14px 16px", cursor: "pointer",
+        padding: isSelected ? "13px 15px" : "14px 15px", cursor: "pointer",
         opacity: isDone ? 0.55 : 1, transition: "box-shadow 0.15s, opacity 0.2s, border 0.15s",
       }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = "0 2px 8px rgba(0,0,0,0.06)" }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.boxShadow = "none" }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.border = "1px solid #9BDcc1" }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.border = "1px solid transparent" }}
     >
       <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink, #1A1A17)", lineHeight: 1.45, marginBottom: 10 }}>{ticket.title}</div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ display: "inline-block", fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 5, background: cat.bg, color: cat.color }}>{ticket.category}</span>
+        <span style={{ display: "inline-block", fontSize: 11, fontWeight: 400, padding: "2px 10px", borderRadius: 30, background: cat.bg, color: cat.color }}>{ticket.category}</span>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {!isDone && <span style={{ width: 8, height: 8, borderRadius: "50%", background: pri.color, flexShrink: 0 }} />}
           {ticket.assignee && (
-            <span style={{ width: 26, height: 26, borderRadius: "50%", fontSize: 10, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", background: cat.bg, color: cat.color, flexShrink: 0 }}>{initials(ticket.assignee)}</span>
+            <span style={{ width: 23, height: 23, borderRadius: "50%", fontSize: 10, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", background: cat.bg, border: 1, borderStyle: "solid", borderColor: cat.bordercolor, color: cat.color, flexShrink: 0 }}>{initials(ticket.assignee)}</span>
           )}
         </div>
       </div>
@@ -219,10 +220,12 @@ function KanbanColumn({ status, tickets, onDragStart, onDrop, onCardClick, selec
 
   return (
     <div style={{ flex: 1, minWidth: 220 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, paddingLeft: 2 }}>
-        <span style={{ width: 9, height: 9, borderRadius: "50%", background: COL_DOT[status], flexShrink: 0 }} />
-        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink, #1A1A17)" }}>{status}</span>
-        <span style={{ fontSize: 12, color: "var(--ink-4, #B0AEA6)", fontWeight: 400 }}>{tickets.length}</span>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, paddingLeft: 2 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: COL_DOT[status], flexShrink: 0 }} />
+          <span style={{ fontSize: "12.5px", fontWeight: 500, color: "var(--ink, #1A1A17)" }}>{status}</span>
+        </div>
+        <span style={{ padding: "0px 8px", fontSize: 11, background: "#EEF0EE", color: "var(--ink-4, #82D887)", borderRadius: 30, fontWeight: 400 }}>{tickets.length}</span>
       </div>
       <div
         onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
@@ -284,8 +287,8 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
 
   return (
     <div style={{
-      width: 440, flexShrink: 0, borderLeft: "1px solid var(--line, #E8E6E0)", background: "var(--surface, #fff)",
-      display: "flex", flexDirection: "column", height: "100%", overflow: "hidden",
+      width: 675, flexShrink: 0, borderLeft: "1px solid var(--line, #E8E6E0)", background: "#fff",
+      display: "flex", flexDirection: "column", height: "calc(100vh - 106px)", overflow: "auto",
     }}>
       {/* Header */}
       <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--line, #E8E6E0)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -311,9 +314,9 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
 
         {/* AI Summary */}
         {ticket.description && (
-          <div style={{ background: "var(--surface-2, #F4F1EA)", borderRadius: 10, padding: "14px 16px", marginBottom: 20, border: "1px solid var(--line, #E8E6E0)" }}>
-            <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--accent, #179463)", marginBottom: 6 }}>AI Summary</div>
-            <div style={{ fontSize: 12.5, color: "var(--ink, #1A1A17)", lineHeight: 1.55 }}>
+          <div style={{ background: "#edf8f2", borderRadius: 10, padding: "14px 16px", marginBottom: 20, border: "1px solid var(--line, #E8E6E0)" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--accent, #179463)", marginBottom: 6 }}><IconSparkles/> AI Summary</div>
+            <div style={{ fontSize: 12.5, color: "#4a554f", lineHeight: 1.55 }}>
               {ticket.description.slice(0, 200)}{ticket.description.length > 200 ? "..." : ""}
             </div>
           </div>
@@ -400,10 +403,10 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
 
       {/* Footer */}
       <div style={{ padding: "12px 20px", borderTop: "1px solid var(--line, #E8E6E0)", display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12, color: "var(--ink-3, #8C8A84)" }}>
-        <span><strong>Ticket synced</strong> · PRD attached</span>
+        <span style={{ color: "#15201b", fontWeight: 400, fontSize: 12 }}><strong style={{ fontWeight: 500 }}>Ticket synced</strong> · PRD attached</span>
         <div style={{ display: "flex", gap: 8 }}>
-          <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 7, border: "1px solid var(--line, #E8E6E0)", background: "var(--surface, #fff)", cursor: "pointer", color: "var(--ink-2, #5A5853)" }}>Send to Jira</button>
-          <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 7, background: "var(--accent, #179463)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 600 }}>Send to Claude Code</button>
+          <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 30, border: "1px solid var(--line, #E8E6E0)", background: "var(--surface, #fff)", cursor: "pointer", color: "var(--ink-2, #5A5853)" }}>Send to Jira</button>
+          <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 30, background: "var(--accent, #179463)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 400 }}>Send to Claude Code</button>
         </div>
       </div>
     </div>
@@ -465,23 +468,24 @@ export function TicketsScreen() {
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <span style={{ fontSize: 15, color: "var(--accent, #179463)" }}>📋</span>
               <span style={{ fontSize: 15, fontWeight: 600, color: "var(--ink, #1A1A17)" }}>Tickets</span>
-              <span style={{ fontSize: 12, color: "var(--ink-4, #B0AEA6)", fontWeight: 400 }}>{total} ticket{total !== 1 ? "s" : ""}</span>
+              <span style={{ fontSize: 12, color: "var(--ink-4, #828D87)", fontWeight: 400 }}>{total} ticket{total !== 1 ? "s" : ""}</span>
+
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button type="button" style={toolBtnStyle}>Import CSV</button>
+              <button type="button" style={toolBtnStyle}><IconUpload size={13} color="#5A5853" /> Import CSV</button>
               <button type="button" onClick={() => setShowAdd(true)} style={{
-                fontSize: 12, padding: "6px 12px", background: "var(--accent, #179463)", color: "#fff", border: "none",
-                borderRadius: 8, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer",
-              }}>+ Add ticket</button>
+                fontSize: 12, padding: "5px 12px", background: "var(--accent, #179463)", color: "#fff", border: "none",
+                borderRadius: 15, fontWeight: 400, display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer",
+              }}><IconPlus size={13} color="#fff" /> Add ticket</button>
             </div>
           </div>
 
           {/* Toolbar */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
-            <button type="button" style={toolBtnStyle}>Filter</button>
+            <button type="button" style={toolBtnStyle}><IconFilter size={13} color="#5A5853" /> Filter</button>
             <div style={{ display: "flex", gap: 6 }}>
-              <button type="button" style={toolBtnStyle}>Group</button>
-              <button type="button" style={toolBtnStyle}>Display</button>
+              <button type="button" style={toolBtnStyle}><IconSortAscendingLetters size={13} color="#5A5853" /> Group</button>
+              <button type="button" style={toolBtnStyle}><IconAdjustments size={13} color="#5A5853" /> Display</button>
             </div>
           </div>
 
