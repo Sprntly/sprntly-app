@@ -27,4 +27,16 @@ describe("onboarding step renumbering", () => {
     expect(screenIdFromPathname("/onboarding/8")).toBe("chat")
     expect(ONBOARDING_SCREENS).not.toContain("ob-8")
   })
+
+  it("the analyzing interstitial is NOT a numbered onboarding step", () => {
+    // /onboarding/analyzing is a transient, unnumbered route — it must not map
+    // to an ob-N screen id (so it's excluded from the progress-dot count) and
+    // must not appear in the numbered onboarding screen list.
+    expect(ONBOARDING_SCREENS).not.toContain("ob-analyzing")
+    // Its path does not resolve to a numbered onboarding screen.
+    const analyzingScreen = screenIdFromPathname("/onboarding/analyzing")
+    expect(
+      ONBOARDING_SCREENS.includes(analyzingScreen),
+    ).toBe(false)
+  })
 })

@@ -1,12 +1,14 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
+import { useFieldValidation } from "../../onboarding/InterviewLayout"
+import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
 import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
 import type { SuggestedMetric } from "../../../lib/api"
+import { Check, InfoCircle, Plus, Sparkles } from "../../auth/icons"
 import {
   buildKpiTreePayload,
   canSaveKpiTree,
@@ -17,16 +19,21 @@ import {
 } from "../../../lib/onboarding/kpiTreeApi"
 
 /**
- * Onboarding page 04 — "Success metrics" (single consolidated step; merges the
- * old KPI-tree + success-metrics pages into one).
+ * Onboarding metrics page (route /onboarding/2 in the new flow; component name
+ * kept as Onboarding4 to avoid churning the other-PR-owned screens). Restyled
+ * to the v4 `.metric-tree` design.
  *
- * Renders the website-analysis `suggested_metrics` as SELECTABLE options (each
- * showing metric + description), lets the user add their own {metric,
- * description}, and shows the predicted industry + business_type as ALWAYS
- * editable dropdowns (pre-filled from the analysis; the user can override
- * anytime). On save we persist the confirmed industry/business_type to the
- * company and the selected + custom metrics to the KPI tree
- * (PUT /v1/company/kpi-tree).
+ * Renders the website-analysis `suggested_metrics` as SELECTABLE metric-tree
+ * cards (metric + description in the title), lets the user add their own
+ * {metric, description} via `.metric-other`, and shows the predicted industry +
+ * business_type as ALWAYS-editable dropdowns (pre-filled from the analysis; the
+ * user can override anytime, guarded by a `touched` flag). On save we persist
+ * the confirmed industry/business_type to the company and the selected + custom
+ * metrics to the KPI tree (PUT /v1/company/kpi-tree).
+ *
+ * The analysis is now produced by the BLOCKING `/onboarding/analyzing`
+ * interstitial that precedes this page, so by the time we render the result is
+ * already on context (or null → graceful manual fallback).
  */
 
 const MAX_SUPPORTING = MAX_PRIMARY_METRICS + MAX_SECONDARY_SIGNALS
@@ -103,55 +110,62 @@ export function MetricsSetupView({
 
   return (
     <>
-      {error && <div className="ob-form-error">{error}</div>}
+      {error && <div className="onb-form-error">{error}</div>}
 
-      <div className="ob-predicted-grid">
-        <div className="field" data-field="industry">
-          <label className="field-label">Industry</label>
-          <p className="field-hint">Predicted from your website — change if it&apos;s off.</p>
-          <select
-            className="input"
-            value={industry}
-            onChange={(e) => onChangeIndustry(e.target.value)}
-            aria-label="Industry"
-          >
-            {INDUSTRIES.map((i) => (
-              <option key={i}>{i}</option>
-            ))}
-          </select>
+      <div className="onb-section">
+        <div className="onb-section-h">
+          Your business <span className="opt">— predicted from your website, edit if it&apos;s off</span>
         </div>
-        <div className="field" data-field="businessType">
-          <label className="field-label">Business type</label>
-          <p className="field-hint">Predicted from your website — change if it&apos;s off.</p>
-          <select
-            className="input"
-            value={businessType}
-            onChange={(e) => onChangeBusinessType(e.target.value)}
-            aria-label="Business type"
-          >
-            {BUSINESS_TYPES.map((b) => (
-              <option key={b}>{b}</option>
-            ))}
-          </select>
+        <div className="form-grid">
+          <div className="field" data-field="industry">
+            <div className="field-l">Industry</div>
+            <select
+              className="inp"
+              value={industry}
+              onChange={(e) => onChangeIndustry(e.target.value)}
+              aria-label="Industry"
+            >
+              {INDUSTRIES.map((i) => (
+                <option key={i}>{i}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field" data-field="businessType">
+            <div className="field-l">Business type</div>
+            <select
+              className="inp"
+              value={businessType}
+              onChange={(e) => onChangeBusinessType(e.target.value)}
+              aria-label="Business type"
+            >
+              {BUSINESS_TYPES.map((b) => (
+                <option key={b}>{b}</option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 
-      <div className={`field ${errors.northStar ? "has-error" : ""}`} data-field="northStar">
-        <label className="field-label">Primary metric — your North Star *</label>
+      <div className="onb-section" data-field="northStar">
+        <div className="onb-section-h">
+          Primary metric <span className="opt">— your North Star, required</span>
+        </div>
         <input
-          className="input"
+          className={`inp ${errors.northStar ? "has-error" : ""}`}
           value={northStar}
           onChange={(e) => onChangeNorthStar(e.target.value)}
           placeholder="The one metric that best captures product value"
         />
-        {errors.northStar && <p className="field-error">{errors.northStar}</p>}
-        <div className="ob-ns-hints">
-          <span className="ob-ns-hints-label">Common for {industry || "your stage"}:</span>
+        {errors.northStar && <p className="onb-field-error">{errors.northStar}</p>}
+        <div className="metric-other-l" style={{ marginTop: 12 }}>
+          Common for {industry || "your stage"}
+        </div>
+        <div className="onb-chip-row">
           {northStarHints.map((h) => (
             <button
               key={h}
               type="button"
-              className="metric-chip"
+              className="onb-chip"
               onClick={() => onPickNorthStar(h)}
             >
               {h}
@@ -159,7 +173,8 @@ export function MetricsSetupView({
           ))}
         </div>
         <textarea
-          className="input ob-metric-desc"
+          className="inp"
+          style={{ marginTop: 12 }}
           value={northStarDescription}
           onChange={(e) => onChangeNorthStarDescription(e.target.value)}
           placeholder="Describe what this metric means and why it matters (context for goal-fit scoring)"
@@ -168,95 +183,105 @@ export function MetricsSetupView({
         />
       </div>
 
-      <div className="field">
-        <label className="field-label">Suggested supporting metrics</label>
-        {suggestedMetrics.length > 0 ? (
-          <>
-            <p className="field-hint">
-              Drafted from your website — select the ones that fit.
-            </p>
-            <ul className="ob-suggested-list">
-              {suggestedMetrics.map((m) => {
+      <div className="onb-section">
+        <div className="onb-section-h">
+          Supporting metrics <span className="opt">— pick what fits, or write your own</span>
+        </div>
+
+        <div className="metric-tree">
+          <div className="mt-source">
+            <div className="mt-source-dot" />
+            <div className="mt-source-lbl">Primary leads to…</div>
+          </div>
+          {suggestedMetrics.length > 0 ? (
+            <div className="mt-targets" id="suggestedMetrics">
+              {suggestedMetrics.map((m, i) => {
                 const sel = isSelected(m.metric)
                 return (
-                  <li key={m.metric}>
-                    <button
-                      type="button"
-                      className={`ob-suggested-card ${sel ? "selected" : ""}`}
-                      aria-pressed={sel}
-                      data-metric={m.metric}
-                      onClick={() => onToggleSuggested(m)}
-                    >
-                      <span className="ob-suggested-check" aria-hidden>
-                        {sel ? "✓" : "+"}
-                      </span>
-                      <span className="ob-suggested-body">
-                        <span className="ob-suggested-name">{m.metric}</span>
-                        {m.description && (
-                          <span className="ob-suggested-desc">{m.description}</span>
-                        )}
-                      </span>
-                    </button>
-                  </li>
+                  <button
+                    key={m.metric}
+                    type="button"
+                    className={`metric mt-suggested ${sel ? "sel" : ""}`}
+                    style={{ ["--d" as string]: `${0.05 * (i + 1)}s` }}
+                    aria-pressed={sel}
+                    data-metric={m.metric}
+                    title={m.description || undefined}
+                    onClick={() => onToggleSuggested(m)}
+                  >
+                    <span className="mt-ic" aria-hidden>
+                      {sel ? (
+                        <Check style={{ width: 12, height: 12 }} />
+                      ) : (
+                        <Sparkles style={{ width: 12, height: 12 }} />
+                      )}
+                    </span>
+                    {m.metric}
+                  </button>
                 )
               })}
-            </ul>
-          </>
-        ) : (
-          <p className="field-hint ob-no-suggestions">
-            No suggestions yet — add your own metrics below.
-          </p>
-        )}
-      </div>
-
-      <div className="field">
-        <label className="field-label">Add your own</label>
-        <div className="ob-custom-metric">
-          <input
-            className="input"
-            value={customMetric}
-            onChange={(e) => onChangeCustomMetric(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault()
-                onAddCustom()
-              }
-            }}
-            placeholder="Metric name"
-            maxLength={80}
-            aria-label="Custom metric name"
-          />
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={onAddCustom}
-            disabled={!customMetric.trim() || supporting.length >= MAX_SUPPORTING}
-          >
-            Add
-          </button>
+            </div>
+          ) : (
+            <p className="onb-field-hint" style={{ textAlign: "center" }}>
+              No suggestions yet — add your own metrics below.
+            </p>
+          )}
         </div>
-        <textarea
-          className="input ob-metric-desc"
-          value={customDescription}
-          onChange={(e) => onChangeCustomDescription(e.target.value)}
-          placeholder="Describe what this metric means and why it matters (optional)"
-          rows={2}
-          maxLength={400}
-          aria-label="Custom metric description"
-        />
-      </div>
 
-      <div className="field">
-        <p className="ob-metric-count">
-          {supporting.length} supporting metric{supporting.length === 1 ? "" : "s"} selected
-        </p>
+        <div className="metric-other">
+          <div className="metric-other-l">Or write your own</div>
+          <div className="metric-other-row">
+            <input
+              className="inp"
+              value={customMetric}
+              onChange={(e) => onChangeCustomMetric(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault()
+                  onAddCustom()
+                }
+              }}
+              placeholder="e.g., Net new enterprise logos per quarter"
+              maxLength={80}
+              aria-label="Custom metric name"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={onAddCustom}
+              disabled={!customMetric.trim() || supporting.length >= MAX_SUPPORTING}
+            >
+              <Plus style={{ width: 13, height: 13 }} aria-hidden /> Add
+            </button>
+          </div>
+          <textarea
+            className="inp"
+            style={{ marginTop: 10 }}
+            value={customDescription}
+            onChange={(e) => onChangeCustomDescription(e.target.value)}
+            placeholder="Describe what this metric means and why it matters (optional)"
+            rows={2}
+            maxLength={400}
+            aria-label="Custom metric description"
+          />
+        </div>
+
+        <div className="metric-count">
+          <span className="mt-ic" aria-hidden>
+            <InfoCircle style={{ width: 13, height: 13 }} />
+          </span>
+          <span>
+            <strong>{supporting.length}</strong> supporting metric
+            {supporting.length === 1 ? "" : "s"} selected
+          </span>
+        </div>
+
         {supporting.length > 0 && (
-          <div className="ob-metric-desc-list">
+          <div>
             {supporting.map((m) => (
-              <div key={m.name} className="ob-metric-desc-block" data-metric={m.name}>
-                <label className="ob-metric-desc-label">{m.name}</label>
+              <div key={m.name} className="metric-desc-block" data-metric={m.name}>
+                <label className="metric-desc-l">{m.name}</label>
                 <textarea
-                  className="input ob-metric-desc"
+                  className="inp"
                   value={m.description}
                   onChange={(e) => onChangeSupportingDescription(m.name, e.target.value)}
                   placeholder="Describe what this metric means and why it matters"
@@ -268,105 +293,6 @@ export function MetricsSetupView({
           </div>
         )}
       </div>
-
-      <style jsx>{`
-        .ob-predicted-grid {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 14px;
-        }
-        @media (max-width: 560px) {
-          .ob-predicted-grid {
-            grid-template-columns: 1fr;
-          }
-        }
-        .ob-ns-hints {
-          display: flex;
-          flex-wrap: wrap;
-          align-items: center;
-          gap: 8px;
-          margin-top: 10px;
-        }
-        .ob-ns-hints-label {
-          font-size: 12px;
-          color: var(--muted);
-        }
-        .ob-suggested-list {
-          list-style: none;
-          margin: 8px 0 0;
-          padding: 0;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-        .ob-suggested-card {
-          display: flex;
-          align-items: flex-start;
-          gap: 10px;
-          width: 100%;
-          text-align: left;
-          padding: 12px 14px;
-          border: 1px solid var(--line);
-          border-radius: 10px;
-          background: var(--surface);
-          cursor: pointer;
-          transition: border-color 0.15s, background 0.15s;
-        }
-        .ob-suggested-card:hover {
-          border-color: var(--accent);
-        }
-        .ob-suggested-card.selected {
-          border-color: var(--accent);
-          background: var(--accent-soft, rgba(15, 111, 78, 0.06));
-        }
-        .ob-suggested-check {
-          font-weight: 600;
-          color: var(--accent);
-          flex-shrink: 0;
-        }
-        .ob-suggested-body {
-          display: flex;
-          flex-direction: column;
-          gap: 2px;
-        }
-        .ob-suggested-name {
-          font-size: 14px;
-          font-weight: 600;
-        }
-        .ob-suggested-desc {
-          font-size: 12.5px;
-          color: var(--ink-3);
-          line-height: 1.4;
-        }
-        .ob-custom-metric {
-          display: flex;
-          gap: 8px;
-        }
-        .ob-custom-metric :global(.input) {
-          flex: 1;
-        }
-        .ob-metric-count {
-          font-size: 12px;
-          color: var(--muted);
-          margin: 0;
-        }
-        .ob-metric-desc {
-          width: 100%;
-          margin-top: 10px;
-          resize: vertical;
-        }
-        .ob-metric-desc-list {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          margin-top: 14px;
-        }
-        .ob-metric-desc-label {
-          display: block;
-          font-size: 13px;
-          font-weight: 600;
-        }
-      `}</style>
     </>
   )
 }
@@ -483,21 +409,17 @@ export function Onboarding4() {
       await kpiTreeApi.put(
         buildKpiTreePayload(northStar, northStarDescription, supporting),
       )
-      const updated = await advanceOnboardingStep(workspace.id, 5)
+      // Next numbered step is the optimizing-for page (route 3).
+      const updated = await advanceOnboardingStep(workspace.id, 3)
       const product = updated.product ?? workspace.product
       setWorkspace({ ...updated, product })
-      router.push("/onboarding/5")
+      router.push("/onboarding/3")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your metrics.")
     } finally {
       setSaving(false)
     }
   }
-
-  const previewMetrics = useMemo(
-    () => supporting.slice(0, MAX_SUPPORTING),
-    [supporting],
-  )
 
   // Redirect when there's no workspace to anchor the step. Done in an effect
   // (not during render) so navigation never fires as a render side-effect —
@@ -507,36 +429,26 @@ export function Onboarding4() {
     if (!loading && !workspace) router.replace("/onboarding/1")
   }, [loading, workspace, router])
 
-  if (loading || !workspace) return <div className="ob-shell">Loading…</div>
+  if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
-    <InterviewLayout
-      step={4}
-      eyebrow="Saved · auto-saves after every step"
-      title="Set your success metrics"
-      agentMessage="Success metrics anchor the whole workspace. I've drafted suggestions and predicted your industry from your website — confirm what fits, add your own, and set the North Star they all ladder up to."
-      rightPane={
-        <div>
-          <div className="ob-preview-label">Success metrics</div>
-          {!northStar ? (
-            <p className="ob-preview-empty">
-              Set a North Star and supporting metrics to see your KPI tree take
-              shape.
-            </p>
-          ) : (
-            <ul className="ob-preview-list">
-              <li>
-                <strong>North Star:</strong> {northStar}
-              </li>
-              {previewMetrics.map((m) => (
-                <li key={m.name}>{m.name}</li>
-              ))}
-            </ul>
-          )}
-        </div>
+    <OnboardingChrome
+      step={2}
+      saveLabel="Saved · auto-saves"
+      title={
+        <>
+          Set your success <em>metrics.</em>
+        </>
       }
-      onBack={() => router.push("/onboarding/3")}
+      subtitle="Success metrics anchor the whole workspace. We've drafted suggestions and predicted your business from your website — confirm what fits, add your own, and set the North Star they all ladder up to."
+      footerMeta={
+        northStar
+          ? `North Star + ${supporting.length} supporting metric${supporting.length === 1 ? "" : "s"} captured`
+          : "Set a North Star to continue"
+      }
+      onBack={() => router.push("/onboarding/1")}
       onContinue={persist}
+      continueDisabled={saving}
       loading={saving}
     >
       <div ref={containerRef}>
@@ -576,6 +488,6 @@ export function Onboarding4() {
           onAddCustom={addCustom}
         />
       </div>
-    </InterviewLayout>
+    </OnboardingChrome>
   )
 }

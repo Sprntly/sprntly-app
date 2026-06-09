@@ -66,16 +66,16 @@ export function Onboarding2() {
 
   return (
     <InterviewLayout
-      step={2}
+      step={3}
       eyebrow="Strategic context"
       title="What are you optimizing for right now?"
       agentMessage="OKRs and current priorities weight my recommendations. Dead ends and recent decisions prevent me from re-suggesting paths you've already ruled out."
       rightPane={
         <PreviewCard okrs={okrs} risk={biggestRisk} deadEnds={deadEnds} />
       }
-      onBack={() => router.push("/onboarding/1")}
-      onContinue={() => save(3)}
-      onSkip={() => save(3, ["okrs", "recent_decisions", "dead_ends", "biggest_risk"])}
+      onBack={() => router.push("/onboarding/2")}
+      onContinue={() => save(4)}
+      onSkip={() => save(4, ["okrs", "recent_decisions", "dead_ends", "biggest_risk"])}
       loading={saving}
     >
       <div className="field">

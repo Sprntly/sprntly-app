@@ -396,9 +396,9 @@ export function Onboarding3() {
           }
         }
       }
-      const updated = await advanceOnboardingStep(workspace.id, 4)
+      const updated = await advanceOnboardingStep(workspace.id, 5)
       setWorkspace(updated)
-      router.push("/onboarding/4")
+      router.push("/onboarding/5")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your context.")
     } finally {
@@ -426,7 +426,7 @@ export function Onboarding3() {
 
   return (
     <InterviewLayout
-      step={3}
+      step={4}
       eyebrow="Saved · auto-saves after every step"
       title="Share your business context"
       agentMessage="Hand me whatever explains how your business thinks — strategy docs, decks, notes, or links. I've drafted a starting blurb from your website; edit it or add your own. Skip if you'd rather I work from your website and connectors alone."
@@ -451,7 +451,7 @@ export function Onboarding3() {
           )}
         </div>
       }
-      onBack={() => router.push("/onboarding/2")}
+      onBack={() => router.push("/onboarding/3")}
       onContinue={() => persist(false)}
       onSkip={() => persist(true)}
       continueLabel={hasAnything ? "Continue" : "Continue without context"}

@@ -10334,3 +10334,566 @@
     margin-bottom: 12px;
     text-align: left;
   }
+
+  /* ============================================================
+   V4 ONBOARDING SCENES (Company / Analyzing / Metrics)
+   Ported from the v4 design kit (sprntly.css .onb-* / .metric-*
+   rules). Design tokens are remapped to this app's Lightfield
+   theme — design --brand → --accent (#179463), --bg2 →
+   --surface-2, --text2 → --ink-2, --r-sm → --radius-sm, --ff →
+   --font-serif, etc. Form primitives (.field/.inp/.form-grid)
+   are SCOPED under .onb-card / .onb-shell so they don't restyle
+   the rest of the app — mirrors how the auth port scoped
+   .auth-card .inp. The Tabler icon webfont is NOT used; inline
+   SVGs come from components/auth/icons.tsx.
+   ============================================================ */
+  .onb-shell {
+    flex: 1;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 24px 36px;
+    overflow-y: auto;
+    position: relative;
+    background: radial-gradient(ellipse 800px 400px at top, var(--accent-alpha-06) 0%, transparent 60%), var(--surface);
+  }
+
+  .onb-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    max-width: 720px;
+    margin-bottom: 16px;
+  }
+
+  .onb-head .onb-brand {
+    font-size: 16px;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+    color: var(--ink);
+  }
+
+  .onb-head .onb-brand .dot {
+    color: var(--accent);
+  }
+
+  .onb-head .save {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--ink-3);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .onb-head .save .pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: onbPulse 2.4s infinite;
+  }
+
+  @keyframes onbPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+
+  .onb-dots {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 0 auto;
+  }
+
+  .onb-dots .od {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--surface-4);
+    transition: all 0.25s ease;
+  }
+
+  .onb-dots .od.done {
+    background: var(--accent-2);
+  }
+
+  .onb-dots .od.cur {
+    background: var(--accent);
+    width: 22px;
+    border-radius: 5px;
+  }
+
+  .onb-card {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    padding: 30px 40px 28px;
+    width: 100%;
+    max-width: 720px;
+    box-shadow: var(--shadow-md);
+  }
+
+  .onb-h {
+    font-family: var(--font-serif);
+    font-size: 30px;
+    font-weight: 400;
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    margin-bottom: 8px;
+    color: var(--ink);
+  }
+
+  .onb-h em {
+    font-style: italic;
+    color: var(--accent);
+  }
+
+  .onb-sub {
+    font-size: 13.5px;
+    color: var(--ink-2);
+    margin-bottom: 22px;
+    line-height: 1.55;
+    max-width: 560px;
+  }
+
+  .onb-section {
+    margin-bottom: 20px;
+  }
+
+  .onb-section:last-child {
+    margin-bottom: 0;
+  }
+
+  .onb-section-h {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-3);
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .onb-section-h::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+  }
+
+  .onb-section-h .opt {
+    color: var(--ink-4);
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    font-size: 10.5px;
+  }
+
+  .onb-footer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    max-width: 720px;
+    margin-top: 24px;
+  }
+
+  .onb-footer .meta {
+    font-size: 11.5px;
+    color: var(--ink-3);
+    flex: 1;
+  }
+
+  .onb-foot-meta {
+    margin-top: 34px;
+    font-size: 11px;
+    color: var(--ink-4);
+    text-align: center;
+  }
+
+  /* Form primitives — scoped to the onboarding card/footer. */
+  .onb-card .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px 18px;
+  }
+
+  .onb-card .form-grid .field.full {
+    grid-column: 1 / -1;
+  }
+
+  .onb-card .field {
+    margin-bottom: 16px;
+  }
+
+  .onb-card .field-l {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ink-2);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 7px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .onb-card .field-l .req {
+    color: var(--accent);
+  }
+
+  .onb-card .field-l .opt {
+    color: var(--ink-4);
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    font-size: 10.5px;
+  }
+
+  .onb-card .inp {
+    width: 100%;
+    font-size: 14px;
+    padding: 11px 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--ink);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  .onb-card select.inp {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 32px;
+    cursor: pointer;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238C8576' stroke-width='2'><polyline points='6 9 12 15 18 9'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 12px;
+  }
+
+  .onb-card .inp:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .onb-card .inp::placeholder {
+    color: var(--ink-4);
+  }
+
+  .onb-card .inp.has-error {
+    border-color: #C13838;
+  }
+
+  .onb-field-hint {
+    font-size: 10.5px;
+    color: var(--ink-3);
+    margin: 6px 0 0;
+  }
+
+  .onb-field-error {
+    font-size: 11.5px;
+    color: #C13838;
+    margin: 6px 0 0;
+  }
+
+  .onb-form-error {
+    color: #C13838;
+    font-size: 13px;
+    padding: 8px 12px;
+    background: rgba(193, 56, 56, 0.08);
+    border-radius: var(--radius-sm);
+    margin-bottom: 16px;
+  }
+
+  /* Buttons — scoped pill styling, mirrors the auth port. */
+  .onb-shell .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    font-size: 13.5px;
+    font-weight: 500;
+    padding: 11px 18px;
+    border-radius: 30px;
+    border: 1px solid transparent;
+    transition: background 0.15s, border-color 0.15s, transform 0.08s;
+    cursor: pointer;
+    letter-spacing: -0.002em;
+  }
+
+  .onb-shell .btn-brand {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .onb-shell .btn-brand:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  .onb-shell .btn-brand:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .onb-shell .btn-secondary {
+    background: var(--surface-2);
+    border-color: var(--line-strong);
+    color: var(--ink);
+  }
+
+  .onb-shell .btn-secondary:hover {
+    background: var(--surface-3);
+  }
+
+  .onb-shell .btn-secondary:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .onb-shell .btn-ghost {
+    background: transparent;
+    color: var(--ink-2);
+    padding: 10px 14px;
+  }
+
+  .onb-shell .btn-ghost:hover {
+    color: var(--ink);
+    background: var(--surface-3);
+  }
+
+  .onb-shell .btn-ghost:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  /* Stage / tech chip rows. */
+  .onb-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .onb-chip {
+    font-size: 13px;
+    padding: 8px 15px;
+    border: 1px solid var(--line-strong);
+    border-radius: 30px;
+    background: var(--surface-2);
+    color: var(--ink-2);
+    transition: all 0.12s;
+    cursor: pointer;
+  }
+
+  .onb-chip:hover {
+    border-color: var(--ink-2);
+    color: var(--ink);
+  }
+
+  .onb-chip.sel {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--surface-2);
+    font-weight: 500;
+  }
+
+  /* Metric tree (suggested success metrics). */
+  .metric-tree {
+    position: relative;
+    padding: 6px 0 18px;
+  }
+
+  .mt-source {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+
+  .mt-source-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 5px var(--accent-soft);
+    animation: mtPulse 2s infinite;
+  }
+
+  @keyframes mtPulse {
+    0%, 100% { box-shadow: 0 0 0 5px var(--accent-soft); }
+    50% { box-shadow: 0 0 0 9px var(--accent-alpha-05); }
+  }
+
+  .mt-source-lbl {
+    font-size: 10.5px;
+    color: var(--ink-3);
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .mt-rays {
+    width: 100%;
+    height: 60px;
+    display: block;
+    margin-bottom: 8px;
+  }
+
+  .mt-targets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    justify-content: center;
+  }
+
+  .metric {
+    font-size: 13px;
+    padding: 8px 15px;
+    border: 1px solid var(--line-strong);
+    border-radius: 30px;
+    background: var(--surface-2);
+    color: var(--ink-2);
+    transition: all 0.12s;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    text-align: left;
+  }
+
+  .metric:hover {
+    border-color: var(--ink-2);
+    color: var(--ink);
+  }
+
+  .metric.sel {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--surface-2);
+    font-weight: 500;
+  }
+
+  .metric.sel .mt-ic {
+    color: var(--accent-2);
+  }
+
+  .mt-suggested .mt-ic {
+    color: var(--accent-hover);
+    display: inline-flex;
+  }
+
+  .metric-other {
+    margin-top: 20px;
+    padding-top: 18px;
+    border-top: 1px dashed var(--line-strong);
+  }
+
+  .metric-other-l {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-3);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 9px;
+  }
+
+  .metric-other-row {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+  }
+
+  .metric-other-row .inp {
+    flex: 1;
+  }
+
+  .metric-count {
+    font-size: 11.5px;
+    color: var(--ink-3);
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .metric-count .mt-ic {
+    color: var(--accent);
+    display: inline-flex;
+  }
+
+  .metric-count strong {
+    color: var(--ink);
+    font-weight: 500;
+  }
+
+  .metric-desc-block {
+    margin-top: 12px;
+  }
+
+  .metric-desc-block .metric-desc-l {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 6px;
+    display: block;
+  }
+
+  .metric-desc-block textarea.inp,
+  .onb-card textarea.inp {
+    resize: vertical;
+    line-height: 1.5;
+  }
+
+  /* Analyzing interstitial (blocking loader). */
+  .onb-analyzing {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    padding: 56px 40px;
+    text-align: center;
+  }
+
+  .onb-spinner {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 3px solid var(--accent-soft);
+    border-top-color: var(--accent);
+    animation: onbSpin 0.9s linear infinite;
+  }
+
+  @keyframes onbSpin {
+    to { transform: rotate(360deg); }
+  }
+
+  .onb-analyzing-h {
+    font-family: var(--font-serif);
+    font-size: 24px;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    margin: 0;
+  }
+
+  .onb-analyzing-sub {
+    font-size: 13.5px;
+    color: var(--ink-2);
+    max-width: 420px;
+    line-height: 1.55;
+    margin: 0;
+  }
+
+  .onb-analyzing-skip {
+    margin-top: 6px;
+  }
