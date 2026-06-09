@@ -22,6 +22,7 @@ from typing import TypedDict
 from urllib.parse import urlsplit
 
 from app.net_guard import UnsafeURLError, assert_public_url
+from app.design_agent.design_system.adapters import _css_color_to_hex
 
 logger = logging.getLogger(__name__)
 
@@ -70,18 +71,53 @@ _SAMPLER_JS = r"""
   const h1 = document.querySelector('h1');
   const h1Cs = cs(h1);
 
-  // Largest visible <button> = the primary action.
+  // Primary action = the most prominent filled call-to-action. Real CTAs are
+  // often links styled as buttons (not <button>s), and the biggest <button> can
+  // be a transparent icon/ghost button — so search a broader set and skip
+  // anything invisible or transparent-filled. A transparent fill would leak a
+  // default accent downstream, so it never wins here.
+  const isTransparent = (c) =>
+    !c || c === 'transparent' || /rgba\([^)]*,\s*0(\.0+)?\s*\)/.test(c);
+  const ctaSelector =
+    'button, [role="button"], a[class*="btn" i], a[class*="cta" i], a[class*="button" i]';
   let primaryBtn = null;
-  let maxArea = 0;
-  for (const b of document.querySelectorAll('button')) {
-    const area = b.offsetWidth * b.offsetHeight;
-    if (area > maxArea) { maxArea = area; primaryBtn = b; }
+  let bestArea = 0;
+  let bestTop = Infinity;
+  for (const el of document.querySelectorAll(ctaSelector)) {
+    const rect = el.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    if (area <= 0) continue;                       // not laid out / zero-area
+    const elCs = getComputedStyle(el);
+    if (elCs.visibility === 'hidden' || elCs.display === 'none') continue;
+    if (isTransparent(elCs.backgroundColor)) continue;  // unfilled / ghost CTA
+    // Prefer the larger filled candidate; on a tie prefer the one higher up the
+    // page (closer to the top of the viewport — likelier the hero CTA).
+    if (area > bestArea || (area === bestArea && rect.top < bestTop)) {
+      bestArea = area;
+      bestTop = rect.top;
+      primaryBtn = el;
+    }
+  }
+  // Fall back to the largest <button> of any kind only if nothing filled
+  // qualified. Its color is convertibility-checked on the Python side, so a
+  // transparent fallback cannot pass the confidence floor.
+  if (!primaryBtn) {
+    let maxArea = 0;
+    for (const b of document.querySelectorAll('button')) {
+      const area = b.offsetWidth * b.offsetHeight;
+      if (area > maxArea) { maxArea = area; primaryBtn = b; }
+    }
   }
   const btnCs = cs(primaryBtn);
 
-  // Primary color: prefer the button's background-color, fall back to its text color.
+  // Primary color: the button's fill when it has one, else its text color (a
+  // ghost button's text often carries the brand accent).
   let primaryColor = '';
-  if (btnCs) { primaryColor = btnCs.backgroundColor || btnCs.color || ''; }
+  if (btnCs) {
+    primaryColor = (!isTransparent(btnCs.backgroundColor)
+      ? btnCs.backgroundColor
+      : (btnCs.color || ''));
+  }
 
   // Spacing scale: button padding + header/nav padding.
   const spacing = [];
@@ -128,12 +164,21 @@ def _first_family(font_family: str) -> str:
 
 
 def _below_confidence(ds: WebsiteDesignSystem) -> bool:
-    """Below-confidence = no primary color sampled OR no heading font family
-    detected. Either alone yields output too generic to justify the Chromium
-    cost — the manual color-picker floor (P5-02) is strictly better in that
+    """Below-confidence = no usable primary color sampled OR no heading font
+    family detected. Either alone yields output too generic to justify the
+    Chromium cost — the manual color-picker floor is strictly better in that
     case, so the caller is told to fall back via the ``None`` sentinel.
+
+    A primary color that does not convert to a usable hex (transparent or
+    unparseable) counts as absent: a ghost/transparent CTA fill must not pass
+    the floor and leak a default accent into the tokens downstream. This mirrors
+    the convertibility check ``WebExtractor.normalize`` applies, so the sampler's
+    own confidence gate and the adapter's stay consistent.
     """
-    return (not ds["primary_color"]) or (not ds["heading_font_family"])
+    usable_primary = bool(ds["primary_color"]) and (
+        _css_color_to_hex(ds["primary_color"]) is not None
+    )
+    return (not usable_primary) or (not ds["heading_font_family"])
 
 
 def _map_sample(raw: dict | None) -> WebsiteDesignSystem:

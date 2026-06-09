@@ -558,3 +558,44 @@ async def test_extract_load_path_timeout_still_floors(monkeypatch, caplog):
     assert "confident=False" in blob
     assert "reason=timeout" in blob
     assert "error_class=TimeoutError" in blob
+
+
+# --- Accent convertibility floor + broadened CTA sampler -------------------
+
+def test_below_confidence_transparent_primary_is_treated_as_absent():
+    """A transparent CTA fill does not convert to a usable hex, so it counts as
+    no primary at all — the sampler must floor to the None sentinel rather than
+    leak a default accent downstream."""
+    ds = website._map_sample(
+        {"primary_color": "rgba(0, 0, 0, 0)", "heading_font_family": "Inter"}
+    )
+    assert website._below_confidence(ds) is True
+
+
+def test_below_confidence_solid_primary_with_heading_passes():
+    """A solid, convertible primary plus a heading font clears the floor."""
+    ds = website._map_sample(
+        {"primary_color": "rgb(14, 107, 79)", "heading_font_family": "Inter"}
+    )
+    assert website._below_confidence(ds) is False
+
+
+async def test_extract_transparent_primary_floors_to_none(monkeypatch):
+    """End to end: a sample whose only primary is transparent returns the None
+    sentinel (the caller then shows the manual color-picker floor)."""
+    raw = dict(_GOOD_RAW, primary_color="rgba(0, 0, 0, 0)")
+    h = _build_fake(evaluate_return=raw)
+    _install(monkeypatch, h)
+
+    ds = await website.extract_website_design_system("https://example.com")
+
+    assert ds is None
+
+
+def test_sampler_js_broadens_cta_candidates_and_guards_transparency():
+    """Lock the sampler's CTA breadth + transparency guard against silent
+    regression (the in-page JS itself is proven by the live re-extraction)."""
+    js = website._SAMPLER_JS
+    assert 'role="button"' in js
+    assert "cta" in js.lower()
+    assert "isTransparent" in js
