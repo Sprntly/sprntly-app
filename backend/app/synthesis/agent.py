@@ -254,7 +254,10 @@ def run_synthesis(
             ],
             "goal_factor_enabled": goal_enabled,
             "goal_weight": goal_weight,
-            "prompt_version": PROMPT_VERSION,
+            # Pin the gateway's RETURNED prompt_version (carries the
+            # `+prioritize@<hash>` skill suffix), not the bare module constant —
+            # otherwise the bound method version is lost from the §4d audit row.
+            "prompt_version": result.prompt_version,
         },
         reasoning="\n".join(
             f"#{i+1} {ins['title']}: {ins.get('reasoning', '')}"
@@ -262,7 +265,7 @@ def run_synthesis(
         ),
         output={"insight_titles": [i["title"] for i in insights],
                 "hypothesis_ids": hypothesis_ids},
-        model=result.model, prompt_version=PROMPT_VERSION,
+        model=result.model, prompt_version=result.prompt_version,
         confidence=max((i.get("confidence", 0) for i in insights), default=None),
         kg_refs=[c.theme_id for c in cands] + hypothesis_ids,
     )

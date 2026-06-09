@@ -61,12 +61,19 @@ def compute_convergence(
     for theme in themes:
         tc = ThemeConvergence(theme_id=theme.id, theme_label=theme.canonical_label)
         scored_evidence: list[tuple[float, dict]] = []
+        # Dedup by source signal id (a signal can reach a theme via >1
+        # relationship row, e.g. AFFECTS + PRESSURES). Without this, revenue /
+        # signal_count / effective_weight double-count that signal. Mirrors the
+        # `seen` dedup in evidence_kg's trail builder so the base score is
+        # computed over DISTINCT signals.
+        seen: set[str] = set()
         for edge in facade.edges_to(enterprise_id, theme.id):
-            if edge.source_kind != "signal":
+            if edge.source_kind != "signal" or edge.source_id in seen:
                 continue
             sig = facade.get_signal(enterprise_id, edge.source_id)
             if sig is None or sig.properties.get("superseded_by"):
                 continue
+            seen.add(sig.id)
             w = sig.confidence * sig.weight * _recency_factor(sig, now)
             tc.signal_count += 1
             tc.source_types.add(sig.source_type)
