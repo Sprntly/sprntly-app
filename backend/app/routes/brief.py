@@ -8,6 +8,7 @@ from app.brief_runner import auto_generate_brief, get_status, set_status, warm_s
 from app.config import settings
 from app.corpus import load_corpus
 from app.db import get_current_brief, save_brief
+from app.db.companies import display_name_for_slug
 from app.deps.ownership import require_owned_brief, require_owned_dataset
 from app.llm import call_json
 from app.prompts import BRIEF_SCHEMA_VERSION, BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
@@ -28,6 +29,16 @@ def _track(task: asyncio.Task) -> asyncio.Task:
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
     return task
+
+
+def _with_company_name(brief: dict) -> dict:
+    """Attach the company's display name to a brief payload.
+
+    The `dataset` slug is an internal key (db / infra-api only) — the UI must
+    never have to render it. `company_name` is None for legacy demo datasets
+    that have no companies row; the frontend falls back to the slug then.
+    """
+    return {**brief, "company_name": display_name_for_slug(brief.get("dataset") or "")}
 
 
 async def _synthesis_generate_bg(dataset: str) -> None:
@@ -77,7 +88,7 @@ def current(
     require_owned_dataset(dataset, company.company_id)
     brief = get_current_brief(dataset)
     if brief:
-        return brief
+        return _with_company_name(brief)
     raise HTTPException(404, {"message": "No brief generated yet", **get_status(dataset)})
 
 
@@ -128,7 +139,7 @@ def by_id(
 ):
     # require_owned_brief resolves brief → dataset → company and 404s on
     # mismatch (or a missing brief), returning the brief row on success.
-    return require_owned_brief(brief_id, company.company_id)
+    return _with_company_name(require_owned_brief(brief_id, company.company_id))
 
 
 @router.post("/generate")
@@ -155,7 +166,7 @@ def generate(
             raise HTTPException(409, str(e)) from e
         saved = get_current_brief(dataset)
         brief_id = saved.get("id") if saved else None
-        return {"brief_id": brief_id, **payload}
+        return _with_company_name({"brief_id": brief_id, "dataset": dataset, **payload})
 
     corpus = load_corpus(dataset)
     try:
@@ -174,4 +185,4 @@ def generate(
         payload=payload,
         schema_version=BRIEF_SCHEMA_VERSION,
     )
-    return {"brief_id": brief_id, **payload}
+    return _with_company_name({"brief_id": brief_id, "dataset": dataset, **payload})
