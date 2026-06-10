@@ -16,7 +16,8 @@ import {
   pathForScreen,
   screenIdFromPathname,
 } from "../../../lib/routes"
-import { figmaKeyForPrototype, buildGatedOnClose } from "../PrototypeRoute"
+import { figmaKeyForPrototype, buildGatedOnClose, prototypeTabState } from "../PrototypeRoute"
+import type { PrototypeRecord } from "../../../lib/api"
 
 // Repo test convention: components carry no `import React`; expose it globally.
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -125,6 +126,33 @@ describe("prototype route — gated onClose (buildGatedOnClose)", () => {
     loading = false  // handleGenDone resets the ref
     onClose()        // now safe to navigate
     expect(navigateCalls).toEqual(["/prd"])
+  })
+})
+
+describe("prototype route — in-tab render state (prototypeTabState)", () => {
+  const readyProto = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/bundle.js",
+    error: null,
+  } as PrototypeRecord
+
+  it("no PRD context → 'no-prd' (the empty landing)", () => {
+    expect(prototypeTabState(null, false, null)).toBe("no-prd")
+    expect(prototypeTabState(null, true, readyProto)).toBe("no-prd")
+  })
+
+  it("a held prototype → 'ready' (the in-tab canvas), even while resolving", () => {
+    expect(prototypeTabState(42, false, readyProto)).toBe("ready")
+    expect(prototypeTabState(42, true, readyProto)).toBe("ready")
+  })
+
+  it("PRD set, no prototype yet, resolve in flight → 'resolving'", () => {
+    expect(prototypeTabState(42, true, null)).toBe("resolving")
+  })
+
+  it("PRD set, resolve settled with no prototype → 'generate' (the generate panel)", () => {
+    expect(prototypeTabState(42, false, null)).toBe("generate")
   })
 })
 
