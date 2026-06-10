@@ -382,32 +382,35 @@ export function GenerateModal({
               ))}
             </div>
 
-            {/* Figma connector status — always shown so user can connect before
-                selecting. The URL paste input is only revealed when Figma is
-                the active selection AND Figma is connected. */}
-            <div className="src-row-compact">
-              <span className="src-bullet" aria-hidden="true" />
-              <span className="src-name">Figma</span>
-              {figmaActive ? (
-                <>
-                  <span className="src-connected">
-                    Connected
-                    {figmaRow.accountLabel ? ` · ${figmaRow.accountLabel}` : ""}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span className="src-not-connected">⚠ Not connected</span>
-                  <button
-                    type="button"
-                    className="src-connect-btn"
-                    onClick={() => void redirectToConnect("figma")}
-                  >
-                    Connect Figma →
-                  </button>
-                </>
-              )}
-            </div>
+            {/* Figma connector status — shown only when Figma is the selected
+                source. Displays connected state or a connect affordance when
+                not yet connected. The URL paste input is only revealed when
+                Figma is the active selection AND Figma is connected. */}
+            {designSource === "figma" && (
+              <div className="src-row-compact">
+                <span className="src-bullet" aria-hidden="true" />
+                <span className="src-name">Figma</span>
+                {figmaActive ? (
+                  <>
+                    <span className="src-connected">
+                      Connected
+                      {figmaRow.accountLabel ? ` · ${figmaRow.accountLabel}` : ""}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="src-not-connected">⚠ Not connected</span>
+                    <button
+                      type="button"
+                      className="src-connect-btn"
+                      onClick={() => void redirectToConnect("figma")}
+                    >
+                      Connect Figma →
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
 
             {/* Figma URL paste — shown only when Figma is the chosen source and
                 Figma is connected. Paste any Figma design/file URL; the key is
@@ -438,32 +441,35 @@ export function GenerateModal({
               </div>
             )}
 
-            {/* Codebase / GitHub connector status — always shown so user can
-                connect before selecting. The repo selector is only revealed
-                when GitHub is the chosen source and GitHub is connected. */}
-            <div className="src-row-compact">
-              <span className="src-bullet" aria-hidden="true" />
-              <span className="src-name">Codebase</span>
-              {githubActive ? (
-                <>
-                  <span className="src-connected">
-                    Connected
-                    {githubRow.accountLabel ? ` · ${githubRow.accountLabel}` : ""}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span className="src-not-connected muted">Not connected</span>
-                  <button
-                    type="button"
-                    className="src-connect-btn ghost"
-                    onClick={() => void redirectToConnect("github")}
-                  >
-                    Connect a repo →
-                  </button>
-                </>
-              )}
-            </div>
+            {/* Codebase / GitHub connector status — shown only when Codebase is
+                the selected source. Displays connected state or a connect
+                affordance when not yet connected. The repo selector is only
+                revealed when GitHub is the chosen source and GitHub is connected. */}
+            {designSource === "github" && (
+              <div className="src-row-compact">
+                <span className="src-bullet" aria-hidden="true" />
+                <span className="src-name">Codebase</span>
+                {githubActive ? (
+                  <>
+                    <span className="src-connected">
+                      Connected
+                      {githubRow.accountLabel ? ` · ${githubRow.accountLabel}` : ""}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="src-not-connected muted">Not connected</span>
+                    <button
+                      type="button"
+                      className="src-connect-btn ghost"
+                      onClick={() => void redirectToConnect("github")}
+                    >
+                      Connect a repo →
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
 
             {/* GitHub repo selector — shown only when Codebase is the chosen
                 source and GitHub is connected. */}
