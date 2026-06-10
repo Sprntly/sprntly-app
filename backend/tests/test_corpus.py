@@ -67,27 +67,30 @@ def test_load_corpus_ignores_non_md_files(isolated_settings):
     assert [d.name for d in c.docs] == ["a"]
 
 
-def test_load_corpus_missing_dataset_raises_file_not_found(isolated_settings):
+def test_load_corpus_missing_dataset_returns_empty(isolated_settings):
     corpus_mod = isolated_settings["corpus"]
-    with pytest.raises(FileNotFoundError):
-        corpus_mod.load_corpus("nope-does-not-exist")
+    c = corpus_mod.load_corpus("nope-does-not-exist")
+    assert c.docs == ()
+    assert c.dataset == "nope-does-not-exist"
 
 
-def test_load_corpus_empty_dataset_dir_raises_runtime_error(isolated_settings):
+def test_load_corpus_empty_dataset_dir_returns_empty(isolated_settings):
     corpus_mod = isolated_settings["corpus"]
     data_dir = isolated_settings["data_dir"]
     (data_dir / "empty").mkdir()
-    with pytest.raises(RuntimeError):
-        corpus_mod.load_corpus("empty")
+    c = corpus_mod.load_corpus("empty")
+    assert c.docs == ()
+    assert c.dataset == "empty"
 
 
-def test_load_corpus_only_underscore_files_raises_runtime_error(isolated_settings):
-    """A dir with only `_*.md` files is effectively empty — same error."""
+def test_load_corpus_only_underscore_files_returns_empty(isolated_settings):
+    """A dir with only `_*.md` files is effectively empty — returns empty corpus."""
     corpus_mod = isolated_settings["corpus"]
     data_dir = isolated_settings["data_dir"]
     _build_dataset(data_dir, "answers", {"_key.md": "leaked"})
-    with pytest.raises(RuntimeError):
-        corpus_mod.load_corpus("answers")
+    c = corpus_mod.load_corpus("answers")
+    assert c.docs == ()
+    assert c.dataset == "answers"
 
 
 def test_corpus_total_chars_sums_doc_lengths(isolated_settings):
