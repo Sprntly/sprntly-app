@@ -6,6 +6,7 @@ as marketing_signals.md.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -147,7 +148,11 @@ async def run_marketing_agent(dataset: str) -> dict[str, Any]:
     )
 
     try:
-        report = call_md(system=MARKETING_SYSTEM, user=user_prompt, max_tokens=8000)
+        # call_md blocks (and now waits on the process-wide LLM concurrency
+        # semaphore); run it on a worker thread so the event loop stays free.
+        report = await asyncio.to_thread(
+            call_md, system=MARKETING_SYSTEM, user=user_prompt, max_tokens=8000
+        )
     except Exception as exc:
         logger.error("Marketing LLM call failed: %s", exc)
         return {"status": "llm_failed", "dataset": dataset, "error": str(exc)}

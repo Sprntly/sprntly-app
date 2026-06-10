@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # environment via DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS. Read at call-time
     # in design_agent/storage.py:_vite_build_sync so it stays tunable + testable.
     design_agent_vite_build_timeout_seconds: int = 120
+    # Process-wide cap on in-flight Anthropic model calls (see app/llm.py).
+    # The small prod box thrashes at 4+ concurrent streams, so calls beyond
+    # this QUEUE instead of piling on. Default 3 fits one PRD's two parallel
+    # parts + one other call. Env-overridable via LLM_MAX_CONCURRENCY; values
+    # <= 0 fall back to the default (never 0, which would deadlock).
+    llm_max_concurrency: int = 3
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 
