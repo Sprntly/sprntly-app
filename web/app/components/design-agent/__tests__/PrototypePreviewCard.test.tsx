@@ -116,9 +116,10 @@ describe("PrototypePreviewCard — edge cases", () => {
       }),
     )
     expect(html).toContain("<iframe")
-    // Inert: not tabbable and sandboxed with no tokens.
+    // Inert: not tabbable; the sandbox allows scripts + same-origin so the
+    // bundle actually renders (an empty sandbox left the thumbnail blank).
     expect(html).toContain('tabindex="-1"')
-    expect(html).toContain('sandbox=""')
+    expect(html).toContain('sandbox="allow-scripts allow-same-origin"')
   })
 })
 

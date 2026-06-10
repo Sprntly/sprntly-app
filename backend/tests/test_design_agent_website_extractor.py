@@ -37,10 +37,16 @@ def _allow_public_dns(monkeypatch):
 
     monkeypatch.setattr("app.net_guard.socket.getaddrinfo", _public)
 
-# A well-formed raw page.evaluate() return (pre-mapping): a button color, an h1
-# font stack, a body, padding samples, and a logo — i.e. the confident case.
+# A well-formed raw page.evaluate() return (pre-mapping): the sampler is a dumb
+# emitter, so this carries candidate LISTS (a convertible green CTA), an h1 font
+# stack, a body, padding samples, and a logo — i.e. the confident case.
 _GOOD_RAW = {
-    "primary_color": "rgb(37, 99, 235)",
+    "color_candidates": [
+        {"color": "rgb(37, 99, 235)", "area": 8000, "saturation": 0.6},
+    ],
+    "neutral_candidates": [],
+    "container_observations": [],
+    "observed_component_types": [],
     "background_color": "rgb(255, 255, 255)",
     "heading_font_family": '"Inter", system-ui, sans-serif',
     "heading_size_scale": "48px",
@@ -115,7 +121,10 @@ async def test_extract_returns_expected_sample_fields(monkeypatch):
 
     assert ds is not None
     assert set(ds.keys()) == {
-        "primary_color",
+        "color_candidates",
+        "neutral_candidates",
+        "container_observations",
+        "observed_component_types",
         "background_color",
         "heading_font_family",
         "heading_size_scale",
@@ -123,13 +132,10 @@ async def test_extract_returns_expected_sample_fields(monkeypatch):
         "border_radius_convention",
         "spacing_scale_samples",
         "logo_url",
-        "surface_color",
-        "border_color",
-        "muted_color",
-        "elevation_hint",
-        "component_counts",
     }
-    assert ds["primary_color"] == "rgb(37, 99, 235)"
+    assert ds["color_candidates"] == [
+        {"color": "rgb(37, 99, 235)", "area": 8000, "saturation": 0.6},
+    ]
     assert ds["background_color"] == "rgb(255, 255, 255)"
     # Heading family is reduced to the first family in the stack, quotes stripped.
     assert ds["heading_font_family"] == "Inter"
@@ -188,8 +194,8 @@ async def test_extract_navigation_timeout_is_8s(monkeypatch):
 
 
 async def test_extract_below_confidence_no_primary_color_returns_none(monkeypatch):
-    """AC5: no primary color sampled -> None (below-confidence sentinel)."""
-    raw = dict(_GOOD_RAW, primary_color="")
+    """AC5: no chromatic candidate sampled -> None (below-confidence sentinel)."""
+    raw = dict(_GOOD_RAW, color_candidates=[])
     h = _build_fake(evaluate_return=raw)
     _install(monkeypatch, h)
 
@@ -346,7 +352,7 @@ async def test_confident_path_reason_ok(monkeypatch, caplog):
 async def test_below_confidence_reason_low_confidence(monkeypatch, caplog):
     """AC3: an extraction that maps but trips _below_confidence floors to None
     and logs confident=False reason=low_confidence."""
-    raw = dict(_GOOD_RAW, primary_color="")
+    raw = dict(_GOOD_RAW, color_candidates=[])
     h = _build_fake(evaluate_return=raw)
     _install(monkeypatch, h)
 
@@ -529,7 +535,10 @@ async def test_extract_load_path_returns_design_system(monkeypatch):
     # The success ran through the load path.
     assert h.page.goto.await_args.kwargs["wait_until"] == "load"
     assert set(ds.keys()) == {
-        "primary_color",
+        "color_candidates",
+        "neutral_candidates",
+        "container_observations",
+        "observed_component_types",
         "background_color",
         "heading_font_family",
         "heading_size_scale",
@@ -537,13 +546,10 @@ async def test_extract_load_path_returns_design_system(monkeypatch):
         "border_radius_convention",
         "spacing_scale_samples",
         "logo_url",
-        "surface_color",
-        "border_color",
-        "muted_color",
-        "elevation_hint",
-        "component_counts",
     }
-    assert ds["primary_color"] == "rgb(37, 99, 235)"
+    assert ds["color_candidates"] == [
+        {"color": "rgb(37, 99, 235)", "area": 8000, "saturation": 0.6},
+    ]
     assert ds["heading_font_family"] == "Inter"
 
 
@@ -574,26 +580,56 @@ async def test_extract_load_path_timeout_still_floors(monkeypatch, caplog):
 
 def test_below_confidence_transparent_primary_is_treated_as_absent():
     """A transparent CTA fill does not convert to a usable hex, so it counts as
-    no primary at all — the sampler must floor to the None sentinel rather than
-    leak a default accent downstream."""
+    no chromatic candidate at all — the sampler must floor to the None sentinel
+    rather than leak a default accent downstream."""
     ds = website._map_sample(
-        {"primary_color": "rgba(0, 0, 0, 0)", "heading_font_family": "Inter"}
+        {
+            "color_candidates": [
+                {"color": "rgba(0, 0, 0, 0)", "area": 100, "saturation": 0.0}
+            ],
+            "heading_font_family": "Inter",
+        }
     )
     assert website._below_confidence(ds) is True
 
 
 def test_below_confidence_solid_primary_with_heading_passes():
-    """A solid, convertible primary plus a heading font clears the floor."""
+    """A solid, convertible chromatic candidate plus a heading font clears the
+    floor."""
     ds = website._map_sample(
-        {"primary_color": "rgb(14, 107, 79)", "heading_font_family": "Inter"}
+        {
+            "color_candidates": [
+                {"color": "rgb(14, 107, 79)", "area": 8000, "saturation": 0.77}
+            ],
+            "heading_font_family": "Inter",
+        }
     )
     assert website._below_confidence(ds) is False
 
 
+def test_below_confidence_missing_heading_returns_true():
+    """A convertible chromatic candidate with NO heading font is still below the
+    floor."""
+    ds = website._map_sample(
+        {
+            "color_candidates": [
+                {"color": "rgb(14, 107, 79)", "area": 8000, "saturation": 0.77}
+            ],
+            "heading_font_family": "",
+        }
+    )
+    assert website._below_confidence(ds) is True
+
+
 async def test_extract_transparent_primary_floors_to_none(monkeypatch):
-    """End to end: a sample whose only primary is transparent returns the None
-    sentinel (the caller then shows the manual color-picker floor)."""
-    raw = dict(_GOOD_RAW, primary_color="rgba(0, 0, 0, 0)")
+    """End to end: a sample whose only chromatic candidate is transparent returns
+    the None sentinel (the caller then shows the manual color-picker floor)."""
+    raw = dict(
+        _GOOD_RAW,
+        color_candidates=[
+            {"color": "rgba(0, 0, 0, 0)", "area": 100, "saturation": 0.0}
+        ],
+    )
     h = _build_fake(evaluate_return=raw)
     _install(monkeypatch, h)
 
@@ -611,46 +647,54 @@ def test_sampler_js_broadens_cta_candidates_and_guards_transparency():
     assert "isTransparent" in js
 
 
-def test_sampler_js_prefers_chromatic_cta_over_monochrome():
-    """Lock the saturation-first CTA ranking against regression (the in-page JS
-    itself is proven by the live re-extraction): a monochrome button fill must
-    not outrank the brand color simply because it is larger."""
+def test_sampler_js_emits_saturation_per_candidate():
+    """Lock the per-candidate saturation emission against regression (the in-page
+    JS is proven by the live re-extraction): the sampler computes saturationOf on
+    each CTA fill so the kernel can rank chromatic vs monochrome candidates."""
     js = website._SAMPLER_JS
     assert "saturationOf" in js
-    assert "SAT_THRESHOLD" in js
+    assert "colorCandidates" in js
+    assert "saturation:" in js
 
 
 def test_map_sample_defaults_absent_neutrals_to_empty():
-    """Neutral keys absent from the raw evaluate() dict map to empty strings so
-    the adapter falls back to its defaults rather than crashing."""
+    """Candidate-list keys absent from the raw evaluate() dict map to empty lists
+    so the adapter falls back to its defaults rather than crashing."""
     ds = website._map_sample(
-        {"primary_color": "rgb(1, 2, 3)", "heading_font_family": "Inter"}
+        {
+            "color_candidates": [{"color": "rgb(1, 2, 3)", "area": 10, "saturation": 0.5}],
+            "heading_font_family": "Inter",
+        }
     )
-    assert ds["surface_color"] == ""
-    assert ds["border_color"] == ""
-    assert ds["muted_color"] == ""
+    assert ds["neutral_candidates"] == []
+    assert ds["container_observations"] == []
 
 
-def test_map_sample_defaults_absent_component_counts_to_empty():
-    """An absent component_counts key maps to an empty dict."""
+def test_map_sample_defaults_absent_component_types_to_empty():
+    """An absent observed_component_types key maps to an empty list."""
     ds = website._map_sample(
-        {"primary_color": "rgb(1, 2, 3)", "heading_font_family": "Inter"}
+        {
+            "color_candidates": [{"color": "rgb(1, 2, 3)", "area": 10, "saturation": 0.5}],
+            "heading_font_family": "Inter",
+        }
     )
-    assert ds["component_counts"] == {}
+    assert ds["observed_component_types"] == []
 
 
-def test_sampler_js_emits_component_counts():
-    """Lock the DOM component counting against regression (the in-page JS is
-    proven by the live re-extraction)."""
+def test_sampler_js_emits_component_types():
+    """Lock the DOM component-type detection against regression (the in-page JS is
+    proven by the live re-extraction): names only, no counts."""
     js = website._SAMPLER_JS
-    assert "component_counts" in js
+    assert "observed_component_types" in js
     assert "componentSelectors" in js
 
 
-def test_sampler_js_counts_elevation_prevalence():
-    """Lock the count-based elevation signal against regression (the in-page JS
-    is proven by the live re-extraction): the sampler tallies shadow vs border
-    prevalence across containers rather than trusting the first one."""
+def test_sampler_js_emits_container_observations():
+    """Lock the bounded container scan against regression (the in-page JS is
+    proven by the live re-extraction): the sampler emits per-container
+    border/shadow observations and the kernel tallies prevalence."""
     js = website._SAMPLER_JS
-    assert "shadowCount" in js
-    assert "borderCount" in js
+    assert "containerObservations" in js
+    assert "has_border" in js
+    assert "has_shadow" in js
+    assert "ELEVATION_SCAN_CAP" in js

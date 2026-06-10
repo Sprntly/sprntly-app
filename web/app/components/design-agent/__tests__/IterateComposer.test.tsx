@@ -742,9 +742,11 @@ describe("iterate cost-confirm skip — skipCostConfirm bypasses the estimate ga
     expect(propDoc).toContain(DURABLE)
     expect(propDoc).not.toContain("UX-EXPLORE")
 
-    // ApproveModal: the comment above the prop pass on the primary canvas mount.
+    // PrototypeRoute: the comment above the prop pass on the in-tab canvas mount
+    // (the primary canvas mount moved here when the full-screen overlay was
+    // retired).
     const modalSrc = readFileSync(
-      join(process.cwd(), "app", "components", "shared", "ApproveModal.tsx"),
+      join(process.cwd(), "app", "(app)", "prototype", "PrototypeRoute.tsx"),
       "utf8",
     )
     const modalLines = modalSrc.split("\n")

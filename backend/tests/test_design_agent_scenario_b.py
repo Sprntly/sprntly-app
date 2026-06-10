@@ -135,7 +135,7 @@ async def _drain_inflight(routes_mod) -> None:
 # typography/logo — exactly the Stripe/Linear shape the P5-01 verifier found.
 def _transparent_color_ds() -> dict:
     return {
-        "primary_color": "rgba(0,0,0,0)",
+        "color_candidates": [{"color": "rgba(0,0,0,0)", "area": 8000, "saturation": 0.0}],
         "background_color": "rgba(0,0,0,0)",
         "heading_font_family": "Inter",
         "heading_size_scale": "48px",
@@ -148,7 +148,7 @@ def _transparent_color_ds() -> dict:
 
 def _good_ds() -> dict:
     return {
-        "primary_color": "#3b82f6",
+        "color_candidates": [{"color": "#3b82f6", "area": 8000, "saturation": 0.78}],
         "background_color": "#ffffff",
         "heading_font_family": "Inter",
         "heading_size_scale": "48px",

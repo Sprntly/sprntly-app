@@ -20,7 +20,8 @@
  */
 
 import { useEffect, useState, type ReactNode } from "react"
-import { useNavigation } from "../../context/NavigationContext"
+import { useRouter } from "next/navigation"
+import { prototypePath } from "../../lib/routes"
 import { DesignAgentDrawer } from "./DesignAgentDrawer"
 import { PostGenerationResult } from "./PostGenerationResult"
 import { GenerationErrorBanner, reasonCopy } from "./GenerationErrorBanner"
@@ -239,24 +240,10 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   existing?: PrototypeRecord | null
   /** PRD title for the preview card label. */
   prdTitle?: string | null
-  /** Open the full-screen canvas for the existing prototype (skips the loading
-   *  screen). */
+  /** Navigate to the in-tab canvas (`/prototype?prd=<id>`) for the existing
+   *  prototype. */
   onOpenExisting?: () => void
   onDeleteExisting?: () => Promise<void>
-  /** The prototype currently shown in the launcher-owned full-screen canvas, or
-   *  null. */
-  canvasResult?: PrototypeRecord | null
-  /** Close the launcher-owned full-screen canvas (returns to the PRD). */
-  onCloseCanvas?: () => void
-  /** Pin-apply seam for the canvas (mirrors ApproveModal). */
-  onPinApply?: (comment: CommentRecord) => void
-  /** Refresh the canvas record after a share / iterate (distinct from the inline
-   *  result's refreshers so the two surfaces never cross-refresh). */
-  onCanvasRefresh?: () => void
-  /** Called when the canvas prototype's completion state changes (Mark Complete /
-   *  Resume) so the container can merge `is_complete` into `canvasResult` without
-   *  a round-trip. Optional — omitting it keeps existing callers type-checking. */
-  onCanvasStateChange?: (state: { isComplete: boolean }) => void
   /** P2-12: the generated prototype to show post-generation. Null → no result
    *  view yet (the Generate button is the only chrome). Optional/defaulted so
    *  existing direct-view test calls keep typechecking. */
@@ -328,11 +315,6 @@ export function DesignAgentLauncherView({
   prdMetaLine = null,
   onOpenExisting,
   onDeleteExisting,
-  canvasResult = null,
-  onCloseCanvas,
-  onPinApply,
-  onCanvasRefresh,
-  onCanvasStateChange,
   renderDrawer = defaultRenderDrawer,
 }: LauncherViewProps) {
   return (
@@ -350,8 +332,8 @@ export function DesignAgentLauncherView({
         <PrototypeGeneratingCard />
       )}
       {/* When the PRD already has a ready prototype (read-only getByPrd), show a
-          preview card here. Clicking it opens the full-screen canvas directly,
-          skipping the loading screen. When none exists this renders nothing (the
+          preview card here. Clicking it navigates to the in-tab canvas
+          (`/prototype?prd=<id>`). When none exists this renders nothing (the
           Design section stays empty). Suppressed while the launcher's own
           in-session `result` is mounted below to avoid a duplicate surface. */}
       {existing && !result && (
@@ -449,79 +431,23 @@ export function DesignAgentLauncherView({
         onGenerated,
         onKickoff,
       })}
-      {/* Launcher-owned full-screen canvas for the existing prototype, opened
-          from the preview card. Mirrors ApproveModal's `da-canvas-fullscreen`
-          shell + PostGenerationResult composition (Done in the control bar;
-          comments gated on share_token; IterateComposer reflecting real lock
-          state with skipCostConfirm). Opened directly — no loading screen — since
-          the bundle already exists.
-
-          PRD sidebar content: prdSections and prdMetaLine are now threaded on
-          this path alongside prdTitle, so the condensed PRD context panel renders
-          in the left sidebar for the existing-prototype open path — matching the
-          modal "View Prototype" path. */}
-      {canvasResult && (
-        <div
-          className="da-canvas-fullscreen design-agent-surface"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Existing prototype"
-          data-testid="da-launcher-canvas-fullscreen"
-        >
-          <div className="da-canvas-fullscreen-body">
-            <PostGenerationResult
-              key={`existing-${canvasResult.id}`}
-              prototype={canvasResult}
-              prdTitle={prdTitle}
-              prdSections={prdSections}
-              prdMetaLine={prdMetaLine}
-              onStateChange={onCanvasStateChange}
-              onDone={onCloseCanvas}
-              onPinApply={onPinApply}
-              comments={
-                canvasResult.share_token ? (
-                  <CommentsPanel
-                    key={`existing-comments-${canvasResult.id}`}
-                    token={canvasResult.share_token}
-                    prototypeId={canvasResult.id}
-                    onApply={(comment) => setApplyTarget?.(comment)}
-                  />
-                ) : null
-              }
-              iterate={
-                <IterateComposer
-                  key={`existing-iterate-${canvasResult.id}`}
-                  prototypeId={canvasResult.id}
-                  isComplete={canvasResult.is_complete ?? false}
-                  applyTarget={applyTarget}
-                  onClearApply={() => setApplyTarget?.(null)}
-                  onIterated={onCanvasRefresh}
-                  skipCostConfirm
-                />
-              }
-              onShared={onCanvasRefresh}
-            />
-          </div>
-        </div>
-      )}
     </div>
   )
 }
 
 /**
- * Pushes the refresh-stable canvas route (`/design/{id}`) when the
- * launcher-owned canvas opens, so a refresh re-resolves the canvas — parity with
- * the modal "View Prototype" open path. Reads navigation from context, so it is
- * mounted ONLY while a canvas is open: that keeps `DesignAgentLauncher` itself
- * renderable without a NavigationProvider (its node-env tests render the bare
- * container, where no canvas is open). The push runs once per opened prototype
- * id (effect keyed on the id), so a same-id canvas refresh does not re-push.
+ * Navigates to the in-tab canvas (`/prototype?prd=<id>`) when the preview card is
+ * opened. Reads `useRouter` from context, so it is mounted ONLY once a navigation
+ * is requested (a non-null `prdId`): that keeps `DesignAgentLauncher` itself
+ * renderable without a router context (its node-env tests render the bare
+ * container, where no navigation is in flight). The push runs once per requested
+ * PRD id (effect keyed on the id).
  */
-function CanvasRouteSync({ prototypeId }: { prototypeId: number }) {
-  const { goToCanvas } = useNavigation()
+function NavigateToCanvas({ prdId }: { prdId: number | null | undefined }) {
+  const router = useRouter()
   useEffect(() => {
-    goToCanvas(prototypeId)
-  }, [goToCanvas, prototypeId])
+    router.push(prototypePath(prdId ?? undefined))
+  }, [router, prdId])
   return null
 }
 
@@ -546,9 +472,10 @@ export function DesignAgentLauncher({
   // (getByPrd swallows the 404 → null) so the card simply does not render and no
   // generation is kicked.
   const [existing, setExisting] = useState<PrototypeRecord | null>(null)
-  // The prototype shown in the launcher-owned full-screen canvas (opened from the
-  // preview card), or null.
-  const [canvasResult, setCanvasResult] = useState<PrototypeRecord | null>(null)
+  // The PRD id to navigate to the in-tab canvas for, set when the preview card is
+  // opened (`/prototype?prd=<id>`). Null until the user opens the existing
+  // prototype; the navigation runs declaratively via <NavigateToCanvas>.
+  const [navPrdId, setNavPrdId] = useState<number | null>(null)
   // P6-08 (Fix #11): the last generation attempt's failure, or null. A non-null
   // value renders the persistent GenerationErrorBanner (replacing the old silent
   // revert). Kept INDEPENDENT of `result` so a failed retry after a prior success
@@ -644,38 +571,16 @@ export function DesignAgentLauncher({
     setExisting(null)
   }
 
-  // Open the existing prototype directly in the full-screen canvas — no loading
-  // screen, since the bundle already exists. Opening also pushes the
-  // refresh-stable canvas route (`/design/{id}`) so a refresh re-resolves the
-  // canvas, matching the modal "View Prototype" path. The route push is wired
-  // declaratively by `<CanvasRouteSync>` (mounted in the returned tree while a
-  // canvas is open) rather than called inline here: this container is rendered
-  // without a NavigationProvider in its node-env tests, so reading
-  // `useNavigation()` directly in the container would throw. Mounting the route
-  // sync only while the canvas is open keeps the container renderable in those
-  // tests (where no canvas is open) while still pushing the route in the app.
+  // Open the existing prototype in the in-tab canvas (`/prototype?prd=<id>`). The
+  // navigation runs declaratively via <NavigateToCanvas> (mounted in the returned
+  // tree once a target id is set) rather than inline here: this container is
+  // rendered without a router context in its node-env tests, so reading
+  // `useRouter()` directly in the container would be unsafe. Mounting the
+  // navigator only once a target is set keeps the container renderable in those
+  // tests (where no navigation is in flight) while still pushing the route in the
+  // app. The existing prototype shares this PRD, so navigate by `prdId`.
   const openExisting = () => {
-    if (existing) setCanvasResult(existing)
-  }
-  const closeCanvas = () => {
-    setCanvasResult(null)
-    setApplyTarget(null)
-  }
-  // Refresh the canvas record after a share / iterate so the in-canvas comments +
-  // viewer reflect it (single-shot, mirrors ApproveModal.refreshCanvas).
-  const refreshCanvas = async () => {
-    const id = canvasResult?.id
-    if (id == null) return
-    const fresh = await refreshShareTokenStep(id, designAgentApi)
-    if (fresh) setCanvasResult(fresh)
-  }
-  // Thread the completion-state change from the canvas PostGenerationResult back
-  // into canvasResult so IterateComposer's isComplete prop stays current after
-  // Mark Complete / Resume without a round-trip.
-  const handleCanvasStateChange = (state: { isComplete: boolean }) => {
-    setCanvasResult((prev) =>
-      prev ? { ...prev, is_complete: state.isComplete } : prev,
-    )
+    if (existing) setNavPrdId(prdId)
   }
 
   return (
@@ -700,17 +605,12 @@ export function DesignAgentLauncher({
         prdTitle={prdTitle}
         onOpenExisting={openExisting}
         onDeleteExisting={deleteExisting}
-        canvasResult={canvasResult}
-        onCloseCanvas={closeCanvas}
-        onPinApply={(comment) => setApplyTarget(comment)}
-        onCanvasRefresh={refreshCanvas}
-        onCanvasStateChange={handleCanvasStateChange}
         renderDrawer={renderDrawer}
       />
-      {/* When the launcher-owned canvas is open, push the refresh-stable canvas
-          route so a refresh re-resolves it (parity with the modal open path).
-          Mounted only while a canvas is open — see CanvasRouteSync. */}
-      {canvasResult && <CanvasRouteSync prototypeId={canvasResult.id} />}
+      {/* Once the preview card is opened, navigate to the in-tab canvas
+          (`/prototype?prd=<id>`). Mounted only while a target id is set — see
+          NavigateToCanvas. */}
+      {navPrdId != null && <NavigateToCanvas prdId={navPrdId} />}
     </>
   )
 }

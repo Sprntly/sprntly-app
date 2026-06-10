@@ -875,9 +875,19 @@
   width: 100%;
   height: auto;
 }
+/* Reserve right-side clearance in the full-screen chrome bar so the absolutely
+   positioned close (×, right:22px + 36px wide) does not overlap the
+   Desktop/Mobile platform toggle, which otherwise sits at the bar's right edge. */
+.design-agent-surface .proto-fullscreen .proto-frame-head {
+  padding-right: 70px;
+}
 .design-agent-surface .proto-fullscreen-close {
   position: absolute;
-  top: 18px;
+  /* Align with the chrome bar's row: the frame-head's 11px top padding places
+     the Desktop/Mobile toggle's top edge at 11px, and the toggle is the same
+     36px height as this control, so matching top lines up both their top and
+     bottom edges with that row. */
+  top: 11px;
   right: 22px;
   width: 36px;
   height: 36px;

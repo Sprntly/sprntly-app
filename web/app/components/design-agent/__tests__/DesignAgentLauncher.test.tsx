@@ -845,39 +845,18 @@ describe("condensed PRD panel is forwarded on both launcher open paths", () => {
     expect(html).not.toContain("PRD content unavailable.")
   })
 
-  it("renders the condensed panel on the existing-prototype canvas path when sections are provided (test_launcher_existing_canvas_mount_renders_condensed_panel)", () => {
-    const html = panelHtml({ canvasResult: sampleResult, prdSections: sampleSections })
-    expect(html).toContain('data-testid="da-launcher-canvas-fullscreen"')
-    expect(html).toContain('data-testid="da-prd-condensed"')
-    expect(html).toContain('data-testid="da-prd-pcx-problem"')
-    expect(html).not.toContain("PRD content unavailable.")
-  })
-
-  it("threads prdMetaLine into the panel subtitle on both paths (test_meta_line_threads_into_panel_subtitle)", () => {
+  it("threads prdMetaLine into the panel subtitle on the in-session result path (test_meta_line_threads_into_panel_subtitle)", () => {
     const metaLine = "Redesign initiative, Sprint 5"
     const inSessionHtml = panelHtml({
       result: sampleResult,
       prdSections: sampleSections,
       prdMetaLine: metaLine,
     })
-    const canvasHtml = panelHtml({
-      canvasResult: sampleResult,
-      prdSections: sampleSections,
-      prdMetaLine: metaLine,
-    })
     expect(inSessionHtml).toContain(metaLine)
-    expect(canvasHtml).toContain(metaLine)
   })
 
   it("falls back to the empty-state on the in-session path when sections are absent (test_launcher_no_sections_renders_empty_state)", () => {
     const html = panelHtml({ result: sampleResult })
-    expect(html).toContain("PRD content unavailable.")
-    expect(html).not.toContain('data-testid="da-prd-condensed"')
-  })
-
-  it("falls back to the empty-state on the canvas path when sections are absent", () => {
-    const html = panelHtml({ canvasResult: sampleResult })
-    expect(html).toContain('data-testid="da-launcher-canvas-fullscreen"')
     expect(html).toContain("PRD content unavailable.")
     expect(html).not.toContain('data-testid="da-prd-condensed"')
   })

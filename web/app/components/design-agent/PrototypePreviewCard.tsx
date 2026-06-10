@@ -65,16 +65,19 @@ export function PrototypePreviewCard({
       >
         <div className="da-preview-thumb" aria-hidden="true">
           {prototype.bundle_url ? (
-            // Scaled, click-inert live preview of the bundle. `tabIndex=-1` +
-            // `pointer-events:none` (CSS) keep it non-interactive; `sandbox` with no
-            // tokens keeps it inert/safe inside the card.
+            // Scaled, click-inert live preview of the bundle. The bundle's scripts
+            // must be allowed to run for the preview to render — an empty sandbox
+            // blocks all JS and leaves the thumbnail blank. `allow-same-origin`
+            // lets the bundle load its own assets from the same origin.
+            // Inertness is enforced by `pointer-events:none` (CSS), `tabIndex={-1}`,
+            // and `scrolling="no"` — not by restricting the sandbox.
             <iframe
               className="da-preview-iframe"
               src={prototype.bundle_url}
               title=""
               tabIndex={-1}
               scrolling="no"
-              sandbox=""
+              sandbox="allow-scripts allow-same-origin"
             />
           ) : (
             <div className="da-preview-thumb-empty" />

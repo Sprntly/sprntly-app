@@ -20,13 +20,9 @@ export type ScreenId =
   | "connectors"
   | "sources"
   | "tickets"
-  // The dedicated full-page prototype generation surface ("Generate Prototype"
-  // redirects here instead of opening the generate modal inline over the PRD).
+  // The dedicated full-page prototype surface. The prototype canvas renders
+  // in-tab here at `/prototype?prd=<id>`; the PRD context rides as a query param.
   | "prototype"
-  // The post-generation Design Agent canvas — the one refresh-stable deep-URL
-  // screen (`/design/{prototype_id}`). Layered on top of the existing no-deep-URL
-  // nav; see lib/routes.ts canvasPath / prototypeIdFromCanvasPath.
-  | "da-canvas"
 
 // The NUMBERED onboarding screens, in flow order. `ob-analyzing` is deliberately
 // absent — it is the unnumbered loader, not a counted step.
@@ -78,10 +74,6 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   sources: "Sources",
   tickets: "Project Management",
   prototype: "Prototype",
-  // The canvas renders as a full-screen overlay (its own breadcrumb), so this
-  // chrome title is never actually shown; present only for Record<ScreenId>
-  // completeness.
-  "da-canvas": "Prototype",
 }
 
 export function getMainChromeTitle(screen: ScreenId): string {
