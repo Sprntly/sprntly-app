@@ -38,6 +38,7 @@ import { useRouter, useSearchParams } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { prdIdFromPrototypeSearch } from "../../lib/routes"
+import { AppLayout } from "../../components/screens/app/AppLayout"
 import { GenerateModal } from "../../components/design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../../components/design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../../components/design-agent/PostGenerationResult"
@@ -358,15 +359,17 @@ export function PrototypeRoute() {
   // user to the PRD screen to pick/approve a PRD first.
   if (prdId == null) {
     return (
-      <div className="design-agent-surface da-prototype-empty" data-testid="prototype-route-empty">
-        <h2 className="da-prototype-empty-title">No PRD selected</h2>
-        <p className="da-prototype-empty-sub">
-          Open a PRD and choose “Generate Prototype” to start a prototype here.
-        </p>
-        <button type="button" className="btn btn-accent" onClick={() => goTo("prd")}>
-          Go to PRD
-        </button>
-      </div>
+      <AppLayout>
+        <div className="design-agent-surface da-prototype-empty" data-testid="prototype-route-empty">
+          <h2 className="da-prototype-empty-title">No PRD selected</h2>
+          <p className="da-prototype-empty-sub">
+            Open a PRD and choose "Generate Prototype" to start a prototype here.
+          </p>
+          <button type="button" className="btn btn-accent" onClick={() => goTo("prd")}>
+            Go to PRD
+          </button>
+        </div>
+      </AppLayout>
     )
   }
 
@@ -374,14 +377,16 @@ export function PrototypeRoute() {
   // prototype id forces a clean remount (fresh iterate runner) per prototype.
   if (proto) {
     return (
-      <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
-        <InTabCanvas
-          key={proto.id}
-          proto={proto}
-          onProtoChange={setProto}
-          onDone={() => setProto(null)}
-        />
-      </div>
+      <AppLayout>
+        <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
+          <InTabCanvas
+            key={proto.id}
+            proto={proto}
+            onProtoChange={setProto}
+            onDone={() => setProto(null)}
+          />
+        </div>
+      </AppLayout>
     )
   }
 
@@ -390,11 +395,13 @@ export function PrototypeRoute() {
   // overlay is reserved for an active generation kicked off from the panel below.
   if (resolving) {
     return (
-      <div
-        className="design-agent-surface da-prototype-page"
-        data-testid="prototype-route-loading"
-        aria-busy="true"
-      />
+      <AppLayout>
+        <div
+          className="design-agent-surface da-prototype-page"
+          data-testid="prototype-route-loading"
+          aria-busy="true"
+        />
+      </AppLayout>
     )
   }
 
@@ -402,25 +409,27 @@ export function PrototypeRoute() {
   // generation reveals the new prototype IN-TAB via handleGenDone (no overlay
   // navigation). The GenerationLoadingScreen covers kickoff-to-ready feedback.
   return (
-    <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
-      <GenerateModal
-        open
-        onClose={buildGatedOnClose(
-          () => genLoadingRef.current,
-          () => router.push("/prd"),
-        )}
-        prdId={prdId}
-        figmaFileKey={figmaFileKey}
-        onGenStart={handleGenStart}
-        onKickoff={(id) => setGenProtoId(id)}
-        onGenDone={handleGenDone}
-      />
-      <GenerationLoadingScreen
-        open={genLoading}
-        figmaFileKey={genFigmaKey}
-        githubRepo={genGithubRepo}
-        prototypeId={genProtoId}
-      />
-    </div>
+    <AppLayout>
+      <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
+        <GenerateModal
+          open
+          onClose={buildGatedOnClose(
+            () => genLoadingRef.current,
+            () => router.push("/prd"),
+          )}
+          prdId={prdId}
+          figmaFileKey={figmaFileKey}
+          onGenStart={handleGenStart}
+          onKickoff={(id) => setGenProtoId(id)}
+          onGenDone={handleGenDone}
+        />
+        <GenerationLoadingScreen
+          open={genLoading}
+          figmaFileKey={genFigmaKey}
+          githubRepo={genGithubRepo}
+          prototypeId={genProtoId}
+        />
+      </div>
+    </AppLayout>
   )
 }
