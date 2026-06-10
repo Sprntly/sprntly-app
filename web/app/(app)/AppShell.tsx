@@ -9,6 +9,7 @@ import {
   InviteModal,
   ClaudeDrawer,
   TicketDrawer,
+  ContentPanel,
 } from "../components/shared"
 import { useCompany } from "../context/CompanyContext"
 import { useContent } from "../context/ContentContext"
@@ -109,6 +110,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <InviteModal />
       <ClaudeDrawer />
       <TicketDrawer />
+      <ContentPanel />
     </>
   )
 }

@@ -92,7 +92,7 @@ export function DetailScreen() {
 
   if (!d) {
     return (
-      <AppLayout mainClassName="main--reading">
+      <AppLayout mainClassName="main--reading" inlineChat>
         <a className="detail-back" onClick={() => goTo("brief")}>
           ← Weekly brief
         </a>
@@ -106,7 +106,7 @@ export function DetailScreen() {
   }
 
   return (
-    <AppLayout mainClassName="main--reading">
+    <AppLayout mainClassName="main--reading" inlineChat>
       <a className="detail-back" onClick={() => goTo("brief")}>
         {d.backLabel}
       </a>

@@ -88,8 +88,8 @@ export function getMainChromeTitle(screen: ScreenId): string {
   return MAIN_CHROME_TITLE[screen]
 }
 
-/** Bottom contextual ask bar — Brief, Evidence, PRD only. Home uses in-page chat. */
-export const AI_BAR_SCREENS: ScreenId[] = ["brief", "detail", "prd"]
+/** All three contextual screens use an inline chat column; global overlay is not used. */
+export const AI_BAR_SCREENS: ScreenId[] = []
 
 export const AI_CONTEXTS: Record<
   string,

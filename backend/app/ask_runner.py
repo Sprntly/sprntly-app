@@ -124,7 +124,7 @@ def compose_ask_answer(
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
     corpus = load_corpus(dataset)
-    cacheable = f"Corpus:\n\n{corpus.joined()}"
+    cacheable = f"Corpus:\n\n{corpus.joined()}" if corpus.docs else None
 
     bundle = _retrieve_kg_bundle(enterprise_id, question)
 

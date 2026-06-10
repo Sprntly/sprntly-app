@@ -48,6 +48,11 @@ interface NavigationContextType {
   openDrawer: (drawer: "claude" | "ticket" | "design-agent") => void
   closeDrawers: () => void
 
+  // Content panel (Evidence / PRD / Tickets — opens in-place instead of navigating)
+  contentPanelTab: "evidence" | "prd" | "tickets" | null
+  openContentPanel: (tab: "evidence" | "prd" | "tickets") => void
+  closeContentPanel: () => void
+
   // Modal state
   activeModal: "approve" | "invite" | "generate" | null
   openModal: (modal: "approve" | "invite" | "generate") => void
@@ -105,6 +110,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   )
 
   const [activeDrawer, setActiveDrawer] = useState<"claude" | "ticket" | "design-agent" | null>(null)
+  const [contentPanelTab, setContentPanelTab] = useState<"evidence" | "prd" | "tickets" | null>(null)
   const [activeModal, setActiveModal] = useState<"approve" | "invite" | "generate" | null>(null)
   const [shareMenuOpen, setShareMenuOpen] = useState(false)
   const [reviewPastOpen, setReviewPastOpen] = useState(false)
@@ -235,6 +241,14 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     setActiveDrawer(null)
   }, [])
 
+  const openContentPanel = useCallback((tab: "evidence" | "prd" | "tickets") => {
+    setContentPanelTab(tab)
+  }, [])
+
+  const closeContentPanel = useCallback(() => {
+    setContentPanelTab(null)
+  }, [])
+
   const openModal = useCallback((modal: "approve" | "invite" | "generate") => {
     setActiveModal(modal)
   }, [])
@@ -262,6 +276,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         activeDrawer,
         openDrawer,
         closeDrawers,
+        contentPanelTab,
+        openContentPanel,
+        closeContentPanel,
         activeModal,
         openModal,
         closeModal,
