@@ -24,9 +24,11 @@ type OnboardingCtx = {
   refresh: () => Promise<void>
   setWorkspace: (w: WorkspaceCompany | null) => void
   /**
-   * Best-effort website-analysis result, stashed by step 1's background
-   * analyze call and read by later steps (business context, success
-   * metrics). `null` while pending / never run; may carry `ok: false`.
+   * Website-analysis result, stashed by the blocking `/onboarding/analyzing`
+   * interstitial that runs between the Company and Metrics pages, and read by
+   * later steps (success metrics, business context). `null` while pending /
+   * never run / on failure; may carry `ok: false` when analysis degraded — in
+   * every such case downstream pages fall back to manual entry.
    */
   websiteAnalysis: AnalyzeWebsiteResponse | null
   setWebsiteAnalysis: (a: AnalyzeWebsiteResponse | null) => void

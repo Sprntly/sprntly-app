@@ -18,7 +18,7 @@ import {
 } from "../../../lib/onboarding/connectorsWizard"
 
 /**
- * Onboarding page 05 — "Connect your tools."
+ * Onboarding "connectors" step — "Connect your tools."
  *
  * A categorized SEQUENTIAL wizard: the PM works one connector category at
  * a time — "each one opens the next" — with Skip / Done·next per category.
@@ -27,7 +27,7 @@ import {
  * before Continue; live OAuth/API-key wiring happens in Settings after
  * onboarding (selections here pre-stage intent).
  */
-export function Onboarding5() {
+export function Connectors() {
   const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
@@ -90,9 +90,10 @@ export function Onboarding5() {
     setSaving(true)
     try {
       if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
-      const updated = await advanceOnboardingStep(workspace.id, 6)
+      // Next numbered step is coworkers (index 4 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 4)
       setWorkspace(updated)
-      router.push("/onboarding/6")
+      router.push("/onboarding/coworkers")
     } finally {
       setSaving(false)
     }
@@ -103,7 +104,7 @@ export function Onboarding5() {
   // that path surfaces in production as a client-side exception / error
   // boundary. Render returns the loading shell until the redirect lands.
   useEffect(() => {
-    if (!loading && !workspace) router.replace("/onboarding/1")
+    if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
 
   if (loading || !workspace) return <div className="ob-shell">Loading…</div>
@@ -119,7 +120,7 @@ export function Onboarding5() {
 
   return (
     <InterviewLayout
-      step={5}
+      step={3}
       eyebrow="Saved"
       title="Connect your tools"
       agentMessage="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
@@ -142,7 +143,7 @@ export function Onboarding5() {
           </ul>
         </div>
       }
-      onBack={() => router.push("/onboarding/4")}
+      onBack={() => router.push("/onboarding/metrics")}
       onContinue={() => go(false)}
       onSkip={() => go(true)}
       continueLabel="Continue"
@@ -251,7 +252,7 @@ export function Onboarding5() {
         connection={
           connections.find((c) => c.provider === modalProvider) ?? null
         }
-        returnTo="/onboarding/5"
+        returnTo="/onboarding/connectors"
         onClose={() => setModalProvider(null)}
         onConnected={() => {
           setModalProvider(null)

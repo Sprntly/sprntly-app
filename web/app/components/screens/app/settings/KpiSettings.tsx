@@ -70,7 +70,7 @@ export function KpiSettings() {
     return (
       <SettingsSection title="KPI tree" sub="Complete onboarding first.">
         <p className="settings-placeholder">
-          <a href="/onboarding/2">Set up your KPI tree →</a>
+          <a href="/onboarding/metrics">Set up your KPI tree →</a>
         </p>
       </SettingsSection>
     )

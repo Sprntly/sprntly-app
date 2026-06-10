@@ -1,11 +1,13 @@
 export type ScreenId =
-  | "ob-1"
-  | "ob-2"
-  | "ob-3"
-  | "ob-4"
-  | "ob-5"
-  | "ob-6"
-  | "ob-7"
+  // Numbered onboarding steps, keyed by their semantic slug.
+  | "ob-business-info"
+  | "ob-metrics"
+  | "ob-connectors"
+  | "ob-coworkers"
+  | "ob-first-brief"
+  // Unnumbered loader interstitial — its own route, excluded from the numbered
+  // ONBOARDING_SCREENS list and the progress dots.
+  | "ob-analyzing"
   | "chat"
   | "brief"
   | "detail"
@@ -26,14 +28,14 @@ export type ScreenId =
   // nav; see lib/routes.ts canvasPath / prototypeIdFromCanvasPath.
   | "da-canvas"
 
+// The NUMBERED onboarding screens, in flow order. `ob-analyzing` is deliberately
+// absent — it is the unnumbered loader, not a counted step.
 export const ONBOARDING_SCREENS: ScreenId[] = [
-  "ob-1",
-  "ob-2",
-  "ob-3",
-  "ob-4",
-  "ob-5",
-  "ob-6",
-  "ob-7",
+  "ob-business-info",
+  "ob-metrics",
+  "ob-connectors",
+  "ob-coworkers",
+  "ob-first-brief",
 ]
 
 export const APP_SCREENS: ScreenId[] = [
@@ -56,13 +58,13 @@ export const APP_SCREENS: ScreenId[] = [
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-1": "Setup · Step 1 of 7",
-  "ob-2": "Setup · Step 2 of 7",
-  "ob-3": "Setup · Step 3 of 7",
-  "ob-4": "Setup · Step 4 of 7",
-  "ob-5": "Setup · Step 5 of 7",
-  "ob-6": "Setup · Step 6 of 7",
-  "ob-7": "Setup · Step 7 of 7",
+  "ob-business-info": "Setup · Step 1 of 5",
+  "ob-metrics": "Setup · Step 2 of 5",
+  "ob-connectors": "Setup · Step 3 of 5",
+  "ob-coworkers": "Setup · Step 4 of 5",
+  "ob-first-brief": "Setup · Step 5 of 5",
+  // Unnumbered loader — no step counter.
+  "ob-analyzing": "Setup",
   chat: "Home",
   brief: "Weekly brief",
   detail: "Evidence",
@@ -74,7 +76,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   team: "Team",
   connectors: "Connectors",
   sources: "Sources",
-  tickets: "Tickets",
+  tickets: "Project Management",
   prototype: "Prototype",
   // The canvas renders as a full-screen overlay (its own breadcrumb), so this
   // chrome title is never actually shown; present only for Record<ScreenId>

@@ -54,7 +54,7 @@ export function FeatureFlagsSettings() {
     return (
       <SettingsSection title="Feature flags" sub="Complete onboarding first.">
         <p className="settings-placeholder">
-          <a href="/onboarding/5">Configure agents →</a>
+          <a href="/onboarding/connectors">Configure agents →</a>
         </p>
       </SettingsSection>
     )

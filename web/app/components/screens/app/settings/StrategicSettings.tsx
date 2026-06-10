@@ -59,8 +59,11 @@ export function StrategicSettings() {
   if (!workspace) {
     return (
       <SettingsSection title="Strategic context" sub="Complete onboarding first.">
+        {/* The dedicated strategic-context onboarding page was removed in the
+            semantic-routes refactor. There's no longer a step to deep-link to,
+            so the no-workspace CTA points at the start of onboarding. */}
         <p className="settings-placeholder">
-          <a href="/onboarding/3">Add strategic context →</a>
+          <a href="/onboarding/business-info">Start onboarding →</a>
         </p>
       </SettingsSection>
     )

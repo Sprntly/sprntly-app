@@ -1,22 +1,21 @@
-// View tests for onboarding step 04 — "Set your success metrics" (the single
-// consolidated metrics page). renderToStaticMarkup pattern (node-env, no
+// View tests for the onboarding metrics page — "Set your success metrics" (the
+// single consolidated metrics page). renderToStaticMarkup pattern (node-env, no
 // jsdom, no hooks): the stateful container wires hooks, while MetricsSetupView
 // is pure and renders to static markup directly.
+//
+// NOTE: the suggestion-CHIP row was removed in the semantic-routes refactor.
+// Metrics are now pre-seeded directly as tree-target cards (edit + delete) and
+// re-added via "write your own"; there are no selectable suggestion chips, so
+// these tests assert there is NO chip surface.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { MetricsSetupView, type MetricsSetupViewProps } from "../Onboarding4"
-import type { SuggestedMetric } from "../../../../lib/api"
+import { MetricsSetupView, type MetricsSetupViewProps } from "../Metrics"
 
 function noop() {}
-
-const SUGGESTED: SuggestedMetric[] = [
-  { metric: "Reconciled volume", description: "Total $ reconciled / week." },
-  { metric: "Active accounts", description: "Accounts with a live sync." },
-]
 
 function render(override: Partial<MetricsSetupViewProps> = {}): string {
   const defaults: MetricsSetupViewProps = {
@@ -25,7 +24,6 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
     northStar: "",
     northStarDescription: "",
     northStarHints: ["Net revenue retention", "Activated accounts"],
-    suggestedMetrics: SUGGESTED,
     supporting: [],
     customMetric: "",
     customDescription: "",
@@ -36,8 +34,8 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
     onChangeNorthStar: noop,
     onChangeNorthStarDescription: noop,
     onPickNorthStar: noop,
-    onToggleSuggested: noop,
     onChangeSupportingDescription: noop,
+    onRemoveSupporting: noop,
     onChangeCustomMetric: noop,
     onChangeCustomDescription: noop,
     onAddCustom: noop,
@@ -47,45 +45,66 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
   )
 }
 
-describe("MetricsSetupView — suggested metrics (selectable)", () => {
-  it("renders each suggested metric with its description as a selectable option", () => {
-    const html = render()
-    expect(html).toContain("Suggested supporting metrics")
-    expect(html).toContain("Reconciled volume")
-    expect(html).toContain("Total $ reconciled / week.")
-    expect(html).toContain("Active accounts")
-    // selectable buttons carry aria-pressed
-    expect(html).toContain('aria-pressed="false"')
-    expect(html).toContain('data-metric="Reconciled volume"')
-  })
-
-  it("marks a suggested metric as selected when it's in `supporting`", () => {
+describe("MetricsSetupView — NO suggestion chips", () => {
+  it("renders no selectable suggestion-chip surface", () => {
     const html = render({
-      supporting: [{ name: "Reconciled volume", description: "Total $ reconciled / week." }],
+      supporting: [{ name: "Reconciled volume", description: "Weekly total." }],
     })
-    expect(html).toContain('aria-pressed="true"')
-    expect(html).toContain("1 supporting metric selected")
+    // The chip row + its toggle affordance are gone entirely.
+    expect(html).not.toContain("mt-suggested")
+    expect(html).not.toContain("aria-pressed")
+    expect(html).not.toContain('id="suggestedMetrics"')
   })
 
-  it("falls back to an add-your-own prompt when there are NO suggestions", () => {
-    const html = render({ suggestedMetrics: [] })
-    expect(html).toContain("No suggestions yet")
-    expect(html).toContain("Add your own")
+  it("shows an add-your-own prompt when nothing is seeded yet", () => {
+    const html = render({ supporting: [] })
+    expect(html).toContain("No supporting metrics yet")
+    expect(html).toContain("Or write your own")
   })
 })
 
-describe("MetricsSetupView — add your own", () => {
+describe("MetricsSetupView — selected metrics render as tree targets", () => {
+  it("renders each selected supporting metric as a tree target with name, editable description, and a delete control", () => {
+    const html = render({
+      supporting: [{ name: "Reconciled volume", description: "Weekly total." }],
+    })
+    // targets live inside the metric-tree (source → targets), not a separate block
+    expect(html).toContain("metric-tree")
+    expect(html).toContain('class="mt-targets mt-targets-cards"')
+    expect(html).toContain('class="mt-target"')
+    expect(html).toContain('data-metric="Reconciled volume"')
+    // name + editable description textarea
+    expect(html).toContain("Reconciled volume")
+    expect(html).toContain('aria-label="Description for Reconciled volume"')
+    expect(html).toContain("Weekly total.")
+    // delete control
+    expect(html).toContain('aria-label="Remove Reconciled volume"')
+    expect(html).toMatch(/<button[^>]*type="button"[^>]*aria-label="Remove Reconciled volume"/)
+    // the old separate bottom cards section is gone
+    expect(html).not.toContain("metric-desc-block")
+  })
+
+  it("shows a targets empty state (not the bottom cards) when nothing is selected", () => {
+    const html = render({ supporting: [] })
+    expect(html).toContain("mt-targets-empty")
+    expect(html).not.toContain('class="mt-target"')
+    expect(html).toContain("0</strong> supporting metrics selected")
+  })
+})
+
+describe("MetricsSetupView — add your own (metric-other)", () => {
   it("renders the custom metric name + description inputs and an Add button", () => {
     const html = render()
-    expect(html).toContain("Add your own")
+    expect(html).toContain("metric-other")
+    expect(html).toContain("Or write your own")
     expect(html).toContain('aria-label="Custom metric name"')
     expect(html).toContain('aria-label="Custom metric description"')
-    expect(html).toContain(">Add</button>")
+    expect(html).toContain("Add</button>")
   })
 
   it("disables Add when the custom name is empty", () => {
     const html = render({ customMetric: "" })
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>Add<\/button>/)
+    expect(html).toMatch(/<button[^>]*disabled/)
   })
 })
 
@@ -99,7 +118,7 @@ describe("MetricsSetupView — editable industry / business-type dropdowns", () 
     expect(html).toMatch(/<option[^>]*selected[^>]*>Marketplace<\/option>/)
     // and they're editable (not disabled / not read-only text)
     expect(html).not.toMatch(/<select[^>]*disabled/)
-    expect(html).toContain("Predicted from your website")
+    expect(html).toContain("predicted from your website")
   })
 })
 
@@ -129,7 +148,7 @@ describe("MetricsSetupView — North Star", () => {
 
   it("renders an error banner when error is set", () => {
     const html = render({ error: "Save failed" })
-    expect(html).toContain("ob-form-error")
+    expect(html).toContain("onb-form-error")
     expect(html).toContain("Save failed")
   })
 })

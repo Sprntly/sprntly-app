@@ -108,3 +108,50 @@ export function InfoCircle(props: SVGProps<SVGSVGElement>) {
     </svg>
   )
 }
+
+export function ArrowLeft(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base(props)}>
+      <line x1="19" y1="12" x2="5" y2="12" />
+      <polyline points="12 19 5 12 12 5" />
+    </svg>
+  )
+}
+
+export function Sparkles(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z" />
+      <path d="M18 14l.7 1.9L20.6 16.6l-1.9.7L18 19.2l-.7-1.9-1.9-.7 1.9-.7z" />
+    </svg>
+  )
+}
+
+export function Plus(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base(props)}>
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  )
+}
+
+export function Check(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base(props)}>
+      <polyline points="5 12 10 17 19 7" />
+    </svg>
+  )
+}
+
+export function Trash(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base(props)}>
+      <line x1="4" y1="7" x2="20" y2="7" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12" />
+      <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
+    </svg>
+  )
+}

@@ -647,7 +647,7 @@ export const connectorsApi = {
    * runs the auth check via fetch + Bearer, then hands back the URL the
    * browser should navigate to next.
    *
-   * `returnTo` is an optional relative path (e.g. `/onboarding/4`) the
+   * `returnTo` is an optional relative path (e.g. `/onboarding/connectors`) the
    * backend signs into the OAuth state JWT; the callback then redirects
    * there with `?connected=<provider>` appended. Used by the onboarding
    * connector modal to bounce the user back to the same step instead of

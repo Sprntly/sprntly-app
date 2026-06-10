@@ -1,7 +1,8 @@
 // Node-env SSR render assertion (no jsdom) — same View pattern as the
 // connector/PRD component tests. InterviewLayout is purely presentational
 // (props only, no hooks), so it renders to static markup directly. It is
-// the shared v4 onboarding shell for pages 05/06/07.
+// the shared v4 onboarding shell for the connectors / coworkers / first-brief
+// steps (a 5-step flow).
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
@@ -14,7 +15,7 @@ const noop = () => {}
 
 function render(override: Partial<React.ComponentProps<typeof InterviewLayout>> = {}): string {
   const defaults: React.ComponentProps<typeof InterviewLayout> = {
-    step: 7,
+    step: 5,
     eyebrow: "Saved",
     title: "Introducing your AI coworkers. Give them a name.",
     agentMessage: "Three specialists plus an Admin join your workspace.",
@@ -34,15 +35,15 @@ describe("InterviewLayout (v4 onboarding shell)", () => {
     expect(html).toContain("preview")
   })
 
-  it("shows the step progress label and a 7-dot indicator", () => {
+  it("shows the step progress label and a 5-dot indicator", () => {
     const html = render({ step: 5 })
-    expect(html).toContain("Step 5 of 7")
+    expect(html).toContain("Step 5 of 5")
     // one dot element per step (match the className attribute, not CSS rules)
-    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(7)
+    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(5)
   })
 
   it("marks done/active dots relative to the current step", () => {
-    const html = render({ step: 6 })
+    const html = render({ step: 4 })
     expect(html).toContain("interview-dot done") // steps before current
     expect(html).toContain("interview-dot  active") // current step
   })
