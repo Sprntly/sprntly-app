@@ -37,10 +37,10 @@ interface NavigationContextType {
   // Canvas-ONLY refresh-stable route surface. Purely additive — the rest of this
   // interface is unchanged. The canvas is the single deep-URL screen; everything
   // else stays no-deep-URL.
-  /** The prototype_id read from the canvas URL (`/design/{id}`), or null when
+  /** The prototype_id read from the canvas URL (`/prototype/{id}`), or null when
    *  the current path is not the canvas route. */
   canvasPrototypeId: number | null
-  /** Push the refresh-stable canvas route for a prototype (`/design/{id}`). */
+  /** Push the refresh-stable canvas route for a prototype (`/prototype/{id}`). */
   goToCanvas: (prototypeId: number) => void
 
   // Drawer state
@@ -216,7 +216,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     [router],
   )
 
-  // Navigate to the refresh-stable canvas route. Pushes `/design/{id}` so a
+  // Navigate to the refresh-stable canvas route. Pushes `/prototype/{id}` so a
   // refresh re-resolves the canvas (ApproveModal's resolver reads
   // canvasPrototypeId on mount). Layered on top of the existing local-state
   // canvas flow — it does NOT replace it.

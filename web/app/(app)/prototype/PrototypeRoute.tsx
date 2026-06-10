@@ -1,28 +1,27 @@
 "use client"
 
-// Client surface for the dedicated /prototype route. "Generate Prototype" now
-// redirects here (router.push(prototypePath(prdId))) instead of opening the
-// generate modal inline over the PRD — the founder's request: "once someone
-// clicks Generate Prototype it should redirect to a new page /prototype".
+// Client surface for the dedicated /prototype route. This page is the prototype
+// tab's landing: it renders the generate panel as an always-open form, reads the
+// PRD context from the URL (?prd=<id>) via useSearchParams, and hands off to the
+// refresh-stable canvas route (/prototype/{id}) once generation succeeds.
+//
+// The normal entry path from the PRD screen is now inline: clicking "Generate
+// Prototype" opens the generate modal in-place over the PRD (no navigation).
+// This page remains available for direct URL access and can be reached by
+// navigating to the prototype tab with a PRD query param. Bare /prototype (no
+// ?prd=) shows an empty state prompting the user to choose a PRD first.
 //
 // Co-located with the page exactly like web/app/p/[token]/PublicTokenViewer.tsx
 // and web/app/(app)/onboarding/[step]/OnboardingStep.tsx — the server shell
 // (page.tsx) satisfies static export; this owns the runtime behaviour. The PRD
-// context is read from the URL (?prd=<id>) via useSearchParams at runtime, so
-// the page needs no per-id dynamic segment / generateStaticParams (static-export
-// safe — the route is emitted once and resolves the PRD client-side).
+// context is read from the URL client-side so no per-id dynamic segment is needed.
 //
-// Reuse, not a rewrite: the generation surface is the SAME GenerateModal the
-// Approve flow used (real connector/figma/repo wiring, the shared runGenerateFlow
-// via designAgentApi.generate), rendered as the always-open panel on this page.
-// The GenerationLoadingScreen overlay provides kickoff→ready feedback. Once
-// generation succeeds with a ready prototype, the page hands off to the
-// refresh-stable canvas route (/design/{id}) — the same destination the modal
-// flow revealed as a full-screen canvas — so the generated prototype opens and a
-// refresh re-resolves it. The figma_file_key is pulled from ContentContext when
-// the loaded PRD matches the URL's prd id (the modal sourced it the same way);
-// it degrades to null otherwise (generation still runs, just without a preset
-// Figma source — the user can paste a Figma URL in the panel).
+// The generation surface reuses the same GenerateModal as the approve flow (real
+// connector/figma/repo wiring, the shared runGenerateFlow via
+// designAgentApi.generate), rendered as the always-open panel. The
+// GenerationLoadingScreen overlay provides kickoff-to-ready feedback. The
+// figma_file_key is pulled from ContentContext when the loaded PRD matches the
+// URL's prd id; it degrades to null otherwise.
 //
 // Lives in the (app) group → behind AuthGate, matching the canvas route: this is
 // an authed internal authoring surface.
@@ -100,10 +99,10 @@ export function PrototypeRoute() {
   }
 
   // Terminal generation outcome. On SUCCESS hand off to the refresh-stable canvas
-  // route for the generated prototype (the page's job is done — it landed the
-  // user on /prototype, kicked generation, and now opens the result). On FAILURE
-  // / no result, just dismiss the overlay; the panel stays so the user can retry
-  // (runGenerateFlow already toasted the failure).
+  // route for the generated prototype (navigates to /prototype/{id} — the canvas
+  // route that coexists with this landing under the same /prototype base). On
+  // FAILURE / no result, just dismiss the overlay; the panel stays so the user
+  // can retry (runGenerateFlow already toasted the failure).
   const handleGenDone = (result?: DesignAgentGenResult) => {
     genLoadingRef.current = false
     setGenLoading(false)

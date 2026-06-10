@@ -1,10 +1,12 @@
 // Scoped refresh-stable canvas route.
 //
-// The canvas is the one deep-URL screen (`/design/{prototype_id}`) layered on
-// top of the app's otherwise no-deep-URL, pathname-driven nav. These tests cover
-// the canvas-scoped pure helpers (path build/parse + the resolver decision) and
-// prove the existing nav is UNCHANGED — screenIdFromPathname / pathForScreen
-// logic is untouched (the route stays bounded to the canvas).
+// The canvas is the one deep-URL screen (`/prototype/{prototype_id}`) layered on
+// top of the app's otherwise no-deep-URL, pathname-driven nav. The canvas path
+// is under the same `/prototype` base as the generation landing — they coexist
+// as sibling routes in the filesystem. These tests cover the canvas-scoped pure
+// helpers (path build/parse + the resolver decision) and prove the existing nav
+// is UNCHANGED — screenIdFromPathname / pathForScreen logic for all other routes
+// is untouched.
 //
 // Node-env (no jsdom pragma): every unit here exercises pure exported functions,
 // matching the repo convention of testing extracted helpers rather than rendering
@@ -15,6 +17,7 @@
 import { describe, expect, it } from "vitest"
 import {
   CANVAS_BASE_PATH,
+  PROTOTYPE_PATH,
   SCREEN_PATH,
   canvasPath,
   canvasResolveTarget,
@@ -25,30 +28,31 @@ import {
 import type { ScreenId } from "../../../types"
 
 describe("canvas route — resolution (test_canvas_route_resolves_to_canvas_screen)", () => {
-  it("maps the canvas base path to the da-canvas screen id (PATH_TO_SCREEN inverse)", () => {
-    // screenIdFromPathname is UNCHANGED (exact-match); the new inverse entry
-    // resolves the bare base path to da-canvas.
-    expect(screenIdFromPathname(CANVAS_BASE_PATH)).toBe("da-canvas")
+  it("bare /prototype maps to the prototype screen (prototype tab highlighted on landing)", () => {
+    // The bare /prototype is the generation landing; it resolves to "prototype".
+    // CANVAS_BASE_PATH is now an alias for PROTOTYPE_PATH — both are /prototype.
+    expect(screenIdFromPathname(CANVAS_BASE_PATH)).toBe("prototype")
+    expect(screenIdFromPathname(PROTOTYPE_PATH)).toBe("prototype")
   })
 
   it("reads the prototype_id from an id-bearing canvas path", () => {
-    expect(prototypeIdFromCanvasPath("/design/54")).toBe(54)
+    expect(prototypeIdFromCanvasPath("/prototype/54")).toBe(54)
   })
 
-  it("leaves the id-bearing canvas path out of screenIdFromPathname (overlay model, logic untouched)", () => {
-    // The full `/design/{id}` deliberately does NOT resolve to a screen via
-    // screenIdFromPathname — the canvas is a full-screen overlay driven by
-    // canvasResolveTarget, not by currentScreen. This proves screenIdFromPathname
-    // logic was not changed to special-case the canvas.
-    expect(screenIdFromPathname("/design/54")).toBe("chat")
+  it("id-bearing canvas path resolves to the prototype screen (prototype tab stays highlighted)", () => {
+    // The full `/prototype/{id}` resolves to "prototype" via the prefix rule in
+    // screenIdFromPathname, so the prototype tab stays highlighted while the
+    // canvas overlay is open — the canvas is anchored under the prototype tab.
+    expect(screenIdFromPathname("/prototype/54")).toBe("prototype")
+    expect(screenIdFromPathname("/prototype/7")).toBe("prototype")
   })
 })
 
 describe("canvas route — navigation path (test_navigate_to_canvas_pushes_prototype_id_route)", () => {
   it("builds the refresh-stable id-bearing path", () => {
     // This is exactly what NavigationContext.goToCanvas pushes via router.push.
-    expect(canvasPath(54)).toBe("/design/54")
-    expect(canvasPath(7)).toBe("/design/7")
+    expect(canvasPath(54)).toBe("/prototype/54")
+    expect(canvasPath(7)).toBe("/prototype/7")
   })
 
   it("round-trips: parse(build(id)) === id", () => {
@@ -66,7 +70,7 @@ describe("canvas resolver — refresh rehydration (test_refresh_on_canvas_route_
   it("yields the prototype_id to fetch when the canvas route is set and the workspace is hydrated", () => {
     // Simulate a remount with the canvas route set (refresh): the resolver reads
     // the id from the URL and signals a fetch of that prototype.
-    const routeId = prototypeIdFromCanvasPath("/design/54")
+    const routeId = prototypeIdFromCanvasPath("/prototype/54")
     expect(canvasResolveTarget(routeId, /* hydrated */ true, /* mounted */ null)).toBe(54)
   })
 
@@ -96,30 +100,30 @@ describe("prototypeIdFromCanvasPath — edge cases", () => {
   })
 
   it("tolerates a trailing slash on the id-bearing path", () => {
-    expect(prototypeIdFromCanvasPath("/design/54/")).toBe(54)
+    expect(prototypeIdFromCanvasPath("/prototype/54/")).toBe(54)
   })
 
   it("returns null for non-numeric / malformed ids", () => {
-    expect(prototypeIdFromCanvasPath("/design/abc")).toBeNull()
-    expect(prototypeIdFromCanvasPath("/design/-1")).toBeNull()
-    expect(prototypeIdFromCanvasPath("/design/54x")).toBeNull()
+    expect(prototypeIdFromCanvasPath("/prototype/abc")).toBeNull()
+    expect(prototypeIdFromCanvasPath("/prototype/-1")).toBeNull()
+    expect(prototypeIdFromCanvasPath("/prototype/54x")).toBeNull()
   })
 
   it("returns null for deeper paths under the canvas base", () => {
-    expect(prototypeIdFromCanvasPath("/design/54/extra")).toBeNull()
+    expect(prototypeIdFromCanvasPath("/prototype/54/extra")).toBeNull()
   })
 
   it("returns null for null / empty / unrelated paths", () => {
     expect(prototypeIdFromCanvasPath(null)).toBeNull()
     expect(prototypeIdFromCanvasPath("")).toBeNull()
     expect(prototypeIdFromCanvasPath("/prd")).toBeNull()
-    expect(prototypeIdFromCanvasPath("/designs/54")).toBeNull()
+    expect(prototypeIdFromCanvasPath("/prototypes/54")).toBeNull()
   })
 })
 
 describe("non-canvas routes unchanged (test_non_canvas_routes_unchanged)", () => {
-  // The exhaustive set of pre-existing path→screen mappings. Adding the canvas
-  // route must NOT change any of these — no nav regression.
+  // The exhaustive set of pre-existing path→screen mappings. The canvas route
+  // change must NOT alter any of these — no nav regression.
   const EXPECTED: Array<[string, ScreenId]> = [
     ["/", "chat"],
     ["/brief", "brief"],
@@ -148,8 +152,8 @@ describe("non-canvas routes unchanged (test_non_canvas_routes_unchanged)", () =>
     }
   })
 
-  it("SCREEN_PATH gained exactly the da-canvas entry and kept every prior entry", () => {
-    // Spot-check a few prior entries are intact + the new one is present.
+  it("SCREEN_PATH has the da-canvas entry and kept every prior entry", () => {
+    // Spot-check a few prior entries are intact + the canvas entry is present.
     expect(SCREEN_PATH.chat).toBe("/")
     expect(SCREEN_PATH.prd).toBe("/prd")
     expect(SCREEN_PATH["da-canvas"]).toBe(CANVAS_BASE_PATH)

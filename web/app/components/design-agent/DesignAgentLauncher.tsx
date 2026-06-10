@@ -509,7 +509,7 @@ export function DesignAgentLauncherView({
 }
 
 /**
- * Pushes the refresh-stable canvas route (`/design/{id}`) when the
+ * Pushes the refresh-stable canvas route (`/prototype/{id}`) when the
  * launcher-owned canvas opens, so a refresh re-resolves the canvas — parity with
  * the modal "View Prototype" open path. Reads navigation from context, so it is
  * mounted ONLY while a canvas is open: that keeps `DesignAgentLauncher` itself
@@ -646,7 +646,7 @@ export function DesignAgentLauncher({
 
   // Open the existing prototype directly in the full-screen canvas — no loading
   // screen, since the bundle already exists. Opening also pushes the
-  // refresh-stable canvas route (`/design/{id}`) so a refresh re-resolves the
+  // refresh-stable canvas route (`/prototype/{id}`) so a refresh re-resolves the
   // canvas, matching the modal "View Prototype" path. The route push is wired
   // declaratively by `<CanvasRouteSync>` (mounted in the returned tree while a
   // canvas is open) rather than called inline here: this container is rendered

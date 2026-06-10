@@ -6,10 +6,8 @@
 // ApproveModal closing. Its open/close state lives in the shared navigation
 // modal union (`activeModal === "generate"`), not local component state.
 import { useCallback, useEffect, useRef, useState } from "react"
-import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
-import { prototypePath } from "../../lib/routes"
 import { GenerateModal } from "../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../design-agent/PostGenerationResult"
@@ -33,8 +31,7 @@ const MIN_VISIBLE_MS = 2500
 const SAFETY_MAX_MS = 6.5 * 60 * 1000
 
 export function ApproveModal() {
-  const router = useRouter()
-  const { activeModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas, showToast } =
+  const { activeModal, closeModal, openDrawer, openModal, goTo, canvasPrototypeId, goToCanvas, showToast } =
     useNavigation()
   const { content } = useContent()
   // Full-screen loading-overlay visibility.
@@ -157,8 +154,7 @@ export function ApproveModal() {
     [hideLoading],
   )
 
-  // Close/Done — clear the full-screen canvas (returns to the PRD) and drop any
-  // lifted apply target.
+  // Close/Done — clear the full-screen canvas and return to the prototype tab.
   const closeCanvas = useCallback(() => {
     setCanvasResult(null)
     setApplyTarget(null)
@@ -168,18 +164,16 @@ export function ApproveModal() {
     // rather than clearing it to null. Clearing it caused a re-resolution race:
     // canvasResult → null triggered the resolver effect which, seeing
     // urlResolvedIdRef.current = null while canvasPrototypeId was still the old
-    // id (Next.js router.push is async), would re-fetch and re-open the canvas
-    // before the /prd navigation completed, making the breadcrumb appear to do
-    // nothing on the standalone /design/[id] route.
+    // id (navigation is async), would re-fetch and re-open the canvas before the
+    // navigation completed.
     urlResolvedIdRef.current = canvasPrototypeId
-    // Leave the canvas route so the URL and view stay consistent and the
-    // resolver does not immediately re-open the canvas. The canvas opens from
-    // the approved PRD, so the PRD is its logical parent.
+    // Navigate to the bare /prototype tab (the prototype section's landing) so
+    // the URL and sidebar highlight stay consistent. The canvas is anchored under
+    // the prototype tab, so closing it lands there rather than on a different screen.
     if (canvasPrototypeId != null) {
-      goTo("prd")
-      router.push("/prd")
+      goTo("prototype")
     }
-  }, [canvasPrototypeId, goTo, router])
+  }, [canvasPrototypeId, goTo])
 
   // After a Share or an iterate advances the
   // SAME prototype, re-fetch the record so the in-canvas share-gated CommentsPanel
@@ -268,9 +262,9 @@ export function ApproveModal() {
     }
   }, [activeModal, prd?.prd_id])
 
-  // Refresh re-resolution. When the URL is the canvas route (`/design/{id}`) —
+  // Refresh re-resolution. When the URL is the canvas route (`/prototype/{id}`) —
   // e.g. after a page refresh while editing — re-open the canvas by fetching the
-  // prototype, instead of dropping to the empty PRD screen.
+  // prototype, instead of dropping to the empty base screen.
   //
   // Fix B (un-gate + dedupe): the hydration gate is removed from the resolver
   // itself — the fetch starts as soon as the prototype id is known from the URL.
@@ -518,15 +512,14 @@ export function ApproveModal() {
       }
       return
     }
-    // "Generate Prototype" now REDIRECTS to the dedicated /prototype page
-    // (carrying the PRD context as ?prd=<id>) instead of opening the generate
-    // modal inline over the PRD. Close this modal first so it does not linger
-    // over the new route. The generate panel + loading screen + canvas hand-off
-    // all live on /prototype now (the inline GenerateModal subtree below stays
-    // mounted only as forward-compat / the loading-overlay host — it is no longer
-    // opened from this flow via the navigation modal union's generate member).
-    closeModal()
-    router.push(prototypePath(prd?.prd_id ?? null))
+    // Open the generate modal in-place over the PRD screen. Switching the
+    // navigation modal union from "approve" to "generate" causes the approve
+    // content to unmount (the guard `if (activeModal !== "approve")` above) and
+    // the GenerateModal to mount in its place — no navigation on click. The
+    // redirect to the canvas (/prototype/{id}) happens only after the user
+    // submits the form and the generate kickoff returns the new prototype_id,
+    // wired via the existing goToCanvas path in the hideLoading callback above.
+    openModal("generate")
   }
 
   const handleTicketClick = () => {

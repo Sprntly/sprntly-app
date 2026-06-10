@@ -4,21 +4,22 @@ import {
   ONBOARDING_STEP_SLUGS,
 } from "./onboarding/types"
 
-/** Base path for the refresh-stable Design Agent canvas route. The full route
- *  carries the prototype_id (`/design/{prototype_id}`). This is the only
- *  deep-URL screen in the app's otherwise no-deep-URL nav. */
-export const CANVAS_BASE_PATH = "/design"
-
-/** Dedicated full-page prototype generation surface. "Generate Prototype" now
- *  redirects here (instead of opening the generate modal inline over the PRD).
- *  The PRD context is carried as a `?prd=<id>` query param; the page kicks off
- *  generation and, once a prototype_id exists, hands off to the canvas route
- *  (`/design/{id}`). A static page (no per-id dynamic segment), so it needs no
- *  generateStaticParams — the query param is read client-side. */
+/** Base path shared by the prototype generation landing page (`/prototype`)
+ *  and the refresh-stable Design Agent canvas route (`/prototype/{prototype_id}`).
+ *  The canvas coexists with the bare landing: `/prototype/page.tsx` handles the
+ *  landing; `/prototype/[prototype_id]/page.tsx` is the canvas shell. Both live
+ *  under this single base — there is no separate "/design" constant. */
 export const PROTOTYPE_PATH = "/prototype"
 
-/** Build the prototype-page path, threading the PRD context as `?prd=<id>` when
- *  present. With no PRD it returns the bare `/prototype`. Pure → unit-testable. */
+/** Alias kept so callers that import CANVAS_BASE_PATH continue to work without
+ *  a rename. It resolves to the same value as PROTOTYPE_PATH — canvas paths are
+ *  now `/prototype/{id}` rather than `/design/{id}`. */
+export const CANVAS_BASE_PATH = PROTOTYPE_PATH
+
+/** Build the bare prototype landing path, threading the PRD context as `?prd=<id>`
+ *  when present. With no PRD it returns the bare `/prototype`. Used by callers that
+ *  navigate to the generation landing — distinct from canvasPath, which builds the
+ *  id-bearing canvas path. Pure → unit-testable. */
 export function prototypePath(prdId?: number | string | null): string {
   if (prdId == null || prdId === "") return PROTOTYPE_PATH
   return `${PROTOTYPE_PATH}?prd=${encodeURIComponent(String(prdId))}`
@@ -57,12 +58,13 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   connectors: "/settings?section=connectors",
   sources: "/sources",
   tickets: "/tickets",
-  // The dedicated full-page prototype generation surface (sidebar nav target).
-  // The "Generate Prototype" entry point redirects here with a ?prd=<id> query
-  // param; the page reads it client-side (no per-id dynamic segment).
+  // The prototype generation landing (sidebar nav target). The generate modal
+  // opens in-place over the PRD screen; this route remains available for
+  // direct navigation (e.g. bare /prototype with no ?prd= param shows an
+  // empty state prompting the user to choose a PRD first).
   prototype: PROTOTYPE_PATH,
-  // The refresh-stable canvas route. The bare base path; the id-bearing path
-  // (`/design/{prototype_id}`) is built by canvasPath() below.
+  // The refresh-stable canvas route base. The id-bearing path
+  // (`/prototype/{prototype_id}`) is built by canvasPath() below.
   // pathForScreen("da-canvas") returns this base — canvas navigation goes
   // through goToCanvas(id)/canvasPath(id), never pathForScreen.
   "da-canvas": CANVAS_BASE_PATH,
@@ -79,12 +81,12 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/team": "team",
   "/sources": "sources",
   "/tickets": "tickets",
+  // Both the bare landing (/prototype) and the id-bearing canvas path
+  // (/prototype/{id}) map to the "prototype" screen so the prototype tab
+  // stays highlighted while the canvas overlay is open. The id-bearing path
+  // is handled by a prefix rule in screenIdFromPathname below (not by an
+  // exact-match entry here, since the id segment is unbounded).
   [PROTOTYPE_PATH]: "prototype",
-  // Inverse for the canvas base path. screenIdFromPathname is left UNCHANGED —
-  // it exact-matches, so the bare "/design" resolves to "da-canvas" while the
-  // id-bearing "/design/{id}" falls through to "chat" (the canvas is a
-  // full-screen overlay driven by canvasResolveTarget, not by currentScreen).
-  [CANVAS_BASE_PATH]: "da-canvas",
 }
 
 // Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).
@@ -103,6 +105,11 @@ export function normalizePathname(pathname: string | null): string {
 
 export function screenIdFromPathname(pathname: string | null): ScreenId {
   const path = normalizePathname(pathname)
+  // Prefix rule: /prototype/{digits} (the canvas overlay route) resolves to the
+  // same "prototype" screen as the bare /prototype landing, so the prototype tab
+  // stays highlighted while the canvas is open. The exact-match table handles
+  // /prototype itself; this catches the id-bearing variant.
+  if (/^\/prototype\/\d+$/.test(path)) return "prototype"
   return PATH_TO_SCREEN[path] ?? "chat"
 }
 
@@ -117,15 +124,15 @@ export function pathForScreen(screen: ScreenId): string {
 // the app's no-deep-URL nav is untouched.
 
 /** Build the refresh-stable canvas path for a prototype, e.g.
- *  canvasPath(54) === "/design/54". The prototype_id is the ONLY state the
+ *  canvasPath(54) === "/prototype/54". The prototype_id is the ONLY state the
  *  canvas route carries. */
 export function canvasPath(prototypeId: number | string): string {
   return `${CANVAS_BASE_PATH}/${prototypeId}`
 }
 
 /** Read the canvas prototype_id from a pathname, or null when the path is not
- *  the canvas route. Matches `/design/{id}` (one trailing numeric segment);
- *  the bare "/design", any non-numeric segment, or any deeper path returns null
+ *  the canvas route. Matches `/prototype/{id}` (one trailing numeric segment);
+ *  the bare "/prototype", any non-numeric segment, or any deeper path returns null
  *  so the canvas never resolves against a malformed URL. */
 export function prototypeIdFromCanvasPath(pathname: string | null): number | null {
   const path = normalizePathname(pathname)

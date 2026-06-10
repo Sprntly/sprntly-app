@@ -24,7 +24,7 @@ export type ScreenId =
   // redirects here instead of opening the generate modal inline over the PRD).
   | "prototype"
   // The post-generation Design Agent canvas — the one refresh-stable deep-URL
-  // screen (`/design/{prototype_id}`). Layered on top of the existing no-deep-URL
+  // screen (`/prototype/{prototype_id}`). Layered on top of the existing no-deep-URL
   // nav; see lib/routes.ts canvasPath / prototypeIdFromCanvasPath.
   | "da-canvas"
 
