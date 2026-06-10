@@ -438,6 +438,20 @@ export function condensePrd(sections: PrdSection[] | undefined): CondensedPrd {
   return { ...empty, hasFullBody: sections.length > 0 }
 }
 
+/** Pure: drop the leading PRD boilerplate (the "# Part A …" title, the
+ *  Author/DRI/Status meta line, the divider) so a CONDENSED preview leads with
+ *  the first real content. Heuristic: PRD content sections are numbered
+ *  ("1. …", "2. …"), so the first heading whose text starts with a digit marks
+ *  where the substance begins; everything before it is preamble. If no numbered
+ *  heading is found the sections are returned unchanged (safe no-op). Only the
+ *  preview uses this — the full doc behind "View full PRD" renders unmodified. */
+export function stripPrdPreamble(sections: PrdSection[]): PrdSection[] {
+  const firstContentIdx = sections.findIndex(
+    (s) => s.type === "h2" && /^\d/.test(s.text.trim()),
+  )
+  return firstContentIdx > 0 ? sections.slice(firstContentIdx) : sections
+}
+
 /**
  * the condensed left-sidebar context
  * panel — PRD title + one-line meta + Problem/Fix/Impact cards (David's
@@ -501,7 +515,7 @@ function CondensedPrdPanel({
             maskImage: "linear-gradient(to bottom, black 65%, transparent)",
           }}
         >
-          <PrdSections sections={sections} />
+          <PrdSections sections={stripPrdPreamble(sections)} />
         </div>
       ) : (
         <p className="da-left-prd-empty">No summary available for this PRD.</p>
