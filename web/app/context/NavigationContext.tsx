@@ -12,12 +12,7 @@ import {
 import { usePathname, useRouter } from "next/navigation"
 import type { ScreenId } from "../types"
 import type { AskResponse } from "../lib/api"
-import {
-  pathForScreen,
-  screenIdFromPathname,
-  canvasPath,
-  prototypeIdFromCanvasPath,
-} from "../lib/routes"
+import { pathForScreen, screenIdFromPathname } from "../lib/routes"
 
 /** Top search hands off `/v1/ask` results to Ask Sprntly (in-page thread) without a second request. */
 export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: string }
@@ -33,15 +28,6 @@ export const AI_PANEL_COLLAPSED_WIDTH = 84
 interface NavigationContextType {
   currentScreen: ScreenId
   goTo: (screen: ScreenId) => void
-
-  // Canvas-ONLY refresh-stable route surface. Purely additive — the rest of this
-  // interface is unchanged. The canvas is the single deep-URL screen; everything
-  // else stays no-deep-URL.
-  /** The prototype_id read from the canvas URL (`/prototype/{id}`), or null when
-   *  the current path is not the canvas route. */
-  canvasPrototypeId: number | null
-  /** Push the refresh-stable canvas route for a prototype (`/prototype/{id}`). */
-  goToCanvas: (prototypeId: number) => void
 
   // Drawer state
   activeDrawer: "claude" | "ticket" | "design-agent" | null
@@ -97,12 +83,6 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
   const currentScreen = useMemo(() => screenIdFromPathname(pathname), [pathname])
-  // The canvas prototype_id derived from the URL. null on every non-canvas path
-  // — does not affect currentScreen derivation above.
-  const canvasPrototypeId = useMemo(
-    () => prototypeIdFromCanvasPath(pathname),
-    [pathname],
-  )
 
   const [activeDrawer, setActiveDrawer] = useState<"claude" | "ticket" | "design-agent" | null>(null)
   const [activeModal, setActiveModal] = useState<"approve" | "invite" | "generate" | null>(null)
@@ -216,17 +196,6 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     [router],
   )
 
-  // Navigate to the refresh-stable canvas route. Pushes `/prototype/{id}` so a
-  // refresh re-resolves the canvas (ApproveModal's resolver reads
-  // canvasPrototypeId on mount). Layered on top of the existing local-state
-  // canvas flow — it does NOT replace it.
-  const goToCanvas = useCallback(
-    (prototypeId: number) => {
-      router.push(canvasPath(prototypeId))
-    },
-    [router],
-  )
-
   const openDrawer = useCallback((drawer: "claude" | "ticket" | "design-agent") => {
     setActiveDrawer(drawer)
   }, [])
@@ -257,8 +226,6 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
       value={{
         currentScreen,
         goTo,
-        canvasPrototypeId,
-        goToCanvas,
         activeDrawer,
         openDrawer,
         closeDrawers,

@@ -248,6 +248,11 @@ function InTabCanvas({
           applyTarget={applyTarget}
           onClearApply={() => setApplyTarget(null)}
           onIterated={refreshCanvas}
+          // The iterate path intentionally skips the pre-flight cost-estimate
+          // confirmation modal. The per-generation soft/hard spend caps remain
+          // the guardrail, and the generate-path estimate is unchanged. The
+          // default (`skipCostConfirm = false`) preserves the confirmation modal
+          // for any non-iterate caller.
           skipCostConfirm
           runIterateExternal={runCanvasIterate}
           externalBusy={iterateRun.running}

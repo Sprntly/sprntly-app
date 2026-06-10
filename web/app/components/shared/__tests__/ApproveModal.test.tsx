@@ -177,16 +177,22 @@ describe("ApproveModal no longer owns generate visibility locally", () => {
   })
 
   it("test_approve_modal_generate_opens_modal_inline: Generate Prototype opens the generate modal in-place, no navigation on click", () => {
-    // Clicking "Generate Prototype" in the approve modal now opens the generate
+    // Clicking "Generate Prototype" (no existing prototype) opens the generate
     // modal inline over the PRD screen (openModal("generate")) instead of
-    // navigating away. The redirect to the canvas happens only after the user
-    // submits and the kickoff returns a prototype_id, wired via goToCanvas.
-    // Asserted on the source so the contract is pinned without a full DOM mount.
+    // navigating away. The redirect to the in-tab canvas happens only after the
+    // user submits and the generation resolves, wired via the hideLoading
+    // callback. Asserted on the source so the contract is pinned without a full
+    // DOM mount.
     const src = readFileSync(
       resolve(process.cwd(), "app/components/shared/ApproveModal.tsx"),
       "utf8",
     )
+    // The generate CTA's no-existing branch falls through to openModal("generate").
     expect(src).toContain('openModal("generate")')
-    expect(src).not.toContain("router.push(prototypePath(")
+    // The canvas is reached IN-TAB via prototypePath (success reveal + "View
+    // Prototype"), never via the legacy id-bearing canvas route helpers.
+    expect(src).toContain("router.push(prototypePath(")
+    expect(src).not.toContain("goToCanvas")
+    expect(src).not.toContain("canvasPath(")
   })
 })
