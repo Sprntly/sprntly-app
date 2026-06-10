@@ -460,7 +460,22 @@ function CondensedPrdPanel({
           {cards.map((card) => (
             <div className="pcx" key={card.label} data-testid={`da-prd-pcx-${card.label.toLowerCase()}`}>
               <div className="pcx-label">{card.label}</div>
-              <div className="pcx-body">{card.body}</div>
+              {/* Clamp a long Problem/Fix/Impact field to a few lines so a
+                  verbose card can't blow out the panel height. Non-destructive:
+                  the full text stays in the document (and is reachable via
+                  "View full PRD"); hover shows it in full via the title. */}
+              <div
+                className="pcx-body"
+                title={card.body}
+                style={{
+                  display: "-webkit-box",
+                  WebkitLineClamp: 3,
+                  WebkitBoxOrient: "vertical",
+                  overflow: "hidden",
+                }}
+              >
+                {card.body}
+              </div>
             </div>
           ))}
         </div>

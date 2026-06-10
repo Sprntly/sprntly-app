@@ -86,6 +86,44 @@ export function figmaKeyForPrototype(
   return contentPrd.figma_file_key ?? null
 }
 
+/** Pure: decide whether the supplemental PRD fetch is needed. Returns true when
+ *  the canvas has a prd_id to fetch AND ContentContext does not already hold
+ *  usable sections for that prd AND the prd has not already been loaded in this
+ *  mount.
+ *  Exported for unit testing without a DOM (Node env, no jsdom needed).
+ */
+export function needsSupplementalPrd(
+  protoPrdId: number | null,
+  contentPrdId: number | null | undefined,
+  contentSectionsLength: number,
+  loadedPrdId: number | null,
+): boolean {
+  if (protoPrdId == null) return false
+  const contentMatches =
+    contentPrdId === protoPrdId && contentSectionsLength > 0
+  if (contentMatches) return false
+  if (loadedPrdId === protoPrdId) return false
+  return true
+}
+
+/** Pure: pick the PRD sections/title to pass to the left panel. Prefers
+ *  ContentContext when it holds a matching, non-empty sections array; falls back
+ *  to the supplemental-fetched values otherwise.
+ *  Exported for unit testing without a DOM (Node env, no jsdom needed).
+ */
+export function pickPrdFields<S, T>(
+  contentMatches: boolean,
+  contentSections: S,
+  urlSections: S,
+  contentTitle: T,
+  urlTitle: T,
+): { sections: S; title: T } {
+  return {
+    sections: contentMatches ? contentSections : urlSections,
+    title: contentMatches ? contentTitle : urlTitle,
+  }
+}
+
 /** Pure: classify the in-tab render state for a given prd context. Extracted so
  *  the route's three-way branch is unit-testable without a DOM. */
 export type PrototypeTabState = "no-prd" | "resolving" | "ready" | "generate"
@@ -187,22 +225,34 @@ function InTabCanvas({
     }
   }, [proto.id, onProtoChange])
 
-  // Supplemental PRD pull. When ContentContext lacks the right PRD, fetch it by
-  // the prototype's prd_id → parse → sections/title for the left panel. Loads
-  // once per prd_id (the loadedPrdId guard makes it a no-op afterwards).
+  // ContentContext has usable sections for this prd when all three hold: prd_id
+  // matches, sections is a non-empty array. Empty-array is the zero-value for a
+  // stale/partial prd (ContentContext initialises sections to []); an empty array
+  // is not usable, so we treat it the same as absent and fall back to the fetch.
+  const contentMatches =
+    prd?.prd_id === protoPrdId &&
+    Array.isArray(prd?.sections) &&
+    prd.sections.length > 0
+
+  // Supplemental PRD pull. Fetches when ContentContext does NOT hold usable
+  // sections for this prototype's prd. Loads at most once per prd_id (the
+  // loadedPrdId guard makes subsequent re-renders a no-op once the fetch
+  // completes). Loop-safety: when contentMatches becomes true the effect returns
+  // early before the loadedPrdId guard, so no re-fetch fires and no state
+  // changes, avoiding any cycle.
   useEffect(() => {
-    if (protoPrdId == null) return
-    if (prd?.prd_id === protoPrdId) return
-    if (loadedPrdId === protoPrdId) return
+    if (!needsSupplementalPrd(protoPrdId, prd?.prd_id, prd?.sections?.length ?? 0, loadedPrdId)) return
+    // protoPrdId is non-null here (needsSupplementalPrd returned true)
+    const prdIdToFetch = protoPrdId as number
     let cancelled = false
     prdApi
-      .get(protoPrdId)
+      .get(prdIdToFetch)
       .then((fetchedPrd) => {
         if (cancelled) return
         const parsed = markdownToPrdState(fetchedPrd.payload_md)
         setUrlPrdSections(parsed.sections)
         setUrlPrdTitle(fetchedPrd.title ?? null)
-        setLoadedPrdId(protoPrdId)
+        setLoadedPrdId(prdIdToFetch)
       })
       .catch(() => {
         /* best-effort — left panel simply omits sections on error */
@@ -210,7 +260,15 @@ function InTabCanvas({
     return () => {
       cancelled = true
     }
-  }, [protoPrdId, loadedPrdId, prd?.prd_id])
+  }, [protoPrdId, loadedPrdId, prd?.prd_id, prd?.sections?.length])
+
+  const panelFields = pickPrdFields(
+    contentMatches,
+    prd?.sections,
+    urlPrdSections,
+    prd?.title ?? null,
+    urlPrdTitle,
+  )
 
   return (
     <PostGenerationResult
@@ -218,8 +276,8 @@ function InTabCanvas({
       onStateChange={(state) =>
         onProtoChange({ ...proto, is_complete: state.isComplete })
       }
-      prdSections={prd?.sections ?? urlPrdSections}
-      prdTitle={prd?.title ?? urlPrdTitle}
+      prdSections={panelFields.sections}
+      prdTitle={panelFields.title}
       prdMetaLine={prd?.metaLine ?? null}
       onPinIterate={runCanvasIterate}
       onDone={onDone}
