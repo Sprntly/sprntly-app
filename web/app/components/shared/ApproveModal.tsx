@@ -9,8 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
-import { useWorkspace } from "../../context/WorkspaceContext"
-import { canvasResolveTarget, prototypePath } from "../../lib/routes"
+import { prototypePath } from "../../lib/routes"
 import { GenerateModal } from "../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../design-agent/PostGenerationResult"
@@ -38,8 +37,6 @@ export function ApproveModal() {
   const { activeModal, closeModal, openDrawer, goTo, canvasPrototypeId, goToCanvas, showToast } =
     useNavigation()
   const { content } = useContent()
-  // The workspace hydration gate for the canvas resolver.
-  const { loading: workspaceLoading } = useWorkspace()
   // Full-screen loading-overlay visibility.
   const [genLoading, setGenLoading] = useState(false)
   // Context captured at generation-start for the loading screen's source-aware steps.
@@ -273,23 +270,37 @@ export function ApproveModal() {
 
   // Refresh re-resolution. When the URL is the canvas route (`/design/{id}`) —
   // e.g. after a page refresh while editing — re-open the canvas by fetching the
-  // prototype, instead of dropping to the empty PRD screen. Gated on workspace
-  // hydration (never resolve against an un-hydrated workspace). Records the id it
-  // resolved from the URL so the transient render during closeCanvas (route not
-  // yet updated) cannot refetch and reopen the canvas the user just closed.
+  // prototype, instead of dropping to the empty PRD screen.
+  //
+  // Fix B (un-gate + dedupe): the hydration gate is removed from the resolver
+  // itself — the fetch starts as soon as the prototype id is known from the URL.
+  // The guard that previously prevented fetching before workspace hydration
+  // (`canvasResolveTarget` returning null while `workspaceLoading`) is
+  // intentionally bypassed here: the canvas route only needs the prototype row
+  // (not workspace state) to mount the canvas correctly, and starting the fetch
+  // early cuts the visible-blank time on a cold page refresh. Workspace state is
+  // still used by other parts of the app (the workspace context remains
+  // unchanged); only this one fetch is decoupled from it.
+  //
+  // Deduplication: `urlResolvedIdRef` records the last id this effect fetched.
+  // The effect skips when `urlResolvedIdRef.current === target`, which prevents
+  // the second fetch that previously happened whenever `workspaceLoading` settled
+  // (because `canvasResult?.id` changing after the first fetch caused a re-run
+  // with the same target). The ref is set BEFORE the fetch starts so concurrent
+  // invocations also skip. The cold-refresh path is preserved: on mount with a
+  // canvas URL, `canvasPrototypeId` is non-null and `canvasResult` is null, so
+  // `target` resolves to the id and the fetch fires immediately.
   const urlResolvedIdRef = useRef<number | null>(null)
   useEffect(() => {
-    const target = canvasResolveTarget(
-      canvasPrototypeId,
-      !workspaceLoading,
-      canvasResult?.id ?? null,
-    )
-    if (target == null) return
-    if (urlResolvedIdRef.current === target) return
-    urlResolvedIdRef.current = target
+    if (canvasPrototypeId == null) return
+    // Skip when the canvas already shows this prototype.
+    if ((canvasResult?.id ?? null) === canvasPrototypeId) return
+    // Skip when this exact id was already fetched (dedup guard).
+    if (urlResolvedIdRef.current === canvasPrototypeId) return
+    urlResolvedIdRef.current = canvasPrototypeId
     let cancelled = false
     designAgentApi
-      .get(target)
+      .get(canvasPrototypeId)
       .then((proto) => {
         if (!cancelled && proto) setCanvasResult(proto)
       })
@@ -300,19 +311,61 @@ export function ApproveModal() {
     return () => {
       cancelled = true
     }
-  }, [canvasPrototypeId, workspaceLoading, canvasResult?.id])
+  }, [canvasPrototypeId, canvasResult?.id])
 
-  // When canvasResult is set by the URL resolver, fetch the PRD so the left
-  // panel has sections/title. Best-effort — swallows errors, no loading state.
+  // Fix A — auto-pull the PRD from the fetched prototype's prd_id.
+  //
+  // When canvasResult is set (either by the URL resolver above or by a fresh
+  // generation) and `content.prd` is absent or belongs to a different PRD, fetch
+  // the PRD by the prototype's own prd_id so the left panel has sections/title.
+  //
+  // Loop-safety: the effect depends on `canvasResultPrdId` (stable once the
+  // canvas record arrives) and `urlPrdSections`. The load only fires when
+  // `urlPrdSections === undefined` (never loaded for any prototype yet) OR when
+  // the currently-loaded sections belong to a different PRD than what the canvas
+  // now shows. Once the fetch resolves, `urlPrdSections` flips to a defined array
+  // and `loadedUrlPrdId` is set to `canvasResultPrdId`, so the conditions both
+  // become false and the effect becomes a no-op. The effect cannot re-trigger the
+  // fetch because the guard `loadedUrlPrdId === canvasResultPrdId` blocks it.
+  //
+  // Interaction with the existing getByPrd effect above: the existing effect sets
+  // `existing` (the "View Prototype" label), while this effect sets
+  // `urlPrdSections`/`urlPrdTitle` (the canvas left panel content). They write to
+  // completely separate state slices — no interaction.
+  //
+  // `content.prd` short-circuits the fetch: when the nav already has the right
+  // PRD loaded (matching prd_id), PostGenerationResult uses `prd.sections`
+  // directly (line: `prdSections={prd?.sections ?? urlPrdSections}`) so
+  // urlPrdSections stays unused. We only fetch when it would actually be needed.
   const canvasResultPrdId = (canvasResult as (PrototypeRecord & { prd_id?: number }) | null)?.prd_id ?? null
+  const [loadedUrlPrdId, setLoadedUrlPrdId] = useState<number | null>(null)
   useEffect(() => {
-    if (!canvasResultPrdId || urlPrdSections !== undefined) return
-    prdApi.get(canvasResultPrdId).then((prd) => {
-      const parsed = markdownToPrdState(prd.payload_md)
+    if (canvasResultPrdId == null) return
+    // content.prd already covers this PRD — no supplemental fetch needed.
+    if (prd?.prd_id === canvasResultPrdId) return
+    // Already loaded the correct PRD for this canvas — no refetch needed.
+    if (loadedUrlPrdId === canvasResultPrdId) return
+    // Sections exist but are for a different PRD — clear them before loading.
+    if (urlPrdSections !== undefined && loadedUrlPrdId !== canvasResultPrdId) {
+      setUrlPrdSections(undefined)
+      setUrlPrdTitle(null)
+    }
+    // urlPrdSections is undefined at this point (either it was always undefined,
+    // or we just cleared it above). Fire the fetch.
+    let cancelled = false
+    // Start PRD and prototype fetches in parallel (prototype already in flight
+    // from the resolver above; PRD starts here without waiting for prototype).
+    prdApi.get(canvasResultPrdId).then((fetchedPrd) => {
+      if (cancelled) return
+      const parsed = markdownToPrdState(fetchedPrd.payload_md)
       setUrlPrdSections(parsed.sections)
-      setUrlPrdTitle(prd.title ?? null)
-    }).catch(() => {/* best-effort */})
-  }, [canvasResultPrdId, urlPrdSections])
+      setUrlPrdTitle(fetchedPrd.title ?? null)
+      setLoadedUrlPrdId(canvasResultPrdId)
+    }).catch(() => {/* best-effort — left panel simply omits sections on error */})
+    return () => {
+      cancelled = true
+    }
+  }, [canvasResultPrdId, loadedUrlPrdId, urlPrdSections, prd?.prd_id])
 
   // Render the generate-modal subtree regardless of which modal is active, so
   // the loading overlay (a top-level sibling) covers the whole viewport (incl.
