@@ -479,6 +479,22 @@ function CondensedPrdPanel({
             </div>
           ))}
         </div>
+      ) : sections && sections.length > 0 ? (
+        // Prose PRD (no structured TL;DR): show a BOUNDED preview of the parsed
+        // content rather than a blank placeholder — a capped, fading window so it
+        // never dominates the panel; the full doc sits behind "View full PRD".
+        <div
+          className="proto-ctx-cards"
+          data-testid="da-prd-prose-preview"
+          style={{
+            maxHeight: 220,
+            overflow: "hidden",
+            WebkitMaskImage: "linear-gradient(to bottom, black 65%, transparent)",
+            maskImage: "linear-gradient(to bottom, black 65%, transparent)",
+          }}
+        >
+          <PrdSections sections={sections} />
+        </div>
       ) : (
         <p className="da-left-prd-empty">No summary available for this PRD.</p>
       )}
