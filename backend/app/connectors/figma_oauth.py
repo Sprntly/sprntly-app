@@ -283,3 +283,38 @@ def fetch_file_styles(access_token: str, file_key: str) -> dict[str, Any]:
         )
         raise HTTPException(resp.status_code, "Figma styles fetch failed")
     return resp.json()
+
+
+def fetch_file_variables(access_token: str, file_key: str) -> dict[str, Any]:
+    """Fetch local variable definitions for a Figma file.
+
+    Returns the raw GET /v1/files/{key}/variables/local JSON on success.
+    Returns ``{}`` on ANY non-OK status or any exception — this call 403s on
+    every non-Enterprise plan and whenever the OAuth scopes do not include
+    ``file_variables:read`` (which is today's production default).  The
+    caller must be able to degrade silently; this helper deliberately diverges
+    from ``fetch_file_styles``'s ``raise HTTPException`` pattern.
+
+    Logs non-OK at debug level with status code + file key only (no token,
+    no body) to avoid leaking credentials in log aggregators.
+    """
+    try:
+        resp = requests.get(
+            f"{FIGMA_API_BASE}/files/{file_key}/variables/local",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
+        if not resp.ok:
+            logger.debug(
+                "Figma /files/%s/variables/local returned %s — degrading to empty",
+                file_key,
+                resp.status_code,
+            )
+            return {}
+        return resp.json()
+    except Exception:
+        logger.debug(
+            "Figma /files/%s/variables/local raised an exception — degrading to empty",
+            file_key,
+        )
+        return {}

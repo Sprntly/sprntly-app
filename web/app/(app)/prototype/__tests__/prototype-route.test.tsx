@@ -16,7 +16,15 @@ import {
   pathForScreen,
   screenIdFromPathname,
 } from "../../../lib/routes"
-import { figmaKeyForPrototype, buildGatedOnClose } from "../PrototypeRoute"
+import {
+  figmaKeyForPrototype,
+  buildGatedOnClose,
+  prototypeTabState,
+  needsSupplementalPrd,
+  pickPrdFields,
+  fsParamToFullscreen,
+} from "../PrototypeRoute"
+import type { PrototypeRecord } from "../../../lib/api"
 
 // Repo test convention: components carry no `import React`; expose it globally.
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -128,6 +136,33 @@ describe("prototype route — gated onClose (buildGatedOnClose)", () => {
   })
 })
 
+describe("prototype route — in-tab render state (prototypeTabState)", () => {
+  const readyProto = {
+    id: 7,
+    status: "ready",
+    bundle_url: "https://cdn/bundle.js",
+    error: null,
+  } as PrototypeRecord
+
+  it("no PRD context → 'no-prd' (the empty landing)", () => {
+    expect(prototypeTabState(null, false, null)).toBe("no-prd")
+    expect(prototypeTabState(null, true, readyProto)).toBe("no-prd")
+  })
+
+  it("a held prototype → 'ready' (the in-tab canvas), even while resolving", () => {
+    expect(prototypeTabState(42, false, readyProto)).toBe("ready")
+    expect(prototypeTabState(42, true, readyProto)).toBe("ready")
+  })
+
+  it("PRD set, no prototype yet, resolve in flight → 'resolving'", () => {
+    expect(prototypeTabState(42, true, null)).toBe("resolving")
+  })
+
+  it("PRD set, resolve settled with no prototype → 'generate' (the generate panel)", () => {
+    expect(prototypeTabState(42, false, null)).toBe("generate")
+  })
+})
+
 describe("prototype route — figma source resolver (figmaKeyForPrototype)", () => {
   it("returns the content PRD's figma key when its prd_id matches the URL", () => {
     expect(figmaKeyForPrototype(42, { prd_id: 42, figma_file_key: "abc" })).toBe("abc")
@@ -145,5 +180,84 @@ describe("prototype route — figma source resolver (figmaKeyForPrototype)", () 
   it("returns null when the matching PRD has no figma key set", () => {
     expect(figmaKeyForPrototype(42, { prd_id: 42 })).toBeNull()
     expect(figmaKeyForPrototype(42, { prd_id: 42, figma_file_key: null })).toBeNull()
+  })
+})
+
+describe("prototype route — supplemental PRD fetch gate (needsSupplementalPrd)", () => {
+  // Case (a): cold load — ContentContext.prd is null, so prd_id is undefined and
+  // sectionsLength is 0 → contentMatches is false → fetch should fire.
+  it("returns true on cold load (no content prd at all)", () => {
+    expect(needsSupplementalPrd(42, undefined, 0, null)).toBe(true)
+    expect(needsSupplementalPrd(42, null, 0, null)).toBe(true)
+  })
+
+  // Case (b): client-nav with stale/partial prd — prd_id matches but sections is
+  // empty (ContentContext zero-value). The old guard skipped the fetch here;
+  // the new gate must NOT skip it.
+  it("returns true when prd_id matches but sections is empty (stale prd, post-generation nav)", () => {
+    expect(needsSupplementalPrd(42, 42, 0, null)).toBe(true)
+  })
+
+  // Case (c): ContentContext genuinely has sections for this prd → skip the fetch.
+  it("returns false when ContentContext holds a non-empty sections array for this prd", () => {
+    expect(needsSupplementalPrd(42, 42, 3, null)).toBe(false)
+  })
+
+  // Case (d): already fetched this prd in this mount → no redundant re-fetch.
+  it("returns false when the prd was already fetched (loadedPrdId matches)", () => {
+    expect(needsSupplementalPrd(42, undefined, 0, 42)).toBe(false)
+    expect(needsSupplementalPrd(42, null, 0, 42)).toBe(false)
+  })
+
+  // No protoPrdId → nothing to fetch.
+  it("returns false when protoPrdId is null", () => {
+    expect(needsSupplementalPrd(null, undefined, 0, null)).toBe(false)
+  })
+
+  // Different prd_id in ContentContext + not yet loaded → fetch needed.
+  it("returns true when ContentContext has a DIFFERENT prd loaded", () => {
+    expect(needsSupplementalPrd(42, 7, 5, null)).toBe(true)
+  })
+})
+
+describe("prototype route — panel field picker (pickPrdFields)", () => {
+  const contentSections = [{ id: "s1" }] as unknown as import("../../../types/content").PrdSection[]
+  const urlSections = [{ id: "s2" }] as unknown as import("../../../types/content").PrdSection[]
+
+  it("picks ContentContext values when contentMatches is true", () => {
+    const result = pickPrdFields(true, contentSections, urlSections, "content title", "url title")
+    expect(result.sections).toBe(contentSections)
+    expect(result.title).toBe("content title")
+  })
+
+  it("picks supplemental-fetched values when contentMatches is false", () => {
+    const result = pickPrdFields(false, contentSections, urlSections, "content title", "url title")
+    expect(result.sections).toBe(urlSections)
+    expect(result.title).toBe("url title")
+  })
+
+  it("falls back to undefined urlSections when contentMatches is false and no fetch yet", () => {
+    const result = pickPrdFields(false, [] as unknown as import("../../../types/content").PrdSection[], undefined, null, null)
+    expect(result.sections).toBeUndefined()
+    expect(result.title).toBeNull()
+  })
+})
+
+describe("prototype route — fs param derivation (fsParamToFullscreen)", () => {
+  // Absent fs param → fullscreen (default-open state for the in-tab canvas).
+  it("returns true when fs param is absent (null)", () => {
+    expect(fsParamToFullscreen(null)).toBe(true)
+  })
+
+  // Any value other than the exact string "0" → fullscreen.
+  it("returns true for any value other than '0' (e.g. empty string, unknown value)", () => {
+    expect(fsParamToFullscreen("")).toBe(true)
+    expect(fsParamToFullscreen("1")).toBe(true)
+    expect(fsParamToFullscreen("true")).toBe(true)
+  })
+
+  // Exactly "0" → in-shell split view (the only suppression value).
+  it("returns false only when fs param is exactly '0'", () => {
+    expect(fsParamToFullscreen("0")).toBe(false)
   })
 })

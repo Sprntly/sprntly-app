@@ -740,7 +740,9 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     # so no browser runs; the run reaches the extracted-design-system branch.
     async def _fake_extract(url: str):
         return {
-            "primary_color": "#2563eb",
+            "color_candidates": [
+                {"color": "#2563eb", "area": 8000, "saturation": 0.78}
+            ],
             "background_color": "#ffffff",
             "heading_font_family": "Inter",
             "heading_size_scale": "48px",

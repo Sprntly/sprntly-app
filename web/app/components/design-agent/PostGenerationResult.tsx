@@ -218,6 +218,14 @@ export type PostGenerationResultProps = {
    *  `is_complete` value into its own copy of the record without a round-trip.
    *  Optional — existing callers that omit it keep type-checking. */
   onStateChange?: (state: { isComplete: boolean }) => void
+  /** When true, the full-screen prototype view is open on mount; defaults false
+   *  so existing consumers are unaffected. */
+  defaultFullscreen?: boolean
+  /** Optional notification callback — fired whenever the fullscreen state
+   *  toggles. Receives the new open value. The parent can use this to sync
+   *  external state (e.g. a URL query param) without taking control of the
+   *  internal `fullscreenOpen` state. */
+  onFullscreenChange?: (open: boolean) => void
 }
 
 export type PostGenerationResultViewProps = {
@@ -430,6 +438,20 @@ export function condensePrd(sections: PrdSection[] | undefined): CondensedPrd {
   return { ...empty, hasFullBody: sections.length > 0 }
 }
 
+/** Pure: drop the leading PRD boilerplate (the "# Part A …" title, the
+ *  Author/DRI/Status meta line, the divider) so a CONDENSED preview leads with
+ *  the first real content. Heuristic: PRD content sections are numbered
+ *  ("1. …", "2. …"), so the first heading whose text starts with a digit marks
+ *  where the substance begins; everything before it is preamble. If no numbered
+ *  heading is found the sections are returned unchanged (safe no-op). Only the
+ *  preview uses this — the full doc behind "View full PRD" renders unmodified. */
+export function stripPrdPreamble(sections: PrdSection[]): PrdSection[] {
+  const firstContentIdx = sections.findIndex(
+    (s) => s.type === "h2" && /^\d/.test(s.text.trim()),
+  )
+  return firstContentIdx > 0 ? sections.slice(firstContentIdx) : sections
+}
+
 /**
  * the condensed left-sidebar context
  * panel — PRD title + one-line meta + Problem/Fix/Impact cards (David's
@@ -460,9 +482,40 @@ function CondensedPrdPanel({
           {cards.map((card) => (
             <div className="pcx" key={card.label} data-testid={`da-prd-pcx-${card.label.toLowerCase()}`}>
               <div className="pcx-label">{card.label}</div>
-              <div className="pcx-body">{card.body}</div>
+              {/* Clamp a long Problem/Fix/Impact field to a few lines so a
+                  verbose card can't blow out the panel height. Non-destructive:
+                  the full text stays in the document (and is reachable via
+                  "View full PRD"); hover shows it in full via the title. */}
+              <div
+                className="pcx-body"
+                title={card.body}
+                style={{
+                  display: "-webkit-box",
+                  WebkitLineClamp: 3,
+                  WebkitBoxOrient: "vertical",
+                  overflow: "hidden",
+                }}
+              >
+                {card.body}
+              </div>
             </div>
           ))}
+        </div>
+      ) : sections && sections.length > 0 ? (
+        // Prose PRD (no structured TL;DR): show a BOUNDED preview of the parsed
+        // content rather than a blank placeholder — a capped, fading window so it
+        // never dominates the panel; the full doc sits behind "View full PRD".
+        <div
+          className="proto-ctx-cards"
+          data-testid="da-prd-prose-preview"
+          style={{
+            maxHeight: 220,
+            overflow: "hidden",
+            WebkitMaskImage: "linear-gradient(to bottom, black 65%, transparent)",
+            maskImage: "linear-gradient(to bottom, black 65%, transparent)",
+          }}
+        >
+          <PrdSections sections={stripPrdPreamble(sections)} />
         </div>
       ) : (
         <p className="da-left-prd-empty">No summary available for this PRD.</p>
@@ -1427,6 +1480,8 @@ export function PostGenerationResult({
   onAnswerQuestion,
   bundleReloadNonce,
   onStateChange,
+  defaultFullscreen,
+  onFullscreenChange,
 }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
@@ -1435,7 +1490,7 @@ export function PostGenerationResult({
   // P6-16 (UX-6): client-only open state for the full-screen overlay. Owned here
   // (the stateful container) and threaded into the SSR-renderable pure view,
   // matching the existing `onStateChange` threading pattern.
-  const [fullscreenOpen, setFullscreenOpen] = useState<boolean>(false)
+  const [fullscreenOpen, setFullscreenOpen] = useState<boolean>(defaultFullscreen ?? false)
 
   // collapsible-panel + control-bar state, owned
   // by the container (same threading pattern as `fullscreenOpen`). LEFT sidebar
@@ -1494,11 +1549,14 @@ export function PostGenerationResult({
   useEffect(() => {
     if (!fullscreenOpen) return
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setFullscreenOpen(false)
+      if (e.key === "Escape") {
+        setFullscreenOpen(false)
+        onFullscreenChange?.(false)
+      }
     }
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
-  }, [fullscreenOpen])
+  }, [fullscreenOpen, onFullscreenChange])
 
   // Clear any active element highlight whenever mark mode is exited.
   useEffect(() => {
@@ -1714,8 +1772,8 @@ export function PostGenerationResult({
       iterate={iterate}
       onShared={onShared}
       fullscreenOpen={fullscreenOpen}
-      onOpenFullscreen={() => setFullscreenOpen(true)}
-      onCloseFullscreen={() => setFullscreenOpen(false)}
+      onOpenFullscreen={() => { setFullscreenOpen(true); onFullscreenChange?.(true) }}
+      onCloseFullscreen={() => { setFullscreenOpen(false); onFullscreenChange?.(false) }}
       prdSections={prdSections}
       prdTitle={prdTitle}
       prdMetaLine={prdMetaLine}

@@ -85,6 +85,9 @@ type GenerateFlowDeps = {
     /** Connected-repo full_name ("org/repo") the prototype should match.
      *  Prompt context only — no file fetch, no clone, no agent tool. */
     github_repo?: string | null
+    /** Explicit single-source selector. When set, overrides the implicit
+     *  precedence in the backend. Absent (null) = old-client back-compat. */
+    design_source?: "figma" | "github" | "website" | null
   }
   generate: typeof designAgentApi.generate
   runGeneration: typeof runDesignAgentGeneration
@@ -127,6 +130,7 @@ export function buildGenerateParams({
   manualColor,
   manualFont,
   githubRepo,
+  designSource,
 }: {
   prdId: number
   platform: TargetPlatform
@@ -141,6 +145,10 @@ export function buildGenerateParams({
   manualFont: string
   /** Connected-repo full_name ("org/repo") to match; blank/whitespace -> null. */
   githubRepo?: string
+  /** Explicit design-source selection from the single-select picker. Absent
+   *  (undefined) means no explicit choice was made — the backend preserves the
+   *  prior implicit precedence (back-compat for the drawer's own generate path). */
+  designSource?: "figma" | "github" | "website"
 }): GenerateFlowDeps["params"] {
   return {
     prd_id: prdId,
@@ -154,6 +162,7 @@ export function buildGenerateParams({
         ? { primary_color: manualColor, font_family: manualFont }
         : null,
     github_repo: githubRepo?.trim() || null,
+    design_source: designSource ?? null,
   }
 }
 

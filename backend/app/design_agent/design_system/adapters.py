@@ -42,20 +42,6 @@ _KNOWN_WEB_FONTS = {
 }
 
 _HEX_RE = re.compile(r"#(?:[0-9a-fA-F]{6})\b")
-_JS_HEX_PAIR_RE = re.compile(
-    r"['\"]?([A-Za-z][A-Za-z0-9_-]*)['\"]?\s*:\s*['\"](#[0-9a-fA-F]{6})['\"]"
-)
-_CSS_VAR_RE = re.compile(r"--([A-Za-z0-9_-]+)\s*:\s*([^;{}]+);")
-_FONT_DECL_RE = re.compile(r"font-family\s*:\s*([^;{}]+);", re.IGNORECASE)
-_FONT_TOKEN_RE = re.compile(
-    r"['\"]?([A-Za-z][A-Za-z0-9_-]*)['\"]?\s*:\s*(?:\[)?['\"]([^'\"\]]+)['\"]"
-)
-_SIZE_PAIR_RE = re.compile(
-    r"['\"]?([A-Za-z0-9][A-Za-z0-9_-]*)['\"]?\s*:\s*['\"]([0-9.]+(?:px|rem))['\"]"
-)
-_SHADOW_PAIR_RE = re.compile(
-    r"['\"]?([A-Za-z][A-Za-z0-9_-]*)['\"]?\s*:\s*['\"]([^'\"]*(?:rgba?\(|#[0-9a-fA-F]{3,6})[^'\"]*)['\"]"
-)
 
 _GITHUB_DESIGN_FILES = (
     "tailwind.config.ts",
@@ -92,44 +78,6 @@ _GITHUB_MAX_UI_FILES = 12
 _GITHUB_MAX_UI_FILE_BYTES = 96_000
 _GITHUB_EXPLICIT_FILE_BYTES = 128_000
 
-_TAILWIND_COLORS = {
-    "slate": "#64748b",
-    "gray": "#6b7280",
-    "zinc": "#71717a",
-    "neutral": "#737373",
-    "stone": "#78716c",
-    "red": "#ef4444",
-    "orange": "#f97316",
-    "amber": "#f59e0b",
-    "yellow": "#eab308",
-    "lime": "#84cc16",
-    "green": "#22c55e",
-    "emerald": "#10b981",
-    "teal": "#14b8a6",
-    "cyan": "#06b6d4",
-    "sky": "#0ea5e9",
-    "blue": "#3b82f6",
-    "indigo": "#6366f1",
-    "violet": "#8b5cf6",
-    "purple": "#a855f7",
-    "fuchsia": "#d946ef",
-    "pink": "#ec4899",
-    "rose": "#f43f5e",
-    "white": "#ffffff",
-    "black": "#000000",
-}
-
-_TAILWIND_COLOR_CLASS_RE = re.compile(
-    r"\b(?:bg|text|border|ring|from|to)-([a-z]+)(?:-\d{2,3})?\b"
-)
-_TAILWIND_RADIUS_RE = re.compile(r"\brounded(?:-(none|sm|md|lg|xl|2xl|3xl|full))?\b")
-_TAILWIND_SPACING_RE = re.compile(r"\b(?:p|px|py|pt|pr|pb|pl|gap|space-x|space-y|m|mx|my)-(\d+)\b")
-_TAILWIND_SHADOW_RE = re.compile(r"\bshadow(?:-(sm|md|lg|xl|2xl|none))?\b")
-_TAILWIND_WEIGHT_RE = re.compile(r"\bfont-(medium|semibold|bold)\b")
-_TAILWIND_TEXT_SIZE_RE = re.compile(r"\btext-(xs|sm|base|lg|xl|2xl|3xl)\b")
-_EXPORT_COMPONENT_RE = re.compile(
-    r"\b(?:function|const)\s+([A-Z][A-Za-z0-9]*)|\bexport\s+\{\s*([A-Z][A-Za-z0-9]*)"
-)
 
 
 def _luminance(hex_color: str) -> float:
@@ -164,20 +112,6 @@ def _repo_ref_parts(ref: str) -> tuple[str, str | None]:
     return repo.strip(), branch.strip() or None
 
 
-def _parse_px_or_rem(value: str | None) -> int | None:
-    if not value:
-        return None
-    v = value.strip().lower()
-    try:
-        if v.endswith("px"):
-            return int(round(float(v[:-2])))
-        if v.endswith("rem"):
-            return int(round(float(v[:-3]) * 16))
-    except ValueError:
-        return None
-    return None
-
-
 def _first_known_font(values: list[str]) -> str | None:
     for raw in values:
         for part in str(raw).split(","):
@@ -208,10 +142,11 @@ def _walk_json(value):
 class FigmaExtractor:
     """Adapter for a connected Figma file.
 
-    `extract_raw_signals` wraps the existing `_extract_palette_summary` walk over
-    a fetched Figma document; `normalize` folds its background / accent / swatches
-    / typography into `DesignSystem` tokens. The source reference is the Figma
-    file key.
+    `extract_raw_signals` captures the rich gather signals from an
+    already-fetched Figma document into a `RawSignals` bag. `normalize` folds
+    those gather keys into a `DesignSignals` object and returns `harden(signals)`
+    — no inline accent / neutral / confidence decision remains here. The source
+    reference is the Figma file key.
     """
 
     category = "design_tool"
@@ -258,67 +193,188 @@ class FigmaExtractor:
         return None
 
     def extract_raw_signals(self, ref: str, file_doc: dict | None = None) -> RawSignals:
-        """Capture the dominant palette + typography from an already-fetched
-        Figma document into a `RawSignals` bag.
+        """Capture rich gather signals from an already-fetched Figma document.
 
         The document is fetched by the caller (it owns the access token and the
-        page-depth budget) and passed in as `file_doc`. We reuse the existing
-        `_extract_palette_summary` rather than re-walking the tree.
-        """
-        from app.design_agent.tools import _extract_palette_summary
+        page-depth budget) and passed in as ``file_doc``.
 
-        summary = _extract_palette_summary(file_doc or {}) or {}
-        return RawSignals(provider=self.provider, ref=ref, signals=summary)
+        The returned ``signals`` dict carries the rich gather keys from
+        ``gather_figma_signals``:
+            ``theme_background, theme_is_dark, foreground, color_candidates,
+            neutral_candidates, container_observations, observed_component_types,
+            heading_font_family, body_font_family, font_weights_observed,
+            radius_convention, spacing_px, explicit_color_styles,
+            explicit_text_styles``
+
+        The legacy palette-summary keys (``background``, ``accent``, ``is_dark``,
+        ``swatches``, ``font_family``, ``font_weights``) were removed here because
+        ``normalize`` now reads the gather keys through the shared kernel. The
+        duplicate accent/palette heuristic still lives in ``tools.py`` for the
+        in-loop Figma fetch-tool payload — it is not deleted, just no longer
+        consumed by design-system extraction.
+        """
+        from app.design_agent.design_system.figma_gather import gather_figma_signals
+
+        doc = file_doc or {}
+
+        # Obtain the optional Variables document only when we have an access token.
+        variables_doc: dict | None = None
+        access_token = (
+            getattr(self, "figma_access_token", None)
+            or getattr(self, "access_token", None)
+        )
+        if access_token and ref:
+            try:
+                from app.connectors.figma_oauth import fetch_file_variables
+                variables_doc = fetch_file_variables(access_token, ref)
+            except Exception:
+                variables_doc = None
+
+        signals = gather_figma_signals(doc, variables_doc=variables_doc)
+        return RawSignals(provider=self.provider, ref=ref, signals=signals)
 
     def normalize(self, raw: RawSignals) -> DesignSystem:
-        """Fold a Figma palette summary into the common `DesignSystem` shape."""
-        s = raw.signals or {}
-        background = s.get("background")
-        accent = s.get("accent")
-        is_dark = bool(s.get("is_dark"))
+        """Fold Figma gather signals into the common DesignSystem shape via the shared kernel.
 
-        if not _is_hex(background):
-            # No usable palette — neutral baseline, low confidence.
+        Constructs a DesignSignals object from the gather keys in raw.signals and
+        returns harden(signals) directly. No inline accent / neutral / elevation /
+        inventory / confidence decision is made here; all heuristics live in the
+        kernel (hardening.py). Nothing is assigned on the returned DesignSystem
+        after harden — harden is the sole assembler.
+
+        An empty gather bag (the unusable-doc sentinel) returns the neutral
+        baseline DesignSystem so callers always receive a complete object.
+        """
+        from app.design_agent.design_system.hardening import harden, pick_accent, _saturation_of
+        from app.design_agent.design_system.signals import (
+            ColorCandidate,
+            ContainerObservation,
+            DesignSignals,
+            FieldFlags,
+            NeutralCandidate,
+            TypographySignals,
+        )
+
+        s = raw.signals or {}
+        if not s:
             return DesignSystem()
 
-        foreground = "#f4f1ea" if is_dark else "#1a1a1a"
-        primary = accent if _is_hex(accent) else background
-        # Surface / muted mirror the runner's swatch heuristic so the rendered
-        # CSS stays identical to the long-standing Figma pre-seed. Note we use the
-        # ORIGINAL (un-filtered) swatch ordering for surface/muted indexing so the
-        # second/third swatch lands exactly where the legacy renderer put it.
-        raw_swatches = s.get("swatches") or []
-        surface = raw_swatches[1] if len(raw_swatches) > 1 else background
-        muted = raw_swatches[2] if len(raw_swatches) > 2 else surface
-
-        font_family = s.get("font_family")
-        weights = [int(w) for w in (s.get("font_weights") or []) if isinstance(w, (int, float))]
-        fonts = Fonts()
-        if font_family:
-            fonts = Fonts(
-                heading_family=font_family,
-                body_family=font_family,
-                weights=weights or Fonts().weights,
+        # Color candidates: saturation computed via the kernel's HSL formula
+        # (_saturation_of in hardening.py). Never use tools.py:_saturation — that
+        # function uses a different (max-min)/max formula and must not be used for
+        # accent selection. Forgetting saturation leaves it at the 0.0 default and
+        # causes pick_accent to degrade to weight-only, ignoring chromatic-ness.
+        candidates: list[ColorCandidate] = [
+            ColorCandidate(
+                hex=c["hex"],
+                weight=float(c.get("weight") or 0.0),
+                saturation=_saturation_of(c["hex"]),
             )
+            for c in (s.get("color_candidates") or [])
+            if c.get("hex")
+        ]
 
-        colors = Colors(
-            background=background,
-            foreground=foreground,
-            surface=surface if _is_hex(surface) else background,
-            primary=primary,
-            accent=primary,
-            muted=muted if _is_hex(muted) else (surface if _is_hex(surface) else background),
-            border=Colors().border,
+        neutral_list: list[NeutralCandidate] = [
+            NeutralCandidate(
+                role=n["role"],
+                hex=n["hex"],
+                weight=float(n.get("weight") or 0.0),
+            )
+            for n in (s.get("neutral_candidates") or [])
+            if n.get("role") in ("surface", "border", "muted") and n.get("hex")
+        ]
+
+        container_list: list[ContainerObservation] = [
+            ContainerObservation(
+                has_border=bool(o.get("has_border")),
+                has_shadow=bool(o.get("has_shadow")),
+            )
+            for o in (s.get("container_observations") or [])
+        ]
+
+        observed_types = [str(t) for t in (s.get("observed_component_types") or [])]
+
+        heading = (s.get("heading_font_family") or "").strip()
+        body = (s.get("body_font_family") or "").strip()
+        weights = [
+            int(w) for w in (s.get("font_weights_observed") or [])
+            if isinstance(w, (int, float))
+        ]
+        radius_conv = (s.get("radius_convention") or "").strip()
+        typography = TypographySignals(
+            heading_family=heading,
+            body_family=body,
+            weights=weights,
+            radius_convention=radius_conv,
         )
-        # Figma signals here are inferred from fills and typography, not from a
-        # documented design system. A real palette plus typography is a richer
-        # signal than a palette alone.
-        confidence = "high" if (font_family and accent) else "medium"
-        return DesignSystem(
-            tokens=Tokens(colors=colors, is_dark=is_dark, fonts=fonts),
-            has_explicit_system=False,
-            confidence=confidence,
+
+        # Non-heuristic pass-throughs. Background and foreground map straight;
+        # the kernel's harden() handles absent values via NON-assignment.
+        background_hex = s.get("theme_background") or ""
+        is_dark = bool(s.get("theme_is_dark"))
+
+        # Foreground rule: use the gathered dominant text-node fill when present;
+        # else derive from the background theme when present; else absent ("").
+        raw_foreground = s.get("foreground")
+        if raw_foreground:
+            foreground_hex = raw_foreground
+        elif background_hex:
+            foreground_hex = "#f4f1ea" if is_dark else "#1a1a1a"
+        else:
+            foreground_hex = ""
+
+        spacing_scale = [
+            int(p) for p in (s.get("spacing_px") or [])
+            if isinstance(p, (int, float)) and int(p) > 0
+        ]
+
+        # Honest provenance flags drive score_confidence.
+        # explicit.accent and explicit.neutrals both require explicit_color_styles
+        # AND the corresponding gathered list to be non-empty — if published colour
+        # styles resolve but none route to neutral roles, explicit.neutrals is False.
+        # explicit.typography requires published text styles (explicit_text_styles).
+        # gathered.* reflect what the kernel can actually pick (non-empty lists).
+        # Every explicit.X=True also implies gathered.X=True.
+        has_explicit_colors = bool(s.get("explicit_color_styles"))
+        has_explicit_text = bool(s.get("explicit_text_styles"))
+
+        explicit = FieldFlags(
+            accent=has_explicit_colors and bool(candidates),
+            neutrals=has_explicit_colors and bool(neutral_list),
+            typography=has_explicit_text,
+            elevation=False,   # no explicit elevation source in the gather layer
+            inventory=False,   # component inventory is always inferred, not explicit
         )
+        gathered = FieldFlags(
+            accent=pick_accent(candidates) is not None,
+            typography=bool(heading),
+            neutrals=bool(neutral_list),
+            elevation=bool(container_list),
+            inventory=bool(observed_types),
+        )
+        # If a flag is explicit it must also be gathered.
+        if explicit.accent:
+            gathered.accent = True
+        if explicit.neutrals:
+            gathered.neutrals = True
+        if explicit.typography:
+            gathered.typography = True
+
+        signals = DesignSignals(
+            color_candidates=candidates,
+            neutral_candidates=neutral_list,
+            container_observations=container_list,
+            observed_component_types=observed_types,
+            typography=typography,
+            is_dark=is_dark,
+            background_hex=background_hex,
+            foreground_hex=foreground_hex,
+            spacing_scale=spacing_scale,
+            gathered=gathered,
+            explicit=explicit,
+            provider="figma",
+        )
+        return harden(signals)  # sole assembler — no field assigned on the result after this
 
 
 # ─── Website ──────────────────────────────────────────────────────────────
@@ -468,79 +524,100 @@ class WebExtractor:
     def normalize(self, raw: RawSignals) -> DesignSystem:
         """Fold a website sample into the common `DesignSystem` shape.
 
+        The sampler is a dumb emitter of candidate lists; every decision lives in
+        the shared kernel. This method GATHERS the raw candidates into a
+        `DesignSignals` bag and returns `harden(signals)` — no inline accent /
+        neutral / elevation / inventory / confidence decision is made here, and
+        nothing is post-decorated onto the DesignSystem after harden.
+
         An empty bag (the low-confidence / failure case) yields the neutral
         baseline so callers always get a complete object.
         """
+        from app.design_agent.design_system.hardening import harden, pick_accent
+        from app.design_agent.design_system.signals import (
+            ColorCandidate,
+            ContainerObservation,
+            DesignSignals,
+            FieldFlags,
+            NeutralCandidate,
+            TypographySignals,
+        )
+
         s = raw.signals or {}
         if not s:
             return DesignSystem()
 
-        primary = _css_color_to_hex(s.get("primary_color"))
         background = _css_color_to_hex(s.get("background_color"))
         is_dark = bool(background and _luminance(background) < 128)
 
-        colors = Colors()
-        if background:
-            colors.background = background
-            colors.foreground = "#f4f1ea" if is_dark else "#1a1a1a"
-        if primary:
-            colors.primary = primary
-            colors.accent = primary
+        # Chromatic candidates: convert each raw colour; drop non-convertible.
+        chromatic_list: list[ColorCandidate] = []
+        for c in s.get("color_candidates") or []:
+            hx = _css_color_to_hex(c.get("color"))
+            if hx:
+                chromatic_list.append(
+                    ColorCandidate(
+                        hex=hx,
+                        weight=float(c.get("area") or 0.0),
+                        saturation=float(c.get("saturation") or 0.0),
+                    )
+                )
 
-        # Neutral tones sampled from real surfaces. Each falls back to the
-        # baseline default when the site has no usable value, so a partial
-        # sample never produces a broken color.
-        surface = _css_color_to_hex(s.get("surface_color"))
-        if surface:
-            colors.surface = surface
-        border = _css_color_to_hex(s.get("border_color"))
-        if border:
-            colors.border = border
-        muted = _css_color_to_hex(s.get("muted_color"))
-        if muted:
-            colors.muted = muted
+        # Neutral candidates: convert each raw colour; keep only valid roles.
+        neutral_list: list[NeutralCandidate] = []
+        for n in s.get("neutral_candidates") or []:
+            hx = _css_color_to_hex(n.get("color"))
+            if hx and n.get("role") in ("surface", "border", "muted"):
+                neutral_list.append(
+                    NeutralCandidate(
+                        role=n["role"],
+                        hex=hx,
+                        weight=float(n.get("area") or 0.0),
+                    )
+                )
+
+        # Container observations for elevation derivation.
+        container_list = [
+            ContainerObservation(
+                has_border=bool(o.get("has_border")),
+                has_shadow=bool(o.get("has_shadow")),
+            )
+            for o in (s.get("container_observations") or [])
+        ]
 
         heading = (s.get("heading_font_family") or "").strip()
-        body = (s.get("body_font_family") or "").strip()
-        fonts = Fonts()
-        if heading:
-            fonts.heading_family = heading
-        if body:
-            fonts.body_family = body
-
-        tokens = Tokens(
-            colors=colors,
-            is_dark=is_dark,
-            fonts=fonts,
+        typography = TypographySignals(
+            heading_family=heading,
+            body_family=(s.get("body_font_family") or "").strip(),
             radius_convention=_radius_convention(s.get("border_radius_convention")),
+        )
+
+        observed_types = [str(t) for t in (s.get("observed_component_types") or [])]
+
+        gathered = FieldFlags(
+            accent=pick_accent(chromatic_list) is not None,
+            typography=bool(heading),
+            neutrals=bool(neutral_list),
+            elevation=bool(container_list),
+            inventory=bool(observed_types),
+        )
+
+        signals = DesignSignals(
+            color_candidates=chromatic_list,
+            neutral_candidates=neutral_list,
+            container_observations=container_list,
+            observed_component_types=observed_types,
+            typography=typography,
+            is_dark=is_dark,
+            background_hex=background or "",
+            # Non-heuristic foreground pass-through (today's exact rule).
+            foreground_hex=("#f4f1ea" if is_dark else "#1a1a1a") if background else "",
             spacing_scale=_spacing_samples_to_scale(s.get("spacing_scale_samples")),
+            gathered=gathered,
+            explicit=FieldFlags(),
+            provider="web",
         )
-        # Reconcile the elevation token with the observed border-vs-shadow usage.
-        # Only a recognized hint overrides the default; anything else is left
-        # alone so an unreadable site keeps the baseline.
-        elevation_hint = (s.get("elevation_hint") or "").strip()
-        if elevation_hint in ("shadows", "borders"):
-            tokens.elevation_style = elevation_hint
-        # Website signals are inferred from sampled computed styles, not from a
-        # documented design system. A usable brand color plus a heading font is
-        # the sampler's own confidence floor; meeting it here too keeps the
-        # signal honest.
-        has_system = bool(primary and heading)
-        # Component inventory: keep only known primitive types with a positive
-        # count, sorted. A type list only — never component code — matching the
-        # codebase adapter's inventory contract.
-        counts = s.get("component_counts") or {}
-        inventory = sorted(
-            name
-            for name, count in counts.items()
-            if name in _COMPONENT_HINTS and isinstance(count, int) and count > 0
-        )
-        return DesignSystem(
-            tokens=tokens,
-            component_inventory=inventory,
-            has_explicit_system=False,
-            confidence="medium" if has_system else "low",
-        )
+        return harden(signals)
 
 
 # ─── GitHub/codebase ────────────────────────────────────────────────────────
@@ -716,384 +793,310 @@ class GithubExtractor:
         return out
 
     def extract_raw_signals(self, ref: str) -> RawSignals:
+        """Gather design tokens from a GitHub repository via the styling-system sub-registry.
+
+        Fetch strategy:
+          1. Fetch ``package.json`` + the bounded design-file list to detect the styling system.
+          2. Detect the stack via the sub-registry (deps + file paths only — no bodies read
+             for strategies that don't match).
+          3. Fetch ONLY the winning strategy's file bodies.
+          4. Call the strategy's ``gather`` function and return the gather dict.
+
+        The ``_collect_*`` parsing helpers live in ``github_gather.py``; this method owns
+        all network I/O and passes already-fetched content into the pure gather module.
+        """
+        from app.design_agent.design_system.github_gather import (
+            gather_github_signals,
+            styling_registry,
+            degrade_strategy,
+        )
+
         repo_full_name, branch = _repo_ref_parts(ref)
         if not repo_full_name or "/" not in repo_full_name:
             return RawSignals(provider=self.provider, ref=ref, signals={})
 
-        signals: dict = {
-            "files_present": [],
-            "colors": {},
-            "fonts": [],
-            "spacing": [],
-            "radius": None,
-            "shadows": [],
-            "components": [],
-            "inferred_colors": {},
-            "inferred_spacing": [],
-            "inferred_radius": None,
-            "inferred_shadows": [],
-            "inferred_fonts": [],
-            "inferred_components": [],
-            "inference_files": [],
-        }
-        components: set[str] = set()
-        spacing: set[int] = set()
-        shadows: list[str] = []
-        inferred_components: set[str] = set()
-        inferred_spacing: set[int] = set()
-        inferred_shadows: list[str] = []
-        inferred_fonts: list[str] = []
-        inferred_colors: dict[str, str] = {}
-        inference_stats: dict[str, int] = {}
+        # ── Step 1: Fetch package.json and the bounded design-file listing ──
+        # Read package.json first so we can extract deps for detection.
+        # Then fetch each design-file path within the explicit-file byte cap.
+        # We record which paths are present (regardless of whether their body
+        # fits the cap) so the strategy detector can do path-glob checks.
+
+        fetched_design: dict[str, str] = {}  # path -> text (already-fetched bodies)
+        all_design_paths: list[str] = []     # paths that exist in the repo (for detection)
+        deps: set[str] = set()
 
         for path in _GITHUB_DESIGN_FILES:
-            text = self._fetch_text_file(repo_full_name, path, branch)
-            if not text:
+            text = self._fetch_text_file(repo_full_name, path, branch,
+                                         max_bytes=_GITHUB_EXPLICIT_FILE_BYTES)
+            if text is None:
                 continue
-            signals["files_present"].append(path)
-            lowered_path = path.lower()
-            if lowered_path.endswith(".json"):
-                self._collect_json_signals(text, signals, components, spacing, shadows)
-            if lowered_path.endswith((".css", ".js", ".ts", ".mjs", ".cjs")):
-                self._collect_text_signals(text, signals, components, spacing, shadows)
+            all_design_paths.append(path)
+            fetched_design[path] = text
+            # Extract dependency names from package.json for stack detection.
+            if path == "package.json":
+                try:
+                    pkg = json.loads(text)
+                    for section in ("dependencies", "devDependencies", "peerDependencies"):
+                        deps.update((pkg.get(section) or {}).keys())
+                except (TypeError, ValueError):
+                    pass
 
-        for path, name in self._list_ui_files(repo_full_name, branch):
+        # ── Step 2: Detect the styling system ──
+        # Detection reads only deps + the list of present paths — no extra fetches.
+        strategy = styling_registry.detect(deps, all_design_paths)
+        if strategy is None:
+            strategy = degrade_strategy
+
+        # ── Step 3: Fetch the winning strategy's UI-file bodies ──
+        # UI files (component source files) provide inferred signals regardless of
+        # which strategy won.  The file listing is already bounded to _GITHUB_MAX_UI_FILES
+        # inside _list_ui_files; we enforce the cap here as well so callers that
+        # substitute a test double cannot accidentally exceed it.
+        ui_listing = self._list_ui_files(repo_full_name, branch)
+        ui_fetched = 0
+        for path, _name in ui_listing:
+            if ui_fetched >= _GITHUB_MAX_UI_FILES:
+                break
+            if path in fetched_design:
+                continue  # already fetched above (counts against the cap only once)
             text = self._fetch_text_file(
-                repo_full_name,
-                path,
-                branch,
-                max_bytes=_GITHUB_MAX_UI_FILE_BYTES,
+                repo_full_name, path, branch, max_bytes=_GITHUB_MAX_UI_FILE_BYTES
             )
-            if not text:
-                continue
-            signals["inference_files"].append(path)
-            self._collect_inferred_signals(
-                text,
-                name,
-                inferred_colors,
-                inferred_spacing,
-                inferred_shadows,
-                inferred_fonts,
-                inferred_components,
-                inference_stats,
-            )
+            if text is not None:
+                fetched_design[path] = text
+                ui_fetched += 1
 
-        signals["spacing"] = sorted(spacing)
-        signals["shadows"] = shadows[:8]
-        signals["components"] = sorted(components)
-        signals["inferred_colors"] = inferred_colors
-        signals["inferred_spacing"] = sorted(inferred_spacing)
-        signals["inferred_radius"] = inference_stats.get("_radius")
-        signals["inferred_shadows"] = inferred_shadows[:8]
-        signals["inferred_fonts"] = inferred_fonts[:8]
-        signals["inferred_components"] = sorted(inferred_components)
-        signals["inference_stats"] = inference_stats
+        # ── Step 4: Gather via the winning strategy ──
+        signals = gather_github_signals(fetched_design, deps, all_design_paths, _COMPONENT_HINTS)
         return RawSignals(provider=self.provider, ref=ref, signals=signals)
 
-    def _collect_json_signals(
-        self,
-        text: str,
-        signals: dict,
-        components: set[str],
-        spacing: set[int],
-        shadows: list[str],
-    ) -> None:
-        try:
-            data = json.loads(text)
-        except (TypeError, ValueError):
-            return
-
-        for node in _walk_json(data):
-            if isinstance(node, dict):
-                for key, value in node.items():
-                    if (
-                        isinstance(value, dict)
-                        and isinstance(value.get("value"), str)
-                    ):
-                        self._collect_named_value(
-                            str(key), value["value"], signals, spacing, shadows
-                        )
-                    self._collect_named_value(str(key), value, signals, spacing, shadows)
-            elif isinstance(node, str):
-                self._collect_component_hints(node, components)
-        if isinstance(data, dict):
-            for key in ("components", "aliases"):
-                section = data.get(key)
-                if isinstance(section, dict):
-                    for name in section:
-                        self._collect_component_hints(str(name), components)
-
-    def _collect_text_signals(
-        self,
-        text: str,
-        signals: dict,
-        components: set[str],
-        spacing: set[int],
-        shadows: list[str],
-    ) -> None:
-        for name, value in _JS_HEX_PAIR_RE.findall(text):
-            signals["colors"].setdefault(name.lower(), value.lower())
-
-        for var_name, raw_value in _CSS_VAR_RE.findall(text):
-            key = var_name.lower()
-            value = raw_value.strip()
-            color = _normalize_hex(value)
-            if color:
-                signals["colors"].setdefault(key, color)
-                continue
-            size = _parse_px_or_rem(value)
-            if size is not None:
-                if "radius" in key:
-                    signals["radius"] = value
-                elif any(k in key for k in ("space", "spacing", "gap")):
-                    spacing.add(size)
-
-        for value in _FONT_DECL_RE.findall(text):
-            if value:
-                signals["fonts"].append(value.strip())
-
-        for name, value in _FONT_TOKEN_RE.findall(text):
-            if "font" in name.lower() or name.lower() in {"sans", "heading", "body"}:
-                signals["fonts"].append(value.strip())
-
-        for name, value in _SIZE_PAIR_RE.findall(text):
-            lower = name.lower()
-            px = _parse_px_or_rem(value)
-            if px is None:
-                continue
-            if "radius" in lower or lower in {"sm", "md", "lg", "xl", "full"}:
-                signals["radius"] = value
-            if "space" in lower or "spacing" in lower or lower.isdigit():
-                spacing.add(px)
-
-        for name, value in _SHADOW_PAIR_RE.findall(text):
-            if "shadow" in name.lower() and value not in shadows:
-                shadows.append(value)
-
-        self._collect_component_hints(text, components)
-
-    def _collect_named_value(
-        self,
-        key: str,
-        value,
-        signals: dict,
-        spacing: set[int],
-        shadows: list[str],
-    ) -> None:
-        lower = key.lower()
-        if isinstance(value, str):
-            color = _normalize_hex(value)
-            if color:
-                signals["colors"].setdefault(lower, color)
-                return
-            px = _parse_px_or_rem(value)
-            if px is not None:
-                if "radius" in lower:
-                    signals["radius"] = value
-                elif "space" in lower or "spacing" in lower or lower.isdigit():
-                    spacing.add(px)
-            if "font" in lower:
-                signals["fonts"].append(value)
-            if "shadow" in lower and value not in shadows:
-                shadows.append(value)
-        elif isinstance(value, list) and (
-            "font" in lower or lower in {"sans", "heading", "body"}
-        ):
-            for item in value:
-                if isinstance(item, str):
-                    signals["fonts"].append(item)
-
-    def _collect_component_hints(self, text: str, components: set[str]) -> None:
-        haystack = text.lower()
-        for name in _COMPONENT_HINTS:
-            if re.search(rf"\b{name}\b", haystack):
-                components.add(name)
-
-    def _collect_inferred_signals(
-        self,
-        text: str,
-        file_name: str,
-        colors: dict[str, str],
-        spacing: set[int],
-        shadows: list[str],
-        fonts: list[str],
-        components: set[str],
-        stats: dict[str, int],
-    ) -> None:
-        lower_file = file_name.rsplit(".", 1)[0].lower()
-        if lower_file in _COMPONENT_HINTS:
-            components.add(lower_file)
-        self._collect_component_hints(text, components)
-        for match in _EXPORT_COMPONENT_RE.findall(text):
-            exported = (match[0] or match[1] or "").strip()
-            if exported:
-                self._collect_component_hints(exported, components)
-
-        color_counts: dict[str, int] = {}
-        for color_name in _TAILWIND_COLOR_CLASS_RE.findall(text):
-            if color_name in _TAILWIND_COLORS:
-                color_counts[color_name] = color_counts.get(color_name, 0) + 1
-        for color_name, count in sorted(color_counts.items(), key=lambda item: item[1], reverse=True):
-            if count >= 2 and "primary" not in colors:
-                colors["primary"] = _TAILWIND_COLORS[color_name]
-                stats["color_classes"] = stats.get("color_classes", 0) + count
-                break
-        if "bg-white" in text and "background" not in colors:
-            colors["background"] = "#ffffff"
-        if "bg-black" in text and "background" not in colors:
-            colors["background"] = "#000000"
-        if "text-white" in text and "foreground" not in colors:
-            colors["foreground"] = "#ffffff"
-        if "border-" in text and "border" not in colors:
-            colors["border"] = Colors().border
-
-        radius_hits = _TAILWIND_RADIUS_RE.findall(text)
-        if radius_hits:
-            stats["radius_classes"] = stats.get("radius_classes", 0) + len(radius_hits)
-            order = {"full": 4, "3xl": 3, "2xl": 3, "xl": 2, "lg": 2, "md": 1, "sm": 1, "": 1}
-            current = stats.get("_radius_rank", 0)
-            for value in radius_hits:
-                rank = order.get(value or "", 1)
-                if rank >= current:
-                    stats["_radius_rank"] = rank
-                    if value == "full":
-                        stats["_radius"] = "9999px"
-                    elif value in {"2xl", "3xl"}:
-                        stats["_radius"] = "24px"
-                    elif value in {"lg", "xl"}:
-                        stats["_radius"] = "12px"
-                    elif value == "sm":
-                        stats["_radius"] = "4px"
-                    else:
-                        stats["_radius"] = "8px"
-
-        for raw in _TAILWIND_SPACING_RE.findall(text):
-            try:
-                step = int(raw)
-            except ValueError:
-                continue
-            if step > 0:
-                spacing.add(step * 4)
-                stats["spacing_classes"] = stats.get("spacing_classes", 0) + 1
-
-        shadow_hits = _TAILWIND_SHADOW_RE.findall(text)
-        if shadow_hits:
-            stats["shadow_classes"] = stats.get("shadow_classes", 0) + len(shadow_hits)
-            for value in shadow_hits:
-                label = f"shadow-{value}" if value else "shadow"
-                if label != "shadow-none" and label not in shadows:
-                    shadows.append(label)
-
-        if _TAILWIND_WEIGHT_RE.search(text):
-            fonts.append("font-weight")
-            stats["font_classes"] = stats.get("font_classes", 0) + 1
-        if _TAILWIND_TEXT_SIZE_RE.search(text):
-            fonts.append("type-scale")
-            stats["text_size_classes"] = stats.get("text_size_classes", 0) + 1
-
     def normalize(self, raw: RawSignals) -> DesignSystem:
+        """Fold GitHub gather signals into the common DesignSystem shape via the shared kernel.
+
+        Constructs a DesignSignals object from the gather keys in raw.signals and
+        returns harden(signals) directly. No inline accent / neutral / elevation /
+        inventory / confidence decision is made here; all heuristics live in the
+        kernel (hardening.py). Nothing is assigned on the returned DesignSystem
+        after harden — harden is the sole assembler.
+
+        An empty gather bag (no recognized design files) returns the neutral
+        baseline DesignSystem so callers always receive a complete object.
+        """
+        from app.design_agent.design_system.hardening import harden, pick_accent
+        from app.design_agent.design_system.signals import (
+            ColorCandidate,
+            DesignSignals,
+            FieldFlags,
+            NeutralCandidate,
+            TypographySignals,
+        )
+
+        # Preserve the exact empty-bag predicate from the previous implementation.
         s = raw.signals or {}
         if not s or not (s.get("files_present") or s.get("inference_files")):
             return DesignSystem()
 
+        # Build separate explicit and inferred color maps (lowercased keys, validated hex).
+        # Explicit: tokens sourced from a real config file (tailwind.config, tokens.json, CSS vars).
+        # Inferred: colours observed in className frequencies across UI source files.
         color_map = {
-            str(k).lower(): v
+            str(k).lower(): _normalize_hex(str(v))
             for k, v in (s.get("colors") or {}).items()
             if _normalize_hex(str(v))
         }
         inferred_color_map = {
-            str(k).lower(): v
+            str(k).lower(): _normalize_hex(str(v))
             for k, v in (s.get("inferred_colors") or {}).items()
             if _normalize_hex(str(v))
         }
 
-        def color(*names: str) -> str | None:
+        def _resolve(*names: str) -> tuple[str | None, bool]:
+            """Return (hex, from_explicit) for the first matching name across both maps.
+
+            Resolution order mirrors today's color() helper:
+            exact explicit -> substring explicit -> exact inferred -> substring inferred.
+            The from_explicit flag drives weight and provenance flags downstream.
+            """
             for name in names:
                 if name in color_map:
-                    return color_map[name]
+                    return color_map[name], True
             for key, value in color_map.items():
                 if any(name in key for name in names):
-                    return value
+                    return value, True
             for name in names:
                 if name in inferred_color_map:
-                    return inferred_color_map[name]
+                    return inferred_color_map[name], False
             for key, value in inferred_color_map.items():
                 if any(name in key for name in names):
-                    return value
-            return None
+                    return value, False
+            return None, False
 
-        background = color("background", "bg")
-        foreground = color("foreground", "text", "content")
-        primary = color("primary", "brand", "accent")
-        surface = color("surface", "card", "popover", "secondary")
-        muted = color("muted", "neutral", "gray", "slate")
-        border = color("border", "ring", "stroke")
+        # Route each semantic role to its seam slot.
+        # Accent/primary: placed in color_candidates; the kernel's pick_accent decides.
+        # Neutral roles: placed in neutral_candidates; pick_neutrals decides.
+        # Background/foreground: non-heuristic pass-throughs.
+        #
+        # Weight: explicit config hit gets 2.0, inferred className hit gets 1.0.
+        # This makes a real config theme colour out-rank a className-frequency colour
+        # when both resolve to the same role — no other preference is expressed here.
+        #
+        # Chromatic-ness is NOT evaluated in normalize. Every resolved colour enters
+        # the seam at its role regardless of chroma; the kernel's pick_accent applies
+        # the chromatic gate (_chroma_of) at ranking time. The saturation field on
+        # ColorCandidate is informational metadata only and is left at 0.0 here because
+        # GitHub gather has no per-candidate area or saturation measurement.
+        color_candidates: list[ColorCandidate] = []
+        neutral_candidates: list[NeutralCandidate] = []
 
-        colors = Colors()
-        if background:
-            colors.background = background
-        if foreground:
-            colors.foreground = foreground
-        elif background:
-            colors.foreground = "#f4f1ea" if _luminance(background) < 128 else "#1a1a1a"
-        if primary:
-            colors.primary = primary
-            colors.accent = primary
-        if surface:
-            colors.surface = surface
-        if muted:
-            colors.muted = muted
-        if border:
-            colors.border = border
+        primary_hex, primary_explicit = _resolve("primary", "brand", "accent")
+        if primary_hex:
+            color_candidates.append(
+                ColorCandidate(
+                    hex=primary_hex,
+                    weight=2.0 if primary_explicit else 1.0,
+                    saturation=0.0,
+                )
+            )
 
-        font = _first_known_font(s.get("fonts") or [])
-        fonts = Fonts()
-        if font:
-            fonts.heading_family = font
-            fonts.body_family = font
+        surface_hex, surface_explicit = _resolve("surface", "card", "popover", "secondary")
+        if surface_hex:
+            neutral_candidates.append(
+                NeutralCandidate(
+                    role="surface",
+                    hex=surface_hex,
+                    weight=2.0 if surface_explicit else 1.0,
+                )
+            )
 
-        spacing_scale = (
-            s.get("spacing")
-            or s.get("inferred_spacing")
-            or list(Tokens().spacing_scale)
+        border_hex, border_explicit = _resolve("border", "ring", "stroke")
+        if border_hex:
+            neutral_candidates.append(
+                NeutralCandidate(
+                    role="border",
+                    hex=border_hex,
+                    weight=2.0 if border_explicit else 1.0,
+                )
+            )
+
+        muted_hex, muted_explicit = _resolve("muted", "neutral", "gray", "slate")
+        if muted_hex:
+            neutral_candidates.append(
+                NeutralCandidate(
+                    role="muted",
+                    hex=muted_hex,
+                    weight=2.0 if muted_explicit else 1.0,
+                )
+            )
+
+        background_hex_raw, _bg_explicit = _resolve("background", "bg")
+        background_hex = background_hex_raw or ""
+
+        foreground_hex_raw, _fg_explicit = _resolve("foreground", "text", "content")
+        if foreground_hex_raw:
+            foreground_hex = foreground_hex_raw
+        elif background_hex:
+            # Derive from background luminance when no foreground was gathered.
+            # This preserves the rule that was inline in the previous implementation.
+            foreground_hex = "#f4f1ea" if _luminance(background_hex) < 128 else "#1a1a1a"
+        else:
+            foreground_hex = ""
+
+        # is_dark: only meaningful when a real background was resolved.
+        is_dark = bool(background_hex and _luminance(background_hex) < 128)
+
+        # Spacing: no-silent-default. Pass only real gathered values; an empty list
+        # tells the kernel to leave Tokens.spacing_scale at the model default.
+        # The previous implementation would pass Tokens().spacing_scale when nothing
+        # was gathered — that silently baked in the default scale regardless of source.
+        raw_spacing = s.get("spacing") or s.get("inferred_spacing") or []
+        spacing_scale = [int(x) for x in raw_spacing if int(x) > 0]
+
+        # Radius: no-silent-default. Only set a convention when a real signal exists.
+        # _radius_convention("") floors to "rounded" even with no evidence; to avoid
+        # silently injecting a rounded default when the repo has no radius signal,
+        # we only call _radius_convention when a real value was gathered.
+        raw_radius = s.get("radius") or s.get("inferred_radius")
+        radius_conv = _radius_convention(str(raw_radius)) if raw_radius else ""
+
+        # Font: widened lookup to cover className-inferred font signals.
+        # The previous implementation read only s.get("fonts"); extending to fall back
+        # on s.get("inferred_fonts") ensures className-inferred font names (e.g.
+        # a font-family declaration extracted from a UI file) are not silently dropped.
+        font = _first_known_font(s.get("fonts") or s.get("inferred_fonts") or [])
+
+        typography = TypographySignals(
+            heading_family=font or "",
+            body_family=font or "",
+            weights=[],   # GitHub gather does not collect numeric font weights
+            radius_convention=radius_conv,
         )
-        radius = _radius_convention(str(s.get("radius") or s.get("inferred_radius") or ""))
-        is_dark = bool(background and _luminance(background) < 128)
-        has_explicit_tokens = bool(
-            color_map or font or s.get("spacing") or s.get("radius") or s.get("shadows")
-        )
-        has_inferred_tokens = bool(
-            inferred_color_map
-            or s.get("inferred_spacing")
-            or s.get("inferred_radius")
-            or s.get("inferred_shadows")
-            or s.get("inferred_components")
+
+        # Container observations for elevation derivation.
+        # GitHub gather never produces per-container border/shadow pairs. The previous
+        # implementation set elevation_style="shadows" whenever any shadow token was
+        # present — a coarse any-shadow heuristic. Passing container_observations=[]
+        # tells the kernel there is no real elevation evidence; it will leave
+        # Tokens.elevation_style at the model default rather than forcing "shadows"
+        # based on a loose signal.
+        container_observations: list = []
+
+        # Inventory: pass the raw union to the kernel; assemble_inventory (called
+        # inside harden) handles case-insensitive filtering against _COMPONENT_HINTS,
+        # dedup, and sort. Do not pre-sort or pre-filter here.
+        observed_types = (
+            list(s.get("components") or [])
+            + list(s.get("inferred_components") or [])
         )
 
-        tokens = Tokens(
-            colors=colors,
+        # Provenance flags — drive score_confidence in the kernel.
+        # explicit.accent / explicit.neutrals: require the resolution to have come from
+        # the explicit config map (from_explicit=True), not the inferred className map.
+        # explicit.typography: requires an explicit font declaration (not inferred).
+        # explicit.elevation and explicit.inventory are always False for GitHub gather —
+        # elevation comes only from container observations (none here) and component
+        # inventory is always inferred from filenames.
+        has_explicit_colors = bool(color_map)
+        has_explicit_font = bool(_first_known_font(s.get("fonts") or []))
+
+        explicit = FieldFlags(
+            accent=has_explicit_colors and primary_explicit,
+            neutrals=has_explicit_colors and (
+                surface_explicit or border_explicit or muted_explicit
+            ),
+            typography=has_explicit_font,
+            elevation=False,
+            inventory=False,
+        )
+        gathered = FieldFlags(
+            accent=pick_accent(color_candidates) is not None,
+            neutrals=bool(neutral_candidates),
+            typography=bool(font),
+            elevation=bool(container_observations),
+            inventory=bool(observed_types),
+        )
+        # Every explicit.X True also implies gathered.X True.
+        if explicit.accent:
+            gathered.accent = True
+        if explicit.neutrals:
+            gathered.neutrals = True
+        if explicit.typography:
+            gathered.typography = True
+
+        signals = DesignSignals(
+            color_candidates=color_candidates,
+            neutral_candidates=neutral_candidates,
+            container_observations=container_observations,
+            observed_component_types=observed_types,
+            typography=typography,
             is_dark=is_dark,
-            fonts=fonts,
+            background_hex=background_hex,
+            foreground_hex=foreground_hex,
             spacing_scale=spacing_scale,
-            radius_convention=radius,
-            elevation_style=(
-                "shadows"
-                if (s.get("shadows") or s.get("inferred_shadows"))
-                else Tokens().elevation_style
-            ),
+            gathered=gathered,
+            explicit=explicit,
+            provider="github",
         )
-        return DesignSystem(
-            tokens=tokens,
-            component_inventory=sorted(
-                set(s.get("components") or []) | set(s.get("inferred_components") or [])
-            ),
-            has_explicit_system=has_explicit_tokens,
-            confidence=(
-                "high"
-                if color_map and font
-                else ("medium" if (has_explicit_tokens or has_inferred_tokens) else "low")
-            ),
-        )
+        return harden(signals)  # sole assembler — no field assigned on the result after this
 
 
 # Register both adapters on import so the package's import side-effect populates

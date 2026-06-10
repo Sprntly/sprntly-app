@@ -4,21 +4,16 @@ import {
   ONBOARDING_STEP_SLUGS,
 } from "./onboarding/types"
 
-/** Base path for the refresh-stable Design Agent canvas route. The full route
- *  carries the prototype_id (`/design/{prototype_id}`). This is the only
- *  deep-URL screen in the app's otherwise no-deep-URL nav. */
-export const CANVAS_BASE_PATH = "/design"
-
-/** Dedicated full-page prototype generation surface. "Generate Prototype" now
- *  redirects here (instead of opening the generate modal inline over the PRD).
- *  The PRD context is carried as a `?prd=<id>` query param; the page kicks off
- *  generation and, once a prototype_id exists, hands off to the canvas route
- *  (`/design/{id}`). A static page (no per-id dynamic segment), so it needs no
- *  generateStaticParams — the query param is read client-side. */
+/** Base path for the prototype surface. The prototype canvas renders in-tab at
+ *  `/prototype?prd=<id>` (the PRD context is carried as a query param); there is
+ *  no per-id dynamic segment. The bare `/prototype` shows an empty state
+ *  prompting the user to choose a PRD first. */
 export const PROTOTYPE_PATH = "/prototype"
 
-/** Build the prototype-page path, threading the PRD context as `?prd=<id>` when
- *  present. With no PRD it returns the bare `/prototype`. Pure → unit-testable. */
+/** Build the prototype path, threading the PRD context as `?prd=<id>` when
+ *  present. With no PRD it returns the bare `/prototype`. This is the single
+ *  destination for opening a prototype: the in-tab canvas resolves the PRD's
+ *  ready prototype from the `?prd=` param. Pure → unit-testable. */
 export function prototypePath(prdId?: number | string | null): string {
   if (prdId == null || prdId === "") return PROTOTYPE_PATH
   return `${PROTOTYPE_PATH}?prd=${encodeURIComponent(String(prdId))}`
@@ -57,15 +52,10 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   connectors: "/settings?section=connectors",
   sources: "/sources",
   tickets: "/tickets",
-  // The dedicated full-page prototype generation surface (sidebar nav target).
-  // The "Generate Prototype" entry point redirects here with a ?prd=<id> query
-  // param; the page reads it client-side (no per-id dynamic segment).
+  // The prototype surface (sidebar nav target). The canvas renders in-tab at
+  // `/prototype?prd=<id>`; bare `/prototype` with no `?prd=` shows an empty state
+  // prompting the user to choose a PRD first.
   prototype: PROTOTYPE_PATH,
-  // The refresh-stable canvas route. The bare base path; the id-bearing path
-  // (`/design/{prototype_id}`) is built by canvasPath() below.
-  // pathForScreen("da-canvas") returns this base — canvas navigation goes
-  // through goToCanvas(id)/canvasPath(id), never pathForScreen.
-  "da-canvas": CANVAS_BASE_PATH,
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -79,12 +69,10 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/team": "team",
   "/sources": "sources",
   "/tickets": "tickets",
+  // The prototype surface maps to the "prototype" screen so the prototype tab
+  // stays highlighted. The PRD context rides as a `?prd=` query param, which
+  // pathname-based screen derivation ignores — the path is always `/prototype`.
   [PROTOTYPE_PATH]: "prototype",
-  // Inverse for the canvas base path. screenIdFromPathname is left UNCHANGED —
-  // it exact-matches, so the bare "/design" resolves to "da-canvas" while the
-  // id-bearing "/design/{id}" falls through to "chat" (the canvas is a
-  // full-screen overlay driven by canvasResolveTarget, not by currentScreen).
-  [CANVAS_BASE_PATH]: "da-canvas",
 }
 
 // Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).
@@ -109,46 +97,4 @@ export function screenIdFromPathname(pathname: string | null): ScreenId {
 export function pathForScreen(screen: ScreenId): string {
   const id = screen === "ondemand" ? "chat" : screen
   return SCREEN_PATH[id]
-}
-
-// ── canvas-ONLY refresh-stable route helpers ────────────────────────────────
-// These are additive and scoped strictly to the canvas. They do NOT alter
-// normalizePathname / screenIdFromPathname / pathForScreen above — the rest of
-// the app's no-deep-URL nav is untouched.
-
-/** Build the refresh-stable canvas path for a prototype, e.g.
- *  canvasPath(54) === "/design/54". The prototype_id is the ONLY state the
- *  canvas route carries. */
-export function canvasPath(prototypeId: number | string): string {
-  return `${CANVAS_BASE_PATH}/${prototypeId}`
-}
-
-/** Read the canvas prototype_id from a pathname, or null when the path is not
- *  the canvas route. Matches `/design/{id}` (one trailing numeric segment);
- *  the bare "/design", any non-numeric segment, or any deeper path returns null
- *  so the canvas never resolves against a malformed URL. */
-export function prototypeIdFromCanvasPath(pathname: string | null): number | null {
-  const path = normalizePathname(pathname)
-  if (!path.startsWith(`${CANVAS_BASE_PATH}/`)) return null
-  const rest = path.slice(CANVAS_BASE_PATH.length + 1)
-  // Exactly one segment, all digits (prototype ids are positive integers).
-  if (rest === "" || rest.includes("/") || !/^\d+$/.test(rest)) return null
-  const id = Number(rest)
-  return Number.isSafeInteger(id) ? id : null
-}
-
-/** Decide whether the canvas resolver should fetch — and which prototype_id —
- *  given the prototype_id read from the URL, whether the workspace has hydrated,
- *  and the id already mounted in the canvas. Returns the id to fetch, or null to
- *  do nothing. Gates on hydration (never resolve against an un-hydrated
- *  workspace) and skips a refetch when the canvas already shows that id. */
-export function canvasResolveTarget(
-  routeProtoId: number | null,
-  workspaceHydrated: boolean,
-  mountedCanvasId: number | null,
-): number | null {
-  if (routeProtoId == null) return null
-  if (!workspaceHydrated) return null
-  if (mountedCanvasId === routeProtoId) return null
-  return routeProtoId
 }

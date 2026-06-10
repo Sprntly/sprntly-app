@@ -19,7 +19,7 @@
 // while withAuthRetry / ApiError / setAccessTokenProvider stay REAL so the
 // primitive under test actually runs.
 import * as React from "react"
-import { act, cleanup, render } from "@testing-library/react"
+import { act, cleanup, fireEvent, render } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 // Sprntly components carry no `import React`; vitest's esbuild transform uses the
@@ -182,6 +182,13 @@ function figmaRow(): HTMLElement {
   return rows[0] as HTMLElement
 }
 
+// Select the Figma design-source radio pill so the Figma connector status row
+// (which is now gated on the selected source) becomes visible.
+function selectFigmaSource() {
+  const pill = document.querySelector('[data-val="figma"]') as HTMLElement | null
+  if (pill) act(() => { fireEvent.click(pill) })
+}
+
 describe("GenerateModal connector rows — transient-401 resilience", () => {
   it("test_connector_rows_hold_state_on_transient_401: a transient 401 recovers to Connected, never shows Not connected", async () => {
     listMock
@@ -190,6 +197,9 @@ describe("GenerateModal connector rows — transient-401 resilience", () => {
 
     renderOpenModal()
     await settle()
+
+    // Select Figma so its connector row is visible before asserting.
+    selectFigmaSource()
 
     // The fetch was retried once (401 → recover), not aborted.
     expect(listMock).toHaveBeenCalledTimes(2)
@@ -206,6 +216,8 @@ describe("GenerateModal connector rows — transient-401 resilience", () => {
     listMock.mockResolvedValueOnce({ connections: [activeFigmaConnection()] })
     renderOpenModal()
     await settle()
+    // Select Figma so the gated connector row is visible before measuring.
+    selectFigmaSource()
     const cleanRowCount = document.querySelectorAll(".src-row-compact").length
     const cleanFigma = figmaRow().textContent ?? ""
     cleanup()
@@ -216,6 +228,8 @@ describe("GenerateModal connector rows — transient-401 resilience", () => {
       .mockResolvedValueOnce({ connections: [activeFigmaConnection()] })
     renderOpenModal()
     await settle()
+    // Select Figma so the gated connector row is visible before measuring.
+    selectFigmaSource()
     const flapRowCount = document.querySelectorAll(".src-row-compact").length
     const flapFigma = figmaRow().textContent ?? ""
 
@@ -235,6 +249,9 @@ describe("GenerateModal connector rows — transient-401 resilience", () => {
 
     renderOpenModal()
     await settle()
+
+    // Select Figma so the gated connector row is visible before asserting.
+    selectFigmaSource()
 
     // No retry budget for a 500 — one attempt, then the rows clear.
     expect(listMock).toHaveBeenCalledTimes(1)
