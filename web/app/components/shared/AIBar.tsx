@@ -22,7 +22,7 @@ const AI_TEXTAREA_MAX_PX = 120
 
 type AiLayout = "side" | "bottom"
 
-export function AIBar() {
+export function AIBar({ inline = false }: { inline?: boolean }) {
   const {
     currentScreen,
     goTo,
@@ -34,6 +34,7 @@ export function AIBar() {
     aiPanelCollapsed,
     toggleAiPanelCollapsed,
     expandAiPanel,
+    openContentPanel,
   } = useNavigation()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
@@ -75,6 +76,7 @@ export function AIBar() {
   }, [])
 
   useLayoutEffect(() => {
+    if (inline) return
     const root = document.documentElement
     if (!showAIBar || !context) {
       root.removeAttribute("data-ai-panel")
@@ -102,10 +104,11 @@ export function AIBar() {
       root.style.removeProperty("--ai-panel-occupied")
       root.classList.remove("ai-bar-resizing")
     }
-  }, [showAIBar, context, layout, aiPanelCollapsed, aiPanelWidth])
+  }, [inline, showAIBar, context, layout, aiPanelCollapsed, aiPanelWidth])
 
   /** Match `.ai-bar-ctx` strip + resize-gutter divider Y to `.app-main-chrome` (main column). */
   useLayoutEffect(() => {
+    if (inline) return
     const root = document.documentElement
     if (!showAIBar || layout !== "side") {
       root.style.removeProperty("--ai-chrome-sync-h")
@@ -146,7 +149,7 @@ export function AIBar() {
       window.removeEventListener("resize", apply)
       root.style.removeProperty("--ai-chrome-sync-h")
     }
-  }, [showAIBar, layout])
+  }, [inline, showAIBar, layout])
 
   useEffect(() => {
     const handleKeydown = (e: KeyboardEvent) => {
@@ -354,11 +357,111 @@ export function AIBar() {
     }
   }
 
-  if (!showAIBar || !context) return null
+  if (!inline && (!showAIBar || !context)) return null
 
+  const activeContext = context ?? AI_CONTEXTS["detail"]
+  if (!activeContext) return null
   const showReplyBlock = submitting || agentWorking || askError != null || lastReply != null || agentAction != null
-  const isSide = layout === "side"
-  const showCollapsedRail = isSide && aiPanelCollapsed
+  const isSide = inline || layout === "side"
+  const showCollapsedRail = !inline && isSide && aiPanelCollapsed
+
+  if (inline) {
+    return (
+      <div className="ai-bar ai-bar--inline">
+        <div className="ai-bar-stack">
+          <div className="ai-bar-ctx">
+            <div className="ai-bar-ctx-badge">
+              <IconSparkle size={14} />
+            </div>
+            <span>Asking about</span>
+            <span className="ai-bar-ctx-path">{activeContext.path}</span>
+            <span className="ai-bar-ctx-hint">
+              Highlight any text to ask · <kbd>Cmd</kbd> <kbd>K</kbd>
+            </span>
+          </div>
+          {chips.length > 0 ? (
+            <div className="ai-bar-suggest">
+              {chips.map((s) => (
+                <button key={s} className="ai-bar-chip" type="button" onClick={() => handleChipClick(s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {showReplyBlock ? (
+            <div className="ai-bar-reply">
+              {lastSubmittedQuestion ? (
+                <div className="ai-bar-reply-question">
+                  <div className="ai-bar-reply-question-label">Your question</div>
+                  <div className="ai-bar-reply-question-text">{lastSubmittedQuestion}</div>
+                </div>
+              ) : null}
+              {submitting || agentWorking ? (
+                <div>
+                  <div className="ai-bar-agent-label">
+                    <IconSparkle size={14} />
+                    <span>PM Agent</span>
+                    <span className="ai-bar-agent-badge">PM AGENT</span>
+                    <span className="ai-bar-agent-status">{agentWorking ? "generating PRD…" : "thinking…"}</span>
+                  </div>
+                  <AssistantThinkingSkeleton compact />
+                </div>
+              ) : askError ? (
+                <div className="ai-bar-reply-error">{askError}</div>
+              ) : agentAction ? (
+                <div className="ai-bar-agent-reply">
+                  <div className="ai-bar-agent-label">
+                    <IconSparkle size={14} />
+                    <span>PM Agent</span>
+                    <span className="ai-bar-agent-badge">PM AGENT</span>
+                    <span className="ai-bar-agent-status">PRD draft ready</span>
+                  </div>
+                  <p className="ai-bar-agent-message">{agentAction.message}</p>
+                  <div className="ai-bar-agent-actions">
+                    <button type="button" className="ai-bar-agent-btn ai-bar-agent-btn--primary" onClick={() => openContentPanel("prd")}>
+                      Open PRD
+                    </button>
+                    <button type="button" className="ai-bar-agent-btn" onClick={() => openContentPanel("tickets")}>
+                      Create tickets
+                    </button>
+                    <button type="button" className="ai-bar-agent-btn" onClick={() => {
+                      if (content.prd) goTo("prototype")
+                    }}>
+                      Generate prototype
+                    </button>
+                  </div>
+                </div>
+              ) : lastReply ? (
+                <AskReplyBody reply={lastReply} animateIn simulateTyping omitCitations />
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <div className="ai-bar-input-row">
+          <div className="ai-bar-textarea-shell">
+            <textarea
+              ref={textareaRef}
+              className="ai-bar-textarea"
+              placeholder="Ask Sprntly anything about this page, or describe what to build…"
+              rows={3}
+              value={aiBarValue}
+              onChange={handleInput}
+              onKeyDown={onTextareaKeyDown}
+            />
+          </div>
+          <button
+            type="button"
+            className="ai-bar-send"
+            aria-label="Send"
+            disabled={submitting || !aiBarValue.trim()}
+            onClick={() => void submitAsk()}
+          >
+            {submitting ? "..." : <IconSendUp size={18} />}
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -447,7 +550,7 @@ export function AIBar() {
                   <IconSparkle size={14} />
                 </div>
                 <span>Asking about</span>
-                <span className="ai-bar-ctx-path">{context.path}</span>
+                <span className="ai-bar-ctx-path">{activeContext.path}</span>
                 <span className="ai-bar-ctx-hint">
                   Highlight any text to ask · <kbd>Cmd</kbd> <kbd>K</kbd>
                 </span>

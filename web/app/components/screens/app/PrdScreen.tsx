@@ -180,7 +180,7 @@ export function PrdScreen() {
   }
 
   return (
-    <AppLayout mainClassName="main--reading">
+    <AppLayout mainClassName="main--reading" inlineChat>
       {prd && <PrdPatchBanner prdId={prd.prd_id} />}
       <div className="prd-header-row">
         <a className="detail-back" onClick={() => goTo("detail")}>

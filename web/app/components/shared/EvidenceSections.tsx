@@ -112,8 +112,8 @@ function HeroStrip({ cards }: { cards: EvidenceV2HeroCard[] }) {
     <div className="evv2-hero">
       {cards.map((c, i) => (
         <div key={i} className={`evv2-hero-card evv2-tone-${c.tone}`}>
-          <div className="evv2-hero-label">{c.label}</div>
           <div className="evv2-hero-value">{c.value}</div>
+          <div className="evv2-hero-label">{c.label}</div>
           {c.delta ? <div className="evv2-hero-delta">{c.delta}</div> : null}
           {c.baseline ? (
             <div className="evv2-hero-baseline">{c.baseline}</div>
@@ -125,7 +125,17 @@ function HeroStrip({ cards }: { cards: EvidenceV2HeroCard[] }) {
 }
 
 function ContextChip({ text }: { text: string }) {
-  return <div className="evv2-context-chip">{renderInline(text)}</div>
+  return (
+    <div className="evv2-context-chip">
+      <div className="evv2-context-header">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+          <path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z" />
+        </svg>
+        AI SUMMARY
+      </div>
+      <div className="evv2-context-body">{renderInline(text)}</div>
+    </div>
+  )
 }
 
 function CutsIndex({ rows }: { rows: EvidenceV2CutsIndexRow[] }) {

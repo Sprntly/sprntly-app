@@ -35,7 +35,10 @@ class Corpus:
 def load_corpus(dataset: str = "asurion") -> Corpus:
     base = settings.data_path / dataset
     if not base.exists():
-        raise FileNotFoundError(f"Dataset {dataset!r} not found at {base}")
+        # No static corpus for this tenant — they rely on the knowledge graph.
+        # Return an empty corpus so the KG-only answer path still works.
+        logger.info("No corpus directory for dataset %r at %s; using empty corpus", dataset, base)
+        return Corpus(dataset=dataset, docs=())
     docs: list[CorpusDoc] = []
     # Skip _reference/ which holds the answer key — never feed that to the LLM
     for p in sorted(base.glob("*.md")):
@@ -50,7 +53,8 @@ def load_corpus(dataset: str = "asurion") -> Corpus:
             text = p.read_text(encoding="latin-1")
         docs.append(CorpusDoc(name=p.stem, path=str(p), text=text))
     if not docs:
-        raise RuntimeError(f"No corpus docs found for dataset {dataset!r}")
+        logger.warning("No corpus docs found for dataset %r; using empty corpus", dataset)
+        return Corpus(dataset=dataset, docs=())
     return Corpus(dataset=dataset, docs=tuple(docs))
 
 

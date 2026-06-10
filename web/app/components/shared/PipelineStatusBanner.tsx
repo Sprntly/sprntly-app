@@ -9,7 +9,6 @@ const STAGES: { key: string; label: string }[] = [
   { key: "agents",           label: "Market data"       },
   { key: "ds_agent",         label: "Analysis"          },
   { key: "knowledge_graph",  label: "Knowledge graph"   },
-  { key: "brief",            label: "Brief"             },
 ]
 
 // ── Stage status helpers ───────────────────────────────────────────────────────
@@ -82,6 +81,7 @@ function StageConnector({ done }: { done: boolean }) {
 // ── Trigger button ─────────────────────────────────────────────────────────────
 function RunNowButton({
   onClick,
+  
   disabled,
 }: {
   onClick: () => void

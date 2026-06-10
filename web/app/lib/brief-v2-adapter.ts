@@ -43,16 +43,30 @@ export interface BriefV2Quote {
   source: string
 }
 
+export type BriefV2KpiTone = "positive" | "negative" | "neutral"
+
+export interface BriefV2StatTile {
+  value: string
+  label: string
+  tone: BriefV2KpiTone
+}
+
 interface BriefV2CardBase {
   detailKey: string | undefined
   actionAccent: BriefActionAccent
   actionLabel: string
   tagType: BriefTagType
   tagLabel: string
+  category: string
+  priority: string
   confidence: number
   title: string
   body: string
   metricHighlight: string
+  statTiles: BriefV2StatTile[]
+  // Every insight ships 2–4 chart_hints (required by the synthesis schema), so
+  // every card — hero and supporting alike — carries an inline chart.
+  chart: BriefV2InlineChart | null
   convergence: BriefV2Convergence[]
   secondaryCtaLabel: string
   secondaryCtaBehavior: BriefSecondaryCtaBehavior
@@ -61,7 +75,6 @@ interface BriefV2CardBase {
 
 export interface BriefV2HeroFinding extends BriefV2CardBase {
   kind: "hero"
-  chart: BriefV2InlineChart | null
   quote: BriefV2Quote | null
 }
 
@@ -69,8 +82,6 @@ export interface BriefV2CompactFinding extends BriefV2CardBase {
   kind: "compact"
   extraConvergenceCount: number
 }
-
-export type BriefV2KpiTone = "positive" | "negative" | "neutral"
 
 export interface BriefV2KpiTile {
   label: string
@@ -200,24 +211,63 @@ function metricHighlightFor(insight: Insight, accent: BriefActionAccent): string
   return `${v} · ${lab}`
 }
 
-function pickHeroChart(insight: Insight): BriefV2InlineChart | null {
-  const hints = Array.isArray(insight.chart_hints) ? insight.chart_hints : []
-  for (const h of hints) {
-    if (!h || typeof h !== "object") continue
-    const data = Array.isArray(h.data) ? h.data : []
-    if (data.length === 0) continue
-    const kind = String(h.kind || "bar").toLowerCase() as PrdChartKind
-    return {
-      kind,
-      title: h.title || "",
-      subtitle: (h as ChartHint & { subtitle?: string }).subtitle,
-      data: data.map((d) => ({
-        label: d.label,
-        value: typeof d.value === "number" ? d.value : Number(d.value) || 0,
-      })),
-    }
+function categoryFor(insight: Insight, accent: BriefActionAccent): string {
+  const d = insight.domain?.trim()
+  if (d) return d.toUpperCase()
+  if (accent === "fix") return "RETENTION"
+  if (accent === "build") return "GROWTH"
+  return "REVENUE"
+}
+
+function statTilesFor(insight: Insight, accent: BriefActionAccent): BriefV2StatTile[] {
+  const metrics = insight.metrics || []
+  if (metrics.length === 0) return []
+  const firstTone: BriefV2KpiTone =
+    accent === "fix" ? "negative" : accent === "build" ? "positive" : "neutral"
+  return metrics.slice(0, 3).map((m, i) => ({
+    value: String(m.value ?? "").trim(),
+    label: String(m.label ?? "").trim(),
+    tone: i === 0 ? firstTone : "neutral",
+  }))
+}
+
+function toInlineChart(h: ChartHint): BriefV2InlineChart {
+  const kind = String(h.kind || "bar").toLowerCase() as PrdChartKind
+  return {
+    kind,
+    title: h.title || "",
+    subtitle: (h as ChartHint & { subtitle?: string }).subtitle,
+    data: (Array.isArray(h.data) ? h.data : []).map((d) => ({
+      label: d.label,
+      value: typeof d.value === "number" ? d.value : Number(d.value) || 0,
+    })),
   }
-  return null
+}
+
+// Pick the chart_hint that renders best in the card's compact inline slot.
+// bar / pie read cleanly at mini size (a few comparable categories or a
+// share-of-whole ring); `stat` is heterogeneous hero numbers that map poorly
+// to bars, so rank it last. Every insight ships 2–4 hints (mixed kinds), so a
+// well-suited one is almost always available.
+const CHART_KIND_RANK: Record<string, number> = {
+  bar: 0,
+  pie: 1,
+  donut: 1,
+  line: 2,
+  gauge: 2,
+  stat: 5,
+}
+
+function pickInsightChart(insight: Insight): BriefV2InlineChart | null {
+  const hints = (Array.isArray(insight.chart_hints) ? insight.chart_hints : []).filter(
+    (h) => h && typeof h === "object" && Array.isArray(h.data) && h.data.length > 0,
+  )
+  if (hints.length === 0) return null
+  const best = hints
+    .map((h, i) => ({ h, i, rank: CHART_KIND_RANK[String(h.kind || "").toLowerCase()] ?? 3 }))
+    // Stable: lowest rank wins; ties keep the LLM's original ordering.
+    .sort((a, b) => a.rank - b.rank || a.i - b.i)[0]
+  return toInlineChart(best.h)
 }
 
 function pickHeroQuote(insight: Insight): BriefV2Quote | null {
@@ -232,6 +282,7 @@ function pickHeroQuote(insight: Insight): BriefV2Quote | null {
 function buildCardBase(
   insight: Insight,
   rank: number,
+  priority: string,
 ): BriefV2CardBase {
   const m = metaFor(insight.tag)
   return {
@@ -240,10 +291,14 @@ function buildCardBase(
     actionLabel: m.actionLabel,
     tagType: m.tagType,
     tagLabel: m.tagLabel,
+    category: categoryFor(insight, m.actionAccent),
+    priority,
     confidence: insight.confidence ?? 0,
     title: insight.title,
     body: bodyFor(insight),
     metricHighlight: metricHighlightFor(insight, m.actionAccent),
+    statTiles: statTilesFor(insight, m.actionAccent),
+    chart: pickInsightChart(insight),
     convergence: convergenceRows(insight),
     secondaryCtaLabel: "Generate PRD →",
     secondaryCtaBehavior: "generate_prd",
@@ -254,16 +309,15 @@ function buildCardBase(
 function buildHero(insight: Insight, rank: number): BriefV2HeroFinding {
   return {
     kind: "hero",
-    ...buildCardBase(insight, rank),
-    chart: pickHeroChart(insight),
+    ...buildCardBase(insight, rank, "P0"),
     quote: pickHeroQuote(insight),
   }
 }
 
 const COMPACT_CHIP_CAP = 2
 
-function buildCompact(insight: Insight, rank: number): BriefV2CompactFinding {
-  const base = buildCardBase(insight, rank)
+function buildCompact(insight: Insight, rank: number, priority: string): BriefV2CompactFinding {
+  const base = buildCardBase(insight, rank, priority)
   const trimmed = base.convergence.slice(0, COMPACT_CHIP_CAP)
   return {
     kind: "compact",
@@ -347,10 +401,12 @@ export function briefToBriefV2State(brief: Brief): BriefV2State {
   const hero = buildHero(heroInsight, heroRank)
 
   const supporting: BriefV2CompactFinding[] = []
+  let supportingIdx = 0
   insights.forEach((ins, i) => {
     if (i === heroIdx) return
     const r = rankMap.get(i) ?? 1
-    supporting.push(buildCompact(ins, r))
+    supportingIdx += 1
+    supporting.push(buildCompact(ins, r, `P${supportingIdx}`))
   })
 
   const productArea =
