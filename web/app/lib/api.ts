@@ -863,6 +863,7 @@ export const designAgentApi = {
     website_url?: string | null  // P5-02: Scenario B fallback source
     manual_design?: { primary_color: string; font_family: string } | null  // P5-02: manual floor
     github_repo?: string | null  // connected-repo full_name ("org/repo"); prompt context only
+    design_source?: "figma" | "github" | "website" | null  // explicit source selector; null = back-compat implicit precedence
   }) => api.post<PrototypeStartResponse>("/v1/design-agent/generate", body),
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>

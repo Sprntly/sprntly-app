@@ -48,6 +48,12 @@ const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "both", label: "Both" },
 ]
 
+const SOURCE_OPTIONS: { value: "figma" | "github" | "website"; label: string }[] = [
+  { value: "figma", label: "Figma" },
+  { value: "github", label: "Codebase" },
+  { value: "website", label: "Website" },
+]
+
 /**
  * Visibility is driven by the shared navigation modal union: the parent threads
  * `open={activeModal === "generate"}` and `onClose={closeModal}` in via these
@@ -83,6 +89,7 @@ export function GenerateModal({
   const { showToast } = useNavigation()
 
   const [platform, setPlatform] = useState<TargetPlatform>(DEFAULT_PLATFORM)
+  const [designSource, setDesignSource] = useState<"figma" | "github" | "website">("website")
   const [instructions, setInstructions] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
@@ -255,26 +262,24 @@ export function GenerateModal({
     // The modal then closes (runGenerateFlow's onOpenChange(false)) but the overlay
     // lives in ApproveModal so it survives.
     onGenStart?.({
-      figmaFileKey: figmaUrlKey || figmaFileKey,
-      githubRepo: githubActive ? repoSel : null,
+      figmaFileKey: designSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
+      githubRepo: designSource === "github" && githubActive ? repoSel : null,
     })
     void runGenerateFlow({
       params: buildGenerateParams({
         prdId,
         platform,
         instructions,
-        // Priority order for figma_file_key:
-        //   1. figmaUrlKey — pasted URL (preferred: user explicitly targeted a file)
-        //   2. figmaFileKey — prop fallback (pre-selected key from PRD context)
-        figmaFileKey: figmaUrlKey || figmaFileKey,
-        // figmaNodeId is set when the pasted URL includes a node-id query param;
-        // it targets generation at that specific frame. Only applies when a URL
-        // was pasted (figmaUrlKey set) — the prop-level figmaFileKey has no frame.
-        figmaNodeId: figmaUrlKey ? figmaNodeId : null,
+        // Only send the chosen source's specific input; the other is cleared to
+        // null so the backend receives a clean single-source request.
+        figmaFileKey: designSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
+        // figmaNodeId only applies when Figma is the chosen source AND a URL was pasted.
+        figmaNodeId: designSource === "figma" && figmaUrlKey ? figmaNodeId : null,
         websiteUrl: "",
         manualColor: "",
         manualFont: "",
-        githubRepo: githubActive ? repoSel : "",
+        githubRepo: designSource === "github" && githubActive ? repoSel : "",
+        designSource,
       }),
       generate: designAgentApi.generate,
       runGeneration: runDesignAgentGeneration,
@@ -353,18 +358,36 @@ export function GenerateModal({
             </div>
           </div>
 
-          {/* Design source — each provider collapses to a single compact row
-              (bullet + name + tag + status + inline control), tight vertical
-              rhythm. Connected/not + selectors all driven by real connector
-              status. */}
+          {/* Design source — single-select picker using the same radio-pill
+              vocabulary as the Platform selector above. Connector-status rows
+              always visible so the user can connect a not-yet-connected provider
+              before picking it; the source-specific input beneath each row is
+              gated on the matching selection. */}
           <div className="field">
             <label className="field-label">Design source</label>
+            <div className="radio-group">
+              {SOURCE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  className={
+                    "radio-pill" + (designSource === opt.value ? " selected" : "")
+                  }
+                  data-val={opt.value}
+                  aria-pressed={designSource === opt.value}
+                  onClick={() => setDesignSource(opt.value)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
 
-            {/* Figma — primary source. */}
+            {/* Figma connector status — always shown so user can connect before
+                selecting. The URL paste input is only revealed when Figma is
+                the active selection AND Figma is connected. */}
             <div className="src-row-compact">
               <span className="src-bullet" aria-hidden="true" />
               <span className="src-name">Figma</span>
-              <span className="src-block-tag">Primary</span>
               {figmaActive ? (
                 <>
                   <span className="src-connected">
@@ -386,14 +409,11 @@ export function GenerateModal({
               )}
             </div>
 
-            {/* Figma URL paste — shown only when Figma is connected. The Figma
-                list-files API doesn't exist, so the dropdown above is always
-                empty. This input lets the user paste any Figma design/file URL;
-                the key is extracted client-side and validated against the real
-                GET /v1/connectors/figma/files/{key} endpoint. The resolved file
-                name is shown as a confirmation label. figmaUrlKey (when set)
-                takes precedence over the dropdown selection in generation. */}
-            {figmaActive && (
+            {/* Figma URL paste — shown only when Figma is the chosen source and
+                Figma is connected. Paste any Figma design/file URL; the key is
+                extracted client-side and validated against the real
+                GET /v1/connectors/figma/files/{key} endpoint. */}
+            {designSource === "figma" && figmaActive && (
               <div className="da-generate-figma-url">
                 <label className="da-generate-label" htmlFor="figma-url-input">
                   Paste Figma file link
@@ -418,49 +438,18 @@ export function GenerateModal({
               </div>
             )}
 
-            {/* Codebase / GitHub. */}
+            {/* Codebase / GitHub connector status — always shown so user can
+                connect before selecting. The repo selector is only revealed
+                when GitHub is the chosen source and GitHub is connected. */}
             <div className="src-row-compact">
               <span className="src-bullet" aria-hidden="true" />
               <span className="src-name">Codebase</span>
-              <span className="src-block-tag">Baseline branch</span>
               {githubActive ? (
                 <>
                   <span className="src-connected">
                     Connected
                     {githubRow.accountLabel ? ` · ${githubRow.accountLabel}` : ""}
                   </span>
-                  {/* GitHub repo selector. Wired to a real endpoint —
-                      connectorsApi.listGithubRepos() → GET
-                      /v1/connectors/github/repos. Empty/placeholder is the honest
-                      result when the token can't list. The chosen repo full_name
-                      (repoSel) now threads into generation as prompt context via
-                      buildGenerateParams (github_repo) — identifier only, no fetch. */}
-                  <select
-                    className="input src-select-inline"
-                    value={repoSel}
-                    onChange={(e) => setRepoSel(e.target.value)}
-                    disabled={!repos || repos.length === 0}
-                    aria-label="Select a repo"
-                  >
-                    {repos === null ? (
-                      <option value="">Loading repos…</option>
-                    ) : repos.length === 0 ? (
-                      <option value="">
-                        {reposError
-                          ? "Couldn’t load repos"
-                          : "No repos — install the Sprntly App on a repo"}
-                      </option>
-                    ) : (
-                      <>
-                        <option value="">Pick repo…</option>
-                        {[...repos].sort((a, b) => a.full_name.localeCompare(b.full_name)).map((r) => (
-                          <option key={r.full_name} value={r.full_name}>
-                            {r.full_name}
-                          </option>
-                        ))}
-                      </>
-                    )}
-                  </select>
                 </>
               ) : (
                 <>
@@ -476,10 +465,44 @@ export function GenerateModal({
               )}
             </div>
 
-            {/* Fallback as a single line of muted helper text. */}
-            <p className="src-fallback-line">
-              No design source? We&apos;ll infer a style from the brand website.
-            </p>
+            {/* GitHub repo selector — shown only when Codebase is the chosen
+                source and GitHub is connected. */}
+            {designSource === "github" && githubActive && (
+              <select
+                className="input src-select-inline"
+                value={repoSel}
+                onChange={(e) => setRepoSel(e.target.value)}
+                disabled={!repos || repos.length === 0}
+                aria-label="Select a repo"
+              >
+                {repos === null ? (
+                  <option value="">Loading repos…</option>
+                ) : repos.length === 0 ? (
+                  <option value="">
+                    {reposError
+                      ? "Couldn’t load repos"
+                      : "No repos — install the Sprntly App on a repo"}
+                  </option>
+                ) : (
+                  <>
+                    <option value="">Pick repo…</option>
+                    {[...repos].sort((a, b) => a.full_name.localeCompare(b.full_name)).map((r) => (
+                      <option key={r.full_name} value={r.full_name}>
+                        {r.full_name}
+                      </option>
+                    ))}
+                  </>
+                )}
+              </select>
+            )}
+
+            {/* Website default — the resolved state shown when Website is the
+                chosen source (the onboarding site is used automatically). */}
+            {designSource === "website" && (
+              <p className="src-fallback-line">
+                We&apos;ll infer a style from the brand website.
+              </p>
+            )}
           </div>
 
           {/* Instructions below source; compact two-row textarea. */}

@@ -670,6 +670,7 @@ def _design_source_for_generation(
     website_sample: dict | None,
     github_repo: str | None = None,
     github_installation_id: int | None = None,
+    design_source: str | None = None,
 ):
     """Pick the design source for this generation and return
     ``(provider, source_ref, raw_signals_factory, version_factory)`` for the
@@ -695,8 +696,13 @@ def _design_source_for_generation(
 
     For Figma, a FRESH ``FigmaExtractor`` instance is created with the token set
     — the shared registry singleton carries no token and must never be mutated.
+
+    When ``design_source`` is given it selects the arm explicitly (an
+    unsatisfiable figma/github selection degrades to the website arm); when it
+    is ``None`` the prior implicit Figma → website → github precedence is used
+    unchanged.
     """
-    if figma_file_key and figma_access_token:
+    def _figma_arm():
         def _figma_raw():
             from app.connectors.figma_oauth import fetch_file as _fetch_file
             from app.design_agent.design_system.adapters import FigmaExtractor
@@ -711,7 +717,7 @@ def _design_source_for_generation(
 
         return "figma", figma_file_key, _figma_raw, _figma_version
 
-    if website_url:
+    def _web_arm():
         def _web_raw():
             from app.design_agent.design_system.adapters import WebExtractor
             return WebExtractor().extract_raw_signals(website_url, sample=website_sample)
@@ -722,7 +728,7 @@ def _design_source_for_generation(
 
         return "web", website_url, _web_raw, _web_version
 
-    if github_repo and github_installation_id:
+    def _github_arm():
         def _github_raw():
             from app.design_agent.design_system.adapters import GithubExtractor
             return GithubExtractor(
@@ -737,6 +743,27 @@ def _design_source_for_generation(
 
         return "github", github_repo, _github_raw, _github_version
 
+    figma_ready = bool(figma_file_key and figma_access_token)
+    github_ready = bool(github_repo and github_installation_id)
+
+    if design_source in ("figma", "github", "website"):
+        if design_source == "figma" and figma_ready:
+            return _figma_arm()
+        if design_source == "github" and github_ready:
+            return _github_arm()
+        # website chosen, or the chosen source's inputs were unavailable:
+        # resolve to the website default when present, else leave un-seeded.
+        if website_url:
+            return _web_arm()
+        return None, None, None, None
+
+    # No explicit selection: preserve the prior implicit precedence exactly.
+    if figma_ready:
+        return _figma_arm()
+    if website_url:
+        return _web_arm()
+    if github_ready:
+        return _github_arm()
     return None, None, None, None
 
 
@@ -1185,6 +1212,7 @@ async def generate_prototype(
     github_installation_id: int | None = None,
     website_url: str | None = None,
     website_sample: dict | None = None,
+    design_source: str | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
     """Public entrypoint: run agent_loop with a fresh ToolContext, emit the
     cost-summary log line, and return `(result, virtual_fs)` for P1-07 + P1-08
@@ -1221,6 +1249,7 @@ async def generate_prototype(
         website_sample=website_sample,
         github_repo=github_repo,
         github_installation_id=github_installation_id,
+        design_source=design_source,
     )
     design_system = await asyncio.to_thread(
         _resolve_design_system,

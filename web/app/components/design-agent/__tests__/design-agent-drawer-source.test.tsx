@@ -185,6 +185,8 @@ describe("website fallback retained + buildGenerateParams parity (AC4)", () => {
       // Additive connected-repo context key; the documented fallback shape above
       // is otherwise unchanged. Blank/absent repo arg here → null.
       github_repo: null,
+      // Explicit source selector; null when the caller omits it (back-compat path).
+      design_source: null,
     })
 
     // Floor-absent shape: blank URL + missing font → both null.

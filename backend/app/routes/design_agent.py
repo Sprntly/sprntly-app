@@ -218,6 +218,11 @@ class GenerateRequest(BaseModel):
     #                                       and, when a matching GitHub App installation
     #                                       is known, into the design-system source
     #                                       resolver for future codebase extraction.
+    design_source: Literal["figma", "github", "website"] | None = None
+    #   Explicit single-source selector. figma → use figma_file_key; github →
+    #   use github_repo; website → use the onboarding website (or a typed
+    #   website_url). None = old client / no explicit choice → preserve the
+    #   prior implicit precedence + always-on onboarding fallback unchanged.
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
@@ -264,19 +269,35 @@ async def generate(
     if existing:
         return GenerateResponse(prototype_id=existing["id"], status=existing["status"])
 
+    # Connected-repo identifier the user chose as the existing codebase to match.
+    # No fetch, no clone, no agent tool. The repo full_name remains request-only
+    # because the prototypes table has no codebase text column, but we do persist
+    # the matching GitHub App installation id when available: that is the existing
+    # production-shaped scenario/source column and gives the future codebase
+    # extractor enough installation context to read the selected repo.
+    # Resolved BEFORE the website fallback so we can detect an unsatisfiable
+    # github selection and gracefully degrade rather than hard-failing.
+    repo = body.normalised_github_repo()
+    github_installation_id = _resolve_github_installation_id_for_repo(
+        workspace_id, repo
+    )
+
     # Onboarding website as the automatic design source fallback.
-    # Design-source precedence: Figma → website → manual → none. When the user
-    # connected NO Figma file AND typed NO website URL AND supplied no manual
-    # design hints, fall back to the company's onboarding website
-    # (products.website) so it becomes the automatic design source. We never
-    # override an explicit Figma file or a user-typed website_url, and we only
-    # consult the helper for the genuinely-empty case so Figma runs skip the DB
-    # read entirely. The resolved value is threaded into BOTH the prototype
-    # snapshot (below) and the background generation task, so it's observable on
-    # the prototype row's website_url column.
+    # When design_source is explicitly set to "figma" or "github", the website
+    # auto-fill is suppressed so it cannot clobber the chosen source.
+    # An explicit figma/github selection whose inputs are not actually available
+    # degrades to the website default rather than hard-failing the generation,
+    # so a user who picks GitHub before a repo resolves still gets a prototype.
+    # When design_source is None (old client), the prior implicit precedence +
+    # always-on onboarding auto-fill both run exactly as before (back-compat).
+    selection = body.design_source
+    figma_unsatisfiable = selection == "figma" and not body.figma_file_key
+    github_unsatisfiable = selection == "github" and github_installation_id is None
+    use_website_fallback = selection in (None, "website") or figma_unsatisfiable or github_unsatisfiable
+
     effective_website_url = body.website_url
     typed = (body.website_url or "").strip()
-    if not body.figma_file_key and not typed and body.manual_design is None:
+    if use_website_fallback and not body.figma_file_key and not typed and body.manual_design is None:
         fallback_url = get_company_website(workspace_id)
         if fallback_url:
             effective_website_url = fallback_url
@@ -286,17 +307,6 @@ async def generate(
                 body.prd_id,
                 urlsplit(fallback_url).hostname or "",
             )
-
-    # Connected-repo identifier the user chose as the existing codebase to match.
-    # No fetch, no clone, no agent tool. The repo full_name remains request-only
-    # because the prototypes table has no codebase text column, but we do persist
-    # the matching GitHub App installation id when available: that is the existing
-    # production-shaped scenario/source column and gives the future codebase
-    # extractor enough installation context to read the selected repo.
-    repo = body.normalised_github_repo()
-    github_installation_id = _resolve_github_installation_id_for_repo(
-        workspace_id, repo
-    )
 
     # Insert the generating row. Scenario inputs (figma_file_key, etc.) are
     # stored as snapshots; the A/B/C/0 label is DERIVED at read time
@@ -326,6 +336,7 @@ async def generate(
             manual_design=body.manual_design,
             github_repo=repo,  # normalised connected-repo full_name; prompt context only
             github_installation_id=github_installation_id,
+            design_source=body.design_source,
         )
     )
     _inflight_tasks.add(task)
@@ -556,6 +567,7 @@ async def _run_generation_bg(
     manual_design: ManualDesignInput | None = None,
     github_repo: str | None = None,
     github_installation_id: int | None = None,
+    design_source: str | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -639,6 +651,7 @@ async def _run_generation_bg(
             github_installation_id=github_installation_id,
             website_url=None if figma_file_key else website_url,  # Scenario B pre-seed source
             website_sample=website_sample,  # reuse the single extractor run for the pre-seed
+            design_source=design_source,
         )
         # Success path (P1-08): a complete run that emitted files gets built +
         # staged + marked ready. A complete run with no files, or any non-complete
