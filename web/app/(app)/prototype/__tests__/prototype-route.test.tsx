@@ -22,6 +22,7 @@ import {
   prototypeTabState,
   needsSupplementalPrd,
   pickPrdFields,
+  fsParamToFullscreen,
 } from "../PrototypeRoute"
 import type { PrototypeRecord } from "../../../lib/api"
 
@@ -239,5 +240,24 @@ describe("prototype route — panel field picker (pickPrdFields)", () => {
     const result = pickPrdFields(false, [] as unknown as import("../../../types/content").PrdSection[], undefined, null, null)
     expect(result.sections).toBeUndefined()
     expect(result.title).toBeNull()
+  })
+})
+
+describe("prototype route — fs param derivation (fsParamToFullscreen)", () => {
+  // Absent fs param → fullscreen (default-open state for the in-tab canvas).
+  it("returns true when fs param is absent (null)", () => {
+    expect(fsParamToFullscreen(null)).toBe(true)
+  })
+
+  // Any value other than the exact string "0" → fullscreen.
+  it("returns true for any value other than '0' (e.g. empty string, unknown value)", () => {
+    expect(fsParamToFullscreen("")).toBe(true)
+    expect(fsParamToFullscreen("1")).toBe(true)
+    expect(fsParamToFullscreen("true")).toBe(true)
+  })
+
+  // Exactly "0" → in-shell split view (the only suppression value).
+  it("returns false only when fs param is exactly '0'", () => {
+    expect(fsParamToFullscreen("0")).toBe(false)
   })
 })

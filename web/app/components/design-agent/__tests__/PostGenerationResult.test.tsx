@@ -553,6 +553,70 @@ describe("PostGenerationResult container — defaults from the prototype record 
     expect(html).toContain('data-testid="da-controlbar"')
     expect(html).toContain('data-testid="post-generation-result"')
   })
+
+  it("defaultFullscreen=true seeds fullscreenOpen state to true — overlay renders on mount when a bundle is present", () => {
+    // The in-tab canvas passes defaultFullscreen so the prototype opens maximized.
+    // With a bundleUrl present the FullscreenOverlay is gated on
+    // `fullscreenOpen && bundleUrl`; both are true here so the overlay mounts.
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: "https://cdn/p/42/index.html" }),
+        defaultFullscreen: true,
+      }),
+    )
+    expect(html).toContain('data-testid="proto-fullscreen"')
+    expect(html).toContain('data-testid="proto-fullscreen-close"')
+  })
+
+  it("defaultFullscreen absent (other consumers) — overlay does not render on mount", () => {
+    // Other consumers (PrdScreen, DesignAgentLauncher) omit defaultFullscreen;
+    // it falls through to `undefined ?? false` so fullscreenOpen stays false and
+    // the overlay is not present in the initial render.
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: "https://cdn/p/42/index.html" }),
+      }),
+    )
+    expect(html).not.toContain('data-testid="proto-fullscreen"')
+    expect(html).not.toContain('data-testid="proto-fullscreen-close"')
+  })
+
+  it("onFullscreenChange prop is accepted without error and does not affect initial SSR output", () => {
+    // The callback is an optional notification-only prop — it fires on toggle, not
+    // on mount. Passing it must not crash the static render or alter the markup
+    // (the internal state is the source of truth; the callback is a side-channel).
+    // defaultFullscreen=true so fullscreenOpen is true → overlay renders.
+    const spy = vi.fn()
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: "https://cdn/p/42/index.html" }),
+        defaultFullscreen: true,
+        onFullscreenChange: spy,
+      }),
+    )
+    // Overlay present (defaultFullscreen seeds the initial state).
+    expect(html).toContain('data-testid="proto-fullscreen"')
+    // The callback was NOT invoked during the static render — it only fires on
+    // toggle (open/close handlers), not on initial mount.
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it("onFullscreenChange omitted on other consumers — renders identically to the no-prop case", () => {
+    // Verify the optional prop has no footprint when absent: renders exactly the
+    // same markup as when no fullscreen props are passed (closed by default).
+    const htmlWithout = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: "https://cdn/p/42/index.html" }),
+      }),
+    )
+    const htmlWith = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: "https://cdn/p/42/index.html" }),
+        onFullscreenChange: undefined,
+      }),
+    )
+    expect(htmlWith).toBe(htmlWithout)
+  })
 })
 
 // ─── viewer iframe src + remount key: follow the live build path ─────────────

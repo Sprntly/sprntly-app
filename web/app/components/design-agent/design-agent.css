@@ -875,6 +875,12 @@
   width: 100%;
   height: auto;
 }
+/* Reserve right-side clearance in the full-screen chrome bar so the absolutely
+   positioned close (×, right:22px + 36px wide) does not overlap the
+   Desktop/Mobile platform toggle, which otherwise sits at the bar's right edge. */
+.design-agent-surface .proto-fullscreen .proto-frame-head {
+  padding-right: 70px;
+}
 .design-agent-surface .proto-fullscreen-close {
   position: absolute;
   top: 18px;

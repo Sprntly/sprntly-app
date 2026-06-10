@@ -138,6 +138,15 @@ export function prototypeTabState(
   return "generate"
 }
 
+/** Pure: derive the initial fullscreen state from the `fs` URL query param.
+ *  Absent or any value other than "0" → fullscreen (default-open). Only "0"
+ *  suppresses fullscreen. Extracted for unit-testability without a DOM.
+ *  Exported so the prototype-route tests can cover the derivation logic.
+ */
+export function fsParamToFullscreen(fsParam: string | null): boolean {
+  return fsParam !== "0"
+}
+
 /**
  * In-tab prototype canvas. Mounts <PostGenerationResult> inside the app shell
  * (NOT a fixed-position overlay) and wires it exactly like the modal canvas:
@@ -159,6 +168,8 @@ function InTabCanvas({
   proto,
   onProtoChange,
   onDone,
+  searchParams,
+  router,
 }: {
   proto: PrototypeRecord
   /** Replace the parent's held prototype with a fresher row (after iterate /
@@ -166,6 +177,13 @@ function InTabCanvas({
   onProtoChange: (next: PrototypeRecord) => void
   /** Return the tab to its empty/landing state (clears the in-tab prototype). */
   onDone: () => void
+  /** The current URL search params — threaded from PrototypeRoute so InTabCanvas
+   *  reads the same snapshot that seeded the parent render (SSR-safe: the parent
+   *  already called useSearchParams). */
+  searchParams: ReturnType<typeof useSearchParams>
+  /** The Next.js router — threaded from PrototypeRoute so InTabCanvas can call
+   *  router.replace without a second useRouter call inside the child. */
+  router: ReturnType<typeof useRouter>
 }) {
   const { content } = useContent()
   const prd = content.prd
@@ -273,6 +291,16 @@ function InTabCanvas({
   return (
     <PostGenerationResult
       prototype={proto}
+      defaultFullscreen={fsParamToFullscreen(searchParams.get("fs"))}
+      onFullscreenChange={(open) => {
+        const next = new URLSearchParams(searchParams.toString())
+        if (open) {
+          next.delete("fs")
+        } else {
+          next.set("fs", "0")
+        }
+        router.replace(`/prototype?${next.toString()}`)
+      }}
       onStateChange={(state) =>
         onProtoChange({ ...proto, is_complete: state.isComplete })
       }
@@ -447,6 +475,8 @@ export function PrototypeRoute() {
             proto={proto}
             onProtoChange={setProto}
             onDone={() => setProto(null)}
+            searchParams={search}
+            router={router}
           />
         </div>
       </AppLayout>

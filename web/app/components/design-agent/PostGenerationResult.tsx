@@ -218,6 +218,14 @@ export type PostGenerationResultProps = {
    *  `is_complete` value into its own copy of the record without a round-trip.
    *  Optional — existing callers that omit it keep type-checking. */
   onStateChange?: (state: { isComplete: boolean }) => void
+  /** When true, the full-screen prototype view is open on mount; defaults false
+   *  so existing consumers are unaffected. */
+  defaultFullscreen?: boolean
+  /** Optional notification callback — fired whenever the fullscreen state
+   *  toggles. Receives the new open value. The parent can use this to sync
+   *  external state (e.g. a URL query param) without taking control of the
+   *  internal `fullscreenOpen` state. */
+  onFullscreenChange?: (open: boolean) => void
 }
 
 export type PostGenerationResultViewProps = {
@@ -1458,6 +1466,8 @@ export function PostGenerationResult({
   onAnswerQuestion,
   bundleReloadNonce,
   onStateChange,
+  defaultFullscreen,
+  onFullscreenChange,
 }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
@@ -1466,7 +1476,7 @@ export function PostGenerationResult({
   // P6-16 (UX-6): client-only open state for the full-screen overlay. Owned here
   // (the stateful container) and threaded into the SSR-renderable pure view,
   // matching the existing `onStateChange` threading pattern.
-  const [fullscreenOpen, setFullscreenOpen] = useState<boolean>(false)
+  const [fullscreenOpen, setFullscreenOpen] = useState<boolean>(defaultFullscreen ?? false)
 
   // collapsible-panel + control-bar state, owned
   // by the container (same threading pattern as `fullscreenOpen`). LEFT sidebar
@@ -1525,11 +1535,14 @@ export function PostGenerationResult({
   useEffect(() => {
     if (!fullscreenOpen) return
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setFullscreenOpen(false)
+      if (e.key === "Escape") {
+        setFullscreenOpen(false)
+        onFullscreenChange?.(false)
+      }
     }
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
-  }, [fullscreenOpen])
+  }, [fullscreenOpen, onFullscreenChange])
 
   // Clear any active element highlight whenever mark mode is exited.
   useEffect(() => {
@@ -1745,8 +1758,8 @@ export function PostGenerationResult({
       iterate={iterate}
       onShared={onShared}
       fullscreenOpen={fullscreenOpen}
-      onOpenFullscreen={() => setFullscreenOpen(true)}
-      onCloseFullscreen={() => setFullscreenOpen(false)}
+      onOpenFullscreen={() => { setFullscreenOpen(true); onFullscreenChange?.(true) }}
+      onCloseFullscreen={() => { setFullscreenOpen(false); onFullscreenChange?.(false) }}
       prdSections={prdSections}
       prdTitle={prdTitle}
       prdMetaLine={prdMetaLine}
