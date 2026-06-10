@@ -6,6 +6,7 @@ to competitor_analysis.md in the corpus.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -123,7 +124,10 @@ async def _identify_competitors(
         f"Identify the top 3-5 direct competitors for {company_name}."
     )
     try:
-        result = call_json(
+        # call_json blocks (and now waits on the process-wide LLM concurrency
+        # semaphore); run it on a worker thread so the event loop stays free.
+        result = await asyncio.to_thread(
+            call_json,
             system=COMPETITOR_ID_SYSTEM,
             user=user,
             schema=COMPETITOR_ID_SCHEMA,
@@ -215,7 +219,10 @@ async def run_competitor_agent(dataset: str) -> dict[str, Any]:
     )
 
     try:
-        report = call_md(
+        # call_md blocks (and now waits on the process-wide LLM concurrency
+        # semaphore); run it on a worker thread so the event loop stays free.
+        report = await asyncio.to_thread(
+            call_md,
             system=COMPETITOR_ANALYSIS_SYSTEM,
             user=user_prompt,
             max_tokens=10000,

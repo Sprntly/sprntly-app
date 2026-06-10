@@ -9,6 +9,7 @@ timeouts / connection drops) and a per-request timeout. Existing callers
 import json
 import logging
 import random
+import threading
 import time as _time
 
 import anthropic
@@ -20,6 +21,45 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# --- Process-wide concurrency cap on in-flight Anthropic calls ---------------
+# The prod box is small (~916 MB RAM, limited CPU). 4+ concurrent streaming
+# model calls thrash it: streaming slows to a crawl, requests stall, and the
+# gateway's retry layer fires — which makes the contention WORSE. This semaphore
+# bounds how many calls are in flight at the single chokepoint
+# (`_create_with_retries`) at once; the Nth+1 call BLOCKS (queues) until a slot
+# frees, rather than piling on or failing.
+#
+# Why a threading (not asyncio) semaphore: every heavy caller runs the blocking
+# Anthropic call inside a WORKER THREAD (the gateway's `llm_call` is sync and
+# dispatched via `asyncio.to_thread` / background threads). Acquiring a
+# threading semaphore blocks that worker thread, NOT the asyncio event loop, so
+# the loop stays responsive and queued `to_thread` calls simply wait their turn
+# on the thread-pool side. Any caller that reaches the chokepoint MUST be on a
+# worker thread (see callers rerouted through `asyncio.to_thread`) so the loop
+# is never blocked here.
+#
+# Default 3: lets one PRD's two parallel parts (Part A + Part B, each a stream)
+# run together PLUS one other call (brief/evidence/ask) — the common steady
+# state — while still capping total load well below the 4+ that stalls the box.
+# Tunable via LLM_MAX_CONCURRENCY; values <= 0 / unset fall back to the default
+# (never 0, which would deadlock every call).
+_DEFAULT_MAX_CONCURRENCY = 3
+# How long a call may wait for a slot before we emit a (single) saturation log,
+# so sustained contention is observable without spamming every queued call.
+_SLOT_WAIT_LOG_THRESHOLD_S = 5.0
+
+
+def _resolve_max_concurrency() -> int:
+    raw = getattr(settings, "llm_max_concurrency", _DEFAULT_MAX_CONCURRENCY)
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = _DEFAULT_MAX_CONCURRENCY
+    return n if n > 0 else _DEFAULT_MAX_CONCURRENCY
+
+
+_llm_semaphore = threading.BoundedSemaphore(_resolve_max_concurrency())
 
 # Retry policy for transient API failures. 4 attempts ≈ 0.5s + 2s + 8s of
 # backoff (+ jitter) worst-case before surfacing the error.
@@ -74,27 +114,47 @@ def _create_with_retries(client: Anthropic, *, stream: bool = False, **kwargs):
     big non-streamed response would hit. The return value is the same final
     Message object either way, so callers (`_capture_meta`, content extraction)
     are unchanged.
+
+    The whole call (including its retries) holds ONE process-wide concurrency
+    slot (`_llm_semaphore`) for its full duration, so the box never runs more
+    than LLM_MAX_CONCURRENCY model calls at once. Acquiring blocks the calling
+    WORKER THREAD (not the asyncio loop — see module note); the slot is always
+    released in `finally`, so an Anthropic error never leaks a slot.
     """
-    last: Exception | None = None
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            if stream:
-                with client.messages.stream(**kwargs) as s:
-                    # Drain the stream so deltas are consumed, then return the
-                    # assembled final message (same shape as messages.create).
-                    return s.get_final_message()
-            return client.messages.create(**kwargs)
-        except Exception as exc:  # noqa: BLE001 — classified below
-            if not _is_retryable(exc) or attempt == MAX_ATTEMPTS - 1:
-                raise
-            delay = _attempt_delay(attempt)
-            logger.warning(
-                "LLM call transient failure (attempt %d/%d, retrying in %.1fs): %s",
-                attempt + 1, MAX_ATTEMPTS, delay, exc,
-            )
-            last = exc
-            _time.sleep(delay)
-    raise last  # pragma: no cover — loop always returns or raises
+    _wait_start = _time.monotonic()
+    _llm_semaphore.acquire()
+    waited = _time.monotonic() - _wait_start
+    if waited >= _SLOT_WAIT_LOG_THRESHOLD_S:
+        # Saturation is observable but not spammy: only calls that actually had
+        # to queue for a while log, and only once each (after the slot frees).
+        logger.warning(
+            "LLM call waited %.1fs for a concurrency slot "
+            "(cap=%d) — model calls are saturated",
+            waited, _resolve_max_concurrency(),
+        )
+    try:
+        last: Exception | None = None
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                if stream:
+                    with client.messages.stream(**kwargs) as s:
+                        # Drain the stream so deltas are consumed, then return
+                        # the assembled final message (same shape as create).
+                        return s.get_final_message()
+                return client.messages.create(**kwargs)
+            except Exception as exc:  # noqa: BLE001 — classified below
+                if not _is_retryable(exc) or attempt == MAX_ATTEMPTS - 1:
+                    raise
+                delay = _attempt_delay(attempt)
+                logger.warning(
+                    "LLM call transient failure (attempt %d/%d, retrying in %.1fs): %s",
+                    attempt + 1, MAX_ATTEMPTS, delay, exc,
+                )
+                last = exc
+                _time.sleep(delay)
+        raise last  # pragma: no cover — loop always returns or raises
+    finally:
+        _llm_semaphore.release()
 
 
 def _build_base_kwargs(
