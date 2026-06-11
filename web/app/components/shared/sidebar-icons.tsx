@@ -20,6 +20,15 @@ export function IconHome() {
   )
 }
 
+export function IconChats() {
+  return (
+    <svg {...common}>
+      <path d="M12 21a9 9 0 1 0-9-9c0 1.488.36 2.891 1 4.127L3 21l4.873-1C9.109 20.64 10.512 21 12 21z" />
+      <path d="M8 12h.01M12 12h.01M16 12h.01" />
+    </svg>
+  )
+}
+
 export function IconBrief() {
   return (
     <svg {...common}>

@@ -19,6 +19,7 @@ import type {
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
 import { IconClose, IconSendUp, IconSparkle } from "./app-icons"
+import { IconPlug } from "@tabler/icons-react"
 
 type Finding = BriefV2HeroFinding | BriefV2CompactFinding
 
@@ -95,14 +96,8 @@ function weekLabel(weekOf: string | null): string {
   return weekOf
 }
 
-function briefTitle(weekOf: string | null): string {
-  if (!weekOf) return "Weekly Brief"
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(weekOf)
-  if (m) {
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-    return `${d.toLocaleDateString([], { weekday: "long" })} Brief`
-  }
-  return "Weekly Brief"
+function briefTitle(_weekOf: string | null): string {
+  return "Monday brief"
 }
 
 function parseAskError(e: unknown): string {
@@ -148,16 +143,6 @@ function IconAt({ size = 15 }: { size?: number }) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <circle cx="12" cy="12" r="4" />
       <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.9 7.9" />
-    </svg>
-  )
-}
-function IconShareSmall({ size = 15 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <circle cx="18" cy="5" r="3" />
-      <circle cx="6" cy="12" r="3" />
-      <circle cx="18" cy="19" r="3" />
-      <path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4" />
     </svg>
   )
 }
@@ -210,6 +195,14 @@ function IconTicket({ size = 14 }: { size?: number }) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1a2 2 0 0 0 0 4v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 0 0-4z" />
       <path d="M13 7v10" />
+    </svg>
+  )
+}
+function IconSearch({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
   )
 }
@@ -476,6 +469,10 @@ function BriefFindingCard({
             <button type="button" className="fc-btn-secondary" onClick={onPreview}>
               <IconTerminalPrompt size={13} />
               View prototype
+            </button>
+            <button type="button" className="fc-btn-secondary" onClick={onViewEvidence}>
+              <IconSearch size={13} />
+              View evidence
             </button>
           </div>
         </div>
@@ -834,12 +831,23 @@ export function BriefChat() {
     (finding: Finding) => {
       const key = finding.detailKey
       const detail = key ? content.briefDetails?.[key] : null
-      // Select the finding; the ContentPanel's EvidenceTab effect generates the
-      // evidence from detail.meta (so we don't double-fire the generation here).
-      if (detail) setContent({ detail, evidence: null })
+      // Only update detail (and clear evidence) when switching to a DIFFERENT
+      // insight. When the user re-clicks the same insight's "View evidence",
+      // keep the already-loaded evidence so the panel shows it immediately
+      // instead of re-generating.
+      if (detail) {
+        const currentMeta = content.detail?.meta
+        const isSameInsight =
+          currentMeta &&
+          currentMeta.briefId === detail.meta?.briefId &&
+          currentMeta.insightIndex === detail.meta?.insightIndex
+        if (!isSameInsight) {
+          setContent({ detail, evidence: null })
+        }
+      }
       openContentPanel("evidence")
     },
-    [content.briefDetails, openContentPanel, setContent],
+    [content.briefDetails, content.detail?.meta, openContentPanel, setContent],
   )
 
   const cardGeneratePrd = useCallback(
@@ -849,6 +857,18 @@ export function BriefChat() {
       const meta = detail?.meta
       if (!meta) {
         showToast("Can't generate PRD", "Open evidence from a finding with a linked brief first.")
+        return
+      }
+      // If a PRD is already loaded for the same insight, just show it
+      // instead of re-generating.
+      const currentPrdMeta = content.prdMeta
+      if (
+        content.prd &&
+        currentPrdMeta &&
+        currentPrdMeta.briefId === meta.briefId &&
+        currentPrdMeta.insightIndex === meta.insightIndex
+      ) {
+        openContentPanel("prd")
         return
       }
       // Share the single-flight gate with the composer / agent-button flows so a
@@ -876,7 +896,7 @@ export function BriefChat() {
         }
       }
     },
-    [content.briefDetails, openContentPanel, setContent, showToast],
+    [content.briefDetails, content.prd, content.prdMeta, openContentPanel, setContent, showToast],
   )
 
   const cardDismiss = useCallback((finding: Finding) => {
@@ -952,11 +972,11 @@ export function BriefChat() {
           <button
             type="button"
             className="bh-iconbtn"
-            title="Share"
-            aria-label="Share brief"
-            onClick={() => showToast("Share", "Sharing the brief isn't wired up yet.")}
+            title="Connectors"
+            aria-label="Open connectors"
+            onClick={() => goTo("connectors")}
           >
-            <IconShareSmall />
+            <IconPlug />
           </button>
           <button
             type="button"
@@ -983,7 +1003,7 @@ export function BriefChat() {
                   <IconSparkle size={10} />
                   PM COWORKER
                 </span>
-                <span className="bc-agent-status">Weekly brief · {greetTime}</span>
+                <span className="bc-agent-status">Monday brief · {greetTime}</span>
               </div>
               <div className="bc-agent-body">
                 <p className="bc-greeting">{greeting}</p>
