@@ -54,6 +54,7 @@ from app.connectors import (
     github_app,
     google_oauth,
     hubspot_oauth,
+    jira_oauth,
     slack_oauth,
 )
 from app.connectors.google_drive_sync import (
@@ -279,6 +280,16 @@ def start_oauth(
         )
         return {"authorize_url": url}
 
+    if provider == jira_oauth.JIRA_PROVIDER:
+        if not jira_oauth.jira_configured():
+            raise HTTPException(500, "Jira OAuth is not configured on the server")
+        url = jira_oauth.authorize_url(
+            state=jira_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
     if provider == slack_oauth.SLACK_PROVIDER:
         if not slack_oauth.slack_configured():
             raise HTTPException(500, "Slack OAuth is not configured on the server")
@@ -364,6 +375,18 @@ def test_connection(
     elif provider == hubspot_oauth.HUBSPOT_PROVIDER:
         access_token = token_json.get("access_token") or ""
         user_obj = hubspot_oauth.fetch_token_info(access_token) or {}
+    elif provider == jira_oauth.JIRA_PROVIDER:
+        # Refresh-at-use: Jira tokens rotate hourly, so test through the
+        # same path pushes use — it refreshes + persists when stale.
+        access_token, jira_token_json = jira_oauth.get_valid_access_token(
+            company.company_id
+        )
+        cloud_id = jira_token_json.get("cloud_id") or ""
+        user_obj = jira_oauth.fetch_myself(access_token, cloud_id) or {}
+        if user_obj.get("emailAddress"):
+            user_obj["email"] = user_obj["emailAddress"]
+        elif user_obj.get("displayName"):
+            user_obj["name"] = user_obj["displayName"]
     elif provider == slack_oauth.SLACK_PROVIDER:
         access_token = token_json.get("access_token") or ""
         # Canonical token-validity check: team.info returns {id, name, domain},
@@ -1396,6 +1419,71 @@ def clickup_disconnect(
         raise HTTPException(404, "ClickUp is not connected")
     db.delete_connection(company.company_id, clickup_oauth.CLICKUP_PROVIDER)
     return {"deleted": True, "provider": clickup_oauth.CLICKUP_PROVIDER}
+
+
+# ─────────────────────── Jira ───────────────────────
+#
+# OAuth + issue creation (user-stories push target). No ingest puller yet —
+# kickoff_sync no-ops until a Jira puller lands in kg_ingest.
+
+
+@router.get("/jira/callback")
+def jira_callback(code: str, state: str):
+    payload = jira_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+    token_json = jira_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Jira did not return an access_token")
+
+    # Resolve the Jira Cloud site now — every API call needs the cloud_id,
+    # and a token with no reachable site is useless.
+    resources = jira_oauth.fetch_accessible_resources(access_token)
+    if not resources:
+        raise HTTPException(
+            400, "Jira token has no accessible site — re-authorize and pick a site"
+        )
+
+    user = jira_oauth.fetch_myself(access_token, resources[0].get("id") or "")
+    label = (
+        user.get("emailAddress")
+        or user.get("displayName")
+        or str(user.get("accountId") or "")
+    )
+
+    try:
+        token_encrypted = encrypt_token_json(
+            jira_oauth.token_payload_to_store(token_json, resources=resources)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=jira_oauth.JIRA_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=token_json.get("scope") or jira_oauth.JIRA_SCOPES,
+        account_label=label or None,
+        config_json=json.dumps({
+            "site_name": resources[0].get("name"),
+            "site_url": resources[0].get("url"),
+        }),
+    )
+
+    kickoff_sync(company_id, jira_oauth.JIRA_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, jira_oauth.JIRA_PROVIDER)
+
+
+@router.delete("/jira")
+def jira_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    row = db.get_connection(company.company_id, jira_oauth.JIRA_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Jira is not connected")
+    db.delete_connection(company.company_id, jira_oauth.JIRA_PROVIDER)
+    return {"deleted": True, "provider": jira_oauth.JIRA_PROVIDER}
 
 
 # ─────────────────────── HubSpot ───────────────────────
