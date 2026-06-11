@@ -237,6 +237,97 @@ def test_prd_two_part_path_runs_both_within_cap(isolated_settings, monkeypatch):
     assert probe.max_in_flight == 2  # both parts overlapped, capped at 2
 
 
+def test_background_lane_capped_at_one(isolated_settings, monkeypatch):
+    """With cap=3, three concurrent BACKGROUND calls must run one at a time
+    (bg_cap=1) while an interactive call still enters alongside."""
+    llm = _reload_llm_with_cap(monkeypatch, "3")
+    release = threading.Event()
+    probe = _ConcurrencyProbe(response=_msg(), release_event=release)
+    monkeypatch.setattr(llm, "get_client", lambda: probe)
+
+    errors: list[BaseException] = []
+
+    def _bg():
+        try:
+            llm.call_md(system="s", user="u", background=True)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_bg) for _ in range(3)]
+    for t in threads:
+        t.start()
+
+    # Exactly ONE background call may be in flight.
+    assert probe.started.acquire(timeout=5)
+    assert not probe.started.acquire(timeout=0.5), (
+        "a second background call ran concurrently — bg lane uncapped"
+    )
+    assert probe.in_flight == 1
+
+    # An interactive call enters immediately despite the queued background work.
+    t_int = threading.Thread(target=lambda: llm.call_md(system="i", user="u"))
+    t_int.start()
+    assert probe.started.acquire(timeout=5), "interactive call blocked behind bg lane"
+    assert probe.in_flight == 2
+
+    release.set()
+    for t in [*threads, t_int]:
+        t.join(timeout=10)
+        assert not t.is_alive()
+    assert errors == []
+
+
+def test_interactive_waiter_jumps_background_queue(isolated_settings, monkeypatch):
+    """With cap=1 and a held slot, a background waiter that queued FIRST must
+    still run AFTER an interactive waiter that queued later."""
+    llm = _reload_llm_with_cap(monkeypatch, "1")
+
+    order: list[str] = []
+    order_lock = threading.Lock()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    class _OrderProbe:
+        class _Messages:
+            def create(self, **kwargs):
+                label = kwargs.get("system")
+                with order_lock:
+                    order.append(label)
+                if label == "first":
+                    first_entered.set()
+                    release_first.wait(timeout=10)
+                return _msg()
+
+        messages = _Messages()
+
+    monkeypatch.setattr(llm, "get_client", lambda: _OrderProbe())
+
+    t_first = threading.Thread(target=lambda: llm.call_md(system="first", user="u"))
+    t_first.start()
+    assert first_entered.wait(timeout=5)
+
+    # Queue a background waiter FIRST...
+    t_bg = threading.Thread(
+        target=lambda: llm.call_md(system="bg", user="u", background=True)
+    )
+    t_bg.start()
+    _time_buffer = threading.Event()
+    _time_buffer.wait(0.3)  # let the bg waiter actually park in the gate
+    # ...then an interactive waiter.
+    t_int = threading.Thread(target=lambda: llm.call_md(system="int", user="u"))
+    t_int.start()
+    _time_buffer.wait(0.3)
+
+    release_first.set()
+    for t in (t_first, t_bg, t_int):
+        t.join(timeout=10)
+        assert not t.is_alive()
+
+    assert order == ["first", "int", "bg"], (
+        f"interactive did not jump the background queue: {order}"
+    )
+
+
 def test_slot_released_on_exception_no_leak(isolated_settings, monkeypatch):
     """If the Anthropic call raises, the slot must be released (finally) so a
     later call can still acquire it — i.e. no slot leak / deadlock. With cap=1,

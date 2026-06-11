@@ -36,14 +36,13 @@ from app.db.prds import (
     update_prd_content,
 )
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
-from app.prd_runner import generate_prd
+from app.prd_runner import PRD_VARIANT, generate_prd
 from app.prompts import PRD_TEMPLATE_VERSION
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/prd", tags=["prd"])
 
-_VARIANT = "v2"
 
 # Strong refs to in-flight background generation tasks. asyncio holds only a
 # weak reference to a bare create_task result, so without this the task can be
@@ -82,14 +81,14 @@ async def generate(
 
     if not body.force:
         existing = find_existing_prd(
-            body.brief_id, body.insight_index, variant=_VARIANT
+            body.brief_id, body.insight_index, variant=PRD_VARIANT
         )
         if existing:
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
                 "title": existing["title"],
-                "variant": _VARIANT,
+                "variant": PRD_VARIANT,
             }
 
     insight = insights[body.insight_index]
@@ -99,7 +98,7 @@ async def generate(
         insight_index=body.insight_index,
         title=title,
         template_version=PRD_TEMPLATE_VERSION,
-        variant=_VARIANT,
+        variant=PRD_VARIANT,
     )
     task = asyncio.create_task(
         generate_prd(prd_id, body.brief_id, body.insight_index)
@@ -110,7 +109,7 @@ async def generate(
         "prd_id": prd_id,
         "status": "generating",
         "title": title,
-        "variant": _VARIANT,
+        "variant": PRD_VARIANT,
     }
 
 

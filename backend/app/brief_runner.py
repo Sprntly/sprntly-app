@@ -22,6 +22,7 @@ from app.db import (
 from app.ask_runner import warm_brief_dynamic_asks, warm_predefined_asks
 from app.evidence_runner import generate_evidence
 from app.llm import call_json
+from app.prd_runner import warm_prds_for_brief
 from app.prompts import (
     BRIEF_SCHEMA_VERSION,
     BRIEF_SYSTEM,
@@ -143,11 +144,12 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
     cached entries return immediately (dedupe lives in _warm_evidence /
     ask_runner._warm_one).
 
-    PRDs are deliberately NOT pre-warmed: a PRD is the most expensive
-    drill-down (a large 2-part LLM generation), so warming one per insight
-    floods the queue and a user's "Generate PRD" click stalls behind the
-    backlog. PRDs run strictly on-demand via routes/prd.py, which is
-    unthrottled (it does not acquire _WARM_SEMA), so a click runs immediately.
+    PRDs warm too, but through a different throttle: warm_prds_for_brief runs
+    the top-N insights' PRDs sequentially in the LLM gate's BACKGROUND lane
+    (app.llm._PriorityGate) — at most one warm model-call in flight, and every
+    interactive caller (including a user's "Generate PRD" click on routes/
+    prd.py) jumps ahead of it. That removes the old reason PRDs were on-demand
+    only: warming can no longer stall a click behind the backlog.
     Ask warming runs in parallel with evidence, hitting the same throughput cap.
     """
     brief_id = brief.get("id")
@@ -167,6 +169,9 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
         # finding card in the BriefScreen fires "Tell me more about: <title>"
         # — those titles are known at brief-gen time, so we warm them too.
         warm_brief_dynamic_asks(dataset, brief, _WARM_SEMA)
+    # PRDs for the top insights — background-lane only (see docstring), so
+    # this never competes with evidence/Ask warming or a user click.
+    _track(asyncio.create_task(warm_prds_for_brief(brief)))
 
 
 async def _warm_drilldowns_to_completion(brief: dict, dataset: str | None = None) -> None:
