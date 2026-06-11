@@ -26,15 +26,22 @@ type HomeChipItem = { kind: "home" | "starter"; card: ChatHomeCard }
 function buildHomeChips(home: ChatHomeCard[], starterList: ChatHomeCard[]): HomeChipItem[] {
   const out: HomeChipItem[] = []
   for (const card of home) {
-    if (out.length >= 3) break
+    if (out.length >= 4) break
     out.push({ kind: "home", card })
   }
   for (const card of starterList) {
-    if (out.length >= 3) break
+    if (out.length >= 4) break
     out.push({ kind: "starter", card })
   }
   return out
 }
+
+const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
+  { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View weekly brief", desc: "", target: "brief" } },
+  { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
+  { kind: "starter", card: { id: "def-draft", icon: "document", title: "Draft quarterly report", desc: "", target: "ondemand", prompt: "Draft a quarterly product report with key metrics, wins, and next steps." } },
+  { kind: "starter", card: { id: "def-proto", icon: "rocket", title: "Prototype", desc: "", target: "ondemand", prompt: "Help me prototype the top feature in our product roadmap." } },
+]
 
 export function ChatScreen() {
   const {
@@ -196,8 +203,7 @@ export function ChatScreen() {
   const submitAsk = useCallback(
     async (rawQuery: string) => {
       const query = rawQuery.trim()
-      if (query.length < 3) {
-        showToast("Question too short", "Use at least 3 characters.")
+      if (query.length < 1) {
         return
       }
       if (askingRef.current) return
@@ -243,7 +249,7 @@ export function ChatScreen() {
 
   const handleComposerSubmit = () => {
     const q = draft.trim()
-    if (q.length < 3 || askingRef.current) return
+    if (q.length < 1 || askingRef.current) return
     setDraft("")
     void submitAsk(q)
     const ta = composerRef.current
@@ -296,10 +302,12 @@ export function ChatScreen() {
   }
 
   const hasThread = thread.length > 0
-  const displayChips = useMemo(() => buildHomeChips(homeCards, starters), [homeCards, starters])
-  const showChipRow = !hasThread && displayChips.length > 0
-  const showEmptyStarters =
-    !hasThread && homeCards.length === 0 && starters.length === 0
+  const displayChips = useMemo(() => {
+    const chips = buildHomeChips(homeCards, starters)
+    return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
+  }, [homeCards, starters])
+  const showChipRow = !hasThread
+  const showEmptyStarters = false
 
   return (
     <AppLayout
@@ -324,37 +332,50 @@ export function ChatScreen() {
                   <div className="od-center-inner od-center-inner--home">
                     <div className="chat-greeting">
                       <h1 className="chat-greeting-title">
-                        {content.homeHeadline ? (
-                          content.homeHeadline
-                        ) : (
-                          <>
-                            Hi <span>{name}</span>, what should we build today?
-                          </>
-                        )}
+                        Welcome back, <em>{name}</em>.
                       </h1>
-                      {content.homeSub ? <p className="chat-greeting-sub">{content.homeSub}</p> : null}
+                      <p className="chat-greeting-sub">Let&apos;s build something awesome.</p>
                     </div>
 
                     <div className="home-landing-composer">
-                      <div className="od-composer-row od-composer-row--home-eyeline">
+                      <div className="chat-home-composer">
                         <textarea
                           ref={composerRef}
-                          className="od-composer-input"
+                          className="chat-home-composer-input"
                           placeholder="Ask Sprntly anything about your product memory…"
                           rows={1}
                           value={draft}
                           onChange={handleComposerInput}
                           onKeyDown={handleComposerKeyDown}
                         />
-                        <button
-                          type="button"
-                          className="od-composer-send"
-                          aria-label="Send"
-                          disabled={busy || draft.trim().length < 3}
-                          onClick={handleComposerSubmit}
-                        >
-                          <IconSendUp size={18} />
-                        </button>
+                        <div className="chat-home-composer-footer">
+                          <div className="chat-home-composer-actions">
+                            <button type="button" className="chat-home-action-btn" aria-label="Voice input">
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                <line x1="12" y1="19" x2="12" y2="23"/>
+                                <line x1="8" y1="23" x2="16" y2="23"/>
+                              </svg>
+                              Voice
+                            </button>
+                            <button type="button" className="chat-home-action-btn" aria-label="Attach file">
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                              </svg>
+                              Attach
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            className="chat-home-composer-send"
+                            aria-label="Send"
+                            disabled={busy || draft.trim().length < 1}
+                            onClick={handleComposerSubmit}
+                          >
+                            <IconSendUp size={16} />
+                          </button>
+                        </div>
                       </div>
                       {showChipRow ? (
                         <div className="home-chip-row home-chip-row--under-chat" role="list">
@@ -467,7 +488,7 @@ export function ChatScreen() {
                     type="button"
                     className="od-composer-send"
                     aria-label="Send"
-                    disabled={busy || draft.trim().length < 3}
+                    disabled={busy || draft.trim().length < 1}
                     onClick={handleComposerSubmit}
                   >
                     <IconSendUp size={18} />

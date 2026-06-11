@@ -17,8 +17,74 @@ const TABS = [
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
 ] as const
 
+const CPANEL_WIDTH_KEY = "sprntly-cpanel-width"
+const CPANEL_WIDTH_MIN = 650   // min: content needs room to breathe
+const CPANEL_MAX_VW   = 0.6    // max: never more than 60% of the viewport
+
+function clampCpanelWidth(px: number): number {
+  const max = Math.round(window.innerWidth * CPANEL_MAX_VW)
+  return Math.min(max, Math.max(CPANEL_WIDTH_MIN, Math.round(px)))
+}
+
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel } = useNavigation()
+
+  // Tracks the live pixel width; null = use the CSS default (60vw).
+  const widthRef = useRef<number | null>(null)
+
+  // On open: restore saved width, apply it, and keep it clamped on window resize.
+  // On close: remove the CSS var so it resets to default.
+  useEffect(() => {
+    if (!contentPanelTab) return
+    const root = document.documentElement
+
+    const saved = Number(window.localStorage.getItem(CPANEL_WIDTH_KEY))
+    widthRef.current = Number.isFinite(saved) && saved >= CPANEL_WIDTH_MIN ? saved : null
+
+    const apply = () => {
+      if (window.innerWidth <= 768 || widthRef.current == null) {
+        root.style.removeProperty("--cpanel-width")
+        return
+      }
+      const next = clampCpanelWidth(widthRef.current)
+      widthRef.current = next
+      root.style.setProperty("--cpanel-width", `${next}px`)
+    }
+
+    apply()
+    window.addEventListener("resize", apply)
+    return () => {
+      window.removeEventListener("resize", apply)
+      root.style.removeProperty("--cpanel-width")
+    }
+  }, [contentPanelTab])
+
+  // Pointer-down on the left-edge handle starts a drag session.
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    if (window.innerWidth <= 768) return
+    e.preventDefault()
+    const root = document.documentElement
+    const startX = e.clientX
+    const startW = widthRef.current ?? Math.round(window.innerWidth * CPANEL_MAX_VW)
+    root.classList.add("cpanel-resizing")
+
+    const onMove = (ev: MouseEvent) => {
+      // Dragging LEFT widens the panel (panel anchored to right edge).
+      const next = clampCpanelWidth(startW + (startX - ev.clientX))
+      widthRef.current = next
+      root.style.setProperty("--cpanel-width", `${next}px`)
+    }
+    const onUp = () => {
+      if (widthRef.current != null) {
+        window.localStorage.setItem(CPANEL_WIDTH_KEY, String(widthRef.current))
+      }
+      root.classList.remove("cpanel-resizing")
+      window.removeEventListener("mousemove", onMove)
+      window.removeEventListener("mouseup", onUp)
+    }
+    window.addEventListener("mousemove", onMove)
+    window.addEventListener("mouseup", onUp)
+  }, [])
 
   if (!contentPanelTab) return null
 
@@ -26,6 +92,14 @@ export function ContentPanel() {
     <>
       <div className="cpanel-overlay" onClick={closeContentPanel} />
       <aside className="cpanel">
+        {/* Draggable left edge — grab to resize */}
+        <div
+          className="cpanel-resize-handle"
+          onMouseDown={handleResizeStart}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panel"
+        />
         <div className="cpanel-head">
           <div>
             <div className="cpanel-tabs">
@@ -361,6 +435,16 @@ const MOCK_TICKETS: Ticket[] = [
   },
 ]
 
+type AssigneeOption = { initials: string; color: string; name: string; email: string; role: string }
+
+const DEMO_ASSIGNEES: AssigneeOption[] = [
+  { initials: "SC", color: "#2A6EC8", name: "Sarah Chen", email: "sarah@meridian.health", role: "Product" },
+  { initials: "JK", color: "#634AB0", name: "Jordan Kim", email: "jordan@meridian.health", role: "Analytics" },
+  { initials: "PS", color: "#C13838", name: "Priya Sharma", email: "priya@meridian.health", role: "Engineering" },
+  { initials: "MO", color: "#179463", name: "Marcus O'Brien", email: "marcus@meridian.health", role: "Customer Success" },
+  { initials: "—", color: "#AAB3AE", name: "Unassigned", email: "", role: "" },
+]
+
 const PRIORITY_COLOR: Record<TicketPriority, string> = {
   P0: "#C13838",
   P1: "#C16A0B",
@@ -375,13 +459,23 @@ function TicketRow({ ticket, onClick }: { ticket: Ticket; onClick: () => void })
           <span className="tkt-row-id">{ticket.id}</span>
           <span className="tkt-row-cat">{ticket.category}</span>
         </div>
-        <div className="tkt-row-title">{ticket.title}</div>
-        <div className="tkt-row-tags">
-          <span className="tkt-tag tkt-tag--priority" style={{ color: PRIORITY_COLOR[ticket.priority], borderColor: `${PRIORITY_COLOR[ticket.priority]}33` }}>
-            {ticket.priority}
-          </span>
-          {ticket.points > 0 && <span className="tkt-tag">{ticket.points} pts</span>}
-          <span className="tkt-tag">{ticket.techTag}</span>
+        <div className="tkt-row-main">
+          <div className="tkt-row-title">{ticket.title}</div>
+          <div className="tkt-row-desc">{ticket.description}</div>
+          <div className="tkt-row-tags">
+            <span
+              className="tkt-tag tkt-tag--priority"
+              style={{
+                color: PRIORITY_COLOR[ticket.priority],
+                background: `${PRIORITY_COLOR[ticket.priority]}14`,
+                borderColor: `${PRIORITY_COLOR[ticket.priority]}33`,
+              }}
+            >
+              {ticket.priority}
+            </span>
+            {ticket.points > 0 && <span className="tkt-tag">{ticket.points} pts</span>}
+            <span className="tkt-tag">{ticket.techTag}</span>
+          </div>
         </div>
       </div>
       <div className="tkt-row-right">
@@ -488,6 +582,7 @@ function saveTktLocal(id: string, data: TktOverrides) {
 
 function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }) {
   const { showToast } = useNavigation()
+  const { content } = useContent()
   const [status, setStatus] = useState<TicketStatus>("Backlog")
   const [priority, setPriority] = useState<TicketPriority>(ticket.priority)
   const [sprint, setSprint] = useState("Sprint 25")
@@ -495,6 +590,30 @@ function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }
   const [attachName, setAttachName] = useState("")
   const [attachSub, setAttachSub] = useState("")
   const [showAttachForm, setShowAttachForm] = useState(false)
+  const [assignee, setAssignee] = useState<AssigneeOption>({
+    initials: ticket.initials,
+    color: ticket.initialsColor,
+    name: ticket.personName,
+    email: ticket.personEmail,
+    role: ticket.personRole,
+  })
+  const [showReassign, setShowReassign] = useState(false)
+  const assigneeOptions: AssigneeOption[] = content.teamMembers.length > 0
+    ? content.teamMembers.map((m) => ({ initials: m.initials, color: m.color ?? "#4A554F", name: m.name, email: m.email, role: m.role }))
+    : DEMO_ASSIGNEES
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const kb = file.size / 1024
+    const sizeFmt = kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.round(kb)} KB`
+    setAttachName(file.name)
+    setAttachSub(`${file.type || "file"} · ${sizeFmt}`)
+    setShowAttachForm(true)
+    // Reset so the same file can be re-selected if needed
+    e.target.value = ""
+  }
 
   // State for description, attachments, comments — loaded from backend on mount
   const [overrides, setOverrides] = useState<TktOverrides>(() => loadTktLocal(ticket.id))
@@ -611,23 +730,53 @@ function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }
       {/* Person responsible */}
       <div className="tkt-detail-section">
         <div className="tkt-detail-section-label">PERSON RESPONSIBLE</div>
-        <div className="tkt-person-row">
-          <div className="tkt-person-avatar" style={{ background: `${ticket.initialsColor}22`, color: ticket.initialsColor }}>
-            {ticket.initials}
+        <div className="tkt-person-row" style={{ position: "relative" }}>
+          <div className="tkt-person-avatar" style={{ background: `${assignee.color}22`, color: assignee.color }}>
+            {assignee.initials}
           </div>
           <div className="tkt-person-info">
-            <div className="tkt-person-name">{ticket.personName}</div>
+            <div className="tkt-person-name">{assignee.name}</div>
             <div className="tkt-person-role">
-              {ticket.personEmail ? `${ticket.personEmail} · ` : ""}{ticket.personRole}
+              {assignee.email ? `${assignee.email} · ` : ""}{assignee.role}
             </div>
           </div>
-          <button type="button" className="tkt-reassign-btn" onClick={() => showToast("Reassign", "Reassignment isn't wired up yet.")}>
+          <button type="button" className="tkt-reassign-btn" onClick={() => setShowReassign((v) => !v)}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" />
               <polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" />
             </svg>
             Reassign
           </button>
+          {showReassign && (
+            <>
+              <div className="tkt-reassign-backdrop" onClick={() => setShowReassign(false)} />
+              <div className="tkt-reassign-menu" role="listbox" aria-label="Select assignee">
+                {assigneeOptions.map((opt) => (
+                  <button
+                    key={opt.email || opt.name}
+                    type="button"
+                    role="option"
+                    aria-selected={opt.email === assignee.email && opt.name === assignee.name}
+                    className={`tkt-reassign-option${opt.email === assignee.email && opt.name === assignee.name ? " tkt-reassign-option--active" : ""}`}
+                    onClick={() => { setAssignee(opt); setShowReassign(false) }}
+                  >
+                    <div className="tkt-reassign-option-avatar" style={{ background: `${opt.color}22`, color: opt.color }}>
+                      {opt.initials}
+                    </div>
+                    <div className="tkt-reassign-option-info">
+                      <div className="tkt-reassign-option-name">{opt.name}</div>
+                      {opt.role ? <div className="tkt-reassign-option-role">{opt.role}</div> : null}
+                    </div>
+                    {opt.email === assignee.email && opt.name === assignee.name && (
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ flexShrink: 0, marginLeft: "auto" }}>
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -777,9 +926,17 @@ function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }
             </div>
           </div>
         ) : (
-          <button type="button" className="tkt-attach-btn" onClick={() => setShowAttachForm(true)}>
-            + Attach a file or paste a link
-          </button>
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              style={{ display: "none" }}
+              onChange={handleFileSelect}
+            />
+            <button type="button" className="tkt-attach-btn" onClick={() => fileInputRef.current?.click()}>
+              + Attach a file or paste a link
+            </button>
+          </>
         )}
       </div>
 

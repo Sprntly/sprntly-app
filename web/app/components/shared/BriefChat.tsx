@@ -96,14 +96,8 @@ function weekLabel(weekOf: string | null): string {
   return weekOf
 }
 
-function briefTitle(weekOf: string | null): string {
-  if (!weekOf) return "Weekly Brief"
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(weekOf)
-  if (m) {
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-    return `${d.toLocaleDateString([], { weekday: "long" })} Brief`
-  }
-  return "Weekly Brief"
+function briefTitle(_weekOf: string | null): string {
+  return "Monday brief"
 }
 
 function parseAskError(e: unknown): string {
@@ -1009,7 +1003,7 @@ export function BriefChat() {
                   <IconSparkle size={10} />
                   PM COWORKER
                 </span>
-                <span className="bc-agent-status">Weekly brief · {greetTime}</span>
+                <span className="bc-agent-status">Monday brief · {greetTime}</span>
               </div>
               <div className="bc-agent-body">
                 <p className="bc-greeting">{greeting}</p>

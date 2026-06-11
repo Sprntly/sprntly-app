@@ -24,6 +24,7 @@ export type ScreenId =
   // The dedicated full-page prototype surface. The prototype canvas renders
   // in-tab here at `/prototype?prd=<id>`; the PRD context rides as a query param.
   | "prototype"
+  | "backlog"
 
 // The NUMBERED onboarding screens, in flow order. `ob-analyzing` is deliberately
 // absent — it is the unnumbered loader, not a counted step.
@@ -52,6 +53,7 @@ export const APP_SCREENS: ScreenId[] = [
   "sources",
   "tickets",
   "prototype",
+  "backlog",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
@@ -65,7 +67,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   "ob-analyzing": "Setup",
   chat: "Home",
   chats: "All chats",
-  brief: "Weekly brief",
+  brief: "Monday brief",
   detail: "Evidence",
   prd: "PRD",
   ondemand: "Home",
@@ -77,6 +79,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   sources: "Sources",
   tickets: "Project Management",
   prototype: "Prototype",
+  backlog: "Backlog Projects",
 }
 
 export function getMainChromeTitle(screen: ScreenId): string {

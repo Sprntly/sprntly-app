@@ -57,6 +57,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // `/prototype?prd=<id>`; bare `/prototype` with no `?prd=` shows an empty state
   // prompting the user to choose a PRD first.
   prototype: PROTOTYPE_PATH,
+  backlog: "/backlog",
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -75,6 +76,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   // stays highlighted. The PRD context rides as a `?prd=` query param, which
   // pathname-based screen derivation ignores — the path is always `/prototype`.
   [PROTOTYPE_PATH]: "prototype",
+  "/backlog": "backlog",
 }
 
 // Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).

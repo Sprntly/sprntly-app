@@ -8,15 +8,13 @@ import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext
 import type { ScreenId } from "../../types"
 import {
   IconChats,
-  IconHome,
-  IconPrd,
-  IconSettings,
   IconSources,
   IconTickets,
   IconBrief,
 } from "./sidebar-icons"
 import { IconSparkle } from "./app-icons"
 import { CompanySwitcher } from "./CompanySwitcher"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory } from "@tabler/icons-react"
 
 interface SidebarProps {
   activeCompany?: string
@@ -145,11 +143,11 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
 
         {/* Main nav icons */}
         <div className="sb-rail-nav">
-          <RailItem screen="chat" icon={<IconHome />} label="Home" />
-          <RailItem screen="chats" icon={<IconChats />} label="All chats" />
-          <RailItem screen="prd" icon={<IconPrd />} label="PRD" />
-          <RailItem screen="prototype" icon={<IconSparkle />} label="Prototype" />
-          <RailItem screen="tickets" icon={<IconTickets />} label="Project Management" />
+          <RailItem screen="brief" icon={<IconMessageCircle />} label="Monday brief" />
+          <RailItem screen="chats" icon={<IconHistory />} label="All chats" />
+          <RailItem screen="backlog" icon={<IconBulb />} label="Backlog Projects" />
+          <RailItem screen="prototype" icon={<IconPrompt />} label="Prototype" />
+          <RailItem screen="tickets" icon={<IconLayoutKanban />} label="Project Management" />
         </div>
 
         <div className="sb-rail-spacer" />
@@ -226,12 +224,6 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
       <div className="sb-body">
         <div className="sb-section-title">Overview</div>
         <NavItem
-          screen="chat"
-          icon={<IconHome />}
-          label="Home"
-          count={content.sidebarConvCount ?? undefined}
-        />
-        <NavItem
           screen="chats"
           icon={<IconChats />}
           label="All chats"
@@ -241,9 +233,10 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         <NavItem
           screen="brief"
           icon={<IconBrief />}
-          label="Weekly brief"
+          label="Monday brief"
           count={content.sidebarBriefCount ?? undefined}
         />
+        <NavItem screen="backlog" icon={<IconBacklogProjects />} label="Backlog Projects" />
         {/* <NavItem screen="prd" icon={<IconPrd />} label="PRD" /> */}
         <NavItem screen="prototype" icon={<IconSparkle />} label="Prototype" />
         <NavItem screen="tickets" icon={<IconTickets />} label="Project Management" />
@@ -273,6 +266,19 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         </div>
       </div>
     </aside>
+  )
+}
+
+function IconBacklogProjects() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <line x1="8" y1="6" x2="21" y2="6" />
+      <line x1="8" y1="12" x2="21" y2="12" />
+      <line x1="8" y1="18" x2="21" y2="18" />
+      <line x1="3" y1="6" x2="3.01" y2="6" />
+      <line x1="3" y1="12" x2="3.01" y2="12" />
+      <line x1="3" y1="18" x2="3.01" y2="18" />
+    </svg>
   )
 }
 
