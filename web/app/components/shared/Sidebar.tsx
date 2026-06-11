@@ -8,6 +8,7 @@ import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext
 import type { ScreenId } from "../../types"
 import {
   IconBrief,
+  IconChats,
   IconEvidence,
   IconHome,
   IconPrd,
@@ -146,6 +147,7 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         {/* Main nav icons */}
         <div className="sb-rail-nav">
           <RailItem screen="chat" icon={<IconHome />} label="Home" />
+          <RailItem screen="chats" icon={<IconChats />} label="All chats" />
           <RailItem screen="brief" icon={<IconBrief />} label="Weekly brief" />
           <RailItem screen="detail" icon={<IconEvidence />} label="Evidence" />
           <RailItem screen="prd" icon={<IconPrd />} label="PRD" />
@@ -231,6 +233,11 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
           icon={<IconHome />}
           label="Home"
           count={content.sidebarConvCount ?? undefined}
+        />
+        <NavItem
+          screen="chats"
+          icon={<IconChats />}
+          label="All chats"
         />
 
         <div className="sb-section-title">Intelligence</div>

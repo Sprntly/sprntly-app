@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react"
 import { AppLayout } from "./AppLayout"
 import { IconSortAscendingLetters, IconAdjustments, IconFilter, IconPlus, IconUpload, IconSparkles } from "@tabler/icons-react"
 import { EmptyPane } from "../../shared/EmptyPane"
+import { ticketPushApi, type ClickUpList } from "../../../lib/api"
 
 export type InternalTicket = {
   id: string
@@ -258,6 +259,52 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
   const [editCategory, setEditCategory] = useState(ticket.category)
   const [commentText, setCommentText] = useState("")
 
+  // ── ClickUp push state ──
+  const [showListPicker, setShowListPicker] = useState(false)
+  const [clickUpLists, setClickUpLists] = useState<ClickUpList[]>([])
+  const [listsLoading, setListsLoading] = useState(false)
+  const [listsError, setListsError] = useState<string | null>(null)
+  const [pushStatus, setPushStatus] = useState<"idle" | "pushing" | "done" | "error">("idle")
+  const [pushMessage, setPushMessage] = useState<string | null>(null)
+
+  const handleOpenListPicker = useCallback(async () => {
+    if (showListPicker) { setShowListPicker(false); return }
+    setShowListPicker(true)
+    setListsLoading(true)
+    setListsError(null)
+    try {
+      const res = await ticketPushApi.listClickUpLists()
+      setClickUpLists(res.lists)
+    } catch (err: any) {
+      setListsError(err?.status === 404 ? "ClickUp is not connected. Connect it in Settings." : (err?.message || "Failed to load lists"))
+    } finally {
+      setListsLoading(false)
+    }
+  }, [showListPicker])
+
+  const handlePushToClickUp = useCallback(async (listId: string) => {
+    setShowListPicker(false)
+    setPushStatus("pushing")
+    setPushMessage(null)
+    try {
+      const res = await ticketPushApi.pushToClickUp(listId, [{
+        title: ticket.title,
+        description: ticket.description,
+        priority: ticket.priority,
+      }])
+      if (res.created.length > 0) {
+        setPushStatus("done")
+        setPushMessage(`Pushed to ClickUp`)
+      } else {
+        setPushStatus("error")
+        setPushMessage(res.errors[0]?.error || "Push failed")
+      }
+    } catch (err: any) {
+      setPushStatus("error")
+      setPushMessage(err?.message || "Push failed")
+    }
+  }, [ticket])
+
   // Sync local state when ticket changes
   useEffect(() => {
     setEditTitle(ticket.title)
@@ -402,11 +449,60 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
       </div>
 
       {/* Footer */}
-      <div style={{ padding: "12px 20px", borderTop: "1px solid var(--line, #E8E6E0)", display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12, color: "var(--ink-3, #8C8A84)" }}>
-        <span style={{ color: "#15201b", fontWeight: 400, fontSize: 12 }}><strong style={{ fontWeight: 500 }}>Ticket synced</strong> · PRD attached</span>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 30, border: "1px solid var(--line, #E8E6E0)", background: "var(--surface, #fff)", cursor: "pointer", color: "var(--ink-2, #5A5853)" }}>Send to Jira</button>
+      <div style={{ padding: "12px 20px", borderTop: "1px solid var(--line, #E8E6E0)", display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12, color: "var(--ink-3, #8C8A84)", position: "relative" }}>
+        <span style={{ color: "#15201b", fontWeight: 400, fontSize: 12 }}>
+          {pushStatus === "done" && <span style={{ color: "var(--accent, #179463)", fontWeight: 500 }}>{pushMessage}</span>}
+          {pushStatus === "error" && <span style={{ color: "#DC2626", fontWeight: 500 }}>{pushMessage}</span>}
+          {pushStatus === "pushing" && <span style={{ fontWeight: 500 }}>Pushing...</span>}
+          {pushStatus === "idle" && <><strong style={{ fontWeight: 500 }}>Ticket synced</strong> · PRD attached</>}
+        </span>
+        <div style={{ display: "flex", gap: 8, position: "relative" }}>
+          <button type="button" onClick={handleOpenListPicker} disabled={pushStatus === "pushing"} style={{
+            fontSize: 11.5, padding: "5px 12px", borderRadius: 30,
+            border: "1px solid var(--line, #E8E6E0)", background: showListPicker ? "var(--surface-2, #F4F1EA)" : "var(--surface, #fff)",
+            cursor: pushStatus === "pushing" ? "not-allowed" : "pointer", color: "var(--ink-2, #5A5853)",
+          }}>Send to ClickUp</button>
           <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 30, background: "var(--accent, #179463)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 400 }}>Send to Claude Code</button>
+
+          {/* ClickUp list picker dropdown */}
+          {showListPicker && (
+            <div style={{
+              position: "absolute", bottom: "100%", right: 0, marginBottom: 6,
+              width: 300, maxHeight: 260, overflowY: "auto",
+              background: "#fff", borderRadius: 10, border: "1px solid var(--line, #E8E6E0)",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.12)", zIndex: 100, padding: "6px 0",
+            }}>
+              <div style={{ padding: "8px 14px 6px", fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--ink-3, #8C8A84)" }}>
+                Select ClickUp list
+              </div>
+              {listsLoading && (
+                <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--ink-3, #8C8A84)" }}>Loading lists...</div>
+              )}
+              {listsError && (
+                <div style={{ padding: "12px 14px", fontSize: 12, color: "#DC2626" }}>{listsError}</div>
+              )}
+              {!listsLoading && !listsError && clickUpLists.length === 0 && (
+                <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--ink-3, #8C8A84)" }}>No lists found</div>
+              )}
+              {!listsLoading && clickUpLists.map((list) => (
+                <button key={list.id} type="button" onClick={() => handlePushToClickUp(list.id)} style={{
+                  display: "block", width: "100%", textAlign: "left", padding: "8px 14px",
+                  background: "none", border: "none", cursor: "pointer", fontSize: 12.5,
+                  color: "var(--ink, #1A1A17)", lineHeight: 1.4,
+                }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F4F1EA)" }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none" }}
+                >
+                  <div style={{ fontWeight: 500 }}>{list.name}</div>
+                  {(list.space || list.folder) && (
+                    <div style={{ fontSize: 11, color: "var(--ink-3, #8C8A84)", marginTop: 1 }}>
+                      {[list.space, list.folder].filter(Boolean).join(" / ")}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

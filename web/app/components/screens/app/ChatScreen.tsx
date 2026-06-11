@@ -94,11 +94,40 @@ export function ChatScreen() {
     })
   }, [pendingOndemandDraft, setPendingOndemandDraft])
 
+  // Track the current Supabase conversation ID for multi-turn persistence
+  const dbConvIdRef = useRef<number | null>(null)
+
+  // Resume a conversation from ChatsScreen (loads all turns from DB)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("sprntly_resume_conv")
+      if (!raw) return
+      localStorage.removeItem("sprntly_resume_conv")
+      const data = JSON.parse(raw) as { dbId: number; title: string; turns: { role: string; content: string }[] }
+      if (!data.turns || data.turns.length === 0) return
+      dbConvIdRef.current = data.dbId
+      const restored: ThreadTurn[] = []
+      for (let i = 0; i < data.turns.length; i++) {
+        const t = data.turns[i]
+        if (t.role === "user") {
+          const next = data.turns[i + 1]
+          const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [] } as AskResponse : undefined
+          restored.push({ id: `resumed-${i}`, query: t.content, reply })
+          if (reply) i++ // skip the assistant turn we consumed
+        }
+      }
+      if (restored.length > 0) {
+        setThread(restored)
+        setActiveConv(0)
+      }
+    } catch { /* ignore corrupt data */ }
+  }, [])
+
   const pushPendingConversation = useCallback(
     (turnId: string, query: string) => {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
-      const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      const timeStr = new Date().toISOString()
       const nextCount = prev.length + 1
       setContent({
         conversations: [
@@ -106,6 +135,30 @@ export function ChatScreen() {
           ...prev,
         ],
         sidebarConvCount: nextCount,
+      })
+      // Persist to Supabase — create conversation + first user turn
+      import("../../../lib/api").then(({ conversationsApi }) => {
+        // If this is a follow-up in the same thread, just add a turn
+        if (dbConvIdRef.current) {
+          conversationsApi.addTurn(dbConvIdRef.current, "user", query).catch(() => {})
+          return
+        }
+        // New conversation
+        conversationsApi.create({
+          title,
+          preview: query.slice(0, 200),
+          query,
+          agent_type: "ask",
+        }).then((conv) => {
+          dbConvIdRef.current = conv.id
+          // Tag the in-memory conversation with the DB id so rail can load turns
+          const latest = conversationsRef.current
+          const tagged = latest.map((c) =>
+            c.id === turnId ? { ...c, _dbId: conv.id } as any : c,
+          )
+          setContent({ conversations: tagged })
+          conversationsApi.addTurn(conv.id, "user", query).catch(() => {})
+        }).catch(() => {})
       })
     },
     [setContent],
@@ -127,6 +180,15 @@ export function ChatScreen() {
           return c
         }),
       })
+      // Save assistant reply as a turn in Supabase
+      if (updates.reply && dbConvIdRef.current) {
+        const replyText = typeof updates.reply === "string"
+          ? updates.reply
+          : (updates.reply as any)?.answer || JSON.stringify(updates.reply).slice(0, 2000)
+        import("../../../lib/api").then(({ conversationsApi }) => {
+          conversationsApi.addTurn(dbConvIdRef.current!, "assistant", replyText).catch(() => {})
+        })
+      }
     },
     [setContent],
   )
@@ -230,6 +292,7 @@ export function ChatScreen() {
     setThread([])
     setDraft("")
     setActiveConv(null)
+    dbConvIdRef.current = null
   }
 
   const hasThread = thread.length > 0
@@ -289,14 +352,41 @@ export function ChatScreen() {
                   <div
                     key={conv.id}
                     className={`od-conv-item ${activeConv === i ? "active" : ""}`}
-                    onClick={() => {
+                    onClick={async () => {
+                      setActiveConv(i)
+                      // Try to load full turns from DB
+                      const dbId = (conv as any)._dbId as number | undefined
+                      if (dbId) {
+                        try {
+                          const { conversationsApi: cApi } = await import("../../../lib/api")
+                          const res = await cApi.listTurns(dbId)
+                          if (res.turns.length > 0) {
+                            dbConvIdRef.current = dbId
+                            const restored: ThreadTurn[] = []
+                            for (let j = 0; j < res.turns.length; j++) {
+                              const t = res.turns[j]
+                              if (t.role === "user") {
+                                const next = res.turns[j + 1]
+                                const reply = next?.role === "assistant"
+                                  ? ({ answer: next.content, sources: [], follow_ups: [] } as AskResponse)
+                                  : undefined
+                                restored.push({ id: `db-${t.id}`, query: t.content, reply })
+                                if (reply) j++
+                              }
+                            }
+                            setThread(restored)
+                            return
+                          }
+                        } catch { /* fallback below */ }
+                      }
+                      // Fallback: single saved turn
                       const st = conv.savedTurn
                       if (st) {
+                        dbConvIdRef.current = null
                         setThread([{ id: st.id, query: st.query, reply: st.reply, error: st.error }])
                       } else {
                         setThread([])
                       }
-                      setActiveConv(i)
                     }}
                   >
                     <div className="od-conv-title">{conv.title}</div>
@@ -393,6 +483,50 @@ export function ChatScreen() {
                       </div>
                     </div>
                   ))}
+                  {/* Artifact action bar — navigate to Evidence / PRD / Tickets */}
+                  {thread.length > 0 && thread[thread.length - 1].reply && (
+                    <div style={{
+                      display: "flex", gap: 8, padding: "14px 0 8px",
+                      borderTop: "1px solid var(--line, #E8E6E0)", marginTop: 12,
+                    }}>
+                      <button
+                        type="button"
+                        onClick={() => goTo("detail")}
+                        style={{
+                          fontSize: 12.5, padding: "6px 14px", borderRadius: 8,
+                          background: "var(--surface-2, #F4F1EA)", border: "1px solid var(--line, #E8E6E0)",
+                          cursor: "pointer", color: "var(--ink-2, #5A5853)", display: "flex", alignItems: "center", gap: 5,
+                        }}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        View evidence
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => goTo("prd")}
+                        style={{
+                          fontSize: 12.5, padding: "6px 14px", borderRadius: 8,
+                          background: "var(--accent, #179463)", border: "none",
+                          cursor: "pointer", color: "#fff", fontWeight: 600, display: "flex", alignItems: "center", gap: 5,
+                        }}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        View PRD
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => goTo("tickets")}
+                        style={{
+                          fontSize: 12.5, padding: "6px 14px", borderRadius: 8,
+                          background: "var(--surface-2, #F4F1EA)", border: "1px solid var(--line, #E8E6E0)",
+                          cursor: "pointer", color: "var(--ink-2, #5A5853)", display: "flex", alignItems: "center", gap: 5,
+                        }}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                        View tickets
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

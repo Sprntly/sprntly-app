@@ -837,12 +837,23 @@ export function BriefChat() {
     (finding: Finding) => {
       const key = finding.detailKey
       const detail = key ? content.briefDetails?.[key] : null
-      // Select the finding; the ContentPanel's EvidenceTab effect generates the
-      // evidence from detail.meta (so we don't double-fire the generation here).
-      if (detail) setContent({ detail, evidence: null })
+      // Only update detail (and clear evidence) when switching to a DIFFERENT
+      // insight. When the user re-clicks the same insight's "View evidence",
+      // keep the already-loaded evidence so the panel shows it immediately
+      // instead of re-generating.
+      if (detail) {
+        const currentMeta = content.detail?.meta
+        const isSameInsight =
+          currentMeta &&
+          currentMeta.briefId === detail.meta?.briefId &&
+          currentMeta.insightIndex === detail.meta?.insightIndex
+        if (!isSameInsight) {
+          setContent({ detail, evidence: null })
+        }
+      }
       openContentPanel("evidence")
     },
-    [content.briefDetails, openContentPanel, setContent],
+    [content.briefDetails, content.detail?.meta, openContentPanel, setContent],
   )
 
   const cardGeneratePrd = useCallback(
@@ -852,6 +863,18 @@ export function BriefChat() {
       const meta = detail?.meta
       if (!meta) {
         showToast("Can't generate PRD", "Open evidence from a finding with a linked brief first.")
+        return
+      }
+      // If a PRD is already loaded for the same insight, just show it
+      // instead of re-generating.
+      const currentPrdMeta = content.prdMeta
+      if (
+        content.prd &&
+        currentPrdMeta &&
+        currentPrdMeta.briefId === meta.briefId &&
+        currentPrdMeta.insightIndex === meta.insightIndex
+      ) {
+        openContentPanel("prd")
         return
       }
       // Share the single-flight gate with the composer / agent-button flows so a
@@ -879,7 +902,7 @@ export function BriefChat() {
         }
       }
     },
-    [content.briefDetails, openContentPanel, setContent, showToast],
+    [content.briefDetails, content.prd, content.prdMeta, openContentPanel, setContent, showToast],
   )
 
   const cardDismiss = useCallback((finding: Finding) => {

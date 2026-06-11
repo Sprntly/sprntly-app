@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { EvidenceSections } from "./EvidenceSections"
@@ -81,11 +81,18 @@ function EvidenceTab() {
   useEffect(() => {
     if (!detail?.meta) return
     const key = `${detail.meta.briefId}:${detail.meta.insightIndex}`
+    // If we already loaded evidence for this exact insight, don't re-fetch.
+    // This prevents regeneration when the user re-clicks "View evidence"
+    // for the same insight or switches tabs and comes back.
     if (loadedKeyRef.current === key && evidence) return
+    // If switching to a different insight, clear stale evidence.
+    // If same key but evidence was cleared externally, re-fetch without clearing.
+    if (loadedKeyRef.current !== key) setContent({ evidence: null })
     let cancelled = false
     setEvidenceState({ kind: "loading" })
-    if (loadedKeyRef.current !== key) setContent({ evidence: null })
     loadedKeyRef.current = key
+    // generate() with default force=false returns existing row if one exists
+    // (backend dedup), so this is safe to call repeatedly.
     runEvidenceGeneration(detail.meta)
       .then((result) => {
         if (cancelled) return
@@ -99,15 +106,28 @@ function EvidenceTab() {
         setEvidenceState({ kind: "error", message: msg })
       })
     return () => { cancelled = true }
-  }, [detail?.meta?.briefId, detail?.meta?.insightIndex, setContent])
+  }, [detail?.meta?.briefId, detail?.meta?.insightIndex, evidence, setContent])
 
   const handleGeneratePrd = async () => {
     if (!detail?.meta) {
       showToast("Can't generate PRD", "Open this evidence from the brief first.")
       return
     }
+    // If a PRD is already loaded for this exact insight, just show it.
+    const currentPrdMeta = content.prdMeta
+    if (
+      content.prd &&
+      currentPrdMeta &&
+      currentPrdMeta.briefId === detail.meta.briefId &&
+      currentPrdMeta.insightIndex === detail.meta.insightIndex
+    ) {
+      openContentPanel("prd")
+      return
+    }
     setGeneratingPrd(true)
     try {
+      // generate() with default force=false — backend returns the existing
+      // PRD row if one already exists, avoiding a new generation.
       const result = await runPrdGeneration(detail.meta)
       if (!result.ok) { showToast("PRD generation failed", result.message.slice(0, 200)); return }
       setContent({ prd: result.prd, prdMeta: detail.meta })
@@ -451,12 +471,86 @@ const PRIORITY_LABEL: Record<TicketPriority, string> = {
   P2: "P2 — Medium",
 }
 
+// ── localStorage fallback for ticket overrides ──
+const TKT_KEY = (id: string) => `sprntly_tkt_${id}`
+type TktOverrides = {
+  description?: string
+  acceptanceCriteria?: string[]
+  attachments?: { id?: number; label: string; sub: string }[]
+  comments?: { id?: number; author: string; text: string; time: string }[]
+}
+function loadTktLocal(id: string): TktOverrides {
+  try { return JSON.parse(localStorage.getItem(TKT_KEY(id)) ?? "{}") } catch { return {} }
+}
+function saveTktLocal(id: string, data: TktOverrides) {
+  try { localStorage.setItem(TKT_KEY(id), JSON.stringify(data)) } catch { /* ignore */ }
+}
+
 function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }) {
   const { showToast } = useNavigation()
   const [status, setStatus] = useState<TicketStatus>("Backlog")
   const [priority, setPriority] = useState<TicketPriority>(ticket.priority)
   const [sprint, setSprint] = useState("Sprint 25")
   const [comment, setComment] = useState("")
+  const [attachName, setAttachName] = useState("")
+  const [attachSub, setAttachSub] = useState("")
+  const [showAttachForm, setShowAttachForm] = useState(false)
+
+  // State for description, attachments, comments — loaded from backend on mount
+  const [overrides, setOverrides] = useState<TktOverrides>(() => loadTktLocal(ticket.id))
+  const desc = overrides.description ?? ticket.description
+  const criteria = overrides.acceptanceCriteria ?? ticket.acceptanceCriteria
+  const attachments = overrides.attachments ?? ticket.attachments.map((a) => ({ label: a.label, sub: a.sub }))
+  const comments = overrides.comments ?? []
+  const descTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Load from Supabase on mount
+  useEffect(() => {
+    let cancelled = false
+    import("../../lib/api").then(({ ticketDataApi }) => {
+      ticketDataApi.getData(ticket.id).then((data) => {
+        if (cancelled) return
+        const loaded: TktOverrides = {}
+        if (data.description != null) loaded.description = data.description
+        if (data.acceptance_criteria != null) loaded.acceptanceCriteria = data.acceptance_criteria
+        if (data.attachments.length > 0) loaded.attachments = data.attachments
+        if (data.comments.length > 0) loaded.comments = data.comments.map((c) => ({
+          id: c.id, author: c.author, text: c.body, time: c.time,
+        }))
+        if (Object.keys(loaded).length > 0) {
+          setOverrides((prev) => ({ ...prev, ...loaded }))
+          saveTktLocal(ticket.id, { ...loadTktLocal(ticket.id), ...loaded })
+        }
+      }).catch(() => { /* use localStorage fallback */ })
+    })
+    return () => { cancelled = true }
+  }, [ticket.id])
+
+  const persist = (patch: Partial<TktOverrides>) => {
+    const next = { ...overrides, ...patch }
+    setOverrides(next)
+    saveTktLocal(ticket.id, next)
+  }
+
+  // Debounced description save to backend (2s after last edit)
+  const saveDescToBackend = useCallback((newDesc: string, newCriteria: string[]) => {
+    if (descTimerRef.current) clearTimeout(descTimerRef.current)
+    descTimerRef.current = setTimeout(() => {
+      import("../../lib/api").then(({ ticketDataApi }) => {
+        ticketDataApi.saveDescription(ticket.id, newDesc, newCriteria).catch(() => {})
+      })
+    }, 2000)
+  }, [ticket.id])
+
+  const persistDesc = (newDesc: string) => {
+    persist({ description: newDesc })
+    saveDescToBackend(newDesc, criteria)
+  }
+
+  const persistCriteria = (newCriteria: string[]) => {
+    persist({ acceptanceCriteria: newCriteria })
+    saveDescToBackend(desc, newCriteria)
+  }
 
   return (
     <div className="tkt-detail">
@@ -545,20 +639,57 @@ function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }
           </svg>
           DESCRIPTION
         </div>
-        <p className="tkt-detail-desc">{ticket.description}</p>
+        <textarea
+          className="tkt-detail-desc"
+          value={desc}
+          onChange={(e) => persistDesc(e.target.value)}
+          style={{
+            width: "100%", border: "1px solid transparent", borderRadius: 8,
+            padding: "10px 12px", fontSize: 14, lineHeight: 1.65, fontFamily: "inherit",
+            color: "var(--ink)", background: "transparent", resize: "vertical",
+            minHeight: 60, outline: "none", transition: "border-color 0.15s",
+          }}
+          onFocus={(e) => { e.currentTarget.style.borderColor = "var(--line)" }}
+          onBlur={(e) => { e.currentTarget.style.borderColor = "transparent" }}
+        />
         <div className="tkt-detail-criteria-label">Acceptance criteria:</div>
-        <ul className="tkt-detail-criteria">
-          {ticket.acceptanceCriteria.map((c, i) => (
-            <li key={i}>{c}</li>
+        <ul className="tkt-detail-criteria" style={{ listStyle: "disc", paddingLeft: 20 }}>
+          {criteria.map((c, i) => (
+            <li key={i} style={{ marginBottom: 4 }}>
+              <input
+                value={c}
+                onChange={(e) => {
+                  const updated = [...criteria]
+                  updated[i] = e.target.value
+                  persistCriteria(updated)
+                }}
+                style={{
+                  border: "none", outline: "none", background: "transparent",
+                  fontSize: 14, color: "var(--ink)", width: "100%", fontFamily: "inherit",
+                }}
+              />
+            </li>
           ))}
+          <li>
+            <button
+              type="button"
+              onClick={() => persistCriteria([...criteria, ""])}
+              style={{
+                border: "none", background: "none", color: "var(--accent)",
+                fontSize: 13, cursor: "pointer", padding: "2px 0", fontWeight: 500,
+              }}
+            >
+              + Add criterion
+            </button>
+          </li>
         </ul>
       </div>
 
       {/* Attachments */}
       <div className="tkt-detail-section">
-        <div className="tkt-detail-section-label">ATTACHMENTS · {ticket.attachments.length}</div>
+        <div className="tkt-detail-section-label">ATTACHMENTS · {attachments.length}</div>
         <div className="tkt-attachments">
-          {ticket.attachments.map((a, i) => (
+          {attachments.map((a, i) => (
             <div key={i} className="tkt-attachment-row">
               <div className="tkt-attachment-icon">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -569,21 +700,127 @@ function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }
                 <div className="tkt-attachment-label">{a.label}</div>
                 <div className="tkt-attachment-sub">{a.sub}</div>
               </div>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--ink-4)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ flexShrink: 0 }}>
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" />
-              </svg>
+              <button
+                type="button"
+                onClick={() => {
+                  const removed = attachments[i]
+                  const updated = attachments.filter((_, idx) => idx !== i)
+                  persist({ attachments: updated })
+                  if (removed.id) {
+                    import("../../lib/api").then(({ ticketDataApi }) => {
+                      ticketDataApi.removeAttachment(ticket.id, removed.id!).catch(() => {})
+                    })
+                  }
+                }}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink-4)", fontSize: 14, padding: 0, lineHeight: 1, flexShrink: 0 }}
+                title="Remove"
+              >×</button>
             </div>
           ))}
         </div>
-        <button type="button" className="tkt-attach-btn" onClick={() => showToast("Attach", "File attachments aren't wired up yet.")}>
-          + Attach a file or paste a link
-        </button>
+        {showAttachForm ? (
+          <div style={{
+            padding: "10px 12px", borderRadius: 8, border: "1px solid var(--accent, #179463)",
+            background: "var(--surface, #fff)", display: "flex", flexDirection: "column", gap: 8,
+          }}>
+            <input
+              autoFocus
+              value={attachName}
+              onChange={(e) => setAttachName(e.target.value)}
+              placeholder="Name (e.g. Design spec v2)"
+              style={{
+                fontSize: 13, padding: "6px 10px", borderRadius: 6, width: "100%",
+                border: "1px solid var(--line, #E8E6E0)", outline: "none", fontFamily: "inherit",
+              }}
+            />
+            <input
+              value={attachSub}
+              onChange={(e) => setAttachSub(e.target.value)}
+              placeholder="Description (e.g. Figma · 12 screens)"
+              style={{
+                fontSize: 12, padding: "5px 10px", borderRadius: 6, width: "100%",
+                border: "1px solid var(--line, #E8E6E0)", outline: "none", fontFamily: "inherit",
+                color: "var(--ink-3)",
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && attachName.trim()) {
+                  const label = attachName.trim(); const sub = attachSub.trim()
+                  persist({ attachments: [...attachments, { label, sub }] })
+                  setAttachName(""); setAttachSub(""); setShowAttachForm(false)
+                  import("../../lib/api").then(({ ticketDataApi }) => {
+                    ticketDataApi.addAttachment(ticket.id, label, sub).catch(() => {})
+                  })
+                }
+              }}
+            />
+            <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+              <button type="button" onClick={() => { setShowAttachForm(false); setAttachName(""); setAttachSub("") }}
+                style={{ fontSize: 12, padding: "4px 12px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", color: "var(--ink-3)" }}>
+                Cancel
+              </button>
+              <button type="button" disabled={!attachName.trim()}
+                onClick={() => {
+                  const label = attachName.trim(); const sub = attachSub.trim()
+                  persist({ attachments: [...attachments, { label, sub }] })
+                  setAttachName(""); setAttachSub(""); setShowAttachForm(false)
+                  import("../../lib/api").then(({ ticketDataApi }) => {
+                    ticketDataApi.addAttachment(ticket.id, label, sub).catch(() => {})
+                  })
+                }}
+                style={{
+                  fontSize: 12, padding: "4px 12px", borderRadius: 6, border: "none",
+                  background: attachName.trim() ? "var(--accent, #179463)" : "#ccc", color: "#fff",
+                  cursor: attachName.trim() ? "pointer" : "not-allowed", fontWeight: 600,
+                }}>
+                Add
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" className="tkt-attach-btn" onClick={() => setShowAttachForm(true)}>
+            + Attach a file or paste a link
+          </button>
+        )}
       </div>
 
       {/* Comments */}
       <div className="tkt-detail-section">
-        <div className="tkt-detail-section-label">COMMENTS</div>
-        <div className="tkt-comments-empty">No comments yet — be the first to add context.</div>
+        <div className="tkt-detail-section-label">COMMENTS · {comments.length}</div>
+        {comments.length === 0 && (
+          <div className="tkt-comments-empty">No comments yet — be the first to add context.</div>
+        )}
+        {comments.map((c, i) => (
+          <div key={i} style={{
+            padding: "10px 12px", marginBottom: 8, borderRadius: 8,
+            background: "var(--surface-2, #F4F1EA)", border: "1px solid var(--line, #E8E6E0)",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <span style={{
+                width: 22, height: 22, borderRadius: "50%", fontSize: 9, fontWeight: 600,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "var(--accent-muted)", color: "var(--accent-ink)",
+              }}>{c.author.slice(0, 2).toUpperCase()}</span>
+              <strong style={{ fontSize: 12, color: "var(--ink)" }}>{c.author}</strong>
+              <span style={{ fontSize: 11, color: "var(--ink-4)" }}>{c.time}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const removed = comments[i]
+                  const updated = comments.filter((_, idx) => idx !== i)
+                  persist({ comments: updated })
+                  if (removed.id) {
+                    import("../../lib/api").then(({ ticketDataApi }) => {
+                      ticketDataApi.removeComment(ticket.id, removed.id!).catch(() => {})
+                    })
+                  }
+                }}
+                style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "var(--ink-4)", fontSize: 13, padding: 0, lineHeight: 1 }}
+                title="Delete"
+              >×</button>
+            </div>
+            <div style={{ fontSize: 13, color: "var(--ink)", lineHeight: 1.5 }}>{c.text}</div>
+          </div>
+        ))}
         <div className="tkt-comment-composer">
           <div className="tkt-comment-avatar" style={{ background: "var(--accent-muted)", color: "var(--accent-ink)" }}>
             You
@@ -595,6 +832,19 @@ function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }
               rows={1}
               value={comment}
               onChange={(e) => setComment(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && comment.trim()) {
+                  e.preventDefault()
+                  const body = comment.trim()
+                  const c = { author: "You", text: body, time: new Date().toLocaleString() }
+                  persist({ comments: [...comments, c] })
+                  setComment("")
+                  showToast("Comment added", "Saved to this ticket.")
+                  import("../../lib/api").then(({ ticketDataApi }) => {
+                    ticketDataApi.addComment(ticket.id, "You", body).catch(() => {})
+                  })
+                }
+              }}
               onInput={(e) => {
                 const el = e.currentTarget
                 el.style.height = "auto"
@@ -606,8 +856,14 @@ function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }
                 type="button"
                 className="tkt-comment-send"
                 onClick={() => {
-                  showToast("Comment added", "Comments aren't persisted yet — coming soon.")
+                  const body = comment.trim()
+                  const c = { author: "You", text: body, time: new Date().toLocaleString() }
+                  persist({ comments: [...comments, c] })
                   setComment("")
+                  showToast("Comment added", "Saved to this ticket.")
+                  import("../../lib/api").then(({ ticketDataApi }) => {
+                    ticketDataApi.addComment(ticket.id, "You", body).catch(() => {})
+                  })
                 }}
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>

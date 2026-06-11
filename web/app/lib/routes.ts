@@ -38,6 +38,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-first-brief": "/onboarding/first-brief",
   "ob-analyzing": `/onboarding/${ONBOARDING_ANALYZING_SLUG}`,
   chat: "/",
+  chats: "/chats",
   brief: "/brief",
   detail: "/evidence",
   prd: "/prd",
@@ -60,6 +61,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/": "chat",
+  "/chats": "chats",
   "/brief": "brief",
   "/evidence": "detail",
   "/prd": "prd",

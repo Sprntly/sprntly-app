@@ -9,6 +9,7 @@ export type ScreenId =
   // ONBOARDING_SCREENS list and the progress dots.
   | "ob-analyzing"
   | "chat"
+  | "chats"
   | "brief"
   | "detail"
   | "prd"
@@ -36,6 +37,7 @@ export const ONBOARDING_SCREENS: ScreenId[] = [
 
 export const APP_SCREENS: ScreenId[] = [
   "chat",
+  "chats",
   "brief",
   "detail",
   "prd",
@@ -62,6 +64,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   // Unnumbered loader — no step counter.
   "ob-analyzing": "Setup",
   chat: "Home",
+  chats: "All chats",
   brief: "Weekly brief",
   detail: "Evidence",
   prd: "PRD",
