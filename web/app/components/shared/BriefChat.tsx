@@ -213,6 +213,14 @@ function IconTicket({ size = 14 }: { size?: number }) {
     </svg>
   )
 }
+function IconSearch({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  )
+}
 
 // ── Mini inline chart + prototype preview (reference card chrome) ─────────────
 // First signed number found in a string ("70% handoff threshold" → 70). Used
@@ -476,6 +484,10 @@ function BriefFindingCard({
             <button type="button" className="fc-btn-secondary" onClick={onPreview}>
               <IconTerminalPrompt size={13} />
               View prototype
+            </button>
+            <button type="button" className="fc-btn-secondary" onClick={onViewEvidence}>
+              <IconSearch size={13} />
+              View evidence
             </button>
           </div>
         </div>
@@ -1035,7 +1047,7 @@ export function BriefChat() {
         <div className="bc-dock">
           {findings.length > 0 ? (
             <div className="bc-suggest">
-              <span className="bc-suggest-label">Suggested</span>
+              {/* <span className="bc-suggest-label">Suggested</span> */}
               <div className="bc-suggest-list">
                 {suggestions.map((s) => (
                   <button

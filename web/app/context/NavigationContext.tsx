@@ -137,6 +137,13 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     }
   }, [sidebarCollapsed])
 
+  // The content panel (Evidence / PRD / Tickets) opens in-place without changing
+  // the route, so a route change always means the user navigated to another page
+  // — close the panel so it never lingers over the new screen.
+  useEffect(() => {
+    setContentPanelTab(null)
+  }, [pathname])
+
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
       const next = !prev
