@@ -11,10 +11,10 @@ import {
   IconEvidence,
   IconHome,
   IconPrd,
-  IconSettings,
   IconSources,
   IconTickets,
 } from "./sidebar-icons"
+import { IconMessageCircle, IconLayoutKanban, IconPrompt, IconSettings } from "@tabler/icons-react"
 import { IconSparkle } from "./app-icons"
 import { CompanySwitcher } from "./CompanySwitcher"
 
@@ -146,11 +146,11 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         {/* Main nav icons */}
         <div className="sb-rail-nav">
           <RailItem screen="chat" icon={<IconHome />} label="Home" />
-          <RailItem screen="brief" icon={<IconBrief />} label="Weekly brief" />
+          <RailItem screen="brief" icon={<IconMessageCircle />} label="Weekly brief" />
           <RailItem screen="detail" icon={<IconEvidence />} label="Evidence" />
           <RailItem screen="prd" icon={<IconPrd />} label="PRD" />
-          <RailItem screen="prototype" icon={<IconSparkle />} label="Prototype" />
-          <RailItem screen="tickets" icon={<IconTickets />} label="Project Management" />
+          <RailItem screen="prototype" icon={<IconPrompt />} label="Prototype" />
+          <RailItem screen="tickets" icon={<IconLayoutKanban />} label="Project Management" />
         </div>
 
         <div className="sb-rail-spacer" />

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { EvidenceSections } from "./EvidenceSections"
@@ -17,8 +17,80 @@ const TABS = [
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
 ] as const
 
+// Content-panel width is persisted across opens and shared with the main column
+// via the --cpanel-width custom property on <html>. The panel never exceeds 60%
+// of the viewport; the lower bound keeps the document readable — wide enough for
+// the 3-up "Impact at a glance" tiles and prose to breathe rather than be crushed.
+const CPANEL_WIDTH_KEY = "sprntly-cpanel-width"
+const CPANEL_WIDTH_MIN = 650
+const CPANEL_MAX_VW = 0.6
+
+/** Clamp a pixel width to [MIN, 60% of viewport]. */
+function clampCpanelWidth(px: number) {
+  const max = Math.round(window.innerWidth * CPANEL_MAX_VW)
+  return Math.min(max, Math.max(CPANEL_WIDTH_MIN, Math.round(px)))
+}
+
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel } = useNavigation()
+
+  // Live width in px; null means "use the CSS default (60vw)" until the user
+  // has resized at least once.
+  const widthRef = useRef<number | null>(null)
+
+  // Apply the saved width on open, re-clamp on viewport resize (so it can never
+  // exceed 60%), and clear the override when the panel closes.
+  useEffect(() => {
+    if (!contentPanelTab) return
+    const root = document.documentElement
+
+    const saved = Number(window.localStorage.getItem(CPANEL_WIDTH_KEY))
+    widthRef.current = Number.isFinite(saved) && saved > 0 ? saved : null
+
+    const apply = () => {
+      // On phones the CSS takes over (full-width sheet) — don't fight it.
+      if (window.innerWidth <= 768 || widthRef.current == null) {
+        root.style.removeProperty("--cpanel-width")
+        return
+      }
+      const next = clampCpanelWidth(widthRef.current)
+      widthRef.current = next
+      root.style.setProperty("--cpanel-width", `${next}px`)
+    }
+
+    apply()
+    window.addEventListener("resize", apply)
+    return () => {
+      window.removeEventListener("resize", apply)
+      root.style.removeProperty("--cpanel-width")
+    }
+  }, [contentPanelTab])
+
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    if (window.innerWidth <= 768) return
+    e.preventDefault()
+    const root = document.documentElement
+    const startX = e.clientX
+    const startW = widthRef.current ?? Math.round(window.innerWidth * CPANEL_MAX_VW)
+    root.classList.add("cpanel-resizing")
+
+    const onMove = (ev: MouseEvent) => {
+      // Handle sits on the panel's left edge; dragging left widens the panel.
+      const next = clampCpanelWidth(startW + (startX - ev.clientX))
+      widthRef.current = next
+      root.style.setProperty("--cpanel-width", `${next}px`)
+    }
+    const onUp = () => {
+      if (widthRef.current != null) {
+        window.localStorage.setItem(CPANEL_WIDTH_KEY, String(widthRef.current))
+      }
+      root.classList.remove("cpanel-resizing")
+      window.removeEventListener("mousemove", onMove)
+      window.removeEventListener("mouseup", onUp)
+    }
+    window.addEventListener("mousemove", onMove)
+    window.addEventListener("mouseup", onUp)
+  }, [])
 
   if (!contentPanelTab) return null
 
@@ -26,6 +98,13 @@ export function ContentPanel() {
     <>
       <div className="cpanel-overlay" onClick={closeContentPanel} />
       <aside className="cpanel">
+        <div
+          className="cpanel-resize-handle"
+          onMouseDown={handleResizeStart}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panel"
+        />
         <div className="cpanel-head">
           <div>
             <div className="cpanel-tabs">
