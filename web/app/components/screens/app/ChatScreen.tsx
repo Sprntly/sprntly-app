@@ -118,7 +118,7 @@ export function ChatScreen() {
         const t = data.turns[i]
         if (t.role === "user") {
           const next = data.turns[i + 1]
-          const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [] } as AskResponse : undefined
+          const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
           restored.push({ id: `resumed-${i}`, query: t.content, reply })
           if (reply) i++ // skip the assistant turn we consumed
         }
