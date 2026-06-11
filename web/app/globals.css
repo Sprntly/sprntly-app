@@ -5863,8 +5863,8 @@
     background: var(--surface);
   }
 
-  /* Suggested next-step actions — single right-aligned row above the
-     composer (label inline with the chips); wraps on narrow screens */
+  /* Suggested next-step actions — single right-aligned row of chips above
+     the composer; wraps on narrow screens */
   .bc-suggest {
     display: flex;
     align-items: center;
@@ -5872,14 +5872,6 @@
     flex-wrap: wrap;
     gap: 8px 10px;
     padding-bottom: 12px;
-  }
-
-  .bc-suggest-label {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #aab3ae;
   }
 
   .bc-suggest-list {
