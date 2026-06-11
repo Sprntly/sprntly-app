@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     clickup_client_secret: str = ""
     clickup_oauth_redirect_uri: str = ""
 
+    # Jira connector (Atlassian OAuth 2.0 3LO, rotating refresh tokens)
+    jira_client_id: str = ""
+    jira_client_secret: str = ""
+    jira_oauth_redirect_uri: str = ""
+
     # HubSpot connector (OAuth 2.0 with refresh tokens)
     hubspot_client_id: str = ""
     hubspot_client_secret: str = ""
