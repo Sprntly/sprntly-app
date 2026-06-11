@@ -78,6 +78,27 @@ class ProbeResult:
     router_convention: str = ""
 
 
+def _strip_comments_and_strings(body: str) -> str:
+    """Remove line comments, block comments, and string literals.
+
+    Posture regexes run on the result so that declaration keywords appearing
+    only inside a comment or string literal do not false-positive CLEAN.
+    Block comments stripped first so their content cannot seed line-comment
+    removal; template literals before single/double quotes.
+    """
+    # Block comments /* ... */ (may span lines)
+    body = re.sub(r"/\*.*?\*/", " ", body, flags=re.DOTALL)
+    # Line comments // ...
+    body = re.sub(r"//[^\n]*", " ", body)
+    # Template literals `...` (may span lines, handle escape sequences)
+    body = re.sub(r"`(?:[^`\\]|\\.)*`", " ", body, flags=re.DOTALL)
+    # Double-quoted strings (handle escape sequences, no newlines)
+    body = re.sub(r'"(?:[^"\\]|\\.)*"', " ", body)
+    # Single-quoted strings (handle escape sequences, no newlines)
+    body = re.sub(r"'(?:[^'\\]|\\.)*'", " ", body)
+    return body
+
+
 def probe_nav_abstraction(snapshot: RepoSnapshot) -> ProbeResult:
     """Scan snapshot for a typed nav abstraction; return a ProbeResult.
 
@@ -91,16 +112,21 @@ def probe_nav_abstraction(snapshot: RepoSnapshot) -> ProbeResult:
     nav_decl_file = ""
 
     # -- Pass 1: scan file bodies for registry / route-table / nav-decl signals --
+    # Posture regexes run on comment-and-string-stripped text only, so a
+    # declaration keyword that appears solely inside a comment or string literal
+    # does not flip the posture to CLEAN.
     for path, body in snapshot.files.items():
-        if _REGISTRY_DECL_RE.search(body):
+        stripped = _strip_comments_and_strings(body)
+
+        if _REGISTRY_DECL_RE.search(stripped):
             if not registry_file:
                 registry_file = path
 
-        if _ROUTE_TABLE_CONST_RE.search(body) or _ROUTE_TABLE_RECORD_RE.search(body):
+        if _ROUTE_TABLE_CONST_RE.search(stripped) or _ROUTE_TABLE_RECORD_RE.search(stripped):
             if path not in route_table_files:
                 route_table_files.append(path)
 
-        if _NAV_DECL_RE.search(body) and not nav_decl_file:
+        if _NAV_DECL_RE.search(stripped) and not nav_decl_file:
             nav_decl_file = path
 
     # -- Determine posture --

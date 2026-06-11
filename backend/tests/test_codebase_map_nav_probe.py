@@ -87,6 +87,34 @@ def test_comment_mention_does_not_flip_clean():
     assert result.posture == "PARTIAL"
 
 
+def test_line_comment_with_declaration_keyword_stays_partial():
+    """enum ScreenId appearing only inside a // comment must not flip posture to CLEAN."""
+    body = (
+        "// TODO: introduce an enum ScreenId here, plus a const ROUTES table.\n"
+        "export default function App() { return null; }\n"
+    )
+    snap = _snap(**{"src/app.tsx": body})
+    snap.tree_paths = ["src/app.tsx"]
+    result = probe_nav_abstraction(snap)
+    assert result.posture == "PARTIAL", (
+        "A // comment containing 'enum ScreenId' must not flip posture to CLEAN"
+    )
+
+
+def test_string_literal_with_declaration_stays_partial():
+    """export const ROUTES appearing only inside a string literal must not flip posture to CLEAN."""
+    body = (
+        "const message = 'export const ROUTES is on the roadmap';\n"
+        "export default function App() { return null; }\n"
+    )
+    snap = _snap(**{"src/app.tsx": body})
+    snap.tree_paths = ["src/app.tsx"]
+    result = probe_nav_abstraction(snap)
+    assert result.posture == "PARTIAL", (
+        "A string literal containing 'export const ROUTES' must not flip posture to CLEAN"
+    )
+
+
 def test_nav_primitive_most_referenced_wins():
     """When goTo is called more times than router.push, nav_primitive == 'goTo'."""
     go_to_calls = "goTo(ScreenId.Team);\n" * 8
