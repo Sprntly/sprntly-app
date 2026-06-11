@@ -59,7 +59,7 @@ from app.config import settings
 from app.corpus import load_corpus
 from app.db import complete_prd_2part, get_brief_by_id
 from app.db.companies import company_id_for_slug
-from app.db.prds import fail_prd
+from app.db.prds import fail_prd, find_existing_prd, start_prd
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
@@ -71,6 +71,9 @@ logger = logging.getLogger(__name__)
 PROMPT_VERSION = "prd-author-v1"
 _SKILL = "prd-author"
 _AGENT = "prd"
+# Storage variant for new PRD rows — shared by the on-demand route
+# (routes/prd.py) and pre-warming below, so dedupe matches across both paths.
+PRD_VARIANT = "v2"
 
 # Agent-specific framing. The prd-author METHOD (the 2-part Part A/Part B
 # structure + anti-hallucination discipline) is supplied by the bound skill;
@@ -259,7 +262,7 @@ def _build_context(brief_id: int, insight_index: int) -> dict:
     }
 
 
-def _call_part(ctx: dict, *, purpose: str, directive: str):
+def _call_part(ctx: dict, *, purpose: str, directive: str, background: bool = False):
     """One prd-author call that emits a single part.
 
     Shares `ctx`'s insight + evidence + template across both parts and steers
@@ -280,17 +283,24 @@ def _call_part(ctx: dict, *, purpose: str, directive: str):
         system=_SYSTEM,
         input=user,
         skill=_SKILL,
+        background=background,
     )
 
 
-def _call_part_a(ctx: dict):
+def _call_part_a(ctx: dict, background: bool = False):
     """Concurrent call A — ONLY the human-readable PRD (Part A)."""
-    return _call_part(ctx, purpose="generate_prd_part_a", directive=_PART_A_DIRECTIVE)
+    return _call_part(
+        ctx, purpose="generate_prd_part_a", directive=_PART_A_DIRECTIVE,
+        background=background,
+    )
 
 
-def _call_part_b(ctx: dict):
+def _call_part_b(ctx: dict, background: bool = False):
     """Concurrent call B — ONLY the LLM Implementation Spec (Part B)."""
-    return _call_part(ctx, purpose="generate_prd_part_b", directive=_PART_B_DIRECTIVE)
+    return _call_part(
+        ctx, purpose="generate_prd_part_b", directive=_PART_B_DIRECTIVE,
+        background=background,
+    )
 
 
 def _finalize(prd_id: int, brief_id: int, insight_index: int, ctx: dict,
@@ -357,7 +367,9 @@ def _finalize(prd_id: int, brief_id: int, insight_index: int, ctx: dict,
         )
 
 
-async def _generate_2part(prd_id: int, brief_id: int, insight_index: int) -> None:
+async def _generate_2part(
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False
+) -> None:
     """Build shared context, run the two part-calls CONCURRENTLY, finalize.
 
     The gateway's `llm_call` is synchronous, so each part runs in a worker
@@ -371,8 +383,8 @@ async def _generate_2part(prd_id: int, brief_id: int, insight_index: int) -> Non
     # Run both halves concurrently. return_exceptions=True so a Part-B failure
     # doesn't cancel an in-flight Part A; we decide per-part below.
     result_a, result_b = await asyncio.gather(
-        asyncio.to_thread(_call_part_a, ctx),
-        asyncio.to_thread(_call_part_b, ctx),
+        asyncio.to_thread(_call_part_a, ctx, background),
+        asyncio.to_thread(_call_part_b, ctx, background),
         return_exceptions=True,
     )
 
@@ -402,18 +414,86 @@ def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
     asyncio.run(_generate_2part(prd_id, brief_id, insight_index))
 
 
-async def generate_prd(prd_id: int, brief_id: int, insight_index: int) -> None:
-    """Run the concurrent two-part PRD generation; update DB with result."""
+async def generate_prd(
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False
+) -> None:
+    """Run the concurrent two-part PRD generation; update DB with result.
+
+    `background=True` (pre-warming) routes both part-calls through the LLM
+    gate's low-priority lane: capped concurrency, and always behind any
+    interactive caller — a user's "Generate PRD" click is never queued
+    behind warm work.
+    """
     logger.info(
-        "PRD generation starting prd_id=%s brief_id=%s insight_index=%s",
+        "PRD generation starting prd_id=%s brief_id=%s insight_index=%s priority=%s",
         prd_id,
         brief_id,
         insight_index,
+        "background" if background else "interactive",
     )
     try:
-        await _generate_2part(prd_id, brief_id, insight_index)
+        await _generate_2part(prd_id, brief_id, insight_index, background)
         logger.info("PRD generation succeeded prd_id=%s", prd_id)
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
         logger.exception("PRD generation failed prd_id=%s", prd_id)
         fail_prd(prd_id, msg)
+
+
+def _top_insight_indices(insights: list, count: int) -> list[int]:
+    """Original indices of the `count` insights a user is likeliest to open:
+    the LLM-flagged headline insight first, then by confidence descending —
+    the same hero-selection order the brief UI renders."""
+    ranked = sorted(
+        range(len(insights)),
+        key=lambda i: (
+            not bool((insights[i] or {}).get("is_headline")),
+            -float((insights[i] or {}).get("confidence") or 0.0),
+        ),
+    )
+    return ranked[:count]
+
+
+async def warm_prds_for_brief(brief: dict) -> None:
+    """Pre-generate PRDs for the top insights of a freshly-saved brief.
+
+    Runs strictly in the LLM gate's BACKGROUND lane (see app.llm._PriorityGate):
+    at most one warm model-call holds a slot at a time and any interactive
+    caller jumps ahead of it, so a user's "Generate PRD" click is never queued
+    behind warming. PRDs warm sequentially (cheapest way to keep the background
+    footprint at one call) and dedupe against existing rows, so a brief that
+    already warmed — or an insight the user already generated — is skipped.
+
+    Error-isolated per insight: warming is a perf optimization, never a
+    correctness requirement.
+    """
+    count = settings.prd_warm_count
+    if count <= 0:
+        return
+    brief_id = brief.get("id")
+    insights = brief.get("insights") or []
+    if not brief_id or not insights:
+        return
+    from app.prompts import PRD_TEMPLATE_VERSION
+
+    for i in _top_insight_indices(insights, count):
+        try:
+            if find_existing_prd(brief_id, i, variant=PRD_VARIANT):
+                continue
+            title = (insights[i] or {}).get("title") or f"Insight #{i + 1}"
+            prd_id = start_prd(
+                brief_id=brief_id,
+                insight_index=i,
+                title=title,
+                template_version=PRD_TEMPLATE_VERSION,
+                variant=PRD_VARIANT,
+            )
+            logger.info(
+                "Warming PRD prd_id=%s brief_id=%s insight_index=%s",
+                prd_id, brief_id, i,
+            )
+            await generate_prd(prd_id, brief_id, i, background=True)
+        except Exception:  # noqa: BLE001 — warming is best-effort
+            logger.exception(
+                "PRD warming failed brief_id=%s insight_index=%s", brief_id, i
+            )

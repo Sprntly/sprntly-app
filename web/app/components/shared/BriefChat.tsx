@@ -1047,7 +1047,6 @@ export function BriefChat() {
         <div className="bc-dock">
           {findings.length > 0 ? (
             <div className="bc-suggest">
-              {/* <span className="bc-suggest-label">Suggested</span> */}
               <div className="bc-suggest-list">
                 {suggestions.map((s) => (
                   <button

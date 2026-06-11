@@ -112,6 +112,7 @@ def llm_call(
     skill: Optional[str] = None,
     skill_module: Optional[str] = None,
     log: bool = True,
+    background: bool = False,
 ) -> LLMResult:
     """One attributed, telemetered LLM call. See module docstring.
 
@@ -147,7 +148,7 @@ def llm_call(
         output: Any = call_json(
             system=system, user=input, model=chosen_model, max_tokens=max_tokens,
             schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
-            meta_out=meta, stream=stream, timeout=timeout,
+            meta_out=meta, stream=stream, timeout=timeout, background=background,
         )
     else:
         # call_md has no cacheable-prefix path; fold the method into the system
@@ -155,7 +156,7 @@ def llm_call(
         md_system = f"{method_block}\n{system}" if method_block else system
         output = call_md(
             system=md_system, user=input, model=chosen_model, max_tokens=max_tokens,
-            meta_out=meta, stream=stream, timeout=timeout,
+            meta_out=meta, stream=stream, timeout=timeout, background=background,
         )
     latency_ms = int((time.monotonic() - t0) * 1000)
 

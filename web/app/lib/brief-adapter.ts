@@ -12,7 +12,7 @@ import type {
   DetailState,
 } from "../types/content"
 import type { Brief, ChartHint, ConvergenceItem, Insight } from "./api"
-import { briefToBriefV2State } from "./brief-v2-adapter"
+import { briefToBriefV2State, companyLabel } from "./brief-v2-adapter"
 
 type TagMeta = {
   tagType: BriefTagType
@@ -218,11 +218,6 @@ function heroMetricsFor(
   }))
 }
 
-function prettyCompany(company: string): string {
-  const c = (company || "company").trim()
-  return c.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
-}
-
 function signalLineFromInsight(insight: Insight): string {
   const conv = insightArrays(insight).convergence
   if (conv.length > 0) {
@@ -263,7 +258,7 @@ function buildDocHeader(brief: Brief, insights: Insight[]): BriefDocHeader {
       ? `${first.domain} · ${first.subdomain}`
       : first.domain || "Product"
   return {
-    company: prettyCompany(brief.company || ""),
+    company: companyLabel(brief),
     weekOf: brief.week_label || brief.generated_at?.slice(0, 10) || "—",
     productArea,
   }

@@ -59,7 +59,62 @@ def _resolve_max_concurrency() -> int:
     return n if n > 0 else _DEFAULT_MAX_CONCURRENCY
 
 
-_llm_semaphore = threading.BoundedSemaphore(_resolve_max_concurrency())
+class _PriorityGate:
+    """Two-lane concurrency gate over the process-wide call cap.
+
+    Interactive callers (the default — anything a user is actively waiting on)
+    compete for `capacity` slots exactly like the old BoundedSemaphore.
+    Background callers (pre-warming) are second-class twice over:
+
+      - at most `bg_cap` background calls hold slots at once, so warming can
+        never occupy the whole cap; and
+      - a background caller never acquires while ANY interactive caller is
+        waiting — a user's click always jumps the warm queue.
+
+    A threading (not asyncio) primitive for the same reason the old semaphore
+    was one: callers hold the slot from worker threads (see module note), so
+    waiting blocks that thread, never the event loop.
+    """
+
+    def __init__(self, capacity: int, bg_cap: int = 1) -> None:
+        self._capacity = capacity
+        # Background may never consume the full cap (that would starve clicks
+        # until a warm call finishes); with capacity 1 there is no spare slot,
+        # so background degrades to polite-FIFO behind interactive waiters.
+        self._bg_cap = max(1, min(bg_cap, capacity - 1)) if capacity > 1 else 1
+        self._cond = threading.Condition()
+        self._active = 0
+        self._bg_active = 0
+        self._interactive_waiting = 0
+
+    def acquire(self, *, background: bool = False) -> None:
+        with self._cond:
+            if background:
+                while (
+                    self._active >= self._capacity
+                    or self._bg_active >= self._bg_cap
+                    or self._interactive_waiting > 0
+                ):
+                    self._cond.wait()
+                self._bg_active += 1
+            else:
+                self._interactive_waiting += 1
+                try:
+                    while self._active >= self._capacity:
+                        self._cond.wait()
+                finally:
+                    self._interactive_waiting -= 1
+            self._active += 1
+
+    def release(self, *, background: bool = False) -> None:
+        with self._cond:
+            self._active -= 1
+            if background:
+                self._bg_active -= 1
+            self._cond.notify_all()
+
+
+_llm_gate = _PriorityGate(_resolve_max_concurrency())
 
 # Retry policy for transient API failures. 4 attempts ≈ 0.5s + 2s + 8s of
 # backoff (+ jitter) worst-case before surfacing the error.
@@ -105,7 +160,9 @@ def _attempt_delay(attempt: int) -> float:
     return _BACKOFF_BASE_S * (4 ** attempt) * (1 + random.random() * 0.25)
 
 
-def _create_with_retries(client: Anthropic, *, stream: bool = False, **kwargs):
+def _create_with_retries(
+    client: Anthropic, *, stream: bool = False, background: bool = False, **kwargs
+):
     """`messages.create` with exponential backoff on transient failures.
 
     When `stream=True`, the request is issued through `client.messages.stream`
@@ -116,13 +173,17 @@ def _create_with_retries(client: Anthropic, *, stream: bool = False, **kwargs):
     are unchanged.
 
     The whole call (including its retries) holds ONE process-wide concurrency
-    slot (`_llm_semaphore`) for its full duration, so the box never runs more
+    slot (`_llm_gate`) for its full duration, so the box never runs more
     than LLM_MAX_CONCURRENCY model calls at once. Acquiring blocks the calling
     WORKER THREAD (not the asyncio loop — see module note); the slot is always
     released in `finally`, so an Anthropic error never leaks a slot.
+
+    `background=True` marks the call as pre-warming: it waits in the gate's
+    low-priority lane (capped, and always behind interactive waiters) so a
+    user-facing call is never queued behind warm work.
     """
     _wait_start = _time.monotonic()
-    _llm_semaphore.acquire()
+    _llm_gate.acquire(background=background)
     waited = _time.monotonic() - _wait_start
     if waited >= _SLOT_WAIT_LOG_THRESHOLD_S:
         # Saturation is observable but not spammy: only calls that actually had
@@ -154,7 +215,7 @@ def _create_with_retries(client: Anthropic, *, stream: bool = False, **kwargs):
                 _time.sleep(delay)
         raise last  # pragma: no cover — loop always returns or raises
     finally:
-        _llm_semaphore.release()
+        _llm_gate.release(background=background)
 
 
 def _build_base_kwargs(
@@ -227,6 +288,7 @@ def call_json(
     meta_out: dict | None = None,
     stream: bool = False,
     timeout: float | None = None,
+    background: bool = False,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
 
@@ -265,6 +327,7 @@ def call_json(
         msg = _create_with_retries(
             client,
             stream=stream,
+            background=background,
             **base_kwargs,
             tools=[tool],
             tool_choice={"type": "tool", "name": "submit_response"},
@@ -277,7 +340,7 @@ def call_json(
             502, "LLM did not invoke the structured response tool"
         )
 
-    msg = _create_with_retries(client, stream=stream, **base_kwargs)
+    msg = _create_with_retries(client, stream=stream, background=background, **base_kwargs)
     _capture_meta(meta_out, msg, model)
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
     # Tolerate accidental fences
@@ -303,6 +366,7 @@ def call_md(
     meta_out: dict | None = None,
     stream: bool = False,
     timeout: float | None = None,
+    background: bool = False,
 ) -> str:
     """Call Claude expecting plain markdown output.
 
@@ -318,7 +382,7 @@ def call_md(
     )
     if timeout is not None:
         kwargs["timeout"] = timeout
-    msg = _create_with_retries(get_client(), stream=stream, **kwargs)
+    msg = _create_with_retries(get_client(), stream=stream, background=background, **kwargs)
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 

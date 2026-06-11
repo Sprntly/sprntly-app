@@ -332,6 +332,13 @@ function prettyCompany(company: string): string {
   return c.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+/** Display label for a brief's company: prefer the human-readable
+ * `company_name` from the backend; the slug is an internal key and only
+ * shows (prettified) when no companies row exists (legacy demo datasets). */
+export function companyLabel(brief: Pick<Brief, "company" | "company_name">): string {
+  return brief.company_name?.trim() || prettyCompany(brief.company || "")
+}
+
 function buildKpiTiles(insights: Insight[]): BriefV2KpiTile[] {
   // Tile 1: lead impact metric (from hero) — tone follows hero tag.
   // Tile 2: secondary scale metric (hero's second metric, or the first
@@ -385,7 +392,7 @@ export function briefToBriefV2State(brief: Brief): BriefV2State {
   const empty: BriefV2State = {
     headline: null,
     weekOf: null,
-    company: prettyCompany(brief.company || ""),
+    company: companyLabel(brief),
     productArea: "",
     kpiTiles: [],
     hero: null,
@@ -417,7 +424,7 @@ export function briefToBriefV2State(brief: Brief): BriefV2State {
   return {
     headline: brief.summary_headline?.trim() || null,
     weekOf: brief.week_label || brief.generated_at?.slice(0, 10) || null,
-    company: prettyCompany(brief.company || ""),
+    company: companyLabel(brief),
     productArea,
     kpiTiles: buildKpiTiles(insights),
     hero,

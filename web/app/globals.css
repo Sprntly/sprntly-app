@@ -5906,8 +5906,8 @@
     background: transparent;
   }
 
-  /* Suggested next-step actions — floating right-aligned stack that hovers just
-     above the composer (absolute, so it overlays the thread, no reserved strip). */
+  /* Suggested next-step actions — single right-aligned row of chips above
+     the composer; wraps on narrow screens */
   .bc-suggest {
     position: absolute;
     left: 24px;
@@ -5919,23 +5919,13 @@
     pointer-events: none;
   }
 
-  .bc-suggest-label,
-  .bc-suggest-list {
-    pointer-events: auto;
-  }
-
-  .bc-suggest-label {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #aab3ae;
-  }
-
   .bc-suggest-list {
     display: flex;
     flex-direction: row;
     align-items: flex-end;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 7px;
   }
 

@@ -39,6 +39,20 @@ def company_id_for_slug(slug: str) -> str | None:
     return result.data[0]["id"] if result.data else None
 
 
+def display_name_for_slug(slug: str) -> str | None:
+    """Resolve a company slug → its human-readable display name. None if no
+    company owns the slug (e.g. legacy demo datasets)."""
+    client = require_client()
+    result = (
+        client.table("companies")
+        .select("display_name")
+        .eq("slug", slug)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0]["display_name"] if result.data else None
+
+
 def slug_for_company_id(company_id: str) -> str | None:
     """Resolve a company id → its slug (the dataset slug). None if not found."""
     client = require_client()
