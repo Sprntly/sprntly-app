@@ -4854,24 +4854,25 @@
     flex: 1 1 auto;
     min-height: 0;
     width: 100%;
-    /* Full width so the thread's scrollbar hugs the screen edge; the header,
-       thread and composer each center their own content at 1024px below. */
+    /* Full width so the thread's scrollbar hugs the screen edge; the header
+       spans the full column width, while the thread and composer below each
+       center their own content at 1024px. */
     display: flex;
     flex-direction: column;
   }
 
-  /* Brief header */
+  /* Brief header — full width: title hugs the left edge, action icons the
+     right, and the bottom border spans the whole column (the thread and
+     composer below still center their content at 1024px). */
   .bh {
     flex-shrink: 0;
     width: 100%;
-    max-width: 1024px;
-    margin: 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
-    padding: 16px 24px 14px;
+    padding: 16px 28px 14px;
     border-bottom: 1px solid var(--line);
   }
 

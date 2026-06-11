@@ -19,6 +19,7 @@ import type {
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
 import { IconClose, IconSendUp, IconSparkle } from "./app-icons"
+import { IconPlug } from "@tabler/icons-react"
 
 type Finding = BriefV2HeroFinding | BriefV2CompactFinding
 
@@ -148,16 +149,6 @@ function IconAt({ size = 15 }: { size?: number }) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <circle cx="12" cy="12" r="4" />
       <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.9 7.9" />
-    </svg>
-  )
-}
-function IconShareSmall({ size = 15 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <circle cx="18" cy="5" r="3" />
-      <circle cx="6" cy="12" r="3" />
-      <circle cx="18" cy="19" r="3" />
-      <path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4" />
     </svg>
   )
 }
@@ -964,11 +955,11 @@ export function BriefChat() {
           <button
             type="button"
             className="bh-iconbtn"
-            title="Share"
-            aria-label="Share brief"
-            onClick={() => showToast("Share", "Sharing the brief isn't wired up yet.")}
+            title="Connectors"
+            aria-label="Open connectors"
+            onClick={() => goTo("connectors")}
           >
-            <IconShareSmall />
+            <IconPlug />
           </button>
           <button
             type="button"
