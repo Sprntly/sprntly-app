@@ -140,7 +140,7 @@ export function ChatScreen() {
       import("../../../lib/api").then(({ conversationsApi }) => {
         // If this is a follow-up in the same thread, just add a turn
         if (dbConvIdRef.current) {
-          conversationsApi.addTurn(dbConvIdRef.current, "user", query).catch(() => {})
+          conversationsApi.addTurn(dbConvIdRef.current, "user", query).catch(() => { })
           return
         }
         // New conversation
@@ -157,8 +157,8 @@ export function ChatScreen() {
             c.id === turnId ? { ...c, _dbId: conv.id } as any : c,
           )
           setContent({ conversations: tagged })
-          conversationsApi.addTurn(conv.id, "user", query).catch(() => {})
-        }).catch(() => {})
+          conversationsApi.addTurn(conv.id, "user", query).catch(() => { })
+        }).catch(() => { })
       })
     },
     [setContent],
@@ -186,7 +186,7 @@ export function ChatScreen() {
           ? updates.reply
           : (updates.reply as any)?.answer || JSON.stringify(updates.reply).slice(0, 2000)
         import("../../../lib/api").then(({ conversationsApi }) => {
-          conversationsApi.addTurn(dbConvIdRef.current!, "assistant", replyText).catch(() => {})
+          conversationsApi.addTurn(dbConvIdRef.current!, "assistant", replyText).catch(() => { })
         })
       }
     },
@@ -221,8 +221,8 @@ export function ChatScreen() {
             ? detail
             : Array.isArray(detail)
               ? detail
-                  .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
-                  .join(" · ")
+                .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
+                .join(" · ")
               : null
         const msg =
           e instanceof ApiError
@@ -315,87 +315,7 @@ export function ChatScreen() {
     >
       <div className="home-chat-root">
         <div className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}>
-          <aside
-            className="od-rail"
-            onMouseEnter={() => setRailExpanded(true)}
-            onMouseLeave={() => setRailExpanded(false)}
-          >
-            <div className="od-rail-collapsed-icon" aria-hidden>
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M3 12a9 9 0 1 0 3-6.7" />
-                <path d="M3 4v5h5" />
-                <path d="M12 7v5l3 2" />
-              </svg>
-            </div>
-            <div className="od-rail-head">
-              <h3 className="od-rail-title">Conversations</h3>
-              <button type="button" className="od-rail-newbtn" onClick={startNewThread}>
-                + New
-              </button>
-            </div>
-            <div className="od-rail-body">
-              {conversations.length === 0 ? (
-                <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--muted)" }}>
-                  No saved threads yet.
-                </div>
-              ) : (
-                conversations.map((conv, i) => (
-                  <div
-                    key={conv.id}
-                    className={`od-conv-item ${activeConv === i ? "active" : ""}`}
-                    onClick={async () => {
-                      setActiveConv(i)
-                      // Try to load full turns from DB
-                      const dbId = (conv as any)._dbId as number | undefined
-                      if (dbId) {
-                        try {
-                          const { conversationsApi: cApi } = await import("../../../lib/api")
-                          const res = await cApi.listTurns(dbId)
-                          if (res.turns.length > 0) {
-                            dbConvIdRef.current = dbId
-                            const restored: ThreadTurn[] = []
-                            for (let j = 0; j < res.turns.length; j++) {
-                              const t = res.turns[j]
-                              if (t.role === "user") {
-                                const next = res.turns[j + 1]
-                                const reply = next?.role === "assistant"
-                                  ? ({ answer: next.content, sources: [], follow_ups: [] } as AskResponse)
-                                  : undefined
-                                restored.push({ id: `db-${t.id}`, query: t.content, reply })
-                                if (reply) j++
-                              }
-                            }
-                            setThread(restored)
-                            return
-                          }
-                        } catch { /* fallback below */ }
-                      }
-                      // Fallback: single saved turn
-                      const st = conv.savedTurn
-                      if (st) {
-                        dbConvIdRef.current = null
-                        setThread([{ id: st.id, query: st.query, reply: st.reply, error: st.error }])
-                      } else {
-                        setThread([])
-                      }
-                    }}
-                  >
-                    <div className="od-conv-title">{conv.title}</div>
-                    <div className="od-conv-time">{conv.time}</div>
-                  </div>
-                ))
-              )}
-            </div>
-          </aside>
+
 
           <main className={`od-center ${hasThread ? "od-center--thread" : "od-center--landing"}`}>
             <div className={`od-center-scroll${!hasThread ? " od-center-scroll--home-landing" : ""}`}>
@@ -498,7 +418,7 @@ export function ChatScreen() {
                           cursor: "pointer", color: "var(--ink-2, #5A5853)", display: "flex", alignItems: "center", gap: 5,
                         }}
                       >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
                         View evidence
                       </button>
                       <button
@@ -510,7 +430,7 @@ export function ChatScreen() {
                           cursor: "pointer", color: "#fff", fontWeight: 600, display: "flex", alignItems: "center", gap: 5,
                         }}
                       >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
                         View PRD
                       </button>
                       <button
@@ -522,7 +442,7 @@ export function ChatScreen() {
                           cursor: "pointer", color: "var(--ink-2, #5A5853)", display: "flex", alignItems: "center", gap: 5,
                         }}
                       >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M9 21V9" /></svg>
                         View tickets
                       </button>
                     </div>

@@ -7,14 +7,13 @@ import { useAuth } from "../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import {
-  IconBrief,
   IconChats,
-  IconEvidence,
   IconHome,
   IconPrd,
   IconSettings,
   IconSources,
   IconTickets,
+  IconBrief,
 } from "./sidebar-icons"
 import { IconSparkle } from "./app-icons"
 import { CompanySwitcher } from "./CompanySwitcher"
@@ -148,8 +147,6 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
         <div className="sb-rail-nav">
           <RailItem screen="chat" icon={<IconHome />} label="Home" />
           <RailItem screen="chats" icon={<IconChats />} label="All chats" />
-          <RailItem screen="brief" icon={<IconBrief />} label="Weekly brief" />
-          <RailItem screen="detail" icon={<IconEvidence />} label="Evidence" />
           <RailItem screen="prd" icon={<IconPrd />} label="PRD" />
           <RailItem screen="prototype" icon={<IconSparkle />} label="Prototype" />
           <RailItem screen="tickets" icon={<IconTickets />} label="Project Management" />
@@ -247,8 +244,7 @@ export function Sidebar({ activeCompany, onSwitchCompany }: SidebarProps = {}) {
           label="Weekly brief"
           count={content.sidebarBriefCount ?? undefined}
         />
-        <NavItem screen="detail" icon={<IconEvidence />} label="Evidence" />
-        <NavItem screen="prd" icon={<IconPrd />} label="PRD" />
+        {/* <NavItem screen="prd" icon={<IconPrd />} label="PRD" /> */}
         <NavItem screen="prototype" icon={<IconSparkle />} label="Prototype" />
         <NavItem screen="tickets" icon={<IconTickets />} label="Project Management" />
         <div className="sb-spacer" />
