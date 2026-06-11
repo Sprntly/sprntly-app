@@ -80,6 +80,19 @@ def create(
     body: CreateDatasetIn,
     company: CompanyContext = Depends(require_company),
 ):
+    # Format first (422), then the tenant gate: a dataset slug IS a company
+    # slug, and onboarding (not this route) is what creates companies. Only
+    # the caller's own slug may be registered here — otherwise any signed-in
+    # user could mint dataset rows for arbitrary slugs (including ones a
+    # future tenant would claim).
+    try:
+        slug = datasets.validate_slug(body.slug)
+    except datasets.InvalidSlug as e:
+        raise HTTPException(422, str(e))
+    if slug != slug_for_company_id(company.company_id):
+        raise HTTPException(
+            403, "Datasets can only be created for your own company"
+        )
     try:
         out = datasets.create_dataset(slug=body.slug, display_name=body.display_name)
     except datasets.DatasetAlreadyExists as e:

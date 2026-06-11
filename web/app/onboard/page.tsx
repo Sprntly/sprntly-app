@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../lib/auth"
+import { fetchWorkspaceForUser } from "../lib/onboarding/store"
+import { isSupabaseConfigured } from "../lib/supabase/client"
 import {
   ApiError,
   briefApi,
@@ -56,6 +58,36 @@ export default function OnboardPage() {
       router.replace("/sign-in")
     }
   }, [auth.kind, router])
+
+  // Mirror of the /onboarding/* OnboardingCompletedGuard (see
+  // app/(app)/onboarding/layout.tsx): a user who already finished onboarding
+  // must not reach this page either — it creates companies/datasets. We hold
+  // rendering until the workspace check resolves so the form never flashes.
+  const [workspaceChecked, setWorkspaceChecked] = useState(false)
+  useEffect(() => {
+    if (auth.kind !== "authed") return
+    if (!isSupabaseConfigured()) {
+      setWorkspaceChecked(true)
+      return
+    }
+    let cancelled = false
+    fetchWorkspaceForUser(auth.user.id)
+      .then((w) => {
+        if (cancelled) return
+        if (w?.onboarding_completed_at != null) {
+          router.replace("/")
+        } else {
+          setWorkspaceChecked(true)
+        }
+      })
+      .catch(() => {
+        // Workspace lookup failing must not lock a mid-onboarding user out.
+        if (!cancelled) setWorkspaceChecked(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [auth, router])
 
   // Keep slug synced to display name until the user overrides it.
   useEffect(() => {
@@ -158,7 +190,8 @@ export default function OnboardPage() {
   if (
     auth.kind === "loading" ||
     auth.kind === "anonymous" ||
-    auth.kind === "unconfigured"
+    auth.kind === "unconfigured" ||
+    !workspaceChecked
   ) {
     return null
   }
