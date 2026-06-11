@@ -268,6 +268,174 @@ def test_edges_module_imports_without_anthropic_or_ast_parser():
     assert callable(getattr(mod, "resolve_edges", None))
 
 
+# ── Regression — NavLink and multi-line JSX discovery ─────────────────────────
+
+
+def test_navlink_literal_edge_resolved():
+    """<NavLink to='/team'> yields a resolved literal edge."""
+    snap = _snap({"app/home/page.tsx": '<NavLink to="/team">'})
+    nodes = [_node("/home", "app/home/page.tsx")]
+    edges, unresolved = resolve_edges(snap, _probe(), nodes)
+
+    assert len(edges) == 1
+    e = edges[0]
+    assert e.to_route == "/team"
+    assert e.kind == "literal"
+    assert e.resolved is True
+    assert unresolved == []
+
+
+def test_multiline_link_literal_discovered():
+    """<Link> with to= on the next physical line yields a resolved literal edge."""
+    content = '<Link\n  to="/customers"\n>'
+    snap = _snap({"app/home/page.tsx": content})
+    nodes = [_node("/home", "app/home/page.tsx")]
+    edges, _ = resolve_edges(snap, _probe(), nodes)
+
+    assert len(edges) == 1
+    assert edges[0].to_route == "/customers"
+    assert edges[0].kind == "literal"
+
+
+def test_multiline_navlink_literal_discovered():
+    """<NavLink> with to= on the next physical line yields a resolved literal edge."""
+    content = '<NavLink\n  to="/flows/new"\n>'
+    snap = _snap({"app/home/page.tsx": content})
+    nodes = [_node("/home", "app/home/page.tsx")]
+    edges, _ = resolve_edges(snap, _probe(), nodes)
+
+    assert len(edges) == 1
+    assert edges[0].to_route == "/flows/new"
+    assert edges[0].kind == "literal"
+
+
+def test_multiline_path_builder_discovered():
+    """<Link> with a template-literal to= on the next line resolves as path_builder."""
+    content = "<Link\n  to={`/flows/${id}/edit`}\n>"
+    snap = _snap({"app/home/page.tsx": content})
+    nodes = [_node("/home", "app/home/page.tsx")]
+    edges, _ = resolve_edges(snap, _probe(), nodes)
+
+    assert len(edges) == 1
+    assert edges[0].to_route == "/flows/:id/edit"
+    assert edges[0].kind == "path_builder"
+    assert edges[0].resolved is True
+
+
+def test_trailing_comment_after_real_call_not_mis_resolved():
+    """goTo('/team') // goTo('/admin') yields exactly one edge to /team."""
+    snap = _snap({"app/home/page.tsx": "goTo('/team') // goTo('/admin')"})
+    nodes = [_node("/home", "app/home/page.tsx")]
+    edges, unresolved = resolve_edges(snap, _probe(), nodes)
+
+    routes = [e.to_route for e in edges]
+    assert "/team" in routes, "real nav call must be discovered"
+    assert "/admin" not in routes, "commented nav target must not produce an edge"
+
+
+# ── Composite — launchpad-shape ────────────────────────────────────────────────
+
+
+def test_launchpad_shape_multiline_graph_not_empty():
+    """Multi-line JSX nav (NavLink + Link + path-builder + loop-var) yields non-empty graph."""
+    content = (
+        '<NavLink\n  to="/customers"\n>\n'
+        '<NavLink\n  to="/flows/new"\n>\n'
+        "<Link\n  to={`/flows/${id}/edit`}\n>\n"
+        "<Link\n  to={`/customers/${id}`}\n>\n"
+        "<Link to={to}>\n"
+        "<Link to={to}>\n"
+    )
+    snap = _snap({"app/main/page.tsx": content})
+    nodes = [_node("/main", "app/main/page.tsx")]
+    edges, unresolved = resolve_edges(snap, _probe(posture="PARTIAL"), nodes)
+
+    to_routes = {e.to_route for e in edges}
+    assert "/customers" in to_routes
+    assert "/flows/new" in to_routes
+    assert "/flows/:id/edit" in to_routes
+    assert "/customers/:id" in to_routes
+    assert len(edges) >= 4
+    assert len(unresolved) >= 2
+
+
+# ── Non-regression — guards the fix scope ─────────────────────────────────────
+
+
+def test_trailing_comment_does_not_overstrip_real_route():
+    """A trailing comment on a line with a real nav call does not suppress the call."""
+    snap = _snap({"app/home/page.tsx": "navigate('/team'); // old path was '/home'"})
+    nodes = [_node("/home", "app/home/page.tsx")]
+    edges, _ = resolve_edges(snap, _probe(), nodes)
+
+    assert any(e.to_route == "/team" for e in edges)
+    assert not any(e.to_route == "/home" for e in edges)
+
+
+def test_resolver_functions_unchanged():
+    """The resolver classifiers are unchanged — the fix stays in discovery."""
+    import inspect
+    from app.design_agent.codebase_map import edges as edges_mod
+
+    classify_src = inspect.getsource(edges_mod._classify)
+    assert "external" in classify_src
+    assert "path_builder" in classify_src
+    assert "literal" in classify_src
+    assert "_classify_reason" in classify_src
+
+    norm_src = inspect.getsource(edges_mod._normalize_template)
+    assert ":param" in norm_src
+    assert "_INTERP_RE" in norm_src
+
+
+def test_multiline_call_site_line_number_correct():
+    """A multi-line NavLink opening on line 3 emits a call_site anchored to line 3."""
+    content = "const a = 1;\nconst b = 2;\n<NavLink\n  to=\"/team\"\n/>"
+    snap = _snap({"app/home/page.tsx": content})
+    nodes = [_node("/home", "app/home/page.tsx")]
+    edges, _ = resolve_edges(snap, _probe(), nodes)
+
+    assert len(edges) == 1
+    assert edges[0].call_site.endswith(":3"), (
+        f"call_site must reference the opening-tag line; got {edges[0].call_site!r}"
+    )
+
+
+def test_anchor_external_still_classified():
+    """<a href=...> still produces an external edge; NavLink does not match the anchor regex."""
+    from app.design_agent.codebase_map.edges import _ANCHOR_HREF_RE
+
+    snap = _snap({"app/nav/page.tsx": '<a href="https://external.com">'})
+    nodes = [_node("/nav", "app/nav/page.tsx")]
+    edges, _ = resolve_edges(snap, _probe(), nodes)
+    assert len(edges) == 1
+    assert edges[0].kind == "external"
+
+    assert not _ANCHOR_HREF_RE.search("<NavLink to='/home'>"), (
+        "<NavLink> must not match the anchor regex"
+    )
+
+
+def test_resolution_is_deterministic_multiline():
+    """resolve_edges yields identical sorted results on multi-line NavLink input."""
+    content = (
+        '<NavLink\n  to="/gamma"\n>\n'
+        '<NavLink\n  to="/alpha"\n>\n'
+        '<NavLink\n  to="/beta"\n>\n'
+    )
+    snap = _snap({"app/home/page.tsx": content})
+    nodes = [_node("/home", "app/home/page.tsx")]
+    probe = _probe()
+
+    edges1, unresolved1 = resolve_edges(snap, probe, nodes)
+    edges2, unresolved2 = resolve_edges(snap, probe, nodes)
+
+    assert edges1 == edges2
+    assert unresolved1 == unresolved2
+    routes = [e.to_route for e in edges1]
+    assert routes == sorted(routes)
+
+
 def test_no_prohibited_tokens_in_source():
     """Neither edges.py nor this test file contain internal tracking tokens.
 
