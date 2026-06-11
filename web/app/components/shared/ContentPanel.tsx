@@ -309,7 +309,7 @@ interface Ticket {
   personRole: string
   acceptanceCriteria: string[]
   prdSection: string
-  attachments: { label: string; sub: string }[]
+  attachments: { id?: number; label: string; sub: string }[]
 }
 
 const MOCK_TICKETS: Ticket[] = [
@@ -619,7 +619,7 @@ function TicketDetail({ ticket, onBack }: { ticket: Ticket; onBack: () => void }
   const [overrides, setOverrides] = useState<TktOverrides>(() => loadTktLocal(ticket.id))
   const desc = overrides.description ?? ticket.description
   const criteria = overrides.acceptanceCriteria ?? ticket.acceptanceCriteria
-  const attachments = overrides.attachments ?? ticket.attachments.map((a) => ({ label: a.label, sub: a.sub }))
+  const attachments = overrides.attachments ?? ticket.attachments.map((a) => ({ id: a.id, label: a.label, sub: a.sub }))
   const comments = overrides.comments ?? []
   const descTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 

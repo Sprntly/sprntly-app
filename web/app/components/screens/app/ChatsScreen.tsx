@@ -189,7 +189,7 @@ export function ChatsScreen() {
       id: String(c.id),
       title: c.title,
       time: c.created_at,
-      savedTurn: { query: c.query || c.preview, reply: c.reply },
+      savedTurn: { id: String(c.id), query: c.query || c.preview },
       _pinned: c.pinned,
       _agentType: c.agent_type,
       _dbId: c.id,
