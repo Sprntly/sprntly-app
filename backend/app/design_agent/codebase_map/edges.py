@@ -26,12 +26,21 @@ _NAV_CALL_RE = re.compile(
     r"\b(?:goTo|navigate|navigateTo|router\.push|router\.replace)\s*\(([^),\n]*)"
 )
 
-# JSX <Link href=...> and <Link to=...> (handles "str", 'str', and {expr} forms)
+# JSX <Link href=...> / <NavLink href=...> and <Link to=...> / <NavLink to=...>
+# (handles "str", 'str', and {expr} forms; re.DOTALL lets [^>]* span newlines
+# so Prettier-formatted multi-line tags with to= on the next line are matched)
+# The curly-brace arm uses (?:[^{}]|\{[^{}]*\})* (one-level nesting) so that
+# template literals containing ${id} interpolations are captured in full — the
+# simpler [^}]+ would stop at the } inside ${id} and truncate the raw_arg.
 _JSX_HREF_RE = re.compile(
-    r"<Link\b[^>]*\bhref\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|\{([^}]+)\})"
+    r"<(?:Link|NavLink)\b[^>]*\bhref\s*=\s*"
+    r"(?:\"([^\"]+)\"|'([^']+)'|\{((?:[^{}]|\{[^{}]*\})*)\})",
+    re.DOTALL,
 )
 _JSX_TO_RE = re.compile(
-    r"<Link\b[^>]*\bto\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|\{([^}]+)\})"
+    r"<(?:Link|NavLink)\b[^>]*\bto\s*=\s*"
+    r"(?:\"([^\"]+)\"|'([^']+)'|\{((?:[^{}]|\{[^{}]*\})*)\})",
+    re.DOTALL,
 )
 # <a href=...> scanned to classify external links
 _ANCHOR_HREF_RE = re.compile(
@@ -117,46 +126,77 @@ def _extract_jsx_arg(m: re.Match) -> str:
     return val.strip() if val else ""
 
 
+# Tokenizes JS/TS source into string literals (preserved) and comments (blanked).
+# String alternatives appear BEFORE comment alternatives so URLs inside strings
+# (e.g. href="https://...") are consumed as string tokens and their // is never
+# matched by the line-comment arm. Local to edges.py — the nav_probe
+# _strip_comments_and_strings helper collapses length and strips strings, making
+# it unsuitable for offset-stable, target-preserving discovery.
+_BLANKER_TOKEN_RE = re.compile(
+    r'"(?:[^"\\]|\\.)*"'          # double-quoted string
+    r"|'(?:[^'\\]|\\.)*'"         # single-quoted string
+    r"|`[^`\\]*(?:\\.[^`\\]*)*`"  # template literal (backtick-delimited)
+    r"|/\*.*?\*/"                 # block comment
+    r"|//[^\n]*",                 # trailing line comment
+    re.DOTALL,
+)
+
+
+def _blank_comments_preserving_offsets(body: str) -> str:
+    """Replace block and trailing line comments with equal-length spaces (newlines kept).
+
+    Scans string literals before comment patterns so that URLs inside quoted values
+    (e.g. href="https://...") are consumed as string tokens rather than truncated by
+    the line-comment blanker. Re match offsets map to original line numbers after
+    cleaning because only non-newline characters are replaced.
+    """
+
+    def _replace(m: re.Match) -> str:
+        s = m.group(0)
+        if s.startswith("//") or s.startswith("/*"):
+            return re.sub(r"[^\n]", " ", s)
+        return s  # string literal — preserve as-is
+
+    return _BLANKER_TOKEN_RE.sub(_replace, body)
+
+
+def _line_of(body: str, offset: int) -> int:
+    # 1-based line number of a match start (offset→line mapping replaces enumerate)
+    return body.count("\n", 0, offset) + 1
+
+
 def _discover_sites(snapshot: RepoSnapshot) -> list[_Site]:
-    """Scan every fetched UI file for navigation call-sites."""
+    """Scan every fetched UI file for navigation call-sites.
+
+    Whole-body finditer scan with offset→line mapping so that multi-line JSX
+    tags (opening tag and to=/href= attribute on different physical lines) are
+    correctly discovered. Comment blanking is applied first so call-sites inside
+    comments are invisible to the matchers.
+    """
     sites: list[_Site] = []
     for path, body in snapshot.files.items():
         if not any(path.endswith(ext) for ext in (".ts", ".tsx", ".js", ".jsx")):
             continue
 
-        in_block = False
-        for lineno, line in enumerate(body.split("\n"), start=1):
-            # Coarse block-comment tracking (perfect stripping not required — false
-            # positives produce unresolved edges rather than wrong resolved edges)
-            if in_block:
-                if "*/" in line:
-                    in_block = False
-                continue
-            if "/*" in line:
-                in_block = True
-                continue
+        cleaned = _blank_comments_preserving_offsets(body)
 
-            stripped = line.lstrip()
-            if stripped.startswith("//") or stripped.startswith("*"):
-                continue
+        for m in _NAV_CALL_RE.finditer(cleaned):
+            sites.append(_Site(path, _line_of(cleaned, m.start()), m.group(1).strip(), False))
 
-            for m in _NAV_CALL_RE.finditer(line):
-                sites.append(_Site(path, lineno, m.group(1).strip(), False))
+        for m in _JSX_HREF_RE.finditer(cleaned):
+            arg = _extract_jsx_arg(m)
+            if arg:
+                sites.append(_Site(path, _line_of(cleaned, m.start()), arg, True))
 
-            for m in _JSX_HREF_RE.finditer(line):
-                arg = _extract_jsx_arg(m)
-                if arg:
-                    sites.append(_Site(path, lineno, arg, True))
+        for m in _JSX_TO_RE.finditer(cleaned):
+            arg = _extract_jsx_arg(m)
+            if arg:
+                sites.append(_Site(path, _line_of(cleaned, m.start()), arg, True))
 
-            for m in _JSX_TO_RE.finditer(line):
-                arg = _extract_jsx_arg(m)
-                if arg:
-                    sites.append(_Site(path, lineno, arg, True))
-
-            for m in _ANCHOR_HREF_RE.finditer(line):
-                arg = _extract_jsx_arg(m)
-                if arg:
-                    sites.append(_Site(path, lineno, arg, True))
+        for m in _ANCHOR_HREF_RE.finditer(cleaned):
+            arg = _extract_jsx_arg(m)
+            if arg:
+                sites.append(_Site(path, _line_of(cleaned, m.start()), arg, True))
 
     return sites
 

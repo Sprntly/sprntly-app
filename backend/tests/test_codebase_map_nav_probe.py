@@ -126,6 +126,18 @@ def test_nav_primitive_most_referenced_wins():
     assert result.nav_primitive == "goTo"
 
 
+def test_navlink_counted_as_link_primitive():
+    """A snapshot whose only nav usage is <NavLink> yields nav_primitive == 'Link'."""
+    snap = _snap(**{
+        "src/nav/Nav.tsx": (
+            "import { NavLink } from 'react-router-dom';\n"
+            "function Nav() { return <NavLink to='/x'>Home</NavLink>; }\n"
+        ),
+    })
+    result = probe_nav_abstraction(snap)
+    assert result.nav_primitive == "Link"
+
+
 # ── Module integrity ───────────────────────────────────────────────────────────
 
 def test_no_ast_parser_dependency():

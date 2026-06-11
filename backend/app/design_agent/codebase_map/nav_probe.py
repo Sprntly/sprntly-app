@@ -60,7 +60,7 @@ _NAV_CALL_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("navigateTo", re.compile(r"\bnavigateTo\s*\(")),
     ("navigate", re.compile(r"\bnavigate\s*\(")),
     ("router.push", re.compile(r"\brouter\.push\s*\(")),
-    ("Link", re.compile(r"<Link\b")),
+    ("Link", re.compile(r"<(?:Link|NavLink)\b")),
 ]
 
 # ── Filesystem route conventions ──────────────────────────────────────────────
