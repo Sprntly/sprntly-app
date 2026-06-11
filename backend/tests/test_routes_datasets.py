@@ -44,6 +44,24 @@ def test_create_dataset_invalid_slug(tenant_client):
     assert r.status_code == 422
 
 
+def test_create_dataset_foreign_slug_forbidden(tenant_client):
+    """A signed-in user must not mint dataset rows for slugs that aren't
+    their company's — that would squat slugs other tenants would claim."""
+    t = tenant_client.make(slug="acme")
+    r = t.client.post("/v1/datasets", json={"slug": "not-mine", "display_name": "X"})
+    assert r.status_code == 403
+    # And it must not have registered anything.
+    assert t.client.get("/v1/datasets").json() == {"datasets": []}
+
+
+def test_create_dataset_other_tenants_slug_forbidden(tenant_client):
+    """Specifically: the slug of an EXISTING other company is rejected too."""
+    tenant_client.make(slug="company-a")
+    b = tenant_client.make(slug="company-b")
+    r = b.client.post("/v1/datasets", json={"slug": "company-a", "display_name": "A"})
+    assert r.status_code == 403
+
+
 def test_upload_files_happy_path(tenant_client):
     t = tenant_client.make(slug="acme")
     t.client.post("/v1/datasets", json={"slug": "acme", "display_name": "Acme"})
