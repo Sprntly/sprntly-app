@@ -5863,12 +5863,14 @@
     background: var(--surface);
   }
 
-  /* Suggested next-step actions — right-aligned stack above the composer */
+  /* Suggested next-step actions — single right-aligned row above the
+     composer (label inline with the chips); wraps on narrow screens */
   .bc-suggest {
     display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px 10px;
     padding-bottom: 12px;
   }
 
@@ -5882,8 +5884,9 @@
 
   .bc-suggest-list {
     display: flex;
-    flex-direction: column;
-    align-items: flex-end;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 7px;
   }
 
