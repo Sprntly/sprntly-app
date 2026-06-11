@@ -1,0 +1,30 @@
+{
+  "repos": [
+    {
+      "repo": "jideokus/launchpad",
+      "ref": null,
+      "expected_posture": "PARTIAL",
+      "min_nodes": 6,
+      "must_have_routes": ["/DashboardPage", "/SettingsPage"],
+      "min_resolved_edges": 3,
+      "shell": {
+        "brand_nonempty": true,
+        "min_nav_items": 5,
+        "logo_render_kind_in": ["text", "img_src", "imported_asset", "inline_svg"]
+      }
+    },
+    {
+      "repo": "jideokus/ccwaterloo-website",
+      "ref": null,
+      "expected_posture": "PARTIAL",
+      "min_nodes": 0,
+      "must_have_routes": [],
+      "min_resolved_edges": 0,
+      "shell": {
+        "brand_nonempty": true,
+        "min_nav_items": 5,
+        "logo_render_kind_in": ["inline_svg", "img_src", "imported_asset", "text"]
+      }
+    }
+  ]
+}
