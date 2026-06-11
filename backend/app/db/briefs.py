@@ -48,6 +48,29 @@ def get_brief_by_id(brief_id: int) -> dict | None:
 
 
 @retry_on_disconnect
+def recent_briefs_for_dataset(
+    dataset: str, *, exclude_id: int | None = None, limit: int = 3
+) -> list[dict]:
+    """The most recent prior briefs for `dataset`, newest first.
+
+    Used by PRD reuse: when a regenerated brief carries an unchanged insight,
+    the previous briefs are where its already-generated PRD lives. `exclude_id`
+    drops the current brief from the result.
+    """
+    c = require_client()
+    q = (
+        c.table("briefs")
+        .select("*")
+        .eq("dataset", dataset)
+        .order("generated_at", desc=True)
+        .limit(limit + (1 if exclude_id is not None else 0))
+    )
+    resp = q.execute()
+    rows = [r for r in (resp.data or []) if r["id"] != exclude_id]
+    return [_explode(r) for r in rows[:limit]]
+
+
+@retry_on_disconnect
 def save_brief(
     dataset: str,
     week_label: str,
