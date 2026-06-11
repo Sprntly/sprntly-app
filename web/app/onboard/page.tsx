@@ -59,10 +59,13 @@ export default function OnboardPage() {
     }
   }, [auth.kind, router])
 
-  // Mirror of the /onboarding/* OnboardingCompletedGuard (see
-  // app/(app)/onboarding/layout.tsx): a user who already finished onboarding
-  // must not reach this page either — it creates companies/datasets. We hold
-  // rendering until the workspace check resolves so the form never flashes.
+  // Companion to the /onboarding/* OnboardingCompletedGuard (see
+  // app/(app)/onboarding/layout.tsx), but stricter: this page CREATES a
+  // company, and the product invariant is one company per user — so ANY
+  // existing workspace (completed or mid-onboarding) means the user has no
+  // business here. Deliberately not keyed on `onboarding_completed_at`,
+  // which legacy accounts never had set. We hold rendering until the check
+  // resolves so the form never flashes.
   const [workspaceChecked, setWorkspaceChecked] = useState(false)
   useEffect(() => {
     if (auth.kind !== "authed") return
@@ -74,14 +77,14 @@ export default function OnboardPage() {
     fetchWorkspaceForUser(auth.user.id)
       .then((w) => {
         if (cancelled) return
-        if (w?.onboarding_completed_at != null) {
+        if (w != null) {
           router.replace("/")
         } else {
           setWorkspaceChecked(true)
         }
       })
       .catch(() => {
-        // Workspace lookup failing must not lock a mid-onboarding user out.
+        // Workspace lookup failing must not lock a new user out.
         if (!cancelled) setWorkspaceChecked(true)
       })
     return () => {

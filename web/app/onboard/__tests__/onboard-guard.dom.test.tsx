@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 //
-// Mount tests for the /onboard completed-user guard (mirror of the
-// /onboarding/* layout guard): a user who already finished onboarding is
-// bounced to "/" and never sees the create-company form; mid-onboarding and
-// no-workspace users still get the page; the form never flashes while the
-// workspace check is in flight.
+// Mount tests for the /onboard workspace guard. Stricter than the
+// /onboarding/* layout guard: /onboard creates a company and the product
+// invariant is one company per user, so ANY existing workspace — completed
+// or mid-onboarding, with or without the legacy `onboarding_completed_at`
+// marker — bounces to "/". Only a user with no workspace sees the form, and
+// the form never flashes while the check is in flight.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -52,7 +53,7 @@ afterEach(() => {
   cleanup()
 })
 
-describe("OnboardPage completed-user guard", () => {
+describe("OnboardPage workspace guard", () => {
   it("redirects a user who already completed onboarding to / and never shows the form", async () => {
     fetchWorkspaceMock.mockResolvedValue(
       makeWorkspace({ onboarding_completed_at: "2026-01-01T00:00:00Z" }),
@@ -64,15 +65,17 @@ describe("OnboardPage completed-user guard", () => {
     expect(screen.queryByTestId("onboard-display-name")).toBeNull()
   })
 
-  it("renders the form for a mid-onboarding user (workspace, not completed)", async () => {
+  it("redirects a user with a workspace even when the legacy completed marker is unset", async () => {
+    // Legacy accounts (pre-marker) have onboarding_completed_at: null but a
+    // real workspace — they must be bounced too: one company per user.
     fetchWorkspaceMock.mockResolvedValue(
       makeWorkspace({ onboarding_completed_at: null }),
     )
 
     render(<OnboardPage />)
 
-    expect(await screen.findByTestId("onboard-display-name")).toBeTruthy()
-    expect(routerMock.replace).not.toHaveBeenCalledWith("/")
+    await waitFor(() => expect(routerMock.replace).toHaveBeenCalledWith("/"))
+    expect(screen.queryByTestId("onboard-display-name")).toBeNull()
   })
 
   it("renders the form for a user with no workspace yet", async () => {
