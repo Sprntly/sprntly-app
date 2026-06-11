@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { ApiError, apiErrorMessage, connectorsApi, type DriveFolderBrowse } from "../../lib/api"
+import { useWorkspace } from "../../context/WorkspaceContext"
 
 type Crumb = { id: string; name: string }
 
@@ -18,6 +19,9 @@ export function GoogleDriveFolderPicker({
   selectedFolderName,
   onSelected,
 }: Props) {
+  const { workspace } = useWorkspace()
+  // `dataset` is the internal slug — show the company's display name in copy.
+  const companyName = workspace?.display_name || dataset
   const [open, setOpen] = useState(!selectedFolderId)
   const [breadcrumbs, setBreadcrumbs] = useState<Crumb[]>([
     { id: "root", name: "My Drive" },
@@ -170,7 +174,7 @@ export function GoogleDriveFolderPicker({
 
           <p className="conn-drive-hint">
             Open a folder to browse inside it, then choose which folder to sync into{" "}
-            <strong>{dataset}</strong>. Files appear under Sources after you run Sync now.
+            <strong>{companyName}</strong>. Files appear under Sources after you run Sync now.
           </p>
         </div>
       ) : null}

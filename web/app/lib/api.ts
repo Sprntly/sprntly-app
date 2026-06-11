@@ -160,7 +160,11 @@ export type Insight = {
 }
 export type Brief = {
   id: number
+  /** Dataset slug — internal key (db / infra-api only); never render in UI. */
   company: string
+  /** Human-readable name (companies.display_name); null for legacy demo
+   * datasets that have no companies row. */
+  company_name?: string | null
   generated_at: string
   week_label: string
   summary_headline: string

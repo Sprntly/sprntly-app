@@ -52,6 +52,27 @@ def test_current_returns_saved_brief(tenant_client, isolated_settings):
     assert r.json()["id"] == brief_id
 
 
+def test_current_includes_company_display_name(tenant_client, isolated_settings):
+    """The UI renders company_name — the dataset slug is an internal key only."""
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["db"]
+    _save_brief(db, "acme")
+    r = t.client.get("/v1/brief/current?dataset=acme")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["dataset"] == "acme"
+    assert body["company_name"] == "Acme"  # companies.display_name, not the slug
+
+
+def test_brief_by_id_includes_company_display_name(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["db"]
+    brief_id = _save_brief(db, "acme")
+    r = t.client.get(f"/v1/brief/{brief_id}")
+    assert r.status_code == 200
+    assert r.json()["company_name"] == "Acme"
+
+
 def test_current_cross_tenant_returns_404(tenant_client, isolated_settings):
     """Company B cannot read company A's current brief via A's slug."""
     tenant_client.make(slug="company-a")

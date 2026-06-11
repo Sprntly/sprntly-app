@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { Brief, Insight } from "../api"
-import { briefToBriefV2State } from "../brief-v2-adapter"
+import { briefToBriefV2State, companyLabel } from "../brief-v2-adapter"
 
 function makeInsight(overrides: Partial<Insight> & { tag: Insight["tag"] }): Insight {
   return {
@@ -54,7 +54,29 @@ function makeBrief(insights: Insight[]): Brief {
   }
 }
 
+describe("companyLabel", () => {
+  it("prefers the backend display name over the dataset slug", () => {
+    expect(companyLabel({ company: "cgfwwhyn3bfl", company_name: "Acme Corp" })).toBe(
+      "Acme Corp",
+    )
+  })
+
+  it("falls back to a prettified slug when no display name exists (demo datasets)", () => {
+    expect(companyLabel({ company: "asurion", company_name: null })).toBe("Asurion")
+    expect(companyLabel({ company: "asurion" })).toBe("Asurion")
+  })
+
+  it("ignores a blank display name", () => {
+    expect(companyLabel({ company: "asurion", company_name: "  " })).toBe("Asurion")
+  })
+})
+
 describe("briefToBriefV2State", () => {
+  it("uses company_name for the rendered company label when present", () => {
+    const brief = { ...makeBrief([]), company: "cgfwwhyn3bfl", company_name: "Acme Corp" }
+    expect(briefToBriefV2State(brief).company).toBe("Acme Corp")
+  })
+
   it("returns the empty state when there are no insights", () => {
     const out = briefToBriefV2State(makeBrief([]))
     expect(out.hero).toBeNull()
