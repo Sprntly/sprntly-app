@@ -7,6 +7,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   type ReactNode,
 } from "react"
 import { usePathname, useRouter } from "next/navigation"
@@ -24,6 +25,12 @@ export const AI_PANEL_WIDTH_MIN = 280
 export const AI_PANEL_WIDTH_MAX = 560
 /** Narrow dock when the side assistant is collapsed (mark + bubble on one row). */
 export const AI_PANEL_COLLAPSED_WIDTH = 84
+
+/** Below this viewport width the full sidebar (202px) + the 60vw content panel
+ *  squeeze the brief/chat column too far, so opening the panel auto-collapses
+ *  the sidebar to its 60px rail. Above it there's room to keep both. The lower
+ *  900px bound is the mobile breakpoint where the sidebar is hidden anyway. */
+export const CPANEL_AUTO_COLLAPSE_MAX_W = 1600
 
 interface NavigationContextType {
   currentScreen: ScreenId
@@ -102,6 +109,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [aiPanelWidth, setAiPanelWidthState] = useState(AI_PANEL_WIDTH_DEFAULT)
   /** Default collapsed; expanded only if user saved `sprntly-ai-panel-collapsed=0`. */
   const [aiPanelCollapsed, setAiPanelCollapsed] = useState(true)
+  /** True while the sidebar is collapsed *by the content panel* (not the user),
+   *  so it can be restored when the panel closes. Cleared on any manual toggle. */
+  const autoCollapsedRef = useRef(false)
 
   useEffect(() => {
     try {
@@ -145,6 +155,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   }, [pathname])
 
   const toggleSidebar = useCallback(() => {
+    // A manual toggle takes over from any panel-driven auto-collapse, so the
+    // panel-close restore below won't fight the user's choice.
+    autoCollapsedRef.current = false
     setSidebarCollapsed((prev) => {
       const next = !prev
       try {
@@ -155,6 +168,28 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
       return next
     })
   }, [])
+
+  // On a normal-size laptop or smaller, the full sidebar and the 60vw content
+  // panel can't share the row without crushing the brief/chat column — so when
+  // the panel opens at those widths we collapse the sidebar to its rail, then
+  // restore it when the panel closes. The collapse is transient (not persisted),
+  // so it never overwrites the user's saved sidebar preference.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    if (contentPanelTab) {
+      const w = window.innerWidth
+      if (w > 900 && w <= CPANEL_AUTO_COLLAPSE_MAX_W) {
+        setSidebarCollapsed((prev) => {
+          if (prev) return prev // already collapsed → nothing to restore later
+          autoCollapsedRef.current = true
+          return true
+        })
+      }
+    } else if (autoCollapsedRef.current) {
+      autoCollapsedRef.current = false
+      setSidebarCollapsed(false)
+    }
+  }, [contentPanelTab])
 
   const setAiPanelWidth = useCallback((width: number) => {
     const clamped = Math.min(

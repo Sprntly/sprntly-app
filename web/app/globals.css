@@ -5153,6 +5153,11 @@
     flex-direction: column;
     gap: 14px;
     margin-top: 4px;
+    /* The brief/chat column gets narrow when the content panel is open on a
+       laptop, so the cards inside reflow to *their own* width via container
+       queries (see below) rather than the viewport — the viewport can be
+       1440px while this column is only ~400px. */
+    container-type: inline-size;
   }
 
   .fc {
@@ -5392,6 +5397,10 @@
     color: var(--ink-3);
     font-weight: 400;
     line-height: 1.3;
+    /* Wrap between words only — never shatter "revenue" into "reven ue"
+       (the .bc-agent-body ancestor sets overflow-wrap: anywhere). */
+    overflow-wrap: normal;
+    word-break: normal;
   }
 
   .fc-stat--negative .fc-stat-value {
@@ -5615,8 +5624,11 @@
     color: var(--ink-4);
   }
 
-  /* Stack the preview under the content on narrow surfaces */
-  @media (max-width: 640px) {
+  /* Reflow the card to its own column width (not the viewport) — the brief
+     column can be ~400px while the screen is 1440px when the content panel is
+     open. Container context is set on .fc-stack above. */
+  @container (max-width: 620px) {
+    /* Drop the prototype-preview rail below the content, full width */
     .fc-grid {
       flex-direction: column;
     }
@@ -5626,6 +5638,23 @@
     }
     .fc-preview-mock {
       height: 84px;
+    }
+  }
+
+  @container (max-width: 480px) {
+    /* Stack the mini chart above the KPI tiles so each tile keeps a usable
+       width instead of being crushed to a few pixels (labels then wrap cleanly
+       at word boundaries rather than mid-word). */
+    .fc-stats-row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 14px;
+    }
+    .fc-mc {
+      padding-right: 0;
+      padding-bottom: 12px;
+      border-right: none;
+      border-bottom: 1px solid var(--line);
     }
   }
 
