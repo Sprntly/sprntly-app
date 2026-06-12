@@ -4,14 +4,12 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
-import { InterviewLayout } from "../../onboarding/InterviewLayout"
-import { KpiTreePreview } from "../../onboarding/KpiTreePreview"
+import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { completeOnboarding } from "../../../lib/onboarding/store"
 import { briefToContentPatch } from "../../../lib/brief-adapter"
 import type { Brief } from "../../../lib/api"
 import {
-  briefPreviewInsight,
   ensureDatasetForWorkspace,
   fetchBriefWhenReady,
   pollBriefStatus,
@@ -19,6 +17,26 @@ import {
   startBriefGeneration,
 } from "../../../lib/workspace-brief"
 import { useContent } from "../../../context/ContentContext"
+import { Check, FileText } from "../../auth/icons"
+
+/**
+ * Onboarding "first-brief" step — restyled to the v4 placeholder/loading
+ * design (page 16) on the shared OnboardingChrome. This page never previews
+ * brief content: it narrates generation with a three-stage checklist
+ * (`.gen-stages`) and, when the brief lands, AUTO-FORWARDS into the app —
+ * completeOnboarding → localStorage active company → router.replace("/brief")
+ * — so the brief itself is only ever seen on the Brief page.
+ *
+ * Phase → stage mapping (monotonic; stages only ever advance):
+ *   1 "Workspace context saved"        active while preparing + seeding
+ *   2 "Analyzing your sources"         active once seeding completes
+ *   3 "Composing your first Monday Brief"
+ *                                      active once the poller first reports
+ *                                      status "generating"
+ *
+ * The failed state never blocks entry: Retry re-runs the pipeline, and
+ * "Enter Sprntly anyway" finishes onboarding to home ("/").
+ */
 
 type GenPhase =
   | { kind: "idle" }
@@ -27,22 +45,52 @@ type GenPhase =
   | { kind: "ready"; brief: Brief }
   | { kind: "failed"; error: string }
 
+const STAGES = [
+  {
+    label: "Workspace context saved",
+    sub: null,
+    pendingIcon: null,
+  },
+  {
+    label: "Analyzing your sources",
+    sub: "Connected tools · website analysis · success metrics",
+    pendingIcon: null,
+  },
+  {
+    label: "Composing your first Monday Brief",
+    sub: "Lands on your Brief page when ready",
+    pendingIcon: FileText,
+  },
+] as const
+
 export function FirstBrief() {
   const auth = useAuth()
   const { workspace, loading } = useOnboarding()
   const { setContent } = useContent()
   const router = useRouter()
   const [finishing, setFinishing] = useState(false)
+  const [finishError, setFinishError] = useState<string | null>(null)
   const [phase, setPhase] = useState<GenPhase>({ kind: "idle" })
+  // 1-based index of the currently ACTIVE generation stage; only ever bumped
+  // upward so the checklist never regresses while phases churn.
+  const [stage, setStage] = useState(1)
   const startedRef = useRef(false)
+  const forwardedRef = useRef(false)
+
+  const bumpStage = useCallback((n: number) => {
+    setStage((s) => Math.max(s, n))
+  }, [])
 
   const runGeneration = useCallback(async () => {
     if (!workspace) return
+    setStage(1)
     setPhase({ kind: "preparing" })
     try {
       await ensureDatasetForWorkspace(workspace)
       setPhase({ kind: "generating", message: "Saving your workspace context…" })
       await seedWorkspaceContextFiles(workspace)
+      // Context is persisted — stage 1 done, "Analyzing your sources" active.
+      bumpStage(2)
 
       const existing = await fetchBriefWhenReady(workspace.slug)
       if (existing) {
@@ -57,6 +105,8 @@ export function FirstBrief() {
       const finalStatus = await pollBriefStatus(workspace.slug, {
         onTick: (s) => {
           if (s.status === "generating") {
+            // Backend is composing — stage 2 done, stage 3 active.
+            bumpStage(3)
             setPhase({ kind: "generating", message: "Sprntly is analyzing your context…" })
           }
         },
@@ -86,7 +136,7 @@ export function FirstBrief() {
         error: e instanceof Error ? e.message : "Could not start brief generation.",
       })
     }
-  }, [workspace, setContent])
+  }, [workspace, setContent, bumpStage])
 
   useEffect(() => {
     if (!workspace || startedRef.current) return
@@ -94,19 +144,41 @@ export function FirstBrief() {
     void runGeneration()
   }, [workspace, runGeneration])
 
-  async function finish() {
-    if (!workspace || auth.kind !== "authed") return
-    setFinishing(true)
-    try {
-      await completeOnboarding(workspace.id, auth.user.id)
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("sprntly_active_company", workspace.slug)
+  /** Finish onboarding and enter the app at `dest` ("/brief" or "/"). */
+  const finish = useCallback(
+    async (dest: string) => {
+      if (!workspace || auth.kind !== "authed") return
+      setFinishError(null)
+      setFinishing(true)
+      try {
+        await completeOnboarding(workspace.id, auth.user.id)
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem("sprntly_active_company", workspace.slug)
+        }
+        router.replace(dest)
+      } catch (e) {
+        // Manual-fallback path: surface the error and re-enable the footer
+        // button so the user is never stuck on this page.
+        setFinishError(
+          e instanceof Error ? e.message : "Couldn't finish onboarding. Try again below.",
+        )
+        setFinishing(false)
       }
-      router.replace("/")
-    } finally {
-      setFinishing(false)
-    }
-  }
+    },
+    [workspace, auth, router],
+  )
+
+  // AUTO-FORWARD: the moment the brief is ready, finish onboarding and land
+  // on /brief. Guarded by a ref so it fires exactly once, and driven from an
+  // effect — NEVER as a render side-effect (that pattern surfaced in
+  // production as a client-side exception / error boundary). If finish()
+  // throws, finishError renders with the footer button as manual fallback.
+  useEffect(() => {
+    if (phase.kind !== "ready" || forwardedRef.current) return
+    if (!workspace || auth.kind !== "authed") return
+    forwardedRef.current = true
+    void finish("/brief")
+  }, [phase, workspace, auth.kind, finish])
 
   // Redirect when there's no workspace to anchor the step. Done in an effect
   // (not during render) so navigation never fires as a render side-effect —
@@ -116,116 +188,126 @@ export function FirstBrief() {
     if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
 
-  if (loading || !workspace) return <div className="ob-shell">Loading…</div>
+  if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
-  const preview =
-    phase.kind === "ready" ? briefPreviewInsight(phase.brief) : null
+  const generating =
+    phase.kind === "idle" || phase.kind === "preparing" || phase.kind === "generating"
+
+  const title =
+    phase.kind === "ready" ? (
+      <>
+        Your first Brief is <em>ready.</em>
+      </>
+    ) : phase.kind === "failed" ? (
+      <>
+        Almost <em>there.</em>
+      </>
+    ) : (
+      <>
+        Setting up your <em>workspace.</em>
+      </>
+    )
+
+  const subtitle =
+    phase.kind === "ready"
+      ? "Your workspace is live and your coworkers have finished their first pass."
+      : phase.kind === "failed"
+        ? "Your workspace is set up. The first Brief needs a bit more data — you can still enter Sprntly now and it will land on your Brief page once sources come in."
+        : "Your coworkers are reading everything you shared and composing your first Monday Brief. It'll be waiting on your Brief page — this usually takes one to two minutes."
+
+  const footerMeta =
+    phase.kind === "ready"
+      ? "Workspace ready · 5 of 5 steps complete"
+      : phase.kind === "failed"
+        ? "You can enrich the next Brief from Sources once inside"
+        : "Generating… your Brief opens as soon as it's ready"
+
+  const findings = phase.kind === "ready" ? phase.brief.insights.length : 0
 
   return (
-    <InterviewLayout
+    <OnboardingChrome
       step={5}
-      eyebrow="First Brief preview"
-      title={
-        phase.kind === "ready"
-          ? "Your first Brief is ready"
-          : phase.kind === "failed"
-            ? "Almost there"
-            : "Preparing your first Brief"
-      }
-      agentMessage={
-        phase.kind === "ready"
-          ? "Here's the top finding from your first Brief — ranked against your KPI tree. You can drill into the full Brief from Home."
-          : phase.kind === "generating" || phase.kind === "preparing"
-            ? "We're using your onboarding context to generate a first Brief. This usually takes one to two minutes."
-            : phase.kind === "failed"
-              ? "You can still enter Sprntly. Add analytics or upload sources under Sources to enrich the next Brief."
-              : "Starting brief generation…"
-      }
-      rightPane={<KpiTreePreview tree={workspace.kpi_tree} />}
+      title={title}
+      subtitle={subtitle}
+      footerMeta={footerMeta}
       onBack={() => router.push("/onboarding/coworkers")}
-      onContinue={finish}
-      continueLabel={phase.kind === "ready" ? "Enter Sprntly →" : "Enter Sprntly anyway →"}
+      onContinue={() => void finish(phase.kind === "failed" ? "/" : "/brief")}
+      continueLabel={phase.kind === "failed" ? "Enter Sprntly anyway" : "Open your Brief"}
+      continueDisabled={generating}
       loading={finishing}
-      continueDisabled={phase.kind === "preparing" || phase.kind === "generating"}
     >
-      {phase.kind === "preparing" || phase.kind === "generating" ? (
-        <div className="ob-brief-status">
-          <div className="ob-brief-spinner" aria-hidden />
-          <p>{phase.kind === "generating" ? phase.message : "Preparing your workspace…"}</p>
+      {finishError && (
+        <div className="onb-form-error" role="alert">
+          {finishError}
         </div>
-      ) : null}
+      )}
+
+      {generating && (
+        <div className="gen-stages">
+          {STAGES.map((s, i) => {
+            const n = i + 1
+            const state = n < stage ? "done" : n === stage ? "active" : "pending"
+            const PendingIcon = s.pendingIcon
+            return (
+              <div key={s.label} className={`gen-stage ${state}`}>
+                <span className="st-ic" aria-hidden>
+                  {state === "done" && <Check style={{ width: 13, height: 13 }} />}
+                  {state === "pending" && PendingIcon && (
+                    <PendingIcon style={{ width: 12, height: 12 }} />
+                  )}
+                </span>
+                <div>
+                  {s.label}
+                  {s.sub && <span className="st-sub">{s.sub}</span>}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {phase.kind === "ready" && (
+        <div className="gen-ready">
+          <div className="ic" aria-hidden>
+            <Check style={{ width: 17, height: 17 }} />
+          </div>
+          <div>
+            <div className="t">Your Monday Brief is waiting</div>
+            <div className="s">
+              {findings > 0 ? `${findings} findings, ranked against your KPI tree — open` : "Open"}{" "}
+              it to see what your coworkers found, and ask follow-ups in the thread.
+            </div>
+          </div>
+        </div>
+      )}
 
       {phase.kind === "failed" && (
-        <div className="ob-form-error" role="alert">
+        <div className="gen-fail" role="alert">
           {phase.error}
-          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => void runGeneration()}>
+          <div className="acts">
+            <button type="button" className="btn btn-ghost" onClick={() => void runGeneration()}>
               Retry generation
             </button>
-            <Link href="/sources" className="btn btn-ghost btn-sm">
+            <Link href="/sources" className="btn btn-ghost">
               Add sources →
             </Link>
           </div>
         </div>
       )}
 
-      {preview && (
-        <div className="ob-brief-preview ob-brief-preview-live">
-          <div className="ob-brief-label">{preview.tag}</div>
-          <h3 className="ob-brief-title">{preview.headline}</h3>
-          {preview.subtitle && <p className="ob-brief-body">{preview.subtitle}</p>}
-          {phase.kind === "ready" && (
-            <p className="ob-brief-meta">
-              Week: {phase.brief.week_label || "This week"} · {phase.brief.insights.length} findings
-            </p>
-          )}
+      <div className="ws-strip">
+        <div className="kv">
+          Company<b>{workspace.display_name}</b>
         </div>
-      )}
-
-      {!preview && phase.kind !== "generating" && phase.kind !== "preparing" && (
-        <div className="ob-brief-preview">
-          <div className="ob-brief-label">Workspace summary</div>
-          <ul className="ob-preview-list">
-            <li>Company: {workspace.display_name}</li>
-            {workspace.product?.name && <li>Product: {workspace.product.name}</li>}
-            <li>North star: {workspace.kpi_tree.north_star || "—"}</li>
-          </ul>
+        {workspace.product?.name && (
+          <div className="kv">
+            Product<b>{workspace.product.name}</b>
+          </div>
+        )}
+        <div className="kv">
+          North star<b className="ns">{workspace.kpi_tree.north_star || "—"}</b>
         </div>
-      )}
-
-      <style jsx>{`
-        .ob-brief-status {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          padding: 16px;
-          background: var(--surface-2);
-          border-radius: 10px;
-          font-size: 14px;
-          color: var(--ink-2);
-        }
-        .ob-brief-spinner {
-          width: 22px;
-          height: 22px;
-          border: 2px solid var(--line);
-          border-top-color: var(--accent);
-          border-radius: 50%;
-          animation: ob-spin 0.8s linear infinite;
-          flex-shrink: 0;
-        }
-        @keyframes ob-spin {
-          to { transform: rotate(360deg); }
-        }
-        .ob-brief-preview-live {
-          border: 1px solid var(--accent);
-          background: var(--accent-soft, rgba(15, 111, 78, 0.06));
-        }
-        .ob-brief-meta {
-          font-size: 12px;
-          color: var(--muted);
-          margin-top: 12px;
-        }
-      `}</style>
-    </InterviewLayout>
+      </div>
+    </OnboardingChrome>
   )
 }
