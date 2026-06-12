@@ -15,7 +15,7 @@ import { useCompany } from "../context/CompanyContext"
 import { useContent } from "../context/ContentContext"
 import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
 import { useAuth } from "../lib/auth"
-import { connectorsApi } from "../lib/api"
+import { connectorsApi, teamApi, type TeamMemberRecord } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
 
@@ -64,6 +64,30 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             .filter((c) => c.status === "active")
             .map((c) => c.provider),
         })
+      })
+      .catch(() => {})
+  }, [setContent, workspace?.id])
+
+  // Load real team members from the database so ticket reassignment and
+  // other assignee pickers show actual company users instead of demo data.
+  useEffect(() => {
+    if (!workspace?.id) return
+    void teamApi.list()
+      .then((r) => {
+        const COLORS = ["#2A6EC8", "#634AB0", "#C13838", "#179463", "#C16A0B", "#0E6E49", "#4A554F"]
+        const members = r.members.map((m: TeamMemberRecord, i: number) => {
+          const name = m.display_name || m.email || "Unknown"
+          const initials = name.split(/\s+/).slice(0, 2).map((w: string) => w[0]?.toUpperCase() ?? "").join("")
+          return {
+            id: m.user_id,
+            name,
+            email: m.email ?? "",
+            initials,
+            role: m.role.charAt(0).toUpperCase() + m.role.slice(1) as "Admin" | "Viewer",
+            color: COLORS[i % COLORS.length],
+          }
+        })
+        setContent({ teamMembers: members })
       })
       .catch(() => {})
   }, [setContent, workspace?.id])

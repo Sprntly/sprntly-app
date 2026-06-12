@@ -1180,6 +1180,21 @@ export const ticketPushApi = {
     }),
 }
 
+// ── Team members ──────────────────────────────────────────────────────────
+
+export type TeamMemberRecord = {
+  user_id: string
+  role: string
+  display_name: string | null
+  email: string | null
+  avatar_url: string | null
+}
+
+export const teamApi = {
+  /** Fetch all company members enriched with profile data. */
+  list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
+}
+
 // ── Conversations (chat history persistence) ──
 
 export type ConversationRecord = {
