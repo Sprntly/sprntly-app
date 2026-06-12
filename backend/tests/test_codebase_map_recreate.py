@@ -24,6 +24,8 @@ from app.design_agent.codebase_map.recreate import (
     RecreateSources,
     SHELL_CANDIDATES,
     THEME_CANDIDATES,
+    bridge_theme,
+    port_tailwind_extend,
     read_located_sources,
     recreate_pre_seed,
     render_recreate_task_block,
@@ -416,3 +418,238 @@ def test_no_prohibited_tokens_in_source():
         text = target.read_text()
         matches = re.findall(pattern, text)
         assert not matches, f"Prohibited token(s) {matches} found in {target.name}"
+
+
+# ── helpers for bridge/extend tests ─────────────────────────────────────────────
+
+
+def _sources_with_files(
+    files: dict[str, str],
+    *,
+    repo: str = _REPO,
+    sha: str = _SHA,
+) -> RecreateSources:
+    return RecreateSources(
+        repo=repo,
+        commit_sha=sha,
+        files=files,
+        screen_path="src/Home.tsx",
+        also_screen_paths=(),
+    )
+
+
+_SCAFFOLD_CSS = """\
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --primary: 222.2 47.4% 11.2%;
+  }
+}"""
+
+
+# ── bridge_theme: AC1 ────────────────────────────────────────────────────────────
+
+
+def test_bridge_inlines_globals_after_tailwind_never_import():
+    """The bridge inlines the real globals body after @tailwind — never @import."""
+    real_globals = ":root { --brand: 24 100% 60%; }\n@layer base { body { color: red; } }"
+    sources = _sources_with_files({"app/globals.css": real_globals})
+    result = bridge_theme(_SCAFFOLD_CSS, sources)
+
+    assert "--brand: 24 100% 60%;" in result
+    # No @import of a local stylesheet path
+    local_import = re.search(r"@import\s+['\"][^'\"]+\.css['\"]", result, re.IGNORECASE)
+    assert local_import is None, "bridge_theme must not emit a local stylesheet @import"
+    # @tailwind directives still present
+    assert "@tailwind base" in result
+    assert "@tailwind utilities" in result
+
+
+# ── bridge_theme: AC2 ────────────────────────────────────────────────────────────
+
+
+def test_real_tokens_override_scaffold_defaults_in_cascade():
+    """Real :root tokens appear AFTER the scaffold default block so they win."""
+    real_globals = ":root { --primary: 24 100% 60%; }"
+    sources = _sources_with_files({"app/globals.css": real_globals})
+    result = bridge_theme(_SCAFFOLD_CSS, sources)
+
+    # Both declarations present
+    assert "--primary: 222.2 47.4% 11.2%;" in result
+    assert "--primary: 24 100% 60%;" in result
+    # Real value comes AFTER the scaffold default (last declaration wins the cascade)
+    idx_scaffold = result.index("--primary: 222.2 47.4% 11.2%;")
+    idx_real = result.index("--primary: 24 100% 60%;")
+    assert idx_real > idx_scaffold, "real token must appear after scaffold default"
+
+
+# ── bridge_theme: AC3 ────────────────────────────────────────────────────────────
+
+
+def test_font_imports_hoisted_to_top():
+    """Font @import url(...) from globals is hoisted before @tailwind directives."""
+    font_import = '@import url("https://fonts.googleapis.com/css2?family=Inter");'
+    real_globals = f"{font_import}\n:root {{ --primary: 24 100% 60%; }}"
+    sources = _sources_with_files({"app/globals.css": real_globals})
+    result = bridge_theme(_SCAFFOLD_CSS, sources)
+
+    assert font_import in result
+    idx_font = result.index(font_import)
+    idx_tailwind = result.index("@tailwind base")
+    assert idx_font < idx_tailwind, "font @import must precede @tailwind base"
+
+
+# ── bridge_theme: AC4 ────────────────────────────────────────────────────────────
+
+
+def test_absent_globals_returns_scaffold_unchanged():
+    """When sources has no globals, bridge_theme returns the scaffold unchanged."""
+    sources = _sources_with_files({})
+    result = bridge_theme(_SCAFFOLD_CSS, sources)
+    assert result == _SCAFFOLD_CSS
+
+
+# ── port_tailwind_extend: AC5 ───────────────────────────────────────────────────
+
+
+def test_port_tailwind_extend_returns_summary_not_config_file():
+    """port_tailwind_extend returns a compact summary, not a config file."""
+    tailwind_src = (
+        'import type { Config } from "tailwindcss";\n'
+        "const config: Config = {\n"
+        "  theme: {\n"
+        "    extend: {\n"
+        "      colors: {\n"
+        '        brand: "#0ea5e9",\n'
+        '        accent: "#f43f5e",\n'
+        "      },\n"
+        "      fontFamily: {\n"
+        '        sans: ["Inter", "ui-sans-serif"],\n'
+        "      },\n"
+        "    },\n"
+        "  },\n"
+        "};\n"
+        "export default config;\n"
+    )
+    sources = _sources_with_files({"tailwind.config.ts": tailwind_src})
+    summary = port_tailwind_extend("", sources)
+
+    # Returns a non-empty string
+    assert summary
+    # Does NOT look like a TypeScript/config file
+    assert "export default" not in summary
+    assert "const config" not in summary
+    # Contains key information from theme.extend
+    assert "brand" in summary or "colors" in summary
+    # Is a summary (much shorter than the full config)
+    assert len(summary) < len(tailwind_src)
+
+    # bridge_theme must not write tailwind.config.ts into virtual_fs
+    vfs: dict[str, str] = {}
+    real_globals = ":root { --primary: 24 100% 60%; }"
+    full_sources = _sources_with_files({
+        "app/globals.css": real_globals,
+        "tailwind.config.ts": tailwind_src,
+    })
+    bridge_theme("@tailwind base;\n@tailwind utilities;", full_sources)
+    assert "tailwind.config.ts" not in vfs
+
+
+# ── v4 / edge: AC6 ──────────────────────────────────────────────────────────────
+
+
+def test_v4_theme_block_detected_not_ported_here(caplog):
+    """A v4 @theme {} block is detected and logged; the v3 inline path still runs."""
+    font_import = '@import url("https://fonts.googleapis.com/css2?family=Inter");'
+    real_globals = (
+        f"{font_import}\n\n"
+        "@theme {\n"
+        "  --color-brand: oklch(0.7 0.15 200);\n"
+        "  --color-accent: oklch(0.6 0.2 320);\n"
+        "}\n\n"
+        ":root {\n"
+        "  --primary: 24 100% 60%;\n"
+        "}\n"
+    )
+    sources = _sources_with_files({"app/globals.css": real_globals})
+    with caplog.at_level(logging.INFO, logger="app.design_agent.codebase_map.recreate"):
+        result = bridge_theme(_SCAFFOLD_CSS, sources, prototype_id=5)
+
+    # v4 detected and logged
+    msgs = [r.getMessage() for r in caplog.records if "theme_bridge" in r.getMessage()]
+    assert any("is_v4=true" in m for m in msgs)
+
+    # v3 inline path still ran — :root from globals is in the output
+    assert "--primary: 24 100% 60%;" in result
+
+    # Does not crash on v4 input
+    assert result
+
+
+# ── seam wiring: AC7 ────────────────────────────────────────────────────────────
+
+
+def test_recreate_index_css_is_bridged_when_located():
+    """When real globals are present, bridge_theme returns the bridged value."""
+    scaffold = (
+        "@tailwind base;\n@tailwind utilities;\n"
+        "@layer base { :root { --primary: 222.2 47.4% 11.2%; } }"
+    )
+    real_globals = ":root { --primary: 24 100% 60%; }"
+    sources = _sources_with_files({"app/globals.css": real_globals})
+    result = bridge_theme(scaffold, sources)
+
+    assert "--primary: 24 100% 60%;" in result
+    assert result != scaffold
+    assert "@tailwind base" in result
+
+
+# ── seam wiring: AC8 ────────────────────────────────────────────────────────────
+
+
+def test_scenario_a_index_css_unchanged():
+    """When sources has no globals, bridge_theme returns the scaffold unchanged
+    (the non-recreate path keeps the existing output untouched)."""
+    scaffold = (
+        "@tailwind base;\n@tailwind utilities;\n"
+        "@layer base { :root { --primary: 222.2 47.4% 11.2%; } }"
+    )
+    sources = _sources_with_files({})
+    result = bridge_theme(scaffold, sources)
+    assert result == scaffold
+
+
+# ── observability: AC9 ──────────────────────────────────────────────────────────
+
+
+def test_theme_bridge_logs_booleans_only(caplog):
+    """bridge_theme emits exactly one INFO line with booleans and counts only."""
+    font_import = '@import url("https://fonts.googleapis.com/css2?family=Inter");'
+    real_globals = (
+        f"{font_import}\n:root {{ --primary: 24 100% 60%; }}\n@layer base {{ color: red; }}"
+    )
+    sources = _sources_with_files({"app/globals.css": real_globals})
+    with caplog.at_level(logging.INFO, logger="app.design_agent.codebase_map.recreate"):
+        bridge_theme(_SCAFFOLD_CSS, sources, prototype_id=99)
+
+    bridge_records = [
+        r for r in caplog.records
+        if r.levelno == logging.INFO and "theme_bridge" in r.getMessage()
+    ]
+    assert len(bridge_records) == 1, f"expected 1 theme_bridge log, got {len(bridge_records)}"
+
+    msg = bridge_records[0].getMessage()
+    assert "has_globals=true" in msg
+    assert "n_font_imports=1" in msg
+    assert "is_v4=" in msg
+    assert "has_tailwind_extend=" in msg
+
+    # No CSS body content in any log record
+    for record in caplog.records:
+        log_text = record.getMessage()
+        assert "--primary" not in log_text, "CSS variable body must not appear in log"
+        assert "@layer" not in log_text, "CSS rule body must not appear in log"
