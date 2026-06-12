@@ -168,9 +168,11 @@ def add_turn(
         "role": body.role,
         "content": body.content,
     }).execute()
-    # Update conversation preview
-    c.table("conversations").update({
-        "preview": body.content[:200] if body.role == "user" else "",
-        "updated_at": utc_now(),
-    }).eq("id", conversation_id).execute()
+    # Update conversation preview + timestamp. Only overwrite preview on user
+    # turns — assistant turns should NOT blank out the last user message shown
+    # in the chat-history list (ChatsScreen).
+    patch: dict[str, Any] = {"updated_at": utc_now()}
+    if body.role == "user":
+        patch["preview"] = body.content[:200]
+    c.table("conversations").update(patch).eq("id", conversation_id).execute()
     return resp.data[0] if resp.data else {}

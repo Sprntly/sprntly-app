@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef, useState } from "react"
+import { useCallback, useRef, useState } from "react"
 import { AppLayout } from "./AppLayout"
 import { useNavigation } from "../../../context/NavigationContext"
 
@@ -70,7 +70,44 @@ const COMPLETED: CompletedInitiative[] = [
   { id: "c6", title: "SSO via Okta + SCIM provisioning",        sub: "Cleared security gate for enterprise",     type: "Infra",          shipped: "Dec 8, 2025",  impactDelivered: "3 deals unblocked", impactDir: "up"   },
 ]
 
-const GROUP_OPTIONS = ["Impact (ranked)", "Type", "Source", "Date added"]
+// ── Prioritization frameworks ─────────────────────────────────────────────────
+// Each framework scores ideas on different dimensions. The user picks a framework
+// from the "Prioritize by" dropdown and the ideas re-sort by that score.
+
+type PrioritizationFramework = "Impact (ranked)" | "RICE" | "ICE" | "MoSCoW" | "Value vs Effort" | "WSJF"
+
+const PRIORITIZE_OPTIONS: { value: PrioritizationFramework; label: string; description: string }[] = [
+  { value: "Impact (ranked)",  label: "Impact (ranked)",  description: "Default Sprntly scoring — VoC volume × severity × strategic fit" },
+  { value: "RICE",             label: "RICE",             description: "Reach × Impact × Confidence ÷ Effort" },
+  { value: "ICE",              label: "ICE",              description: "Impact × Confidence × Ease" },
+  { value: "Value vs Effort",  label: "Value vs Effort",  description: "Business value ÷ implementation effort" },
+  { value: "WSJF",             label: "WSJF",             description: "Weighted Shortest Job First — SAFe framework" },
+  { value: "MoSCoW",           label: "MoSCoW",           description: "Must / Should / Could / Won't classification" },
+]
+
+// Simulated scores per idea per framework (in production these come from the LLM scoring pipeline)
+type FrameworkScores = Record<PrioritizationFramework, number>
+
+function generateScores(idea: BacklogIdea, index: number): FrameworkScores {
+  // Deterministic pseudo-scores based on idea properties
+  const hash = idea.title.length + index * 7
+  const isBrief = idea.source === "brief"
+  const isBug = idea.type === "Bug"
+  const baseImpact = 12 - index // Higher rank = higher impact
+
+  return {
+    "Impact (ranked)": baseImpact,
+    "RICE":            Math.round((isBrief ? 8 : 5) * (baseImpact / 3) * 0.8 / Math.max(1, (hash % 5) + 1) * 10) / 10,
+    "ICE":             Math.round(((baseImpact / 2) * (isBrief ? 0.9 : 0.7) * (isBug ? 9 : 6 + (hash % 4))) * 10) / 10,
+    "Value vs Effort": Math.round((baseImpact * (isBrief ? 1.2 : 0.8)) / ((hash % 4) + 2) * 10) / 10,
+    "WSJF":            Math.round(((isBug ? 10 : 6) + baseImpact * 0.5) / ((hash % 3) + 1) * 10) / 10,
+    "MoSCoW":          isBug ? 4 : isBrief ? (index < 3 ? 4 : 3) : (index < 6 ? 3 : index < 9 ? 2 : 1),
+  }
+}
+
+const MOSCOW_LABELS: Record<number, string> = { 4: "Must", 3: "Should", 2: "Could", 1: "Won't" }
+
+const GROUP_OPTIONS = PRIORITIZE_OPTIONS.map((o) => o.value)
 
 // ── Icon helpers ──────────────────────────────────────────────────────────────
 
@@ -187,10 +224,11 @@ function SourceCell({ idea }: { idea: BacklogIdea }) {
 // ── Idea row ──────────────────────────────────────────────────────────────────
 
 function IdeaRow({
-  idea, onTypeChange, dragHandlers, isDragging, isDragOver,
+  idea, onTypeChange, onSelect, dragHandlers, isDragging, isDragOver, isSelected, framework,
 }: {
   idea: BacklogIdea
   onTypeChange: (id: string, t: IdeaType) => void
+  onSelect: (idea: BacklogIdea) => void
   dragHandlers: {
     onDragStart: (e: React.DragEvent, id: string) => void
     onDragOver:  (e: React.DragEvent, id: string) => void
@@ -199,14 +237,22 @@ function IdeaRow({
   }
   isDragging: boolean
   isDragOver: boolean
+  isSelected: boolean
+  framework: PrioritizationFramework
 }) {
-  const cls = ["bl-row", isDragging ? "bl-row--dragging" : "", isDragOver ? "bl-row--over" : ""].filter(Boolean).join(" ")
+  const cls = ["bl-row", isDragging ? "bl-row--dragging" : "", isDragOver ? "bl-row--over" : "", isSelected ? "bl-row--selected" : ""].filter(Boolean).join(" ")
   const impactCls = idea.impactClass === "positive" ? "bl-impact--pos" : idea.impactClass === "negative" ? "bl-impact--neg" : ""
+  const origIdx = INITIAL_IDEAS.findIndex((init) => init.id === idea.id)
+  const scores = generateScores(idea, origIdx >= 0 ? origIdx : idea.rank - 1)
+  const fwScore = scores[framework]
+  const showScore = framework !== "Impact (ranked)"
 
   return (
     <div
       className={cls}
       draggable
+      onClick={() => onSelect(idea)}
+      style={{ cursor: "pointer" }}
       onDragStart={(e) => dragHandlers.onDragStart(e, idea.id)}
       onDragOver={(e)  => dragHandlers.onDragOver(e, idea.id)}
       onDragEnd={dragHandlers.onDragEnd}
@@ -222,7 +268,21 @@ function IdeaRow({
       <div className="bl-cell bl-cell--type">
         <TypeBadge type={idea.type} onChange={(t) => onTypeChange(idea.id, t)} />
       </div>
-      <div className={`bl-cell bl-cell--impact ${impactCls}`}>{idea.impact}</div>
+      <div className={`bl-cell bl-cell--impact ${impactCls}`}>
+        {showScore ? (
+          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{
+              fontSize: 11, fontWeight: 600, padding: "2px 7px", borderRadius: 5,
+              background: "var(--accent-muted, #DBF1E7)", color: "var(--accent, #179463)",
+            }}>
+              {framework === "MoSCoW" ? MOSCOW_LABELS[fwScore] ?? fwScore : fwScore}
+            </span>
+            <span style={{ fontSize: 11, color: "var(--ink-4)" }}>{idea.impact}</span>
+          </span>
+        ) : (
+          idea.impact
+        )}
+      </div>
     </div>
   )
 }
@@ -310,8 +370,12 @@ function AddIdeaCard({
 
 function ProposedContent({
   addHandlerRef,
+  onSelectIdea,
+  selectedIdeaId,
 }: {
   addHandlerRef: React.MutableRefObject<((title: string, type: IdeaType) => void) | null>
+  onSelectIdea: (idea: BacklogIdea) => void
+  selectedIdeaId: string | null
 }) {
   const { showToast }               = useNavigation()
   const [ideas, setIdeas]           = useState<BacklogIdea[]>(INITIAL_IDEAS)
@@ -359,13 +423,27 @@ function ProposedContent({
           </svg>
           <span>
             <strong>{ideas.length} ideas</strong>{" "}
-            surfaced from your data that aren&apos;t being worked on yet — sequenced by impact. Drag rows to re-rank, change a type inline, or ask Sprntly below to re-prioritize.
+            surfaced from your data that aren&apos;t being worked on yet — sequenced by {PRIORITIZE_OPTIONS.find((o) => o.value === group)?.label ?? "impact"}. Drag rows to re-rank, change a type inline, or ask Sprntly below to re-prioritize.
           </span>
         </div>
         <div className="bl-info-right">
-          <span className="bl-group-label">Group by</span>
-          <select className="bl-group-select" value={group} onChange={(e) => setGroup(e.target.value)}>
-            {GROUP_OPTIONS.map((o) => <option key={o}>{o}</option>)}
+          <span className="bl-group-label">Prioritize by</span>
+          <select className="bl-group-select" value={group} onChange={(e) => {
+            const fw = e.target.value as PrioritizationFramework
+            setGroup(fw)
+            // Re-sort ideas by the selected framework
+            setIdeas((prev) => {
+              const scored = prev.map((idea, i) => ({
+                ...idea,
+                _score: generateScores(idea, INITIAL_IDEAS.findIndex((init) => init.id === idea.id)),
+              }))
+              scored.sort((a, b) => (b._score[fw] ?? 0) - (a._score[fw] ?? 0))
+              return scored.map((item, idx) => ({ ...item, rank: idx + 1 }))
+            })
+          }}>
+            {PRIORITIZE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value} title={o.description}>{o.label}</option>
+            ))}
           </select>
         </div>
       </div>
@@ -377,7 +455,7 @@ function ProposedContent({
           <div className="bl-th bl-th--project">Project</div>
           <div className="bl-th bl-th--source">Source</div>
           <div className="bl-th bl-th--type">Type</div>
-          <div className="bl-th bl-th--impact">Impact</div>
+          <div className="bl-th bl-th--impact">{group === "Impact (ranked)" ? "Impact" : group}</div>
         </div>
         <div className="bl-tbody">
           {ideas.map((idea) => (
@@ -385,8 +463,11 @@ function ProposedContent({
               key={idea.id}
               idea={idea}
               onTypeChange={handleTypeChange}
+              onSelect={onSelectIdea}
               dragHandlers={{ onDragStart: handleDragStart, onDragOver: handleDragOver, onDragEnd: handleDragEnd, onDrop: handleDrop }}
               isDragging={dragId.current === idea.id}
+              isSelected={selectedIdeaId === idea.id}
+              framework={group as PrioritizationFramework}
               isDragOver={dragOverId === idea.id}
             />
           ))}
@@ -476,14 +557,19 @@ function SyncingOverlay() {
 // ── Main screen ───────────────────────────────────────────────────────────────
 
 export function BacklogScreen() {
-  const { showToast }                       = useNavigation()
+  const { showToast, openContentPanel }     = useNavigation()
   const [tab, setTab]                       = useState<BacklogTab>("proposed")
   const [showAddIdea, setShowAddIdea]       = useState(false)
   const [isSyncing, setIsSyncing]           = useState(false)
   const [chatValue, setChatValue]           = useState("")
+  const [selectedIdea, setSelectedIdea]     = useState<BacklogIdea | null>(null)
   const textareaRef                         = useRef<HTMLTextAreaElement>(null)
   // Bridge to ProposedContent's add-idea handler without lifting ideas state
   const addHandlerRef = useRef<((title: string, type: IdeaType) => void) | null>(null)
+
+  const handleSelectIdea = useCallback((idea: BacklogIdea) => {
+    setSelectedIdea(idea)
+  }, [])
 
   const handleSync = () => {
     if (isSyncing) return
@@ -545,11 +631,131 @@ export function BacklogScreen() {
           </div>
         </div>
 
-        {/* ── Scrollable content ── */}
-        <div className="bl-body">
-          {tab === "proposed"
-            ? <ProposedContent addHandlerRef={addHandlerRef} />
-            : <CompletedContent />}
+        {/* ── Scrollable content + right panel ── */}
+        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+          <div className="bl-body" style={{ flex: 1, overflow: "auto" }}>
+            {tab === "proposed"
+              ? <ProposedContent addHandlerRef={addHandlerRef} onSelectIdea={handleSelectIdea} selectedIdeaId={selectedIdea?.id ?? null} />
+              : <CompletedContent />}
+          </div>
+
+          {/* ── Right panel: idea detail + PRD generation ── */}
+          {selectedIdea && (
+            <aside style={{
+              width: 420, flexShrink: 0, borderLeft: "1px solid var(--line, #E8E6E0)",
+              background: "var(--surface, #fff)", display: "flex", flexDirection: "column",
+              overflow: "hidden",
+            }}>
+              {/* Header */}
+              <div style={{
+                padding: "14px 18px", borderBottom: "1px solid var(--line, #E8E6E0)",
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+              }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>
+                  #{selectedIdea.rank} · {selectedIdea.type}
+                </span>
+                <button type="button" onClick={() => setSelectedIdea(null)}
+                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "var(--ink-3)", padding: 0, lineHeight: 1 }}>×</button>
+              </div>
+
+              {/* Body */}
+              <div style={{ flex: 1, overflowY: "auto", padding: "16px 18px" }}>
+                <h2 style={{ fontSize: 17, fontWeight: 600, color: "var(--ink)", margin: "0 0 6px", lineHeight: 1.35 }}>
+                  {selectedIdea.title}
+                </h2>
+                <p style={{ fontSize: 13, color: "var(--ink-3)", margin: "0 0 16px" }}>
+                  {selectedIdea.sub}
+                </p>
+
+                {/* Impact */}
+                <div style={{
+                  padding: "10px 14px", borderRadius: 8, background: "var(--accent-muted, #DBF1E7)",
+                  marginBottom: 16, fontSize: 13,
+                }}>
+                  <strong style={{ color: "var(--accent, #179463)" }}>Impact:</strong>{" "}
+                  <span style={{ color: "var(--ink)" }}>{selectedIdea.impact}</span>
+                </div>
+
+                {/* Chat thread */}
+                <div style={{
+                  fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em",
+                  color: "var(--ink-3)", marginBottom: 10,
+                }}>
+                  Chat thread
+                </div>
+                <div style={{
+                  padding: "12px 14px", borderRadius: 8, border: "1px solid var(--line, #E8E6E0)",
+                  background: "var(--surface-2, #F4F1EA)", marginBottom: 16, fontSize: 13, color: "var(--ink-2)",
+                }}>
+                  <div style={{ marginBottom: 8, fontWeight: 500, color: "var(--ink)" }}>You</div>
+                  <div>Tell me more about &ldquo;{selectedIdea.title}&rdquo; — what&apos;s the problem, who&apos;s affected, and what would a solution look like?</div>
+                </div>
+                <div style={{
+                  padding: "12px 14px", borderRadius: 8, border: "1px solid var(--accent, #179463)",
+                  background: "#fff", marginBottom: 16, fontSize: 13, color: "var(--ink)",
+                }}>
+                  <div style={{ marginBottom: 8, fontWeight: 500, color: "var(--accent)" }}>Sprntly</div>
+                  <div style={{ lineHeight: 1.55 }}>
+                    <strong>{selectedIdea.title}</strong> — {selectedIdea.sub}. This idea has an estimated impact of <strong>{selectedIdea.impact}</strong>.
+                    Based on the data, I recommend generating a PRD to scope this properly before moving to implementation.
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div style={{
+                  fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em",
+                  color: "var(--ink-3)", marginBottom: 10,
+                }}>
+                  Next steps
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <button type="button" onClick={() => {
+                    // Navigate to chat with a PRD generation prompt
+                    localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+                      dbId: 0, title: selectedIdea.title,
+                      turns: [
+                        { role: "user", content: `Generate a PRD for: ${selectedIdea.title}. Context: ${selectedIdea.sub}. Expected impact: ${selectedIdea.impact}` },
+                      ],
+                    }))
+                    window.location.href = "/"
+                  }} style={{
+                    fontSize: 13, padding: "10px 16px", borderRadius: 8,
+                    background: "var(--accent, #179463)", color: "#fff", border: "none",
+                    cursor: "pointer", fontWeight: 600, display: "flex", alignItems: "center", gap: 6,
+                  }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    Generate PRD
+                  </button>
+                  <button type="button" onClick={() => {
+                    localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+                      dbId: 0, title: selectedIdea.title,
+                      turns: [
+                        { role: "user", content: `Deep dive into "${selectedIdea.title}": ${selectedIdea.sub}. What evidence do we have? What are the risks? Who should own this?` },
+                      ],
+                    }))
+                    window.location.href = "/"
+                  }} style={{
+                    fontSize: 13, padding: "10px 16px", borderRadius: 8,
+                    background: "var(--surface-2, #F4F1EA)", border: "1px solid var(--line, #E8E6E0)",
+                    cursor: "pointer", color: "var(--ink-2)", display: "flex", alignItems: "center", gap: 6,
+                  }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Continue in chat
+                  </button>
+                  <button type="button" onClick={() => {
+                    showToast("Prototype", `Starting prototype generation for "${selectedIdea.title}"…`)
+                  }} style={{
+                    fontSize: 13, padding: "10px 16px", borderRadius: 8,
+                    background: "var(--surface-2, #F4F1EA)", border: "1px solid var(--line, #E8E6E0)",
+                    cursor: "pointer", color: "var(--ink-2)", display: "flex", alignItems: "center", gap: 6,
+                  }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                    Generate prototype
+                  </button>
+                </div>
+              </div>
+            </aside>
+          )}
         </div>
 
         {/* ── Add idea card: outside scroll, replaces chat bar ── */}

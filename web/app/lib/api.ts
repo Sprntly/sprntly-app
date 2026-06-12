@@ -222,9 +222,19 @@ export type AskResponse = {
   unanswered: string
 }
 
+export type SkillInfo = {
+  id: string
+  label: string
+  trigger: string
+  description: string
+}
+
 export const askApi = {
   ask: (question: string, company: string = "asurion") =>
     api.post<AskResponse>("/v1/ask", { question, dataset: company }),
+  /** List available skills the chat can route to. */
+  skills: () =>
+    api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),
 }
 
 export type PrdStartResponse = {

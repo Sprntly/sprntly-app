@@ -48,6 +48,7 @@ const EMPTY: AppContentState = {
   prd: null,
   prdMeta: null,
   evidence: null,
+  evidenceGenerating: false,
   teamMembers: [],
   teamPending: [],
   connectorCategories: [],

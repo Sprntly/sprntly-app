@@ -107,11 +107,40 @@ function AddTicketModal({ onClose, onAdd }: { onClose: () => void; onAdd: (t: In
   const [category, setCategory] = useState("Product")
   const [assignee, setAssignee] = useState("")
   const [description, setDescription] = useState("")
+  const [pushClickUp, setPushClickUp] = useState(false)
+  const [clickUpOk, setClickUpOk] = useState(false)
+  const [busy, setBusy] = useState(false)
 
-  const handleSubmit = () => {
+  // Check ClickUp connection on mount
+  useEffect(() => {
+    import("../../../lib/api").then(({ connectorsApi }) => {
+      connectorsApi.list().then((conns) => {
+        const list = Array.isArray(conns) ? conns : (conns as unknown as { connections?: any[] }).connections ?? []
+        if (list.find((c: any) => c.provider === "clickup")) {
+          setClickUpOk(true); setPushClickUp(true)
+        }
+      }).catch(() => {})
+    })
+  }, [])
+
+  const handleSubmit = async () => {
     if (!title.trim()) return
+    setBusy(true)
     const ticket = saveTicket({ title: title.trim(), priority, category, assignee: assignee.trim(), description: description.trim() })
     onAdd(ticket)
+
+    // Auto-push to ClickUp if enabled
+    if (pushClickUp && clickUpOk) {
+      try {
+        const listsRes = await ticketPushApi.listClickUpLists()
+        if (listsRes.lists.length > 0) {
+          await ticketPushApi.pushToClickUp(listsRes.lists[0].id, [{
+            title: ticket.title, description: ticket.description, priority: ticket.priority,
+          }])
+        }
+      } catch { /* silent — saved internally */ }
+    }
+    setBusy(false)
     onClose()
   }
 
@@ -155,12 +184,18 @@ function AddTicketModal({ onClose, onAdd }: { onClose: () => void; onAdd: (t: In
             <textarea style={{ ...inputStyle, minHeight: 90, resize: "vertical", fontFamily: "inherit" }} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What needs to be done?" />
           </div>
         </div>
+        {clickUpOk && (
+          <div style={{ padding: "0 22px 10px", display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="checkbox" id="modal-push-cu" checked={pushClickUp} onChange={(e) => setPushClickUp(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+            <label htmlFor="modal-push-cu" style={{ fontSize: 12.5, color: "var(--ink-2)", cursor: "pointer" }}>Also push to ClickUp</label>
+          </div>
+        )}
         <div style={{ padding: "0 22px 18px", display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button type="button" onClick={onClose} style={{ ...toolBtnStyle, padding: "7px 16px" }}>Cancel</button>
-          <button type="button" onClick={handleSubmit} disabled={!title.trim()} style={{
-            fontSize: 12, padding: "7px 16px", background: title.trim() ? "var(--accent, #179463)" : "#ccc", color: "#fff",
-            border: "none", borderRadius: 7, fontWeight: 600, cursor: title.trim() ? "pointer" : "not-allowed",
-          }}>Create ticket</button>
+          <button type="button" onClick={handleSubmit} disabled={!title.trim() || busy} style={{
+            fontSize: 12, padding: "7px 16px", background: title.trim() && !busy ? "var(--accent, #179463)" : "#ccc", color: "#fff",
+            border: "none", borderRadius: 7, fontWeight: 600, cursor: title.trim() && !busy ? "pointer" : "not-allowed",
+          }}>{busy ? "Creating..." : pushClickUp ? "Create & push to ClickUp" : "Create ticket"}</button>
         </div>
       </div>
     </>

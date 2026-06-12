@@ -8,65 +8,6 @@ import type { ConversationRow } from "../../../types/content"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
-// ── Mock data (matches the design mockup exactly) ──
-
-const MOCK_CHATS: ConversationRow[] = [
-  {
-    id: "pinned-1",
-    title: "Monday Brief · Week of May 27",
-    time: new Date(Date.now() - 3600000).toISOString(),
-    savedTurn: { id: "pinned-1-t", query: "Three signals — Day-30 retention dip in 4 deployments, Cerner deal stalled in security review, care plan co-authoring up 12% WoW." },
-  },
-  {
-    id: "today-1",
-    title: "On-call · CarePlan compose latency spike",
-    time: new Date(Date.now() - 7200000).toISOString(),
-    savedTurn: { id: "today-1-t", query: "SEV-2 active · Sentry + Datadog confluence triggered · 11 Riverside users affected, p99 7.4s." },
-  },
-  {
-    id: "today-2",
-    title: "Day-30 cohort breakdown by EHR vendor",
-    time: new Date(Date.now() - 10800000).toISOString(),
-    savedTurn: { id: "today-2-t", query: "DS Agent ran a cross-segment analysis — Epic deployments show a 4pt gap vs Cerner; deeper dive recommended on Epic-specific FHIR latency." },
-  },
-  {
-    id: "today-3",
-    title: "Cerner expansion — security review next steps",
-    time: new Date(Date.now() - 14400000).toISOString(),
-    savedTurn: { id: "today-3-t", query: "Drafted three talking points for the Cerner InfoSec call · attached SOC 2 packet · suggested legal bring HIPAA BAA addendum." },
-  },
-  {
-    id: "yesterday-1",
-    title: "Prototype · First-Handoff Wizard v2",
-    time: new Date(Date.now() - 86400000).toISOString(),
-    savedTurn: { id: "yesterday-1-t", query: "Design Agent iterated 3 directions for the inline 3-step prompt. Direction B (split-screen) won internal review." },
-  },
-  {
-    id: "yesterday-2",
-    title: "Veradigm integration scoping",
-    time: new Date(Date.now() - 100000000).toISOString(),
-    savedTurn: { id: "yesterday-2-t", query: "PM Agent compared FHIR coverage across Veradigm, Epic, and Cerner. Veradigm scope is roughly 60% smaller. PRD generated." },
-  },
-  {
-    id: "week-1",
-    title: "Shift-handoff drop · root-cause investigation",
-    time: new Date(Date.now() - 172800000).toISOString(),
-    savedTurn: { id: "week-1-t", query: "Resolved · was a deploy-time config regression. Engineer Agent caught it. Full RCA in thread." },
-  },
-  {
-    id: "week-2",
-    title: "Q3 OKR mid-quarter review · prep doc",
-    time: new Date(Date.now() - 259200000).toISOString(),
-    savedTurn: { id: "week-2-t", query: "Drafted the mid-quarter narrative — 2 of 3 OKRs on track, retention OKR at risk (now flagged this week)." },
-  },
-  {
-    id: "earlier-1",
-    title: "Onboarding redesign · prototype",
-    time: new Date(Date.now() - 604800000).toISOString(),
-    savedTurn: { id: "earlier-1-t", query: "Design Agent prototyped a 5-step new-deployment onboarding. Tested with 3 customers. Direction approved." },
-  },
-]
-
 // ── Agent type config ──
 
 type AgentType = "pm" | "oncall" | "ds" | "design" | "ask"
@@ -209,8 +150,7 @@ export function ChatsScreen() {
       const extra = inMemory.filter((c) => !dbTitles.has(c.title))
       return [...dbRows, ...extra]
     }
-    if (inMemory.length > 0) return inMemory
-    return MOCK_CHATS
+    return inMemory
   }, [dbRows, content.conversations])
 
   const handleDelete = useCallback((row: ConversationRow) => {
@@ -254,29 +194,43 @@ export function ChatsScreen() {
     return map
   }, [filtered])
 
-  const handleRowClick = (row: ConversationRow) => {
+  const handleRowClick = async (row: ConversationRow) => {
     const dbId = (row as any)._dbId as number | undefined
+
     if (dbId) {
-      // Load full conversation turns from DB and pass via localStorage
-      conversationsApi.listTurns(dbId).then((res) => {
-        // Store turns in localStorage so ChatScreen can pick them up
-        try {
+      try {
+        const res = await conversationsApi.listTurns(dbId)
+        if (res.turns && res.turns.length > 0) {
           localStorage.setItem("sprntly_resume_conv", JSON.stringify({
             dbId,
             title: row.title,
             turns: res.turns,
           }))
-        } catch { /* ignore */ }
-        goTo("chat")
-      }).catch(() => {
-        // Fallback: just navigate with the saved turn
-        if (row.savedTurn?.query) setPendingOndemandDraft(row.savedTurn.query)
-        goTo("chat")
-      })
-    } else {
-      if (row.savedTurn?.query) setPendingOndemandDraft(row.savedTurn.query)
-      goTo("chat")
+          goTo("chat")
+          return
+        }
+      } catch { /* fallback below */ }
     }
+
+    // Fallback: build a thread from the saved turn
+    if (row.savedTurn?.query) {
+      const fakeTurns = [{ role: "user", content: row.savedTurn.query }]
+      if (row.savedTurn.reply) {
+        const replyText = typeof row.savedTurn.reply === "string"
+          ? row.savedTurn.reply
+          : (row.savedTurn.reply as any)?.answer ?? ""
+        if (replyText) fakeTurns.push({ role: "assistant", content: replyText })
+      }
+      localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+        dbId: dbId ?? 0,
+        title: row.title,
+        turns: fakeTurns,
+      }))
+      goTo("chat")
+      return
+    }
+
+    goTo("chat")
   }
 
   return (
@@ -335,8 +289,29 @@ export function ChatsScreen() {
           </button>
         </div>
 
+        {/* Loading state */}
+        {!loaded && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "20px 0" }}>
+            {[1, 2, 3, 4, 5].map((i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 10px", borderRadius: 10 }}>
+                <div style={{ width: 38, height: 38, borderRadius: "50%", background: "var(--surface-2, #F0EDE7)", animation: "chats-pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.1}s` }} />
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div style={{ height: 13, borderRadius: 6, background: "var(--surface-2, #F0EDE7)", width: `${50 + i * 8}%`, animation: "chats-pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.1}s` }} />
+                  <div style={{ height: 10, borderRadius: 4, background: "var(--surface-2, #F0EDE7)", width: `${70 + i * 5}%`, animation: "chats-pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.15}s` }} />
+                  <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+                    <div style={{ height: 16, borderRadius: 8, background: "var(--surface-2, #F0EDE7)", width: 60, animation: "chats-pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.2}s` }} />
+                    <div style={{ height: 16, borderRadius: 8, background: "var(--surface-2, #F0EDE7)", width: 40, animation: "chats-pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.2}s` }} />
+                  </div>
+                </div>
+                <div style={{ width: 55, height: 10, borderRadius: 4, background: "var(--surface-2, #F0EDE7)", animation: "chats-pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.1}s` }} />
+              </div>
+            ))}
+            <style>{`@keyframes chats-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }`}</style>
+          </div>
+        )}
+
         {/* Empty state */}
-        {allChats.length === 0 && (
+        {loaded && allChats.length === 0 && (
           <EmptyPane
             title="No conversations yet"
             hint="Start a new chat from the home screen."
@@ -352,7 +327,7 @@ export function ChatsScreen() {
         )}
 
         {/* Grouped list */}
-        {GROUP_ORDER.map((group) => {
+        {!loaded ? null : GROUP_ORDER.map((group) => {
           const rows = grouped.get(group)
           if (!rows || rows.length === 0) return null
           return (

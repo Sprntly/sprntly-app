@@ -6,6 +6,7 @@ import { useFieldValidation } from "../../onboarding/InterviewLayout"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
+import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
 import { InfoCircle, Plus, Sparkles, Trash } from "../../auth/icons"
 import {
@@ -288,17 +289,28 @@ export function MetricsSetupView({
 }
 
 export function Metrics() {
+  const DRAFT_KEY = "metrics"
   const { workspace, setWorkspace, websiteAnalysis, loading } = useOnboarding()
   const router = useRouter()
-  const [industry, setIndustry] = useState<string>(INDUSTRIES[0])
-  const [businessType, setBusinessType] = useState<string>(BUSINESS_TYPES[0])
-  const [northStar, setNorthStar] = useState("")
-  const [northStarDescription, setNorthStarDescription] = useState("")
-  const [supporting, setSupporting] = useState<SupportingMetric[]>([])
+  const mdraft = loadDraft(DRAFT_KEY)
+  const [industry, setIndustry] = useState<string>((mdraft?.industry as string) ?? INDUSTRIES[0])
+  const [businessType, setBusinessType] = useState<string>((mdraft?.businessType as string) ?? BUSINESS_TYPES[0])
+  const [northStar, setNorthStar] = useState((mdraft?.northStar as string) ?? "")
+  const [northStarDescription, setNorthStarDescription] = useState((mdraft?.northStarDescription as string) ?? "")
+  const [supporting, setSupporting] = useState<SupportingMetric[]>((mdraft?.supporting as SupportingMetric[]) ?? [])
   const [customMetric, setCustomMetric] = useState("")
   const [customDescription, setCustomDescription] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Save draft on tab switch only
+  useEffect(() => {
+    const onHide = () => {
+      if (document.hidden) saveDraft(DRAFT_KEY, { industry, businessType, northStar, northStarDescription, supporting })
+    }
+    document.addEventListener("visibilitychange", onHide)
+    return () => document.removeEventListener("visibilitychange", onHide)
+  }, [industry, businessType, northStar, northStarDescription, supporting])
   // Once the user touches the industry/business-type dropdowns we stop
   // overwriting their choice when a late analysis result arrives.
   const [industryTouched, setIndustryTouched] = useState(false)
@@ -422,6 +434,7 @@ export function Metrics() {
       await kpiTreeApi.put(
         buildKpiTreePayload(northStar, northStarDescription, supporting),
       )
+      clearDraft(DRAFT_KEY)
       // Next numbered step is connectors (index 3 in ONBOARDING_STEP_SLUGS).
       const updated = await advanceOnboardingStep(workspace.id, 3)
       const product = updated.product ?? workspace.product

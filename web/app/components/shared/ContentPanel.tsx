@@ -142,42 +142,39 @@ export function ContentPanel() {
 function EvidenceTab() {
   const { expandAiPanel, setAIBarValue, showToast, openContentPanel, closeContentPanel } = useNavigation()
   const { content, setContent } = useContent()
-  const { detail, evidence } = content
+  const { detail, evidence, evidenceGenerating } = content
 
-  const [evidenceState, setEvidenceState] = useState<
+  // Local generation state — used only when coming from the brief/detail flow
+  // (detail.meta is present). Chat-flow generation is driven externally by
+  // ChatScreen and signalled via content.evidenceGenerating.
+  const [localState, setLocalState] = useState<
     | { kind: "idle" }
     | { kind: "loading" }
     | { kind: "error"; message: string }
-  >({ kind: detail?.meta && !evidence ? "loading" : "idle" })
+  >({ kind: "idle" })
   const [generatingPrd, setGeneratingPrd] = useState(false)
   const loadedKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!detail?.meta) return
     const key = `${detail.meta.briefId}:${detail.meta.insightIndex}`
-    // If we already loaded evidence for this exact insight, don't re-fetch.
-    // This prevents regeneration when the user re-clicks "View evidence"
-    // for the same insight or switches tabs and comes back.
+    // Already loaded this exact insight — don't re-fetch.
     if (loadedKeyRef.current === key && evidence) return
-    // If switching to a different insight, clear stale evidence.
-    // If same key but evidence was cleared externally, re-fetch without clearing.
+    // Switching to a different insight — clear stale evidence.
     if (loadedKeyRef.current !== key) setContent({ evidence: null })
     let cancelled = false
-    setEvidenceState({ kind: "loading" })
+    setLocalState({ kind: "loading" })
     loadedKeyRef.current = key
-    // generate() with default force=false returns existing row if one exists
-    // (backend dedup), so this is safe to call repeatedly.
     runEvidenceGeneration(detail.meta)
       .then((result) => {
         if (cancelled) return
-        if (!result.ok) { setEvidenceState({ kind: "error", message: result.message }); return }
+        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); return }
         setContent({ evidence: result.evidence })
-        setEvidenceState({ kind: "idle" })
+        setLocalState({ kind: "idle" })
       })
       .catch((e: unknown) => {
         if (cancelled) return
-        const msg = e instanceof Error ? e.message : String(e)
-        setEvidenceState({ kind: "error", message: msg })
+        setLocalState({ kind: "error", message: e instanceof Error ? e.message : String(e) })
       })
     return () => { cancelled = true }
   }, [detail?.meta?.briefId, detail?.meta?.insightIndex, evidence, setContent])
@@ -187,7 +184,6 @@ function EvidenceTab() {
       showToast("Can't generate PRD", "Open this evidence from the brief first.")
       return
     }
-    // If a PRD is already loaded for this exact insight, just show it.
     const currentPrdMeta = content.prdMeta
     if (
       content.prd &&
@@ -200,21 +196,22 @@ function EvidenceTab() {
     }
     setGeneratingPrd(true)
     try {
-      // generate() with default force=false — backend returns the existing
-      // PRD row if one already exists, avoiding a new generation.
       const result = await runPrdGeneration(detail.meta)
       if (!result.ok) { showToast("PRD generation failed", result.message.slice(0, 200)); return }
       setContent({ prd: result.prd, prdMeta: detail.meta })
       openContentPanel("prd")
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      showToast("PRD generation failed", msg.slice(0, 200))
+      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     } finally {
       setGeneratingPrd(false)
     }
   }
 
-  if (!detail) {
+  // Unified loading flag: either local (brief flow) or external (chat flow)
+  const isLoading = localState.kind === "loading" || evidenceGenerating
+
+  // Nothing to show at all
+  if (!detail && !evidence && !isLoading && localState.kind !== "error") {
     return (
       <div className="cpanel-empty">
         <IconSparkle size={20} />
@@ -227,28 +224,30 @@ function EvidenceTab() {
     <div className="ev-panel">
       {/* Scrollable document body */}
       <div className="ev-doc">
-        {/* Tag row: tags + BRIEF INSIGHT + ask button */}
-        <div className="ev-doc-tag-row">
-          <div className="ev-doc-tags">
-            {detail.tags && detail.tags.map((t, i) => (
-              <span key={i} className={`ev-tag ${t.className ?? ""}`}>{t.label}</span>
-            ))}
-            <span className="ev-tag ev-tag--insight">BRIEF INSIGHT</span>
+        {/* Tag row — only shown when we have brief detail context */}
+        {detail && (
+          <div className="ev-doc-tag-row">
+            <div className="ev-doc-tags">
+              {detail.tags && detail.tags.map((t, i) => (
+                <span key={i} className={`ev-tag ${t.className ?? ""}`}>{t.label}</span>
+              ))}
+              <span className="ev-tag ev-tag--insight">BRIEF INSIGHT</span>
+            </div>
+            <button
+              type="button"
+              className="ev-ask-btn"
+              title="Ask AI about this finding"
+              onClick={() => {
+                expandAiPanel()
+                setAIBarValue("About this finding — summarize risks and next steps.")
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+            </button>
           </div>
-          <button
-            type="button"
-            className="ev-ask-btn"
-            title="Ask AI about this finding"
-            onClick={() => {
-              expandAiPanel()
-              setAIBarValue("About this finding — summarize risks and next steps.")
-            }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-            </svg>
-          </button>
-        </div>
+        )}
 
         {evidence ? (
           <>
@@ -258,16 +257,16 @@ function EvidenceTab() {
               <EvidenceSections sections={evidence.sections} />
             </div>
           </>
-        ) : evidenceState.kind === "loading" ? (
+        ) : isLoading ? (
           <EmptyPane
             title="Generating evidence…"
             hint="Pulling the data-science slicing, infographics, qualitative signals, and hypothesis for this finding."
             placeholders={4}
           />
-        ) : evidenceState.kind === "error" ? (
+        ) : localState.kind === "error" ? (
           <EmptyPane
             title="Couldn't load full evidence"
-            hint={evidenceState.message}
+            hint={localState.message}
             placeholders={0}
           />
         ) : null}
