@@ -20,11 +20,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.design_agent.codebase_map.recreate import (
+    BrandAssetCarry,
     LocatedScreen,
     RecreateSources,
     SHELL_CANDIDATES,
     THEME_CANDIDATES,
     bridge_theme,
+    carry_brand_asset,
     port_tailwind_extend,
     read_located_sources,
     recreate_pre_seed,
@@ -653,3 +655,154 @@ def test_theme_bridge_logs_booleans_only(caplog):
         log_text = record.getMessage()
         assert "--primary" not in log_text, "CSS variable body must not appear in log"
         assert "@layer" not in log_text, "CSS rule body must not appear in log"
+
+
+# ── carry_brand_asset: scaffold + render cases ──────────────────────────────────
+
+
+def test_public_dir_ships_and_not_excluded():
+    """AC1 + AC9: public/ dir is not in _SCAFFOLD_EXCLUDE and the .gitkeep exists."""
+    from app.design_agent.storage import _SCAFFOLD_EXCLUDE
+
+    assert "public" not in _SCAFFOLD_EXCLUDE
+
+    repo_root = Path(__file__).parent.parent.parent
+    public_dir = repo_root / "prototype-runtime" / "public"
+    assert public_dir.exists(), "prototype-runtime/public/ must exist in the scaffold"
+    assert (public_dir / ".gitkeep").exists(), "prototype-runtime/public/.gitkeep must exist"
+
+
+def test_img_src_copies_file_and_renders_verbatim(caplog):
+    """AC2: img_src carry injects public/<basename> with the real bytes and the
+    shell reference contains the verbatim <img> tag including its size classes."""
+    logo = LogoAsset(render_kind="img_src", asset_ref="/salency-logo.svg", alt_text="Salency")
+    shell_body = (
+        '<header class="h-16">'
+        '<img src="/salency-logo.svg" class="h-9 w-auto shrink-0" alt="Salency" />'
+        "</header>"
+    )
+    sources = _sources_with_files({
+        "src/components/Sidebar.tsx": shell_body,
+        "salency-logo.svg": "<svg><path d='M0 0'/></svg>",
+    })
+
+    carry = carry_brand_asset(logo, sources, prototype_id=1)
+
+    assert "public/salency-logo.svg" in carry.virtual_fs_keys
+    assert carry.virtual_fs_keys["public/salency-logo.svg"] == "<svg><path d='M0 0'/></svg>"
+    assert carry.carried is True
+    assert 'src="/salency-logo.svg"' in carry.shell_render_ref
+    assert "h-9 w-auto shrink-0" in carry.shell_render_ref
+
+
+def test_img_src_fallback_when_file_absent(caplog):
+    """AC3: when the asset is absent from sources.files, no exception; carried=False;
+    a minimal shell reference is still returned (relative src preserved)."""
+    logo = LogoAsset(render_kind="img_src", asset_ref="/logo.png")
+    sources = _sources_with_files({})
+
+    carry = carry_brand_asset(logo, sources, prototype_id=2)
+
+    assert carry.carried is False
+    assert carry.virtual_fs_keys == {}
+    assert carry.shell_render_ref  # a fallback img tag is still produced
+
+
+def test_imported_asset_copies_and_keeps_import(caplog):
+    """AC4: imported_asset carry injects under the normalized path and the reference
+    keeps the import line verbatim."""
+    logo = LogoAsset(render_kind="imported_asset", asset_ref="src/assets/brand.svg")
+    sources = _sources_with_files({"src/assets/brand.svg": "<svg>brand</svg>"})
+
+    carry = carry_brand_asset(logo, sources, prototype_id=3)
+
+    assert "src/assets/brand.svg" in carry.virtual_fs_keys
+    assert carry.virtual_fs_keys["src/assets/brand.svg"] == "<svg>brand</svg>"
+    assert carry.carried is True
+    assert 'import logo from "src/assets/brand.svg"' in carry.shell_render_ref
+
+
+def test_inline_svg_reproduces_markup(caplog):
+    """AC5: inline_svg carry has no public/ or src/assets/ key; the shell reference
+    carries the verbatim <svg> markup from the shell source."""
+    svg_markup = '<svg width="24" height="24"><circle cx="12" cy="12" r="10"/></svg>'
+    logo = LogoAsset(render_kind="inline_svg")
+    sources = _sources_with_files({
+        "src/components/Sidebar.tsx": f"<nav>{svg_markup}</nav>",
+    })
+
+    carry = carry_brand_asset(logo, sources, prototype_id=4)
+
+    assert not any(k.startswith("public/") for k in carry.virtual_fs_keys)
+    assert not any(k.startswith("src/assets/") for k in carry.virtual_fs_keys)
+    assert "<svg" in carry.shell_render_ref
+    assert carry.carried is False
+
+
+def test_text_absent_never_invents_logo_file():
+    """AC6: text/absent carry never injects public/* or src/assets/* keys; the
+    wordmark text is passed through for the text case."""
+    for rk, ref in (("text", "Salency"), ("absent", "")):
+        logo = LogoAsset(render_kind=rk, asset_ref=ref)
+        sources = _sources_with_files({})
+
+        carry = carry_brand_asset(logo, sources, prototype_id=5)
+
+        pub_keys = [k for k in carry.virtual_fs_keys if k.startswith("public/")]
+        asset_keys = [k for k in carry.virtual_fs_keys if k.startswith("src/assets/")]
+        svg_keys = [k for k in carry.virtual_fs_keys if k.endswith(".svg")]
+        assert not pub_keys, f"{rk}: no public/ key expected"
+        assert not asset_keys, f"{rk}: no src/assets/ key expected"
+        assert not svg_keys, f"{rk}: no fabricated .svg key expected"
+
+    # Wordmark text carried through for text render kind
+    logo_text = LogoAsset(render_kind="text", asset_ref="Acme")
+    carry_text = carry_brand_asset(logo_text, _sources_with_files({}), prototype_id=5)
+    assert "Acme" in carry_text.shell_render_ref
+
+
+def test_raster_uses_deployed_url_fallback():
+    """AC7: a binary raster not present in sources.files (reader skipped it) results
+    in no bytes injected — no garbled content, no exception."""
+    logo = LogoAsset(render_kind="img_src", asset_ref="/logo.png")
+    sources = _sources_with_files({})  # raster absent (binary skipped by reader)
+
+    carry = carry_brand_asset(logo, sources, prototype_id=6)
+
+    assert carry.carried is False
+    for v in carry.virtual_fs_keys.values():
+        assert isinstance(v, str), "injected value must always be a plain string"
+        v.encode("utf-8")  # must not raise — no garbled bytes
+
+
+def test_scenario_a_no_public_key():
+    """AC8: an absent render kind (no located screen) produces no public/ key."""
+    logo = LogoAsset(render_kind="absent")
+    sources = _sources_with_files({})
+
+    carry = carry_brand_asset(logo, sources, prototype_id=7)
+
+    pub_keys = [k for k in carry.virtual_fs_keys if k.startswith("public/")]
+    assert not pub_keys
+
+
+def test_brand_asset_logs_render_kind_only(caplog):
+    """AC10: carry_brand_asset emits exactly one INFO line containing render_kind
+    and carried; no asset bytes appear in any log line."""
+    svg_content = "<svg><rect width='10' height='10'/></svg>"
+    logo = LogoAsset(render_kind="img_src", asset_ref="/icon.svg", alt_text="icon")
+    sources = _sources_with_files({"icon.svg": svg_content})
+
+    with caplog.at_level(logging.INFO, logger="app.design_agent.codebase_map.recreate"):
+        carry_brand_asset(logo, sources, prototype_id=8)
+
+    brand_records = [
+        r for r in caplog.records
+        if r.levelno == logging.INFO and "brand_asset" in r.getMessage()
+    ]
+    assert len(brand_records) == 1, f"expected 1 brand_asset log line, got {len(brand_records)}"
+    msg = brand_records[0].getMessage()
+    assert "render_kind=" in msg
+    assert "carried=" in msg
+    assert svg_content not in msg
+    assert "<svg" not in msg

@@ -56,9 +56,11 @@ from app.design_agent.autofixer import format_errors_for_agent
 from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
 from app.design_agent.codebase_map.recreate import (
+    BrandAssetCarry,
     LocatedScreen,
     RecreateSources,
     bridge_theme,
+    carry_brand_asset,
     recreate_pre_seed,
     render_recreate_task_block,
 )
@@ -1299,6 +1301,7 @@ async def generate_prototype(
     # virtual filesystem as reference files. Best-effort: any failure leaves
     # the token / primitive pre-seed in place.
     recreate_sources: RecreateSources | None = None
+    _brand_carry: BrandAssetCarry | None = None
     if located_screen is not None:
         try:
             recreate_sources = recreate_pre_seed(
@@ -1310,6 +1313,12 @@ async def generate_prototype(
                     recreate_sources,
                     prototype_id=prototype_id,
                 )
+                _brand_carry = carry_brand_asset(
+                    located_screen.map_result.shell.logo,
+                    recreate_sources,
+                    prototype_id=prototype_id,
+                )
+                virtual_fs.update(_brand_carry.virtual_fs_keys)
         except Exception as exc:
             recreate_sources = None
             logger.warning(
@@ -1342,7 +1351,7 @@ async def generate_prototype(
     # above (never into system_blocks — the cached prefix must stay stable).
     if recreate_sources is not None:
         try:
-            recreate_block = render_recreate_task_block(located_screen, recreate_sources)
+            recreate_block = render_recreate_task_block(located_screen, recreate_sources, _brand_carry)
             content = user_message.get("content")
             if isinstance(content, list):
                 user_message["content"] = list(content) + [
