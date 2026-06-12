@@ -1,13 +1,16 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ComponentType, type SVGProps } from "react"
 import { useRouter } from "next/navigation"
-import { InterviewLayout, useFieldValidation } from "../../onboarding/InterviewLayout"
+import { useFieldValidation } from "../../onboarding/InterviewLayout"
+import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep } from "../../../lib/onboarding/store"
+import { ChartBar, Palette, Settings, Sparkles } from "../../auth/icons"
 import {
   canLaunchWorkspace,
   COWORKERS,
+  coworkerHandle,
   coworkersApi,
   emptyCoworkerNames,
   withCoworkerDefaults,
@@ -16,14 +19,27 @@ import {
 } from "../../../lib/onboarding/coworkersApi"
 
 /**
- * Onboarding "coworkers" step — "Introducing your AI coworkers."
+ * Onboarding "coworkers" step — "Introducing your AI coworkers." Restyled to
+ * the v4 `.cowork-*` design (page 07) on the shared OnboardingChrome.
  *
  * Four specialists join the workspace: Product / Design / Data Science /
- * Admin. The user names each one — the name is how the coworker signs its
- * work in chats, briefs, and comments. Names persist to the backend
- * (PUT /v1/company/coworkers). "Launch workspace" advances to the first-brief
- * step, where the first Brief is generated.
+ * Admin (the COWORKERS catalog is the source of truth). The user names each
+ * one — the name is how the coworker signs its work in chats, briefs, and
+ * comments — and a live `.cowork-handle` pill previews the handle as they
+ * type ("Maya" → maya_pm). Names persist to the backend
+ * (PUT /v1/company/coworkers). "Launch workspace" advances to the
+ * first-brief step, where the first Brief is generated.
  */
+
+/** Slot → avatar glyph, standing in for the mock's Tabler webfont classes
+ *  (ti-sparkles / ti-palette / ti-chart-bar / ti-settings-automation). */
+const SLOT_ICONS: Record<CoworkerSlot, ComponentType<SVGProps<SVGSVGElement>>> = {
+  pm: Sparkles,
+  pd: Palette,
+  ds: ChartBar,
+  admin: Settings,
+}
+
 export function Coworkers() {
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
@@ -43,8 +59,8 @@ export function Coworkers() {
     () =>
       COWORKERS.map((c) => ({
         key: c.slot,
-        valid: true,  // naming is optional — blanks get a default name on launch
-        message: "",
+        valid: names[c.slot].trim().length > 0,
+        message: `Name your ${c.label.toLowerCase()} to launch.`,
       })),
   )
 
@@ -81,122 +97,67 @@ export function Coworkers() {
     if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
 
-  if (loading || !workspace) return <div className="ob-shell">Loading…</div>
+  if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   const namedCount = COWORKERS.filter((c) => names[c.slot].trim()).length
 
   return (
-    <InterviewLayout
+    <OnboardingChrome
       step={4}
-      eyebrow="Saved"
-      title="Introducing your AI coworkers. Give them a name."
-      agentMessage="Three specialists plus an Admin join your workspace. You can give them a task, ask them questions, or @mention them — and their name is how they'll sign their work in chats, briefs, and comments."
-      rightPane={
-        <div>
-          <div className="ob-preview-label">Your coworkers</div>
-          <p className="ob-stat-lg">
-            {namedCount} of {COWORKERS.length} named
-          </p>
-          <ul className="ob-preview-list">
-            {COWORKERS.map((c) => (
-              <li key={c.slot}>
-                {names[c.slot].trim() || c.label}
-              </li>
-            ))}
-          </ul>
-        </div>
+      title={
+        <>
+          Introducing your <em>AI coworkers.</em> Give them a name.
+        </>
+      }
+      subtitle="Three specialists plus an Admin join your workspace. You can give them a task, ask them questions, or @mention them — and their name is how they'll sign their work in chats, briefs, and comments."
+      footerMeta={
+        <>
+          {namedCount} of {COWORKERS.length} named ·{" "}
+          {canLaunch ? "ready to launch" : "name each coworker to launch"}
+        </>
       }
       onBack={() => router.push("/onboarding/connectors")}
       onContinue={launch}
       continueLabel="Launch workspace"
+      continueDisabled={saving}
       loading={saving}
     >
       <div ref={containerRef}>
-      {error && <div className="ob-form-error">{error}</div>}
+        {error && <div className="onb-form-error">{error}</div>}
 
-      <div className="ob-coworker-list">
-        {COWORKERS.map((c) => (
-          <div
-            key={c.slot}
-            className={`ob-coworker-row cw-${c.color}`}
-            data-field={c.slot}
-          >
-            <div className="ob-coworker-meta">
-              <div className="ob-coworker-label">{c.label}</div>
-              <div className="ob-coworker-blurb">{c.blurb}</div>
-              {errors[c.slot] && <p className="field-error">{errors[c.slot]}</p>}
-            </div>
-            <input
-              className={`input ob-coworker-input ${errors[c.slot] ? "has-error" : ""}`}
-              value={names[c.slot]}
-              onChange={(e) => setName(c.slot, e.target.value)}
-              placeholder={c.placeholder}
-              maxLength={40}
-              aria-label={`Name for ${c.label}`}
-            />
-          </div>
-        ))}
+        <div className="cowork-list">
+          {COWORKERS.map((c) => {
+            const Icon = SLOT_ICONS[c.slot]
+            return (
+              <div key={c.slot} className="cowork" data-field={c.slot}>
+                <div className={`cowork-av ${c.color}`} aria-hidden>
+                  <Icon style={{ width: 19, height: 19 }} />
+                </div>
+                <div className="cowork-body">
+                  <div className="cowork-role">{c.label}</div>
+                  <div className="cowork-desc">{c.blurb}</div>
+                  <div className="cowork-input">
+                    <input
+                      className={`inp ${errors[c.slot] ? "has-error" : ""}`}
+                      value={names[c.slot]}
+                      onChange={(e) => setName(c.slot, e.target.value)}
+                      placeholder="Enter a name"
+                      maxLength={40}
+                      aria-label={`Name for ${c.label}`}
+                    />
+                    <span className="cowork-handle">
+                      {coworkerHandle(c.slot, names[c.slot])}
+                    </span>
+                  </div>
+                  {errors[c.slot] && (
+                    <p className="onb-field-error">{errors[c.slot]}</p>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
       </div>
-
-      <p className="ob-launch-note">
-        {namedCount} of {COWORKERS.length} named ·{" "}
-        {canLaunch ? "ready to launch" : "name each coworker to launch"}
-      </p>
-      </div>
-
-      <style jsx>{`
-        .ob-coworker-list {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-        .ob-coworker-row {
-          display: grid;
-          grid-template-columns: 1fr 180px;
-          gap: 14px;
-          align-items: center;
-          padding: 16px 18px;
-          border: 1px solid var(--line);
-          border-left: 3px solid var(--accent);
-          border-radius: 12px;
-          background: var(--surface-2);
-        }
-        .cw-pm {
-          border-left-color: var(--accent);
-        }
-        .cw-pd {
-          border-left-color: #2a6ec8;
-        }
-        .cw-ds {
-          border-left-color: #634ab0;
-        }
-        .cw-admin {
-          border-left-color: var(--ink-3);
-        }
-        .ob-coworker-label {
-          font-weight: 600;
-          font-size: 14px;
-        }
-        .ob-coworker-blurb {
-          font-size: 12px;
-          color: var(--ink-3);
-          margin-top: 2px;
-          line-height: 1.4;
-        }
-        .ob-coworker-input {
-          font-family: var(--font-mono, monospace);
-        }
-        .ob-launch-note {
-          font-size: 12px;
-          color: var(--muted);
-          margin: 16px 0 0;
-        }
-        @media (max-width: 560px) {
-          .ob-coworker-row {
-            grid-template-columns: 1fr;
-          }
-        }
-      `}</style>
-    </InterviewLayout>
+    </OnboardingChrome>
   )
 }
