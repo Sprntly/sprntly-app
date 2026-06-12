@@ -26,7 +26,10 @@ from __future__ import annotations
 # v4 (P4-02, manual-edit commit-back): the DESIGN_AGENT_MANUAL_EDIT_SYSTEM
 # commit-only prompt family (AD23) lands; bumping invalidates cached prototypes
 # so they regenerate under the version that knows the manual-edit workflow.
-DESIGN_AGENT_TEMPLATE_VERSION = 4
+# v5 (recreate discipline): DESIGN_AGENT_RECREATE_DISCIPLINE appended —
+# re-express/on-theme/PRD-scoped rules for codebase-source runs. Bumping
+# invalidates cached prototypes so recreate-path runs pick up the new discipline.
+DESIGN_AGENT_TEMPLATE_VERSION = 5
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the
@@ -793,4 +796,37 @@ relevant screens and set "is_multi_node": true.
 that does not appear in that list. If no screen in the provided list is a plausible \
 match, return an empty candidates array.
 - "rationale" must be a single sentence with no line breaks.
+"""
+
+
+# ─── Recreate-path discipline ─────────────────────────────────────────────────
+# Appended into the USER-message recreate task block (via recreate.py) when a
+# screen is located. Never placed in system_blocks — the cached prefix must
+# stay stable across recreate-path runs.
+DESIGN_AGENT_RECREATE_DISCIPLINE = """\
+RE-EXPRESS, DON'T PARAPHRASE.
+You are handed the REAL source of a product screen + its child components + the
+real app shell (sidebar/topbar) as reference files. Re-express them into the
+fixed prototype stack (Vite + React + Tailwind + shadcn). Reuse the real JSX
+structure, the real className strings, the real nav labels / order / icons, and
+the real brand mark. Drop only what the fixed stack cannot run (a "use client"
+directive, Next.js server components, backend data fetches, real context
+providers) — replace data with plausible client-side mock data and swap the
+real nav primitive for local state.
+
+ON-THEME TOKENS ONLY — NEVER RAW PALETTE COLOURS.
+Every element, including NON-PRD action buttons, uses the app's semantic token
+classes: bg-primary / bg-accent / bg-secondary / bg-card / bg-background and the
+matching text-*-foreground. NEVER a raw Tailwind palette colour (bg-green-600,
+bg-blue-500, text-red-500, ...). A raw palette colour is the one thing that reads
+off-brand on an otherwise-faithful screen. If you can see the real element's
+classes in the reference, reuse them verbatim; if not, default to bg-primary.
+
+PRD-SCOPED FIDELITY — DO NOT GOLD-PLATE.
+Reproduce faithfully: the SHELL (brand / nav / icons / collapse) + the screen
+header/structure + the PRD-affected region (style its new behaviour with the
+app's REAL components — the real Toast, the real Dialog). Other regions
+(unrelated data tables, side panels) only need to be RECOGNIZABLE: simple,
+plausible, on-theme content — do NOT pixel-reproduce every region. Parity is
+"recognizable screen + faithful PRD interaction", not a full clone.
 """
