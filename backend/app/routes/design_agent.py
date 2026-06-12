@@ -554,13 +554,21 @@ class LocateResponse(BaseModel):
 
 def _unmapped_locate_response(repo: str) -> LocateResponse:
     """Fail-open response for the no-installation and map-failure paths."""
-    from app.design_agent.codebase_map.gate import threshold_for_repo
+    from app.design_agent.codebase_map.gate import GateResult, threshold_for_repo
+    from app.design_agent.codebase_map.locate import emit_locate_telemetry
+    t = threshold_for_repo(repo)
+    emit_locate_telemetry(
+        repo=repo,
+        sha="",
+        gate_result=GateResult(decision="ranked_confirm", chosen=[], ranked=[], threshold=t, top_confidence=0),
+        n_candidates=0,
+    )
     return LocateResponse(
         decision="ranked_confirm",
         chosen=[],
         ranked=[],
         top_confidence=0,
-        threshold=threshold_for_repo(repo),
+        threshold=t,
         repo=repo,
         posture="PARTIAL",
         unmapped=True,
@@ -622,7 +630,7 @@ async def locate(
         return _unmapped_locate_response(body.github_repo)
 
     from app.design_agent.codebase_map.service import build_map
-    from app.design_agent.codebase_map.locate import locate_screen
+    from app.design_agent.codebase_map.locate import emit_locate_telemetry, locate_screen
     from app.design_agent.codebase_map.gate import decide_gate, threshold_for_repo
 
     try:
@@ -641,6 +649,12 @@ async def locate(
 
     threshold = threshold_for_repo(body.github_repo)
     gate = decide_gate(locate_result, threshold=threshold)
+    emit_locate_telemetry(
+        repo=body.github_repo,
+        sha=map_result.commit_sha,
+        gate_result=gate,
+        n_candidates=len(gate.ranked),
+    )
 
     return LocateResponse(
         decision=gate.decision,
