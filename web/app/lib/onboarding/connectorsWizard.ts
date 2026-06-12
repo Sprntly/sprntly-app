@@ -59,6 +59,48 @@ export function categoryTitle(cat: ConnectorCategoryRow): string {
   return cat.subLabel ? `${cat.title} · ${cat.subLabel}` : cat.title
 }
 
+/* ── Accordion helpers (sequential unlock) ──────────────────────────
+   The design-v4 page renders ALL categories as a vertical accordion:
+   a category unlocks only once the previous one is done/skipped, and
+   done categories stay re-openable. These pure helpers carry that
+   state so the component stays thin. */
+
+/** Mark a category index done/skipped (returns a new set). */
+export function markCategoryDone(
+  done: ReadonlySet<number>,
+  index: number,
+): Set<number> {
+  const next = new Set(done)
+  next.add(index)
+  return next
+}
+
+/**
+ * A category is unlocked when it's the first one, is itself already
+ * done (done categories remain re-openable), or the previous category
+ * is done/skipped.
+ */
+export function isCategoryUnlocked(
+  done: ReadonlySet<number>,
+  index: number,
+): boolean {
+  return index === 0 || done.has(index) || done.has(index - 1)
+}
+
+/**
+ * First not-yet-done category index — the accordion section to open
+ * after completing one — or null once every category is done.
+ */
+export function firstIncompleteCategory(
+  done: ReadonlySet<number>,
+  count: number,
+): number | null {
+  for (let i = 0; i < count; i++) {
+    if (!done.has(i)) return i
+  }
+  return null
+}
+
 /** Toggle a connector id in a selection set (returns a new set). */
 export function toggleSelection(
   selected: ReadonlySet<string>,
