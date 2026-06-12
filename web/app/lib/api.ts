@@ -1062,6 +1062,34 @@ export const designAgentApi = {
    *  <1s. Returns { question }. */
   clarifyComment: (prototypeId: number, commentBody: string) =>
     api.post<{ question: string }>(`/v1/design-agent/${prototypeId}/clarify-comment`, { comment_body: commentBody }),
+  /** Run the map → locate-LLM → gate pipeline for a PRD + connected repo.
+   *  Returns the gate decision, chosen screen(s), and the full ranked top-3.
+   *  `unmapped` is true when no installation or codebase map is available —
+   *  the caller should fall back to the manual-picker flow in that case. */
+  locate: (body: { prd_id: number; github_repo: string; ref?: string | null }) =>
+    api.post<LocateResponse>("/v1/design-agent/locate", body),
+}
+
+/** One ranked screen candidate from the locate pipeline (map → LLM → gate). */
+export type LocateCandidate = {
+  route: string
+  entry_component: string
+  confidence: number
+  rationale: string
+  ambiguous: boolean
+  component_count: number
+}
+
+/** Shape returned by POST /v1/design-agent/locate. */
+export type LocateResponse = {
+  decision: "auto_proceed" | "proceed_with_note" | "ranked_confirm"
+  chosen: LocateCandidate[]
+  ranked: LocateCandidate[]
+  top_confidence: number
+  threshold: number
+  repo: string
+  posture: "CLEAN" | "PARTIAL"
+  unmapped: boolean
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */

@@ -510,6 +510,150 @@ def list_figma_files(
     )
 
 
+# ─── Locate: map + locate + gate pipeline ─────────────────────────────────────
+#
+# POST /locate is a static POST and cannot be shadowed by GET /{prototype_id}.
+# Declared here (above the catch-all) as a defensive measure per the standing
+# route-ordering lesson; FastAPI matches POSTs independently of GETs.
+#
+# Flow: workspace-check PRD → resolve installation → build_map → locate_screen
+#       → decide_gate → serialize.  Both blocking calls are wrapped in
+#       asyncio.to_thread so the FastAPI worker is never blocked.
+#
+# Degradation:
+#   No installation / build_map None     → unmapped fail-open (200, unmapped=True)
+#   build_map raises                     → unmapped fail-open (200, unmapped=True)
+#   locate_screen raises (patched tests) → 502 (PM retries; never fabricates)
+
+
+class LocateRequest(BaseModel):
+    prd_id: int = Field(..., gt=0)
+    github_repo: str = Field(..., min_length=1)   # connected-repo full_name "org/repo"
+    ref: str | None = None                         # branch/sha; None = default branch
+
+
+class LocateCandidateOut(BaseModel):
+    route: str
+    entry_component: str
+    confidence: int
+    rationale: str
+    ambiguous: bool
+    component_count: int = 0  # composed_components length from the matching ScreenNode
+
+
+class LocateResponse(BaseModel):
+    decision: Literal["auto_proceed", "proceed_with_note", "ranked_confirm"]
+    chosen: list[LocateCandidateOut]   # screen(s) generation would run on
+    ranked: list[LocateCandidateOut]   # full top-3 for the picker
+    top_confidence: int
+    threshold: int
+    repo: str
+    posture: Literal["CLEAN", "PARTIAL"]   # from MapResult — surfaced for the chip
+    unmapped: bool = False                  # True when no installation / empty map
+
+
+def _unmapped_locate_response(repo: str) -> LocateResponse:
+    """Fail-open response for the no-installation and map-failure paths."""
+    from app.design_agent.codebase_map.gate import threshold_for_repo
+    return LocateResponse(
+        decision="ranked_confirm",
+        chosen=[],
+        ranked=[],
+        top_confidence=0,
+        threshold=threshold_for_repo(repo),
+        repo=repo,
+        posture="PARTIAL",
+        unmapped=True,
+    )
+
+
+def _candidate_to_out(candidate, map_result) -> LocateCandidateOut:
+    """Serialize one LocateCandidate, enriching component_count from the map."""
+    component_count = 0
+    if map_result is not None:
+        for node in map_result.nodes:
+            if node.route == candidate.route:
+                component_count = len(node.composed_components)
+                break
+    return LocateCandidateOut(
+        route=candidate.route,
+        entry_component=candidate.entry_component,
+        confidence=candidate.confidence,
+        rationale=candidate.rationale,
+        ambiguous=candidate.ambiguous,
+        component_count=component_count,
+    )
+
+
+@router.post(
+    "/locate",
+    response_model=LocateResponse,
+    dependencies=[Depends(require_same_origin)],
+)
+async def locate(
+    body: LocateRequest,
+    company: CompanyContext = Depends(require_company),
+) -> LocateResponse:
+    """Resolve the locate pipeline: map → locate LLM → gate → serialize.
+
+    Feature-flag gated (404 when off). Workspace-isolated via PRD ownership
+    check (require_owned_prd). Blocking I/O and LLM calls run off the event
+    loop via asyncio.to_thread. Map or installation failures degrade to
+    unmapped=True (200); locate-LLM failures return 502.
+    """
+    _require_feature_enabled()
+    workspace_id = company.company_id
+
+    logger.info(
+        "design_agent.locate.request prd_id=%s repo=%s workspace_id=%s",
+        body.prd_id, body.github_repo, workspace_id,
+    )
+
+    # Workspace isolation: PRD must belong to this company's workspace.
+    from app.deps.ownership import require_owned_prd
+    require_owned_prd(body.prd_id, workspace_id)
+    prd_row = get_prd_rendered(body.prd_id)
+    prd_text = (prd_row.get("payload_md") or "") if prd_row else ""
+
+    installation_id = _resolve_github_installation_id_for_repo(
+        workspace_id, body.github_repo
+    )
+    if installation_id is None:
+        return _unmapped_locate_response(body.github_repo)
+
+    from app.design_agent.codebase_map.service import build_map
+    from app.design_agent.codebase_map.locate import locate_screen
+    from app.design_agent.codebase_map.gate import decide_gate, threshold_for_repo
+
+    try:
+        map_result = await asyncio.to_thread(build_map, installation_id, body.github_repo, body.ref)
+    except Exception:
+        logger.info("design_agent.locate.map_failed repo=%s", body.github_repo)
+        return _unmapped_locate_response(body.github_repo)
+
+    if map_result is None:
+        return _unmapped_locate_response(body.github_repo)
+
+    try:
+        locate_result = await asyncio.to_thread(locate_screen, prd_text, map_result)
+    except Exception:
+        raise HTTPException(status_code=502, detail="locate failed")
+
+    threshold = threshold_for_repo(body.github_repo)
+    gate = decide_gate(locate_result, threshold=threshold)
+
+    return LocateResponse(
+        decision=gate.decision,
+        chosen=[_candidate_to_out(c, map_result) for c in gate.chosen],
+        ranked=[_candidate_to_out(c, map_result) for c in gate.ranked],
+        top_confidence=gate.top_confidence,
+        threshold=gate.threshold,
+        repo=body.github_repo,
+        posture=map_result.posture,
+        unmapped=False,
+    )
+
+
 @router.get("/{prototype_id}")
 def get_one(
     prototype_id: int,
