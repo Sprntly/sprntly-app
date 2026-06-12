@@ -13,6 +13,7 @@ import { Toaster as Sonner } from "sonner"
 type ToasterProps = React.ComponentProps<typeof Sonner>
 
 const Toaster = ({ ...props }: ToasterProps) => {
+  // Safe without a ThemeProvider ancestor: useTheme() returns {} when unmounted; = "system" covers the undefined theme field.
   const { theme = "system" } = useTheme()
 
   return (
