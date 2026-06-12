@@ -16,11 +16,12 @@ ones that do not exist).
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 
 from .repo_reader import read_repo
-from .types import MapResult, ScreenNode
+from .types import LogoAsset, MapResult, ScreenNode
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,193 @@ class RecreateSources:
     files: dict[str, str]
     screen_path: str
     also_screen_paths: tuple[str, ...]
+
+
+@dataclass
+class BrandAssetCarry:
+    """Result of carrying the shell brand logo into the recreate virtual filesystem.
+
+    ``virtual_fs_keys`` holds the path→content entries to merge into ``virtual_fs``
+    before the agent run (empty for inline_svg / text / absent render kinds).
+    ``shell_render_ref`` is the verbatim markup or import line the agent should
+    re-use when expressing the shell logo.  ``carried`` is True when file bytes
+    were injected via ``virtual_fs_keys``.
+    """
+
+    virtual_fs_keys: dict[str, str]
+    shell_render_ref: str
+    deployed_url: str
+    render_kind: str
+    carried: bool
+
+
+# Regex helpers for brand-asset carry — shared by the three render-case functions.
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*/?>", re.IGNORECASE)
+_SVG_BLOCK_RE = re.compile(r"<svg\b[^>]*>.*?</svg>", re.IGNORECASE | re.DOTALL)
+
+
+def _normalize_asset_ref(ref: str) -> str:
+    """Strip a leading ``/`` or ``./`` so the path matches ``sources.files`` keys."""
+    ref = ref.strip()
+    if ref.startswith("./"):
+        return ref[2:]
+    if ref.startswith("/"):
+        return ref[1:]
+    return ref
+
+
+def _find_img_tag_in_shell(
+    sources: RecreateSources, src_variants: tuple[str, ...]
+) -> str:
+    """Return the first ``<img>`` tag in any shell candidate that contains a src variant."""
+    for key in SHELL_CANDIDATES:
+        body = sources.files.get(key, "")
+        if not body:
+            continue
+        for m in _IMG_TAG_RE.finditer(body):
+            tag = m.group(0)
+            if any(v and v in tag for v in src_variants):
+                return tag
+    return ""
+
+
+def _find_inline_svg_in_shell(sources: RecreateSources) -> str:
+    """Return the first ``<svg>...</svg>`` block found in any shell candidate."""
+    for key in SHELL_CANDIDATES:
+        body = sources.files.get(key, "")
+        if not body:
+            continue
+        m = _SVG_BLOCK_RE.search(body)
+        if m:
+            return m.group(0)
+    return ""
+
+
+def _carry_img_src(
+    logo: LogoAsset,
+    sources: RecreateSources,
+    *,
+    prototype_id: int,
+) -> "BrandAssetCarry":
+    raw_ref = logo.asset_ref or ""
+    norm_ref = _normalize_asset_ref(raw_ref)
+    basename = os.path.basename(norm_ref) if norm_ref else ""
+    vfs_key = f"public/{basename}" if basename else ""
+
+    src_variants = (raw_ref, f"/{norm_ref}", norm_ref, basename)
+    img_tag = _find_img_tag_in_shell(sources, src_variants)
+    if not img_tag:
+        alt = logo.alt_text or ""
+        img_tag = f'<img src="{raw_ref}" alt="{alt}" />'
+
+    file_body = sources.files.get(norm_ref, "")
+    carried = bool(file_body and vfs_key)
+    vfs_keys: dict[str, str] = {vfs_key: file_body} if carried else {}
+
+    logger.info(
+        "design_agent.brand_asset prototype_id=%s render_kind=%s carried=%s fallback=%s",
+        prototype_id, "img_src", carried, False,
+    )
+    return BrandAssetCarry(
+        virtual_fs_keys=vfs_keys,
+        shell_render_ref=img_tag,
+        deployed_url="",
+        render_kind="img_src",
+        carried=carried,
+    )
+
+
+def _carry_imported_asset(
+    logo: LogoAsset,
+    sources: RecreateSources,
+    *,
+    prototype_id: int,
+) -> "BrandAssetCarry":
+    raw_ref = logo.asset_ref or ""
+    norm_ref = _normalize_asset_ref(raw_ref)
+    file_body = sources.files.get(norm_ref, "")
+    carried = bool(file_body and norm_ref)
+    vfs_keys: dict[str, str] = {norm_ref: file_body} if carried else {}
+    import_ref = raw_ref or norm_ref
+    shell_render_ref = f'import logo from "{import_ref}"' if import_ref else ""
+
+    logger.info(
+        "design_agent.brand_asset prototype_id=%s render_kind=%s carried=%s fallback=%s",
+        prototype_id, "imported_asset", carried, False,
+    )
+    return BrandAssetCarry(
+        virtual_fs_keys=vfs_keys,
+        shell_render_ref=shell_render_ref,
+        deployed_url="",
+        render_kind="imported_asset",
+        carried=carried,
+    )
+
+
+def _carry_inline_svg(
+    logo: LogoAsset,
+    sources: RecreateSources,
+    *,
+    prototype_id: int,
+) -> "BrandAssetCarry":
+    svg_markup = _find_inline_svg_in_shell(sources)
+
+    logger.info(
+        "design_agent.brand_asset prototype_id=%s render_kind=%s carried=%s fallback=%s",
+        prototype_id, "inline_svg", False, False,
+    )
+    return BrandAssetCarry(
+        virtual_fs_keys={},
+        shell_render_ref=svg_markup,
+        deployed_url="",
+        render_kind="inline_svg",
+        carried=False,
+    )
+
+
+def _carry_text_or_absent(
+    logo: LogoAsset,
+    *,
+    prototype_id: int,
+) -> "BrandAssetCarry":
+    wordmark = logo.asset_ref or logo.alt_text or ""
+
+    logger.info(
+        "design_agent.brand_asset prototype_id=%s render_kind=%s carried=%s fallback=%s",
+        prototype_id, logo.render_kind, False, False,
+    )
+    return BrandAssetCarry(
+        virtual_fs_keys={},
+        shell_render_ref=wordmark,
+        deployed_url="",
+        render_kind=logo.render_kind,
+        carried=False,
+    )
+
+
+def carry_brand_asset(
+    logo: LogoAsset,
+    sources: RecreateSources,
+    *,
+    prototype_id: int = 0,
+) -> BrandAssetCarry:
+    """Carry the shell brand logo into the recreate virtual filesystem.
+
+    Deterministic — no LLM calls. Selects the carry strategy from the logo's
+    render kind: file-copy for img_src and imported_asset, markup extraction
+    for inline_svg, wordmark passthrough for text/absent.
+
+    The returned ``BrandAssetCarry.virtual_fs_keys`` should be merged into
+    ``virtual_fs`` before the agent run; ``shell_render_ref`` is appended to
+    the recreate task block so the agent knows the exact logo markup to use.
+    """
+    if logo.render_kind == "img_src":
+        return _carry_img_src(logo, sources, prototype_id=prototype_id)
+    if logo.render_kind == "imported_asset":
+        return _carry_imported_asset(logo, sources, prototype_id=prototype_id)
+    if logo.render_kind == "inline_svg":
+        return _carry_inline_svg(logo, sources, prototype_id=prototype_id)
+    return _carry_text_or_absent(logo, prototype_id=prototype_id)
 
 
 def _component_paths(m: MapResult, names: list[str]) -> set[str]:
@@ -456,6 +644,7 @@ def port_tailwind_extend(scaffold_config: str, sources: RecreateSources) -> str:
 def render_recreate_task_block(
     located: LocatedScreen,
     sources: RecreateSources,
+    brand_carry: BrandAssetCarry | None = None,
 ) -> str:
     """Render the user-message task block for the recreate path.
 
@@ -464,13 +653,16 @@ def render_recreate_task_block(
     into the virtual filesystem), and frames the re-express + apply-PRD
     pivot. Discipline wording (no gold-plate, on-theme, etc.) is owned by
     the prompts module and applied alongside this block.
+
+    When ``brand_carry`` is provided, the shell logo render reference is
+    appended so the agent knows the exact markup to reproduce.
     """
     node = located.node
     ref_paths = sorted(sources.files.keys())
     ref_lines = [f"  - __reference__/{p}" for p in ref_paths] or [
         "  (no reference files resolved)"
     ]
-    return (
+    block = (
         "RECREATE TARGET (from the connected codebase)\n"
         "You are re-expressing a REAL product screen, not generating from blank canvas.\n"
         f"Located screen: {node.entry_component} (route {node.route}) "
@@ -479,3 +671,8 @@ def render_recreate_task_block(
         + "\n".join(ref_lines)
         + "\nApply the requirements change ON TOP of the re-expressed screen."
     )
+    if brand_carry and brand_carry.shell_render_ref:
+        block += (
+            f"\nBrand logo ({brand_carry.render_kind}): {brand_carry.shell_render_ref}"
+        )
+    return block
