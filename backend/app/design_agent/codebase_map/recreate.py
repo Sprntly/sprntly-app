@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 
 from ..prompts import DESIGN_AGENT_RECREATE_DISCIPLINE
+from ..storage import ThemeBridgeError
 from .repo_reader import read_repo
 from .types import LogoAsset, MapResult, ScreenNode
 
@@ -90,6 +91,23 @@ THEME_CANDIDATES: tuple[str, ...] = (
     "tailwind.config.cjs",
     "tailwind.config.mjs",
 )
+
+
+# CSS variable VALUES the scaffold ships by default (both :root and .dark).
+# Values that appear in a real customer's globals but are NOT in this set are
+# discriminating build-gate signals: a scaffold-only bundle (theme not bridged)
+# would carry only the defaults, while a bridged bundle carries the real values.
+_SCAFFOLD_DEFAULT_VALUES: frozenset[str] = frozenset({
+    "0 0% 100%",
+    "222.2 84% 4.9%",
+    "222.2 47.4% 11.2%",
+    "210 40% 98%",
+    "210 40% 96.1%",
+    "215.4 16.3% 46.9%",
+    "0 84.2% 60.2%",
+    "214.3 31.8% 91.4%",
+    "0.5rem",
+})
 
 
 @dataclass(frozen=True)
@@ -678,3 +696,116 @@ def render_recreate_task_block(
         )
     block += f"\n\n{DESIGN_AGENT_RECREATE_DISCIPLINE.strip()}"
     return block
+
+
+# ── Theme-bridge build gate ───────────────────────────────────────────────────
+
+_VAR_VALUE_RE = re.compile(r"--[\w-]+\s*:\s*([^;}\n]+)")
+_FONT_IMPORT_RE_FAMILY = re.compile(
+    r"@import\s+url\([^)]*[?&]family=([A-Za-z][^&+):]+)",
+    re.IGNORECASE,
+)
+_FONT_DECL_RE = re.compile(r"font-family\s*:\s*['\"]?([A-Za-z][A-Za-z0-9 _-]+)")
+
+
+@dataclass(frozen=True)
+class ThemeExpectations:
+    """Discriminating build-gate signals derived from the real bridged globals.
+
+    token_signals: real CSS variable VALUES (not names) that differ from the
+    scaffold defaults — present in the dist only when the bridge succeeded.
+    font_families: font-family name strings that must appear in the built CSS.
+    class_signals: at least ONE of these Tailwind utility strings must appear
+    in the built dist (the agent used brand-colour utilities).
+    asset_basename: the carried logo file basename; None when no file asset.
+    """
+
+    token_signals: tuple[str, ...]
+    font_families: tuple[str, ...]
+    class_signals: tuple[str, ...]
+    asset_basename: str | None
+
+
+def build_theme_expectations(
+    sources: RecreateSources,
+    brand_carry: "BrandAssetCarry | None" = None,
+) -> "ThemeExpectations | None":
+    """Derive discriminating build-gate signals from the real globals.
+
+    Extracts CSS variable values that differ from the scaffold defaults and
+    font-family names. Returns None when no globals are present in sources
+    (no assertion can be made without a real baseline), or when no
+    discriminating signals are found.
+    """
+    globals_css = _find_globals_css(sources)
+    if not globals_css:
+        return None
+
+    raw_values = [m.group(1).strip() for m in _VAR_VALUE_RE.finditer(globals_css)]
+    token_signals = tuple(
+        v for v in raw_values
+        if v and v not in _SCAFFOLD_DEFAULT_VALUES and len(v) > 2
+    )[:4]
+
+    font_imports = [
+        f.split("+")[0].strip()
+        for f in _FONT_IMPORT_RE_FAMILY.findall(globals_css)
+    ]
+    font_declarations = _FONT_DECL_RE.findall(globals_css)
+    raw_fonts = font_imports + font_declarations
+    font_families = tuple(dict.fromkeys(f for f in raw_fonts if f))[:3]
+
+    if not token_signals and not font_families:
+        return None
+
+    class_signals = ("bg-primary", "text-primary", "text-foreground", "bg-background")
+
+    asset_basename: str | None = None
+    if brand_carry is not None and brand_carry.carried:
+        vfs_keys = list(brand_carry.virtual_fs_keys.keys())
+        if vfs_keys:
+            asset_basename = os.path.basename(vfs_keys[0])
+
+    return ThemeExpectations(
+        token_signals=token_signals,
+        font_families=font_families,
+        class_signals=class_signals,
+        asset_basename=asset_basename,
+    )
+
+
+def assert_theme_landed(
+    dist_files: dict[str, str],
+    expected: ThemeExpectations,
+) -> None:
+    """Grep the built dist for real theme signals. Raise ThemeBridgeError when
+    the theme did NOT bridge — a green build that shipped unstyled.
+
+    Checks the full concatenated dist blob (all built CSS/JS assets) for:
+    1. Each discriminating token VALUE (not name) from the real globals.
+    2. Each font-family name.
+    3. At least one semantic class string (purge-tolerant: any-one-of).
+    4. The carried logo file basename in blob or dist file keys (when set).
+    """
+    blob = "\n".join(dist_files.values())
+    missing: list[tuple[str, str]] = []
+
+    for token_val in expected.token_signals:
+        if token_val not in blob:
+            missing.append(("token", token_val))
+
+    for font in expected.font_families:
+        if font not in blob:
+            missing.append(("font", font))
+
+    if expected.class_signals and not any(c in blob for c in expected.class_signals):
+        missing.append(("class", expected.class_signals[0]))
+
+    if expected.asset_basename:
+        in_blob = expected.asset_basename in blob
+        in_keys = any(expected.asset_basename in k for k in dist_files)
+        if not in_blob and not in_keys:
+            missing.append(("asset", expected.asset_basename))
+
+    if missing:
+        raise ThemeBridgeError(f"theme did not bridge to dist: {missing}")

@@ -19,13 +19,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import importlib
+from types import SimpleNamespace
+
 from app.design_agent.codebase_map.recreate import (
     BrandAssetCarry,
     LocatedScreen,
     RecreateSources,
     SHELL_CANDIDATES,
     THEME_CANDIDATES,
+    ThemeExpectations,
+    _SCAFFOLD_DEFAULT_VALUES,
+    assert_theme_landed,
     bridge_theme,
+    build_theme_expectations,
     carry_brand_asset,
     port_tailwind_extend,
     read_located_sources,
@@ -39,6 +46,7 @@ from app.design_agent.codebase_map.types import (
     ScreenNode,
     ShellModel,
 )
+from app.design_agent.storage import ThemeBridgeError, ViteBuildError
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────────
@@ -806,3 +814,255 @@ def test_brand_asset_logs_render_kind_only(caplog):
     assert "carried=" in msg
     assert svg_content not in msg
     assert "<svg" not in msg
+
+
+# ── Theme-bridge build gate ───────────────────────────────────────────────────
+
+_REAL_PRIMARY = "142 71% 45%"  # green — not in scaffold defaults
+_REAL_FONT = "Inter"
+_REAL_GLOBALS = f"""
+:root {{
+  --primary: {_REAL_PRIMARY};
+  --background: 0 0% 98%;
+}}
+@import url(https://fonts.googleapis.com/css2?family={_REAL_FONT}:wght@400;600&display=swap);
+"""
+
+
+def _expectations_with(
+    token_signals=(_REAL_PRIMARY,),
+    font_families=(_REAL_FONT,),
+    class_signals=("bg-primary", "text-primary"),
+    asset_basename=None,
+) -> ThemeExpectations:
+    return ThemeExpectations(
+        token_signals=token_signals,
+        font_families=font_families,
+        class_signals=class_signals,
+        asset_basename=asset_basename,
+    )
+
+
+def test_theme_landed_passes_when_all_signals_present():
+    dist = {
+        "assets/index.css": f".bg-primary {{ color: hsl({_REAL_PRIMARY}); font-family: {_REAL_FONT}; }}",
+    }
+    assert_theme_landed(dist, _expectations_with())
+
+
+def test_missing_token_raises_with_discriminating_value():
+    scaffold_only = {"assets/index.css": "--primary: 222.2 47.4% 11.2%; font-family: Inter;"}
+    with pytest.raises(ThemeBridgeError) as exc_info:
+        assert_theme_landed(scaffold_only, _expectations_with(token_signals=(_REAL_PRIMARY,)))
+    assert _REAL_PRIMARY in str(exc_info.value)
+    assert "token" in str(exc_info.value)
+
+
+def test_missing_font_raises():
+    dist = {"assets/index.css": f"hsl({_REAL_PRIMARY}) bg-primary"}
+    with pytest.raises(ThemeBridgeError) as exc_info:
+        assert_theme_landed(dist, _expectations_with(font_families=("Montserrat",)))
+    assert "font" in str(exc_info.value)
+    assert "Montserrat" in str(exc_info.value)
+
+
+def test_class_assertion_tolerates_purge_any_of():
+    dist = {"assets/index.css": f"hsl({_REAL_PRIMARY}) font-family:{_REAL_FONT} text-primary"}
+    # Only text-primary is present; bg-primary is not — any-one-of must pass.
+    assert_theme_landed(dist, _expectations_with(class_signals=("bg-primary", "text-primary", "bg-background")))
+
+
+def test_missing_carried_asset_reported():
+    dist = {"assets/index.css": f"hsl({_REAL_PRIMARY}) {_REAL_FONT}"}
+    with pytest.raises(ThemeBridgeError) as exc_info:
+        assert_theme_landed(dist, _expectations_with(asset_basename="logo.svg"))
+    assert "asset" in str(exc_info.value)
+    assert "logo.svg" in str(exc_info.value)
+
+
+def test_token_signals_exclude_scaffold_defaults():
+    sources = _sources_with_files({
+        "src/index.css": """
+        :root {
+          --primary: 222.2 47.4% 11.2%;
+          --background: 0 0% 100%;
+          --accent: 310 85% 55%;
+        }
+        """
+    })
+    expectations = build_theme_expectations(sources)
+    assert expectations is not None
+    for default_val in _SCAFFOLD_DEFAULT_VALUES:
+        assert default_val not in expectations.token_signals, (
+            f"scaffold default '{default_val}' must not be a signal"
+        )
+    # The non-default value 310 85% 55% IS a signal
+    assert "310 85% 55%" in expectations.token_signals
+
+
+# ── Staging integration ───────────────────────────────────────────────────────
+
+_STAGE_PROTOTYPE_DDL = """
+CREATE TABLE prototypes (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    prd_id                 INTEGER,
+    workspace_id           TEXT NOT NULL,
+    status                 TEXT NOT NULL DEFAULT 'generating',
+    variant                TEXT NOT NULL DEFAULT 'v1',
+    template_version       INTEGER NOT NULL,
+    instructions           TEXT,
+    target_platform        TEXT NOT NULL DEFAULT 'both',
+    figma_file_key         TEXT,
+    website_url            TEXT,
+    github_installation_id INTEGER,
+    bundle_url             TEXT,
+    current_checkpoint_id  INTEGER,
+    error                  TEXT,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at           TEXT
+);
+CREATE TABLE prototype_checkpoints (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id      INTEGER NOT NULL,
+    workspace_id      TEXT NOT NULL,
+    bundle_url        TEXT,
+    prd_revision_hash TEXT,
+    figma_frame_hash  TEXT,
+    prompt_history    TEXT NOT NULL DEFAULT '[]',
+    comment_state     TEXT NOT NULL DEFAULT '[]',
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
+@pytest.fixture
+def stage_env(isolated_settings, monkeypatch):
+    """Fake-DB env for _stage_complete_run integration tests."""
+    from tests import _fake_supabase
+
+    _fake_supabase.get_fake_db().executescript(_STAGE_PROTOTYPE_DDL)
+    monkeypatch.setitem(
+        _fake_supabase._JSONB_COLUMNS, "prototype_checkpoints",
+        {"prompt_history", "comment_state"},
+    )
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    monkeypatch.delenv("SUPABASE_STORAGE_BUCKET", raising=False)
+
+    import app.db.prototypes as proto_mod
+    importlib.reload(proto_mod)
+    import app.routes.design_agent as routes_mod
+    importlib.reload(routes_mod)
+
+    return SimpleNamespace(
+        proto=proto_mod,
+        routes=routes_mod,
+        db=isolated_settings["db"],
+    )
+
+
+async def test_scenario_a_skips_theme_gate(stage_env, monkeypatch):
+    """When theme_expectations is None, assert_theme_landed is never called."""
+    dist = {"assets/index.css": "--primary: 222.2 47.4% 11.2%;"}
+
+    async def _fake_build(vfs):
+        return dist, vfs
+
+    call_count = {"n": 0}
+
+    def _fake_assert(d, e):
+        call_count["n"] += 1
+
+    monkeypatch.setattr(stage_env.routes, "vite_build_with_repair", _fake_build)
+    monkeypatch.setattr(stage_env.routes, "assert_theme_landed", _fake_assert)
+
+    prd_id = stage_env.db.start_prd(brief_id=1, insight_index=0, title="t", template_version=1, variant="v2")
+    stage_env.db.complete_prd(prd_id, title="t", md="body")
+    pid = stage_env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    await stage_env.routes._stage_complete_run(
+        prototype_id=pid, workspace_id="app", virtual_fs={"src/App.tsx": "x"},
+        theme_expectations=None,
+    )
+
+    assert call_count["n"] == 0, "assert_theme_landed must not be called when theme_expectations is None"
+    row = stage_env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "ready"
+
+
+async def test_theme_bridge_error_fails_row_no_stage(stage_env, monkeypatch):
+    """When assert_theme_landed raises ThemeBridgeError, fail_prototype is called
+    and no checkpoint is staged."""
+    dist = {"assets/index.css": "/* scaffold only */"}
+
+    async def _fake_build(vfs):
+        return dist, vfs
+
+    monkeypatch.setattr(stage_env.routes, "vite_build_with_repair", _fake_build)
+
+    prd_id = stage_env.db.start_prd(brief_id=1, insight_index=0, title="t", template_version=1, variant="v2")
+    stage_env.db.complete_prd(prd_id, title="t", md="body")
+    pid = stage_env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    bad_expectations = _expectations_with(token_signals=(_REAL_PRIMARY,), font_families=(_REAL_FONT,))
+    await stage_env.routes._stage_complete_run(
+        prototype_id=pid, workspace_id="app", virtual_fs={"src/App.tsx": "x"},
+        theme_expectations=bad_expectations,
+    )
+
+    row = stage_env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    assert "ThemeBridgeError" in (row["error"] or "")
+    from tests import _fake_supabase
+    cps = _fake_supabase.get_fake_db().execute(
+        f"SELECT id FROM prototype_checkpoints WHERE prototype_id = {pid}"
+    ).fetchall()
+    assert len(cps) == 0, "no checkpoint must be staged on a theme-bridge failure"
+
+
+async def test_widened_except_still_catches_vite_build_error(stage_env, monkeypatch):
+    """The widened except tuple still catches ViteBuildError as before."""
+    async def _fake_build(vfs):
+        raise ViteBuildError("vite build exit=1: SyntaxError")
+
+    monkeypatch.setattr(stage_env.routes, "vite_build_with_repair", _fake_build)
+
+    prd_id = stage_env.db.start_prd(brief_id=1, insight_index=0, title="t", template_version=1, variant="v2")
+    stage_env.db.complete_prd(prd_id, title="t", md="body")
+    pid = stage_env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+
+    await stage_env.routes._stage_complete_run(
+        prototype_id=pid, workspace_id="app", virtual_fs={"src/App.tsx": "x"},
+        theme_expectations=None,
+    )
+
+    row = stage_env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    assert "ViteBuildError" in (row["error"] or "")
+    from tests import _fake_supabase
+    cps = _fake_supabase.get_fake_db().execute(
+        f"SELECT id FROM prototype_checkpoints WHERE prototype_id = {pid}"
+    ).fetchall()
+    assert len(cps) == 0
+
+
+def test_theme_gate_logs_signal_counts_only(caplog):
+    """On a pass, assert_theme_landed does not raise and carries no CSS body;
+    on fail, the ThemeBridgeError message names identifiers only."""
+    dist = {
+        "assets/index.css": (
+            f"hsl({_REAL_PRIMARY}) font-family:{_REAL_FONT} bg-primary"
+        ),
+    }
+    expectations = ThemeExpectations(
+        token_signals=(_REAL_PRIMARY,),
+        font_families=(_REAL_FONT,),
+        class_signals=("bg-primary",),
+        asset_basename=None,
+    )
+    assert_theme_landed(dist, expectations)  # must not raise on pass
+
+    bad_dist = {"assets/index.css": "/* empty */"}
+    with pytest.raises(ThemeBridgeError) as exc_info:
+        assert_theme_landed(bad_dist, expectations)
+    error_msg = str(exc_info.value)
+    assert "/* empty */" not in error_msg  # CSS body not leaked into error

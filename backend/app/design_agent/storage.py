@@ -135,6 +135,18 @@ class TypeCheckRepairExhausted(TypeCheckError):
     route can surface a precise error name in the failed row and the logs."""
 
 
+class ThemeBridgeError(RuntimeError):
+    """Raised when the built dist/ does not carry the real theme signals.
+
+    A green vite build that shipped unstyled: the real globals were not
+    inlined (a silent @import drop or missing bridge step), so the brand CSS
+    never landed in the bundle. Sibling to ViteBuildError so the route can
+    widen its except tuple to catch both and fail the prototype row with a
+    precise missing-signal message. Never carries CSS body — only the signal
+    identifiers (token values / font names) that were expected but absent.
+    """
+
+
 # ─── Vite build (where the anchor-id plugin runs — AD4) ─────────────────────
 
 
