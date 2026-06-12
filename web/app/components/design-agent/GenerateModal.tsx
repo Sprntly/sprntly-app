@@ -27,6 +27,8 @@ import {
   ApiError,
   type ConnectionSummary,
   type GitHubRepo,
+  type LocateResponse,
+  type LocateCandidate,
 } from "../../lib/api"
 import {
   runDesignAgentGeneration,
@@ -41,6 +43,10 @@ import {
 } from "./DesignAgentDrawer"
 import { getGenerateConnectorRowState } from "../../lib/generateConnectorRowState"
 import { IconClose } from "../shared/app-icons"
+import {
+  LocateConfirmView,
+  type LocateConfirmCandidate,
+} from "./ClarifyingQuestionSurface"
 
 const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "desktop", label: "Desktop" },
@@ -50,9 +56,21 @@ const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
 
 const SOURCE_OPTIONS: { value: "figma" | "github" | "website"; label: string }[] = [
   { value: "figma", label: "Figma" },
-  { value: "github", label: "Codebase" },
+  { value: "github", label: "From our codebase" },
   { value: "website", label: "Website" },
 ]
+
+type LocateFlowState = "idle" | "analysing" | "chip" | "ranked_confirm" | "unmapped"
+
+/** Maps LocateCandidate[] to the shape LocateConfirmView expects. */
+export function mapLocateCandidates(ranked: LocateCandidate[]): LocateConfirmCandidate[] {
+  return ranked.map((c, i) => ({
+    route: c.route,
+    entry_component: c.entry_component,
+    component_count: c.component_count,
+    is_top: i === 0,
+  }))
+}
 
 /**
  * Visibility is driven by the shared navigation modal union: the parent threads
@@ -73,25 +91,64 @@ export function GenerateModal({
   onGenStart,
   onKickoff,
   onGenDone,
+  // Injected for testing — bypass the async useEffect cycle so node-env vitest
+  // can render the modal in a known connector/repo/source state without a DOM.
+  // Omit in production; defaults preserve real behaviour.
+  _testConnections,
+  _testRepos,
+  _testInitSource,
+  _testInitRepoSel,
+  _testLocateState,
+  _testLocateResult,
+  _testLocateError,
+  _testChosenRouteForChip,
 }: {
   open: boolean
   onClose: () => void
   prdId: number | null
   figmaFileKey: string | null
-  onGenStart?: (ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => void
+  onGenStart?: (ctx?: {
+    figmaFileKey?: string | null
+    githubRepo?: string | null
+    // The chosen screen route from the locate gate (additive optional field).
+    // Does NOT change buildGenerateParams or the /generate body — C3 consumes
+    // the chosen screen server-side via the map. C2 only passes the UX + repo.
+    chosenScreenRoute?: string | null
+  }) => void
   /** Fires immediately after generate POST returns with the new prototype_id. */
   onKickoff?: (prototypeId: number) => void
   // onGenDone receives the terminal generation RESULT (DesignAgentGenResult) so
   // the parent can reveal the full-screen post-generation canvas on success. May
   // be undefined if the flow rejects before producing a result.
   onGenDone?: (result?: DesignAgentGenResult) => void
+  _testConnections?: ConnectionSummary[] | null
+  _testRepos?: GitHubRepo[] | null
+  _testInitSource?: "figma" | "github" | "website"
+  _testInitRepoSel?: string
+  // Locate-state injection for node-env vitest (bypasses async effects).
+  _testLocateState?: LocateFlowState
+  _testLocateResult?: LocateResponse | null
+  _testLocateError?: string | null
+  _testChosenRouteForChip?: string | null
 }) {
   const { showToast } = useNavigation()
 
   const [platform, setPlatform] = useState<TargetPlatform>(DEFAULT_PLATFORM)
-  const [designSource, setDesignSource] = useState<"figma" | "github" | "website">("website")
+  const [designSource, setDesignSource] = useState<"figma" | "github" | "website">(
+    _testInitSource ?? "website",
+  )
   const [instructions, setInstructions] = useState("")
   const [submitting, setSubmitting] = useState(false)
+
+  // Locate-UX state machine for codebase mode.
+  // idle → analysing → chip (auto-proceed; generation already started)
+  //                  → ranked_confirm (block until PM picks)
+  //                  → unmapped (no map; show search/fallback)
+  // A locate error falls back to idle with locateError set.
+  const [locateState, setLocateState] = useState<LocateFlowState>(_testLocateState ?? "idle")
+  const [locateResult, setLocateResult] = useState<LocateResponse | null>(_testLocateResult ?? null)
+  const [locateError, setLocateError] = useState<string | null>(_testLocateError ?? null)
+  const [chosenRouteForChip, setChosenRouteForChip] = useState<string | null>(_testChosenRouteForChip ?? null)
 
   // Figma URL paste state — URL input, extracted key, extracted node-id,
   // resolved label, and validating flag. When figmaUrlKey is set it is
@@ -183,19 +240,25 @@ export function GenerateModal({
 
   // Real connector status — figma + github rows derive connected vs not from
   // connectorsApi.list() (same source AppShell uses for connectedConnectorIds).
-  const [connections, setConnections] = useState<ConnectionSummary[] | null>(null)
+  const [connections, setConnections] = useState<ConnectionSummary[] | null>(
+    _testConnections !== undefined ? _testConnections : null,
+  )
   const connFor = (provider: string): ConnectionSummary | undefined =>
     connections?.find((c) => c.provider === provider)
 
   // Per-provider source selectors.
   // GitHub: real endpoint — connectorsApi.listGithubRepos() → GET
   //   /v1/connectors/github/repos. We fetch + populate the repo <select>.
-  const [repos, setRepos] = useState<GitHubRepo[] | null>(null)
+  const [repos, setRepos] = useState<GitHubRepo[] | null>(
+    _testRepos !== undefined ? _testRepos : null,
+  )
   const [reposError, setReposError] = useState(false)
-  const [repoSel, setRepoSel] = useState("")
+  const [repoSel, setRepoSel] = useState(_testInitRepoSel ?? "")
 
   useEffect(() => {
     if (!open) return
+    // Skip the real fetch when test connections are injected directly.
+    if (_testConnections !== undefined) return
     let cancelled = false
     void withAuthRetry(() => connectorsApi.list())
       .then((r) => {
@@ -226,6 +289,8 @@ export function GenerateModal({
   const githubActive = getGenerateConnectorRowState(connFor("github")).connected
   useEffect(() => {
     if (!open || !githubActive) return
+    // Skip the real fetch when test repos are injected directly.
+    if (_testRepos !== undefined) return
     let cancelled = false
     setReposError(false)
     void withAuthRetry(() => connectorsApi.listAccessibleGithubRepos())
@@ -248,6 +313,13 @@ export function GenerateModal({
 
   const figmaActive = getGenerateConnectorRowState(connFor("figma")).connected
 
+  // 'From our codebase' = github source with the locate gate enabled.
+  // design_source stays 'github' on the wire — no backend enum change in this
+  // ticket; locate is keyed off the repo, not a new enum value. The locate gate
+  // sits in front of handleGenerate for this mode only; all other source paths
+  // are untouched.
+  const codebaseMode = designSource === "github" && githubActive
+
   if (!open) return null
 
   // Figma + GitHub row state (connected vs not + account label) from the shared
@@ -255,15 +327,16 @@ export function GenerateModal({
   const figmaRow = getGenerateConnectorRowState(connFor("figma"))
   const githubRow = getGenerateConnectorRowState(connFor("github"))
 
-  const handleGenerate = () => {
-    if (submitting || prdId == null) return
-    // Show the full-screen loading overlay the moment generation kicks off. Pass
-    // the selected source context so the loading screen can show source-aware steps.
-    // The modal then closes (runGenerateFlow's onOpenChange(false)) but the overlay
-    // lives in ApproveModal so it survives.
+  // Kick off the generate flow with an optional chosen screen route.
+  // The chosen route travels via onGenStart's context — it does NOT change
+  // buildGenerateParams or the /generate body; C3 consumes the chosen screen
+  // server-side via the map. C2 only needs the gate UX + repo to be correct.
+  function runGenerateForRoute(chosenRoute: string | null) {
+    if (prdId == null) return
     onGenStart?.({
       figmaFileKey: designSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
       githubRepo: designSource === "github" && githubActive ? repoSel : null,
+      chosenScreenRoute: chosenRoute,
     })
     void runGenerateFlow({
       params: buildGenerateParams({
@@ -312,6 +385,43 @@ export function GenerateModal({
       // swallows kickoff errors), still dismiss the overlay.
       onGenDone?.()
     })
+  }
+
+  const handleGenerate = () => {
+    if (submitting || prdId == null) return
+
+    if (codebaseMode) {
+      // Codebase mode: gate generation through the locate pipeline before starting.
+      setLocateError(null)
+      setLocateState("analysing")
+      void (async () => {
+        try {
+          const result = await designAgentApi.locate({ prd_id: prdId, github_repo: repoSel })
+          setLocateResult(result)
+          if (result.unmapped) {
+            setLocateState("unmapped")
+            return
+          }
+          if (result.decision === "auto_proceed" || result.decision === "proceed_with_note") {
+            const route = result.chosen[0]?.route ?? null
+            setChosenRouteForChip(route)
+            setLocateState("chip")
+            // Immediately start generation — chip is non-blocking and informational.
+            runGenerateForRoute(route)
+          } else {
+            // ranked_confirm: block until PM picks a candidate.
+            setLocateState("ranked_confirm")
+          }
+        } catch {
+          setLocateError("Couldn't analyse the codebase — pick a screen or switch source")
+          setLocateState("idle")
+        }
+      })()
+      return
+    }
+
+    // Non-codebase path — runs as before, chosenScreenRoute is null.
+    runGenerateForRoute(null)
   }
 
   return (
@@ -486,7 +596,7 @@ export function GenerateModal({
                 ) : repos.length === 0 ? (
                   <option value="">
                     {reposError
-                      ? "Couldn’t load repos"
+                      ? "Couldn't load repos"
                       : "No repos — install the Sprntly App on a repo"}
                   </option>
                 ) : (
@@ -525,11 +635,58 @@ export function GenerateModal({
               rows={2}
             />
           </div>
+
+          {/* Locate-UX state indicators (codebase mode only). -------------------- */}
+          {locateError && (
+            <p className="locate-error" data-testid="locate-error" role="alert">
+              {locateError}
+            </p>
+          )}
+          {locateState === "analysing" && (
+            <p className="locate-hint" data-testid="locate-analysing">
+              Analysing your codebase&hellip;
+            </p>
+          )}
+          {locateState === "chip" && (
+            <p className="locate-chip" data-testid="locate-chip">
+              Generating on top of{" "}
+              <strong data-testid="locate-chip-route">
+                {chosenRouteForChip ?? "…"}
+              </strong>
+              {" · Not this screen?"}
+              {/* The correction path is deferred to the mid-run iteration feature. */}
+            </p>
+          )}
+          {locateState === "ranked_confirm" && locateResult && (
+            <LocateConfirmView
+              candidates={mapLocateCandidates(locateResult.ranked)}
+              onChoose={(route) => {
+                setChosenRouteForChip(route)
+                setLocateState("chip")
+                runGenerateForRoute(route)
+              }}
+              onSearchOther={() => {
+                setLocateState("idle")
+                setLocateResult(null)
+              }}
+            />
+          )}
+          {locateState === "unmapped" && (
+            <p className="locate-hint" data-testid="locate-unmapped">
+              We couldn&apos;t map your codebase to a screen — search for
+              another screen or switch source.
+            </p>
+          )}
         </div>
 
         <div className="modal-foot">
-          <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
-            Generation is asynchronous — get notified when it&apos;s ready.
+          <span
+            style={{ fontSize: 11.5, color: "var(--muted)" }}
+            data-testid={codebaseMode && !repoSel ? "codebase-no-repo-helper" : undefined}
+          >
+            {codebaseMode && !repoSel
+              ? "Connect Figma or a codebase to generate"
+              : "Generation is asynchronous — get notified when it’s ready."}
           </span>
           <div className="modal-foot-r">
             <button
@@ -543,8 +700,15 @@ export function GenerateModal({
             <button
               type="button"
               className="btn btn-accent"
+              data-testid="generate-btn"
               onClick={handleGenerate}
-              disabled={submitting || prdId == null}
+              disabled={
+                submitting ||
+                prdId == null ||
+                (codebaseMode && !repoSel) ||
+                locateState === "analysing" ||
+                locateState === "ranked_confirm"
+              }
             >
               {submitting ? "Generating…" : "Generate →"}
             </button>
