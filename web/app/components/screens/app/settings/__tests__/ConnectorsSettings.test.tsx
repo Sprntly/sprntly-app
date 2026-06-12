@@ -107,15 +107,16 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
     expect(html).toContain("Connect")
   })
 
-  it("Figma row is currently routed to the API-key (PAT) modal, not OAuth", () => {
-    // Stopgap while the Sprntly Figma OAuth app is in Figma's review queue.
-    // The catalog flag drives this; flipping back to oauth:true re-enables OAuth.
+  it("Figma row is routed to OAuth (re-flipped for Figma app-review resubmission, June 2026)", () => {
+    // Figma's review explicitly rejected the PAT-based public connect
+    // mechanism. Catalog flag flipped back to oauth:true; the PAT backend
+    // route stays alive for grandfathered tokens but no UI exposes it.
     const figma = CONNECTOR_CATALOG.flatMap((c) => c.items).find(
       (i) => i.id === "figma",
     )
     expect(figma).toBeTruthy()
-    expect(figma!.oauth).toBe(false)
-    expect(figma!.authType).toBe("apikey")
+    expect(figma!.oauth).toBe(true)
+    expect(figma!.authType).toBeUndefined()
   })
 
   it("shows 'Coming soon' (disabled) action for non-OAuth connector with no connection", () => {

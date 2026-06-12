@@ -120,13 +120,13 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
 })
 
 describe("CONNECTOR_IDS_WITH_OAUTH", () => {
-  it("contains the connectors whose UI surfaces a live OAuth flow (Drive/GitHub + ClickUp + HubSpot + Slack)", () => {
-    // Figma's OAuth backend is implemented but the catalog routes Connect to
-    // the PAT modal while the Sprntly Figma OAuth app is in Figma's review
-    // queue (see connectorsCatalog.ts comment near `id: "figma"`). Re-add
-    // `"figma"` here when the catalog flips back to `oauth: true`.
+  it("contains the connectors whose UI surfaces a live OAuth flow (Drive/GitHub + ClickUp + HubSpot + Slack + Figma)", () => {
+    // Figma flipped to OAuth in June 2026 for the Figma app-review
+    // resubmission — Figma's reviewers rejected the PAT-based public
+    // connect path. The figma_pat backend module is still alive to
+    // grandfather any stored PAT, but no UI exposes it.
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
-      ["clickup", "github", "google_drive", "hubspot", "slack"].sort(),
+      ["clickup", "figma", "github", "google_drive", "hubspot", "slack"].sort(),
     )
   })
 
