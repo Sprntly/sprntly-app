@@ -290,3 +290,119 @@ export function ClarifyingQuestionSurface({
     />
   )
 }
+
+// ---- pre-gen locate-confirm view -------------------------------------------
+
+/** One ranked screen candidate for the pre-gen screen-selection gate.
+ *  The wiring container maps LocateResponse.ranked → LocateConfirmCandidate[],
+ *  marking is_top on the first (highest-confidence) entry. */
+export type LocateConfirmCandidate = {
+  route: string
+  entry_component: string
+  component_count: number
+  is_top: boolean
+}
+
+export type LocateConfirmViewProps = {
+  /** Defaults to "Which screen does this change affect?". */
+  question?: string
+  candidates: LocateConfirmCandidate[]
+  busy?: boolean
+  error?: string | null
+  /** Fires the chosen candidate's exact route string, not the readable label. */
+  onChoose: (route: string) => void
+  /** When provided, renders a "Search for another screen…" affordance.
+   *  The caller decides what it opens; omit this prop to hide the button. */
+  onSearchOther?: () => void
+}
+
+/** Derive a human-readable label from an entry_component string.
+ *  Strips a trailing Screen/Page suffix then splits camelCase words with spaces
+ *  (e.g. TeamScreen → "Team", BriefingPage → "Briefing",
+ *  ManualEditOverlay → "Manual Edit Overlay"). Falls back to the raw route
+ *  when the result is empty (handles blank or non-standard component names). */
+function deriveScreenLabel(entryComponent: string, route: string): string {
+  const stripped = entryComponent.replace(/(Screen|Page)$/, "")
+  const label = stripped.replace(/([A-Z])/g, " $1").trim()
+  return label || route
+}
+
+/** Pure presentational view for the pre-gen screen-selection gate. No hooks,
+ *  no I/O — SSR-renderable in node-env vitest. Reuses the
+ *  clarifying-question-* CSS class family; introduces no new class names
+ *  requiring globals.css changes. The top-candidate marker is grayscale/opacity
+ *  only (no new colour, per design-system restraint). */
+export function LocateConfirmView({
+  question = "Which screen does this change affect?",
+  candidates,
+  busy = false,
+  error = null,
+  onChoose,
+  onSearchOther,
+}: LocateConfirmViewProps) {
+  return (
+    <div
+      className="clarifying-question-surface"
+      data-testid="locate-confirm-surface"
+      role="region"
+      aria-label="Select the screen this change affects"
+    >
+      <p
+        className="clarifying-question-text"
+        data-testid="locate-confirm-question"
+      >
+        {question}
+      </p>
+      <div
+        className="clarifying-question-choices"
+        data-testid="locate-confirm-choices"
+      >
+        {candidates.map((c) => (
+          <button
+            key={c.route}
+            type="button"
+            className="clarifying-question-choice"
+            data-testid="locate-confirm-choice"
+            disabled={busy}
+            onClick={() => onChoose(c.route)}
+          >
+            <span data-testid="locate-confirm-choice-label">
+              {deriveScreenLabel(c.entry_component, c.route)}
+            </span>{" "}
+            <span data-testid="locate-confirm-route-info">
+              {c.route} · {c.component_count} components
+            </span>
+            {c.is_top && (
+              <span
+                data-testid="locate-confirm-top-badge"
+                style={{ opacity: 0.55 }}
+              >
+                {" "}Top candidate
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+      {onSearchOther !== undefined && (
+        <button
+          type="button"
+          className="clarifying-question-choice"
+          data-testid="locate-confirm-search-other"
+          disabled={busy}
+          onClick={onSearchOther}
+        >
+          Search for another screen…
+        </button>
+      )}
+      {error && (
+        <p
+          className="clarifying-question-error error"
+          role="alert"
+          data-testid="locate-confirm-error"
+        >
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
