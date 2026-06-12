@@ -6,6 +6,7 @@ import { useFieldValidation } from "../../onboarding/InterviewLayout"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep } from "../../../lib/onboarding/store"
+import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { ChartBar, Palette, Settings, Sparkles } from "../../auth/icons"
 import {
   canLaunchWorkspace,
@@ -43,9 +44,18 @@ const SLOT_ICONS: Record<CoworkerSlot, ComponentType<SVGProps<SVGSVGElement>>> =
 export function Coworkers() {
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
-  const [names, setNames] = useState<CoworkerNames>(emptyCoworkerNames())
+  const DRAFT_KEY = "coworkers"
+  const cdraft = loadDraft(DRAFT_KEY)
+  const [names, setNames] = useState<CoworkerNames>((cdraft?.names as CoworkerNames) ?? emptyCoworkerNames())
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Save draft on tab switch only
+  useEffect(() => {
+    const onHide = () => { if (document.hidden) saveDraft(DRAFT_KEY, { names }) }
+    document.addEventListener("visibilitychange", onHide)
+    return () => document.removeEventListener("visibilitychange", onHide)
+  }, [names])
 
   useEffect(() => {
     if (!workspace?.id) return
@@ -78,6 +88,7 @@ export function Coworkers() {
     setSaving(true)
     try {
       await coworkersApi.put(withCoworkerDefaults(names))
+      clearDraft(DRAFT_KEY)
       // Next numbered step is first-brief (index 5 in ONBOARDING_STEP_SLUGS).
       const updated = await advanceOnboardingStep(workspace.id, 5)
       setWorkspace(updated)

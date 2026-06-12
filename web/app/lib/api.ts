@@ -222,9 +222,19 @@ export type AskResponse = {
   unanswered: string
 }
 
+export type SkillInfo = {
+  id: string
+  label: string
+  trigger: string
+  description: string
+}
+
 export const askApi = {
   ask: (question: string, company: string = "asurion") =>
     api.post<AskResponse>("/v1/ask", { question, dataset: company }),
+  /** List available skills the chat can route to. */
+  skills: () =>
+    api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),
 }
 
 export type PrdStartResponse = {
@@ -1168,6 +1178,21 @@ export const ticketPushApi = {
       list_id: listId,
       tickets,
     }),
+}
+
+// ── Team members ──────────────────────────────────────────────────────────
+
+export type TeamMemberRecord = {
+  user_id: string
+  role: string
+  display_name: string | null
+  email: string | null
+  avatar_url: string | null
+}
+
+export const teamApi = {
+  /** Fetch all company members enriched with profile data. */
+  list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
 }
 
 // ── Conversations (chat history persistence) ──

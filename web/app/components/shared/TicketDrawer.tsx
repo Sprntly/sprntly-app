@@ -37,15 +37,62 @@ function InternalTicketForm({ onClose }: { onClose: () => void }) {
   const [category, setCategory] = useState("Product")
   const [assignee, setAssignee] = useState("")
   const [description, setDescription] = useState(() => prdDescription(content.prd))
+  const [pushToClickUp, setPushToClickUp] = useState(false)
+  const [clickUpConnected, setClickUpConnected] = useState(false)
+  const [creating, setCreating] = useState(false)
 
-  const handleCreate = () => {
+  // Check if ClickUp is connected on mount
+  useEffect(() => {
+    import("../../lib/api").then(({ connectorsApi }) => {
+      connectorsApi.list().then((conns) => {
+        const list = Array.isArray(conns) ? conns : (conns as unknown as { connections?: any[] }).connections ?? []
+        const cu = list.find((c: any) => c.provider === "clickup")
+        if (cu) { setClickUpConnected(true); setPushToClickUp(true) }
+      }).catch(() => {})
+    })
+  }, [])
+
+  const handleCreate = async () => {
+    setCreating(true)
     const ticket = saveTicket({ title, priority, category, assignee, description })
+
+    // Auto-push to ClickUp if enabled
+    if (pushToClickUp && clickUpConnected) {
+      try {
+        const { ticketPushApi } = await import("../../lib/api")
+        const listsRes = await ticketPushApi.listClickUpLists()
+        const lists = listsRes.lists
+        if (lists.length > 0) {
+          const targetList = lists[0] // Use first available list
+          const result = await ticketPushApi.pushToClickUp(targetList.id, [{
+            title: ticket.title,
+            description: ticket.description,
+            priority: ticket.priority,
+          }])
+          if (result.created?.length > 0) {
+            const task = result.created[0]
+            onClose()
+            showToast(
+              `Ticket created in ClickUp`,
+              `"${title.slice(0, 50)}" pushed to ClickUp. ${task.url ? "" : ""}`,
+              task.url || "View tickets →"
+            )
+            goTo("tickets")
+            return
+          }
+        }
+      } catch {
+        // ClickUp push failed — still save internally
+      }
+    }
+
     onClose()
     showToast(
-      `Internal ticket created · ${ticket.id}`,
-      `"${title.slice(0, 60) || "Untitled"}" saved to Tickets.`,
+      `Ticket created · ${ticket.id}`,
+      `"${title.slice(0, 60) || "Untitled"}" saved to Tickets.${pushToClickUp ? " ClickUp push failed — saved locally." : ""}`,
       "View tickets →"
     )
+    setCreating(false)
     goTo("tickets")
   }
 
@@ -53,10 +100,9 @@ function InternalTicketForm({ onClose }: { onClose: () => void }) {
     <>
       <div className="drawer-body">
         <p className="drawer-sub">
-          No ticket tracker connected. This ticket will be saved internally in
-          Sprntly. Connect Linear, Jira, or Asana in{" "}
-          <span style={{ color: "var(--accent)" }}>Settings → Connectors</span>{" "}
-          to push it externally.
+          {clickUpConnected
+            ? "ClickUp is connected. Your ticket will be saved internally and pushed to ClickUp automatically."
+            : "No ticket tracker connected. This ticket will be saved internally. Connect ClickUp, Linear, or Jira in Settings → Connectors to push externally."}
         </p>
 
         <div className="ticket-row">
@@ -144,9 +190,28 @@ function InternalTicketForm({ onClose }: { onClose: () => void }) {
         </div>
       </div>
 
+      {/* ClickUp auto-push toggle */}
+      {clickUpConnected && (
+        <div style={{
+          padding: "8px 16px", borderTop: "1px solid var(--line)",
+          display: "flex", alignItems: "center", gap: 8,
+        }}>
+          <input
+            type="checkbox"
+            id="push-clickup"
+            checked={pushToClickUp}
+            onChange={(e) => setPushToClickUp(e.target.checked)}
+            style={{ accentColor: "var(--accent)" }}
+          />
+          <label htmlFor="push-clickup" style={{ fontSize: 12.5, color: "var(--ink-2)", cursor: "pointer" }}>
+            Also push to ClickUp
+          </label>
+        </div>
+      )}
+
       <div className="drawer-foot">
         <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
-          Saved internally in Sprntly
+          {clickUpConnected && pushToClickUp ? "Will push to ClickUp" : "Saved internally in Sprntly"}
         </span>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={onClose}>Cancel</button>
@@ -154,11 +219,11 @@ function InternalTicketForm({ onClose }: { onClose: () => void }) {
             type="button"
             className="btn btn-accent"
             onClick={handleCreate}
-            disabled={!title.trim()}
+            disabled={!title.trim() || creating}
           >
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <IconCheck size={16} />
-              Save ticket
+              {creating ? "Creating..." : pushToClickUp ? "Create & push" : "Save ticket"}
             </span>
           </button>
         </div>

@@ -9,6 +9,7 @@ from app.ask_runner import compose_ask_answer
 from app.auth import CompanyContext, require_company
 from app.db import find_cached_ask, log_ask
 from app.deps.ownership import require_owned_dataset
+from app.skill_router import detect_intent, list_available_skills
 
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
 
@@ -124,20 +125,58 @@ def ask(
                 )
             return _strip_citations(payload)
 
-    # 2) Cache miss → compose the answer from the legacy corpus AND the
-    # knowledge graph (#18). compose_ask_answer loads the corpus as a cacheable
-    # prefix, retrieves a ranked KG context bundle for the resolved tenant (if
-    # any), injects it as a "KNOWLEDGE GRAPH CONTEXT" section, runs the LLM, and
-    # decision-logs the ask with kg_refs. When no company resolves (legacy cookie
-    # session) or the KG is empty, it falls back to corpus-only — the pre-#18
-    # behaviour.
+    # 2) Skill routing: detect if the question maps to a specialized skill
+    intent = detect_intent(body.question)
+
+    # 3) Cache miss → compose the answer. If a skill matched, include the skill
+    # context so the LLM uses the specialized method. Otherwise fall back to
+    # general Ask (corpus + KG).
     enterprise_id = company.company_id
-    payload = compose_ask_answer(
-        body.dataset, body.question, enterprise_id=enterprise_id
-    )
+
+    if intent and intent.confidence >= 0.75:
+        # Skill-routed answer: load the skill method and prepend it to the system prompt
+        try:
+            from app.graph.gateway import llm_call
+            from app.graph.facade import GraphFacade
+
+            facade = GraphFacade()
+            result = llm_call(
+                facade=facade,
+                enterprise_id=enterprise_id,
+                system_extra=f"The user asked a question that maps to the '{intent.skill_id}' skill. Use this skill's methodology to give a structured, actionable response.",
+                user=body.question,
+                skill=intent.skill_id,
+                schema=_ASK_RESPONSE_SCHEMA,
+                max_tokens=12000,
+            )
+            payload = result if isinstance(result, dict) else {"answer": str(result), "key_points": [], "citations": [], "confidence": intent.confidence, "unanswered": ""}
+            # Tag the response with the matched skill for frontend rendering
+            payload["_skill"] = intent.skill_id
+            payload["_skill_action"] = intent.action
+            payload["_skill_confidence"] = intent.confidence
+        except Exception:
+            # Skill call failed — fall back to general Ask
+            payload = compose_ask_answer(
+                body.dataset, body.question, enterprise_id=enterprise_id
+            )
+    else:
+        payload = compose_ask_answer(
+            body.dataset, body.question, enterprise_id=enterprise_id
+        )
+        # Tag with detected intent (if any, even low confidence) for UI hints
+        if intent:
+            payload["_skill_hint"] = intent.skill_id
+            payload["_skill_hint_action"] = intent.action
+
     log_ask(
         question=body.question,
         answer=payload.get("answer", ""),
         citations=payload.get("citations", []),
     )
     return _strip_citations(payload)
+
+
+@router.get("/skills")
+def get_skills():
+    """Return the list of available skills for the chat composer UI."""
+    return {"skills": list_available_skills()}
