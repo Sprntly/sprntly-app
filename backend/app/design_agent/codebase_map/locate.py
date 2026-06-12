@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Optional
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
+    from app.design_agent.codebase_map.gate import GateResult
     from app.design_agent.codebase_map.types import MapResult
 
 logger = logging.getLogger(__name__)
@@ -213,3 +214,34 @@ def locate_screen(
             )
         except Exception:
             logger.debug("locate: telemetry failed (non-fatal)", exc_info=True)
+
+
+def emit_locate_telemetry(
+    *,
+    repo: str,
+    sha: str,
+    gate_result: "GateResult",
+    n_candidates: int,
+) -> None:
+    """Emit one structured calibration line per locate request.
+
+    Mirrors the k=v discipline of llm_telemetry.log_llm_run: identifiers only,
+    no PRD body, no screen source, no rationale, no installation token.
+    Emitted on every /locate request including the unmapped fail-open path
+    (sha='', n_candidates=0) so the unmapped rate is observable in logs.
+    """
+    chosen_screen = gate_result.chosen[0].route if gate_result.chosen else ""
+    leading_ranked = gate_result.ranked[0] if gate_result.ranked else None
+    ambiguous = leading_ranked.ambiguous if leading_ranked is not None else False
+    logger.info(
+        "codebase_map.locate repo=%s sha=%s top_confidence=%d decision=%s"
+        " chosen_screen=%s ambiguous=%s n_candidates=%d threshold=%d",
+        repo,
+        sha,
+        gate_result.top_confidence,
+        gate_result.decision,
+        chosen_screen,
+        ambiguous,
+        n_candidates,
+        gate_result.threshold,
+    )
