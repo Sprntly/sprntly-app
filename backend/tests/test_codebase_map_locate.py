@@ -500,6 +500,6 @@ def test_no_prohibited_tokens_in_source():
     )
 
 
-def test_template_version_unchanged():
-    """DESIGN_AGENT_TEMPLATE_VERSION is still 4 after this ticket."""
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 4
+def test_template_version_at_current():
+    """DESIGN_AGENT_TEMPLATE_VERSION is 5 after the recreate-discipline bump."""
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 5

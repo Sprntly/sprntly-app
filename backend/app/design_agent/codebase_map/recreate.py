@@ -20,6 +20,7 @@ import os
 import re
 from dataclasses import dataclass
 
+from ..prompts import DESIGN_AGENT_RECREATE_DISCIPLINE
 from .repo_reader import read_repo
 from .types import LogoAsset, MapResult, ScreenNode
 
@@ -675,4 +676,5 @@ def render_recreate_task_block(
         block += (
             f"\nBrand logo ({brand_carry.render_kind}): {brand_carry.shell_render_ref}"
         )
+    block += f"\n\n{DESIGN_AGENT_RECREATE_DISCIPLINE.strip()}"
     return block

@@ -66,9 +66,9 @@ def test_iterate_system_renders_shadcn_inventory():
     assert "ITERATING" in DESIGN_AGENT_ITERATE_SYSTEM
 
 
-def test_template_version_is_4():
-    # AC2: bumped to 4 by P4-02 (manual-edit commit-back family); was 3 at P3-05.
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 4
+def test_template_version_is_5():
+    # Bumped to 5 by the recreate-discipline append (codebase-context wave).
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 5
 
 
 def test_render_iterate_user_cache_on_last_stable_block():

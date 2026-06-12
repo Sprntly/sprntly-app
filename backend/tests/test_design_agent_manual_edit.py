@@ -73,9 +73,9 @@ def test_manual_edit_system_renders_shadcn_inventory():
     assert "{shadcn_inventory}" not in DESIGN_AGENT_MANUAL_EDIT_SYSTEM
 
 
-def test_template_version_is_4():
-    # AC2: bumped to 4 by P4-02 (manual-edit commit-back family).
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 4
+def test_template_version_is_5():
+    # Bumped to 5 by the recreate-discipline append (codebase-context wave).
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 5
 
 
 def test_manual_edit_system_prompt_prefers_tailwind_class_swap():
