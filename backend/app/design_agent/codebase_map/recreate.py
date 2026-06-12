@@ -29,18 +29,50 @@ logger = logging.getLogger(__name__)
 # during extraction; we re-fetch a focused candidate set and let the reader
 # silently drop non-existent paths.
 SHELL_CANDIDATES: tuple[str, ...] = (
+    # src/components/ — both .tsx and .jsx (top-level variants)
     "src/components/Sidebar.tsx",
+    "src/components/Sidebar.jsx",
     "src/components/AppShell.tsx",
+    "src/components/AppShell.jsx",
     "src/components/Shell.tsx",
+    "src/components/Shell.jsx",
     "src/components/Navigation.tsx",
+    "src/components/Navigation.jsx",
     "src/components/Layout.tsx",
+    "src/components/Layout.jsx",
+    # src/components/layout/ — nested layout subdir (.jsx first, then .tsx)
+    "src/components/layout/Sidebar.jsx",
+    "src/components/layout/Sidebar.tsx",
+    "src/components/layout/AppLayout.jsx",
+    "src/components/layout/AppLayout.tsx",
+    "src/components/layout/TopBar.jsx",
+    "src/components/layout/TopBar.tsx",
+    # src/layout/ — flat layout directory alternative
+    "src/layout/Sidebar.jsx",
+    "src/layout/Sidebar.tsx",
+    "src/layout/AppLayout.jsx",
+    "src/layout/AppLayout.tsx",
+    # app/components/ — both .tsx and .jsx
     "app/components/Sidebar.tsx",
+    "app/components/Sidebar.jsx",
     "app/components/AppShell.tsx",
+    "app/components/AppShell.jsx",
     "app/components/Shell.tsx",
+    "app/components/Shell.jsx",
     "app/components/Navigation.tsx",
+    "app/components/Navigation.jsx",
     "app/components/Layout.tsx",
+    "app/components/Layout.jsx",
+    # app/layout/ — flat layout directory alternative
+    "app/layout/Sidebar.jsx",
+    "app/layout/Sidebar.tsx",
+    "app/layout/AppLayout.jsx",
+    "app/layout/AppLayout.tsx",
+    # components/ — top-level (both .tsx and .jsx)
     "components/Sidebar.tsx",
+    "components/Sidebar.jsx",
     "components/Layout.tsx",
+    "components/Layout.jsx",
 )
 
 # Conventional locations for the global CSS + Tailwind config. Same pattern:

@@ -140,6 +140,11 @@ def test_read_located_sources_reads_screen_children_shell_theme():
         | {"logo.svg"}
     )
     assert set(extra) == expected
+    # Verify .jsx variants and components/layout/ forms are present in the union.
+    assert "src/components/Sidebar.jsx" in set(extra)
+    assert "src/components/layout/Sidebar.jsx" in set(extra)
+    assert "src/components/layout/AppLayout.jsx" in set(extra)
+    assert "src/components/layout/TopBar.jsx" in set(extra)
     assert sources is not None
     assert sources.repo == _REPO
     assert sources.commit_sha == _SHA
