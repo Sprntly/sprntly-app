@@ -85,12 +85,14 @@ from app.llm_telemetry import (
 logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"  # AD2; NEVER claude-sonnet-4-7
+ESCALATION_MODEL = "claude-opus-4-7"  # long-context hatch; recovery only, NOT the default engine
 DEFAULT_MAX_ITERS = 40
 try:
     DEFAULT_MAX_TOKENS = int(os.environ.get("DESIGN_AGENT_MAX_TOKENS", "4096"))
 except ValueError:
     logger.warning("DESIGN_AGENT_MAX_TOKENS is not a valid integer; falling back to 4096")
     DEFAULT_MAX_TOKENS = 4096
+ESCALATION_MAX_TOKENS = DEFAULT_MAX_TOKENS * 4  # larger output budget for the opus escalation hatch
 TOOL_RESULT_MAX_CHARS = 25000  # per agent-build-research.md §5.1
 
 # ── Pre-flight cost estimate (AD14 / AD15, P3-11) ────────────────────────────
@@ -209,6 +211,10 @@ class RunResult:
     # (iterate_prototype / generate_prototype) onto the prototype's pending_question
     # sidecar column; no checkpoint is staged for a pause (no bundle was built).
     pending_question: dict[str, Any] | None = None
+    # True when agent_loop escalated from MODEL to ESCALATION_MODEL mid-run (second
+    # consecutive max_tokens hit). Callers use this to tag the cost-summary log line
+    # with model=ESCALATION_MODEL + escalated=true so telemetry prices the run honestly.
+    model_escalated: bool = False
 
 
 def _hash_tool_call(name: str, input: dict[str, Any]) -> str:
@@ -840,6 +846,8 @@ async def agent_loop(
     start = time.perf_counter()
     iters = 0
     max_tokens_retried = False
+    model_escalated = False
+    active_model = MODEL
     cost_guard_nudged = False
     # Last assistant turn's content, salvaged on a max_iters exit so a near-
     # complete build (the agent ran out of turns mid-flow) is not discarded.
@@ -883,7 +891,7 @@ async def agent_loop(
 
             def _stream() -> object:
                 with client.messages.stream(
-                    model=MODEL,
+                    model=active_model,
                     max_tokens=max_tokens,
                     system=system_blocks,
                     tools=tools_payload,
@@ -948,14 +956,28 @@ async def agent_loop(
                     ctx.prototype_id, mode, usage.est_cost_usd(MODEL),
                     HARD_CAP_USD, SOFT_CAP_USD, iters,
                 )
-                return _finish(usage, "aborted", iters, start, last_assistant_content, ctx.prototype_id)
+                return _finish(usage, "aborted", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated)
 
             if stop == "end_turn":
-                return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
 
             if stop == "max_tokens":
                 if max_tokens_retried:
-                    return _finish(usage, "max_tokens", iters, start, content, ctx.prototype_id)
+                    if not model_escalated:
+                        # Second cap-hit: escalate to the opus long-context hatch.
+                        # Discard the truncated turn and retry the same turn at the
+                        # escalation budget — do NOT return yet. Third cap-hit after
+                        # escalation exits cleanly (bounded, no infinite loop).
+                        logger.info(
+                            "design_agent.output_cap_escalation prototype_id=%s from_model=%s to_model=%s iter=%d",
+                            ctx.prototype_id, MODEL, ESCALATION_MODEL, iters,
+                        )
+                        active_model = ESCALATION_MODEL
+                        model_escalated = True
+                        max_tokens = ESCALATION_MAX_TOKENS
+                        messages.pop()
+                        continue
+                    return _finish(usage, "max_tokens", iters, start, content, ctx.prototype_id, model_escalated=True)
                 max_tokens *= 2
                 max_tokens_retried = True
                 # The truncated assistant turn was appended above. When the cap
@@ -973,10 +995,10 @@ async def agent_loop(
                 continue
 
             if stop == "refusal":
-                return _finish(usage, "refused", iters, start, content, ctx.prototype_id)
+                return _finish(usage, "refused", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
 
             if stop != "tool_use":
-                return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
 
             # Collect tool_use blocks; dispatch concurrently per parallel-tool-use rule.
             tool_uses = [b for b in content if b.get("type") == "tool_use"]
@@ -1037,7 +1059,7 @@ async def agent_loop(
             )
             if patch:
                 await dispatch(patch["name"], patch.get("input") or {}, ctx, allowed_tool_names)
-                return _finish(usage, "complete", iters, start, content, ctx.prototype_id)
+                return _finish(usage, "complete", iters, start, content, ctx.prototype_id, model_escalated=model_escalated)
 
             # Emit a per-tool step event BEFORE dispatch so the frontend
             # activity stream shows what the agent is about to do at tool
@@ -1120,10 +1142,10 @@ async def agent_loop(
         # Exited because iters == max_iters. Salvage the last assistant turn as
         # final_content (was discarded as []) — a build that ran out of turns
         # mid-flow is usually near-complete and worth staging, not throwing away.
-        return _finish(usage, "max_iters", iters, start, last_assistant_content, ctx.prototype_id)
+        return _finish(usage, "max_iters", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated)
 
     except Exception as exc:
-        result = _finish(usage, "error", iters, start, [], ctx.prototype_id)
+        result = _finish(usage, "error", iters, start, [], ctx.prototype_id, model_escalated=model_escalated)
         result.error_class = type(exc).__name__
         result.error_message = str(exc)
         return result
@@ -1192,6 +1214,7 @@ def _finish(
     start: float,
     final_content: list,
     prototype_id: int | None = None,
+    model_escalated: bool = False,
 ) -> RunResult:
     # Flush the SSE terminal event to all active subscribers so every open
     # /events stream ends cleanly. Covers every exit path (complete / max_iters /
@@ -1206,6 +1229,7 @@ def _finish(
         usage=usage,
         duration_ms=duration_ms,
         final_content=final_content,
+        model_escalated=model_escalated,
     )
 
 
@@ -1408,9 +1432,10 @@ async def generate_prototype(
         usage=result.usage,
         duration_ms=result.duration_ms,
         status=result.status,
-        model=MODEL,
+        model=ESCALATION_MODEL if result.model_escalated else MODEL,
         error_class=result.error_class,
         iters=result.iters,
+        escalated=result.model_escalated,
     )
     # Strip reference files before returning the build-facing virtual_fs —
     # the agent could view them during the loop, but they must never reach
@@ -1490,9 +1515,10 @@ async def repair_typecheck_run(
         usage=result.usage,
         duration_ms=result.duration_ms,
         status=result.status,
-        model=MODEL,
+        model=ESCALATION_MODEL if result.model_escalated else MODEL,
         error_class=result.error_class,
         iters=result.iters,
+        escalated=result.model_escalated,
     )
     return result, ctx.virtual_fs
 
@@ -1596,9 +1622,10 @@ async def iterate_prototype(
         usage=result.usage,
         duration_ms=result.duration_ms,
         status=result.status,
-        model=MODEL,
+        model=ESCALATION_MODEL if result.model_escalated else MODEL,
         error_class=result.error_class,
         iters=result.iters,
+        escalated=result.model_escalated,
     )
     return result, ctx.virtual_fs
 
@@ -1675,9 +1702,10 @@ async def manual_edit_prototype(
         usage=result.usage,
         duration_ms=result.duration_ms,
         status=result.status,
-        model=MODEL,
+        model=ESCALATION_MODEL if result.model_escalated else MODEL,
         error_class=result.error_class,
         iters=result.iters,
+        escalated=result.model_escalated,
     )
     return result, ctx.virtual_fs
 

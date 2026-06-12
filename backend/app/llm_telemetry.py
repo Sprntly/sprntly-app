@@ -175,6 +175,7 @@ def log_llm_run(
         f"output_tokens={usage.output_tokens}",
         f"duration_ms={duration_ms}",
         f"est_cost_usd={cost:.4f}",
+        f"model={model}",
         f"status={status}",
         f"error_class={error_class or ''}",
     ])
