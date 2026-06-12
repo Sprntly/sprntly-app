@@ -16,6 +16,7 @@ ones that do not exist).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from .repo_reader import read_repo
@@ -263,6 +264,193 @@ def recreate_pre_seed(
         located_screen.map_result.posture,
     )
     return sources
+
+
+# ── Theme/font bridge ────────────────────────────────────────────────────────
+# Ordered by likelihood of presence in real projects.
+_CSS_GLOBALS_KEYS: tuple[str, ...] = (
+    "app/globals.css",
+    "src/styles/globals.css",
+    "styles/globals.css",
+    "src/index.css",
+)
+
+_TAILWIND_CONFIG_KEYS: tuple[str, ...] = (
+    "tailwind.config.ts",
+    "tailwind.config.js",
+    "tailwind.config.cjs",
+    "tailwind.config.mjs",
+)
+
+# Matches @import url(...) lines that must be hoisted above @tailwind directives.
+# The CSS spec requires @import to precede all other rules (except @charset).
+_FONT_IMPORT_RE = re.compile(
+    r"@import\s+url\s*\([^)]+\)[^;]*;\s*",
+    re.IGNORECASE,
+)
+
+# Matches a Tailwind v4 @theme { ... } block.
+_V4_THEME_BLOCK_RE = re.compile(r"@theme\s*\{")
+
+
+def _find_globals_css(sources: RecreateSources) -> str:
+    for key in _CSS_GLOBALS_KEYS:
+        body = sources.files.get(key, "")
+        if body:
+            return body
+    return ""
+
+
+def _find_tailwind_config(sources: RecreateSources) -> str:
+    for key in _TAILWIND_CONFIG_KEYS:
+        body = sources.files.get(key, "")
+        if body:
+            return body
+    return ""
+
+
+def _is_tailwind_v4_with_tokens(css: str) -> bool:
+    """Return True when the CSS contains a @theme {} block with custom tokens."""
+    m = _V4_THEME_BLOCK_RE.search(css)
+    if not m:
+        return False
+    start = m.end()
+    depth, i = 1, start
+    while i < len(css) and depth > 0:
+        ch = css[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    block = css[start : i - 1]
+    return bool(re.search(r"--[\w-]+\s*:", block))
+
+
+def _extract_font_imports(css: str) -> str:
+    """Return all @import url(...) lines joined by newlines (for hoisting)."""
+    return "\n".join(m.group(0).strip() for m in _FONT_IMPORT_RE.finditer(css))
+
+
+def _strip_font_imports(css: str) -> str:
+    """Remove @import url(...) lines from a CSS string (they are hoisted)."""
+    return _FONT_IMPORT_RE.sub("", css).strip()
+
+
+def _extract_theme_extend(config_src: str) -> str:
+    """Extract the content of theme.extend { ... } from a Tailwind config string."""
+    m = re.search(r"extend\s*:\s*\{", config_src)
+    if not m:
+        return ""
+    start = m.end()
+    depth, i = 1, start
+    while i < len(config_src) and depth > 0:
+        ch = config_src[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    return config_src[start : i - 1].strip()
+
+
+def _summarize_extend(extend_block: str) -> str:
+    """Return a compact summary of theme.extend keys and their top-level names."""
+    key_pattern = re.compile(r"(\w+)\s*:\s*\{")
+    lines: list[str] = []
+    for m in key_pattern.finditer(extend_block):
+        key = m.group(1)
+        block_start = m.end()
+        depth, i = 1, block_start
+        while i < len(extend_block) and depth > 0:
+            ch = extend_block[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        block_content = extend_block[block_start : i - 1]
+        names = re.findall(r"""['"]?([\w-]+)['"]?\s*:""", block_content)
+        if names:
+            unique = list(dict.fromkeys(names[:8]))
+            lines.append(f"  {key}: {', '.join(unique)}")
+    return "\n".join(lines)
+
+
+def bridge_theme(
+    scaffold_index_css: str,
+    sources: RecreateSources,
+    *,
+    prototype_id: int = 0,
+) -> str:
+    """Inline the real globals.css body into the scaffold index.css AFTER the
+    @tailwind directives. NEVER @import — PostCSS silently drops a top-level
+    @import of a stylesheet that itself uses @layer/@tailwind, shipping unstyled.
+
+    Font @import url(...) lines from the real globals are hoisted above the
+    @tailwind directives (CSS spec: @import must precede all other rules).
+    The real :root/@layer base tokens follow the scaffold shadcn default block
+    so they win the cascade. Returns the scaffold unchanged when no real globals
+    are found in sources.
+    """
+    globals_css = _find_globals_css(sources)
+    if not globals_css:
+        logger.info(
+            "design_agent.theme_bridge prototype_id=%s repo=%s"
+            " has_globals=false has_tailwind_extend=false n_font_imports=0 is_v4=false",
+            prototype_id,
+            sources.repo,
+        )
+        return scaffold_index_css
+
+    is_v4 = _is_tailwind_v4_with_tokens(globals_css)
+    tailwind_src = _find_tailwind_config(sources)
+    has_tailwind_extend = bool(tailwind_src and _extract_theme_extend(tailwind_src))
+    font_import_matches = _FONT_IMPORT_RE.findall(globals_css)
+    n_font_imports = len(font_import_matches)
+    font_imports = _extract_font_imports(globals_css)
+    globals_body = _strip_font_imports(globals_css)
+
+    logger.info(
+        "design_agent.theme_bridge prototype_id=%s repo=%s"
+        " has_globals=true has_tailwind_extend=%s n_font_imports=%d is_v4=%s",
+        prototype_id,
+        sources.repo,
+        str(has_tailwind_extend).lower(),
+        n_font_imports,
+        str(is_v4).lower(),
+    )
+
+    parts: list[str] = []
+    if font_imports:
+        parts.append(font_imports)
+    parts.append(scaffold_index_css.strip())
+    if globals_body:
+        parts.append(globals_body)
+    return "\n\n".join(p for p in parts if p)
+
+
+def port_tailwind_extend(scaffold_config: str, sources: RecreateSources) -> str:
+    """Return a compact summary of the real tailwind.config theme.extend for the
+    recreate reference block.
+
+    Does NOT produce a config file — tailwind.config.ts is agent-immutable.
+    The scaffold config already maps shadcn slots to hsl(var(--token)); the
+    inlined :root block from bridge_theme redefines those tokens, so utilities
+    resolve to real colours without a config replacement. Custom theme.extend
+    names that have no CSS-variable backing are surfaced here so the agent can
+    use scaffold-supported equivalents.
+    """
+    tailwind_src = _find_tailwind_config(sources)
+    if not tailwind_src:
+        return ""
+    extend_block = _extract_theme_extend(tailwind_src)
+    if not extend_block:
+        return ""
+    summary = _summarize_extend(extend_block)
+    if not summary:
+        return ""
+    return f"tailwind.config theme.extend (from {sources.repo}):\n{summary}"
 
 
 def render_recreate_task_block(

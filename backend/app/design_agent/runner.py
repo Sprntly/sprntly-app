@@ -58,6 +58,7 @@ from app.design_agent.client import get_design_agent_client
 from app.design_agent.codebase_map.recreate import (
     LocatedScreen,
     RecreateSources,
+    bridge_theme,
     recreate_pre_seed,
     render_recreate_task_block,
 )
@@ -1303,6 +1304,12 @@ async def generate_prototype(
             recreate_sources = recreate_pre_seed(
                 virtual_fs, located_screen, github_installation_id, prototype_id
             )
+            if recreate_sources is not None:
+                virtual_fs["src/index.css"] = bridge_theme(
+                    virtual_fs.get("src/index.css", ""),
+                    recreate_sources,
+                    prototype_id=prototype_id,
+                )
         except Exception as exc:
             recreate_sources = None
             logger.warning(
