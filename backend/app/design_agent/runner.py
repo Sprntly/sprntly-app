@@ -55,6 +55,12 @@ from app.db.prototypes import get_prototype, set_pending_question
 from app.design_agent.autofixer import format_errors_for_agent
 from app.design_agent.autofixer import run as autofixer_run
 from app.design_agent.client import get_design_agent_client
+from app.design_agent.codebase_map.recreate import (
+    LocatedScreen,
+    RecreateSources,
+    recreate_pre_seed,
+    render_recreate_task_block,
+)
 from app.design_agent.event_stream import close as _sse_close
 from app.design_agent.event_stream import publish_step
 from app.design_agent.progress import FINISHING_LABEL, friendly_step
@@ -1213,6 +1219,7 @@ async def generate_prototype(
     website_url: str | None = None,
     website_sample: dict | None = None,
     design_source: str | None = None,
+    located_screen: LocatedScreen | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
     """Public entrypoint: run agent_loop with a fresh ToolContext, emit the
     cost-summary log line, and return `(result, virtual_fs)` for P1-07 + P1-08
@@ -1285,6 +1292,24 @@ async def generate_prototype(
         except Exception:
             pass  # best-effort — generation continues without pre-seeded CSS or primitives
 
+    # Recreate pre-seed: when the locate gate supplied a located screen, read
+    # the real customer source for that screen (plus its direct components,
+    # the app shell, and the theme files) and inject the bytes into the
+    # virtual filesystem as reference files. Best-effort: any failure leaves
+    # the token / primitive pre-seed in place.
+    recreate_sources: RecreateSources | None = None
+    if located_screen is not None:
+        try:
+            recreate_sources = recreate_pre_seed(
+                virtual_fs, located_screen, github_installation_id, prototype_id
+            )
+        except Exception as exc:
+            recreate_sources = None
+            logger.warning(
+                "design_agent.recreate_pre_seed_failed prototype_id=%s error=%s",
+                prototype_id, type(exc).__name__,
+            )
+
     # Inject the design-language guidance into the user prompt so the model's
     # first write is informed by the brand's visual vocabulary. The brief goes
     # ONLY into user_message — never into system_blocks (cached prefix must be
@@ -1305,6 +1330,24 @@ async def generate_prototype(
             # If content is absent or another type, skip silently.
     except Exception:
         pass  # best-effort — generation continues without the design brief
+
+    # Recreate task block: same user-message-only append pattern as the brief
+    # above (never into system_blocks — the cached prefix must stay stable).
+    if recreate_sources is not None:
+        try:
+            recreate_block = render_recreate_task_block(located_screen, recreate_sources)
+            content = user_message.get("content")
+            if isinstance(content, list):
+                user_message["content"] = list(content) + [
+                    {"type": "text", "text": recreate_block}
+                ]
+            elif isinstance(content, str):
+                user_message["content"] = [
+                    {"type": "text", "text": content},
+                    {"type": "text", "text": recreate_block},
+                ]
+        except Exception:
+            pass  # best-effort — generation continues without the recreate block
 
     ctx = ToolContext(
         prototype_id=prototype_id,
@@ -1353,7 +1396,14 @@ async def generate_prototype(
         error_class=result.error_class,
         iters=result.iters,
     )
-    return result, ctx.virtual_fs
+    # Strip reference files before returning the build-facing virtual_fs —
+    # the agent could view them during the loop, but they must never reach
+    # vite_build or the staged checkpoint. The scaffold overlay copies
+    # whatever this map holds.
+    out_virtual_fs = {
+        k: v for k, v in ctx.virtual_fs.items() if not k.startswith("__reference__/")
+    }
+    return result, out_virtual_fs
 
 
 def _render_typecheck_repair_user(diagnostics: str) -> str:
