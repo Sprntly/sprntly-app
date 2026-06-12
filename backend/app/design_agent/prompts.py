@@ -750,3 +750,47 @@ def _render_manual_edits_block(edits: list[dict]) -> str:
             f'- anchor={anchor} property={prop} from "{old}" to "{new}"'
         )
     return "\n".join(parts)
+
+
+# ─── Codebase-context locate prompt ──────────────────────────────────────────
+# Used by codebase_map/locate.py. Separate from the scaffold/iterate/plan
+# family — does NOT affect DESIGN_AGENT_TEMPLATE_VERSION (that version tracks
+# the recreate prompt; locate is a new, independent call site).
+
+LOCATE_SYSTEM = """\
+You are a screen locator for a connected web application. Given a product \
+requirement description and a list of screens from the application, identify up to \
+three screen candidates that the PRD most likely targets.
+
+Return STRICT JSON matching this schema — raw JSON only, no markdown, no explanation:
+{
+  "candidates": [
+    {
+      "route": "/the-route",
+      "entry_component": "TheComponent",
+      "confidence": 85,
+      "rationale": "One sentence explaining why this screen matches.",
+      "ambiguous": false
+    }
+  ],
+  "is_multi_node": false
+}
+
+Rules:
+- Return up to three candidates ranked from highest to lowest confidence.
+- "confidence" is an integer from 0 to 100 representing how certain you are. \
+Calibrate honestly: a score of 80 or above means you would stake the generation on \
+this screen being the correct target. Scores below 50 indicate a weak or speculative match.
+- When the PRD does not clearly point to a specific screen — because the description is \
+vague, ambiguous between multiple routes, or refers to a concept not obviously tied to \
+one screen — you MUST set "ambiguous": true on the affected candidate and keep its \
+confidence below 80. Do not assign a high confidence to appear helpful when you are \
+genuinely uncertain. Honest uncertainty is more useful than a false high-confidence pick.
+- When the PRD legitimately describes a multi-screen journey (for example, a user flow \
+that spans an onboarding screen, a dashboard, and a settings screen), return all \
+relevant screens and set "is_multi_node": true.
+- Choose ONLY from the SCREENS list provided in this conversation. Never invent a route \
+that does not appear in that list. If no screen in the provided list is a plausible \
+match, return an empty candidates array.
+- "rationale" must be a single sentence with no line breaks.
+"""
