@@ -13854,6 +13854,175 @@
     padding: 3px 11px;
   }
 
+  /* First-brief placeholder (page 16) — ported from the v4 kit
+     (.gen-stages / .gen-ready / .ws-strip / .gen-fail). Token remap
+     follows the section convention: --bg → --surface, --border →
+     --line, --border2 → --line-strong, --r → --radius, --brand →
+     --accent, --brand-d → --accent-ink, --green-l/-d/-b →
+     --accent-soft/--accent-ink/--accent-2 (the Lightfield accent IS
+     green), --red-l/-d/-b → the #C13838 error palette already used
+     by .onb-form-error, --text/2/3/4 → --ink/-2/-3/-4, --fm →
+     --font-mono. The spinner reuses this section's onbSpin keyframe
+     instead of duplicating the kit's gen-spin. */
+  .onb-card .gen-stages {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    overflow: hidden;
+  }
+
+  .onb-card .gen-stage {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 13px 16px;
+    font-size: 13px;
+    color: var(--ink-2);
+  }
+
+  .onb-card .gen-stage + .gen-stage {
+    border-top: 1px solid var(--line);
+  }
+
+  .onb-card .gen-stage .st-ic {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+
+  .onb-card .gen-stage.done {
+    color: var(--ink-3);
+  }
+
+  .onb-card .gen-stage.done .st-ic {
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    border: 1px solid var(--accent-2);
+  }
+
+  .onb-card .gen-stage.active .st-ic {
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    animation: onbSpin 0.8s linear infinite;
+  }
+
+  .onb-card .gen-stage.active {
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  .onb-card .gen-stage.pending .st-ic {
+    border: 1px dashed var(--line-strong);
+    color: var(--ink-4);
+  }
+
+  .onb-card .gen-stage.pending {
+    color: var(--ink-4);
+  }
+
+  .onb-card .gen-stage .st-sub {
+    display: block;
+    font-size: 11px;
+    color: var(--ink-3);
+    font-weight: 400;
+    margin-top: 1px;
+  }
+
+  /* Ready tile — a handoff to /brief, not a preview. */
+  .onb-card .gen-ready {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 18px;
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-2);
+    border-radius: var(--radius);
+  }
+
+  .onb-card .gen-ready .ic {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 17px;
+    flex-shrink: 0;
+  }
+
+  .onb-card .gen-ready .t {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  .onb-card .gen-ready .s {
+    font-size: 12px;
+    color: var(--ink-2);
+    margin-top: 2px;
+    line-height: 1.45;
+  }
+
+  /* Workspace summary strip (replaces the old KPI-tree right pane). */
+  .onb-card .ws-strip {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  .onb-card .ws-strip .kv {
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+
+  .onb-card .ws-strip .kv b {
+    display: block;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ink);
+    margin-top: 1px;
+  }
+
+  .onb-card .ws-strip .kv .ns {
+    font-family: var(--font-mono);
+    color: var(--accent-ink);
+  }
+
+  /* Failed-state note — never blocks entry. */
+  .onb-card .gen-fail {
+    padding: 14px 16px;
+    background: rgba(193, 56, 56, 0.08);
+    border: 1px solid rgba(193, 56, 56, 0.25);
+    border-radius: var(--radius);
+    font-size: 13px;
+    color: #C13838;
+    line-height: 1.5;
+  }
+
+  .onb-card .gen-fail .acts {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .onb-card .gen-fail .acts .btn {
+    font-size: 12px;
+    padding: 6px 12px;
+  }
+
   /* ═══════════════════════════════════════════════════════════
      EVIDENCE PANEL
   ═══════════════════════════════════════════════════════════ */
