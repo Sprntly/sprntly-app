@@ -509,6 +509,186 @@ def test_locate_system_constrains_to_given_screens():
 
 
 # ---------------------------------------------------------------------------
+# Placement classification (3-way) + spans flag + separate confidence
+# ---------------------------------------------------------------------------
+
+
+def _classified_payload(
+    route: str = "/team",
+    *,
+    confidence: int = 92,
+    classification=None,
+    spans_multi_surface=None,
+    classification_confidence=None,
+) -> dict:
+    """A happy candidate, optionally carrying the placement-classification fields.
+
+    Any field left as None is OMITTED from the JSON entirely, so the same helper
+    exercises both the present-field and the absent-field (default) paths.
+    """
+    cand: dict = {
+        "route": route,
+        "entry_component": "TeamScreen",
+        "confidence": confidence,
+        "rationale": "The PRD describes team management.",
+        "ambiguous": False,
+    }
+    if classification is not None:
+        cand["classification"] = classification
+    if spans_multi_surface is not None:
+        cand["spans_multi_surface"] = spans_multi_surface
+    if classification_confidence is not None:
+        cand["classification_confidence"] = classification_confidence
+    return {"candidates": [cand], "is_multi_node": False}
+
+
+def test_classification_parses():
+    """A candidate labelled attach-to-host is carried through with that value."""
+    m = _map_with_nodes("/team")
+    payload = _classified_payload(classification="attach-to-host")
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("attach a new feature PRD", m, client=fake)
+
+    assert result.candidates[0].classification == "attach-to-host"
+
+
+def test_classification_defaults_and_bad_label_safe():
+    """Omitted classification defaults to modify-existing; a bad label coerces safely."""
+    m = _map_with_nodes("/team")
+
+    # Omitted → default.
+    fake_default = FakeClient([_make_response(_classified_payload())])
+    result_default = locate_screen("prd", m, client=fake_default)
+    assert result_default.candidates[0].classification == "modify-existing"
+
+    # Unrecognized label → coerced to modify-existing, candidate still present.
+    fake_bad = FakeClient([_make_response(_classified_payload(classification="frobnicate"))])
+    result_bad = locate_screen("prd", m, client=fake_bad)
+    assert len(result_bad.candidates) == 1
+    assert result_bad.candidates[0].classification == "modify-existing"
+
+
+def test_spans_multi_surface_carried():
+    """spans_multi_surface=true is carried as True; omitted defaults to False."""
+    m = _map_with_nodes("/team")
+
+    fake_true = FakeClient([_make_response(_classified_payload(spans_multi_surface=True))])
+    result_true = locate_screen("multi-surface feature PRD", m, client=fake_true)
+    assert result_true.candidates[0].spans_multi_surface is True
+
+    fake_default = FakeClient([_make_response(_classified_payload())])
+    result_default = locate_screen("prd", m, client=fake_default)
+    assert result_default.candidates[0].spans_multi_surface is False
+
+
+def test_classification_confidence_separate_and_clamped():
+    """classification_confidence is independent from confidence and clamps to [0,100]."""
+    m = _map_with_nodes("/team")
+
+    # Both confidences present and distinct → carried independently.
+    fake = FakeClient(
+        [_make_response(_classified_payload(confidence=95, classification_confidence=60))]
+    )
+    result = locate_screen("prd", m, client=fake)
+    first = result.candidates[0]
+    assert first.confidence == 95
+    assert first.classification_confidence == 60
+
+    # Out-of-range int → clamped to 100.
+    fake_over = FakeClient([_make_response(_classified_payload(classification_confidence=150))])
+    result_over = locate_screen("prd", m, client=fake_over)
+    assert result_over.candidates[0].classification_confidence == 100
+
+    # 0-1 float → truncated to int and stays within [0,100].
+    fake_frac = FakeClient([_make_response(_classified_payload(classification_confidence=0.85))])
+    result_frac = locate_screen("prd", m, client=fake_frac)
+    cc = result_frac.candidates[0].classification_confidence
+    assert isinstance(cc, int)
+    assert 0 <= cc <= 100
+
+    # Default when omitted is 0, independent of a high which-surface confidence.
+    fake_default = FakeClient([_make_response(_classified_payload(confidence=95))])
+    result_default = locate_screen("prd", m, client=fake_default)
+    assert result_default.candidates[0].confidence == 95
+    assert result_default.candidates[0].classification_confidence == 0
+
+
+def test_malformed_still_empty_never_raises_with_new_fields():
+    """Garbage output still yields an empty LocateResult and never raises."""
+    m = _map_with_nodes("/team")
+    fake = FakeClient([_make_response("totally not json {{{ broken ]]]")])
+
+    result = locate_screen("prd", m, client=fake)
+
+    assert isinstance(result, LocateResult)
+    assert result.candidates == []
+
+    # A candidate whose new fields are malformed (but the route is valid) must
+    # also never raise — it survives with the safe defaults.
+    bad_fields = {
+        "candidates": [
+            {
+                "route": "/team",
+                "entry_component": "T",
+                "confidence": 80,
+                "rationale": "r",
+                "ambiguous": False,
+                "classification": 123,                       # not a string label
+                "spans_multi_surface": "garblestring",       # not a bool
+                "classification_confidence": "not-a-number", # not numeric
+            }
+        ],
+        "is_multi_node": False,
+    }
+    fake2 = FakeClient([_make_response(bad_fields)])
+    result2 = locate_screen("prd", m, client=fake2)
+    assert len(result2.candidates) == 1
+    surviving = result2.candidates[0]
+    assert surviving.classification == "modify-existing"
+    assert surviving.spans_multi_surface is False
+    assert surviving.classification_confidence == 0
+
+
+def test_pre_amendment_shape_backward_compatible():
+    """A pre-amendment payload (no new fields) parses with defaults, rest unchanged."""
+    m = _map_with_nodes("/team", "/settings/members", "/admin")
+    fake = FakeClient([_make_response(_happy_payload())])
+
+    result = locate_screen("team management PRD", m, client=fake)
+    first = result.candidates[0]
+
+    # Pre-amendment fields behave exactly as before.
+    assert first.route == "/team"
+    assert first.confidence == 92
+    assert first.ambiguous is False
+    # New fields fall back to their defaults.
+    assert first.classification == "modify-existing"
+    assert first.spans_multi_surface is False
+    assert first.classification_confidence == 0
+
+
+def test_locate_system_carries_classification_rules():
+    """LOCATE_SYSTEM instructs the 3-way classification + carry-forward rules."""
+    lower = LOCATE_SYSTEM.lower()
+
+    # The three classification values are named.
+    assert "modify-existing" in LOCATE_SYSTEM
+    assert "attach-to-host" in LOCATE_SYSTEM
+    assert "no-host-decline" in LOCATE_SYSTEM
+
+    # The modify-vs-attach sub-label is advisory, not a routing gate.
+    assert "advisory" in lower
+
+    # classification_confidence is a separate signal from which-surface confidence.
+    assert "classification_confidence" in LOCATE_SYSTEM
+    assert "separate" in lower
+
+    # The spans signal is described.
+    assert "spans_multi_surface" in LOCATE_SYSTEM
+
+
+# ---------------------------------------------------------------------------
 # Plain-English / integrity
 # ---------------------------------------------------------------------------
 

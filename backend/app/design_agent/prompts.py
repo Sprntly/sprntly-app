@@ -773,7 +773,10 @@ Return STRICT JSON matching this schema — raw JSON only, no markdown, no expla
       "entry_component": "TheComponent",
       "confidence": 85,
       "rationale": "One sentence explaining why this screen matches.",
-      "ambiguous": false
+      "ambiguous": false,
+      "classification": "modify-existing",
+      "spans_multi_surface": false,
+      "classification_confidence": 80
     }
   ],
   "is_multi_node": false
@@ -796,6 +799,28 @@ relevant screens and set "is_multi_node": true.
 that does not appear in that list. If no screen in the provided list is a plausible \
 match, return an empty candidates array.
 - "rationale" must be a single sentence with no line breaks.
+
+Classification — for each candidate, also label the KIND of placement the PRD implies:
+- "classification" is one of three values: "modify-existing" (the PRD changes or \
+extends a surface that already exists), "attach-to-host" (the PRD is a NEW feature that \
+hangs off an existing host surface), or "no-host-decline" (no surface in the application \
+can host this feature at all).
+- Treat "modify-existing" and "attach-to-host" together as the SAME outcome: you HAVE \
+located a host surface. The choice between those two is an ADVISORY placement hint, not a \
+routing decision — it may drift between the two while the host surface (the route you \
+picked) stays correct. Choose the better fit, but getting the host right matters far more \
+than the modify-versus-attach sub-label.
+- Use "no-host-decline" ONLY for a genuinely unhosted feature — one that no existing \
+surface could reasonably contain. Do not decline merely because the fit is imperfect.
+- "classification_confidence" is an integer from 0 to 100 reporting how certain you are \
+OF THE CLASSIFICATION. It is a SEPARATE signal from "confidence": "confidence" is your \
+certainty about WHICH surface, while "classification_confidence" is your certainty about \
+the KIND of placement. You can be fully confident in the surface yet unsure of the \
+modify-versus-attach label — score the two independently.
+- "spans_multi_surface" is true when the feature ITSELF legitimately spans more than one \
+surface (it touches several screens by its nature). This is distinct from \
+"is_multi_node", which says the RESULT is a screen set; "spans_multi_surface" is a \
+per-candidate signal about the feature.
 """
 
 
