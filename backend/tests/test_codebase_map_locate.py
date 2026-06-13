@@ -828,6 +828,30 @@ def test_no_host_decline_candidate_survives_without_node():
     assert decline.classification_confidence == 85
 
 
+def test_route_match_rescues_candidate_with_unknown_id():
+    """A candidate echoing a known route but an unknown id survives via the route branch."""
+    m = _map_with_typed_nodes()
+    payload = {
+        "candidates": [
+            {
+                "route": "/team",            # a real route
+                "id": "stale-unknown-id",    # NOT a real node id
+                "entry_component": "TeamScreen",
+                "confidence": 86,
+                "rationale": "r",
+                "ambiguous": False,
+            }
+        ],
+        "is_multi_node": False,
+    }
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("prd", m, client=fake)
+
+    assert len(result.candidates) == 1
+    assert result.candidates[0].route == "/team"
+
+
 # ---------------------------------------------------------------------------
 # Plain-English / integrity
 # ---------------------------------------------------------------------------

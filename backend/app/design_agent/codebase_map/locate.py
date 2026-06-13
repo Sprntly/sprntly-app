@@ -138,12 +138,13 @@ def locate_screen(
         from app.llm_telemetry import RunUsage
 
         map_text = compact_map(map_result)
-        # Validity keys on the stable node id, not the route string. The id set
-        # admits routed screens, in-page sections, and the app shell alike — a
-        # non-route host (shell/section) carries a descriptive, non-route id that
-        # route-string keying would reject. A routed node's id IS its route, so
-        # route-only candidates still match via the `c.id or c.route` fallback.
+        # Candidate validity is checked against BOTH the stable node-id set and
+        # the route set. The id set admits a non-route host (an in-page section,
+        # the app shell) that carries a descriptive, non-route id; the route set
+        # keeps backward-compat for a route-only candidate (or any candidate that
+        # echoed a known route but not its id). See the OR-based check below.
         valid_node_ids = {node.id for node in map_result.nodes}
+        valid_routes = {node.route for node in map_result.nodes}
 
         # System blocks: stable prefix ends with the compact map carrying the
         # cache breakpoint. PRD is the volatile user turn — no cache_control.
@@ -234,17 +235,23 @@ def locate_screen(
         # Post-parse normalization.
         candidates = []
         for c in raw_result.candidates:
-            # A no-host-decline candidate has no backing map node by definition —
-            # it is the representable "nothing in this app can host the feature"
-            # signal, so it is exempt from the node-id membership drop. Every
-            # other candidate must name a real node id (the model echoes the
-            # bracketed id from the compact map); fall back to the route since a
-            # routed node's id IS its route. A candidate that names neither a
-            # real id nor a real route is a hallucination and is dropped.
-            if c.classification != "no-host-decline":
-                candidate_id = c.id or c.route
-                if candidate_id not in valid_node_ids:
-                    continue
+            # A candidate is valid if ANY branch admits it:
+            #   - its id matches a real node id — admits a routed screen, an
+            #     in-page section, or the app shell (the model echoes the
+            #     bracketed id from the compact map); OR
+            #   - its route matches a real route — backward-compat for a
+            #     route-only candidate, or one that echoed a known route but not
+            #     its id; OR
+            #   - it is a no-host-decline candidate, which has no backing map node
+            #     and IS the "nothing in this app can host the feature" signal.
+            # A candidate matching none of these named neither a known id nor a
+            # known route — a true hallucination — and is dropped.
+            if not (
+                c.id in valid_node_ids
+                or c.route in valid_routes
+                or c.classification == "no-host-decline"
+            ):
+                continue
             # Clamp confidence to [0, 100]; coerce to int first.
             c.confidence = max(0, min(100, int(c.confidence)))
             # Clamp classification_confidence to [0, 100] independently — it is a
