@@ -118,6 +118,7 @@ const AUTO_PROCEED: LocateResponse = {
   repo: SEL_REPO,
   posture: "CLEAN",
   unmapped: false,
+  commit_sha: "",
 }
 
 const RANKED_CONFIRM: LocateResponse = {
@@ -146,6 +147,7 @@ const RANKED_CONFIRM: LocateResponse = {
   repo: SEL_REPO,
   posture: "PARTIAL",
   unmapped: false,
+  commit_sha: "",
 }
 
 // ─── Render helpers ──────────────────────────────────────────────────────────

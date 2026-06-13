@@ -228,6 +228,15 @@ class GenerateRequest(BaseModel):
     #   use github_repo; website → use the onboarding website (or a typed
     #   website_url). None = old client / no explicit choice → preserve the
     #   prior implicit precedence + always-on onboarding fallback unchanged.
+    chosen_screen_route: str | None = None
+    #   The route the PM confirmed in the locate UX (codebase generation only).
+    #   When present alongside a resolved installation, the background task
+    #   resolves it to a node on the snapshot map and feeds the recreate
+    #   pre-seed branch of generate_prototype. None = blank-canvas path.
+    map_commit_sha: str | None = None
+    #   The map snapshot the route was confirmed against. Pins build_map at
+    #   read time so the recreate reads the same bytes the PM confirmed
+    #   against, and lands a cache hit on the (installation_id, repo, sha) key.
 
     def normalised_platform(self) -> str:
         return self.target_platform.strip().lower() or "both"
@@ -342,6 +351,8 @@ async def generate(
             github_repo=repo,  # normalised connected-repo full_name; prompt context only
             github_installation_id=github_installation_id,
             design_source=body.design_source,
+            chosen_screen_route=body.chosen_screen_route,
+            map_commit_sha=body.map_commit_sha,
         )
     )
     _inflight_tasks.add(task)
@@ -555,6 +566,11 @@ class LocateResponse(BaseModel):
     repo: str
     posture: Literal["CLEAN", "PARTIAL"]   # from MapResult — surfaced for the chip
     unmapped: bool = False                  # True when no installation / empty map
+    commit_sha: str = ""                    # snapshot SHA the route was confirmed
+    #                                         against; the subsequent generate
+    #                                         pins build_map to this SHA so the
+    #                                         recreate reads the same bytes.
+    #                                         "" on the unmapped path.
 
 
 def _unmapped_locate_response(repo: str) -> LocateResponse:
@@ -577,6 +593,7 @@ def _unmapped_locate_response(repo: str) -> LocateResponse:
         repo=repo,
         posture="PARTIAL",
         unmapped=True,
+        commit_sha="",
     )
 
 
@@ -670,6 +687,7 @@ async def locate(
         repo=body.github_repo,
         posture=map_result.posture,
         unmapped=False,
+        commit_sha=map_result.commit_sha,
     )
 
 
@@ -731,6 +749,8 @@ async def _run_generation_bg(
     github_repo: str | None = None,
     github_installation_id: int | None = None,
     design_source: str | None = None,
+    chosen_screen_route: str | None = None,
+    map_commit_sha: str | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -802,6 +822,49 @@ async def _run_generation_bg(
         )
         scenario_label = ",".join(sorted(scenario_set))  # "A" | "A,C" | "0" ...
 
+        # Resolve the PM-confirmed screen route into a LocatedScreen for the
+        # recreate pre-seed branch of generate_prototype. Gated to codebase
+        # generation only; every other source path is byte-for-byte today's
+        # blank-canvas flow (located_screen stays None). Reuses the
+        # installation id already resolved in the handler so we never make a
+        # second live GitHub OAuth call here. map_commit_sha pins build_map
+        # to the snapshot the PM confirmed the route against, so the recreate
+        # reads the same bytes (and lands a cache hit on the existing key).
+        located = None
+        if (
+            design_source == "github"
+            and chosen_screen_route
+            and github_installation_id is not None
+        ):
+            try:
+                from app.design_agent.codebase_map.recreate import LocatedScreen
+                from app.design_agent.codebase_map.service import build_map
+                map_result = await asyncio.to_thread(
+                    build_map, github_installation_id, github_repo, map_commit_sha
+                )
+                if map_result is not None:
+                    node = next(
+                        (n for n in map_result.nodes if n.route == chosen_screen_route),
+                        None,
+                    )
+                    if node is not None:
+                        located = LocatedScreen(map_result=map_result, node=node)
+                        logger.info(
+                            "design_agent.recreate_wired prototype_id=%s repo=%s route=%s sha=%s",
+                            prototype_id, github_repo, chosen_screen_route, map_commit_sha,
+                        )
+                else:
+                    logger.warning(
+                        "design_agent.recreate_wire_failed prototype_id=%s repo=%s",
+                        prototype_id, github_repo,
+                    )
+            except Exception:
+                logger.warning(
+                    "design_agent.recreate_wire_failed prototype_id=%s repo=%s",
+                    prototype_id, github_repo,
+                )
+                located = None
+
         result, virtual_fs = await generate_prototype(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
@@ -815,6 +878,7 @@ async def _run_generation_bg(
             website_url=None if figma_file_key else website_url,  # Scenario B pre-seed source
             website_sample=website_sample,  # reuse the single extractor run for the pre-seed
             design_source=design_source,
+            located_screen=located,
         )
         # Success path (P1-08): a complete run that emitted files gets built +
         # staged + marked ready. A complete run with no files, or any non-complete
@@ -828,6 +892,10 @@ async def _run_generation_bg(
                 figma_file_key=figma_file_key,
                 figma_node_id=figma_node_id,
                 scenario=scenario_label,
+                # Carries the theme-bridge expectations set on the recreate path
+                # (None on every blank-canvas run). Getattr defensively so older
+                # test stubs that return a bare SimpleNamespace keep working.
+                theme_expectations=getattr(result, "theme_expectations", None),
             )
         elif result.status == "complete" and not virtual_fs:
             fail_prototype(
