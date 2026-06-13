@@ -165,6 +165,18 @@ class Settings(BaseSettings):
     # Routes return 404 when false so the feature is invisible when off.
     design_agent_enabled: bool = False
 
+    # Multi-Agent mode: run PRD + Evidence + Technical Design + QA Test Cases +
+    # Risk Analysis + Traceability Matrix concurrently from a single trigger.
+    # "aggressive" mode pulls ClickUp task context (comments, attachments,
+    # linked tasks) into the generation context for deeper analysis.
+    multi_agent_enabled: bool = True
+    # Analysis depth: "standard" (PRD + Evidence + User Stories) or
+    # "aggressive" (adds Technical Design, QA Test Cases, Risk/Gap Analysis,
+    # Traceability Matrix, and ingests ClickUp task context).
+    analysis_mode: str = "aggressive"
+    # Max concurrent agent calls during multi-agent orchestration.
+    multi_agent_concurrency: int = 6
+
     @property
     def github_app_private_key_pem(self) -> str:
         """Return a clean PEM regardless of how the .env value was written.
