@@ -64,8 +64,10 @@ def compact_map(m: "MapResult") -> str:
     for node in m.nodes:
         count = len(node.composed_components)
         suffix = " (route-state)" if node.is_route_state else ""
+        kind_suffix = "" if node.kind == "route" else f" ({node.kind})"
         lines.append(
-            f"- {node.route} · {node.entry_component} · {count} components{suffix}"
+            f"- [{node.id}] {node.route} · {node.entry_component}"
+            f" · {count} components{suffix}{kind_suffix}"
         )
 
     result = "\n".join(lines)

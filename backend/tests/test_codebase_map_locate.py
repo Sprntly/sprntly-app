@@ -311,6 +311,55 @@ def test_compact_map_has_no_source_and_is_bounded():
     assert len(output) <= _COMPACT_MAP_CHAR_CAP
 
 
+def test_compact_map_carries_id_and_kind_marker():
+    """Each projection line leads with the node id; non-route kinds are marked."""
+    nodes = [
+        ScreenNode(route="/team", entry_component="TeamScreen", composed_components=["A", "B"]),
+        ScreenNode(route="/inbox", entry_component="InboxScreen", composed_components=["C"]),
+        ScreenNode(route="", entry_component="AppShell", kind="shell", id="app-shell"),
+        ScreenNode(
+            route="/team",
+            entry_component="TeamMembers",
+            kind="section",
+            id="/team-members",
+        ),
+    ]
+    m = MapResult(repo="org/repo", commit_sha="abc123", posture="CLEAN", nodes=nodes)
+
+    output = compact_map(m)
+
+    # Every node's id is surfaced in its line.
+    assert "[/team]" in output
+    assert "[/inbox]" in output
+    assert "[app-shell]" in output
+    assert "[/team-members]" in output
+
+    # Non-route kinds are marked; route nodes carry no kind marker.
+    assert "(shell)" in output
+    assert "(section)" in output
+    team_line = next(ln for ln in output.splitlines() if ln.startswith("- [/team]"))
+    assert "(shell)" not in team_line
+    assert "(section)" not in team_line
+
+    # Existing per-node content is preserved.
+    assert "TeamScreen" in output
+    assert "components" in output
+
+
+def test_compact_map_still_bounded():
+    """An oversized map still truncates at the char cap with the id/kind line shape."""
+    nodes = [
+        ScreenNode(route=f"/screen{i}", entry_component=f"Screen{i}", composed_components=["A"])
+        for i in range(400)
+    ]
+    m = MapResult(repo="org/big", commit_sha="sha999", posture="CLEAN", nodes=nodes)
+
+    output = compact_map(m)
+
+    assert len(output) <= _COMPACT_MAP_CHAR_CAP
+    assert output.endswith("...")  # the truncation guard fired
+
+
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
