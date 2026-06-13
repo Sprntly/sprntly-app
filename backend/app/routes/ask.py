@@ -9,6 +9,7 @@ from app.ask_runner import compose_ask_answer
 from app.auth import CompanyContext, require_company
 from app.db import find_cached_ask, log_ask
 from app.deps.ownership import require_owned_dataset
+from app.prompts import ASK_SYSTEM
 from app.skill_router import detect_intent, list_available_skills
 
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
@@ -134,22 +135,38 @@ def ask(
     enterprise_id = company.company_id
 
     if intent and intent.confidence >= 0.75:
-        # Skill-routed answer: load the skill method and prepend it to the system prompt
+        # Skill-routed answer: bind the matched skill's method onto the gateway
+        # call (it prepends SKILL.md into the cacheable prefix + logs the call).
         try:
             from app.graph.gateway import llm_call
-            from app.graph.facade import GraphFacade
 
-            facade = GraphFacade()
             result = llm_call(
-                facade=facade,
                 enterprise_id=enterprise_id,
-                system_extra=f"The user asked a question that maps to the '{intent.skill_id}' skill. Use this skill's methodology to give a structured, actionable response.",
-                user=body.question,
+                agent="ask",
+                purpose="skill_answer",
+                system=(
+                    ASK_SYSTEM
+                    + f"\n\nThe user's question maps to the '{intent.skill_id}' "
+                    "skill. Follow that skill's method to produce a structured, "
+                    "actionable answer."
+                ),
+                input=body.question,
+                prompt_version="ask-skill-v1",
+                json_schema=ASK_RESPONSE_SCHEMA,
                 skill=intent.skill_id,
-                schema=_ASK_RESPONSE_SCHEMA,
                 max_tokens=12000,
             )
-            payload = result if isinstance(result, dict) else {"answer": str(result), "key_points": [], "citations": [], "confidence": intent.confidence, "unanswered": ""}
+            payload = (
+                result.output
+                if isinstance(result.output, dict)
+                else {
+                    "answer": str(result.output),
+                    "key_points": [],
+                    "citations": [],
+                    "confidence": intent.confidence,
+                    "unanswered": "",
+                }
+            )
             # Tag the response with the matched skill for frontend rendering
             payload["_skill"] = intent.skill_id
             payload["_skill_action"] = intent.action
