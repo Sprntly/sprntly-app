@@ -226,6 +226,8 @@ _TAB_ARRAY_RE = re.compile(
 )
 _TAB_LABEL_RE = re.compile(r"\b(?:label|name|title)\s*:\s*['\"]([^'\"]+)['\"]")
 _TAB_ID_RE = re.compile(r"\b(?:id|key|value|slug)\s*:\s*['\"]([^'\"]+)['\"]")
+# One quoted string item inside a string-literal tabs array (`['Overview', …]`).
+_TAB_STRING_ITEM_RE = re.compile(r"['\"]([^'\"]+)['\"]")
 _SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -259,30 +261,56 @@ def discover_route_elements(snapshot: RepoSnapshot) -> list[RouteElement]:
 
 
 def detect_tab_sections(snapshot: RepoSnapshot) -> list[TabSection]:
-    """Discover in-page tab arrays (``const tabs = [{ id, label }, …]``).
+    """Discover in-page tab arrays in either declaration shape.
 
-    Each object entry inside a tabs-named array becomes one TabSection.  The id
-    falls back to a slug of the label when no explicit id/key is present, and to
-    the label itself when neither yields a slug.  Deduplicated by
-    (section_id, file), sorted for determinism.  Returns ``[]`` when no tabs
-    array is present — so a route-only screen set adds no section nodes.
+    Two shapes of a tabs-named array are recognised, both gated on the array
+    name containing "tab" so an unrelated literal does not false-positive:
+
+    * Object form — ``const tabs = [{ id, label }, …]``.  Each object entry
+      becomes one TabSection; the id falls back to a slug of the label when no
+      explicit id/key is present, and is skipped when neither yields a slug.
+    * String-literal form — ``const tabs = ['Overview', 'Funnels', …]`` with at
+      least two string items.  Each string item becomes one TabSection whose id
+      is the slug of the item and whose label is the item text.
+
+    An array is treated as object form when its body contains a ``{`` and as
+    string form otherwise, so the two branches never both fire on one array.
+    Results from both shapes are deduplicated by (section_id, file) and sorted
+    for determinism.  Returns ``[]`` when no tabs array is present — so a
+    route-only screen set adds no section nodes.
     """
     found: dict[tuple[str, str], TabSection] = {}
     for path, body in snapshot.files.items():
         for arr in _TAB_ARRAY_RE.finditer(body):
             array_body = arr.group(2)
-            # Split into rough object-entry spans so a label pairs with the id
-            # declared in the same entry rather than the next one.
-            for entry in array_body.split("}"):
-                label_m = _TAB_LABEL_RE.search(entry)
-                id_m = _TAB_ID_RE.search(entry)
-                if not label_m and not id_m:
+            if "{" in array_body:
+                # Object form: split into rough object-entry spans so a label
+                # pairs with the id declared in the same entry, not the next.
+                for entry in array_body.split("}"):
+                    label_m = _TAB_LABEL_RE.search(entry)
+                    id_m = _TAB_ID_RE.search(entry)
+                    if not label_m and not id_m:
+                        continue
+                    label = label_m.group(1) if label_m else ""
+                    section_id = id_m.group(1) if id_m else _slugify(label)
+                    if not section_id:
+                        continue
+                    key = (section_id, path)
+                    if key not in found:
+                        found[key] = TabSection(section_id=section_id, label=label, file=path)
+            else:
+                # String-literal form: each quoted item is one tab.  Require at
+                # least two items so a lone-string const stays unmatched.  When
+                # two items slugify to the same id the first one wins (the
+                # existing dedupe key); unlikely for real tab labels.
+                items = _TAB_STRING_ITEM_RE.findall(array_body)
+                if len(items) < 2:
                     continue
-                label = label_m.group(1) if label_m else ""
-                section_id = id_m.group(1) if id_m else _slugify(label)
-                if not section_id:
-                    continue
-                key = (section_id, path)
-                if key not in found:
-                    found[key] = TabSection(section_id=section_id, label=label, file=path)
+                for item in items:
+                    section_id = _slugify(item)
+                    if not section_id:
+                        continue
+                    key = (section_id, path)
+                    if key not in found:
+                        found[key] = TabSection(section_id=section_id, label=item, file=path)
     return sorted(found.values(), key=lambda s: (s.file, s.section_id))

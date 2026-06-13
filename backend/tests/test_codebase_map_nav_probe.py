@@ -219,6 +219,103 @@ def test_detect_tab_sections_empty_for_route_only_file():
     assert detect_tab_sections(snap) == []
 
 
+def test_string_literal_tab_array_emits_section_per_item():
+    """A string-literal tabs array yields one TabSection per item, id = slug, label = item."""
+    from app.design_agent.codebase_map.nav_probe import detect_tab_sections
+
+    snap = _snap(**{
+        "src/pages/AnalyticsPage.jsx": "const tabs = ['Overview', 'Funnels', 'Cohorts', 'ROI'];\n",
+    })
+    sections = detect_tab_sections(snap)
+    assert {s.section_id for s in sections} == {"overview", "funnels", "cohorts", "roi"}
+    # label is the original item text; file is the declaring file.
+    by_id = {s.section_id: s for s in sections}
+    assert by_id["overview"].label == "Overview"
+    assert by_id["roi"].label == "ROI"
+    assert all(s.file == "src/pages/AnalyticsPage.jsx" for s in sections)
+
+
+def test_real_launchpad_analytics_and_settings_tabs_detected():
+    """Both real string-literal tab shapes are detected; '&'/spaces slugify to a stable id."""
+    from app.design_agent.codebase_map.nav_probe import detect_tab_sections
+
+    snap = _snap(**{
+        "src/pages/AnalyticsPage.jsx": "const tabs = ['Overview', 'Funnels', 'Cohorts', 'ROI'];\n",
+        "src/pages/SettingsPage.jsx": "const settingsTabs = ['Account', 'Team', 'Billing & Plan'];\n",
+    })
+    sections = detect_tab_sections(snap)
+    analytics = {s.section_id for s in sections if s.file == "src/pages/AnalyticsPage.jsx"}
+    settings = {s.section_id for s in sections if s.file == "src/pages/SettingsPage.jsx"}
+    assert analytics == {"overview", "funnels", "cohorts", "roi"}
+    # 'Billing & Plan' slugifies to a stable, non-empty id (& and spaces collapse to '-').
+    assert settings == {"account", "team", "billing-plan"}
+    billing = next(s for s in sections if s.section_id == "billing-plan")
+    assert billing.section_id and billing.label == "Billing & Plan"
+
+
+def test_object_array_detection_unchanged():
+    """Object-form tabs detection is byte-identical to the pre-amend behaviour (regression)."""
+    from app.design_agent.codebase_map.nav_probe import detect_tab_sections, TabSection
+
+    snap = _snap(**{
+        "src/Team.tsx": (
+            "const tabs = [\n"
+            "  { id: 'members', label: 'Members' },\n"
+            "  { id: 'roles', label: 'Roles' },\n"
+            "];\n"
+            "const colors = ['red', 'green'];\n"  # not a tab array
+        ),
+    })
+    sections = detect_tab_sections(snap)
+    assert sections == [
+        TabSection(section_id="members", label="Members", file="src/Team.tsx"),
+        TabSection(section_id="roles", label="Roles", file="src/Team.tsx"),
+    ]
+
+
+def test_non_tabs_string_array_not_mis_detected():
+    """A string array not named *tabs (e.g. const items = [...]) yields no sections."""
+    from app.design_agent.codebase_map.nav_probe import detect_tab_sections
+
+    snap = _snap(**{"src/data.ts": "const items = ['a', 'b', 'c'];\n"})
+    assert detect_tab_sections(snap) == []
+
+
+def test_detect_tab_sections_single_definition():
+    """detect_tab_sections is one shared function; both adapters reuse the same section pass."""
+    import pathlib
+
+    from app.design_agent.codebase_map.nodes import (
+        NextAppRouterAdapter,
+        ViteReactRouterAdapter,
+    )
+
+    src = (
+        pathlib.Path(__file__).parent.parent
+        / "app" / "design_agent" / "codebase_map" / "nav_probe.py"
+    ).read_text()
+    assert src.count("def detect_tab_sections(") == 1
+    # Both adapters share the SAME section-node callable (no per-adapter copy),
+    # so string-array sections reach both without per-adapter code.
+    assert NextAppRouterAdapter.section_nodes is ViteReactRouterAdapter.section_nodes
+
+
+def test_string_tab_scanner_no_llm_call():
+    """The tab scanner is deterministic static analysis — nav_probe imports no LLM client."""
+    import pathlib
+
+    src = (
+        pathlib.Path(__file__).parent.parent
+        / "app" / "design_agent" / "codebase_map" / "nav_probe.py"
+    ).read_text()
+    assert "import anthropic" not in src
+    assert "from anthropic" not in src
+    for parser in ("esprima", "tree-sitter", "tree_sitter", "@babel", "pyjsparser"):
+        assert parser not in src
+    assert "import ast\n" not in src
+    assert "from ast import" not in src
+
+
 def test_no_prohibited_tokens_in_source():
     """The four deliverable files contain no internal-coordinate tokens."""
     import os
