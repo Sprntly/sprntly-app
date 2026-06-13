@@ -59,7 +59,9 @@ from app.design_agent.codebase_map.recreate import (
     BrandAssetCarry,
     LocatedScreen,
     RecreateSources,
+    ThemeExpectations,
     bridge_theme,
+    build_theme_expectations,
     carry_brand_asset,
     recreate_pre_seed,
     render_recreate_task_block,
@@ -215,6 +217,12 @@ class RunResult:
     # consecutive max_tokens hit). Callers use this to tag the cost-summary log line
     # with model=ESCALATION_MODEL + escalated=true so telemetry prices the run honestly.
     model_escalated: bool = False
+    # Theme-bridge expectations derived from the real recreated globals + brand
+    # carry. Set ONLY on the recreate path; None on every blank-canvas run
+    # (Scenario A / B / website / figma). The route hook reads this to arm the
+    # build-gate — passing the non-None set into `_stage_complete_run` makes
+    # `assert_theme_landed` fire; a None set leaves the gate dormant.
+    theme_expectations: "ThemeExpectations | None" = None
 
 
 def _hash_tool_call(name: str, input: dict[str, Any]) -> str:
@@ -1326,6 +1334,7 @@ async def generate_prototype(
     # the token / primitive pre-seed in place.
     recreate_sources: RecreateSources | None = None
     _brand_carry: BrandAssetCarry | None = None
+    _theme_expectations: ThemeExpectations | None = None
     if located_screen is not None:
         try:
             recreate_sources = recreate_pre_seed(
@@ -1343,8 +1352,16 @@ async def generate_prototype(
                     prototype_id=prototype_id,
                 )
                 virtual_fs.update(_brand_carry.virtual_fs_keys)
+                # Discriminating signals from the real bridged globals + brand
+                # carry. The route hook hands these to `_stage_complete_run`
+                # so `assert_theme_landed` fires on the recreate path. None
+                # when no globals are present (no assertion can be made).
+                _theme_expectations = build_theme_expectations(
+                    recreate_sources, _brand_carry,
+                )
         except Exception as exc:
             recreate_sources = None
+            _theme_expectations = None
             logger.warning(
                 "design_agent.recreate_pre_seed_failed prototype_id=%s error=%s",
                 prototype_id, type(exc).__name__,
@@ -1444,6 +1461,10 @@ async def generate_prototype(
     out_virtual_fs = {
         k: v for k, v in ctx.virtual_fs.items() if not k.startswith("__reference__/")
     }
+    # Surface the theme-bridge expectations to the route hook so it can fire
+    # the build-gate. None on every blank-canvas run; non-None only when the
+    # recreate branch produced real bridged globals.
+    result.theme_expectations = _theme_expectations
     return result, out_virtual_fs
 
 

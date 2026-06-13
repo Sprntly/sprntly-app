@@ -328,32 +328,54 @@ export function GenerateModal({
   const githubRow = getGenerateConnectorRowState(connFor("github"))
 
   // Kick off the generate flow with an optional chosen screen route.
-  // The chosen route travels via onGenStart's context — it does NOT change
-  // buildGenerateParams or the /generate body; C3 consumes the chosen screen
-  // server-side via the map. C2 only needs the gate UX + repo to be correct.
-  function runGenerateForRoute(chosenRoute: string | null) {
+  // In codebase mode the chosen route + the locate snapshot SHA are also
+  // threaded into the /generate body so the backend can resolve them into a
+  // LocatedScreen and feed the recreate pre-seed branch of generate_prototype.
+  // The SHA is only sent when non-empty (unmapped → omit; the backend has no
+  // snapshot to pin against). Non-codebase paths never carry either key.
+  function runGenerateForRoute(
+    chosenRoute: string | null,
+    overrideSha?: string | null,
+  ) {
     if (prdId == null) return
+    const codebaseGenerate = designSource === "github" && githubActive
+    // Auto-proceed path passes the SHA explicitly because it fires before the
+    // setLocateResult re-render lands; the picker path reads from locateResult
+    // state which is already populated by the time onChoose fires.
+    const retainedSha =
+      (codebaseGenerate
+        ? (overrideSha ?? locateResult?.commit_sha)
+        : null) || null
     onGenStart?.({
       figmaFileKey: designSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
-      githubRepo: designSource === "github" && githubActive ? repoSel : null,
+      githubRepo: codebaseGenerate ? repoSel : null,
       chosenScreenRoute: chosenRoute,
     })
+    const baseParams = buildGenerateParams({
+      prdId,
+      platform,
+      instructions,
+      // Only send the chosen source's specific input; the other is cleared to
+      // null so the backend receives a clean single-source request.
+      figmaFileKey: designSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
+      // figmaNodeId only applies when Figma is the chosen source AND a URL was pasted.
+      figmaNodeId: designSource === "figma" && figmaUrlKey ? figmaNodeId : null,
+      websiteUrl: "",
+      manualColor: "",
+      manualFont: "",
+      githubRepo: codebaseGenerate ? repoSel : "",
+      designSource,
+    })
+    const params =
+      codebaseGenerate && chosenRoute
+        ? {
+            ...baseParams,
+            chosen_screen_route: chosenRoute,
+            ...(retainedSha ? { map_commit_sha: retainedSha } : {}),
+          }
+        : baseParams
     void runGenerateFlow({
-      params: buildGenerateParams({
-        prdId,
-        platform,
-        instructions,
-        // Only send the chosen source's specific input; the other is cleared to
-        // null so the backend receives a clean single-source request.
-        figmaFileKey: designSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
-        // figmaNodeId only applies when Figma is the chosen source AND a URL was pasted.
-        figmaNodeId: designSource === "figma" && figmaUrlKey ? figmaNodeId : null,
-        websiteUrl: "",
-        manualColor: "",
-        manualFont: "",
-        githubRepo: designSource === "github" && githubActive ? repoSel : "",
-        designSource,
-      }),
+      params,
       generate: designAgentApi.generate,
       runGeneration: runDesignAgentGeneration,
       onOpenChange: (next) => {
@@ -407,7 +429,9 @@ export function GenerateModal({
             setChosenRouteForChip(route)
             setLocateState("chip")
             // Immediately start generation — chip is non-blocking and informational.
-            runGenerateForRoute(route)
+            // Pass the SHA explicitly because the state update queued above has
+            // not yet re-rendered the closure.
+            runGenerateForRoute(route, result.commit_sha || null)
           } else {
             // ranked_confirm: block until PM picks a candidate.
             setLocateState("ranked_confirm")

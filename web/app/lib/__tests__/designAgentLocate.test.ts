@@ -46,6 +46,7 @@ function makeLocateResponse(overrides: Partial<LocateResponse> = {}): LocateResp
     repo: "org/repo",
     posture: "CLEAN",
     unmapped: false,
+    commit_sha: "",
     ...overrides,
   }
 }

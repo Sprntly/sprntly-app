@@ -88,6 +88,13 @@ type GenerateFlowDeps = {
     /** Explicit single-source selector. When set, overrides the implicit
      *  precedence in the backend. Absent (null) = old-client back-compat. */
     design_source?: "figma" | "github" | "website" | null
+    /** The PM-confirmed screen route from the locate gate. Sent only on the
+     *  codebase generation path; the backend resolves it to a node on the
+     *  pinned map snapshot and feeds the recreate pre-seed branch. */
+    chosen_screen_route?: string | null
+    /** The snapshot SHA the route was confirmed against. Pins the backend's
+     *  build_map at read time so the recreate reads the same bytes. */
+    map_commit_sha?: string | null
   }
   generate: typeof designAgentApi.generate
   runGeneration: typeof runDesignAgentGeneration

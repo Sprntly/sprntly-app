@@ -868,6 +868,14 @@ export const designAgentApi = {
     manual_design?: { primary_color: string; font_family: string } | null  // P5-02: manual floor
     github_repo?: string | null  // connected-repo full_name ("org/repo"); prompt context only
     design_source?: "figma" | "github" | "website" | null  // explicit source selector; null = back-compat implicit precedence
+    /** The screen route the PM confirmed in the locate UX. Sent only on the
+     *  codebase generation path so the backend can resolve it into a recreate
+     *  pre-seed. Absent / null = blank-canvas generation. */
+    chosen_screen_route?: string | null
+    /** The snapshot SHA the route was confirmed against. Pins the backend's
+     *  build_map at read time so the recreate reads the same bytes the PM
+     *  confirmed against (and lands a cache hit). */
+    map_commit_sha?: string | null
   }) => api.post<PrototypeStartResponse>("/v1/design-agent/generate", body),
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
@@ -1090,6 +1098,10 @@ export type LocateResponse = {
   repo: string
   posture: "CLEAN" | "PARTIAL"
   unmapped: boolean
+  /** Snapshot SHA the locate result was resolved against. Empty string on the
+   *  unmapped path. The generate body sends this back as `map_commit_sha` so
+   *  the recreate reads the same snapshot. */
+  commit_sha: string
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
