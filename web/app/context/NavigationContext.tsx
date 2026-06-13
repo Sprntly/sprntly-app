@@ -60,8 +60,8 @@ interface NavigationContextType {
   setReviewPastOpen: (open: boolean) => void
 
   // Toast
-  toast: { title: string; sub: string; link?: string } | null
-  showToast: (title: string, sub: string, link?: string) => void
+  toast: { title: string; sub: string; link?: string; onAction?: () => void; persist?: boolean } | null
+  showToast: (title: string, sub: string, link?: string, opts?: { onAction?: () => void; persist?: boolean }) => void
   hideToast: () => void
 
   // AI bar
@@ -101,7 +101,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [activeModal, setActiveModal] = useState<"approve" | "invite" | "generate" | null>(null)
   const [shareMenuOpen, setShareMenuOpen] = useState(false)
   const [reviewPastOpen, setReviewPastOpen] = useState(false)
-  const [toast, setToast] = useState<{ title: string; sub: string; link?: string } | null>(null)
+  const [toast, setToast] = useState<{ title: string; sub: string; link?: string; onAction?: () => void; persist?: boolean } | null>(null)
   const [aiBarValue, setAIBarValue] = useState("")
   const [pendingSearchHandoff, setPendingSearchHandoff] = useState<PendingSearchHandoff | null>(null)
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
@@ -268,9 +268,11 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     setActiveModal(null)
   }, [])
 
-  const showToast = useCallback((title: string, sub: string, link?: string) => {
-    setToast({ title, sub, link })
-    setTimeout(() => setToast(null), 5500)
+  const showToast = useCallback((title: string, sub: string, link?: string, opts?: { onAction?: () => void; persist?: boolean }) => {
+    setToast({ title, sub, link, onAction: opts?.onAction, persist: opts?.persist })
+    if (!opts?.persist) {
+      setTimeout(() => setToast(null), 5500)
+    }
   }, [])
 
   const hideToast = useCallback(() => {

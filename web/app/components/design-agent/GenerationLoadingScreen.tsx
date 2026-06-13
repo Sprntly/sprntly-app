@@ -51,6 +51,7 @@ export function GenerationLoadingScreen({
   githubRepo,
   mode = "generate",
   prototypeId,
+  onNotifyWhenReady,
 }: {
   open: boolean
   /** Optional: fired once the exit fade completes (cosmetic hook). */
@@ -64,6 +65,9 @@ export function GenerationLoadingScreen({
   /** When provided, the component subscribes to the backend SSE stream and
    *  renders live friendly step text instead of the cosmetic checklist. */
   prototypeId?: number | null
+  /** When provided and mode === "generate", renders a "Notify me when ready"
+   *  button that dismisses the overlay and arms background-completion notification. */
+  onNotifyWhenReady?: () => void
 }) {
   // ── Cosmetic fallback (used when no SSE stream is active) ──────────────────
   const steps = mode === "refresh" ? REFRESH_STEPS : STEPS
@@ -282,6 +286,15 @@ export function GenerationLoadingScreen({
                 )
               })}
         </div>
+        {onNotifyWhenReady && mode === "generate" && (
+          <button
+            type="button"
+            className="proto-gen-notify-btn"
+            onClick={onNotifyWhenReady}
+          >
+            Notify me when ready
+          </button>
+        )}
       </div>
     </div>
   )

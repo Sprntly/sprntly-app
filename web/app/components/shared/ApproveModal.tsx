@@ -16,6 +16,7 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { GenerateModal } from "../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
+import { reasonCopy } from "../design-agent/GenerationErrorBanner"
 import { designAgentApi, type PrototypeRecord } from "../../lib/api"
 import { prototypePath } from "../../lib/routes"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
@@ -74,6 +75,9 @@ export function ApproveModal() {
   // navigation modal union.
   const generateActiveRef = useRef(false)
   generateActiveRef.current = activeModal === "generate"
+  // Set to true when the user clicks "Notify me when ready". Read in
+  // handleGenDone to skip auto-navigate and fire a persistent toast instead.
+  const notifyModeRef = useRef(false)
 
   const clearTimers = useCallback(() => {
     if (safetyTimerRef.current) clearTimeout(safetyTimerRef.current)
@@ -106,6 +110,7 @@ export function ApproveModal() {
     setGenProtoId(null)
     shownAtRef.current = Date.now()
     resolvedRef.current = false
+    notifyModeRef.current = false
     // Clear any prototype-to-reveal from a prior run before this generation
     // resolves.
     pendingCanvasRef.current = null
@@ -134,6 +139,31 @@ export function ApproveModal() {
     (result?: DesignAgentGenResult) => {
       if (resolvedRef.current) return
       resolvedRef.current = true
+      if (notifyModeRef.current) {
+        // User chose "notify me" — overlay already closed. Fire a persistent
+        // toast with an action link; skip auto-navigate.
+        if (result?.ok && result.prototype) {
+          const protoForToast = result.prototype
+          showToast(
+            "Prototype ready",
+            "Your prototype finished generating.",
+            "Open",
+            {
+              persist: true,
+              onAction: () => router.push(prototypePath(prdIdOf(protoForToast))),
+            },
+          )
+        } else if (result && !result.ok) {
+          showToast(
+            "Generation failed",
+            reasonCopy(result.message),
+            undefined,
+            { persist: true },
+          )
+        }
+        clearTimers()
+        return
+      }
       pendingCanvasRef.current =
         result?.ok && result.prototype ? result.prototype : null
       const remaining = MIN_VISIBLE_MS - (Date.now() - shownAtRef.current)
@@ -144,8 +174,16 @@ export function ApproveModal() {
         minTimerRef.current = setTimeout(hideLoading, remaining)
       }
     },
-    [hideLoading],
+    [hideLoading, clearTimers, showToast, router],
   )
+
+  // Fired when the user clicks "Notify me when ready" in the loading overlay.
+  // Arms notify mode (so handleGenDone fires a toast instead of navigating) and
+  // closes the overlay immediately.
+  const handleNotifyWhenReady = useCallback(() => {
+    notifyModeRef.current = true
+    setGenLoading(false)
+  }, [])
 
   // Guard for "View Prototype" re-verification: prevents navigating to a stale
   // canvas.
@@ -195,6 +233,7 @@ export function ApproveModal() {
         figmaFileKey={genFigmaKey}
         githubRepo={genGithubRepo}
         prototypeId={genProtoId}
+        onNotifyWhenReady={handleNotifyWhenReady}
       />
     </>
   )
