@@ -21,7 +21,9 @@ Design notes
 from __future__ import annotations
 
 import base64
+import json
 import logging
+import re
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
@@ -31,9 +33,21 @@ logger = logging.getLogger(__name__)
 # Intentionally separate from the styling-fetch _GITHUB_* constants in adapters.py:
 # the map reader needs more tree entries and more file bodies than the 12-file
 # UI-primitive fetch, but remains bounded well below a full-repo download.
-_MAX_TREE_ENTRIES = 600    # recursive blob paths — route-tree + component discovery
+_MAX_TREE_ENTRIES = 600    # per-build blob-path budget — route-tree + component discovery
+# Raw recursive listing ceiling. We list the WHOLE repo tree up to this many
+# paths (cheap — path strings, never bytes) so read_repo can filter to the
+# detected frontend subtree BEFORE applying the _MAX_TREE_ENTRIES budget. A
+# flat-from-root budget would clip a non-root frontend (e.g. web/) that sorts
+# after a larger backend tree, leaving the map empty. Well above any realistic
+# single-app file count, still bounded against a pathological repo.
+_MAX_TREE_SCAN = 5_000
 _MAX_FILES = 40            # total file bodies per map build (screen + deps + shell + config)
-_MAX_FILE_BYTES = 128_000  # per-file byte cap; files larger than this are skipped, not truncated
+_MAX_FILE_BYTES = 128_000  # per-file byte cap for tree-sampled files; larger files are skipped, not truncated
+# Caller-supplied extras (the explicit must-reads read_repo prepends) get a
+# larger ceiling than tree-sampled files: a monorepo's real globals.css / theme
+# bridge is often 200-400KB and would be silently dropped under the tree cap,
+# killing the theme bridge. Still bounded — never an unlimited fetch.
+_MAX_EXTRA_FILE_BYTES = 1_048_576  # 1 MiB ceiling for explicit extras
 
 
 # ── data model ──────────────────────────────────────────────────────────────────
@@ -103,6 +117,92 @@ def _decode_file_payload(payload, max_bytes: int = _MAX_FILE_BYTES) -> str | Non
         return None
 
 
+# ── frontend-root detection (multi-root monorepo support) ──────────────────────
+# In a monorepo the frontend app lives under a package dir (e.g. web/) while the
+# backend sorts ahead of it in the recursive blob listing. Detecting that subtree
+# lets read_repo measure its per-build budget against frontend files instead of a
+# backend-first prefix.
+
+# A Next.js / App-Router page file under an optional package prefix and optional
+# src/ dir: captures the prefix in front of the conventional app/ root.
+_APP_ROUTER_PAGE_RE = re.compile(r"^(.*?)(?:src/)?app/.*page\.[jt]sx?$")
+
+
+def _candidate_package_json_paths(tree_paths: list[str]) -> list[str]:
+    """package.json paths at the repo root or one/two levels deep.
+
+    Bounded by depth so detection reads only a handful of small manifests rather
+    than every nested package.json in a large monorepo.
+    """
+    out: list[str] = []
+    for p in tree_paths:
+        if p == "package.json" or p.endswith("/package.json"):
+            if p.count("/") <= 2:
+                out.append(p)
+    return out
+
+
+def _pkg_declares_frontend(body: str) -> bool:
+    """True when a package.json body declares a next or react dependency."""
+    try:
+        data = json.loads(body)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        deps = data.get(key)
+        if isinstance(deps, dict) and ("next" in deps or "react" in deps):
+            return True
+    return False
+
+
+def _app_router_prefix(tree_paths: list[str]) -> str:
+    """Shallowest repo-relative prefix hosting an app/**/page.* (or src/app/**)."""
+    best: tuple[int, str] | None = None
+    for p in tree_paths:
+        m = _APP_ROUTER_PAGE_RE.match(p)
+        if not m:
+            continue
+        prefix = m.group(1)
+        depth = prefix.count("/")
+        if best is None or depth < best[0]:
+            best = (depth, prefix)
+    return best[1] if best else ""
+
+
+def _detect_frontend_root(tree_paths: list[str], files: dict[str, str]) -> str:
+    """Return the repo-relative prefix of the frontend app subtree ('web/'), or
+    '' for a repo-root app.
+
+    Detection order: (a) a package.json declaring next/react — prefer the
+    shallowest NON-root one (a monorepo's app package) over a root manifest that
+    may only hoist shared deps; a root-only frontend manifest means a repo-root
+    app and returns ''. (b) Else the prefix of the dir hosting app/**/page.* or
+    src/app/**/page.*. (c) Else '' (honest fallback; never raises). When '',
+    callers apply today's flat behaviour with no filtering.
+    """
+    non_root: list[tuple[int, str]] = []
+    root_is_frontend = False
+    for p in tree_paths:
+        if p != "package.json" and not p.endswith("/package.json"):
+            continue
+        body = files.get(p, "")
+        if not body or not _pkg_declares_frontend(body):
+            continue
+        prefix = p[: len(p) - len("package.json")]  # '' or 'web/' or 'apps/web/'
+        if prefix:
+            non_root.append((prefix.count("/"), prefix))
+        else:
+            root_is_frontend = True
+    if non_root:
+        non_root.sort()
+        return non_root[0][1]
+    if root_is_frontend:
+        return ""
+    return _app_router_prefix(tree_paths)
+
+
 # ── main reader class ────────────────────────────────────────────────────────────
 
 class RepoReader:
@@ -165,34 +265,53 @@ class RepoReader:
             return None, None
 
     def list_tree(self, repo: str, branch: str) -> tuple[list[str], bool]:
-        """Return (paths, truncated) from a bounded recursive blob-path listing.
+        """Return (paths, truncated) from the recursive blob-path listing.
 
-        Delegates to fetch_repo_tree with an explicit max_entries cap.
-        truncated is True when the returned list hit the cap exactly.
+        Lists the WHOLE repo tree up to _MAX_TREE_SCAN paths so read_repo can
+        filter to the detected frontend subtree BEFORE applying the per-build
+        _MAX_TREE_ENTRIES budget. truncated is True when the raw listing hit the
+        scan ceiling exactly.
         """
         from app.connectors import github_app
 
         token = github_app.get_installation_token(self.installation_id)
-        paths = github_app.fetch_repo_tree(token, repo, branch, max_entries=_MAX_TREE_ENTRIES)
-        truncated = len(paths) == _MAX_TREE_ENTRIES
+        paths = github_app.fetch_repo_tree(token, repo, branch, max_entries=_MAX_TREE_SCAN)
+        truncated = len(paths) == _MAX_TREE_SCAN
         return paths, truncated
 
-    def fetch_files(self, repo: str, branch: str, paths: list[str]) -> tuple[dict[str, str], bool]:
-        """Fetch up to _MAX_FILES file bodies.
+    def fetch_files(
+        self,
+        repo: str,
+        branch: str,
+        paths: list[str],
+        always_fetch: int = 0,
+    ) -> tuple[dict[str, str], bool]:
+        """Fetch up to max(_MAX_FILES, always_fetch) file bodies.
 
         Returns (bodies_dict, had_error).  had_error is True if any path was
         skipped due to a non-404 HTTP error or a transport exception, signalling
         that the snapshot is partial.  Oversize or non-base64 skips are silent
-        and do not set had_error.  The call count never exceeds _MAX_FILES.
+        and do not set had_error.
+
+        always_fetch raises the slice budget so the first `always_fetch` paths
+        (the caller's explicit extras, which read_repo prepends) are always
+        attempted even when they alone exceed _MAX_FILES, and earn the larger
+        _MAX_EXTRA_FILE_BYTES ceiling. The default of 0 preserves the original
+        _MAX_FILES-bounded, 128 KB-capped behaviour for callers with no extras.
         """
         headers = self._headers()
         bodies: dict[str, str] = {}
         had_error = False
 
-        for path in paths[:_MAX_FILES]:
+        budget = max(_MAX_FILES, always_fetch)
+        for idx, path in enumerate(paths[:budget]):
+            # The first `always_fetch` paths are the caller's explicit extras
+            # (read_repo prepends them), so they earn the larger byte ceiling.
+            # Tree-sampled paths keep the tighter _MAX_FILE_BYTES cap.
+            max_bytes = _MAX_EXTRA_FILE_BYTES if idx < always_fetch else _MAX_FILE_BYTES
             try:
                 payload = _get_contents_raw(headers, repo, path, branch)
-                text = _decode_file_payload(payload)
+                text = _decode_file_payload(payload, max_bytes=max_bytes)
                 if text is not None:
                     bodies[path] = text
             except Exception:
@@ -208,6 +327,7 @@ def read_repo(
     repo: str,
     ref: str | None,
     extra_paths: list[str] | None = None,
+    frontend_root: str = "",
 ) -> RepoSnapshot | None:
     """Resolve SHA → list tree → fetch bounded file set → return a RepoSnapshot.
 
@@ -215,8 +335,14 @@ def read_repo(
     fails, or the tree is empty.  All transport errors are absorbed; callers
     degrade gracefully to "no codebase map" via a None return.
 
-    extra_paths lets the caller append a screen's dependency closure on a second
-    pass without re-listing the full tree (deduplication is applied).
+    extra_paths lets the caller prepend a screen's dependency closure; the
+    extras are fetched FIRST (within a raised budget) so they always land even
+    when they alone exceed _MAX_FILES.
+
+    frontend_root, when known to the caller (the recreate path knows the located
+    file's prefix), anchors the tree budget directly; otherwise the frontend
+    subtree is auto-detected so the per-build budget measures frontend files,
+    not a backend-first listing. Empty string ('') means today's flat behaviour.
     """
     if not installation_id or not repo or "/" not in repo:
         return None
@@ -227,28 +353,54 @@ def read_repo(
     if not sha or not branch:
         return None
 
-    tree_paths, tree_truncated = reader.list_tree(repo, branch)
-    if not tree_paths:
+    raw_tree, raw_truncated = reader.list_tree(repo, branch)
+    if not raw_tree:
         return None
 
-    # Merge any caller-supplied extra paths (deduplication preserves order).
-    fetch_list: list[str] = list(tree_paths)
-    if extra_paths:
-        seen = set(fetch_list)
-        for p in extra_paths:
-            if p not in seen:
-                fetch_list.append(p)
-                seen.add(p)
+    # Anchor the per-build tree budget to the frontend subtree. Callers that
+    # already know the prefix pass it; the map-build path auto-detects, reading
+    # only the handful of candidate package.json bodies detection needs.
+    root = frontend_root
+    if not root:
+        pkg_paths = _candidate_package_json_paths(raw_tree)
+        pkg_files: dict[str, str] = {}
+        if pkg_paths:
+            pkg_files, _ = reader.fetch_files(repo, branch, pkg_paths)
+        root = _detect_frontend_root(raw_tree, pkg_files)
 
-    truncated = tree_truncated or (len(fetch_list) > _MAX_FILES)
+    filtered = [p for p in raw_tree if p.startswith(root)] if root else raw_tree
+    tree_paths = filtered[:_MAX_TREE_ENTRIES]
+    tree_truncated = raw_truncated or len(tree_paths) == _MAX_TREE_ENTRIES
 
-    bodies, had_fetch_error = reader.fetch_files(repo, branch, fetch_list)
+    # Merge caller-supplied extras FIRST (deduped, order-preserving) so the
+    # screen's explicit dependency closure is always within the fetch budget,
+    # then append the tree sample. Prepending + the always_fetch budget below
+    # guarantees every explicit extra is attempted even when the extras alone
+    # exceed _MAX_FILES (true for monorepos with deep dependency closures).
+    fetch_list: list[str] = []
+    seen: set[str] = set()
+    n_extras = 0
+    for p in (extra_paths or []):
+        if p not in seen:
+            fetch_list.append(p)
+            seen.add(p)
+            n_extras += 1
+    for p in tree_paths:
+        if p not in seen:
+            fetch_list.append(p)
+            seen.add(p)
+
+    truncated = tree_truncated or (len(fetch_list) > max(_MAX_FILES, n_extras))
+
+    bodies, had_fetch_error = reader.fetch_files(
+        repo, branch, fetch_list, always_fetch=n_extras
+    )
     if had_fetch_error:
         truncated = True
 
     logger.info(
-        "codebase_map.repo_read repo=%s sha=%s n_tree=%d n_files=%d truncated=%s",
-        repo, sha, len(tree_paths), len(bodies), truncated,
+        "codebase_map.repo_read repo=%s sha=%s frontend_root=%s n_tree=%d n_files=%d truncated=%s",
+        repo, sha, root or "", len(tree_paths), len(bodies), truncated,
     )
 
     return RepoSnapshot(

@@ -30,7 +30,14 @@ from app.design_agent.codebase_map.recreate import (
     SHELL_CANDIDATES,
     THEME_CANDIDATES,
     ThemeExpectations,
+    _MAX_REEXPORT_TARGETS,
     _SCAFFOLD_DEFAULT_VALUES,
+    _app_root_prefix,
+    _find_globals_css,
+    _prefixed_shell_keys,
+    _reexport_targets,
+    _resolve_composed_component_paths,
+    _resolve_rel_to_repo_path,
     assert_containment,
     assert_theme_landed,
     bridge_theme,
@@ -146,7 +153,13 @@ def test_read_located_sources_reads_screen_children_shell_theme():
     assert mock_read.call_count == 1
     args, kwargs = mock_read.call_args
     extra = kwargs["extra_paths"]
-    assert extra == sorted(extra)  # sorted
+    # The must-read set leads the list (the located screen first, then its
+    # map-resolved children, then the theme/shell candidates that carry
+    # globals.css) so the extras-first fetch budget reaches them even when the
+    # full candidate set exceeds the per-build file cap. The membership of the
+    # union is unchanged.
+    assert extra[0] == "src/Home.tsx"
+    assert len(extra) == len(set(extra))  # no duplicates
 
     expected = (
         {"src/Home.tsx", "src/components/Hero.tsx", "src/components/Footer.tsx"}
@@ -1233,3 +1246,214 @@ def test_containment_no_llm_call():
         )
         assert report.ok is True
     mock_client.assert_not_called()
+
+
+# ── monorepo app-root prefix (Change 2) ────────────────────────────────────────
+
+
+def _sources(files: dict[str, str], prefix: str = "", screen: str = "src/Home.tsx") -> RecreateSources:
+    return RecreateSources(
+        repo=_REPO,
+        commit_sha=_SHA,
+        files=dict(files),
+        screen_path=screen,
+        also_screen_paths=(),
+        app_root_prefix=prefix,
+    )
+
+
+def test_app_root_prefix_monorepo_and_root_and_no_marker():
+    """AC5: the prefix is everything before the first app/ src/ pages/ marker."""
+    mono = LocatedScreen(
+        map_result=_map(), node=_node("S", "web/app/(app)/sources/page.tsx"),
+    )
+    assert _app_root_prefix(mono) == "web/"
+    root = LocatedScreen(map_result=_map(), node=_node("Team", "src/screens/Team.tsx"))
+    assert _app_root_prefix(root) == ""
+    nomark = LocatedScreen(map_result=_map(), node=_node("X", "components/X.tsx"))
+    assert _app_root_prefix(nomark) == ""
+
+
+def test_find_globals_css_prefers_prefixed_key():
+    """AC6: a monorepo prefix resolves globals.css under the prefixed key; a
+    repo-root app resolves the bare key."""
+    mono = _sources({"web/app/globals.css": "MONO"}, prefix="web/")
+    assert _find_globals_css(mono) == "MONO"
+    root = _sources({"app/globals.css": "ROOT"}, prefix="")
+    assert _find_globals_css(root) == "ROOT"
+
+
+def test_prefixed_shell_keys_order_and_root_noop():
+    """AC6: prefixed shell candidates precede the bare ones in a monorepo; a
+    repo-root app yields exactly SHELL_CANDIDATES (no prefixed keys)."""
+    mono = _sources({}, prefix="web/")
+    keys = _prefixed_shell_keys(mono)
+    assert keys[: len(SHELL_CANDIDATES)] == tuple("web/" + c for c in SHELL_CANDIDATES)
+    assert keys[len(SHELL_CANDIDATES):] == SHELL_CANDIDATES
+    assert _prefixed_shell_keys(_sources({}, prefix="")) == SHELL_CANDIDATES
+
+
+# ── re-export / thin-wrapper follow (Change 3) ─────────────────────────────────
+
+
+def test_hard_reexport_target_followed_and_merged():
+    """AC7: a located file that re-exports the real screen triggers a SECOND
+    read for the resolved target and merges its real body into files."""
+    home = _node("Page", "web/app/sources/page.tsx")
+    located = LocatedScreen(map_result=_map(nodes=[home]), node=home)
+    reexport_body = 'export { SourcesScreen } from "../../components/screens/app/SourcesScreen"'
+    snap1 = _snapshot({"web/app/sources/page.tsx": reexport_body})
+    target = "web/components/screens/app/SourcesScreen.tsx"
+    snap2 = _snapshot({target: "export const SourcesScreen = () => <div>real</div>"})
+
+    with patch(
+        "app.design_agent.codebase_map.recreate.read_repo",
+        side_effect=[snap1, snap2],
+    ) as mock_read:
+        sources = read_located_sources(located, _INSTALL)
+
+    assert mock_read.call_count == 2
+    assert target in sources.files
+    assert "real" in sources.files[target]
+
+
+def test_small_import_wrapper_followed_large_not():
+    """AC8: a small wrapper body (<=2KB) with an import is followed; a large
+    body (>2KB) with the same import is treated as a real screen, not followed."""
+    home = _node("Page", "src/pages/page.tsx")
+    located = LocatedScreen(map_result=_map(nodes=[home]), node=home)
+    target = "src/pages/Screen.tsx"
+
+    small_body = 'import { Screen } from "./Screen";\nexport default () => <Screen/>'
+    snap1 = _snapshot({"src/pages/page.tsx": small_body})
+    snap2 = _snapshot({target: "real screen body"})
+    with patch(
+        "app.design_agent.codebase_map.recreate.read_repo",
+        side_effect=[snap1, snap2],
+    ) as mock_read:
+        sources = read_located_sources(located, _INSTALL)
+    assert mock_read.call_count == 2
+    assert target in sources.files
+
+    large_body = 'import { Screen } from "./Screen";\n' + "// padding line\n" * 300
+    assert len(large_body) > 2_048
+    snap_large = _snapshot({"src/pages/page.tsx": large_body})
+    with patch(
+        "app.design_agent.codebase_map.recreate.read_repo",
+        side_effect=[snap_large],
+    ) as mock_read2:
+        read_located_sources(located, _INSTALL)
+    assert mock_read2.call_count == 1  # real screen, no wrapper follow
+
+
+def test_reexport_targets_capped():
+    """AC8: at most _MAX_REEXPORT_TARGETS candidate paths are returned."""
+    body = "\n".join(f'export {{ C{i} }} from "./c{i}"' for i in range(5))
+    targets = _reexport_targets("src/page.tsx", body)
+    assert len(targets) <= _MAX_REEXPORT_TARGETS
+
+
+def test_resolve_rel_skips_alias_and_bare_and_escape():
+    """AC9: only ./ ../ specifiers resolve; alias/bare yield []; a path that
+    escapes above the repo root is rejected."""
+    assert _resolve_rel_to_repo_path("app/page.tsx", "@/components/X") == []
+    assert _resolve_rel_to_repo_path("app/page.tsx", "react") == []
+    assert _resolve_rel_to_repo_path("app/page.tsx", "../../../../etc/passwd") == []
+    ok = _resolve_rel_to_repo_path("src/screens/page.tsx", "./Child")
+    assert "src/screens/Child.tsx" in ok
+
+
+# ── advisory class signal (Change 4) ───────────────────────────────────────────
+
+
+def test_class_miss_advisory_when_token_and_font_landed(caplog):
+    """AC10: tokens + fonts present but the class signal absent → no raise + an
+    advisory log line."""
+    expected = ThemeExpectations(
+        token_signals=("7 90% 55%",),
+        font_families=("Inter",),
+        class_signals=("bg-primary",),
+        asset_basename=None,
+    )
+    dist = {"a.css": ".x{color:hsl(7 90% 55%)} body{font-family:Inter}"}
+    with caplog.at_level(logging.INFO, logger="app.design_agent.codebase_map.recreate"):
+        assert_theme_landed(dist, expected)  # must NOT raise
+    assert any("theme_class_signal_advisory" in r.getMessage() for r in caplog.records)
+
+
+def test_class_miss_still_fails_when_token_or_font_missing():
+    """AC10: when a token (or font) did NOT land, a class miss still fails the
+    gate with the class in the missing set."""
+    expected = ThemeExpectations(
+        token_signals=("7 90% 55%",),
+        font_families=("Inter",),
+        class_signals=("bg-primary",),
+        asset_basename=None,
+    )
+    dist = {"a.css": "body{font-family:Inter}"}  # token missing AND class missing
+    with pytest.raises(ThemeBridgeError) as exc:
+        assert_theme_landed(dist, expected)
+    assert "class" in str(exc.value)
+    assert "bg-primary" in str(exc.value)
+
+
+# ── must-read prioritization + import-graph children (Changes 5 & 6) ───────────
+
+
+def test_must_read_set_front_of_extra_and_fetched_within_budget():
+    """AC15: the located screen + map-resolved children + theme/shell candidates
+    (carrying globals.css) lead the extra list; the asset trails as 'rest'."""
+    home = _node("Home", "src/Home.tsx", composed=["Hero"])
+    hero = _node("Hero", "src/components/Hero.tsx")
+    m = _map(
+        nodes=[home, hero],
+        logo=LogoAsset(render_kind="img_src", asset_ref="/logo.svg"),
+    )
+    located = LocatedScreen(map_result=m, node=home)
+    snap = _snapshot({
+        "src/Home.tsx": "export const Home = () => null",
+        "src/components/Hero.tsx": "x",
+    })
+    with patch(
+        "app.design_agent.codebase_map.recreate.read_repo",
+        return_value=snap,
+    ) as mock_read:
+        sources = read_located_sources(located, _INSTALL)
+
+    extra = mock_read.call_args.kwargs["extra_paths"]
+    assert extra[0] == "src/Home.tsx"           # located screen leads
+    assert extra[-1] == "logo.svg"              # asset (rest) trails
+    assert extra.index("app/globals.css") < extra.index("logo.svg")
+    assert extra.index("src/components/Hero.tsx") < extra.index("logo.svg")
+    assert "src/Home.tsx" in sources.files
+
+
+def test_composed_components_resolved_via_import_graph():
+    """AC16: composed child names resolve to files via the import graph
+    (relative + @/ alias), bare imports skip, and a follow-up merge stays within
+    two read_repo calls."""
+    home = _node("Home", "web/app/page.tsx", composed=["SourcesPanel", "Menu", "Icon"])
+    located = LocatedScreen(map_result=_map(nodes=[home]), node=home)
+    body = (
+        'import { SourcesPanel } from "./components/SourcesPanel";\n'
+        'import Menu from "@/components/Menu";\n'
+        'import { Icon } from "react-icons";\n'  # bare package → skipped
+    )
+    resolved = _resolve_composed_component_paths(located, body, "web/")
+    assert "web/app/components/SourcesPanel.tsx" in resolved   # relative
+    assert "web/components/Menu.tsx" in resolved               # @/ → prefix + rest
+    assert not any("react-icons" in p for p in resolved)       # bare skipped
+
+    # Integration: a resolvable child import triggers exactly one follow-up read.
+    snap1 = _snapshot({
+        "web/app/page.tsx": 'import { SourcesPanel } from "./components/SourcesPanel"',
+    })
+    child = "web/app/components/SourcesPanel.tsx"
+    snap2 = _snapshot({child: "export const SourcesPanel = () => null"})
+    with patch(
+        "app.design_agent.codebase_map.recreate.read_repo",
+        side_effect=[snap1, snap2],
+    ) as mock_read:
+        sources = read_located_sources(located, _INSTALL)
+    assert mock_read.call_count == 2  # never more than two reads
+    assert child in sources.files
