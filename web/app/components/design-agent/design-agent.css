@@ -1058,6 +1058,44 @@
   flex-shrink: 0;
 }
 
+/* ── Shared radio-group / radio-pill (SourceTypePills) — unscoped / global ──
+ * The modal-scoped rules above bind `.radio-group` / `.radio-pill` under the
+ * compound `.design-agent-surface.modal`, so they only matched the generate
+ * modal. This block is FULLY UNSCOPED (no `.design-agent-surface` ancestor) so
+ * the pills render identically wherever the component appears — including the
+ * Settings pane (DesignSourceSettings), which is NOT inside any
+ * `.design-agent-surface`. The modal-scoped rules above remain untouched and
+ * continue to win via specificity for the modal, so the modal looks identical.
+ * Token-only; no colour literals. */
+.radio-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.radio-pill {
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  font-family: var(--font-body);
+}
+.radio-pill:hover {
+  border-color: var(--ink-3);
+}
+.radio-pill.selected {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--surface);
+}
+/* The modal-scoped overrides (padding, gen-inline-field layout) still apply
+   via the higher-specificity `.design-agent-surface.modal .radio-pill` rules
+   above — no changes needed there. */
+
 /* ===========================================================================
  * David's post-gen prototype-section layout.
  * Replaces the prior `.da-canvas` 3-equal-column grid. Replicates the MECHANICS

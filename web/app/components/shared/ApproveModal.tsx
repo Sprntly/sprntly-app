@@ -14,6 +14,9 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
+import { useWorkspace } from "../../context/WorkspaceContext"
+import { updateWorkspace } from "../../lib/onboarding/store"
+import type { DesignSourcePreference } from "../../lib/onboarding/types"
 import { GenerateModal } from "../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
 import { reasonCopy } from "../design-agent/GenerationErrorBanner"
@@ -45,6 +48,14 @@ export function ApproveModal() {
     useNavigation()
   const router = useRouter()
   const { content } = useContent()
+  const { workspace, refresh } = useWorkspace()
+  const savedPref = workspace?.design_source ?? null
+
+  const handleSavePreference = useCallback(async (pref: DesignSourcePreference) => {
+    if (!workspace) return
+    await updateWorkspace(workspace.id, { design_source: pref })
+    await refresh()
+  }, [workspace, refresh])
   // Full-screen loading-overlay visibility.
   const [genLoading, setGenLoading] = useState(false)
   // Context captured at generation-start for the loading screen's source-aware steps.
@@ -227,6 +238,8 @@ export function ApproveModal() {
         onGenStart={handleGenStart}
         onKickoff={(id) => setGenProtoId(id)}
         onGenDone={handleGenDone}
+        savedPreference={savedPref}
+        onSavePreference={handleSavePreference}
       />
       <GenerationLoadingScreen
         open={genLoading}

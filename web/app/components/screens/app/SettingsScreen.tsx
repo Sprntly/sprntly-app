@@ -13,6 +13,7 @@ import { BillingSettings } from "./settings/BillingSettings"
 import { SecuritySettings } from "./settings/SecuritySettings"
 import { ConnectorsSettings } from "./settings/ConnectorsSettings"
 import { TeamSettings } from "./settings/TeamSettings"
+import { DesignSourceSettings } from "./settings/DesignSourceSettings"
 import {
   SETTINGS_NAV,
   type SettingsSectionId,
@@ -47,6 +48,8 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
       return <TeamSettings />
     case "connectors":
       return <ConnectorsSettings />
+    case "design-source":
+      return <DesignSourceSettings />
     default:
       return <ProfileSettings />
   }

@@ -47,17 +47,13 @@ import {
   LocateConfirmView,
   type LocateConfirmCandidate,
 } from "./ClarifyingQuestionSurface"
+import type { DesignSourcePreference } from "../../lib/onboarding/types"
+import { SourceTypePills } from "./SourceTypePills"
 
 const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "desktop", label: "Desktop" },
   { value: "mobile", label: "Mobile" },
   { value: "both", label: "Both" },
-]
-
-const SOURCE_OPTIONS: { value: "figma" | "github" | "website"; label: string }[] = [
-  { value: "figma", label: "Figma" },
-  { value: "github", label: "From our codebase" },
-  { value: "website", label: "Website" },
 ]
 
 type LocateFlowState = "idle" | "analysing" | "chip" | "ranked_confirm" | "unmapped"
@@ -92,6 +88,11 @@ export function GenerateModal({
   onGenStart,
   onKickoff,
   onGenDone,
+  // Persisted design source preference. When set and the named source is
+  // healthy (connected + key/repo valid), the modal fires generation immediately
+  // without user interaction and closes itself. Pass null to always show.
+  savedPreference,
+  onSavePreference,
   // Injected for testing — bypass the async useEffect cycle so node-env vitest
   // can render the modal in a known connector/repo/source state without a DOM.
   // Omit in production; defaults preserve real behaviour.
@@ -122,6 +123,8 @@ export function GenerateModal({
   // the parent can reveal the full-screen post-generation canvas on success. May
   // be undefined if the flow rejects before producing a result.
   onGenDone?: (result?: DesignAgentGenResult) => void
+  savedPreference?: DesignSourcePreference | null
+  onSavePreference?: (pref: DesignSourcePreference) => Promise<void>
   _testConnections?: ConnectionSummary[] | null
   _testRepos?: GitHubRepo[] | null
   _testInitSource?: "figma" | "github" | "website"
@@ -314,6 +317,84 @@ export function GenerateModal({
 
   const figmaActive = getGenerateConnectorRowState(connFor("figma")).connected
 
+  // Auto-generate effect: fires when open=true and connector data is loaded.
+  // When the saved preference's source is healthy, fires generation immediately
+  // and closes the modal without user interaction.
+  useEffect(() => {
+    if (!open) return
+    if (!savedPreference) return
+    if (connections === null) return
+    const src = savedPreference.design_source
+    if (src === "github" && repos === null) return
+
+    const figmaHealthy = src === "figma" && figmaActive && !!savedPreference.figma_file_key
+    const githubHealthy =
+      src === "github" &&
+      githubActive &&
+      !!savedPreference.github_repo &&
+      !!repos?.find((r) => r.full_name === savedPreference.github_repo)
+    const websiteHealthy = src === "website"
+
+    if (!figmaHealthy && !githubHealthy && !websiteHealthy) {
+      return
+    }
+
+    setDesignSource(src)
+    if (src === "figma" && savedPreference.figma_file_key) {
+      setFigmaUrlKey(savedPreference.figma_file_key)
+    }
+    if (src === "github" && savedPreference.github_repo) {
+      setRepoSel(savedPreference.github_repo)
+    }
+    onClose()
+    setTimeout(() => {
+      if (prdId == null) return
+      onGenStart?.({
+        figmaFileKey: src === "figma" ? savedPreference.figma_file_key ?? null : null,
+        githubRepo: src === "github" ? savedPreference.github_repo ?? null : null,
+      })
+      const baseParams = buildGenerateParams({
+        prdId,
+        platform,
+        instructions,
+        figmaFileKey: src === "figma" ? savedPreference.figma_file_key ?? null : null,
+        figmaNodeId: null,
+        websiteUrl: "",
+        manualColor: "",
+        manualFont: "",
+        githubRepo: src === "github" ? savedPreference.github_repo ?? "" : "",
+        designSource: src,
+      })
+      void runGenerateFlow({
+        params: baseParams,
+        generate: designAgentApi.generate,
+        runGeneration: runDesignAgentGeneration,
+        onOpenChange: () => {},
+        showToast,
+        setSubmitting,
+        notifyOnReady: false,
+        notifyOnKickoff: false,
+        onKickoff,
+        onGenerated: (result) => onGenDone?.(result),
+      }).catch(() => { onGenDone?.() })
+    }, 0)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, connections, repos, savedPreference])
+
+  // When connector data loads and there's no saved preference, default the
+  // source selection to the first healthy source: github → figma → website.
+  useEffect(() => {
+    if (connections === null) return
+    if (savedPreference) return
+    if (_testInitSource !== undefined) return
+    // Re-derive health from the loaded connection state
+    const fActive = getGenerateConnectorRowState(connections.find((c) => c.provider === "figma")).connected
+    const gActive = getGenerateConnectorRowState(connections.find((c) => c.provider === "github")).connected
+    const healthy: "figma" | "github" | "website" = gActive ? "github" : fActive ? "figma" : "website"
+    setDesignSource(healthy)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connections, savedPreference])
+
   // 'From our codebase' = github source with the locate gate enabled.
   // design_source stays 'github' on the wire — no backend enum change in this
   // ticket; locate is keyed off the repo, not a new enum value. The locate gate
@@ -441,6 +522,12 @@ export function GenerateModal({
             // Pass the SHA explicitly because the state update queued above has
             // not yet re-rendered the closure. Carry the chosen candidate's id so
             // a non-route host resolves on the backend.
+            void onSavePreference?.({
+              design_source: designSource,
+              figma_file_key: designSource === "figma" ? (figmaUrlKey || figmaFileKey || null) : null,
+              github_repo: designSource === "github" ? (repoSel || null) : null,
+              website_url: null,
+            })
             runGenerateForRoute(route, result.commit_sha || null, id)
           } else {
             // ranked_confirm: block until PM picks a candidate.
@@ -455,6 +542,12 @@ export function GenerateModal({
     }
 
     // Non-codebase path — runs as before, chosenScreenRoute is null.
+    void onSavePreference?.({
+      design_source: designSource,
+      figma_file_key: designSource === "figma" ? (figmaUrlKey || figmaFileKey || null) : null,
+      github_repo: designSource === "github" ? (repoSel || null) : null,
+      website_url: null,
+    })
     runGenerateForRoute(null)
   }
 
@@ -502,29 +595,14 @@ export function GenerateModal({
             </div>
           </div>
 
-          {/* Design source — single-select picker using the same radio-pill
-              vocabulary as the Platform selector above. Connector-status rows
-              always visible so the user can connect a not-yet-connected provider
-              before picking it; the source-specific input beneath each row is
-              gated on the matching selection. */}
+          {/* Design source — single-select picker using the shared SourceTypePills
+              component (same radio-pill vocabulary as the Platform selector above).
+              Connector-status rows always visible so the user can connect a
+              not-yet-connected provider before picking it; the source-specific
+              input beneath each row is gated on the matching selection. */}
           <div className="field">
             <label className="field-label">Design source</label>
-            <div className="radio-group">
-              {SOURCE_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  className={
-                    "radio-pill" + (designSource === opt.value ? " selected" : "")
-                  }
-                  data-val={opt.value}
-                  aria-pressed={designSource === opt.value}
-                  onClick={() => setDesignSource(opt.value)}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
+            <SourceTypePills value={designSource} onChange={setDesignSource} />
 
             {/* Figma connector status — shown only when Figma is the selected
                 source. Displays connected state or a connect affordance when

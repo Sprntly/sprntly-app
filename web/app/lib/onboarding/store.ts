@@ -5,6 +5,7 @@ import {
   DEFAULT_FEATURE_FLAGS,
   emptyKpiTree,
   ONBOARDING_STEP_COUNT,
+  parseDesignSourcePreference,
   parseFeatureFlags,
   parseKpiTree,
   type FeatureFlags,
@@ -54,6 +55,7 @@ function rowToCompany(
       row.notification_settings && typeof row.notification_settings === "object"
         ? (row.notification_settings as Record<string, unknown>)
         : {},
+    design_source: parseDesignSourcePreference(row.design_source),
     // Clamp the persisted step into the new 5-step range so existing users mid
     // the old 7-step flow (step 6/7) resume on a valid step instead of crashing.
     onboarding_step: clampStep(Number(row.onboarding_step) || 1),
