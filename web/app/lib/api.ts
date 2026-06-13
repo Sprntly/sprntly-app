@@ -882,6 +882,12 @@ export const designAgentApi = {
      *  codebase generation path so the backend can resolve it into a recreate
      *  pre-seed. Absent / null = blank-canvas generation. */
     chosen_screen_route?: string | null
+    /** The stable node id the PM confirmed in the locate UX. This is the
+     *  resolution key the backend uses first: a non-route host (the app shell,
+     *  an in-page section) has a non-route id and an empty/shared route, so the
+     *  id is what lets it reach the recreate pre-seed. chosen_screen_route still
+     *  travels as the human label + cache pin; absent id falls back to route. */
+    chosen_screen_id?: string | null
     /** The snapshot SHA the route was confirmed against. Pins the backend's
      *  build_map at read time so the recreate reads the same bytes the PM
      *  confirmed against (and lands a cache hit). */
@@ -1090,6 +1096,10 @@ export const designAgentApi = {
 
 /** One ranked screen candidate from the locate pipeline (map → LLM → gate). */
 export type LocateCandidate = {
+  /** Stable node id. "app-shell" for the shell host, the section id for an
+   *  in-page section, the route for a routed screen. The picker forwards this
+   *  as chosen_screen_id so a non-route host survives the click → generate hop. */
+  id: string
   route: string
   entry_component: string
   confidence: number

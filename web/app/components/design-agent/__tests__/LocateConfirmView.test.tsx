@@ -68,18 +68,21 @@ function captureButtonProps(
 
 const THREE_CANDIDATES: LocateConfirmCandidate[] = [
   {
+    id: "/team",
     route: "/team",
     entry_component: "TeamScreen",
     component_count: 3,
     is_top: true,
   },
   {
+    id: "/dashboard",
     route: "/dashboard",
     entry_component: "DashboardPage",
     component_count: 7,
     is_top: false,
   },
   {
+    id: "/settings",
     route: "/settings",
     entry_component: "SettingsPanel",
     component_count: 2,
@@ -138,6 +141,7 @@ describe("test_label_derived_from_entry_component_with_route_fallback", () => {
     const html = renderView({
       candidates: [
         {
+          id: "/team",
           route: "/team",
           entry_component: "TeamScreen",
           component_count: 1,
@@ -155,6 +159,7 @@ describe("test_label_derived_from_entry_component_with_route_fallback", () => {
     const html = renderView({
       candidates: [
         {
+          id: "/briefing",
           route: "/briefing",
           entry_component: "BriefingPage",
           component_count: 4,
@@ -171,6 +176,7 @@ describe("test_label_derived_from_entry_component_with_route_fallback", () => {
     const html = renderView({
       candidates: [
         {
+          id: "/team",
           route: "/team",
           entry_component: "",
           component_count: 1,
@@ -190,17 +196,17 @@ describe("test_label_derived_from_entry_component_with_route_fallback", () => {
 // ---- Interaction ------------------------------------------------------------
 
 describe("test_onChoose_fires_exact_route", () => {
-  it("clicking a candidate button calls onChoose with the exact route string (AC3)", () => {
+  it("clicking a candidate button calls onChoose with the exact route string AND its stable id", () => {
     const onChoose = vi.fn()
     const buttons = captureButtonProps({ candidates: THREE_CANDIDATES, onChoose })
-    // First candidate button → route "/team"
+    // First candidate button → route "/team", id "/team"
     const firstChoice = buttons.find(
       (b) => b["data-testid"] === "locate-confirm-choice",
     )
     expect(firstChoice).toBeDefined()
     ;(firstChoice!["onClick"] as () => void)()
     expect(onChoose).toHaveBeenCalledTimes(1)
-    expect(onChoose).toHaveBeenCalledWith("/team")
+    expect(onChoose).toHaveBeenCalledWith("/team", "/team")
   })
 })
 

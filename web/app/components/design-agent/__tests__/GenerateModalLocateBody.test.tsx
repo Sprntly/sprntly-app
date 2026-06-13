@@ -97,6 +97,7 @@ function makeLocate(overrides: Partial<LocateResponse> = {}): LocateResponse {
     decision: "auto_proceed",
     chosen: [
       {
+        id: "/team",
         route: "/team",
         entry_component: "TeamScreen",
         confidence: 0.9,
@@ -107,6 +108,7 @@ function makeLocate(overrides: Partial<LocateResponse> = {}): LocateResponse {
     ],
     ranked: [
       {
+        id: "/team",
         route: "/team",
         entry_component: "TeamScreen",
         confidence: 0.9,
@@ -215,6 +217,8 @@ describe("test_codebase_mode_sends_route_and_commit_sha", () => {
 
     const params = lastGenerateParams()
     expect(params["chosen_screen_route"]).toBe("/team")
+    // The chosen candidate's stable id is forwarded too (the resolution key).
+    expect(params["chosen_screen_id"]).toBe("/team")
     expect(params["map_commit_sha"]).toBe("shaABC")
     // The repo and source selectors are still set.
     expect(params["github_repo"]).toBe(SEL_REPO)

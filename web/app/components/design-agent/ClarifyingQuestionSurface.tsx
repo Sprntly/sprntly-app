@@ -297,6 +297,10 @@ export function ClarifyingQuestionSurface({
  *  The wiring container maps LocateResponse.ranked → LocateConfirmCandidate[],
  *  marking is_top on the first (highest-confidence) entry. */
 export type LocateConfirmCandidate = {
+  /** Stable node id. Unique where a route is not — the app shell (empty route)
+   *  and an in-page section (shared/empty route) both carry a distinct id. It
+   *  is the resolution key the picker forwards on choose. */
+  id: string
   route: string
   entry_component: string
   component_count: number
@@ -309,8 +313,9 @@ export type LocateConfirmViewProps = {
   candidates: LocateConfirmCandidate[]
   busy?: boolean
   error?: string | null
-  /** Fires the chosen candidate's exact route string, not the readable label. */
-  onChoose: (route: string) => void
+  /** Fires the chosen candidate's exact route string AND its stable id (the
+   *  resolution key — route is not unique and is empty for non-route hosts). */
+  onChoose: (route: string, id: string) => void
   /** When provided, renders a "Search for another screen…" affordance.
    *  The caller decides what it opens; omit this prop to hide the button. */
   onSearchOther?: () => void
@@ -359,12 +364,12 @@ export function LocateConfirmView({
       >
         {candidates.map((c) => (
           <button
-            key={c.route}
+            key={c.id}
             type="button"
             className="clarifying-question-choice"
             data-testid="locate-confirm-choice"
             disabled={busy}
-            onClick={() => onChoose(c.route)}
+            onClick={() => onChoose(c.route, c.id)}
           >
             <span data-testid="locate-confirm-choice-label">
               {deriveScreenLabel(c.entry_component, c.route)}

@@ -25,6 +25,7 @@ function jsonResponse(status: number, body: unknown): MockResponse {
 
 function makeLocateCandidate(overrides: Partial<LocateCandidate> = {}): LocateCandidate {
   return {
+    id: "/home",
     route: "/home",
     entry_component: "HomeScreen",
     confidence: 90,
@@ -117,6 +118,21 @@ describe("designAgentApi.locate", () => {
 
     expect(result.chosen[0].component_count).toBe(5)
     expect(result.ranked[0].component_count).toBe(5)
+  })
+
+  it("carries the stable candidate id (so the picker can forward a non-route host)", async () => {
+    // The shell host has an empty route but a stable id; the id is what the
+    // picker forwards on generate so it resolves on the backend.
+    const shellHost = makeLocateCandidate({ id: "app-shell", route: "" })
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, makeLocateResponse({ chosen: [shellHost], ranked: [shellHost] })),
+    )
+
+    const result = await designAgentApi.locate({ prd_id: 1, github_repo: "org/repo" })
+
+    expect(result.chosen[0].id).toBe("app-shell")
+    expect(result.chosen[0].route).toBe("")
+    expect(result.ranked[0].id).toBe("app-shell")
   })
 
   it("returns unmapped=true and empty chosen/ranked when map is unavailable", async () => {
