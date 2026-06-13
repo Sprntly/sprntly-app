@@ -152,38 +152,126 @@ def test_synthesis_bg_runner_swallows_errors(isolated_settings, monkeypatch):
 
 # ── seed-if-empty logic ─────────────────────────────────────────────────────
 
-def test_seed_if_empty_triggers_only_when_kg_empty(isolated_settings):
+def test_seed_incremental_on_empty_kg_seeds_corpus_and_connectors(isolated_settings):
     from app.graph.facade import GraphFacade
 
     facade = GraphFacade()
-    # KG empty → seed runs (corpus + connectors invoked)
+    # KG empty → corpus seed runs AND connectors are pulled (was_empty path).
     with patch.object(facade, "active_signals", return_value=[]), \
          patch.object(sb, "_seed_from_corpus", return_value={"docs": 1}) as corpus, \
          patch.object(sb, "_seed_from_connectors", return_value={"providers": 0}) as conn:
-        out = sb.seed_if_empty(facade, "co-1", "acme")
-    assert out is not None
+        out = sb.seed_incremental(facade, "co-1", "acme")
+    assert out["was_empty"] is True
+    assert out["connectors"] is not None
     corpus.assert_called_once()
     conn.assert_called_once()
 
 
-def test_seed_if_empty_skips_when_kg_populated(isolated_settings):
+def test_seed_incremental_on_populated_kg_seeds_corpus_skips_connectors(isolated_settings):
+    """Regression: on a POPULATED KG, the corpus seed still runs (so a newly
+    added doc is extracted) but connectors are NOT re-pulled."""
     from app.graph.facade import GraphFacade
     from app.graph.types import Signal
 
     facade = GraphFacade()
     sig = Signal(enterprise_id="co-1", source_type="revenue", kind="x", content="y")
     with patch.object(facade, "active_signals", return_value=[sig]), \
-         patch.object(sb, "_seed_from_corpus") as corpus, \
+         patch.object(sb, "_seed_from_corpus", return_value={"docs": 1}) as corpus, \
          patch.object(sb, "_seed_from_connectors") as conn:
-        out = sb.seed_if_empty(facade, "co-1", "acme")
-    assert out is None
-    corpus.assert_not_called()
-    conn.assert_not_called()
+        out = sb.seed_incremental(facade, "co-1", "acme")
+    assert out["was_empty"] is False
+    assert out["connectors"] is None
+    corpus.assert_called_once()      # corpus ALWAYS seeded (incremental)
+    conn.assert_not_called()         # connectors NOT re-pulled on populated KG
+
+
+def test_seed_incremental_extracts_only_new_doc_on_populated_kg(isolated_settings):
+    """The bug this PR fixes: a newly-added corpus doc on a populated KG is
+    extracted, while a doc already recorded as a corpus_doc source is not."""
+    from app.graph.facade import GraphFacade
+    from app.graph.types import Signal, Source
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    facade = GraphFacade()
+
+    class _Doc:
+        def __init__(self, name, text):
+            self.name, self.text = name, text
+
+    old_doc = _Doc("kept.md", "already ingested text")
+    new_doc = _Doc("fresh.md", "brand new text")
+
+    class _Corpus:
+        docs = [old_doc, new_doc]
+
+    # Record old_doc as already-ingested (matching the hash the seed computes).
+    import hashlib
+    old_sha = hashlib.sha256(f"co-1|{old_doc.text}".encode()).hexdigest()
+    facade.create_source("co-1", Source(
+        enterprise_id="co-1", source_type="corpus_doc", label=old_doc.name,
+        config={"content_sha": old_sha, "doc": old_doc.name},
+    ))
+
+    # Populated KG so we're on the incremental (not first-time) path.
+    sig = Signal(enterprise_id="co-1", source_type="revenue", kind="x", content="y")
+    extracted: list[str] = []
+    with patch.object(facade, "active_signals", return_value=[sig]), \
+         patch.object(sb, "load_corpus", return_value=_Corpus()), \
+         patch.object(sb, "extract_document",
+                      side_effect=lambda *a, **k: extracted.append(k["doc_name"]) or
+                      {"signals": 1, "themes": 0, "skipped": 0}):
+        out = sb.seed_incremental(facade, "co-1", "acme")
+
+    assert extracted == ["fresh.md"]          # only the NEW doc extracted
+    assert out["corpus"]["docs"] == 1
+    assert out["corpus"]["unchanged"] == 1    # old doc skipped via content_sha
+    # The new doc is now recorded as a corpus_doc source for next time.
+    labels = {s.label for s in facade.list_sources("co-1", source_type="corpus_doc")}
+    assert labels == {"kept.md", "fresh.md"}
+
+
+def test_seed_corpus_reextracts_when_content_changes(isolated_settings):
+    """Same doc NAME, edited text → different hash → IS re-extracted; an
+    unchanged doc (hash already in kg_source) is skipped."""
+    from app.graph.facade import GraphFacade
+    from app.graph.types import Source
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    facade = GraphFacade()
+
+    class _Doc:
+        def __init__(self, name, text):
+            self.name, self.text = name, text
+
+    class _Corpus:
+        docs = [_Doc("notes.md", "v2 edited text"),  # name reused, text changed
+                _Doc("stable.md", "unchanged text")]
+
+    import hashlib
+    # Pre-record the OLD content of notes.md and the current content of stable.md.
+    old_notes_sha = hashlib.sha256("co-1|v1 original text".encode()).hexdigest()
+    stable_sha = hashlib.sha256("co-1|unchanged text".encode()).hexdigest()
+    for sha, name in [(old_notes_sha, "notes.md"), (stable_sha, "stable.md")]:
+        facade.create_source("co-1", Source(
+            enterprise_id="co-1", source_type="corpus_doc", label=name,
+            config={"content_sha": sha, "doc": name},
+        ))
+
+    extracted: list[str] = []
+    with patch.object(sb, "load_corpus", return_value=_Corpus()), \
+         patch.object(sb, "extract_document",
+                      side_effect=lambda *a, **k: extracted.append(k["doc_name"]) or
+                      {"signals": 1, "themes": 0, "skipped": 0}):
+        out = sb._seed_from_corpus(facade, "co-1", "acme")
+
+    assert extracted == ["notes.md"]       # edited doc re-extracted
+    assert out["unchanged"] == 1           # stable.md skipped
+    assert out["docs"] == 1
 
 
 def test_generate_brief_for_seeds_then_runs_synthesis(isolated_settings):
     _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
-    with patch.object(sb, "seed_if_empty", return_value={"corpus": {}}) as seed, \
+    with patch.object(sb, "seed_incremental", return_value={"corpus": {}}) as seed, \
          patch.object(sb, "run_synthesis", return_value={"summary_headline": "ok"}) as run:
         out = sb.generate_brief_for("acme")
     assert out["summary_headline"] == "ok"
@@ -206,12 +294,16 @@ def test_generate_brief_for_unknown_slug_raises(isolated_settings):
 
 
 def test_seed_from_corpus_is_bounded(isolated_settings, monkeypatch):
-    """Seeding caps corpus docs at MAX_SEED_DOCS so it can't hang the request."""
+    """Seeding caps NEW corpus extractions at MAX_SEED_DOCS so it can't hang
+    the request."""
     from app.graph.facade import GraphFacade
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
 
     class _Doc:
         def __init__(self, n):
-            self.name, self.text = f"d{n}", "x"
+            # distinct text per doc → distinct content hash → all "new"
+            self.name, self.text = f"d{n}", f"text-{n}"
 
     class _Corpus:
         docs = [_Doc(i) for i in range(sb.MAX_SEED_DOCS + 10)]
@@ -227,12 +319,15 @@ def test_seed_from_corpus_is_bounded(isolated_settings, monkeypatch):
 
 
 def test_seed_from_corpus_isolates_bad_doc(isolated_settings):
-    """One doc that raises during extraction must not abort the whole seed."""
+    """One doc that raises during extraction must not abort the whole seed,
+    and a failed doc is NOT recorded as ingested (so it retries next run)."""
     from app.graph.facade import GraphFacade
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
 
     class _Doc:
         def __init__(self, n):
-            self.name, self.text = f"d{n}", "x"
+            self.name, self.text = f"d{n}", f"text-{n}"
 
     class _Corpus:
         docs = [_Doc(0), _Doc(1)]
@@ -247,6 +342,37 @@ def test_seed_from_corpus_isolates_bad_doc(isolated_settings):
          patch.object(sb, "extract_document", side_effect=_extract):
         out = sb._seed_from_corpus(facade, "co-1", "acme")
     assert out["docs"] == 1 and out["signals"] == 2  # only the good doc counted
+    # Only the GOOD doc was recorded as ingested; the bad one retries next run.
+    labels = {s.label for s in facade.list_sources("co-1", source_type="corpus_doc")}
+    assert labels == {"d1"}
+
+
+def test_list_sources_is_tenant_scoped_and_filters_by_type(isolated_settings):
+    """Facade list_sources returns only the enterprise's sources and filters
+    by source_type."""
+    from app.graph.facade import GraphFacade
+    from app.graph.types import Source
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    _seed_company(isolated_settings["supabase"], company_id="co-2", slug="globex")
+    facade = GraphFacade()
+
+    facade.create_source("co-1", Source(
+        enterprise_id="co-1", source_type="corpus_doc", label="a",
+        config={"content_sha": "h1"}))
+    facade.create_source("co-1", Source(
+        enterprise_id="co-1", source_type="connector", label="slack"))
+    facade.create_source("co-2", Source(
+        enterprise_id="co-2", source_type="corpus_doc", label="other-tenant",
+        config={"content_sha": "h2"}))
+
+    # tenant-scoped: co-1 never sees co-2's row
+    all_co1 = facade.list_sources("co-1")
+    assert {s.label for s in all_co1} == {"a", "slack"}
+    # filtered by source_type
+    corpus_co1 = facade.list_sources("co-1", source_type="corpus_doc")
+    assert {s.label for s in corpus_co1} == {"a"}
+    assert corpus_co1[0].config == {"content_sha": "h1"}
 
 
 # ── legacy fallback flag ─────────────────────────────────────────────────────

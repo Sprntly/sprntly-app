@@ -183,6 +183,19 @@ class GraphFacade:
         return props
 
     # ---- reads ----------------------------------------------------------
+    def list_sources(
+        self,
+        enterprise_id: str,
+        source_type: Optional[str] = None,
+    ) -> list[Source]:
+        """Tenant-scoped list of `kg_source` rows for the enterprise (optionally
+        filtered to one `source_type`). Used as the per-doc ingested ledger for
+        incremental seeding. Never returns another tenant's sources."""
+        q = self._tbl("kg_source").select("*").eq("enterprise_id", enterprise_id)
+        if source_type:
+            q = q.eq("source_type", source_type)
+        return [self._row_to_source(r) for r in (q.execute().data or [])]
+
     def get_entity(self, enterprise_id: str, entity_id: str) -> Optional[Entity]:
         r = (
             self._tbl("kg_entity").select("*")
@@ -324,6 +337,16 @@ class GraphFacade:
         return out
 
     # ---- row mappers ----------------------------------------------------
+    def _row_to_source(self, r: dict) -> Source:
+        return Source(
+            id=r["id"],
+            enterprise_id=r["enterprise_id"],
+            source_type=r["source_type"],
+            label=r.get("label"),
+            config=r.get("config") or {},
+            status=r.get("status") or "active",
+        )
+
     def _row_to_entity(self, r: dict) -> Entity:
         return Entity(
             id=r["id"],
