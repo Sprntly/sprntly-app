@@ -96,7 +96,12 @@ from app.design_agent.event_stream import publish_step, subscribe as _sse_subscr
 from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
 from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_typecheck_run
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
+from app.design_agent.codebase_map.recreate import (
+    ThemeExpectations,
+    assert_theme_landed,
+)
 from app.design_agent.storage import (
+    ThemeBridgeError,
     TypeCheckError,
     TypeCheckRepairExhausted,
     ViteBuildError,
@@ -953,6 +958,7 @@ async def _stage_complete_run(
     figma_file_key: str | None = None,
     figma_node_id: str | None = None,
     scenario: str = "A",
+    theme_expectations: ThemeExpectations | None = None,
 ) -> None:
     """Post-run hook (P1-08): vite_build → checkpoint → stage_bundle → complete.
 
@@ -985,6 +991,18 @@ async def _stage_complete_run(
     publish_step(prototype_id, VITE_PHASE_STEP)
     try:
         dist_files, repaired_virtual_fs = await vite_build_with_repair(virtual_fs)
+        # Theme-bridge assertion gate (codebase-recreate path only). Runs BEFORE
+        # checkpoint creation so a theme-miss fails the row without staging an
+        # unstyled bundle. No-op for Scenario A/B blank-canvas runs (None).
+        if theme_expectations is not None:
+            assert_theme_landed(dist_files, theme_expectations)
+            logger.info(
+                "design_agent.theme_landed prototype_id=%s n_token_signals=%d n_fonts=%d asset_present=%s",
+                prototype_id,
+                len(theme_expectations.token_signals),
+                len(theme_expectations.font_families),
+                str(bool(theme_expectations.asset_basename)).lower(),
+            )
     except TypeCheckError as exc:
         # A runtime-breaking type error (most often a screen the agent imported but
         # was cut off before writing) does NOT fail outright. Re-enter the agent a
@@ -1025,14 +1043,19 @@ async def _stage_complete_run(
                 error=f"{type(repair_exc).__name__}: {repair_exc}",
             )
             return
-    except (ViteBuildError, FileNotFoundError) as exc:
-        # A build failure with no repair path (bad JSX, timeout, missing runtime,
-        # or unresolved imports the build's own repair could not fix) marks the row
-        # failed. error_class only in the log; the full message goes to the row.
-        logger.warning(
-            "vite_build_failed prototype_id=%s error_class=%s",
-            prototype_id, type(exc).__name__,
-        )
+    except (ViteBuildError, FileNotFoundError, ThemeBridgeError) as exc:
+        # A build failure or theme-bridge miss fails the row. For ThemeBridgeError
+        # the log names the missing signals; for build errors it names the error class.
+        if isinstance(exc, ThemeBridgeError):
+            logger.warning(
+                "theme_bridge_failed prototype_id=%s missing=%s",
+                prototype_id, str(exc),
+            )
+        else:
+            logger.warning(
+                "vite_build_failed prototype_id=%s error_class=%s",
+                prototype_id, type(exc).__name__,
+            )
         fail_prototype(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
