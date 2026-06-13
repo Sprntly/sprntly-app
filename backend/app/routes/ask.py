@@ -5,11 +5,11 @@ import time
 from fastapi import Depends, APIRouter
 from pydantic import BaseModel, Field
 
-from app.ask_runner import compose_ask_answer
+from app import qa_agent
 from app.auth import CompanyContext, require_company
 from app.db import find_cached_ask, log_ask
 from app.deps.ownership import require_owned_dataset
-from app.skill_router import detect_intent, list_available_skills
+from app.skill_router import list_available_skills
 
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
 
@@ -70,6 +70,12 @@ ASK_RESPONSE_SCHEMA: dict = {
 class AskIn(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)
     dataset: str
+    # Optional multi-turn: when set, prior turns of this conversation are
+    # loaded (ownership-checked) and fed to the router + answer for follow-ups.
+    conversation_id: int | None = None
+    # Optional: skip routing and force this skill — used when a confirm-gate
+    # follow-up has already chosen the skill.
+    pinned_skill: str | None = None
 
 
 def _strip_citations(payload: dict) -> dict:
@@ -79,6 +85,37 @@ def _strip_citations(payload: dict) -> dict:
     """
     payload["citations"] = []
     return payload
+
+
+def _load_history(conversation_id: int | None, company_id: str) -> list[dict]:
+    """Fetch prior turns [{role, content}] for an owned conversation, oldest
+    first. Best-effort: no id, foreign conversation, or any read error → []."""
+    if not conversation_id:
+        return []
+    try:
+        from app.db.client import require_client
+
+        c = require_client()
+        owned = (
+            c.table("conversations")
+            .select("id")
+            .eq("id", conversation_id)
+            .eq("company_id", company_id)
+            .limit(1)
+            .execute()
+        )
+        if not owned.data:
+            return []
+        turns = (
+            c.table("conversation_turns")
+            .select("role,content")
+            .eq("conversation_id", conversation_id)
+            .order("created_at")
+            .execute()
+        )
+        return turns.data or []
+    except Exception:  # noqa: BLE001 — history must never break the answer
+        return []
 
 
 @router.post("")
@@ -125,48 +162,18 @@ def ask(
                 )
             return _strip_citations(payload)
 
-    # 2) Skill routing: detect if the question maps to a specialized skill
-    intent = detect_intent(body.question)
-
-    # 3) Cache miss → compose the answer. If a skill matched, include the skill
-    # context so the LLM uses the specialized method. Otherwise fall back to
-    # general Ask (corpus + KG).
+    # 2) Cache miss → hand off to the unified Q&A agent. It routes the question
+    # to the best-fit PM skill (slash / regex / LLM router) or answers directly
+    # (corpus + KG), folding in prior conversation turns for follow-ups.
     enterprise_id = company.company_id
-
-    if intent and intent.confidence >= 0.75:
-        # Skill-routed answer: load the skill method and prepend it to the system prompt
-        try:
-            from app.graph.gateway import llm_call
-            from app.graph.facade import GraphFacade
-
-            facade = GraphFacade()
-            result = llm_call(
-                facade=facade,
-                enterprise_id=enterprise_id,
-                system_extra=f"The user asked a question that maps to the '{intent.skill_id}' skill. Use this skill's methodology to give a structured, actionable response.",
-                user=body.question,
-                skill=intent.skill_id,
-                schema=_ASK_RESPONSE_SCHEMA,
-                max_tokens=12000,
-            )
-            payload = result if isinstance(result, dict) else {"answer": str(result), "key_points": [], "citations": [], "confidence": intent.confidence, "unanswered": ""}
-            # Tag the response with the matched skill for frontend rendering
-            payload["_skill"] = intent.skill_id
-            payload["_skill_action"] = intent.action
-            payload["_skill_confidence"] = intent.confidence
-        except Exception:
-            # Skill call failed — fall back to general Ask
-            payload = compose_ask_answer(
-                body.dataset, body.question, enterprise_id=enterprise_id
-            )
-    else:
-        payload = compose_ask_answer(
-            body.dataset, body.question, enterprise_id=enterprise_id
-        )
-        # Tag with detected intent (if any, even low confidence) for UI hints
-        if intent:
-            payload["_skill_hint"] = intent.skill_id
-            payload["_skill_hint_action"] = intent.action
+    history = _load_history(body.conversation_id, enterprise_id)
+    payload = qa_agent.answer(
+        enterprise_id=enterprise_id,
+        question=body.question,
+        dataset=body.dataset,
+        history=history,
+        pinned_skill=body.pinned_skill,
+    )
 
     log_ask(
         question=body.question,
@@ -180,3 +187,11 @@ def ask(
 def get_skills():
     """Return the list of available skills for the chat composer UI."""
     return {"skills": list_available_skills()}
+
+
+@router.get("/usage")
+def get_usage(company: CompanyContext = Depends(require_company)):
+    """Per-enterprise Q&A usage: calls, cost, tokens (total + by agent)."""
+    from app.qa_usage import fetch_qa_usage
+
+    return fetch_qa_usage(company.company_id)

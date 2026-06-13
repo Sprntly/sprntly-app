@@ -387,6 +387,72 @@ def call_md(
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
+def run_tool_loop(
+    *,
+    system: str,
+    user: str,
+    tools: list[dict],
+    dispatch,                       # (name: str, input: dict) -> str
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = 8000,
+    max_iters: int = 5,
+    user_cacheable_prefix: str | None = None,
+    meta_out: dict | None = None,
+) -> str:
+    """Run a manual tool-use loop until the model stops calling tools.
+
+    The model may call any of `tools`; each `tool_use` is executed by
+    `dispatch(name, input) -> str` and fed back as a `tool_result`. Returns the
+    model's final text. `meta_out` (if given) captures usage from the LAST turn.
+    Bounded by `max_iters` so a misbehaving model can't loop forever.
+
+    This is the shared, single-chokepoint tool loop (same retry/concurrency gate
+    as every other call). Used for skills whose deterministic scripts run as
+    local tools (app.skills.scripts) — the math runs on our infra, not in-prompt.
+    """
+    client = get_client()
+    base = _build_base_kwargs(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        user=user,
+        user_cacheable_prefix=user_cacheable_prefix,
+    )
+    system_param = base["system"]
+    messages = base["messages"]
+    final_text = ""
+    for _ in range(max_iters):
+        msg = _create_with_retries(
+            client,
+            model=model,
+            max_tokens=max_tokens,
+            system=system_param,
+            messages=messages,
+            tools=tools,
+        )
+        _capture_meta(meta_out, msg, model)
+        text = "".join(
+            b.text for b in msg.content if getattr(b, "type", None) == "text"
+        ).strip()
+        if text:
+            final_text = text
+        if getattr(msg, "stop_reason", None) != "tool_use":
+            return final_text
+        messages.append({"role": "assistant", "content": msg.content})
+        results = []
+        for b in msg.content:
+            if getattr(b, "type", None) == "tool_use":
+                try:
+                    out = dispatch(b.name, b.input)
+                except Exception as exc:  # noqa: BLE001 — surface to the model
+                    out = f"(tool {b.name} error: {exc})"
+                results.append(
+                    {"type": "tool_result", "tool_use_id": b.id, "content": str(out)}
+                )
+        messages.append({"role": "user", "content": results})
+    return final_text
+
+
 def call_with_web_search(
     *,
     system: str,
