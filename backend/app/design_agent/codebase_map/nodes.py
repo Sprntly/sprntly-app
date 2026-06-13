@@ -18,7 +18,11 @@ from __future__ import annotations
 import logging
 import re
 
-from app.design_agent.codebase_map.nav_probe import ProbeResult
+from app.design_agent.codebase_map.nav_probe import (
+    ProbeResult,
+    detect_tab_sections,
+    discover_route_elements,
+)
 from app.design_agent.codebase_map.repo_reader import RepoSnapshot
 from app.design_agent.codebase_map.types import ScreenNode
 
@@ -59,22 +63,33 @@ _DYNAMIC_SEGMENT_RE = re.compile(r"\[([^\]]+)\]")
 
 
 def extract_nodes(snapshot: RepoSnapshot, probe: ProbeResult) -> list[ScreenNode]:
-    """Enumerate ScreenNodes from snapshot using the detected posture.
+    """Enumerate ScreenNodes from snapshot via the detected stack's adapter.
 
-    Returns nodes sorted by route for determinism.
-    Running this function twice on the same (snapshot, probe) yields equal results.
+    Detection selects one enumerator adapter (the route-table/filesystem adapter
+    for Next-shaped repos, the react-router adapter for Vite-shaped repos, a
+    low-confidence discovery fallback for an unrecognised JS/TS repo, and a
+    no-emit decline for an unreadable non-JS/TS repo).  The adapter owns the
+    raw enumeration; this function applies the shared route-sort + identifier
+    log so every adapter's output is normalised identically.
+
+    Returns nodes sorted by route for determinism.  Running this function twice
+    on the same (snapshot, probe) yields equal results.
     """
-    if probe.posture == "CLEAN":
-        nodes = _extract_clean(snapshot, probe)
-    else:
-        nodes = _extract_partial(snapshot, probe)
+    # Local import keeps the detection/registry seam free of an import cycle:
+    # the stack module imports the adapters defined below.
+    from app.design_agent.codebase_map.stack import detect_stack, select_adapter
+
+    profile = detect_stack(snapshot)
+    adapter = select_adapter(profile)
+    nodes = adapter.enumerate_nodes(snapshot, probe)
 
     nodes.sort(key=lambda n: n.route)
 
     n_route_state = sum(1 for n in nodes if n.is_route_state)
     logger.info(
-        "codebase_map.nodes repo=%s posture=%s n_nodes=%d n_route_state=%d",
+        "codebase_map.nodes repo=%s stack=%s posture=%s n_nodes=%d n_route_state=%d",
         snapshot.repo,
+        profile.stack,
         probe.posture,
         len(nodes),
         n_route_state,
@@ -295,3 +310,223 @@ def _extract_composed_components(file_path: str, snapshot: RepoSnapshot) -> list
     # Intersection: only tags that are also imported
     result = sorted(jsx_tags & imported)
     return result[:_MAX_COMPOSED]
+
+
+# ── import → repo-path resolution (deep-read seam) ─────────────────────────────
+# The same arithmetic for every adapter; the alias map differs per repo and is
+# supplied by the caller (from the detected stack's tsconfig/jsconfig paths).
+# No filesystem reads beyond the in-memory snapshot — pure string resolution.
+
+_RESOLVE_EXTENSIONS = (".tsx", ".ts", ".jsx", ".js")
+
+
+def _posix_normpath(path: str) -> str:
+    """Collapse ``a/b/../c`` → ``a/c`` without touching the real filesystem."""
+    import posixpath
+
+    return posixpath.normpath(path).lstrip("./")
+
+
+def _exists(candidate: str, snapshot: RepoSnapshot | None) -> bool:
+    if snapshot is None:
+        return False
+    return candidate in snapshot.files or candidate in snapshot.tree_paths
+
+
+def resolve_specifier(
+    specifier: str,
+    from_file: str,
+    alias_roots: dict[str, str],
+    snapshot: RepoSnapshot | None = None,
+) -> str | None:
+    """Resolve a JS/TS import specifier to a repo-relative file path, or None.
+
+    - ``@/x`` style alias imports resolve against the matching ``alias_roots``
+      entry (the tsconfig/jsconfig ``paths`` map, e.g. ``@/* -> src/*``).
+    - ``./x`` / ``../x`` relative imports resolve against the importing file's
+      directory.
+    - bare package specifiers (``react``, ``lucide-react``) are NOT app files
+      and resolve to None.
+
+    When a snapshot is supplied, the extension list (and ``/index``) is tried
+    and the first existing path is returned; otherwise the bare ``.tsx``
+    candidate is returned as a best-effort guess.
+    """
+    if not specifier:
+        return None
+
+    base: str | None = None
+
+    if specifier.startswith("."):
+        from_dir = from_file.rsplit("/", 1)[0] if "/" in from_file else ""
+        base = _posix_normpath(f"{from_dir}/{specifier}" if from_dir else specifier)
+    else:
+        for alias, target in alias_roots.items():
+            prefix = alias.rstrip("/*").rstrip("/")
+            if not prefix:
+                continue
+            if specifier == prefix or specifier.startswith(prefix + "/"):
+                target_prefix = target.rstrip("/*").rstrip("/")
+                remainder = specifier[len(prefix):].lstrip("/")
+                joined = f"{target_prefix}/{remainder}" if remainder else target_prefix
+                base = _posix_normpath(joined)
+                break
+
+    if base is None:
+        # Neither relative nor aliased → a bare package import; not a repo file.
+        return None
+
+    if snapshot is not None:
+        for ext in _RESOLVE_EXTENSIONS:
+            candidate = base + ext
+            if _exists(candidate, snapshot):
+                return candidate
+        for ext in _RESOLVE_EXTENSIONS:
+            candidate = f"{base}/index{ext}"
+            if _exists(candidate, snapshot):
+                return candidate
+        return None
+
+    return base + _RESOLVE_EXTENSIONS[0]
+
+
+# ── shared section-node construction ───────────────────────────────────────────
+
+def _section_nodes(snapshot: RepoSnapshot) -> list[ScreenNode]:
+    """Map every discovered in-page tab into a ``kind="section"`` ScreenNode.
+
+    Returns ``[]`` for a route-only screen set (no tabs array present), so a
+    Next-shaped app with no in-page tabs gains no section nodes — its route
+    enumeration stays exactly as before.
+    """
+    nodes: list[ScreenNode] = []
+    for section in detect_tab_sections(snapshot):
+        stem = section.file.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        nodes.append(ScreenNode(
+            route="",
+            entry_component="",
+            file=section.file,
+            composed_components=[],
+            is_route_state=False,
+            kind="section",
+            id=f"{stem}#{section.section_id}",
+        ))
+    return nodes
+
+
+# ── Vite / react-router route enumeration ──────────────────────────────────────
+
+def _extract_vite_routes(snapshot: RepoSnapshot) -> list[ScreenNode]:
+    """Enumerate route nodes from a ``<Route path= element={<X/>}>`` table.
+
+    Falls back to the filesystem page conventions when no react-router route
+    table is present, so a Vite repo that still uses file-based pages is not
+    left empty.
+    """
+    elements = discover_route_elements(snapshot)
+    if not elements:
+        return _extract_next_app(snapshot) or _extract_next_pages(snapshot)
+
+    nodes: list[ScreenNode] = []
+    seen: set[str] = set()
+    for el in elements:
+        if el.route in seen:
+            continue
+        seen.add(el.route)
+        # Best-effort: locate the element component's source file by import name.
+        file_path = _file_for_component(el.component, snapshot)
+        composed = _extract_composed_components(file_path, snapshot) if file_path else []
+        nodes.append(ScreenNode(
+            route=el.route,
+            entry_component=el.component,
+            file=file_path,
+            composed_components=composed,
+            is_route_state=False,
+            kind="route",
+            id=el.route,
+        ))
+    return nodes
+
+
+def _file_for_component(component: str, snapshot: RepoSnapshot) -> str:
+    """Best-effort: find the file whose default export is ``component``."""
+    if not component:
+        return ""
+    for path, body in snapshot.files.items():
+        if _parse_default_export(body) == component:
+            return path
+    return ""
+
+
+# ── Enumerator adapters (the pluggable seam) ───────────────────────────────────
+# Each adapter satisfies the EnumeratorAdapter protocol declared in stack.py
+# (structural — no inheritance needed).  enumerate_nodes returns UNSORTED nodes;
+# extract_nodes applies the shared route-sort.  Both adapters call the SAME
+# shared section heuristic (detect_tab_sections, via _section_nodes) and the
+# SAME shared import resolver (resolve_specifier) — single definitions, no
+# per-adapter copies.
+
+
+class NextAppRouterAdapter:
+    """First-class adapter for Next.js (App Router + Pages Router).
+
+    enumerate_nodes is the pre-existing route-table/filesystem enumeration
+    verbatim (CLEAN → route table, PARTIAL → filesystem convention), plus the
+    shared in-page section nodes.  For a route-only Next app (no tabs array)
+    the section pass yields nothing, so the route node set is byte-identical to
+    the pre-adapter enumeration.
+    """
+
+    stack = "next-app"
+    # shared utilities held as references so the no-duplication invariant is
+    # checkable: the Vite adapter holds the SAME objects.
+    section_nodes = staticmethod(_section_nodes)
+    resolver = staticmethod(resolve_specifier)
+
+    def enumerate_nodes(
+        self, snapshot: RepoSnapshot, probe: ProbeResult,
+    ) -> list[ScreenNode]:
+        if probe.posture == "CLEAN":
+            nodes = _extract_clean(snapshot, probe)
+        else:
+            nodes = _extract_partial(snapshot, probe)
+        nodes.extend(self.section_nodes(snapshot))
+        return nodes
+
+    def resolve_import(
+        self,
+        specifier: str,
+        from_file: str,
+        alias_roots: dict[str, str],
+        snapshot: RepoSnapshot | None = None,
+    ) -> str | None:
+        return self.resolver(specifier, from_file, alias_roots, snapshot)
+
+
+class ViteReactRouterAdapter:
+    """First-class adapter for Vite + react-router repos.
+
+    Promotes the previously best-effort ``react-router``/``filesystem`` branch
+    into a real enumerator: route nodes from the ``<Route path= element={<X/>}>``
+    table (with a filesystem fallback) plus the shared in-page section nodes.
+    """
+
+    stack = "vite-react-router"
+    section_nodes = staticmethod(_section_nodes)
+    resolver = staticmethod(resolve_specifier)
+
+    def enumerate_nodes(
+        self, snapshot: RepoSnapshot, probe: ProbeResult,
+    ) -> list[ScreenNode]:
+        nodes = _extract_vite_routes(snapshot)
+        nodes.extend(self.section_nodes(snapshot))
+        return nodes
+
+    def resolve_import(
+        self,
+        specifier: str,
+        from_file: str,
+        alias_roots: dict[str, str],
+        snapshot: RepoSnapshot | None = None,
+    ) -> str | None:
+        return self.resolver(specifier, from_file, alias_roots, snapshot)

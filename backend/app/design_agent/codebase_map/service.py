@@ -31,6 +31,11 @@ from app.design_agent.codebase_map.nav_probe import ProbeResult, probe_nav_abstr
 from app.design_agent.codebase_map.nodes import extract_nodes
 from app.design_agent.codebase_map.repo_reader import read_repo
 from app.design_agent.codebase_map.shell import extract_shell
+from app.design_agent.codebase_map.stack import (
+    StackProfile,
+    UnreadableStackError,
+    detect_stack,
+)
 from app.design_agent.codebase_map.types import (
     MapResult,
     NavEdge,
@@ -161,6 +166,21 @@ def build_map(
     probe: ProbeResult = _safe(
         lambda: probe_nav_abstraction(snapshot), ProbeResult(), "probe",
     )
+
+    # Stack detection selects the enumerator adapter. An unreadable non-JS/TS
+    # stack declines LOUDLY here rather than letting any enumerator emit a
+    # confident-but-wrong screen set. detect_stack is deterministic and never
+    # raises on its own; _safe guards an unexpected internal error.
+    profile: StackProfile = _safe(
+        lambda: detect_stack(snapshot), StackProfile(), "stack",
+    )
+    if profile.stack == "unreadable":
+        logger.info(
+            "codebase_map.build repo=%s sha=%s stack=unreadable decline reason=%s",
+            snapshot.repo, snapshot.commit_sha, profile.reason,
+        )
+        raise UnreadableStackError(profile.reason)
+
     nodes: list[ScreenNode] = _safe(
         lambda: extract_nodes(snapshot, probe), [], "nodes",
     )
@@ -172,10 +192,15 @@ def build_map(
         lambda: extract_shell(snapshot), ShellModel(), "shell",
     )
 
+    # The unknown-JS/TS fallback loses the completeness gate, so the build is
+    # PARTIAL regardless of what the nav probe inferred — the capability
+    # downgrade is surfaced, never silent (StackProfile.reason carries the why).
+    posture = "PARTIAL" if profile.stack == "unknown-js-ts" else probe.posture
+
     result = MapResult(
         repo=snapshot.repo,
         commit_sha=snapshot.commit_sha,
-        posture=probe.posture,
+        posture=posture,
         nodes=nodes,
         edges=edges,
         shell=shell,

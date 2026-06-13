@@ -167,6 +167,58 @@ def test_probe_and_nodes_emit_identifier_only_logs(caplog):
     assert "export const ROUTES" not in log_text
 
 
+# ── Shared enumeration heuristics ──────────────────────────────────────────────
+
+def test_discover_route_elements_multiline_and_dedup():
+    """<Route path= element={<X/>}> tags are discovered across multi-line tags."""
+    from app.design_agent.codebase_map.nav_probe import discover_route_elements
+
+    body = (
+        "<Routes>\n"
+        "  <Route path=\"/team\" element={<TeamPage/>} />\n"
+        "  <Route\n"
+        "    path=\"/users/:id\"\n"
+        "    element={<UserPage/>}\n"
+        "  />\n"
+        "  <Route path=\"/team\" element={<TeamPage/>} />\n"  # duplicate
+        "</Routes>\n"
+    )
+    snap = _snap(**{"src/App.tsx": body})
+    elements = discover_route_elements(snap)
+    routes = [(e.route, e.component) for e in elements]
+    assert ("/team", "TeamPage") in routes
+    assert ("/users/:id", "UserPage") in routes
+    # Deduplicated by (route, file) and route-sorted.
+    assert routes == sorted(set(routes))
+
+
+def test_detect_tab_sections_only_matches_tab_arrays():
+    """A const tabs=[{id,label}] array yields TabSections; unrelated arrays do not."""
+    from app.design_agent.codebase_map.nav_probe import detect_tab_sections
+
+    snap = _snap(**{
+        "src/Team.tsx": (
+            "const tabs = [\n"
+            "  { id: 'members', label: 'Members' },\n"
+            "  { id: 'roles', label: 'Roles' },\n"
+            "];\n"
+            "const colors = ['red', 'green'];\n"  # not a tab array
+        ),
+    })
+    sections = detect_tab_sections(snap)
+    ids = {s.section_id for s in sections}
+    assert ids == {"members", "roles"}
+    assert all(s.file == "src/Team.tsx" for s in sections)
+
+
+def test_detect_tab_sections_empty_for_route_only_file():
+    """A route-only file (no tabs array) yields no sections."""
+    from app.design_agent.codebase_map.nav_probe import detect_tab_sections
+
+    snap = _snap(**{"app/team/page.tsx": "export default function Team() { return null; }"})
+    assert detect_tab_sections(snap) == []
+
+
 def test_no_prohibited_tokens_in_source():
     """The four deliverable files contain no internal-coordinate tokens."""
     import os

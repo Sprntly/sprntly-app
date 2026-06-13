@@ -183,3 +183,106 @@ def _detect_router_convention(snapshot: RepoSnapshot) -> str:
     if snapshot.tree_paths:
         return "filesystem"
     return ""
+
+
+# ── Shared enumeration heuristics ──────────────────────────────────────────────
+# These two utilities are defined ONCE here and called by every enumerator
+# adapter (the route-table adapter and the react-router adapter both reuse
+# them).  They are JSX-shape heuristics, not stack-specific, so duplicating them
+# per adapter would let the two copies drift.  Same regex/string technique as
+# the probe: no JS/TS AST parser is used or imported.
+
+
+@dataclass(frozen=True)
+class RouteElement:
+    """One ``<Route path=... element={<Comp/>}>`` entry discovered in source."""
+
+    route: str       # the path attribute ("/team", "/users/:id")
+    component: str    # the PascalCase element component name ("TeamPage")
+    file: str         # repo-relative file the <Route> was declared in
+
+
+@dataclass(frozen=True)
+class TabSection:
+    """One in-page tab declared in a ``const tabs = [...]`` style array."""
+
+    section_id: str   # stable slug for the tab ("members", "billing")
+    label: str        # human label when present ("Members")
+    file: str         # repo-relative file the tab array was declared in
+
+
+# A <Route> JSX tag, captured up to its first '>' so multi-line / Prettier-wrapped
+# attribute lists are tolerated.  path= and element= are then read from the tag
+# body in either order.
+_ROUTE_TAG_RE = re.compile(r"<Route\b([^>]*?)/?>", re.DOTALL)
+_ROUTE_PATH_ATTR_RE = re.compile(r"\bpath\s*=\s*['\"]([^'\"]+)['\"]")
+_ROUTE_ELEMENT_ATTR_RE = re.compile(r"\belement\s*=\s*\{\s*<\s*([A-Z]\w*)")
+
+# A tabs-style array declaration.  The name must contain "tab" so an unrelated
+# array literal does not false-positive as an in-page section set.
+_TAB_ARRAY_RE = re.compile(
+    r"\b(?:const|let|var)\s+(\w*[Tt]ab\w*)\s*(?::[^=\[]+)?=\s*\[(.*?)\]",
+    re.DOTALL,
+)
+_TAB_LABEL_RE = re.compile(r"\b(?:label|name|title)\s*:\s*['\"]([^'\"]+)['\"]")
+_TAB_ID_RE = re.compile(r"\b(?:id|key|value|slug)\s*:\s*['\"]([^'\"]+)['\"]")
+_SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(text: str) -> str:
+    """Lower-case, hyphenate, and trim a label into a stable id fragment."""
+    return _SLUG_STRIP_RE.sub("-", text.strip().lower()).strip("-")
+
+
+def discover_route_elements(snapshot: RepoSnapshot) -> list[RouteElement]:
+    """Discover ``<Route path=... element={<Comp/>}>`` declarations.
+
+    Whole-body scan tolerant of multi-line tags (the react-router edge-hardening
+    convention shared by the edge resolver).  Returns one RouteElement per
+    path-bearing route, deduplicated by (route, file), sorted by route for
+    determinism.  Layout routes with no ``path`` attribute are skipped.
+    """
+    found: dict[tuple[str, str], RouteElement] = {}
+    for path, body in snapshot.files.items():
+        for tag in _ROUTE_TAG_RE.finditer(body):
+            tag_body = tag.group(1)
+            path_m = _ROUTE_PATH_ATTR_RE.search(tag_body)
+            if not path_m:
+                continue
+            route = path_m.group(1)
+            comp_m = _ROUTE_ELEMENT_ATTR_RE.search(tag_body)
+            component = comp_m.group(1) if comp_m else ""
+            key = (route, path)
+            if key not in found:
+                found[key] = RouteElement(route=route, component=component, file=path)
+    return sorted(found.values(), key=lambda r: (r.route, r.file))
+
+
+def detect_tab_sections(snapshot: RepoSnapshot) -> list[TabSection]:
+    """Discover in-page tab arrays (``const tabs = [{ id, label }, …]``).
+
+    Each object entry inside a tabs-named array becomes one TabSection.  The id
+    falls back to a slug of the label when no explicit id/key is present, and to
+    the label itself when neither yields a slug.  Deduplicated by
+    (section_id, file), sorted for determinism.  Returns ``[]`` when no tabs
+    array is present — so a route-only screen set adds no section nodes.
+    """
+    found: dict[tuple[str, str], TabSection] = {}
+    for path, body in snapshot.files.items():
+        for arr in _TAB_ARRAY_RE.finditer(body):
+            array_body = arr.group(2)
+            # Split into rough object-entry spans so a label pairs with the id
+            # declared in the same entry rather than the next one.
+            for entry in array_body.split("}"):
+                label_m = _TAB_LABEL_RE.search(entry)
+                id_m = _TAB_ID_RE.search(entry)
+                if not label_m and not id_m:
+                    continue
+                label = label_m.group(1) if label_m else ""
+                section_id = id_m.group(1) if id_m else _slugify(label)
+                if not section_id:
+                    continue
+                key = (section_id, path)
+                if key not in found:
+                    found[key] = TabSection(section_id=section_id, label=label, file=path)
+    return sorted(found.values(), key=lambda s: (s.file, s.section_id))
