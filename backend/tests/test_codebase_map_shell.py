@@ -451,3 +451,23 @@ def test_no_prohibited_tokens_in_source():
         source = (root / relpath).read_text()
         matches = pattern.findall(source)
         assert not matches, f"{relpath} contains prohibited tokens: {matches}"
+
+
+# ── carried shell file path ──────────────────────────────────────────────────
+
+def test_extract_shell_populates_shell_file_path():
+    """extract_shell records the located shell file's real path."""
+    body = (
+        "import { Link } from 'next/link';\n"
+        "export default function Sidebar(){ return <nav>"
+        "<Link href='/team'>Team</Link><Link href='/settings'>Settings</Link>"
+        "</nav> }\n"
+    )
+    shell = extract_shell(_snapshot({"src/components/layout/Sidebar.tsx": body}))
+    assert shell.shell_file_path == "src/components/layout/Sidebar.tsx"
+
+
+def test_extract_shell_no_file_leaves_path_empty():
+    """A snapshot with no shell file → bare ShellModel with empty path."""
+    shell = extract_shell(_snapshot({"src/util.ts": "export const x = 1\n"}))
+    assert shell.shell_file_path == ""

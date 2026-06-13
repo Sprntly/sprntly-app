@@ -8,10 +8,11 @@ the bytes for injection into the agent's virtual filesystem + user prompt.
 
 Scope: deterministic READ + SHAPING. No LLM calls. No free-roam tree walks —
 every path read is derived from the MapResult's already-known nodes or from a
-small enumerated set of conventional candidates (the underlying shell + theme
-file paths are discarded during map extraction, so this layer re-discovers
-them by fetching focused candidates and letting the reader silently drop the
-ones that do not exist).
+small enumerated set of conventional candidates. The real shell file path is
+carried on the shell model when extraction found one and is read directly; the
+conventional candidate set (and, as a last resort, a layout import-graph walk)
+remains the fallback for repos where no real path was recorded, with the reader
+silently dropping paths that do not exist.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from dataclasses import dataclass
 from ..prompts import DESIGN_AGENT_RECREATE_DISCIPLINE
 from ..storage import ThemeBridgeError
 from .repo_reader import read_repo
-from .types import LogoAsset, MapResult, ScreenNode
+from .types import LogoAsset, MapResult, ScreenNode, ShellModel
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,17 @@ SHELL_CANDIDATES: tuple[str, ...] = (
     "components/Sidebar.jsx",
     "components/Layout.tsx",
     "components/Layout.jsx",
+    # src/components/sidebar/ — dedicated sidebar subdir
+    "src/components/sidebar/Sidebar.tsx",
+    "src/components/sidebar/Sidebar.jsx",
+    "src/components/sidebar/AppSidebar.tsx",
+    "src/components/sidebar/AppSidebar.jsx",
+    # src/components/nav/ — dedicated nav subdir
+    "src/components/nav/Nav.tsx",
+    "src/components/nav/Navigation.tsx",
+    # App-Router route-group layouts
+    "app/(app)/layout.tsx",
+    "app/(dashboard)/layout.tsx",
 )
 
 # Conventional locations for the global CSS + Tailwind config. Same pattern:
@@ -147,6 +159,11 @@ class RecreateSources:
     # for a single-package, repo-root app. Used by the read-side finders to look
     # up prefixed theme/shell keys, not just the bare repo-root candidates.
     app_root_prefix: str = ""
+    # The real located shell file path, carried from the map's shell model when
+    # extraction found one. The shell finders look this up FIRST (the real nav),
+    # before falling back to the conventional candidate keys. Empty when no real
+    # shell path was recorded.
+    shell_file_path: str = ""
 
 
 @dataclass
@@ -183,11 +200,17 @@ def _normalize_asset_ref(ref: str) -> str:
 
 
 def _prefixed_shell_keys(sources: RecreateSources) -> tuple[str, ...]:
-    """Shell candidate lookup keys: app-prefixed (monorepo) THEN bare repo-root."""
+    """Shell candidate lookup keys: the carried REAL shell path first (when set),
+    then app-prefixed (monorepo) candidates, then bare repo-root candidates."""
     prefix = sources.app_root_prefix
     if prefix:
-        return tuple(prefix + c for c in SHELL_CANDIDATES) + SHELL_CANDIDATES
-    return SHELL_CANDIDATES
+        candidates = tuple(prefix + c for c in SHELL_CANDIDATES) + SHELL_CANDIDATES
+    else:
+        candidates = SHELL_CANDIDATES
+    real = sources.shell_file_path
+    if real and real not in candidates:
+        return (real,) + candidates
+    return candidates
 
 
 def _find_img_tag_in_shell(
@@ -593,6 +616,81 @@ def _resolve_composed_component_paths(
     return out
 
 
+# Import-name stems that mark a sidebar/nav/shell component when scanning a
+# layout body. Kept local to the read layer (no dependency on the shell
+# extractor) and matched as a case-insensitive substring of the imported name.
+_SHELL_IMPORT_STEMS: tuple[str, ...] = (
+    "sidebar", "appshell", "shell", "navigation", "nav", "topbar", "layout",
+)
+
+
+def _is_shell_import_name(name: str) -> bool:
+    low = name.lower()
+    return any(stem in low for stem in _SHELL_IMPORT_STEMS)
+
+
+def _layout_candidate_paths(located: LocatedScreen, app_prefix: str) -> list[str]:
+    """App-Router layout files that may wrap the located screen, deepest first.
+
+    Walks the located screen's directory chain down to the ``app/`` root
+    (so a route-group layout like ``app/(app)/layout.tsx`` is offered before the
+    root ``app/layout.tsx``), then the conventional roots as a floor. Bounded.
+    """
+    file = (located.node.file or "").replace(os.sep, "/")
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        if p and p not in seen:
+            out.append(p)
+            seen.add(p)
+
+    idx = file.find("app/")
+    if idx != -1:
+        app_root = file[: idx + len("app/")].rstrip("/")  # ".../app"
+        d = file.rsplit("/", 1)[0] if "/" in file else ""
+        while d and len(d) >= len(app_root):
+            _add(d + "/layout.tsx")
+            _add(d + "/layout.jsx")
+            if d == app_root:
+                break
+            d = d.rsplit("/", 1)[0] if "/" in d else ""
+    for root in (app_prefix + "app", app_prefix + "src/app"):
+        _add(root + "/layout.tsx")
+        _add(root + "/layout.jsx")
+    return out[:8]
+
+
+def _discover_shell_path_via_layout(
+    located: LocatedScreen, app_prefix: str, files: dict[str, str]
+) -> str:
+    """Discover a nested shell file by following the wrapping layout's imports.
+
+    Last-resort fallback (after the carried path and the conventional
+    candidates): read an App-Router layout body already fetched into ``files``,
+    find the imported sidebar/nav/shell component, and resolve its specifier
+    (``./``/``../`` relative or ``@/`` alias) to a repo path so a nested
+    ``app/components/shared/Sidebar.tsx`` is found. Returns ``""`` when no layout
+    body or no shell-looking import resolves (honest empty — never invented).
+    """
+    for layout_path in _layout_candidate_paths(located, app_prefix):
+        body = files.get(layout_path, "")
+        if not body:
+            continue
+        for m in _IMPORT_BINDINGS_RE.finditer(body):
+            names = _parse_binding_names(m.group("bindings"))
+            if not any(_is_shell_import_name(n) for n in names):
+                continue
+            cands = _resolve_spec_to_repo_paths(layout_path, m.group("spec"), app_prefix)
+            if not cands:
+                continue
+            for c in cands:
+                if c in files:
+                    return c
+            return cands[0]
+    return ""
+
+
 def read_located_sources(
     located: LocatedScreen,
     installation_id: int,
@@ -634,12 +732,28 @@ def read_located_sources(
     _push(located.node.file)
     for extra_node in located.also:
         _push(extra_node.file)
+    # The real shell file (when the map recorded one) is read directly — the
+    # actual nav, not a guessed candidate.
+    carried_shell = m.shell.shell_file_path or ""
+    if carried_shell:
+        _push(carried_shell)
     for path in sorted(route_node_paths):
         _push(path)
     for path in sorted(theme_paths):
         _push(path)
     for path in sorted(shell_paths):
         _push(path)
+    # Force-include globals.css (prefix-aware) so the theme bridge always has the
+    # real CSS to inline when it exists — guaranteed, not best-effort. No-op when
+    # already present via the theme candidates above.
+    for key in _CSS_GLOBALS_KEYS:
+        if app_prefix:
+            _push(app_prefix + key)
+        _push(key)
+    # Layout files that may wrap the located screen — read so a nested shell can
+    # be discovered via the layout import graph when no candidate resolves.
+    for lp in _layout_candidate_paths(located, app_prefix):
+        _push(lp)
     rest = [p for p in sorted(asset_paths) if p not in seen_mr]
     extra = must_read + rest
 
@@ -681,6 +795,24 @@ def read_located_sources(
         for target in _reexport_targets(lf, body):
             _add_followup(target)
 
+    # Third-priority shell discovery: fires ONLY when the carried real path was
+    # not read AND no conventional candidate body landed. The carried path wins,
+    # then candidates, then this layout import-graph walk. Folds into the SAME
+    # bounded follow-up read below (no extra read_repo call).
+    if carried_shell and files.get(carried_shell):
+        shell_present = True
+    else:
+        if app_prefix:
+            cand_keys = tuple(app_prefix + c for c in SHELL_CANDIDATES) + SHELL_CANDIDATES
+        else:
+            cand_keys = SHELL_CANDIDATES
+        shell_present = any(files.get(k) for k in cand_keys)
+    discovered_shell = ""
+    if not shell_present:
+        discovered_shell = _discover_shell_path_via_layout(located, app_prefix, files)
+        if discovered_shell:
+            _add_followup(discovered_shell)
+
     if followup:
         followup_paths = sorted(set(followup))
         snapshot2 = read_repo(
@@ -695,6 +827,13 @@ def read_located_sources(
                 if p in snapshot2.files and p not in files:
                     files[p] = snapshot2.files[p]
 
+    logger.info(
+        "design_agent.recreate_shell_source repo=%s shell_real=%s shell_discovered=%s",
+        m.repo,
+        str(bool(carried_shell and files.get(carried_shell))).lower(),
+        str(bool(discovered_shell and files.get(discovered_shell))).lower(),
+    )
+
     return RecreateSources(
         repo=m.repo,
         commit_sha=m.commit_sha,
@@ -702,6 +841,7 @@ def read_located_sources(
         screen_path=located.node.file,
         also_screen_paths=tuple(n.file for n in located.also if n.file),
         app_root_prefix=app_prefix,
+        shell_file_path=carried_shell or discovered_shell,
     )
 
 
@@ -823,6 +963,99 @@ def _is_tailwind_v4_with_tokens(css: str) -> bool:
     return bool(re.search(r"--[\w-]+\s*:", block))
 
 
+# A :root {} block that declares at least one custom --token (the v3-style
+# CSS-variable token system, distinct from the Tailwind-v4 @theme{} shape).
+_ROOT_CSS_VAR_RE = re.compile(r":root\s*\{[^}]*--[\w-]+\s*:", re.DOTALL)
+
+
+def _has_root_css_var_tokens(css: str) -> bool:
+    """True when a :root {} block declares at least one custom --token."""
+    return bool(_ROOT_CSS_VAR_RE.search(css))
+
+
+def _theme_token_mode(css: str) -> str:
+    """Classify the token system: 'tailwind-v4' (@theme{}), 'css-vars-root'
+    (:root{--token}), or 'none'. Tailwind-v4 wins when both are present (a v4
+    file can also carry a :root block), so the v4 path stays today's behaviour.
+    """
+    if _is_tailwind_v4_with_tokens(css):
+        return "tailwind-v4"
+    if _has_root_css_var_tokens(css):
+        return "css-vars-root"
+    return "none"
+
+
+def _assert_bridge_mode_landed(bridged_css: str, mode: str, globals_css: str) -> bool:
+    """Confirm the bridged output carries the detected mode's tokens (advisory).
+
+    css-vars-root: at least one real ``:root{--token: value}`` declaration from
+    the source whose value is NOT a scaffold default survived into bridged_css.
+    tailwind-v4: at least one @theme token value from source survived. none:
+    trivially True. Returns a bool — the caller logs it. This is a SOURCE-side
+    check (the bridged index.css before build); the dist-side
+    ``assert_theme_landed`` remains the single hard gate, so a source-mode miss
+    is advisory and never contradicts a passing dist assertion.
+    """
+    if mode == "none":
+        return True
+    if not bridged_css:
+        return False
+    # Find a discriminating real --token: value from the source and require it in
+    # the bridged output. The value extraction is the same generic --name: value
+    # regex the build gate uses; it works for both :root and @theme blocks.
+    for m in _VAR_VALUE_RE.finditer(globals_css):
+        value = m.group(1).strip()
+        if value and value not in _SCAFFOLD_DEFAULT_VALUES and len(value) > 2:
+            return value in bridged_css
+    # No discriminating token value in source — nothing to assert against.
+    return True
+
+
+def _extract_extend_color_values(extend_block: str) -> dict[str, str]:
+    """Return ``family -> concrete colour literal`` pairs from a tailwind
+    ``theme.extend`` block. Only LEAF string values that look like a concrete
+    colour (``#hex`` / ``rgb()`` / ``hsl()``) are returned — name-only or
+    reference families (``colors.gray[500]``) are skipped so nothing is invented.
+    A ``DEFAULT`` leaf is skipped (not a useful utility family name).
+    """
+    out: dict[str, str] = {}
+    pair_re = re.compile(
+        r"""['"]?([A-Za-z][\w-]*)['"]?\s*:\s*['"]"""
+        r"""(#[0-9A-Fa-f]{3,8}|(?:rgb|hsl)a?\([^)]*\))['"]"""
+    )
+    for m in pair_re.finditer(extend_block):
+        family, value = m.group(1), m.group(2)
+        if family.lower() == "default" or family in out:
+            continue
+        out[family] = value
+    return out
+
+
+def _synthesize_extend_shims(tailwind_src: str) -> str:
+    """Build CSS-var + utility shims for tailwind ``theme.extend`` colour
+    families that have a concrete value but no CSS-variable backing, so
+    ``bg-<family>`` / ``text-<family>`` resolve at build time (tailwind.config is
+    agent-immutable). Returns ``""`` when there is nothing concrete to shim —
+    never invents a colour for a name-only family.
+    """
+    if not tailwind_src:
+        return ""
+    extend_block = _extract_theme_extend(tailwind_src)
+    if not extend_block:
+        return ""
+    values = _extract_extend_color_values(extend_block)
+    if not values:
+        return ""
+    lines: list[str] = [":root {"]
+    for family, value in list(values.items())[:8]:
+        lines.append(f"  --{family}: {value};")
+    lines.append("}")
+    for family in list(values.keys())[:8]:
+        lines.append(f".bg-{family} {{ background-color: var(--{family}); }}")
+        lines.append(f".text-{family} {{ color: var(--{family}); }}")
+    return "\n".join(lines)
+
+
 def _extract_font_imports(css: str) -> str:
     """Return all @import url(...) lines joined by newlines (for hoisting)."""
     return "\n".join(m.group(0).strip() for m in _FONT_IMPORT_RE.finditer(css))
@@ -893,13 +1126,15 @@ def bridge_theme(
     if not globals_css:
         logger.info(
             "design_agent.theme_bridge prototype_id=%s repo=%s"
-            " has_globals=false has_tailwind_extend=false n_font_imports=0 is_v4=false",
+            " has_globals=false has_tailwind_extend=false n_font_imports=0"
+            " is_v4=false token_mode=none",
             prototype_id,
             sources.repo,
         )
         return scaffold_index_css
 
     is_v4 = _is_tailwind_v4_with_tokens(globals_css)
+    mode = _theme_token_mode(globals_css)
     tailwind_src = _find_tailwind_config(sources)
     has_tailwind_extend = bool(tailwind_src and _extract_theme_extend(tailwind_src))
     font_import_matches = _FONT_IMPORT_RE.findall(globals_css)
@@ -909,21 +1144,39 @@ def bridge_theme(
 
     logger.info(
         "design_agent.theme_bridge prototype_id=%s repo=%s"
-        " has_globals=true has_tailwind_extend=%s n_font_imports=%d is_v4=%s",
+        " has_globals=true has_tailwind_extend=%s n_font_imports=%d is_v4=%s token_mode=%s",
         prototype_id,
         sources.repo,
         str(has_tailwind_extend).lower(),
         n_font_imports,
         str(is_v4).lower(),
+        mode,
     )
 
+    # The whole globals body is appended after the scaffold regardless of mode
+    # (no v4-only short-circuit), so a :root{--token} system inlines exactly like
+    # a v4 @theme{} block — the value path is mode-agnostic.
     parts: list[str] = []
     if font_imports:
         parts.append(font_imports)
     parts.append(scaffold_index_css.strip())
     if globals_body:
         parts.append(globals_body)
-    return "\n\n".join(p for p in parts if p)
+    # Shim custom tailwind.config theme.extend colour families (no CSS-var
+    # backing) so bg-/text-<family> resolve at build time. No-op when none.
+    extend_shims = _synthesize_extend_shims(tailwind_src)
+    if extend_shims:
+        parts.append(extend_shims)
+    bridged = "\n\n".join(p for p in parts if p)
+
+    landed = _assert_bridge_mode_landed(bridged, mode, globals_css)
+    logger.info(
+        "design_agent.theme_bridge_mode_check prototype_id=%s token_mode=%s landed=%s",
+        prototype_id,
+        mode,
+        str(landed).lower(),
+    )
+    return bridged
 
 
 def port_tailwind_extend(scaffold_config: str, sources: RecreateSources) -> str:
@@ -1015,6 +1268,57 @@ class ThemeExpectations:
     asset_basename: str | None
 
 
+# A class / className attribute's literal string value.
+_CLASS_ATTR_RE = re.compile(r"""class(?:Name)?\s*=\s*["']([^"']*)["']""")
+# A bg-/text-/border-<family> Tailwind utility within a class string.
+_UTILITY_RE = re.compile(r"\b(bg|text|border)-([a-z][\w-]*)")
+# The shadcn-slot floor: kept as a union member so a slot-based brand still has a
+# discriminating signal even when no custom utilities are detected.
+_STATIC_CLASS_SIGNAL_FLOOR: tuple[str, ...] = (
+    "bg-primary", "text-primary", "text-foreground", "bg-background",
+)
+
+
+def _derive_class_signals(
+    sources: RecreateSources, globals_css: str, tailwind_src: str,
+) -> tuple[str, ...]:
+    """Derive discriminating brand utilities from the real source, unioned with
+    the static shadcn-slot floor.
+
+    Scans the located screen + shell bodies for ``bg-``/``text-``/``border-``
+    utilities whose family corresponds to a real ``--token`` name (from globals)
+    or a ``theme.extend`` family name (from tailwind config), so a brand built on
+    custom utilities (``bg-accent``) gets a discriminating signal while shadcn-
+    slot brands still pass via the floor. The floor is always retained; deduped
+    and capped so the any-one-of check stays cheap.
+    """
+    token_names = {n.lower() for n in re.findall(r"--([\w-]+)\s*:", globals_css)}
+    extend_block = _extract_theme_extend(tailwind_src) if tailwind_src else ""
+    extend_families = {
+        f.lower() for f in re.findall(r"""['"]?([A-Za-z][\w-]*)['"]?\s*:""", extend_block)
+    }
+    families = token_names | extend_families
+
+    derived: list[str] = []
+    seen: set[str] = set()
+    for body in sources.files.values():
+        for attr in _CLASS_ATTR_RE.findall(body):
+            for prefix, family in _UTILITY_RE.findall(attr):
+                if family.lower() in families:
+                    sig = f"{prefix}-{family}"
+                    if sig not in seen:
+                        derived.append(sig)
+                        seen.add(sig)
+
+    signals = list(_STATIC_CLASS_SIGNAL_FLOOR)
+    for sig in derived:
+        if sig not in signals:
+            signals.append(sig)
+        if len(signals) >= 6:
+            break
+    return tuple(signals)
+
+
 def build_theme_expectations(
     sources: RecreateSources,
     brand_carry: "BrandAssetCarry | None" = None,
@@ -1047,7 +1351,8 @@ def build_theme_expectations(
     if not token_signals and not font_families:
         return None
 
-    class_signals = ("bg-primary", "text-primary", "text-foreground", "bg-background")
+    tailwind_src = _find_tailwind_config(sources)
+    class_signals = _derive_class_signals(sources, globals_css, tailwind_src)
 
     asset_basename: str | None = None
     if brand_carry is not None and brand_carry.carried:
@@ -1152,6 +1457,12 @@ _INTERACTION_VERBS: tuple[str, ...] = (
     "select", "upload", "download",
     "approve", "reject", "apply", "cancel",
     "navigate",
+    # Common PRD verbs that must be matched explicitly, not by luck of being a
+    # substring of an unrelated word ("test" was previously only credited via
+    # "connect" ⊂ "Connection").
+    "test", "validate", "verify",
+    "import", "export", "share", "copy",
+    "login", "logout", "sign",
 )
 
 # Verbs that EXTEND an already-interactive surface: the PRD interaction must
@@ -1250,7 +1561,11 @@ def derive_interactive_scope(
     entangled = any(cue in text for cue in _ENTANGLED_CUES)
     scope: list[str] = []
     for verb in _INTERACTION_VERBS:
-        if re.search(rf"\b{verb}", text) and verb not in scope:
+        # Word-stem match anchored on a word boundary: "test" matches
+        # "test"/"testing"/"tests" but NOT a mere substring of an unrelated word
+        # ("contestant" → no match, since the boundary falls mid-word). Each verb
+        # is credited only when it appears as its own word, not by accident.
+        if re.search(rf"\b{re.escape(verb)}\w*", text) and verb not in scope:
             scope.append(verb)
             if entangled:
                 for driver in _ENTANGLED_DRIVERS.get(verb, ()):
@@ -1340,3 +1655,88 @@ def assert_containment(
         inert_without_affordance=inert_without_affordance,
         ok=ok,
     )
+
+
+# ── Source-grounded structural parity self-check ──────────────────────────────
+# After generation, confirm the output actually re-expresses the real source it
+# was handed: the brand, the nav labels, and the composed-component names from
+# the extracted shell + located node. Pure string/identifier presence over the
+# generated SOURCE — no DOM capture, no live URL, no network, no browser. Sits
+# beside assert_containment / assert_theme_landed on the post-gen gate as an
+# ADVISORY quality signal (log + flag, never hard-block).
+_NAV_BLOCK_RE = re.compile(r"<nav\b[^>]*>(.*?)</nav>", re.IGNORECASE | re.DOTALL)
+_NAV_ITEM_TEXT_RE = re.compile(
+    r"<(?:a|NavLink|Link|button|span|li)\b[^>]*>\s*([A-Za-z][A-Za-z0-9 &/-]{1,29})\s*<",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class ParityReport:
+    """Result of the post-gen source-grounded structural parity self-check.
+
+    matched: source refs the generated output reproduced (brand / nav / component).
+    missing: source refs absent from the output (a recognizability gap).
+    extra: nav labels rendered in the output with NO basis in the real nav
+        (invented navigation).
+    ok: True when nothing is missing AND nothing is invented.
+    """
+
+    matched: list[str]
+    missing: list[str]
+    extra: list[str]
+    ok: bool
+
+
+def _assert_structural_parity(
+    generated_source: str,
+    sources: "RecreateSources | None",
+    shell: ShellModel,
+    located: LocatedScreen,
+) -> ParityReport:
+    """Deterministic source-grounded parity self-check (NO DOM, NO live-URL).
+
+    Asserts the generated output reproduces the real source's brand, nav labels,
+    and composed-component names that were in hand (from the extracted
+    ``ShellModel`` + the located node). Pure string/identifier presence — the same
+    grep style as ``assert_containment``; no network, no browser. ``sources`` is
+    optional: the gating ground truth is the shell + located node, so the check
+    runs even without the read sources object.
+    """
+    src = generated_source or ""
+    matched: list[str] = []
+    missing: list[str] = []
+
+    brand = (shell.brand or "").strip()
+    if brand:
+        (matched if brand in src else missing).append(f"brand:{brand}")
+
+    real_labels: list[str] = []
+    for item in shell.nav_items:
+        label = (item.label or "").strip()
+        if label and label not in real_labels:
+            real_labels.append(label)
+            (matched if label in src else missing).append(f"nav:{label}")
+
+    seen_components: set[str] = set()
+    for node in (located.node, *located.also):
+        for name in node.composed_components:
+            if name and name not in seen_components:
+                seen_components.add(name)
+                present = bool(re.search(rf"\b{re.escape(name)}\b", src))
+                (matched if present else missing).append(f"component:{name}")
+
+    # Invented nav: labels rendered inside a <nav> block in the output that have
+    # no basis in the real nav labels. Only computed when we HAVE a real nav to
+    # compare against (no ground truth → cannot call anything invented).
+    extra: list[str] = []
+    if real_labels:
+        real_lower = {label.lower() for label in real_labels}
+        for block in _NAV_BLOCK_RE.findall(src):
+            for text in _NAV_ITEM_TEXT_RE.findall(block):
+                label = text.strip()
+                if label and label.lower() not in real_lower and label not in extra:
+                    extra.append(label)
+
+    ok = not missing and not extra
+    return ParityReport(matched=matched, missing=missing, extra=extra, ok=ok)

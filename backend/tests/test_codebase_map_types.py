@@ -280,3 +280,19 @@ def test_no_prohibited_tokens_in_source():
         text=True,
     )
     assert result.stdout.strip() == "", f"prohibited tokens in types.py:\n{result.stdout}"
+
+
+def test_shell_model_new_fields_default_empty_and_roundtrip():
+    """The two new ShellModel fields default empty and serialize/deserialize."""
+    bare = ShellModel()
+    assert bare.shell_file_path == ""
+    assert bare.child_component_paths == []
+
+    populated = ShellModel(
+        brand="Acme",
+        shell_file_path="src/Shell.tsx",
+        child_component_paths=["a.tsx", "b.tsx"],
+    )
+    restored = ShellModel(**populated.model_dump())
+    assert restored.shell_file_path == "src/Shell.tsx"
+    assert restored.child_component_paths == ["a.tsx", "b.tsx"]

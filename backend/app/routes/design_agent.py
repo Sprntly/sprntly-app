@@ -98,6 +98,7 @@ from app.design_agent.runner import MODEL, generate_prototype, reconcile_comment
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.codebase_map.recreate import (
     ThemeExpectations,
+    _assert_structural_parity,
     assert_containment,
     assert_theme_landed,
     derive_interactive_scope,
@@ -958,6 +959,10 @@ async def _run_generation_bg(
                 # test stubs that return a bare SimpleNamespace keep working.
                 theme_expectations=getattr(result, "theme_expectations", None),
                 interactive_scope=interactive_scope,
+                # Recreate path only (located is not None) — the structural-parity
+                # self-check's ground truth (real shell + located node). None on
+                # every blank-canvas run, so the check is skipped there.
+                parity_located=located,
             )
         elif result.status == "complete" and not virtual_fs:
             fail_prototype(
@@ -1090,6 +1095,7 @@ async def _stage_complete_run(
     scenario: str = "A",
     theme_expectations: ThemeExpectations | None = None,
     interactive_scope: list[str] | None = None,
+    parity_located: "LocatedScreen | None" = None,
 ) -> None:
     """Post-run hook (P1-08): vite_build → checkpoint → stage_bundle → complete.
 
@@ -1179,6 +1185,40 @@ async def _stage_complete_run(
             except Exception:  # noqa: BLE001 — non-fatal: never fail a row on a self-check bug
                 logger.warning(
                     "design_agent.containment_check_errored prototype_id=%s",
+                    prototype_id,
+                )
+        # Structural-parity self-check (recreate path only). A SIBLING of the
+        # containment + theme gates: it greps the agent's GENERATED SOURCE for the
+        # real shell brand, nav labels, and composed-component names the recreate
+        # was handed (from the located screen's extracted shell + node). Source-
+        # grounded — NO DOM, NO live-URL. Same policy as containment: LOG + FLAG a
+        # parity gap, NEVER block — recognizability drift is a quality signal, not
+        # a safety gate, so a prototype that built + themed cleanly still
+        # completes. Wrapped defensively so a self-check bug can never fail the row.
+        if parity_located is not None:
+            try:
+                parity_source = "\n".join(
+                    body for path, body in virtual_fs.items()
+                    if path.endswith((".tsx", ".jsx"))
+                )
+                parity = _assert_structural_parity(
+                    parity_source,
+                    None,
+                    parity_located.map_result.shell,
+                    parity_located,
+                )
+                log_parity = logger.info if parity.ok else logger.warning
+                log_parity(
+                    "design_agent.structural_parity prototype_id=%s matched=%d missing=%d extra=%d ok=%s",
+                    prototype_id,
+                    len(parity.matched),
+                    len(parity.missing),
+                    len(parity.extra),
+                    str(parity.ok).lower(),
+                )
+            except Exception:  # noqa: BLE001 — non-fatal: never fail a row on a self-check bug
+                logger.warning(
+                    "design_agent.structural_parity_check_errored prototype_id=%s",
                     prototype_id,
                 )
     except TypeCheckError as exc:

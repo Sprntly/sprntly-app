@@ -166,6 +166,9 @@ def test_read_located_sources_reads_screen_children_shell_theme():
         | set(SHELL_CANDIDATES)
         | set(THEME_CANDIDATES)
         | {"logo.svg"}
+        # Layout files are also read so a nested shell can be discovered via the
+        # layout import graph when no conventional candidate resolves a shell.
+        | {"app/layout.tsx", "app/layout.jsx", "src/app/layout.tsx", "src/app/layout.jsx"}
     )
     assert set(extra) == expected
     # Verify .jsx variants and components/layout/ forms are present in the union.
@@ -662,9 +665,11 @@ def test_theme_bridge_logs_booleans_only(caplog):
     with caplog.at_level(logging.INFO, logger="app.design_agent.codebase_map.recreate"):
         bridge_theme(_SCAFFOLD_CSS, sources, prototype_id=99)
 
+    # The summary line is `theme_bridge `; the separate `theme_bridge_mode_check`
+    # line is matched specifically below and excluded here.
     bridge_records = [
         r for r in caplog.records
-        if r.levelno == logging.INFO and "theme_bridge" in r.getMessage()
+        if r.levelno == logging.INFO and "theme_bridge " in r.getMessage()
     ]
     assert len(bridge_records) == 1, f"expected 1 theme_bridge log, got {len(bridge_records)}"
 
@@ -673,6 +678,15 @@ def test_theme_bridge_logs_booleans_only(caplog):
     assert "n_font_imports=1" in msg
     assert "is_v4=" in msg
     assert "has_tailwind_extend=" in msg
+    assert "token_mode=css-vars-root" in msg
+
+    # The mode self-check emits exactly one booleans-only line alongside it.
+    mode_records = [
+        r for r in caplog.records
+        if r.levelno == logging.INFO and "theme_bridge_mode_check" in r.getMessage()
+    ]
+    assert len(mode_records) == 1
+    assert "landed=" in mode_records[0].getMessage()
 
     # No CSS body content in any log record
     for record in caplog.records:
@@ -1457,3 +1471,302 @@ def test_composed_components_resolved_via_import_graph():
         sources = read_located_sources(located, _INSTALL)
     assert mock_read.call_count == 2  # never more than two reads
     assert child in sources.files
+
+
+# ── carried real shell path + layout-graph shell discovery ───────────────────
+
+from app.design_agent.codebase_map.types import NavItem  # noqa: E402
+from app.design_agent.codebase_map.recreate import (  # noqa: E402
+    ParityReport,
+    _assert_bridge_mode_landed,
+    _assert_structural_parity,
+    _discover_shell_path_via_layout,
+    _has_root_css_var_tokens,
+    _theme_token_mode,
+)
+
+
+def _map_with_shell(node, shell):
+    return MapResult(
+        repo=_REPO, commit_sha=_SHA, posture="CLEAN", nodes=[node], shell=shell,
+    )
+
+
+def test_carried_shell_path_read_into_reference_set():
+    """A real shell path carried on the model is read directly, even when it is
+    NOT a conventional candidate."""
+    real_shell = "src/weird/CustomNav.tsx"
+    assert real_shell not in SHELL_CANDIDATES
+    node = _node("Home", "src/Home.tsx")
+    shell = ShellModel(
+        brand="Acme",
+        shell_file_path=real_shell,
+        nav_items=[NavItem(label="Home"), NavItem(label="Reports")],
+    )
+    located = LocatedScreen(map_result=_map_with_shell(node, shell), node=node)
+    snap = _snapshot({
+        "src/Home.tsx": "export const Home=()=>null",
+        real_shell: "<nav><a>Home</a><a>Reports</a></nav>",
+    })
+    with patch("app.design_agent.codebase_map.recreate.read_repo", return_value=snap):
+        sources = read_located_sources(located, _INSTALL)
+    assert sources is not None
+    assert real_shell in sources.files
+    assert sources.shell_file_path == real_shell
+    assert real_shell in _prefixed_shell_keys(sources)
+
+
+def test_nested_shell_discovered_via_layout_import():
+    """When neither a carried path nor a candidate resolves a shell, the wrapping
+    layout's import graph is followed to a nested sidebar (control: honest empty)."""
+    node = ScreenNode(
+        route="/sources", entry_component="Sources",
+        file="app/(app)/sources/page.tsx", composed_components=[],
+    )
+    shell = ShellModel()  # no carried path
+    located = LocatedScreen(map_result=_map_with_shell(node, shell), node=node)
+    layout_body = (
+        'import { Sidebar } from "./components/shared/Sidebar"\n'
+        "export default function L({children}){ return <div><Sidebar/>{children}</div> }\n"
+    )
+    snap = _snapshot({
+        "app/(app)/sources/page.tsx": "export default function Sources(){ return null }",
+        "app/layout.tsx": layout_body,
+        "app/components/shared/Sidebar.tsx": "<nav><a>Dashboard</a><a>Sources</a></nav>",
+    })
+    with patch("app.design_agent.codebase_map.recreate.read_repo", return_value=snap) as mock_read:
+        sources = read_located_sources(located, _INSTALL)
+    assert "app/components/shared/Sidebar.tsx" not in SHELL_CANDIDATES
+    assert "app/components/shared/Sidebar.tsx" in sources.files
+    assert sources.shell_file_path == "app/components/shared/Sidebar.tsx"
+    # AC: at most TWO read_repo calls total even with the layout discovery
+    assert mock_read.call_count == 2
+
+    # control: no layout / no shell import → discovery returns "" (honest empty)
+    bare = _snapshot({"app/(app)/sources/page.tsx": "export default function S(){ return null }"})
+    with patch("app.design_agent.codebase_map.recreate.read_repo", return_value=bare):
+        bare_sources = read_located_sources(located, _INSTALL)
+    assert bare_sources.shell_file_path == ""
+
+
+def test_discover_shell_path_via_layout_resolution_rules():
+    """The discovery helper resolves @/ against the app prefix, ./ against the
+    layout dir, and skips bare-package imports."""
+    files = {
+        "web/app/layout.tsx": 'import { AppSidebar } from "@/components/AppSidebar"\n<AppSidebar/>',
+        "web/src/components/AppSidebar.tsx": "x",
+    }
+    node = ScreenNode(route="/x", entry_component="X", file="web/app/(app)/x/page.tsx")
+    located = LocatedScreen(map_result=_map_with_shell(node, ShellModel()), node=node)
+    got = _discover_shell_path_via_layout(located, "web/", files)
+    assert got == "web/src/components/AppSidebar.tsx"
+
+    # bare-package import is not a shell file
+    files2 = {"app/layout.tsx": 'import { Nav } from "some-nav-lib"\n<Nav/>'}
+    node2 = ScreenNode(route="/x", entry_component="X", file="app/x/page.tsx")
+    located2 = LocatedScreen(map_result=_map_with_shell(node2, ShellModel()), node=node2)
+    assert _discover_shell_path_via_layout(located2, "", files2) == ""
+
+
+def test_shell_discovery_third_priority_after_carried_and_candidate():
+    """Carried path wins over discovery; a candidate hit wins over discovery."""
+    layout_body = 'import { Sidebar } from "./shared/Sidebar"\n<Sidebar/>'
+
+    # (a) carried wins: shell_file_path is honoured; the layout-discovered path is unused.
+    node = ScreenNode(route="/x", entry_component="X", file="app/x/page.tsx")
+    carried = "src/MyShell.tsx"
+    shell = ShellModel(shell_file_path=carried)
+    located = LocatedScreen(map_result=_map_with_shell(node, shell), node=node)
+    snap = _snapshot({
+        "app/x/page.tsx": "export default function X(){ return null }",
+        carried: "<nav/>",
+        "app/layout.tsx": layout_body,
+        "app/shared/Sidebar.tsx": "<nav/>",
+    })
+    with patch("app.design_agent.codebase_map.recreate.read_repo", return_value=snap):
+        sources = read_located_sources(located, _INSTALL)
+    assert sources.shell_file_path == carried
+
+    # (b) candidate wins: a conventional candidate body landed → discovery skipped.
+    node2 = ScreenNode(route="/x", entry_component="X", file="app/x/page.tsx")
+    located2 = LocatedScreen(map_result=_map_with_shell(node2, ShellModel()), node=node2)
+    cand = "app/components/Sidebar.tsx"  # a real SHELL_CANDIDATES entry
+    assert cand in SHELL_CANDIDATES
+    snap2 = _snapshot({
+        "app/x/page.tsx": "export default function X(){ return null }",
+        cand: "<nav/>",
+        "app/layout.tsx": layout_body,
+        "app/shared/Sidebar.tsx": "<nav/>",
+    })
+    with patch("app.design_agent.codebase_map.recreate.read_repo", return_value=snap2):
+        sources2 = read_located_sources(located2, _INSTALL)
+    # candidate hit → no discovery → discovered path NOT recorded as the shell
+    assert sources2.shell_file_path == ""
+    assert "app/shared/Sidebar.tsx" not in sources2.files
+
+
+# ── theme-bridge mode detection ────────────────────────────────────────
+
+def test_theme_token_mode_classifies_root_v4_and_none():
+    assert _theme_token_mode(":root{--accent:#179463;--ink:#15201B}") == "css-vars-root"
+    assert _theme_token_mode("@theme{--x:1}") == "tailwind-v4"
+    assert _theme_token_mode("body{color:red}") == "none"
+    # v4 wins when both present
+    assert _theme_token_mode("@theme{--x:1}\n:root{--y:2}") == "tailwind-v4"
+
+
+def test_has_root_css_var_tokens_true_false():
+    assert _has_root_css_var_tokens(":root{--accent:#179463}") is True
+    assert _has_root_css_var_tokens("@theme{--x:1}") is False
+    assert _has_root_css_var_tokens(":root{color:red}") is False
+
+
+def test_bridge_inlines_root_token_value_verbatim():
+    """The real :root token VALUE lands in the bridged CSS verbatim (regression
+    guard: the v3 value path was never the gap)."""
+    sources = _sources_with_files({"app/globals.css": ":root { --accent: #179463; }"})
+    bridged = bridge_theme(_SCAFFOLD_CSS, sources, prototype_id=1)
+    assert "#179463" in bridged
+
+
+def test_bridge_no_v4_only_short_circuit_for_css_vars_root(caplog):
+    """A css-vars-root globals (no @theme{}) still inlines the :root block, and
+    the log reports is_v4=false + token_mode=css-vars-root."""
+    sources = _sources_with_files({"app/globals.css": ":root { --accent: #179463; }"})
+    with caplog.at_level(logging.INFO, logger="app.design_agent.codebase_map.recreate"):
+        bridged = bridge_theme(_SCAFFOLD_CSS, sources, prototype_id=1)
+    assert "--accent: #179463" in bridged
+    line = next(r.getMessage() for r in caplog.records if "theme_bridge " in r.getMessage())
+    assert "is_v4=false" in line
+    assert "token_mode=css-vars-root" in line
+
+
+def test_force_include_globals_in_must_read():
+    """The prefix-aware globals key is force-included in the must-read set even on
+    a monorepo; honest absence yields no globals key."""
+    node = ScreenNode(route="/x", entry_component="X", file="web/app/(app)/x/page.tsx")
+    located = LocatedScreen(map_result=_map_with_shell(node, ShellModel()), node=node)
+    snap = _snapshot({
+        "web/app/(app)/x/page.tsx": "export default function X(){ return null }",
+        "web/app/globals.css": ":root { --accent: #179463; }",
+    })
+    with patch("app.design_agent.codebase_map.recreate.read_repo", return_value=snap) as mock_read:
+        sources = read_located_sources(located, _INSTALL)
+    extra = mock_read.call_args_list[0].kwargs["extra_paths"]
+    assert "web/app/globals.css" in extra
+    assert "web/app/globals.css" in sources.files
+
+
+def test_assert_bridge_mode_landed_root_v4_none():
+    globals_root = ":root { --accent: #179463; }"
+    assert _assert_bridge_mode_landed("x #179463 y", "css-vars-root", globals_root) is True
+    assert _assert_bridge_mode_landed("no tokens here", "css-vars-root", globals_root) is False
+    globals_v4 = "@theme { --brand: #abcdef; }"
+    assert _assert_bridge_mode_landed("uses #abcdef", "tailwind-v4", globals_v4) is True
+    assert _assert_bridge_mode_landed("anything", "none", "") is True
+
+
+def test_class_signals_derived_from_source_with_floor():
+    """Custom brand utilities are derived from real source AND the shadcn floor
+    is retained."""
+    globals_css = ":root { --accent: #179463; --ink: #15201B; }"
+    screen = 'export default function S(){ return <div className="bg-accent text-ink p-4"/> }'
+    sources = _sources_with_files({
+        "app/globals.css": globals_css,
+        "app/screen.tsx": screen,
+    })
+    expectations = build_theme_expectations(sources)
+    assert expectations is not None
+    assert "bg-accent" in expectations.class_signals
+    # floor retained (shadcn-slot brands still pass)
+    assert "bg-primary" in expectations.class_signals
+
+
+def test_theme_extend_shim_synthesized_no_invention():
+    """A concrete theme.extend colour family is shimmed; a name-only family is not
+    invented."""
+    tailwind = (
+        "module.exports = { theme: { extend: { colors: {"
+        " tertiary: '#abc123', ghost: undefinedRef } } } }"
+    )
+    sources = _sources_with_files({
+        "app/globals.css": ":root { --accent: #179463; }",
+        "tailwind.config.js": tailwind,
+    })
+    bridged = bridge_theme(_SCAFFOLD_CSS, sources, prototype_id=1)
+    assert "--tertiary: #abc123" in bridged
+    assert ".bg-tertiary" in bridged
+    assert ".text-tertiary" in bridged
+    # name-only / reference family with no concrete colour is NOT invented
+    assert "--ghost" not in bridged
+
+
+# ── verb-stem hardening ────────────────────────────────────────────────
+
+def test_test_connection_derives_both_verbs_not_luck():
+    m = _map(nodes=[_node("Settings", "app/settings/page.tsx")])
+    located = LocatedScreen(map_result=m, node=m.nodes[0])
+    scope = derive_interactive_scope("Add a Test Connection button", located)
+    assert "test" in scope
+    assert "connect" in scope
+    scope2 = derive_interactive_scope("testing the export flow", located)
+    assert "test" in scope2
+    assert "export" in scope2
+
+
+def test_verb_stem_word_boundary_no_substring_false_positive():
+    m = _map(nodes=[_node("Page", "app/page/page.tsx")])
+    located = LocatedScreen(map_result=m, node=m.nodes[0])
+    # "contestant" contains "test" only mid-word — must NOT add "test"
+    scope = derive_interactive_scope("The contestant list renders", located)
+    assert "test" not in scope
+
+
+# ── structural parity self-check ───────────────────────────────────────
+
+def _parity_located():
+    shell = ShellModel(brand="Acme", nav_items=[
+        NavItem(label="Dashboard"), NavItem(label="Reports"),
+    ])
+    node = _node("Sources", "app/sources/page.tsx", composed=["Sidebar", "DataTable"])
+    return LocatedScreen(map_result=_map_with_shell(node, shell), node=node)
+
+
+def test_structural_parity_matched_ok():
+    located = _parity_located()
+    generated = (
+        '<div data-brand="Acme">'
+        "<Sidebar/><DataTable/>"
+        "<nav><a>Dashboard</a><a>Reports</a></nav>"
+        "</div>"
+    )
+    report = _assert_structural_parity(generated, None, located.map_result.shell, located)
+    assert isinstance(report, ParityReport)
+    assert report.ok is True
+    assert report.missing == []
+    assert report.extra == []
+
+
+def test_structural_parity_missing_and_extra_detected():
+    located = _parity_located()
+    # omits the brand, the "Reports" nav label, and the DataTable component;
+    # invents a "Billing" nav item with no source basis.
+    generated = (
+        "<Sidebar/>"
+        "<nav><a>Dashboard</a><a>Billing</a></nav>"
+    )
+    report = _assert_structural_parity(generated, None, located.map_result.shell, located)
+    assert report.ok is False
+    assert any("Acme" in m for m in report.missing)
+    assert any("Reports" in m for m in report.missing)
+    assert any("DataTable" in m for m in report.missing)
+    assert "Billing" in report.extra
+
+
+def test_structural_self_check_has_no_dom_or_network():
+    """The self-check is pure string analysis — the module imports no browser or
+    network library."""
+    import app.design_agent.codebase_map.recreate as mod
+    src = Path(mod.__file__).read_text()
+    for forbidden in ("import playwright", "import requests", "selenium", "import urllib", "webdriver"):
+        assert forbidden not in src

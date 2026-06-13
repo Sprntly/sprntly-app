@@ -132,6 +132,15 @@ class ShellModel(BaseModel):
     collapse_model: str = ""
     # "" (none) | "collapsible" | "static" — how the shell collapses
     logo: LogoAsset = Field(default_factory=LogoAsset)
+    shell_file_path: str = ""
+    # the real repo-relative path of the located shell file, when extraction
+    # found one. Empty for a bare (no-shell-file) model. Carried so the recreate
+    # read can fetch the actual shell body directly instead of guessing from a
+    # conventional candidate list.
+    child_component_paths: list[str] = Field(default_factory=list)
+    # reserved: the shell's direct child-component repo paths for a future
+    # map-build-time carry. Left empty today — the located screen's children are
+    # resolved at recreate read time from the screen body, not here.
 
 
 class MapResult(BaseModel):

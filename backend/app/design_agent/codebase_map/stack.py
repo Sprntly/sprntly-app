@@ -384,6 +384,16 @@ def _llm_discover_screens(
         parsed = json.loads(text)
         screens = parsed.get("screens", []) if isinstance(parsed, dict) else []
         return [s for s in screens if isinstance(s, dict)]
+    except json.JSONDecodeError:
+        # A truncated snapshot routinely makes the model emit non-JSON. This is
+        # an EXPECTED degraded-path outcome, not a fault — log at DEBUG so it does
+        # not read as alarming. Behaviour is unchanged: no nodes discovered.
+        logger.debug(
+            "codebase_map.stack repo=%s llm-discovery returned non-JSON"
+            " (truncated snapshot); no nodes",
+            getattr(snapshot, "repo", "?"),
+        )
+        return []
     except Exception as exc:
         logger.warning(
             "codebase_map.stack repo=%s llm-discovery failed: %s",
