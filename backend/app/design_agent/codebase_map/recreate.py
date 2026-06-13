@@ -142,6 +142,11 @@ class RecreateSources:
     files: dict[str, str]
     screen_path: str
     also_screen_paths: tuple[str, ...]
+    # The app-package prefix in front of the conventional app/ src/ pages/ root
+    # (e.g. "web/" for a monorepo where the app lives under web/app/...). Empty
+    # for a single-package, repo-root app. Used by the read-side finders to look
+    # up prefixed theme/shell keys, not just the bare repo-root candidates.
+    app_root_prefix: str = ""
 
 
 @dataclass
@@ -177,11 +182,19 @@ def _normalize_asset_ref(ref: str) -> str:
     return ref
 
 
+def _prefixed_shell_keys(sources: RecreateSources) -> tuple[str, ...]:
+    """Shell candidate lookup keys: app-prefixed (monorepo) THEN bare repo-root."""
+    prefix = sources.app_root_prefix
+    if prefix:
+        return tuple(prefix + c for c in SHELL_CANDIDATES) + SHELL_CANDIDATES
+    return SHELL_CANDIDATES
+
+
 def _find_img_tag_in_shell(
     sources: RecreateSources, src_variants: tuple[str, ...]
 ) -> str:
     """Return the first ``<img>`` tag in any shell candidate that contains a src variant."""
-    for key in SHELL_CANDIDATES:
+    for key in _prefixed_shell_keys(sources):
         body = sources.files.get(key, "")
         if not body:
             continue
@@ -194,7 +207,7 @@ def _find_img_tag_in_shell(
 
 def _find_inline_svg_in_shell(sources: RecreateSources) -> str:
     """Return the first ``<svg>...</svg>`` block found in any shell candidate."""
-    for key in SHELL_CANDIDATES:
+    for key in _prefixed_shell_keys(sources):
         body = sources.files.get(key, "")
         if not body:
             continue
@@ -346,14 +359,38 @@ def _component_paths(m: MapResult, names: list[str]) -> set[str]:
     return {by_name[name] for name in names if name in by_name}
 
 
-def _shell_paths(_m: MapResult) -> set[str]:
-    """Conventional shell file candidates."""
-    return set(SHELL_CANDIDATES)
+def _app_root_prefix(located: LocatedScreen) -> str:
+    """Derive the app-package prefix in front of the conventional source root.
+
+    The shell/theme candidates are repo-root-relative (``app/``, ``src/``,
+    ``pages/``). In a monorepo the app lives under a package dir (e.g.
+    ``web/app/(app)/sources/page.tsx``), so those bare candidates never match.
+    This returns everything BEFORE the first of ``app/``/``src/``/``pages/`` in
+    the located screen's file path (``"web/"`` for the example; ``""`` for a
+    repo-root app or when no marker is found).
+    """
+    file = located.node.file or ""
+    for marker in ("app/", "src/", "pages/"):
+        idx = file.find(marker)
+        if idx != -1:
+            return file[:idx]
+    return ""
 
 
-def _theme_paths(_m: MapResult) -> set[str]:
-    """Conventional theme file candidates (global CSS + Tailwind config)."""
-    return set(THEME_CANDIDATES)
+def _shell_paths(_m: MapResult, prefix: str = "") -> set[str]:
+    """Conventional shell file candidates (bare + prefixed for monorepos)."""
+    out = set(SHELL_CANDIDATES)
+    if prefix:
+        out |= {prefix + c for c in SHELL_CANDIDATES}
+    return out
+
+
+def _theme_paths(_m: MapResult, prefix: str = "") -> set[str]:
+    """Conventional theme file candidates (bare + prefixed for monorepos)."""
+    out = set(THEME_CANDIDATES)
+    if prefix:
+        out |= {prefix + c for c in THEME_CANDIDATES}
+    return out
 
 
 def _asset_paths(m: MapResult) -> set[str]:
@@ -377,6 +414,185 @@ def _asset_paths(m: MapResult) -> set[str]:
     return {ref} if ref else set()
 
 
+# ── Re-export / thin-wrapper following + composed-child resolution ─────────────
+# A located page.tsx is frequently a thin re-export of the real screen impl
+# (e.g. `export { SourcesScreen } from "../../components/screens/app/SourcesScreen"`
+# or an `import { X } from "<rel>"` whose body just renders <X/>). The map's node
+# carries no entry_component/composed_components for these wrappers, so the real
+# screen file is never read and the recreate sees ~159 bytes of indirection.
+# Separately, a screen's rendered children (composed_components NAMES) only
+# resolve to files via the existing route-node table when the child is itself a
+# route node — a menu / icon-set / panel is not, so its real body is never read.
+# Both are closed here by resolving relative / alias module specifiers from the
+# located screen body. Bounded: one level of follow, capped target counts.
+_MAX_REEXPORT_TARGETS = 3
+# Mirrors nodes._MAX_COMPOSED (20): the same magnitude bound on a screen's
+# resolvable rendered children, applied here at read time.
+_MAX_COMPOSED_PATHS = 20
+
+# `export { Foo } from "<rel>"`, `export * from "<rel>"`, `export { default } from "<rel>"`
+_REEXPORT_FROM_RE = re.compile(
+    r"""export\s+(?:\*|\{[^}]*\})\s+from\s+['"]([^'"]+)['"]""",
+)
+# `import { Foo } from "<rel>"` / `import Foo from "<rel>"` — candidate wrapper imports.
+_IMPORT_FROM_RE = re.compile(
+    r"""import\s+(?:\{[^}]*\}|[A-Za-z_$][\w$]*)\s+from\s+['"]([^'"]+)['"]""",
+)
+# Full import statement with its binding clause + module specifier, for matching
+# a rendered child NAME to the module it was imported from.
+_IMPORT_BINDINGS_RE = re.compile(
+    r"""import\s+(?P<bindings>[^;'"]+?)\s+from\s+['"](?P<spec>[^'"]+)['"]""",
+)
+
+
+def _path_variants(joined: str) -> list[str]:
+    """Extension/index candidate paths for a module path without an extension."""
+    if os.path.splitext(joined)[1] in (".tsx", ".ts", ".jsx", ".js"):
+        return [joined]
+    return [
+        f"{joined}.tsx",
+        f"{joined}.ts",
+        f"{joined}/index.tsx",
+        f"{joined}/index.ts",
+    ]
+
+
+def _resolve_rel_to_repo_path(located_file: str, rel: str) -> list[str]:
+    """Resolve a relative module specifier against the located file's directory
+    to a list of candidate repo-relative paths (extension/index variants).
+
+    Only follows TRUE relative specifiers (``./`` or ``../``); bare-package and
+    alias (``@/``) imports are skipped — they are not single-file references we
+    can resolve from the located file's directory alone. Any path that escapes
+    above the repo root is rejected.
+    """
+    if not (rel.startswith("./") or rel.startswith("../")):
+        return []
+    base_dir = os.path.dirname(located_file)
+    joined = os.path.normpath(os.path.join(base_dir, rel))
+    if joined.startswith(".."):
+        return []
+    joined = joined.replace(os.sep, "/")
+    return _path_variants(joined)
+
+
+def _resolve_alias_to_repo_paths(spec: str, app_prefix: str) -> list[str]:
+    """Resolve an ``@/``-aliased specifier against the app-root prefix.
+
+    The alias target convention varies (some repos map ``@/`` to the app root,
+    others to ``<root>/src``); both variants are offered and the reader silently
+    drops the one that does not exist.
+    """
+    if not spec.startswith("@/"):
+        return []
+    rest = spec[2:]
+    out: list[str] = []
+    for base in (app_prefix + rest, app_prefix + "src/" + rest):
+        out.extend(_path_variants(base))
+    return out
+
+
+def _resolve_spec_to_repo_paths(located_file: str, spec: str, app_prefix: str) -> list[str]:
+    """Resolve a module specifier (relative or ``@/`` alias) to candidate paths.
+    Bare-package specifiers (``react``, ``lucide-react``) resolve to nothing."""
+    if spec.startswith("./") or spec.startswith("../"):
+        return _resolve_rel_to_repo_path(located_file, spec)
+    if spec.startswith("@/"):
+        return _resolve_alias_to_repo_paths(spec, app_prefix)
+    return []
+
+
+def _reexport_targets(located_file: str, body: str) -> list[str]:
+    """Return repo-relative candidate paths the located file re-exports/wraps.
+
+    Detects ``export ... from "<rel>"`` first (a hard re-export); falls back to
+    ``import { X } from "<rel>"`` when the body looks like a thin wrapper (small
+    enough to plausibly be one). Bounded to keep the read set small. Returns
+    candidates in priority order, deduped.
+    """
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(rel: str) -> None:
+        for cand in _resolve_rel_to_repo_path(located_file, rel):
+            if cand not in seen:
+                candidates.append(cand)
+                seen.add(cand)
+
+    # Hard re-exports are the strongest signal — always follow these.
+    reexport_rels = _REEXPORT_FROM_RE.findall(body)
+    for rel in reexport_rels:
+        _add(rel)
+
+    # Thin-wrapper heuristic: a tiny page body whose only relative imports are
+    # screen-like. Applied only when there were no hard re-exports and the file
+    # is small enough to plausibly be a wrapper (avoids dragging in the deps of
+    # a real screen).
+    if not reexport_rels and len(body) <= 2_048:
+        for rel in _IMPORT_FROM_RE.findall(body):
+            _add(rel)
+
+    return candidates[:_MAX_REEXPORT_TARGETS]
+
+
+def _parse_binding_names(bindings: str) -> list[str]:
+    """Extract the local names bound by an import clause (default, named, ns)."""
+    names: list[str] = []
+    brace = re.search(r"\{([^}]*)\}", bindings)
+    if brace:
+        for part in brace.group(1).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            local = part.split(" as ")[-1].strip()  # "B as C" -> C; "A" -> A
+            if local:
+                names.append(local)
+    head = bindings[: brace.start()] if brace else bindings
+    for tok in head.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if tok.startswith("* as "):
+            names.append(tok[len("* as "):].strip())
+        elif re.match(r"^[A-Za-z_$][\w$]*$", tok):
+            names.append(tok)
+    return names
+
+
+def _resolve_composed_component_paths(
+    located: LocatedScreen, screen_body: str, app_prefix: str,
+) -> set[str]:
+    """Resolve the located screen's rendered child NAMES to repo paths via the
+    import graph.
+
+    For each ``composed_components`` name, find its ``import { Name } from
+    "<spec>"`` / ``import Name from "<spec>"`` specifier in the screen body and
+    resolve it (``./``/``../`` relative, ``@/`` alias). Bare-package imports are
+    skipped. Complements the route-node lookup in ``_component_paths`` so a
+    child resolves whether or not it is itself a route node. Capped to bound the
+    read set.
+    """
+    names = set(located.node.composed_components)
+    if not names or not screen_body:
+        return set()
+    name_to_spec: dict[str, str] = {}
+    for m in _IMPORT_BINDINGS_RE.finditer(screen_body):
+        spec = m.group("spec")
+        for name in _parse_binding_names(m.group("bindings")):
+            name_to_spec.setdefault(name, spec)
+
+    out: set[str] = set()
+    for name in names:
+        spec = name_to_spec.get(name)
+        if not spec:
+            continue
+        for cand in _resolve_spec_to_repo_paths(located.node.file, spec, app_prefix):
+            out.add(cand)
+            if len(out) >= _MAX_COMPOSED_PATHS:
+                return set(sorted(out)[:_MAX_COMPOSED_PATHS])
+    return out
+
+
 def read_located_sources(
     located: LocatedScreen,
     installation_id: int,
@@ -393,36 +609,99 @@ def read_located_sources(
     token/primitive pre-seed in that case.
     """
     m = located.map_result
-    paths: set[str] = set()
-    if located.node.file:
-        paths.add(located.node.file)
-    paths |= _component_paths(m, list(located.node.composed_components))
-    for extra_node in located.also:
-        if extra_node.file:
-            paths.add(extra_node.file)
-        paths |= _component_paths(m, list(extra_node.composed_components))
-    paths |= _shell_paths(m)
-    paths |= _theme_paths(m)
-    paths |= _asset_paths(m)
+    app_prefix = _app_root_prefix(located)
 
-    extra = sorted(paths)
+    # Children resolvable from the map's node table (no body needed).
+    route_node_paths: set[str] = _component_paths(m, list(located.node.composed_components))
+    for extra_node in located.also:
+        route_node_paths |= _component_paths(m, list(extra_node.composed_components))
+    shell_paths = _shell_paths(m, app_prefix)
+    theme_paths = _theme_paths(m, app_prefix)
+    asset_paths = _asset_paths(m)
+
+    # Place the must-read set (located screen + its map-resolved children + the
+    # theme/shell candidates that carry globals.css) at the FRONT of extra so the
+    # extras-first + always_fetch budget in read_repo fetches them even when the
+    # full candidate set exceeds the per-build file cap; everything else trails.
+    must_read: list[str] = []
+    seen_mr: set[str] = set()
+
+    def _push(path: str) -> None:
+        if path and path not in seen_mr:
+            must_read.append(path)
+            seen_mr.add(path)
+
+    _push(located.node.file)
+    for extra_node in located.also:
+        _push(extra_node.file)
+    for path in sorted(route_node_paths):
+        _push(path)
+    for path in sorted(theme_paths):
+        _push(path)
+    for path in sorted(shell_paths):
+        _push(path)
+    rest = [p for p in sorted(asset_paths) if p not in seen_mr]
+    extra = must_read + rest
+
     snapshot = read_repo(
         installation_id,
         m.repo,
         m.commit_sha,
         extra_paths=extra,
+        frontend_root=app_prefix,
     )
     if snapshot is None:
         return None
 
     requested = set(extra)
     files = {p: snapshot.files[p] for p in requested if p in snapshot.files}
+
+    # The located page (and any `also` screens) are often thin re-exports of the
+    # real screen impl, and a screen's rendered children may not be route nodes —
+    # neither is captured by the map. Inspect the located bodies just read,
+    # resolve their re-export target(s) + composed-child specifiers, and do ONE
+    # more bounded read for any that are new, merging the real bodies into files
+    # so they feed both the prompt reference list AND the theme/shell scan.
+    located_files = [located.node.file] + [n.file for n in located.also if n.file]
+    followup: list[str] = []
+    followup_seen: set[str] = set(requested)
+
+    def _add_followup(path: str) -> None:
+        if path and path not in followup_seen:
+            followup.append(path)
+            followup_seen.add(path)
+
+    primary_body = files.get(located.node.file, "")
+    for child_path in _resolve_composed_component_paths(located, primary_body, app_prefix):
+        _add_followup(child_path)
+    for lf in located_files:
+        body = files.get(lf, "")
+        if not body:
+            continue
+        for target in _reexport_targets(lf, body):
+            _add_followup(target)
+
+    if followup:
+        followup_paths = sorted(set(followup))
+        snapshot2 = read_repo(
+            installation_id,
+            m.repo,
+            m.commit_sha,
+            extra_paths=followup_paths,
+            frontend_root=app_prefix,
+        )
+        if snapshot2 is not None:
+            for p in followup_paths:
+                if p in snapshot2.files and p not in files:
+                    files[p] = snapshot2.files[p]
+
     return RecreateSources(
         repo=m.repo,
         commit_sha=m.commit_sha,
         files=files,
         screen_path=located.node.file,
         also_screen_paths=tuple(n.file for n in located.also if n.file),
+        app_root_prefix=app_prefix,
     )
 
 
@@ -501,7 +780,12 @@ _V4_THEME_BLOCK_RE = re.compile(r"@theme\s*\{")
 
 
 def _find_globals_css(sources: RecreateSources) -> str:
+    prefix = sources.app_root_prefix
     for key in _CSS_GLOBALS_KEYS:
+        if prefix:
+            body = sources.files.get(prefix + key, "")
+            if body:
+                return body
         body = sources.files.get(key, "")
         if body:
             return body
@@ -509,7 +793,12 @@ def _find_globals_css(sources: RecreateSources) -> str:
 
 
 def _find_tailwind_config(sources: RecreateSources) -> str:
+    prefix = sources.app_root_prefix
     for key in _TAILWIND_CONFIG_KEYS:
+        if prefix:
+            body = sources.files.get(prefix + key, "")
+            if body:
+                return body
         body = sources.files.get(key, "")
         if body:
             return body
@@ -790,16 +1079,42 @@ def assert_theme_landed(
     blob = "\n".join(dist_files.values())
     missing: list[tuple[str, str]] = []
 
+    token_missing: list[tuple[str, str]] = []
     for token_val in expected.token_signals:
         if token_val not in blob:
-            missing.append(("token", token_val))
+            token_missing.append(("token", token_val))
 
+    font_missing: list[tuple[str, str]] = []
     for font in expected.font_families:
         if font not in blob:
-            missing.append(("font", font))
+            font_missing.append(("font", font))
 
-    if expected.class_signals and not any(c in blob for c in expected.class_signals):
-        missing.append(("class", expected.class_signals[0]))
+    missing.extend(token_missing)
+    missing.extend(font_missing)
+
+    # class_signals are shadcn utility strings (bg-primary, text-foreground, …).
+    # A brand built on raw design tokens (e.g. hsl/hex variables) legitimately
+    # styles via the bridged token VALUES + font families without ever emitting
+    # these shadcn slot utilities — so a class-signal miss alone is NOT proof the
+    # theme failed to bridge. Treat class_signals as a SOFT signal: it binds only
+    # when neither token nor font signals confirmed the bridge (the last line of
+    # defence). When tokens AND fonts both landed, a class miss is advisory
+    # (log-only), never a gate failure.
+    token_landed = bool(expected.token_signals) and not token_missing
+    font_landed = bool(expected.font_families) and not font_missing
+    class_landed = (
+        not expected.class_signals
+        or any(c in blob for c in expected.class_signals)
+    )
+    if not class_landed:
+        if token_landed and font_landed:
+            logger.info(
+                "design_agent.theme_class_signal_advisory missing=%s"
+                " (token+font landed; class signal is soft)",
+                expected.class_signals[0],
+            )
+        else:
+            missing.append(("class", expected.class_signals[0]))
 
     if expected.asset_basename:
         in_blob = expected.asset_basename in blob
