@@ -355,6 +355,7 @@ def extract_shell(snapshot: RepoSnapshot) -> ShellModel:
         nav_items=nav_items,
         collapse_model=collapse,
         logo=logo,
+        shell_file_path=path or "",
     )
 
 

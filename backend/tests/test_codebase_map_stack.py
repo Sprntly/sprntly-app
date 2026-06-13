@@ -337,3 +337,50 @@ def test_no_prohibited_tokens_in_source():
             assert not pattern.search(line), (
                 f"Prohibited token in {target.name}:{lineno}: {line.strip()}"
             )
+
+
+# ── LLM-discovery defensive parse ────────────────────────────────────────────
+
+import logging  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+
+def _disco_snap(**files):
+    return RepoSnapshot(
+        repo="org/repo", commit_sha="sha", branch="main",
+        tree_paths=list(files.keys()), files=files,
+    )
+
+
+def test_llm_discovery_non_json_caught_debug_returns_empty(caplog):
+    """A non-JSON model response (truncated snapshot) is caught as JSONDecodeError,
+    logged at DEBUG (not WARNING), and yields []."""
+    from app.design_agent.codebase_map.stack import _llm_discover_screens
+    client = MagicMock()
+    client.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(text="this is not json at all {")]
+    )
+    snap = _disco_snap(**{"src/index.ts": "export const x = 1"})
+    with caplog.at_level(logging.DEBUG):
+        result = _llm_discover_screens(snap, client=client)
+    assert result == []
+    assert any(
+        r.levelno == logging.DEBUG and "non-JSON" in r.getMessage()
+        for r in caplog.records
+    )
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_llm_discovery_transport_error_warns(caplog):
+    """A genuine transport/SDK error still logs at WARNING and yields []."""
+    from app.design_agent.codebase_map.stack import _llm_discover_screens
+    client = MagicMock()
+    client.messages.create.side_effect = RuntimeError("connection reset")
+    snap = _disco_snap(**{"src/index.ts": "export const x = 1"})
+    with caplog.at_level(logging.DEBUG):
+        result = _llm_discover_screens(snap, client=client)
+    assert result == []
+    assert any(
+        r.levelno == logging.WARNING and "failed" in r.getMessage()
+        for r in caplog.records
+    )

@@ -61,8 +61,13 @@ def test_clean_via_route_table_only():
     assert result.route_table_files  # non-empty
 
 
-def test_partial_filesystem_fallback():
-    """Snapshot with only next-app page files and no registry → PARTIAL, next-app convention."""
+def test_filesystem_next_app_promoted_to_clean():
+    """A filesystem-routed next-app with page files and no registry → CLEAN.
+
+    The App-Router tree is a deterministic, fully-enumerable source of truth, so
+    its completeness is certifiable even without a typed route registry. This is
+    filesystem-CLEAN, distinct from registry-CLEAN: registry_file stays empty.
+    """
     snap = _snap_with_tree(
         tree_paths=["app/team/page.tsx", "app/settings/page.tsx"],
         files={
@@ -71,18 +76,23 @@ def test_partial_filesystem_fallback():
         },
     )
     result = probe_nav_abstraction(snap)
-    assert result.posture == "PARTIAL"
+    assert result.posture == "CLEAN"
     assert result.registry_file == ""
+    assert result.route_table_files == []
     assert result.router_convention == "next-app"
 
 
 def test_comment_mention_does_not_flip_clean():
-    """A file containing only a comment mentioning ScreenId does NOT flip posture to CLEAN."""
+    """A file containing only a comment mentioning ScreenId does NOT flip posture to CLEAN.
+
+    Uses a non-Next filesystem tree (no app/**/page.*) so the only possible CLEAN
+    trigger is the registry path — which a mere comment mention must not satisfy.
+    """
     snap = _snap(**{
         "src/todo.ts": "// ScreenId is planned for a future refactor\n",
-        "app/home/page.tsx": "export default function Home() {}",
+        "src/home.tsx": "export default function Home() {}",
     })
-    snap.tree_paths = ["src/todo.ts", "app/home/page.tsx"]
+    snap.tree_paths = ["src/todo.ts", "src/home.tsx"]
     result = probe_nav_abstraction(snap)
     assert result.posture == "PARTIAL"
 
@@ -341,3 +351,57 @@ def test_no_prohibited_tokens_in_source():
                 assert not pattern.search(line), (
                     f"Prohibited token found in {path}:{lineno}: {line.rstrip()}"
                 )
+
+
+# ── filesystem-Next CLEAN promotion: negative + unchanged cases ──────────────
+
+def test_unknown_and_react_router_stay_partial():
+    """Conventions whose completeness is not certifiable stay PARTIAL."""
+    # react-router: a route table in source, but no typed registry/route-table
+    # const that the CLEAN regexes recognize → PARTIAL, not promoted.
+    rr = _snap_with_tree(
+        tree_paths=["src/App.tsx"],
+        files={"src/App.tsx": "<Routes><Route path='/x' element={<X/>} /></Routes>"},
+    )
+    rr_result = probe_nav_abstraction(rr)
+    assert rr_result.router_convention == "react-router"
+    assert rr_result.posture == "PARTIAL"
+
+    # generic filesystem (no Next page convention, no router lib) → PARTIAL
+    fs = _snap_with_tree(
+        tree_paths=["src/util.ts"],
+        files={"src/util.ts": "export const x = 1"},
+    )
+    fs_result = probe_nav_abstraction(fs)
+    assert fs_result.router_convention in ("filesystem", "")
+    assert fs_result.posture == "PARTIAL"
+
+
+def test_next_dep_no_page_files_stays_partial():
+    """A repo with no app/**/page.* (or pages/**) file is not a certifiable Next
+    filesystem source of truth → stays PARTIAL (the convention is not next-*)."""
+    snap = _snap_with_tree(
+        tree_paths=["src/index.ts", "next.config.js"],
+        files={
+            "src/index.ts": "export const x = 1",
+            "next.config.js": "module.exports = {}",
+        },
+    )
+    result = probe_nav_abstraction(snap)
+    assert result.router_convention not in ("next-app", "next-pages")
+    assert result.posture == "PARTIAL"
+
+
+def test_registry_clean_path_unchanged():
+    """The typed-registry CLEAN path is unaffected by the filesystem promotion:
+    registry_file is still populated."""
+    snap = _snap(**{
+        "src/navigation.ts": (
+            "export enum ScreenId { Team }\n"
+            "export const ROUTES: Record<ScreenId, string> = { [ScreenId.Team]: '/team' };\n"
+        ),
+        "app/team/page.tsx": "export default function Team(){ return null }",
+    })
+    result = probe_nav_abstraction(snap)
+    assert result.posture == "CLEAN"
+    assert result.registry_file != ""

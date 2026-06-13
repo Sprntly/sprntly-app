@@ -563,3 +563,108 @@ def test_no_prohibited_tokens_in_source():
         source = (root / relpath).read_text()
         matches = pattern.findall(source)
         assert not matches, f"{relpath} contains prohibited tokens: {matches}"
+
+
+# ── route-group strip (runtime route normalization) ──────────────────────────
+
+def test_route_group_stripped_single_and_nested_and_dynamic():
+    """Next (group) folders are stripped from the runtime route/id; nested groups
+    and dynamic segments handled; a non-group route is unchanged."""
+    snap = _snap(tree_paths=[
+        "app/(app)/sources/page.tsx",
+        "app/(marketing)/(app)/pricing/page.tsx",
+        "app/(app)/users/[id]/page.tsx",
+        "app/dashboard/page.tsx",
+    ], **{
+        "app/(app)/sources/page.tsx": "export default function S(){return null}",
+        "app/(marketing)/(app)/pricing/page.tsx": "export default function P(){return null}",
+        "app/(app)/users/[id]/page.tsx": "export default function U(){return null}",
+        "app/dashboard/page.tsx": "export default function D(){return null}",
+    })
+    nodes = extract_nodes(snap, _partial_probe("next-app"))
+    route_nodes = [n for n in nodes if n.kind == "route"]
+    routes = {n.route for n in route_nodes}
+    assert "/sources" in routes
+    assert "/pricing" in routes
+    assert "/users/:id" in routes
+    assert "/dashboard" in routes
+    for n in route_nodes:
+        assert "(" not in n.route and "(" not in n.id
+        assert n.id == n.route
+
+
+def test_route_group_strip_preserves_file_path():
+    """The on-disk file path keeps the real (group) folder; only route/id normalize."""
+    snap = _snap(tree_paths=["app/(app)/sources/page.tsx"], **{
+        "app/(app)/sources/page.tsx": "export default function S(){return null}",
+    })
+    nodes = extract_nodes(snap, _partial_probe("next-app"))
+    src = next(n for n in nodes if n.route == "/sources")
+    assert src.file == "app/(app)/sources/page.tsx"
+
+
+# ── child-component path resolution (deep-read seam) ─────────────────────────
+
+def test_resolve_child_paths_relative_and_alias_skip_bare():
+    from app.design_agent.codebase_map.nodes import _resolve_child_component_paths
+    body = (
+        "import { Menu } from './components/Menu'\n"
+        "import Sidebar from '@/components/Sidebar'\n"
+        "import { useState } from 'react'\n"
+        "import { Star } from 'lucide-react'\n"
+        "export default function Screen(){ return (<div><Menu/><Sidebar/><Star/></div>) }\n"
+    )
+    snap = _snap(**{
+        "src/screens/Screen.tsx": body,
+        "src/screens/components/Menu.tsx": "export const Menu=()=>null",
+        "src/components/Sidebar.tsx": "export const Sidebar=()=>null",
+    })
+    paths = _resolve_child_component_paths("src/screens/Screen.tsx", snap, {"@/*": "src/*"})
+    assert "src/screens/components/Menu.tsx" in paths
+    assert "src/components/Sidebar.tsx" in paths
+    # bare-package imports skipped even when rendered (Star from lucide-react)
+    assert not any("lucide" in p or p == "react" for p in paths)
+
+
+def test_resolve_child_paths_only_rendered_imports_and_capped():
+    from app.design_agent.codebase_map.nodes import (
+        _resolve_child_component_paths,
+        _MAX_COMPOSED,
+    )
+    # imported-but-not-rendered components are NOT followed
+    body = (
+        "import { Used } from './Used'\n"
+        "import { Unused } from './Unused'\n"
+        "export default function S(){ return <Used/> }\n"
+    )
+    snap = _snap(**{
+        "a/S.tsx": body,
+        "a/Used.tsx": "export const Used=()=>null",
+        "a/Unused.tsx": "export const Unused=()=>null",
+    })
+    paths = _resolve_child_component_paths("a/S.tsx", snap)
+    assert "a/Used.tsx" in paths
+    assert "a/Unused.tsx" not in paths
+
+    # capped at _MAX_COMPOSED
+    n = _MAX_COMPOSED + 5
+    imports = "".join(f"import {{ C{i} }} from './C{i}'\n" for i in range(n))
+    tags = "".join(f"<C{i}/>" for i in range(n))
+    files = {f"b/C{i}.tsx": "export const x=1" for i in range(n)}
+    files["b/S.tsx"] = f"{imports}export default function S(){{return <div>{tags}</div>}}"
+    snap2 = _snap(**files)
+    capped = _resolve_child_component_paths("b/S.tsx", snap2)
+    assert len(capped) <= _MAX_COMPOSED
+
+
+def test_extract_composed_components_name_output_unchanged():
+    """The NAME list (consumed by edge/route code) is the sorted import∩tag set."""
+    from app.design_agent.codebase_map.nodes import _extract_composed_components
+    body = (
+        "import { Hero } from './Hero'\n"
+        "import Footer from './Footer'\n"
+        "import { useState } from 'react'\n"
+        "export default function S(){ return (<div><Hero/><Footer/></div>) }\n"
+    )
+    snap = _snap(**{"a/S.tsx": body})
+    assert _extract_composed_components("a/S.tsx", snap) == ["Footer", "Hero"]

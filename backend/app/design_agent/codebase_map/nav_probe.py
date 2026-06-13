@@ -157,6 +157,18 @@ def probe_nav_abstraction(snapshot: RepoSnapshot) -> ProbeResult:
     convention = _detect_router_convention(snapshot)
     result.router_convention = convention
 
+    # A filesystem-routed Next App/Pages Router is a deterministic, fully-
+    # enumerable source of truth: its route set is certifiable for completeness
+    # from the tree alone, even without a typed route registry. Promote it to
+    # CLEAN (distinct from registry-CLEAN — the signal here is the filesystem
+    # convention, so registry_file / route_table_files stay empty). Other
+    # conventions (react-router / filesystem / unknown) stay PARTIAL: their
+    # completeness is genuinely not certifiable. The convention label is only
+    # set to next-app/next-pages when a real page file matched, so a Next repo
+    # with zero page files stays PARTIAL here.
+    if result.posture == "PARTIAL" and convention in ("next-app", "next-pages"):
+        result.posture = "CLEAN"
+
     logger.info(
         "codebase_map.nav_probe repo=%s posture=%s primitive=%s convention=%s registry=%s",
         snapshot.repo,

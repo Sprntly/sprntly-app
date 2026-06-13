@@ -60,6 +60,20 @@ _NEXT_APP_PAGE_RE = re.compile(r"(?:^|/)app/(.*?)/page\.[jt]sx?$")
 _NEXT_PAGES_PAGE_RE = re.compile(r"(?:^|/)pages/(.+)\.[jt]sx?$")
 # dynamic segment: [id] → :id
 _DYNAMIC_SEGMENT_RE = re.compile(r"\[([^\]]+)\]")
+# Next App Router (group) folder — an organizational folder that does NOT appear
+# in the runtime URL (e.g. app/(app)/sources → /sources). The optional leading
+# slash lets a leading or mid-path group be removed without leaving a stray "/".
+_ROUTE_GROUP_RE = re.compile(r"/?\([^)]+\)")
+
+
+def _build_route(segments: str) -> str:
+    """Build a runtime route from a captured path segment string: strip Next
+    (group) folders, map [param] → :param, collapse any double slash, and
+    normalize the trailing slash. The on-disk file path is NOT affected."""
+    segments = _ROUTE_GROUP_RE.sub("", segments)
+    route = "/" + _DYNAMIC_SEGMENT_RE.sub(lambda mm: ":" + mm.group(1), segments)
+    route = re.sub(r"/{2,}", "/", route)
+    return route.rstrip("/") or "/"
 
 
 def extract_nodes(snapshot: RepoSnapshot, probe: ProbeResult) -> list[ScreenNode]:
@@ -238,8 +252,7 @@ def _extract_next_app(snapshot: RepoSnapshot) -> list[ScreenNode]:
         if not m:
             continue
         segments = m.group(1)  # everything between app/ and /page.tsx
-        route = "/" + _DYNAMIC_SEGMENT_RE.sub(lambda mm: ":" + mm.group(1), segments)
-        route = route.rstrip("/") or "/"
+        route = _build_route(segments)
 
         body = snapshot.files.get(path, "")
         component = _parse_default_export(body) if body else ""
@@ -271,7 +284,7 @@ def _extract_next_pages(snapshot: RepoSnapshot) -> list[ScreenNode]:
         if rel == "index":
             route = "/"
         else:
-            route = "/" + _DYNAMIC_SEGMENT_RE.sub(lambda mm: ":" + mm.group(1), rel)
+            route = _build_route(rel)
 
         body = snapshot.files.get(path, "")
         component = _parse_default_export(body) if body else ""
@@ -406,6 +419,71 @@ def resolve_specifier(
         return None
 
     return base + _RESOLVE_EXTENSIONS[0]
+
+
+# Full import statement capturing the bound names AND the module specifier, so a
+# rendered child NAME can be mapped back to the module it was imported from.
+_IMPORT_WITH_SPEC_RE = re.compile(
+    r"""import\s+(?P<bindings>[^;'"]+?)\s+from\s+['"](?P<spec>[^'"]+)['"]"""
+)
+
+
+def _binding_names(bindings: str) -> list[str]:
+    """Extract the local names bound by an import clause (default, named, ns)."""
+    names: list[str] = []
+    brace = re.search(r"\{([^}]*)\}", bindings)
+    if brace:
+        for part in brace.group(1).split(","):
+            local = part.strip().split(" as ")[-1].strip()  # "B as C" -> C; "A" -> A
+            if local:
+                names.append(local)
+        head = bindings[: brace.start()]
+    else:
+        head = bindings
+    for tok in head.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if tok.startswith("* as "):
+            names.append(tok[len("* as "):].strip())
+        elif re.match(r"^[A-Za-z_$][\w$]*$", tok):
+            names.append(tok)
+    return names
+
+
+def _resolve_child_component_paths(
+    file_path: str,
+    snapshot: RepoSnapshot,
+    alias_roots: dict[str, str] | None = None,
+) -> list[str]:
+    """Resolve a screen file's directly-rendered child components to repo paths.
+
+    Follows ONE level: for each component imported AND rendered as a PascalCase
+    JSX tag in the file, resolve its import specifier to a repo-relative path via
+    :func:`resolve_specifier` (``./``/``../`` against the file's directory, ``@/``
+    aliases against the stack's alias map, bare-package imports skipped). Deduped,
+    capped at ``_MAX_COMPOSED``. Does NOT change ``_extract_composed_components``
+    — that NAME output is consumed by edge/route code and is left intact.
+    """
+    body = snapshot.files.get(file_path, "")
+    if not body:
+        return []
+    aliases = alias_roots or {}
+    jsx_tags: set[str] = set(_JSX_TAG_RE.findall(body))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _IMPORT_WITH_SPEC_RE.finditer(body):
+        names = _binding_names(m.group("bindings"))
+        if not any(name in jsx_tags for name in names):
+            continue  # only follow imports actually rendered as JSX
+        resolved = resolve_specifier(m.group("spec"), file_path, aliases, snapshot)
+        if resolved and resolved not in seen:
+            out.append(resolved)
+            seen.add(resolved)
+            if len(out) >= _MAX_COMPOSED:
+                break
+    return out
 
 
 # ── shared section-node construction ───────────────────────────────────────────
