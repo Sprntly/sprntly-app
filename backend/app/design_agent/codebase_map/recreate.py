@@ -809,3 +809,219 @@ def assert_theme_landed(
 
     if missing:
         raise ThemeBridgeError(f"theme did not bridge to dist: {missing}")
+
+
+# ── Interactivity-containment self-check ──────────────────────────────────────
+# Two independent axes govern a recreate: the screen is RENDERED faithfully, but
+# interactivity is SCOPED to exactly the PRD's interactions — every other control
+# renders faithfully yet inert. `derive_interactive_scope` derives that scope
+# deterministically from the PRD text + the located node (no upstream object
+# carries `interactive_scope`; this is its sole producer), and `assert_containment`
+# greps the generated source to confirm the agent kept to it. Both are pure
+# string/regex — no LLM, no network. `assert_containment` sits beside
+# `assert_theme_landed` on the recreate post-gen gate path; unlike the theme gate
+# (which greps the built dist) it greps the agent's generated SOURCE, where the
+# event handlers live before the build strips them.
+
+# Interaction verbs/affordances a PRD may name. Each is a scope STEM that
+# `assert_containment` matches (case-insensitive substring) against the bound
+# handler identifier — e.g. "reconnect" attributes a handler bound to
+# `handleReconnect`/`onReconnect`; "expand" attributes `toggleExpand`.
+_INTERACTION_VERBS: tuple[str, ...] = (
+    "reconnect", "connect", "disconnect",
+    "expand", "collapse", "toggle",
+    "filter", "sort", "search",
+    "submit", "save", "send", "add", "create",
+    "remove", "delete", "edit", "update",
+    "open", "close", "refresh", "retry",
+    "select", "upload", "download",
+    "approve", "reject", "apply", "cancel",
+    "navigate",
+)
+
+# Verbs that EXTEND an already-interactive surface: the PRD interaction must
+# drive existing behaviour to work, so the minimal existing behaviour stays live
+# (the entangled case). Each maps to the extra behaviour stem(s) that legitimately
+# remain in scope — included ONLY when the PRD signals it extends a live surface.
+_ENTANGLED_DRIVERS: dict[str, tuple[str, ...]] = {
+    "filter": ("render", "list", "results"),
+    "sort": ("render", "list", "results"),
+    "search": ("render", "list", "results"),
+}
+
+# Cues that the PRD feature extends an EXISTING live surface (vs an isolated
+# handler on a static screen). Presence gates the entangled-driver expansion so
+# an isolated feature does not silently widen its own scope.
+_ENTANGLED_CUES: tuple[str, ...] = (
+    "existing", "already", "live", "current",
+    "this table", "this list", "the table", "the list",
+)
+
+# Scope stems that authorise a live href: navigation is a legitimate PRD
+# interaction, so a href is only a containment leak on non-navigation chrome.
+_NAV_STEMS: frozenset[str] = frozenset({"navigate", "link", "route"})
+
+# A live React event-handler attribute; the JSX expression container opens at the
+# trailing brace. Anchored so `onClick`/`onSubmit`/`onChange` are matched but not
+# substrings of unrelated identifiers.
+_HANDLER_ATTR_RE = re.compile(r"\b(on(?:Click|Submit|Change))\b\s*=\s*\{", re.IGNORECASE)
+# A href attribute; the alternatives capture an expression / double- / single-
+# quoted target so an empty or "#" target can be treated as inert.
+_HREF_RE = re.compile(
+    r"\bhref\s*=\s*(?:\{([^}]*)\}|\"([^\"]*)\"|'([^']*)')", re.IGNORECASE
+)
+# Interactive-looking elements that need a live handler OR a deliberate inert cue.
+_BUTTON_TAG_RE = re.compile(r"<button\b[^>]*>", re.IGNORECASE)
+_ROLE_BUTTON_TAG_RE = re.compile(
+    r"<[A-Za-z][\w.]*\b[^>]*\brole\s*=\s*[\"']button[\"'][^>]*>", re.IGNORECASE
+)
+# Affordances that mark an inert control as DELIBERATELY non-interactive.
+# `disabled` + `cursor-not-allowed` is the shipped default (see below).
+_INERT_AFFORDANCES: tuple[str, ...] = (
+    "disabled",
+    "cursor-not-allowed",
+    "aria-disabled",
+    "data-inert",
+    "data-out-of-scope",
+)
+
+
+@dataclass(frozen=True)
+class ContainmentReport:
+    """Result of the post-gen interactivity-containment self-check.
+
+    handler_count: live onClick/onSubmit/onChange handlers in the generated source.
+    href_count: live href attributes (non-empty, non-"#" target).
+    prd_scope: the derived interactive scope this output was checked against.
+    extra_handlers: handlers not attributable to any scope stem — containment leaks.
+    inert_without_affordance: interactive-looking controls (``<button>`` /
+        ``role="button"``) with NO handler AND no deliberate inert cue
+        (``disabled`` / ``cursor-not-allowed`` / a scope cue) — silent dead clicks.
+    ok: True when extra_handlers is empty AND inert_without_affordance is empty
+        AND there is no live href on non-navigation chrome. ``ok=False`` is a loud
+        signal — over-interactivity (a containment leak) and silent-broken-inert
+        are both failures.
+    """
+
+    handler_count: int
+    href_count: int
+    prd_scope: list[str]
+    extra_handlers: list[str]
+    inert_without_affordance: list[str]
+    ok: bool
+
+
+def derive_interactive_scope(
+    prd_text: str,
+    located_screen: LocatedScreen,
+) -> list[str]:
+    """Derive the PRD's interactive scope as a list of handler-name STEMS.
+
+    Deterministic (regex over the PRD text) — no LLM call, and no upstream
+    object carrying ``interactive_scope``: this is the sole producer. The
+    returned stems are the named interactions the PRD asks for; for an entangled
+    feature — one that extends an already-interactive surface — the scope ALSO
+    includes the minimal existing behaviour the PRD interaction must drive, so
+    legitimate entanglement is not later mistaken for a containment leak. When a
+    PRD names interactions ambiguously we derive the smallest defensible scope
+    and let ``assert_containment`` flag over-interactivity loudly rather than
+    silently widening.
+
+    ``located_screen`` is accepted (the located node the scope is checked
+    against) so the derivation can be sharpened with the target node later;
+    today the scope is derived from the PRD verbs alone.
+    """
+    text = (prd_text or "").lower()
+    entangled = any(cue in text for cue in _ENTANGLED_CUES)
+    scope: list[str] = []
+    for verb in _INTERACTION_VERBS:
+        if re.search(rf"\b{verb}", text) and verb not in scope:
+            scope.append(verb)
+            if entangled:
+                for driver in _ENTANGLED_DRIVERS.get(verb, ()):
+                    if driver not in scope:
+                        scope.append(driver)
+    return scope
+
+
+def _brace_body(src: str, open_idx: int) -> str:
+    """Return the text inside the JSX expression container that opens at
+    ``open_idx`` (the index of the ``{``), balancing nested braces so an arrow
+    body with its own ``{...}`` is captured whole."""
+    depth = 0
+    for i in range(open_idx, len(src)):
+        c = src[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return src[open_idx + 1:i]
+    return src[open_idx + 1:]
+
+
+def assert_containment(
+    generated_source: str,
+    interactive_scope: list[str],
+) -> ContainmentReport:
+    """Confirm the generated source kept interactivity SCOPED to the PRD.
+
+    Deterministic grep over the generated output (no LLM): count live handlers
+    and hrefs, attribute each handler to a scope stem by name proximity, and
+    flag (a) handlers outside the scope as containment leaks and (b)
+    interactive-looking controls left inert WITHOUT a deliberate affordance as
+    silent dead clicks. Returns a :class:`ContainmentReport`; ``ok=False`` is the
+    loud signal the post-gen gate acts on (it does not raise — the caller decides
+    how to fail, mirroring how ``assert_theme_landed`` is wired by the gate).
+
+    The inert-affordance default checked here is "visibly disabled" — see the
+    pending-product-decision note on the recreate discipline; it is a DEFAULT,
+    not a settled rule.
+    """
+    src = generated_source or ""
+    scope = [s.strip().lower() for s in interactive_scope if s and s.strip()]
+
+    handler_labels: list[str] = []
+    extra_handlers: list[str] = []
+    for m in _HANDLER_ATTR_RE.finditer(src):
+        attr = m.group(1)
+        open_idx = m.end() - 1  # the trailing '{' the pattern ends on
+        binding = _brace_body(src, open_idx).strip()
+        label = f"{attr}={{{binding[:48]}}}" if binding else attr
+        handler_labels.append(label)
+        if not any(stem in binding.lower() for stem in scope):
+            extra_handlers.append(label)
+
+    href_count = 0
+    for m in _HREF_RE.finditer(src):
+        target = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+        if target and target != "#":
+            href_count += 1
+    nav_in_scope = any(stem in _NAV_STEMS for stem in scope)
+
+    inert_without_affordance: list[str] = []
+    seen_spans: set[int] = set()
+    for tag_re in (_BUTTON_TAG_RE, _ROLE_BUTTON_TAG_RE):
+        for m in tag_re.finditer(src):
+            if m.start() in seen_spans:
+                continue
+            seen_spans.add(m.start())
+            tag = m.group(0)
+            has_handler = bool(_HANDLER_ATTR_RE.search(tag))
+            has_affordance = any(a in tag.lower() for a in _INERT_AFFORDANCES)
+            if not has_handler and not has_affordance:
+                inert_without_affordance.append(tag[:60])
+
+    ok = (
+        not extra_handlers
+        and not inert_without_affordance
+        and (href_count == 0 or nav_in_scope)
+    )
+    return ContainmentReport(
+        handler_count=len(handler_labels),
+        href_count=href_count,
+        prd_scope=list(scope),
+        extra_handlers=extra_handlers,
+        inert_without_affordance=inert_without_affordance,
+        ok=ok,
+    )

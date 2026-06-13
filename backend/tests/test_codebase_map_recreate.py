@@ -24,16 +24,19 @@ from types import SimpleNamespace
 
 from app.design_agent.codebase_map.recreate import (
     BrandAssetCarry,
+    ContainmentReport,
     LocatedScreen,
     RecreateSources,
     SHELL_CANDIDATES,
     THEME_CANDIDATES,
     ThemeExpectations,
     _SCAFFOLD_DEFAULT_VALUES,
+    assert_containment,
     assert_theme_landed,
     bridge_theme,
     build_theme_expectations,
     carry_brand_asset,
+    derive_interactive_scope,
     port_tailwind_extend,
     read_located_sources,
     recreate_pre_seed,
@@ -1066,3 +1069,167 @@ def test_theme_gate_logs_signal_counts_only(caplog):
         assert_theme_landed(bad_dist, expectations)
     error_msg = str(exc_info.value)
     assert "/* empty */" not in error_msg  # CSS body not leaked into error
+
+
+# ── interactivity scope derivation ────────────────────────────────────────────
+
+
+def _located(component: str = "Home", file: str = "src/Home.tsx") -> LocatedScreen:
+    m = _map(nodes=[_node(component, file)])
+    return LocatedScreen(map_result=m, node=m.nodes[0])
+
+
+def test_derive_interactive_scope_isolated():
+    """A PRD naming isolated interactions yields a non-empty stem list, derived
+    here (no upstream object carries it)."""
+    prd = (
+        "Let the user reconnect a dropped integration. Each row should expand "
+        "and collapse via a toggle."
+    )
+    scope = derive_interactive_scope(prd, _located())
+    assert isinstance(scope, list) and scope, "scope must be a non-empty list"
+    assert "reconnect" in scope
+    assert "expand" in scope
+    # No entangle cue → no widening with existing-behaviour drivers.
+    assert "render" not in scope
+    assert "results" not in scope
+
+
+def test_derive_interactive_scope_entangled_includes_required_existing():
+    """When the feature extends an already-interactive surface, the derived
+    scope ALSO includes the minimal existing behaviour the interaction drives."""
+    prd = (
+        "Introduce a filter on the existing live results table; choosing a "
+        "filter must re-render the results list."
+    )
+    scope = derive_interactive_scope(prd, _located())
+    assert "filter" in scope
+    # the minimal existing behaviour the filter must drive is part of the scope
+    assert any(driver in scope for driver in ("render", "list", "results"))
+
+
+# ── containment self-check ────────────────────────────────────────────────────
+
+
+def test_containment_clean_pass():
+    """Handlers == the derived scope, 0 href, no silent inert chrome → ok."""
+    scope = ["reconnect", "expand"]
+    src = (
+        '<button onClick={handleReconnect}>Reconnect</button>\n'
+        '<button onClick={toggleExpand}>Expand</button>'
+    )
+    report = assert_containment(src, scope)
+    assert isinstance(report, ContainmentReport)
+    assert report.ok is True
+    assert report.handler_count == 2
+    assert report.href_count == 0
+    assert report.extra_handlers == []
+    assert report.inert_without_affordance == []
+
+
+def test_containment_extra_handler_fails():
+    """A non-PRD button carrying a live handler is a containment leak."""
+    scope = ["reconnect"]
+    src = (
+        '<button onClick={handleReconnect}>Reconnect</button>\n'
+        '<button onClick={handleDelete}>Delete</button>'
+    )
+    report = assert_containment(src, scope)
+    assert report.ok is False
+    assert any("delete" in h.lower() for h in report.extra_handlers)
+
+
+def test_containment_href_on_inert_flagged():
+    """A live href on non-navigation chrome drives ok=False via href_count."""
+    scope = ["reconnect"]
+    src = (
+        '<button onClick={handleReconnect}>Reconnect</button>\n'
+        '<a href="/settings">Settings</a>'
+    )
+    report = assert_containment(src, scope)
+    assert report.href_count > 0
+    assert report.ok is False
+    # the failure is the href, not a handler/affordance issue
+    assert report.extra_handlers == []
+    assert report.inert_without_affordance == []
+
+
+def test_containment_href_allowed_when_scope_is_navigation():
+    """A navigation interaction in scope authorises a live href."""
+    scope = ["navigate"]
+    src = '<a href="/settings">Settings</a>'
+    report = assert_containment(src, scope)
+    assert report.href_count > 0
+    assert report.ok is True
+
+
+# ── footguns ──────────────────────────────────────────────────────────────────
+
+
+def test_inert_without_affordance_flagged():
+    """An interactive-looking control with no handler AND no deliberate inert
+    cue is a silent dead click — flagged, not passed."""
+    scope = ["reconnect"]
+    silent = (
+        '<button onClick={handleReconnect}>Reconnect</button>\n'
+        '<button>Settings</button>'
+    )
+    report = assert_containment(silent, scope)
+    assert report.ok is False
+    assert report.inert_without_affordance, "silent dead-click button must flag"
+
+    # The shipped default — visibly disabled — clears the flag.
+    cued = (
+        '<button onClick={handleReconnect}>Reconnect</button>\n'
+        '<button disabled className="cursor-not-allowed">Settings</button>'
+    )
+    ok_report = assert_containment(cued, scope)
+    assert ok_report.inert_without_affordance == []
+    assert ok_report.ok is True
+
+
+def test_entangled_surface_legitimate_handlers_pass():
+    """For an entangled feature, the handler driving the required existing
+    behaviour stays out of extra_handlers (the derived scope covers it)."""
+    prd = (
+        "Introduce a filter on the existing live results table; choosing a "
+        "filter must re-render the results list."
+    )
+    scope = derive_interactive_scope(prd, _located())
+    src = (
+        '<select onChange={handleFilterChange}>...</select>\n'
+        '<button onClick={refreshResults}>Refresh</button>'
+    )
+    report = assert_containment(src, scope)
+    assert report.ok is True
+    assert report.extra_handlers == []
+
+
+def test_entangled_surface_out_of_scope_handler_fails():
+    """Even with the widened entangled scope, a handler outside it still fails."""
+    prd = (
+        "Introduce a filter on the existing live results table; choosing a "
+        "filter must re-render the results list."
+    )
+    scope = derive_interactive_scope(prd, _located())
+    src = (
+        '<select onChange={handleFilterChange}>...</select>\n'
+        '<button onClick={deleteRow}>Delete</button>'
+    )
+    report = assert_containment(src, scope)
+    assert report.ok is False
+    assert any("delete" in h.lower() for h in report.extra_handlers)
+
+
+# ── deterministic — no LLM ─────────────────────────────────────────────────────
+
+
+def test_containment_no_llm_call():
+    """derive_interactive_scope + assert_containment make no LLM/network call."""
+    with patch("app.design_agent.client.get_design_agent_client") as mock_client:
+        scope = derive_interactive_scope("reconnect the integration", _located())
+        report = assert_containment(
+            "<button onClick={handleReconnect}>x</button>", scope
+        )
+        assert report.ok is True
+    mock_client.assert_not_called()
