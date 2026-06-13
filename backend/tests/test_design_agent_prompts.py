@@ -44,12 +44,14 @@ def _section(n: int) -> str:
 
 def test_template_version_is_current():
     # v2 = scaffold-completeness chore #65 (inventory synced to the real vendored
-    # prototype-runtime/src/components/ui/* set); v3 = P3-05 iterate spine (the
+    # prototype-runtime/src/components/ui/* set); v3 = iterate spine (the
     # iterate-aware template family lands); v4 = manual-edit commit-back (the
     # DESIGN_AGENT_MANUAL_EDIT_SYSTEM commit-only family lands); v5 =
-    # recreate-discipline append (codebase-context wave). Each invalidates cached
-    # prototypes so they regenerate.
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 5
+    # recreate-discipline append (codebase-context wave); v6 = scoped-interactivity
+    # axis appended to the recreate discipline (changes which handlers the agent
+    # emits → template-invalidating). Each invalidates cached prototypes so they
+    # regenerate.
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 6
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
@@ -207,3 +209,73 @@ def test_module_emits_no_logs_and_reads_no_env():
     source = Path(p.__file__).read_text(encoding="utf-8")
     for needle in ("logger", "getenv", "environ"):
         assert needle not in source, f"module unexpectedly references {needle!r}"
+
+
+# ---- recreate discipline: scoped-interactivity axis -------------------------
+
+DISCIPLINE = p.DESIGN_AGENT_RECREATE_DISCIPLINE
+
+
+def test_discipline_mentions_both_axes():
+    # The discipline must state BOTH faithful RENDERING of the shell AND scoped
+    # interactivity (only PRD interactions live, everything else inert).
+    low = DISCIPLINE.lower()
+    assert "rendering axis" in low or ("render" in low and "faithful" in low)
+    assert "interactivity axis" in low or "scope the interactivity" in low
+    assert "only the interactions the prd" in low
+    assert "live" in low
+    assert "inert" in low
+
+
+def test_discipline_mentions_entangled_case():
+    # The discipline must address a feature ENTANGLED with existing interactions,
+    # not only an isolated handler dropped onto a static screen.
+    low = DISCIPLINE.lower()
+    assert "entangled" in low
+    assert "existing" in low
+    assert "isolated" in low
+
+
+def test_inert_affordance_default_documented_as_pending():
+    # The discipline ships the visibly-disabled default AND flags it as a
+    # pending product decision (a default, not a settled rule).
+    low = DISCIPLINE.lower()
+    assert "disabled" in low
+    assert "cursor-not-allowed" in low
+    assert "pending" in low
+    assert "default" in low
+    assert "not settled" in low or "not a final decision" in low
+
+
+def test_recreate_discipline_append_only_and_version_line():
+    # The change is template-invalidating → version bumped to 6, owned here.
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 6
+    assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
+    # Append-only: the pre-existing discipline halves are all still present.
+    assert "RE-EXPRESS, DON'T PARAPHRASE." in DISCIPLINE
+    assert "ON-THEME TOKENS ONLY" in DISCIPLINE
+    assert "PRD-SCOPED FIDELITY" in DISCIPLINE
+    # No importer breaks: the module compiles.
+    import py_compile
+
+    py_compile.compile(p.__file__, doraise=True)
+
+
+def test_no_prohibited_tokens_in_source():
+    # No internal engagement coordinates in the appended discipline (the prose
+    # this ticket adds to the prompt). Scoped to the changed region — pre-existing
+    # legacy refs elsewhere in the prompts module / this test file are out of
+    # scope (the no-historical-scrub rule).
+    parts = [
+        r"C[0-9]-[0-9]",
+        "C" + "-series",
+        r"H[0-9]-[0-9]",
+        r"P[0-9]-[0-9]",
+        r"\bAD[0-9]",
+        r"\bF[0-9]{1,2}\b",
+        "DB" + "D",
+        "Babaji" + "de",
+    ]
+    pattern = "|".join(parts)
+    matches = re.findall(pattern, DISCIPLINE)
+    assert not matches, f"Prohibited token(s) {matches} found in the discipline"

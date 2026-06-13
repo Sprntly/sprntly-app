@@ -135,24 +135,25 @@ def test_discipline_states_re_express_drop_rule():
 # ─── AC5: length bounds ───────────────────────────────────────────────────────
 
 def test_discipline_length_within_bounds():
-    """The discipline is substantive (carries three rules) but bounded
-    (it is a task block, not a manual). Bounds: [800, 3000] chars."""
+    """The discipline is substantive (carries four rules: re-express, on-theme,
+    PRD-scoped fidelity, and the scoped-interactivity axis) but bounded (it is a
+    task block, not a manual). Bounds: [800, 4500] chars."""
     length = len(_DISCIPLINE)
-    assert length >= 800, f"discipline too short ({length} chars) — three rules must be present"
-    assert length <= 3000, f"discipline too long ({length} chars) — keep it a task block, not a manual"
+    assert length >= 800, f"discipline too short ({length} chars) — the rules must be present"
+    assert length <= 4500, f"discipline too long ({length} chars) — keep it a task block, not a manual"
 
 
 # ─── AC6: version bumped ─────────────────────────────────────────────────────
 
 def test_template_version_bumped_to_5():
     """DESIGN_AGENT_TEMPLATE_VERSION must be 5 after the recreate-discipline bump."""
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 5
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 6
     assert isinstance(DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
 def test_scaffold_sync_green_at_new_version():
     """The version-coupled scaffold-sync contract: version is an int equal to 5."""
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 5
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 6
 
 
 # ─── AC7: existing system prompts unchanged (append-only) ────────────────────

@@ -68,7 +68,7 @@ def test_iterate_system_renders_shadcn_inventory():
 
 def test_template_version_is_5():
     # Bumped to 5 by the recreate-discipline append (codebase-context wave).
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 5
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 6
 
 
 def test_render_iterate_user_cache_on_last_stable_block():

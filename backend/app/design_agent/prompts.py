@@ -29,7 +29,12 @@ from __future__ import annotations
 # v5 (recreate discipline): DESIGN_AGENT_RECREATE_DISCIPLINE appended —
 # re-express/on-theme/PRD-scoped rules for codebase-source runs. Bumping
 # invalidates cached prototypes so recreate-path runs pick up the new discipline.
-DESIGN_AGENT_TEMPLATE_VERSION = 5
+# v6 (scoped-interactivity axis): the two-axes containment rule (faithful render
+# vs scoped interactivity — only the requested interactions live, the rest inert)
+# is appended to DESIGN_AGENT_RECREATE_DISCIPLINE. This changes which handlers the
+# agent emits, so it is template-invalidating: old prototypes must regenerate
+# under the new discipline.
+DESIGN_AGENT_TEMPLATE_VERSION = 6
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the
@@ -863,6 +868,43 @@ app's REAL components — the real Toast, the real Dialog). Other regions
 (unrelated data tables, side panels) only need to be RECOGNIZABLE: simple,
 plausible, on-theme content — do NOT pixel-reproduce every region. Parity is
 "recognizable screen + faithful PRD interaction", not a full clone.
+
+TWO INDEPENDENT AXES — RENDER FAITHFULLY, SCOPE THE INTERACTIVITY.
+Rendering and interactivity are SEPARATE axes; do not collapse them.
+- RENDERING axis: reproduce the shell, the screen header/structure, and every
+  visible control faithfully so the screen LOOKS like the real product (the
+  recognizability rule above, unchanged).
+- INTERACTIVITY axis: ONLY the interactions the PRD asks for are LIVE. Every
+  other control RENDERS faithfully but is INERT — no live onClick / onSubmit /
+  onChange, no working href. A control can be faithfully RENDERED and INERT at
+  the same time, and that is the CORRECT state for all non-PRD chrome.
+The target is exact: precisely the PRD's interactions wired, zero other
+handlers, and zero href on non-PRD controls (unless a PRD interaction is itself
+a navigation).
+
+INERT CONTROLS NEED A DELIBERATE NON-INTERACTIVE AFFORDANCE.
+A normal-looking button that silently does nothing reads as BROKEN, not as
+out-of-scope. Give every inert interactive-looking control a deliberate cue:
+render it visibly disabled — the `disabled` attribute together with a
+`cursor-not-allowed` class — so it clearly reads as outside this prototype's
+scope rather than dead. NEVER leave a non-PRD button as a normal-looking control
+with a dead click.
+PENDING PRODUCT DECISION (default, not settled): visibly-disabled is the DEFAULT
+treatment for inert chrome while the product owners have not yet ruled on how
+inert controls should present. Until they rule, default to visibly disabled;
+when they rule, update this discipline to match. Treat this as a default, not a
+final decision.
+
+FEATURE ENTANGLED WITH AN ALREADY-INTERACTIVE SURFACE.
+When the PRD feature EXTENDS a surface that is already interactive (for example,
+"add a filter to this live results table"), the new interaction is LIVE — and so
+is the MINIMAL existing behaviour that interaction must drive to work (the filter
+must actually re-render the results). The surface's OTHER pre-existing
+interactions that the PRD does not touch stay INERT. Scope interactivity to "the
+PRD interaction PLUS the minimal existing behaviour it requires" — not the whole
+surface, and not only the isolated new handler. This is the entangled case: a
+feature tangled up with existing interactions, distinct from an isolated handler
+dropped onto an otherwise static screen.
 """
 
 
