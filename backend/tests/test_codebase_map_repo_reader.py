@@ -645,3 +645,45 @@ def test_read_repo_threads_frontend_root_into_tree_filter():
     # surviving path is a frontend path, none of the 100 backend paths leak in.
     assert len(snap.tree_paths) == _MAX_TREE_ENTRIES
     assert all(path.startswith("web/") for path in snap.tree_paths)
+
+
+def test_build_map_nonempty_on_backend_first_monorepo():
+    """AC17 (deterministic proxy): a live-style build over a backend-first
+    multi-root tree (backend sorts BEFORE web/) yields a NON-EMPTY node set.
+
+    The frontend subtree is auto-detected (web/package.json declares next/react)
+    and filtered in before the per-build cap, so the web/app pages reach node
+    extraction — where a flat backend-first cap previously clipped them and the
+    map came back empty. No mock of read_repo: only the GitHub layer is stubbed,
+    so the repo-reader budget fix is exercised end to end.
+    """
+    import json
+
+    from app.design_agent.codebase_map.service import build_map
+
+    backend = [f"backend/app/file{i}.py" for i in range(600)]
+    web = ["web/package.json"] + [f"web/app/route{i}/page.tsx" for i in range(10)]
+    tree = backend + web
+
+    page_body = "export default function Page() { return <div>screen</div> }"
+    pkg_body = json.dumps({"dependencies": {"next": "15.1.6", "react": "19.0.0"}})
+
+    def _resp(url, **kw):
+        if "/commits/" in url:
+            return _ok_response({"sha": "monorepoSHA1234567890"})
+        if "package.json" in url:
+            return _ok_response(_contents_payload("web/package.json", pkg_body))
+        return _ok_response(_contents_payload("page", page_body))
+
+    mock_requests = MagicMock()
+    mock_requests.get.side_effect = _resp
+    with patch("app.connectors.github_app.get_installation_token", return_value=_STUB_TOKEN), \
+         patch("app.connectors.github_app.headers_for_installation", return_value=_STUB_HEADERS), \
+         patch("app.connectors.github_app.fetch_repo_tree", return_value=tree), \
+         patch("app.connectors.github_app.fetch_repo_meta", return_value={"default_branch": "main"}), \
+         patch("app.connectors.github_app.requests", mock_requests):
+        result = build_map(123, "org/monorepo", "org/monorepo@main")
+
+    assert result is not None
+    assert len(result.nodes) > 0  # the empty-map blocker is fixed
+    assert any("web/app" in (n.file or "") for n in result.nodes)
