@@ -359,6 +359,62 @@ def test_vite_adapter_enumerates_second_stack_shape():
     assert team.file == "src/pages/TeamPage.tsx"
 
 
+def test_string_array_section_flows_through_section_nodes():
+    """A string-literal tab array flows through _section_nodes to kind=section nodes (AC3)."""
+    from app.design_agent.codebase_map.nodes import _section_nodes
+
+    snap = _snap(**{
+        "src/pages/AnalyticsPage.jsx": "const tabs = ['Overview', 'Funnels', 'Cohorts', 'ROI'];\n",
+    })
+    nodes = _section_nodes(snap)
+    assert {n.id for n in nodes} == {
+        "AnalyticsPage#overview",
+        "AnalyticsPage#funnels",
+        "AnalyticsPage#cohorts",
+        "AnalyticsPage#roi",
+    }
+    for n in nodes:
+        assert n.kind == "section"
+        assert n.route == ""
+        assert n.is_route_state is False
+        assert n.file == "src/pages/AnalyticsPage.jsx"
+
+
+def test_string_array_sections_do_not_pollute_edges():
+    """String-array section nodes (route="") are inert in edge resolution (AC7)."""
+    snap = _snap(
+        tree_paths=["app/analytics/page.tsx", "app/team/page.tsx"],
+        **{
+            "app/analytics/page.tsx": (
+                "const tabs = ['Overview', 'Funnels'];\n"
+                "export default function AnalyticsScreen() {\n"
+                '  function go() { navigate("/team"); }\n'
+                "  return null;\n"
+                "}\n"
+            ),
+            "app/team/page.tsx": "export default function TeamScreen() {}",
+        },
+    )
+    probe = _partial_probe()
+    nodes = extract_nodes(snap, probe)
+    # Sanity: the string-array section nodes ARE present in the resolved-against set.
+    assert any(n.kind == "section" for n in nodes)
+    nodes_without_sections = [n for n in nodes if n.kind != "section"]
+
+    resolved_with, _ = resolve_edges(snap, probe, nodes)
+    resolved_without, _ = resolve_edges(snap, probe, nodes_without_sections)
+
+    # The resolved edge set is byte-identical with vs without the section nodes.
+    assert resolved_with == resolved_without
+    # (a) No edge originates from a section's empty route.
+    assert all(e.from_route != "" for e in resolved_with)
+    # (b) The real /analytics → /team edge still resolves exactly as before.
+    assert any(
+        e.from_route == "/analytics" and e.to_route == "/team"
+        for e in resolved_with
+    )
+
+
 # ── App-shell node enumeration ──────────────────────────────────────────────────
 
 # A shell whose nav comes from a config array (no <Link>/<a href>/navigate
