@@ -13,6 +13,7 @@ from app.design_agent.codebase_map.gate import (
     threshold_for_repo,
 )
 from app.design_agent.codebase_map.locate import LocateCandidate, LocateResult
+from app.design_agent.codebase_map.shell import APP_SHELL_NODE_ID, APP_SHELL_ROUTE
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,53 @@ def _result(
     return LocateResult(
         candidates=candidates or [],
         is_multi_node=is_multi_node,
+    )
+
+
+def _decline_candidate(
+    *,
+    spans_multi_surface: bool = True,
+    classification_confidence: int = 90,
+    rationale: str = "no single surface owns this feature",
+) -> LocateCandidate:
+    """A no-host-decline candidate — empty host fields, as locate emits on decline."""
+    return LocateCandidate(
+        route="",
+        id="",
+        entry_component="",
+        confidence=0,
+        rationale=rationale,
+        ambiguous=False,
+        classification="no-host-decline",
+        spans_multi_surface=spans_multi_surface,
+        classification_confidence=classification_confidence,
+    )
+
+
+def _host_candidate(
+    *,
+    route: str = "/impact",
+    node_id: str = "/impact",
+    confidence: int = 70,
+    classification: str = "attach-to-host",
+    classification_confidence: int = 90,
+    spans_multi_surface: bool = True,
+) -> LocateCandidate:
+    """A located host candidate — a domain surface or the app-shell.
+
+    Defaults to a below-auto-proceed which-surface confidence so the spans-routing
+    branch (not the auto_proceed branch) is the one exercised.
+    """
+    return LocateCandidate(
+        route=route,
+        id=node_id,
+        entry_component="ImpactScreen",
+        confidence=confidence,
+        rationale="the feature overlays this surface",
+        ambiguous=False,
+        classification=classification,
+        spans_multi_surface=spans_multi_surface,
+        classification_confidence=classification_confidence,
     )
 
 
@@ -146,6 +194,188 @@ def test_threshold_for_repo_override_and_default(monkeypatch: pytest.MonkeyPatch
 
     assert threshold_for_repo("org/known") == 70
     assert threshold_for_repo("org/unknown") == _DEFAULT_AUTO_PROCEED_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# Spans-routing: rescue a spanning would-be-decline to a host instead of declining
+# ---------------------------------------------------------------------------
+
+
+def test_spans_chrome_routes_to_app_shell() -> None:
+    """Chrome-level spanning feature → proceed routed to the app-shell surface.
+
+    A would-be no-host decline carries spans_multi_surface=true, the model echoed
+    the app-shell node as a host candidate, and the app-shell is present in the
+    map → PROCEED (attach-to-shell), not a decline.
+    """
+    shell_host = _host_candidate(
+        route=APP_SHELL_ROUTE,
+        node_id=APP_SHELL_NODE_ID,
+        confidence=70,
+        classification="attach-to-host",
+        classification_confidence=93,
+        spans_multi_surface=True,
+    )
+    decline = _decline_candidate(spans_multi_surface=True, classification_confidence=90)
+    result = decide_gate(_result([shell_host, decline]), has_app_shell=True)
+
+    assert result.decision == "proceed_with_note"
+    assert result.routing == "attach-to-shell"
+    assert result.chosen == [shell_host]
+
+
+def test_spans_non_chrome_routes_to_primary_domain() -> None:
+    """Spanning-but-not-chrome feature → proceed anchored to the primary domain host.
+
+    No app-shell node is echoed among the candidates (even though the map carries
+    one), so routing anchors to the top-ranked domain host the model named.
+    """
+    primary = _host_candidate(
+        route="/impact", node_id="/impact", confidence=72,
+        classification_confidence=90, spans_multi_surface=True,
+    )
+    secondary = _host_candidate(
+        route="/chat", node_id="/chat", confidence=60,
+        classification_confidence=88, spans_multi_surface=True,
+    )
+    decline = _decline_candidate(spans_multi_surface=True, classification_confidence=85)
+    result = decide_gate(_result([primary, secondary, decline]), has_app_shell=True)
+
+    assert result.decision == "proceed_with_note"
+    assert result.routing == "attach-to-primary-domain"
+    assert result.chosen == [primary]
+
+
+def test_genuine_decline_still_declines() -> None:
+    """A non-spanning no-host candidate declines exactly as the shipped gate.
+
+    spans_multi_surface=false ⇒ no spanning signal ⇒ nothing to rescue ⇒
+    ranked_confirm with no routing, even with an app-shell present.
+    """
+    decline = _decline_candidate(spans_multi_surface=False, classification_confidence=95)
+    result = decide_gate(_result([decline]), has_app_shell=True)
+
+    assert result.decision == "ranked_confirm"
+    assert result.routing is None
+    assert result.chosen == []
+
+
+def test_overfit_trap_dressed_as_chrome_still_declines() -> None:
+    """The crux: a new product area dressed in chrome language must STILL decline.
+
+    A "global open-from-anywhere collaborative canvas with live cursors and a
+    persistent room reachable from every screen" is phrased to SOUND like chrome
+    and is flagged spanning at high classification confidence, with an app-shell
+    present in the map. It is a brand-new realtime-canvas product area: the model
+    named NO host (no echoed app-shell, no domain surface), so it must STILL
+    decline — the app-shell does not become a catch-all.
+    """
+    overfit = LocateCandidate(
+        route="",
+        id="",
+        entry_component="",
+        confidence=0,
+        rationale="a global open-from-anywhere collaborative canvas reachable everywhere",
+        ambiguous=False,
+        classification="no-host-decline",
+        spans_multi_surface=True,
+        classification_confidence=88,
+    )
+    result = decide_gate(_result([overfit]), has_app_shell=True)
+
+    assert result.decision == "ranked_confirm"
+    assert result.routing is None
+    assert result.chosen == []
+
+
+def test_routing_ignores_advisory_sublabel() -> None:
+    """Routing keys on the host + classification_confidence, NOT the sub-label.
+
+    The same spanning host routes identically whether the model labelled it
+    "modify-existing" or "attach-to-host" — the advisory sub-label may drift while
+    the located host stays correct.
+    """
+    decline = _decline_candidate(spans_multi_surface=True, classification_confidence=85)
+    for sublabel in ("modify-existing", "attach-to-host"):
+        host = _host_candidate(
+            route="/impact", node_id="/impact", confidence=70,
+            classification=sublabel, classification_confidence=90,
+            spans_multi_surface=True,
+        )
+        result = decide_gate(_result([host, decline]), has_app_shell=True)
+
+        assert result.decision == "proceed_with_note", sublabel
+        assert result.routing == "attach-to-primary-domain", sublabel
+        assert result.chosen == [host], sublabel
+
+
+def test_spans_routing_below_classification_threshold_declines() -> None:
+    """A host the model is NOT confident in (classification_confidence < 85) is not
+    trusted for routing → the spanning feature still declines."""
+    weak_host = _host_candidate(
+        route="/impact", node_id="/impact", confidence=70,
+        classification_confidence=80, spans_multi_surface=True,
+    )
+    decline = _decline_candidate(spans_multi_surface=True, classification_confidence=84)
+    result = decide_gate(_result([weak_host, decline]), has_app_shell=True)
+
+    assert result.decision == "ranked_confirm"
+    assert result.routing is None
+    assert result.chosen == []
+
+
+def test_existing_precedence_unchanged_for_non_spans() -> None:
+    """Non-spans inputs keep the shipped auto/note/confirm outcomes; routing None.
+
+    Also proves an app-shell being present never triggers routing on its own — a
+    spanning-decline signal is required.
+    """
+    # auto_proceed
+    r = decide_gate(_result([_candidate(route="/dashboard", confidence=90)]))
+    assert r.decision == "auto_proceed"
+    assert r.routing is None
+
+    # proceed_with_note (multi-node screen set)
+    a = _candidate(route="/dashboard", confidence=85)
+    b = _candidate(route="/analytics", confidence=80)
+    r = decide_gate(_result([a, b], is_multi_node=True))
+    assert r.decision == "proceed_with_note"
+    assert r.routing is None
+
+    # ranked_confirm (below threshold, no spanning-decline signal)
+    r = decide_gate(_result([_candidate(confidence=60)]))
+    assert r.decision == "ranked_confirm"
+    assert r.routing is None
+
+    # ranked_confirm (no candidates)
+    r = decide_gate(_result([]))
+    assert r.decision == "ranked_confirm"
+    assert r.routing is None
+
+    # below-threshold host WITH an app-shell present but NO spanning decline:
+    # app-shell presence alone must not route.
+    r = decide_gate(_result([_candidate(confidence=60)]), has_app_shell=True)
+    assert r.decision == "ranked_confirm"
+    assert r.routing is None
+
+
+def test_decide_gate_no_llm_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """decide_gate never constructs or calls an LLM client on any path (incl. spans)."""
+    import app.design_agent.client as client_mod
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("decide_gate must not call an LLM client")
+
+    monkeypatch.setattr(client_mod, "get_design_agent_client", _boom, raising=False)
+
+    shell_host = _host_candidate(
+        route=APP_SHELL_ROUTE, node_id=APP_SHELL_NODE_ID, classification_confidence=93,
+    )
+    decline = _decline_candidate(spans_multi_surface=True, classification_confidence=90)
+
+    # exercise the new spans-routing branch + a plain path; no client may be built
+    decide_gate(_result([shell_host, decline]), has_app_shell=True)
+    decide_gate(_result([_candidate(confidence=90)]))
 
 
 # ---------------------------------------------------------------------------
