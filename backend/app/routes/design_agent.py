@@ -98,7 +98,9 @@ from app.design_agent.runner import MODEL, generate_prototype, reconcile_comment
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.codebase_map.recreate import (
     ThemeExpectations,
+    assert_containment,
     assert_theme_landed,
+    derive_interactive_scope,
 )
 from app.design_agent.storage import (
     ThemeBridgeError,
@@ -932,6 +934,17 @@ async def _run_generation_bg(
         # staged + marked ready. A complete run with no files, or any non-complete
         # terminal state, fails the row.
         if result.status == "complete" and virtual_fs:
+            # Derive the interactivity-containment scope on the recreate path
+            # only (located is not None). The PRD's named interactions, derived
+            # deterministically from the PRD text + the located screen — no LLM.
+            # On the blank-canvas path (located is None) the scope is None, so
+            # _stage_complete_run skips the containment check (byte-identical to
+            # today).
+            interactive_scope = (
+                derive_interactive_scope(prd_md, located)
+                if located is not None
+                else None
+            )
             await _stage_complete_run(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
@@ -944,6 +957,7 @@ async def _run_generation_bg(
                 # (None on every blank-canvas run). Getattr defensively so older
                 # test stubs that return a bare SimpleNamespace keep working.
                 theme_expectations=getattr(result, "theme_expectations", None),
+                interactive_scope=interactive_scope,
             )
         elif result.status == "complete" and not virtual_fs:
             fail_prototype(
@@ -1075,6 +1089,7 @@ async def _stage_complete_run(
     figma_node_id: str | None = None,
     scenario: str = "A",
     theme_expectations: ThemeExpectations | None = None,
+    interactive_scope: list[str] | None = None,
 ) -> None:
     """Post-run hook (P1-08): vite_build → checkpoint → stage_bundle → complete.
 
@@ -1119,6 +1134,53 @@ async def _stage_complete_run(
                 len(theme_expectations.font_families),
                 str(bool(theme_expectations.asset_basename)).lower(),
             )
+        # Interactivity-containment self-check (recreate path only). A SIBLING of
+        # the theme gate above — gated on its own scope, independent of
+        # theme_expectations, so it runs on ANY scoped recreate run. Greps the
+        # agent's GENERATED SOURCE (the .tsx/.jsx bodies), where the event
+        # handlers live BEFORE the build strips them — NOT the built dist that
+        # assert_theme_landed inspects. `virtual_fs` here is still the raw emitted
+        # source (the rebind to the repaired map happens further below), which is
+        # the correct containment target.
+        #
+        # Policy: LOG + FLAG on a containment miss, never block. The inert-
+        # affordance UX rule (a silent no-op control reading as broken) is still an
+        # open product decision, so a miss is surfaced as telemetry, not used to
+        # fail a prototype that otherwise built and themed cleanly — every
+        # prototype that completes today still completes. The warning log line is
+        # the observable flag (no DB column). A future ticket can flip this to a
+        # hard block once that product decision lands. Wrapped defensively so an
+        # unexpected error in the pure-regex check can never fail the row.
+        if interactive_scope:
+            try:
+                generated_source = "\n".join(
+                    body for path, body in virtual_fs.items()
+                    if path.endswith((".tsx", ".jsx"))
+                )
+                report = assert_containment(generated_source, interactive_scope)
+                if report.ok:
+                    logger.info(
+                        "design_agent.containment prototype_id=%s ok=%s n_extra_handlers=%d n_inert=%d href_count=%d",
+                        prototype_id,
+                        str(report.ok).lower(),
+                        len(report.extra_handlers),
+                        len(report.inert_without_affordance),
+                        report.href_count,
+                    )
+                else:
+                    logger.warning(
+                        "design_agent.containment prototype_id=%s ok=%s n_extra_handlers=%d n_inert=%d href_count=%d",
+                        prototype_id,
+                        str(report.ok).lower(),
+                        len(report.extra_handlers),
+                        len(report.inert_without_affordance),
+                        report.href_count,
+                    )
+            except Exception:  # noqa: BLE001 — non-fatal: never fail a row on a self-check bug
+                logger.warning(
+                    "design_agent.containment_check_errored prototype_id=%s",
+                    prototype_id,
+                )
     except TypeCheckError as exc:
         # A runtime-breaking type error (most often a screen the agent imported but
         # was cut off before writing) does NOT fail outright. Re-enter the agent a
