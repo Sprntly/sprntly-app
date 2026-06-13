@@ -38,14 +38,16 @@ def _patch_gateway_call_json(monkeypatch, payload):
 def test_ask_skill_route_executes_via_gateway(
     tenant_client, isolated_settings, fake_llm, monkeypatch
 ):
-    """A 'prioritize …' question routes to the prioritize skill and is answered
-    through the gateway with the skill bound — not the generic fallback."""
+    """A 'write user stories …' question routes to the user-stories skill (a
+    non-script skill) and is answered through the gateway with the SKILL.md
+    method bound — not the generic fallback. (Script skills like prioritize
+    take the tool-loop path instead; see test_qa_agent.)"""
     t = tenant_client.make(slug="acme")
     _seed_corpus(isolated_settings["data_dir"], dataset="acme")
 
     skill_payload = {
-        "answer": "## Ranked\n\n1. SSO 2. export 3. dark mode",
-        "key_points": ["RICE applied"],
+        "answer": "## Stories\n\n- As a user…",
+        "key_points": ["INVEST"],
         "citations": [],
         "confidence": 0.92,
         "unanswered": "",
@@ -55,7 +57,7 @@ def test_ask_skill_route_executes_via_gateway(
     resp = t.client.post(
         "/v1/ask",
         json={
-            "question": "Prioritize these features: SSO, dark mode, export",
+            "question": "Write user stories for the checkout flow",
             "dataset": "acme",
         },
     )
@@ -63,24 +65,28 @@ def test_ask_skill_route_executes_via_gateway(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     # Answer came from the skill payload, tagged with the matched skill.
-    assert body["answer"].startswith("## Ranked")
-    assert body["_skill"] == "prioritize"
-    # The gateway was used exactly once, and the prioritize SKILL.md method was
-    # injected into the cacheable prefix.
-    assert len(gw_calls) == 1
-    prefix = gw_calls[0]["kwargs"].get("user_cacheable_prefix") or ""
-    assert "## METHOD (skill: prioritize" in prefix
+    assert body["answer"].startswith("## Stories")
+    assert body["_skill"] == "user-stories"
+    # The gateway was used, and the user-stories SKILL.md method was injected
+    # into the cacheable prefix.
+    assert len(gw_calls) >= 1
+    prefix = gw_calls[-1]["kwargs"].get("user_cacheable_prefix") or ""
+    assert "## METHOD (skill: user-stories" in prefix
 
 
 def test_ask_non_skill_question_uses_generic_path(
     tenant_client, isolated_settings, fake_llm, monkeypatch
 ):
-    """A question with no skill match never touches the gateway skill branch —
-    it answers via the generic compose_ask_answer path (fake_llm)."""
+    """A question with no skill match: the LLM router (gateway) returns 'none',
+    so the answer comes from the generic compose_ask_answer path (fake_llm) and
+    carries no _skill tag."""
     t = tenant_client.make(slug="acme")
     _seed_corpus(isolated_settings["data_dir"], dataset="acme")
 
-    gw_calls = _patch_gateway_call_json(monkeypatch, {"answer": "should-not-run"})
+    # Gateway router call → "none" decision.
+    gw_calls = _patch_gateway_call_json(
+        monkeypatch, {"skill_id": "none", "confidence": 0.0, "reason": "general"}
+    )
     fake_llm["payload"] = {
         "answer": "generic answer",
         "key_points": [],
@@ -95,5 +101,9 @@ def test_ask_non_skill_question_uses_generic_path(
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["answer"] == "generic answer"
-    assert gw_calls == []  # skill branch not taken
+    body = resp.json()
+    assert body["answer"] == "generic answer"
+    assert "_skill" not in body  # answered directly, not via a skill
+    # The one gateway call was the router (skill menu), not a skill answer.
+    assert len(gw_calls) == 1
+    assert "Available skills:" in (gw_calls[0]["kwargs"].get("user_cacheable_prefix") or "")
