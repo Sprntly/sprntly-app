@@ -199,6 +199,19 @@ export function Connectors() {
     })
   }
 
+  // OAuth now opens the provider in a sibling tab instead of navigating this
+  // one away. When the user authorizes there and switches back with the
+  // connect modal still open, refresh so the modal flips to its connected
+  // state (and the grid card to "Live") without a manual reload.
+  useEffect(() => {
+    if (modalProvider == null) return
+    const onVisible = () => {
+      if (document.visibilityState === "visible") reloadConnections()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    return () => document.removeEventListener("visibilitychange", onVisible)
+  }, [modalProvider])
+
   /** Header click: locked headers are inert; others toggle open/closed. */
   function toggleCategory(i: number) {
     if (!isCategoryUnlocked(doneCats, i)) return
