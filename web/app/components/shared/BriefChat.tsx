@@ -9,6 +9,7 @@ import { useCompany } from "../../context/CompanyContext"
 import { ApiError, askApi, briefApi, type AskResponse } from "../../lib/api"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
+import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
 import type {
   BriefV2CompactFinding,
@@ -24,7 +25,7 @@ import { IconPlug } from "@tabler/icons-react"
 type Finding = BriefV2HeroFinding | BriefV2CompactFinding
 
 // ── Turn model ─────────────────────────────────────────────────────────────
-type AgentAction = "prd" | "evidence" | "tickets" | "prototype"
+type AgentAction = "prd" | "evidence" | "tickets" | "prototype" | "multi-agent"
 type Persona = "ds" | "pm"
 
 interface ChatTurn {
@@ -376,6 +377,7 @@ function BriefFindingCard({
   onAsk,
   onViewEvidence,
   onGeneratePrd,
+  onGenerateAll,
   onDismiss,
   onPreview,
 }: {
@@ -385,6 +387,7 @@ function BriefFindingCard({
   onAsk: () => void
   onViewEvidence: () => void
   onGeneratePrd: () => void
+  onGenerateAll: () => void
   onDismiss: () => void
   onPreview: () => void
 }) {
@@ -464,7 +467,17 @@ function BriefFindingCard({
               disabled={busy}
             >
               <IconFileText size={14} />
-              {generating ? "Generating…" : "View PRD"}
+              {generating ? "Generating…" : "Generate PRD"}
+            </button>
+            <button
+              type="button"
+              className="fc-btn-prd fc-btn-prd--aggressive"
+              onClick={onGenerateAll}
+              disabled={busy}
+              title="Multi-Agent: PRD + Evidence + Technical Design + QA Test Cases + Risk Analysis + Traceability Matrix"
+            >
+              <IconSparkle size={14} />
+              Generate PRD first
             </button>
             <button type="button" className="fc-btn-secondary" onClick={onPreview}>
               <IconTerminalPrompt size={13} />
@@ -725,6 +738,64 @@ export function BriefChat() {
     openContentPanel("evidence")
   }, [openContentPanel])
 
+  const multiAgentFlow = useCallback(async () => {
+    const aId = uid()
+    setTurns((t) => [
+      ...t,
+      {
+        id: aId,
+        role: "agent",
+        persona: "pm",
+        status: "running multi-agent analysis…",
+        state: "thinking",
+      },
+    ])
+    scrollToEnd()
+    const fail = (error: string) =>
+      setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error } : x)))
+    try {
+      const brief = await briefApi.current(activeCompany)
+      const insights = brief.insights || []
+      if (!insights.length) {
+        fail("No brief insights available yet. Run the pipeline first.")
+        return
+      }
+      const insight = insights[0]
+      const result = await runMultiAgentGeneration(brief.id, 0, "aggressive")
+      if (!result.ok) {
+        fail(result.message)
+        return
+      }
+      const docCount = result.docs.docs.length
+      const readyCount = result.docs.docs.filter((d) => d.status === "ready").length
+      setTurns((t) =>
+        t.map((x) =>
+          x.id === aId
+            ? {
+                ...x,
+                state: "done",
+                status: "multi-agent analysis complete",
+                message:
+                  `**Multi-Agent Aggressive Analysis** complete for **${insight.title}**.\n\n` +
+                  `Generated **${readyCount}/${docCount + 3}** documents:\n` +
+                  `- PRD (human-readable + implementation spec)\n` +
+                  `- Evidence report (KG-grounded)\n` +
+                  `- User stories with acceptance criteria\n` +
+                  result.docs.docs
+                    .map((d) => `- ${d.title} — ${d.status === "ready" ? "ready" : d.status}`)
+                    .join("\n") +
+                  `\n\nAll documents are cross-referenced in the **Traceability Matrix**. ` +
+                  `Missing requirements, risks, and assumptions have been identified.`,
+                actions: ["prd", "tickets", "prototype"],
+              }
+            : x,
+        ),
+      )
+    } catch (e) {
+      fail(e instanceof Error ? e.message : "Multi-agent generation failed")
+    }
+  }, [activeCompany, scrollToEnd])
+
   const plainAsk = useCallback(
     async (q: string) => {
       const aId = uid()
@@ -788,9 +859,10 @@ export function BriefChat() {
         if (a === "evidence") return evidenceFlow()
         if (a === "tickets") return ticketsFlow()
         if (a === "prototype") return prototypeFlow()
+        if (a === "multi-agent") return multiAgentFlow()
       })
     },
-    [content.prd, evidenceFlow, openContentPanel, prdFlow, prototypeFlow, runGate, ticketsFlow],
+    [content.prd, evidenceFlow, multiAgentFlow, openContentPanel, prdFlow, prototypeFlow, runGate, ticketsFlow],
   )
 
   // ── Suggested-actions: hand the implementation brief to a coding agent ─────
@@ -897,6 +969,43 @@ export function BriefChat() {
       }
     },
     [content.briefDetails, content.prd, content.prdMeta, openContentPanel, setContent, showToast],
+  )
+
+  const cardGenerateAll = useCallback(
+    async (finding: Finding) => {
+      const key = finding.detailKey
+      const detail = key ? content.briefDetails?.[key] : null
+      const meta = detail?.meta
+      if (!meta) {
+        showToast("Can't run multi-agent", "Open evidence from a finding with a linked brief first.")
+        return
+      }
+      if (busyRef.current) return
+      busyRef.current = true
+      setBusy(true)
+      setCardBusyKey(key ?? null)
+      try {
+        const result = await runMultiAgentGeneration(meta.briefId, meta.insightIndex, "aggressive")
+        if (!result.ok) {
+          showToast("Multi-agent generation failed", result.message.slice(0, 200))
+          return
+        }
+        const docCount = result.docs.docs.length
+        showToast(
+          "Multi-agent complete",
+          `Generated PRD + Evidence + ${docCount} analysis documents. All cross-referenced.`,
+        )
+      } catch (e) {
+        showToast("Multi-agent failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+      } finally {
+        busyRef.current = false
+        if (mountedRef.current) {
+          setBusy(false)
+          setCardBusyKey(null)
+        }
+      }
+    },
+    [content.briefDetails, showToast],
   )
 
   const cardDismiss = useCallback((finding: Finding) => {
@@ -1018,6 +1127,7 @@ export function BriefChat() {
                         onAsk={() => cardAsk(f)}
                         onViewEvidence={() => cardViewEvidence(f)}
                         onGeneratePrd={() => cardGeneratePrd(f)}
+                        onGenerateAll={() => cardGenerateAll(f)}
                         onDismiss={() => cardDismiss(f)}
                         onPreview={cardPreview}
                       />
@@ -1136,6 +1246,7 @@ const ACTION_LABEL: Record<AgentAction, string> = {
   evidence: "View evidence",
   tickets: "Create tickets",
   prototype: "Generate prototype",
+  "multi-agent": "Generate PRD first",
 }
 
 function AgentTurn({

@@ -6009,6 +6009,14 @@
     cursor: not-allowed;
   }
 
+  .fc-btn-prd--aggressive {
+    background: linear-gradient(135deg, #10b981, #059669);
+    border-color: #059669;
+  }
+  .fc-btn-prd--aggressive:hover:not(:disabled) {
+    background: linear-gradient(135deg, #059669, #047857);
+  }
+
   .fc-btn-secondary {
     display: inline-flex;
     align-items: center;

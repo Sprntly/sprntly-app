@@ -46,6 +46,7 @@ from app.routes import (
     design_agent,
     ingest,
     metrics,
+    multi_agent,
     onboarding,
     oncall,
     research,
@@ -235,6 +236,7 @@ app.include_router(stories.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
 app.include_router(design_agent.router)
+app.include_router(multi_agent.router)
 app.include_router(pipeline.router)
 app.include_router(synthesis.router)
 app.include_router(ingest.router)

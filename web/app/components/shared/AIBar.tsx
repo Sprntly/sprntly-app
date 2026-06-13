@@ -8,6 +8,7 @@ import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, askApi, briefApi, prdApi, type AskResponse } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
+import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
 import { IconSendUp, IconSparkle } from "./app-icons"
@@ -222,6 +223,12 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
   const isPrdCommand = (q: string) =>
     /\b(generate|create|write|draft|make)\b.*\bprd\b/i.test(q)
 
+  /** Detect multi-agent command: "generate PRD first" / "multi-agent" / "aggressive analysis" */
+  const isMultiAgentCommand = (q: string) =>
+    /\b(generate|create)\b.*\bprd\s+first\b/i.test(q) ||
+    /\bmulti[- ]?agent\b/i.test(q) ||
+    /\baggressive\s+(analysis|mode)\b/i.test(q)
+
   const handlePrdCommand = useCallback(async () => {
     expandAiPanel()
     setAgentWorking(true)
@@ -269,6 +276,44 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
     }
   }, [activeCompany, expandAiPanel, setAIBarValue, setContent])
 
+  const handleMultiAgentCommand = useCallback(async () => {
+    expandAiPanel()
+    setAgentWorking(true)
+    setAgentAction(null)
+    setLastReply(null)
+    setAskError(null)
+    setAIBarValue("")
+    const ta = textareaRef.current
+    if (ta) { ta.style.height = "auto"; ta.style.height = `${AI_TEXTAREA_MIN_PX}px` }
+
+    try {
+      const brief = await briefApi.current(activeCompany)
+      const insights = brief.insights || []
+      if (!insights.length) {
+        setAskError("No brief insights available yet. Generate a Weekly Brief first.")
+        return
+      }
+      const result = await runMultiAgentGeneration(brief.id, 0, "aggressive")
+      if (!result.ok) {
+        setAskError(result.message)
+        return
+      }
+      const docCount = result.docs.docs.length
+      setAgentAction({
+        kind: "prd",
+        prdId: undefined,
+        title: "Multi-Agent Analysis Complete",
+        message:
+          `Generated PRD + Evidence + ${docCount} analysis documents (Technical Design, QA Test Cases, Risk Analysis, Traceability Matrix). ` +
+          `All cross-referenced. Missing requirements, risks, and assumptions identified.`,
+      })
+    } catch (e) {
+      setAskError(e instanceof Error ? e.message : "Multi-agent generation failed")
+    } finally {
+      setAgentWorking(false)
+    }
+  }, [activeCompany, expandAiPanel, setAIBarValue])
+
   const submitAsk = useCallback(async () => {
     const q = aiBarValue.trim()
     if (q.length < 3) {
@@ -276,7 +321,12 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
       return
     }
 
-    // Detect agent commands
+    // Detect agent commands — multi-agent FIRST (more specific match)
+    if (isMultiAgentCommand(q)) {
+      setLastSubmittedQuestion(q)
+      void handleMultiAgentCommand()
+      return
+    }
     if (isPrdCommand(q)) {
       setLastSubmittedQuestion(q)
       void handlePrdCommand()

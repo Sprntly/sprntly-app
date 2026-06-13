@@ -1287,3 +1287,70 @@ export async function withAuthRetry<T>(
     return await fn()
   }
 }
+
+
+// ── Multi-Agent API ─────────────────────────────────────────────────────
+
+export type MultiAgentMode = "standard" | "aggressive"
+
+export interface MultiAgentGenerateResponse {
+  run_id: string
+  status: string
+  mode: MultiAgentMode
+  brief_id: number
+  insight_index: number
+}
+
+export interface MultiAgentDocStatus {
+  id: number
+  status: string
+  title: string
+}
+
+export interface MultiAgentRunStatus {
+  run_id: string
+  status: "generating" | "ready" | "partial" | "unknown"
+  docs: Record<string, MultiAgentDocStatus>
+}
+
+export interface MultiAgentDoc {
+  id: number
+  doc_type: string
+  title: string
+  status: string
+  payload_md: string
+  error?: string
+}
+
+export interface MultiAgentDocsResponse {
+  run_id: string
+  docs: MultiAgentDoc[]
+}
+
+export const multiAgentApi = {
+  /** Kick off multi-agent generation. Returns immediately with run_id. */
+  generate: (
+    briefId: number,
+    insightIndex: number,
+    mode: MultiAgentMode = "aggressive",
+    force = false,
+  ) =>
+    api.post<MultiAgentGenerateResponse>("/v1/multi-agent/generate", {
+      brief_id: briefId,
+      insight_index: insightIndex,
+      mode,
+      force,
+    }),
+
+  /** Poll run status until all docs are ready/partial. */
+  getStatus: (runId: string) =>
+    api.get<MultiAgentRunStatus>(`/v1/multi-agent/${runId}`),
+
+  /** Fetch all generated docs for a run (full markdown). */
+  getDocs: (runId: string) =>
+    api.get<MultiAgentDocsResponse>(`/v1/multi-agent/${runId}/docs`),
+
+  /** Fetch a single doc by id. */
+  getDoc: (docId: number) =>
+    api.get<MultiAgentDoc>(`/v1/multi-agent/doc/${docId}`),
+}
