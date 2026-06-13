@@ -265,3 +265,92 @@ def test_probe_and_nodes_emit_identifier_only_logs(caplog):
     log_text = info_lines[0].getMessage()
     assert "n_nodes=" in log_text
     assert "export default function HomeScreen" not in log_text
+
+
+# ── Adapter dispatch: Next byte-identical + Vite enumeration ────────────────────
+
+def test_next_adapter_node_set_byte_identical_to_pre_ticket():
+    """A Next-shape repo enumerated through the registry yields the exact pre-adapter
+    node set (route-only screens, no in-page tabs), including the kind/id fields."""
+    snap = _snap(
+        tree_paths=[
+            "package.json",
+            "app/team/page.tsx",
+            "app/settings/page.tsx",
+            "app/users/[id]/page.tsx",
+        ],
+        **{
+            "package.json": '{"dependencies": {"next": "15.0.0"}}',
+            "app/team/page.tsx": "export default function TeamScreen() {}",
+            "app/settings/page.tsx": "export default function SettingsScreen() {}",
+            "app/users/[id]/page.tsx": "export default function UserScreen() {}",
+        },
+    )
+    nodes = extract_nodes(snap, _partial_probe())
+
+    # The golden pre-ticket Next-App enumeration: route-sorted, kind="route",
+    # id == route. The registry dispatch must not add or drop a node.
+    golden = [
+        ("/settings", "SettingsScreen", "app/settings/page.tsx"),
+        ("/team", "TeamScreen", "app/team/page.tsx"),
+        ("/users/:id", "UserScreen", "app/users/[id]/page.tsx"),
+    ]
+    assert [(n.route, n.entry_component, n.file) for n in nodes] == golden
+    assert all(n.kind == "route" and n.id == n.route for n in nodes)
+    # No spurious section nodes for a route-only Next app.
+    assert all(n.kind != "section" for n in nodes)
+
+
+def test_vite_adapter_enumerates_second_stack_shape():
+    """A Vite + react-router repo enumerates <Route> route nodes + tab-section nodes."""
+    app_tsx = (
+        "import TeamPage from './pages/TeamPage';\n"
+        "import BillingPage from './pages/BillingPage';\n"
+        "export default function App() {\n"
+        "  return (\n"
+        "    <Routes>\n"
+        "      <Route path=\"/team\" element={<TeamPage/>} />\n"
+        "      <Route path=\"/billing\" element={<BillingPage/>} />\n"
+        "    </Routes>\n"
+        "  );\n"
+        "}\n"
+    )
+    team_page = (
+        "export default function TeamPage() {\n"
+        "  const tabs = [\n"
+        "    { id: 'members', label: 'Members' },\n"
+        "    { id: 'roles', label: 'Roles' },\n"
+        "  ];\n"
+        "  return null;\n"
+        "}\n"
+    )
+    snap = _snap(
+        tree_paths=[
+            "package.json",
+            "src/App.tsx",
+            "src/pages/TeamPage.tsx",
+            "src/pages/BillingPage.tsx",
+            "src/components/Sidebar.tsx",
+        ],
+        **{
+            "package.json": '{"dependencies": {"vite": "5.0.0", "react-router-dom": "6.0.0"}}',
+            "src/App.tsx": app_tsx,
+            "src/pages/TeamPage.tsx": team_page,
+            "src/pages/BillingPage.tsx": "export default function BillingPage() {}",
+            "src/components/Sidebar.tsx": "export default function Sidebar() {}",
+        },
+    )
+    nodes = extract_nodes(snap, _partial_probe(convention="react-router"))
+
+    route_nodes = {n.route for n in nodes if n.kind == "route"}
+    assert "/team" in route_nodes
+    assert "/billing" in route_nodes
+
+    section_ids = {n.id for n in nodes if n.kind == "section"}
+    assert any("members" in sid for sid in section_ids)
+    assert any("roles" in sid for sid in section_ids)
+
+    # The /team route node resolves its element component to the page file.
+    team = next(n for n in nodes if n.route == "/team")
+    assert team.entry_component == "TeamPage"
+    assert team.file == "src/pages/TeamPage.tsx"
