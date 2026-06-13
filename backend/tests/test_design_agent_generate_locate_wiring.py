@@ -703,3 +703,143 @@ def test_no_prohibited_tokens_in_source():
             assert not pattern.search(line), (
                 f"prohibited token in {path}:{lineno}: {line}"
             )
+
+
+# ── Resolve the chosen candidate to a node BY ID ──────────────────────────────
+#
+# The recreate-wire block resolves the PM-confirmed candidate by stable id first,
+# falling back to the route. This admits a non-route host — the app shell (empty
+# route) and an in-page section (empty/shared route) — that route-only keying
+# silently dropped.
+
+
+def _map_with(*nodes) -> MapResult:
+    return MapResult(
+        repo="org/repo", commit_sha="sha", posture="CLEAN",
+        nodes=list(nodes), shell=ShellModel(logo=LogoAsset()),
+    )
+
+
+async def test_generate_resolves_app_shell_node_by_id(env, monkeypatch):
+    """chosen_screen_id='app-shell' (route '') resolves the shell node and builds
+    a LocatedScreen whose node.kind == 'shell'. The same inputs WITHOUT an id (the
+    pre-fix route-only path, route empty) leave located_screen None."""
+    gen_kwargs = _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    shell = ScreenNode(route="", entry_component="AppShell", id="app-shell",
+                       kind="shell", composed_components=[])
+    routed = ScreenNode(route="/team", entry_component="TeamScreen", composed_components=[])
+    fake_map = _map_with(shell, routed)
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: fake_map,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42, design_source="github",
+        chosen_screen_route="", chosen_screen_id="app-shell", map_commit_sha="sha",
+    )
+    located = gen_kwargs[0]["located_screen"]
+    assert isinstance(located, LocatedScreen)
+    assert located.node.kind == "shell"
+    assert located.node.id == "app-shell"
+
+    # Differential: the pre-fix route-only path (no id, empty route) cannot resolve
+    # the shell host — located stays None.
+    gen_kwargs2 = _stub_generate_capture(monkeypatch, env.routes)
+    pid2 = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+    await env.routes._run_generation_bg(
+        prototype_id=pid2, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42, design_source="github",
+        chosen_screen_route="", chosen_screen_id=None, map_commit_sha="sha",
+    )
+    # Empty route + no id → the wire guard never even fires; located is None.
+    assert gen_kwargs2 == [] or gen_kwargs2[0]["located_screen"] is None
+
+
+async def test_generate_resolves_section_node_by_id(env, monkeypatch):
+    """chosen_screen_id equal to a kind='section' node's id resolves it by id even
+    though its route is empty and would collide with other empty-route nodes."""
+    gen_kwargs = _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    routed = ScreenNode(route="/inbox", entry_component="InboxScreen", composed_components=[])
+    section = ScreenNode(route="", entry_component="InboxArchived", id="inbox#archived",
+                         kind="section", composed_components=[])
+    fake_map = _map_with(routed, section)
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: fake_map,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42, design_source="github",
+        chosen_screen_route="", chosen_screen_id="inbox#archived", map_commit_sha="sha",
+    )
+    located = gen_kwargs[0]["located_screen"]
+    assert isinstance(located, LocatedScreen)
+    assert located.node.id == "inbox#archived"
+    assert located.node.kind == "section"
+
+
+async def test_generate_falls_back_to_route_when_no_id(env, monkeypatch):
+    """An old request with chosen_screen_route set and no chosen_screen_id resolves
+    the routed node by route exactly as before — no behaviour change."""
+    gen_kwargs = _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    routed = ScreenNode(route="/team", entry_component="TeamScreen", composed_components=[])
+    fake_map = _map_with(routed)
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: fake_map,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42, design_source="github",
+        chosen_screen_route="/team", chosen_screen_id=None, map_commit_sha="sha",
+    )
+    located = gen_kwargs[0]["located_screen"]
+    assert isinstance(located, LocatedScreen)
+    assert located.node.route == "/team"
+
+
+async def test_generate_no_resolution_falls_through_blank_canvas(env, monkeypatch, caplog):
+    """Neither id nor route resolves a node → located_screen stays None and
+    generation falls through to the blank-canvas path with no exception."""
+    gen_kwargs = _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    routed = ScreenNode(route="/home", entry_component="HomeScreen", composed_components=[])
+    fake_map = _map_with(routed)
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: fake_map,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)
+    with caplog.at_level(logging.WARNING, logger="app.routes.design_agent"):
+        await env.routes._run_generation_bg(
+            prototype_id=pid, workspace_id="app", prd_id=prd_id,
+            target_platform="both", instructions="", figma_file_key=None,
+            github_repo="org/repo", github_installation_id=42, design_source="github",
+            chosen_screen_route="/nope", chosen_screen_id="ghost", map_commit_sha="sha",
+        )
+    # Generation still ran (blank-canvas) with no located screen and no exception.
+    assert len(gen_kwargs) == 1
+    assert gen_kwargs[0]["located_screen"] is None

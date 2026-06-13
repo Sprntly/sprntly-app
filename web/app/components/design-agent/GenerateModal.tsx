@@ -65,6 +65,7 @@ type LocateFlowState = "idle" | "analysing" | "chip" | "ranked_confirm" | "unmap
 /** Maps LocateCandidate[] to the shape LocateConfirmView expects. */
 export function mapLocateCandidates(ranked: LocateCandidate[]): LocateConfirmCandidate[] {
   return ranked.map((c, i) => ({
+    id: c.id,
     route: c.route,
     entry_component: c.entry_component,
     component_count: c.component_count,
@@ -336,6 +337,7 @@ export function GenerateModal({
   function runGenerateForRoute(
     chosenRoute: string | null,
     overrideSha?: string | null,
+    chosenId?: string | null,
   ) {
     if (prdId == null) return
     const codebaseGenerate = designSource === "github" && githubActive
@@ -366,11 +368,17 @@ export function GenerateModal({
       githubRepo: codebaseGenerate ? repoSel : "",
       designSource,
     })
+    // Fire the recreate wiring when EITHER a route or a stable id was chosen —
+    // a non-route host (the app shell, an in-page section) has an empty route,
+    // so id is the only signal present for it. chosen_screen_route still travels
+    // for back-compat + as the human label / cache pin; chosen_screen_id is the
+    // resolution key the backend prefers.
     const params =
-      codebaseGenerate && chosenRoute
+      codebaseGenerate && (chosenRoute || chosenId)
         ? {
             ...baseParams,
             chosen_screen_route: chosenRoute,
+            ...(chosenId ? { chosen_screen_id: chosenId } : {}),
             ...(retainedSha ? { map_commit_sha: retainedSha } : {}),
           }
         : baseParams
@@ -426,12 +434,14 @@ export function GenerateModal({
           }
           if (result.decision === "auto_proceed" || result.decision === "proceed_with_note") {
             const route = result.chosen[0]?.route ?? null
+            const id = result.chosen[0]?.id ?? null
             setChosenRouteForChip(route)
             setLocateState("chip")
             // Immediately start generation — chip is non-blocking and informational.
             // Pass the SHA explicitly because the state update queued above has
-            // not yet re-rendered the closure.
-            runGenerateForRoute(route, result.commit_sha || null)
+            // not yet re-rendered the closure. Carry the chosen candidate's id so
+            // a non-route host resolves on the backend.
+            runGenerateForRoute(route, result.commit_sha || null, id)
           } else {
             // ranked_confirm: block until PM picks a candidate.
             setLocateState("ranked_confirm")
@@ -684,10 +694,10 @@ export function GenerateModal({
           {locateState === "ranked_confirm" && locateResult && (
             <LocateConfirmView
               candidates={mapLocateCandidates(locateResult.ranked)}
-              onChoose={(route) => {
+              onChoose={(route, id) => {
                 setChosenRouteForChip(route)
                 setLocateState("chip")
-                runGenerateForRoute(route)
+                runGenerateForRoute(route, undefined, id)
               }}
               onSearchOther={() => {
                 setLocateState("idle")

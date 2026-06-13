@@ -380,6 +380,236 @@ def test_no_existing_route_broken_imports_clean(env):
     assert "/v1/design-agent/locate" in paths
 
 
+# ── app-shell signal threading + candidate id carry ───────────────────────────
+#
+# The locate handler must (a) forward the map's app-shell signal into the gate so
+# the spans-routing rescue can fire, and (b) carry each candidate's stable id out
+# in the response so the picker can forward it on generate.
+
+
+def _shell_map_result(*, with_shell: bool = True, shell_id: str = "app-shell"):
+    """A MapResult with a routed screen, optionally fronted by a kind='shell'
+    app-shell node — mirrors what build_map promotes for a repo with a shell."""
+    from app.design_agent.codebase_map.types import MapResult, ScreenNode, ShellModel
+
+    nodes = [
+        ScreenNode(
+            route="/home", entry_component="HomeScreen",
+            composed_components=["Header", "Footer"],
+        ),
+    ]
+    if with_shell:
+        nodes.insert(0, ScreenNode(
+            route="", entry_component="AppShell", id=shell_id, kind="shell",
+            composed_components=["Sidebar", "Topbar"],
+        ))
+    return MapResult(repo="org/repo", posture="CLEAN", nodes=nodes, shell=ShellModel())  # type: ignore[arg-type]
+
+
+def _spanning_locate_result(shell_id: str = "app-shell"):
+    """A LocateResult whose only no-host candidate spans surfaces, plus an echoed
+    app-shell host above the routing-classification floor. The exact case the
+    spans-routing rescue exists to admit. Leading confidence stays below the
+    auto-proceed threshold so the gate reaches the rescue branch."""
+    from app.design_agent.codebase_map.locate import LocateResult, LocateCandidate
+
+    decline = LocateCandidate(
+        route="", id="", entry_component="",
+        confidence=70, ambiguous=False,
+        classification="no-host-decline", spans_multi_surface=True,
+        classification_confidence=70,
+    )
+    shell_host = LocateCandidate(
+        route="", id=shell_id, entry_component="AppShell",
+        confidence=60, ambiguous=False,
+        classification="attach-to-host", spans_multi_surface=False,
+        classification_confidence=90,
+    )
+    return LocateResult(candidates=[decline, shell_host])
+
+
+def _to_thread_for(map_result, locate_result):
+    """Build an asyncio.to_thread replacement that returns the given map for
+    build_map and the given locate result for everything else."""
+    async def _fake(func, *args, **kwargs):
+        if func.__name__ == "build_map":
+            return map_result
+        return locate_result
+    return _fake
+
+
+def test_locate_passes_app_shell_signal_when_shell_node_present(client, env, monkeypatch):
+    """When the map carries a kind='shell' node, the handler calls decide_gate
+    with has_app_shell=True and app_shell_node_id == the shell node's id."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    from app.design_agent.codebase_map import gate as gate_mod
+
+    captured: dict = {}
+
+    def _spy(result, **kwargs):
+        captured.update(kwargs)
+        return gate_mod.GateResult(
+            decision="ranked_confirm", chosen=[], ranked=[],
+            threshold=kwargs.get("threshold") or 80, top_confidence=0,
+        )
+
+    monkeypatch.setattr(gate_mod, "decide_gate", _spy)
+    fake_map = _shell_map_result(with_shell=True, shell_id="app-shell")
+    fake_locate = _spanning_locate_result()
+
+    with patch("asyncio.to_thread", new=_to_thread_for(fake_map, fake_locate)):
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert captured["has_app_shell"] is True
+    assert captured["app_shell_node_id"] == "app-shell"
+
+
+def test_locate_passes_no_app_shell_when_absent(client, env, monkeypatch):
+    """No shell node in the map → has_app_shell=False; app_shell_node_id falls
+    back to the module default id."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    from app.design_agent.codebase_map import gate as gate_mod
+    from app.design_agent.codebase_map.shell import APP_SHELL_NODE_ID
+
+    captured: dict = {}
+
+    def _spy(result, **kwargs):
+        captured.update(kwargs)
+        return gate_mod.GateResult(
+            decision="ranked_confirm", chosen=[], ranked=[],
+            threshold=80, top_confidence=0,
+        )
+
+    monkeypatch.setattr(gate_mod, "decide_gate", _spy)
+    fake_map = _shell_map_result(with_shell=False)
+    fake_locate = _spanning_locate_result()
+
+    with patch("asyncio.to_thread", new=_to_thread_for(fake_map, fake_locate)):
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert captured["has_app_shell"] is False
+    assert captured["app_shell_node_id"] == APP_SHELL_NODE_ID
+
+
+def test_spans_routing_fires_through_route(client, env, monkeypatch):
+    """With a shell node present (has_app_shell derived True), the real gate
+    rescues the spanning decline → proceed_with_note attached to the app-shell
+    host. The SAME locate result with NO shell node (has_app_shell False) declines
+    to ranked_confirm — proving the route now forwards the signal it used to drop."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    fake_locate = _spanning_locate_result(shell_id="app-shell")
+
+    # Shell present → rescued to the app-shell host.
+    with patch(
+        "asyncio.to_thread",
+        new=_to_thread_for(_shell_map_result(with_shell=True), fake_locate),
+    ):
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["decision"] == "proceed_with_note"
+    assert len(body["chosen"]) == 1
+    assert body["chosen"][0]["id"] == "app-shell"
+    assert body["chosen"][0]["route"] == ""
+
+    # Control: no shell node → has_app_shell False → genuine decline (pre-fix
+    # behaviour, which the route always produced because it never forwarded the signal).
+    with patch(
+        "asyncio.to_thread",
+        new=_to_thread_for(_shell_map_result(with_shell=False), fake_locate),
+    ):
+        resp2 = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo"},
+        )
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["decision"] == "ranked_confirm"
+
+
+def test_locate_response_carries_candidate_id(client, env, monkeypatch):
+    """/locate's chosen + ranked candidates each surface the stable id from the
+    underlying candidate (routed id, section id, app-shell id), and component_count
+    is resolved BY ID so non-route hosts (empty/shared route) count correctly."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    from app.design_agent.codebase_map.types import MapResult, ScreenNode, ShellModel
+    from app.design_agent.codebase_map.locate import LocateResult, LocateCandidate
+
+    nodes = [
+        ScreenNode(
+            route="", entry_component="AppShell", id="app-shell", kind="shell",
+            composed_components=["Sidebar"],  # 1
+        ),
+        ScreenNode(
+            route="/inbox", entry_component="InboxScreen",
+            composed_components=["List", "Row", "Toolbar"],  # 3
+        ),
+        ScreenNode(
+            route="", entry_component="InboxArchived", id="inbox#archived", kind="section",
+            composed_components=["List", "ArchiveBanner"],  # 2 — distinct from the shell's 1
+        ),
+    ]
+    fake_map = MapResult(repo="org/repo", posture="CLEAN", nodes=nodes, shell=ShellModel())  # type: ignore[arg-type]
+    cands = [
+        LocateCandidate(route="/inbox", id="/inbox", entry_component="InboxScreen",
+                        confidence=90, classification_confidence=90),
+        LocateCandidate(route="", id="inbox#archived", entry_component="InboxArchived",
+                        confidence=85, classification_confidence=85),
+        LocateCandidate(route="", id="app-shell", entry_component="AppShell",
+                        confidence=82, classification_confidence=82),
+    ]
+    fake_locate = LocateResult(candidates=cands)
+
+    with patch("asyncio.to_thread", new=_to_thread_for(fake_map, fake_locate)):
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    ranked_ids = [c["id"] for c in body["ranked"]]
+    assert ranked_ids == ["/inbox", "inbox#archived", "app-shell"]
+    by_id = {c["id"]: c for c in body["ranked"]}
+    # By-id match: the section (route="") counts its own 2 components, NOT the
+    # shell's 1 — a route-only match would have collided on the empty route.
+    assert by_id["inbox#archived"]["component_count"] == 2
+    assert by_id["app-shell"]["component_count"] == 1
+    assert by_id["/inbox"]["component_count"] == 3
+    # Leading high-confidence single node → auto_proceed → chosen carries its id.
+    assert body["chosen"][0]["id"] == "/inbox"
+
+
+def test_no_prohibited_tokens_in_route_changes():
+    """No internal coordinates in this fix's new regression code (this module +
+    the generate-wiring module it extends)."""
+    pattern = re.compile("|".join([
+        r"C[0-9]+-[0-9]+", "C" + "-series", r"H[0-9]+-[0-9]+", r"P[0-9]+-[0-9]+",
+        r"\bAD[0-9]+", r"\bF[0-9]{1,2}\b", "D" + "BD", "Babaj" + "ide",
+    ]))
+    here = Path(__file__).resolve()
+    targets = [here, here.parent / "test_design_agent_generate_locate_wiring.py"]
+    for path in targets:
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            assert not pattern.search(line), (
+                f"prohibited token in {path.name}:{lineno}: {line}"
+            )
+
+
 def test_no_prohibited_tokens_in_appended_lines():
     """Appended lines in route/api files and new test files contain no internal coordinates."""
     _PATTERN = re.compile("|".join([

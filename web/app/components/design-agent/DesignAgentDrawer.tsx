@@ -92,6 +92,11 @@ type GenerateFlowDeps = {
      *  codebase generation path; the backend resolves it to a node on the
      *  pinned map snapshot and feeds the recreate pre-seed branch. */
     chosen_screen_route?: string | null
+    /** The PM-confirmed stable node id from the locate gate. The backend's
+     *  preferred resolution key — a non-route host (app shell, in-page section)
+     *  only survives to the recreate pre-seed by id. Falls back to route when
+     *  absent (old client). */
+    chosen_screen_id?: string | null
     /** The snapshot SHA the route was confirmed against. Pins the backend's
      *  build_map at read time so the recreate reads the same bytes. */
     map_commit_sha?: string | null

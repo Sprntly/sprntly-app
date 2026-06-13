@@ -233,6 +233,13 @@ class GenerateRequest(BaseModel):
     #   When present alongside a resolved installation, the background task
     #   resolves it to a node on the snapshot map and feeds the recreate
     #   pre-seed branch of generate_prototype. None = blank-canvas path.
+    chosen_screen_id: str | None = None
+    #   The stable node id the PM confirmed in the locate UX (codebase generation
+    #   only). This is the resolution key: a non-route host (the app shell, an
+    #   in-page section) carries a non-route id and a possibly-empty/shared route,
+    #   so id is what lets it survive to the recreate pre-seed. chosen_screen_route
+    #   stays the human label + recreate pin / cache key. None = old client; the
+    #   background task then falls back to resolving by route exactly as before.
     map_commit_sha: str | None = None
     #   The map snapshot the route was confirmed against. Pins build_map at
     #   read time so the recreate reads the same bytes the PM confirmed
@@ -352,6 +359,7 @@ async def generate(
             github_installation_id=github_installation_id,
             design_source=body.design_source,
             chosen_screen_route=body.chosen_screen_route,
+            chosen_screen_id=body.chosen_screen_id,
             map_commit_sha=body.map_commit_sha,
         )
     )
@@ -549,6 +557,9 @@ class LocateRequest(BaseModel):
 
 
 class LocateCandidateOut(BaseModel):
+    id: str = ""  # stable node id; "" for an old map node that only had a route.
+    #               The resolution key the picker forwards as chosen_screen_id so a
+    #               non-route host (app shell / in-page section) survives to generate.
     route: str
     entry_component: str
     confidence: int
@@ -598,14 +609,25 @@ def _unmapped_locate_response(repo: str) -> LocateResponse:
 
 
 def _candidate_to_out(candidate, map_result) -> LocateCandidateOut:
-    """Serialize one LocateCandidate, enriching component_count from the map."""
+    """Serialize one LocateCandidate, enriching component_count from the map.
+
+    Prefer matching the map node by stable id so a non-route host (the app
+    shell with an empty route, an in-page section with a shared route) gets the
+    right count; fall back to the route match when the candidate carries no id
+    (an old map node that only had a route).
+    """
+    candidate_id = getattr(candidate, "id", "") or ""
     component_count = 0
     if map_result is not None:
         for node in map_result.nodes:
-            if node.route == candidate.route:
+            matches = (
+                node.id == candidate_id if candidate_id else node.route == candidate.route
+            )
+            if matches:
                 component_count = len(node.composed_components)
                 break
     return LocateCandidateOut(
+        id=candidate_id,
         route=candidate.route,
         entry_component=candidate.entry_component,
         confidence=candidate.confidence,
@@ -654,6 +676,7 @@ async def locate(
     from app.design_agent.codebase_map.service import build_map
     from app.design_agent.codebase_map.locate import emit_locate_telemetry, locate_screen
     from app.design_agent.codebase_map.gate import decide_gate, threshold_for_repo
+    from app.design_agent.codebase_map.shell import APP_SHELL_NODE_ID
 
     try:
         map_result = await asyncio.to_thread(build_map, installation_id, body.github_repo, body.ref)
@@ -670,7 +693,21 @@ async def locate(
         raise HTTPException(status_code=502, detail="locate failed")
 
     threshold = threshold_for_repo(body.github_repo)
-    gate = decide_gate(locate_result, threshold=threshold)
+    # The gate's spans-routing rescue (attach a cross-cutting would-be-decline to
+    # the app shell) only fires when it knows the map promoted an app-shell
+    # surface. Derive that minimal signal from the already-built map — the single
+    # kind="shell" node and its stable id — instead of handing the gate the whole
+    # map. No shell node => has_app_shell=False, leaving routed-node decisions
+    # byte-for-byte unchanged.
+    shell_node = next((n for n in map_result.nodes if n.kind == "shell"), None)
+    has_app_shell = shell_node is not None
+    app_shell_node_id = shell_node.id if shell_node is not None else APP_SHELL_NODE_ID
+    gate = decide_gate(
+        locate_result,
+        threshold=threshold,
+        has_app_shell=has_app_shell,
+        app_shell_node_id=app_shell_node_id,
+    )
     emit_locate_telemetry(
         repo=body.github_repo,
         sha=map_result.commit_sha,
@@ -750,6 +787,7 @@ async def _run_generation_bg(
     github_installation_id: int | None = None,
     design_source: str | None = None,
     chosen_screen_route: str | None = None,
+    chosen_screen_id: str | None = None,
     map_commit_sha: str | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
@@ -833,7 +871,7 @@ async def _run_generation_bg(
         located = None
         if (
             design_source == "github"
-            and chosen_screen_route
+            and (chosen_screen_id or chosen_screen_route)
             and github_installation_id is not None
         ):
             try:
@@ -843,15 +881,25 @@ async def _run_generation_bg(
                     build_map, github_installation_id, github_repo, map_commit_sha
                 )
                 if map_result is not None:
+                    # Resolve by stable id first — the app shell (route="") and an
+                    # in-page section (empty or shared route) only survive this hop
+                    # by id, and id is unique where a route is not. Fall back to the
+                    # route match when no id was sent (old client) or it did not
+                    # resolve, preserving today's routed-node behaviour exactly.
                     node = next(
-                        (n for n in map_result.nodes if n.route == chosen_screen_route),
+                        (n for n in map_result.nodes if chosen_screen_id and n.id == chosen_screen_id),
                         None,
                     )
+                    if node is None and chosen_screen_route:
+                        node = next(
+                            (n for n in map_result.nodes if n.route == chosen_screen_route),
+                            None,
+                        )
                     if node is not None:
                         located = LocatedScreen(map_result=map_result, node=node)
                         logger.info(
-                            "design_agent.recreate_wired prototype_id=%s repo=%s route=%s sha=%s",
-                            prototype_id, github_repo, chosen_screen_route, map_commit_sha,
+                            "design_agent.recreate_wired prototype_id=%s repo=%s route=%s sha=%s node_id=%s node_kind=%s",
+                            prototype_id, github_repo, chosen_screen_route, map_commit_sha, node.id, node.kind,
                         )
                 else:
                     logger.warning(

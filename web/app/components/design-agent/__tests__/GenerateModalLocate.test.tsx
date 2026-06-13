@@ -95,6 +95,7 @@ const AUTO_PROCEED: LocateResponse = {
   decision: "auto_proceed",
   chosen: [
     {
+      id: "/team",
       route: "/team",
       entry_component: "TeamScreen",
       confidence: 0.9,
@@ -105,6 +106,7 @@ const AUTO_PROCEED: LocateResponse = {
   ],
   ranked: [
     {
+      id: "/team",
       route: "/team",
       entry_component: "TeamScreen",
       confidence: 0.9,
@@ -126,6 +128,7 @@ const RANKED_CONFIRM: LocateResponse = {
   chosen: [],
   ranked: [
     {
+      id: "/team",
       route: "/team",
       entry_component: "TeamScreen",
       confidence: 0.6,
@@ -134,6 +137,7 @@ const RANKED_CONFIRM: LocateResponse = {
       component_count: 3,
     },
     {
+      id: "/dashboard",
       route: "/dashboard",
       entry_component: "DashboardPage",
       confidence: 0.5,
