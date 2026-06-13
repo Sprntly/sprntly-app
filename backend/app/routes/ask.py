@@ -187,3 +187,11 @@ def ask(
 def get_skills():
     """Return the list of available skills for the chat composer UI."""
     return {"skills": list_available_skills()}
+
+
+@router.get("/usage")
+def get_usage(company: CompanyContext = Depends(require_company)):
+    """Per-enterprise Q&A usage: calls, cost, tokens (total + by agent)."""
+    from app.qa_usage import fetch_qa_usage
+
+    return fetch_qa_usage(company.company_id)
