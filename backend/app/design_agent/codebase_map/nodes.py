@@ -24,7 +24,7 @@ from app.design_agent.codebase_map.nav_probe import (
     discover_route_elements,
 )
 from app.design_agent.codebase_map.repo_reader import RepoSnapshot
-from app.design_agent.codebase_map.types import ScreenNode
+from app.design_agent.codebase_map.types import ScreenNode, ShellModel
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,24 @@ def extract_nodes(snapshot: RepoSnapshot, probe: ProbeResult) -> list[ScreenNode
     nodes = adapter.enumerate_nodes(snapshot, probe)
 
     nodes.sort(key=lambda n: n.route)
+
+    # Promote the app shell to a locatable node: append exactly one kind="shell"
+    # node alongside the route/section nodes (after the sort, so the route/section
+    # ordering is untouched), reusing the already-extracted ShellModel as its
+    # structural backing. Skip when no shell was identified (a bare ShellModel) —
+    # a repo with no identifiable chrome gets no synthetic catch-all surface. The
+    # local import mirrors the stack import above: it keeps the module-load graph
+    # free of an import cycle (stack.py imports this module).
+    from app.design_agent.codebase_map.shell import (
+        _locate_shell_file,
+        build_app_shell_node,
+        extract_shell,
+    )
+
+    shell = extract_shell(snapshot)
+    if shell != ShellModel() and not any(n.kind == "shell" for n in nodes):
+        shell_path, _ = _locate_shell_file(snapshot)
+        nodes.append(build_app_shell_node(shell, shell_file_path=shell_path or ""))
 
     n_route_state = sum(1 for n in nodes if n.is_route_state)
     logger.info(

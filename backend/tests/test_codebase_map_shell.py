@@ -12,7 +12,13 @@ import re
 import pytest
 
 from app.design_agent.codebase_map.repo_reader import RepoSnapshot
-from app.design_agent.codebase_map.shell import extract_shell
+from app.design_agent.codebase_map.shell import (
+    APP_SHELL_NODE_ID,
+    APP_SHELL_ROUTE,
+    build_app_shell_node,
+    extract_shell,
+)
+from app.design_agent.codebase_map.types import LogoAsset, NavItem, ScreenNode, ShellModel
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -278,6 +284,83 @@ export function Sidebar() {
     first = extract_shell(snap)
     second = extract_shell(snap)
     assert first == second
+
+
+# ── App-shell node construction ─────────────────────────────────────────────────
+
+def test_build_app_shell_node_shape():
+    """build_app_shell_node on a populated ShellModel yields the chrome node shape."""
+    shell = ShellModel(
+        brand="Acme",
+        nav_items=[
+            NavItem(label="Home", order=0, icon="House", route="/"),
+            NavItem(label="Team", order=1, icon="Users", route="/team"),
+        ],
+        collapse_model="collapsible",
+        logo=LogoAsset(render_kind="img_src", asset_ref="/logo.svg"),
+    )
+
+    node = build_app_shell_node(shell, shell_file_path="src/app/Shell.tsx")
+
+    assert isinstance(node, ScreenNode)
+    assert node.id == "app-shell"
+    assert node.id == APP_SHELL_NODE_ID
+    assert node.kind == "shell"
+    assert node.route == APP_SHELL_ROUTE
+    # Component name derives from the located file (leading-uppercase stem).
+    assert node.entry_component == "Shell"
+    assert node.file == "src/app/Shell.tsx"
+    # Nav-item icon component names back the composed list.
+    assert node.composed_components == ["House", "Users"]
+
+
+def test_build_app_shell_node_empty_path_is_honest():
+    """No located file → empty file + empty component (still locatable by id)."""
+    shell = ShellModel(brand="Acme", nav_items=[NavItem(label="Home", route="/")])
+
+    node = build_app_shell_node(shell)
+
+    assert node.id == APP_SHELL_NODE_ID
+    assert node.kind == "shell"
+    assert node.file == ""
+    assert node.entry_component == ""
+    # Nav item with no icon contributes no composed component name.
+    assert node.composed_components == []
+
+
+def test_app_shell_node_makes_no_repo_read():
+    """build_app_shell_node takes no snapshot — it cannot read the repo (AC8)."""
+    import inspect
+
+    params = set(inspect.signature(build_app_shell_node).parameters)
+    assert params == {"shell", "shell_file_path"}
+    # No RepoSnapshot reference in the constructor's own source.
+    src = inspect.getsource(build_app_shell_node)
+    assert "RepoSnapshot" not in src
+    assert "read_repo" not in src
+    # And it returns purely from its inputs, with no snapshot in scope.
+    node = build_app_shell_node(
+        ShellModel(brand="X", nav_items=[NavItem(label="A", route="/a")]),
+        shell_file_path="src/AppShell.tsx",
+    )
+    assert node.entry_component == "AppShell"
+
+
+def test_kind_shell_accepted_and_roundtrips():
+    """A kind="shell" node validates and serialization round-trips the value (AC7)."""
+    node = build_app_shell_node(
+        ShellModel(brand="Acme"), shell_file_path="src/app/AppLayout.tsx"
+    )
+    assert node.kind == "shell"
+
+    dumped = node.model_dump()
+    assert dumped["kind"] == "shell"
+    assert dumped["id"] == "app-shell"
+
+    rebuilt = ScreenNode(**dumped)
+    assert rebuilt.kind == "shell"
+    assert rebuilt.id == "app-shell"
+    assert rebuilt == node
 
 
 # ── Observability / integrity ─────────────────────────────────────────────────

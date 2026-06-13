@@ -1,12 +1,15 @@
 """Unit tests for the screen-node extractor."""
 import logging
+import pathlib
 import re
 
 import pytest
 
+from app.design_agent.codebase_map.edges import resolve_edges
 from app.design_agent.codebase_map.nav_probe import ProbeResult, probe_nav_abstraction
 from app.design_agent.codebase_map.nodes import extract_nodes
 from app.design_agent.codebase_map.repo_reader import RepoSnapshot
+from app.design_agent.codebase_map.shell import APP_SHELL_NODE_ID, APP_SHELL_ROUTE
 
 
 def _snap(tree_paths: list[str] | None = None, **files) -> RepoSnapshot:
@@ -354,3 +357,153 @@ def test_vite_adapter_enumerates_second_stack_shape():
     team = next(n for n in nodes if n.route == "/team")
     assert team.entry_component == "TeamPage"
     assert team.file == "src/pages/TeamPage.tsx"
+
+
+# ── App-shell node enumeration ──────────────────────────────────────────────────
+
+# A shell whose nav comes from a config array (no <Link>/<a href>/navigate
+# call-sites) is non-bare for extract_shell yet contributes zero resolvable
+# navigation sites — the realistic chrome shape that keeps edge resolution inert.
+_SHELL_BODY = (
+    "const NAV = [\n"
+    '  {label:"Home", icon:"House", href:"/"},\n'
+    '  {label:"Team", icon:"Users", href:"/team"},\n'
+    "];\n"
+    "export function Sidebar() {\n"
+    "  return (\n"
+    '    <div className="shell">\n'
+    "      <span>Acme</span>\n"
+    "      <nav>{NAV.map(item => <span key={item.label}>{item.label}</span>)}</nav>\n"
+    "    </div>\n"
+    "  );\n"
+    "}\n"
+)
+
+# A route screen with one literal navigation → a resolvable edge in the set.
+_DASHBOARD_BODY = (
+    "export default function DashboardScreen() {\n"
+    '  function go() { navigate("/team"); }\n'
+    "  return null;\n"
+    "}\n"
+)
+
+
+def _snap_with_shell() -> RepoSnapshot:
+    return _snap(
+        tree_paths=[
+            "app/dashboard/page.tsx",
+            "app/team/page.tsx",
+            "src/components/Sidebar.tsx",
+        ],
+        **{
+            "app/dashboard/page.tsx": _DASHBOARD_BODY,
+            "app/team/page.tsx": "export default function TeamScreen() {}",
+            "src/components/Sidebar.tsx": _SHELL_BODY,
+        },
+    )
+
+
+def _snap_without_shell() -> RepoSnapshot:
+    return _snap(
+        tree_paths=["app/dashboard/page.tsx", "app/team/page.tsx"],
+        **{
+            "app/dashboard/page.tsx": _DASHBOARD_BODY,
+            "app/team/page.tsx": "export default function TeamScreen() {}",
+        },
+    )
+
+
+def test_shell_node_appended_when_shell_exists():
+    """A snapshot with an identifiable shell yields exactly one app-shell node (AC2)."""
+    nodes = extract_nodes(_snap_with_shell(), _partial_probe())
+
+    shell_nodes = [n for n in nodes if n.kind == "shell"]
+    assert len(shell_nodes) == 1
+    node = shell_nodes[0]
+    assert node.id == APP_SHELL_NODE_ID == "app-shell"
+    assert node.route == APP_SHELL_ROUTE
+    assert node.file == "src/components/Sidebar.tsx"
+    # Reuses the shell's nav-item icon component names.
+    assert node.composed_components == ["House", "Users"]
+
+
+def test_no_shell_node_when_no_chrome():
+    """A snapshot with no identifiable chrome yields zero shell nodes (AC3)."""
+    nodes = extract_nodes(_snap_without_shell(), _partial_probe())
+    assert [n for n in nodes if n.kind == "shell"] == []
+    # And the route nodes are still enumerated.
+    assert {n.route for n in nodes} == {"/dashboard", "/team"}
+
+
+def test_shell_node_emitted_once():
+    """Assembly never produces more than one app-shell node (AC4)."""
+    nodes = extract_nodes(_snap_with_shell(), _partial_probe())
+    assert sum(1 for n in nodes if n.kind == "shell") == 1
+    # Re-running is idempotent: still exactly one per call (deterministic).
+    again = extract_nodes(_snap_with_shell(), _partial_probe())
+    assert sum(1 for n in again if n.kind == "shell") == 1
+    assert nodes == again
+
+
+def test_route_section_nodes_unchanged_by_shell_append():
+    """Route/section nodes are byte-identical with vs without the shell append (AC5)."""
+    with_shell = extract_nodes(_snap_with_shell(), _partial_probe())
+    # The route/section node set the assembly would have produced absent any shell.
+    baseline = extract_nodes(_snap_without_shell(), _partial_probe())
+
+    non_shell = [n for n in with_shell if n.kind != "shell"]
+    assert non_shell == baseline
+    # The only delta the append introduces is the single shell node.
+    assert len(with_shell) == len(baseline) + 1
+
+
+def test_resolved_edge_set_unchanged_by_shell_node():
+    """The shell node's synthetic route/file are inert in edge resolution (AC6)."""
+    snap = _snap_with_shell()
+    probe = _partial_probe()
+    nodes = extract_nodes(snap, probe)
+    nodes_without_shell = [n for n in nodes if n.kind != "shell"]
+
+    # Sanity: the shell node IS present in the resolved-against set.
+    assert any(n.kind == "shell" for n in nodes)
+
+    resolved_with, _ = resolve_edges(snap, probe, nodes)
+    resolved_without, _ = resolve_edges(snap, probe, nodes_without_shell)
+
+    # The resolved edge set is byte-identical with vs without the shell node.
+    assert resolved_with == resolved_without
+    # (a) No edge originates from the synthetic chrome route.
+    assert all(e.from_route != APP_SHELL_ROUTE for e in resolved_with)
+    # (b) The shell file/route did not displace a real call-site's resolution:
+    #     the real /dashboard → /team edge resolves exactly as before.
+    assert any(
+        e.from_route == "/dashboard" and e.to_route == "/team"
+        for e in resolved_with
+    )
+
+
+def test_no_prohibited_tokens_in_source():
+    """Neither nodes.py nor this test file contain internal tracking tokens (AC9).
+
+    Pattern is assembled by concatenation so the test source itself is clean.
+    """
+    ticket_id = r'[CH][0-9]-[0-9]'
+    c_ser = 'C' + '-' + 'series'
+    h_ser = 'H' + '-' + 'series'
+    p_tick = r'P[0-9]-[0-9]'
+    ad_ref = r'\b' + 'AD' + r'[0-9]'
+    f_ref = r'\b' + 'F' + r'[0-9]{1,2}\b'
+    dbd_tok = 'D' + 'BD'
+    auth_tok = 'Babaj' + 'ide'
+    spk_tok = 'spi' + 'ke'
+    pattern = re.compile(
+        '|'.join([ticket_id, c_ser, h_ser, p_tick, ad_ref, f_ref, dbd_tok, auth_tok, spk_tok])
+    )
+    root = pathlib.Path(__file__).parent.parent
+    for relpath in (
+        "app/design_agent/codebase_map/nodes.py",
+        "tests/test_codebase_map_nodes.py",
+    ):
+        source = (root / relpath).read_text()
+        matches = pattern.findall(source)
+        assert not matches, f"{relpath} contains prohibited tokens: {matches}"

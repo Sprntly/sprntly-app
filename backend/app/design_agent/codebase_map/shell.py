@@ -13,6 +13,7 @@ from app.design_agent.codebase_map.repo_reader import RepoSnapshot
 from app.design_agent.codebase_map.types import (
     LogoAsset,
     NavItem,
+    ScreenNode,
     ShellModel,
 )
 
@@ -354,4 +355,59 @@ def extract_shell(snapshot: RepoSnapshot) -> ShellModel:
         nav_items=nav_items,
         collapse_model=collapse,
         logo=logo,
+    )
+
+
+# ── App-shell node (the locatable chrome surface) ──────────────────────────────
+
+APP_SHELL_NODE_ID = "app-shell"
+# Stable id of the single chrome node emitted per map.
+APP_SHELL_ROUTE = "(app layout — global chrome, not a route)"
+# Synthetic route label — never a real path, so it never matches a navigation
+# call-site and stays inert in edge resolution (edge keying is route/file-based).
+
+
+def _component_name_from_path(path: str) -> str:
+    """Best-effort component name from a file path stem.
+
+    Returns the filename stem when it already reads as a component name
+    (leading uppercase — the React component-file convention); otherwise ""
+    (honest unknown). Pure string work — no repo read.
+    """
+    if not path:
+        return ""
+    name = path.split("/")[-1]
+    stem, _, _ = name.rpartition(".")
+    stem = stem or name
+    return stem if stem[:1].isupper() else ""
+
+
+def build_app_shell_node(shell: ShellModel, *, shell_file_path: str = "") -> ScreenNode:
+    """Construct the kind="shell" app-shell node from an already-extracted ShellModel.
+
+    The app shell is the frame every screen renders inside (sidebar + topbar +
+    persistent global layer: AI bar, toast/notification layer, global modals).
+    It has no single-screen route, so it is promoted to one enumerated, locatable
+    node with a stable id ("app-shell") and a synthetic route.
+
+    The structural backing is the ShellModel the caller already extracted — this
+    builder performs NO repo read / fetch (it takes no snapshot): its fields
+    derive only from the ShellModel and the file path it is given. ``composed_components``
+    reuses the nav items' icon component names when present.
+
+    ``shell_file_path`` is the located shell file (threaded from the node-assembly
+    site, which reuses the path extract_shell computed). When unknown it may be
+    "" — the node stays locatable by its stable id.
+    """
+    composed: list[str] = []
+    for item in shell.nav_items:
+        if item.icon and item.icon not in composed:
+            composed.append(item.icon)
+    return ScreenNode(
+        id=APP_SHELL_NODE_ID,
+        kind="shell",
+        route=APP_SHELL_ROUTE,
+        entry_component=_component_name_from_path(shell_file_path),
+        file=shell_file_path,
+        composed_components=composed,
     )
