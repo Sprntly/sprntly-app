@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Posture = Literal["CLEAN", "PARTIAL"]
 # CLEAN  = a typed screen registry or route-table was found; node completeness
@@ -56,6 +56,20 @@ class ScreenNode(BaseModel):
     is_route_state: bool = False
     # True when the node is a query-param route-state of another route
     # (e.g. "/inbox?view=archived"), not a distinct path
+    kind: Literal["route", "section", "shell"] = "route"
+    # discriminates a routed screen ("route") from an in-page section
+    # ("section") or the app shell ("shell"); today only "route" is emitted
+    id: str = ""
+    # stable per-node key. Defaults to the route when left empty (see the
+    # validator below) — for a routed screen the route IS the stable key.
+    # Section/shell nodes pass an explicit non-route id, which is preserved.
+
+    @model_validator(mode="after")
+    def _default_id_to_route(self) -> "ScreenNode":
+        """Fall the stable id back to the route when no explicit id was given."""
+        if not self.id:
+            self.id = self.route
+        return self
 
 
 class NavEdge(BaseModel):

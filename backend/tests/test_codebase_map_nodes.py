@@ -186,6 +186,68 @@ def test_extraction_is_deterministic():
     assert routes == sorted(routes), f"Nodes must be sorted by route, got {routes}"
 
 
+# ── Node kind + stable id ───────────────────────────────────────────────────────
+
+def test_enumerated_nodes_carry_route_kind_and_id():
+    """Every node from a CLEAN and a PARTIAL fixture is kind="route" with id == route."""
+    clean_snap = _snap(
+        **{
+            "src/routes.ts": "export const ROUTES = { team: '/team' };\n",
+            "app/team/page.tsx": "export default function TeamScreen() {}\n",
+        }
+    )
+    clean_snap.tree_paths = ["src/routes.ts", "app/team/page.tsx"]
+    clean_nodes = extract_nodes(clean_snap, _clean_probe(route_table_files=["src/routes.ts"]))
+    assert clean_nodes
+    for n in clean_nodes:
+        assert n.kind == "route"
+        assert n.id == n.route
+
+    partial_snap = _snap(
+        tree_paths=["app/home/page.tsx", "app/users/[id]/page.tsx"],
+        **{
+            "app/home/page.tsx": "export default function HomeScreen() {}",
+            "app/users/[id]/page.tsx": "export default function UserScreen() {}",
+        }
+    )
+    partial_nodes = extract_nodes(partial_snap, _partial_probe())
+    assert partial_nodes
+    for n in partial_nodes:
+        assert n.kind == "route"
+        assert n.id == n.route
+
+
+def test_enumeration_otherwise_byte_identical():
+    """Beyond the two new fields, each enumerated node is the exact pre-existing shape."""
+    snap = _snap(
+        tree_paths=[
+            "app/team/page.tsx",
+            "app/settings/page.tsx",
+            "app/users/[id]/page.tsx",
+        ],
+        **{
+            "app/team/page.tsx": "export default function TeamScreen() {}",
+            "app/settings/page.tsx": "export default function SettingsScreen() {}",
+            "app/users/[id]/page.tsx": "export default function UserScreen() {}",
+        }
+    )
+    nodes = extract_nodes(snap, _partial_probe())
+    assert nodes
+    for n in nodes:
+        dumped = n.model_dump()
+        # The two new fields carry the deterministic foundation values …
+        assert dumped.pop("kind") == "route"
+        assert dumped.pop("id") == n.route
+        # … and every remaining field is exactly the pre-existing node shape.
+        assert set(dumped.keys()) == {
+            "route",
+            "entry_component",
+            "file",
+            "composed_components",
+            "is_route_state",
+        }
+
+
 # ── Observability ──────────────────────────────────────────────────────────────
 
 def test_probe_and_nodes_emit_identifier_only_logs(caplog):

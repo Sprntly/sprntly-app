@@ -111,6 +111,8 @@ def _extract_clean(snapshot: RepoSnapshot, probe: ProbeResult) -> list[ScreenNod
             file=file_path,
             composed_components=composed,
             is_route_state=is_route_state,
+            kind="route",
+            id=route_path,
         ))
 
     return nodes
@@ -216,6 +218,8 @@ def _extract_next_app(snapshot: RepoSnapshot) -> list[ScreenNode]:
             file=path,
             composed_components=composed,
             is_route_state=False,
+            kind="route",
+            id=route,
         ))
     return nodes
 
@@ -246,6 +250,8 @@ def _extract_next_pages(snapshot: RepoSnapshot) -> list[ScreenNode]:
             file=path,
             composed_components=composed,
             is_route_state=False,
+            kind="route",
+            id=route,
         ))
     return nodes
 

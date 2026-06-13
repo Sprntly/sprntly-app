@@ -59,6 +59,47 @@ def test_screen_node_fields():
     assert node.is_route_state is False
 
 
+def test_kind_defaults_to_route():
+    """A node constructed without a kind is a routed screen by default."""
+    node = ScreenNode(route="/team", entry_component="TeamScreen")
+    assert node.kind == "route"
+
+
+def test_kind_accepts_section_and_shell_rejects_unknown():
+    """kind validates the three discriminator values and rejects anything else."""
+    assert ScreenNode(route="/team", kind="section").kind == "section"
+    assert ScreenNode(route="", kind="shell").kind == "shell"
+    with pytest.raises(ValidationError):
+        ScreenNode(route="/team", kind="bogus")  # type: ignore[arg-type]
+
+
+def test_id_defaults_to_route_when_empty():
+    """An omitted id falls back to the route; an explicit id is preserved."""
+    assert ScreenNode(route="/team").id == "/team"
+    assert ScreenNode(route="/team", id="custom").id == "custom"
+
+
+def test_screen_node_kind_id_roundtrip():
+    """A shell node with an explicit id serializes and deserializes unchanged."""
+    node = ScreenNode(route="", entry_component="AppShell", kind="shell", id="app-shell")
+    restored = ScreenNode.model_validate(node.model_dump())
+    assert restored == node
+    assert restored.kind == "shell"
+    assert restored.id == "app-shell"
+
+
+def test_existing_constructions_valid_with_defaults():
+    """A pre-existing construction that omits kind/id stays valid and gets defaults."""
+    node = ScreenNode(
+        route="/inbox",
+        entry_component="InboxScreen",
+        file="app/inbox/page.tsx",
+        composed_components=["ThreadList"],
+    )
+    assert node.kind == "route"
+    assert node.id == "/inbox"
+
+
 def test_nav_edge_from_to_route_naming():
     edge = NavEdge(from_route="/team", to_route="/team/settings", kind="literal")
     assert edge.from_route == "/team"
