@@ -1355,3 +1355,49 @@ export const multiAgentApi = {
   getDoc: (docId: number) =>
     api.get<MultiAgentDoc>(`/v1/multi-agent/doc/${docId}`),
 }
+
+// ---- Artifacts (All-Chats "Artifacts" tab) ---------------------------------
+// Append-only block. A unified, recency-sorted list of every generated PRD,
+// prototype, and evidence for the active company — backs the Artifacts tab.
+// Reuses the shared `api` helper (credentials/JSON/${API_URL} centralised).
+
+/** The brief/parent-PRD context shown on an artifact row's meta line, plus the
+ *  ids the existing viewer needs to OPEN it. Discriminated by `type`. */
+export type ArtifactItem =
+  | {
+      type: "prd"
+      id: number
+      title: string
+      status: string
+      created_at: string
+      source: { brief_id: number; week_label: string | null; insight_index: number | null }
+      open: { brief_id: number; insight_index: number | null; prd_id: number }
+    }
+  | {
+      type: "evidence"
+      id: number
+      title: string
+      status: string
+      created_at: string
+      source: { brief_id: number; week_label: string | null; insight_index: number | null }
+      open: { brief_id: number; insight_index: number | null; evidence_id: number }
+    }
+  | {
+      type: "prototype"
+      id: number
+      title: string
+      status: string
+      created_at: string
+      source: { prd_id: number | null; prd_title: string }
+      open: { prototype_id: number; prd_id: number | null }
+    }
+
+export const artifactsApi = {
+  /** Unified artifact list for a company slug, newest first. */
+  list: (company: string) =>
+    api
+      .get<{ artifacts: ArtifactItem[] }>(
+        `/v1/artifacts?dataset=${encodeURIComponent(company)}`,
+      )
+      .then((r) => r.artifacts),
+}
