@@ -1726,6 +1726,28 @@
 .design-agent-surface.proto-gen-overlay .proto-gen-step--entering {
   animation: protoGenStepEnter 0.25s ease-out forwards;
 }
+/* Exit animation: played when the user clicks "Notify me when ready" */
+@keyframes protoGenFadeOut {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.97); }
+}
+.design-agent-surface.proto-gen-overlay.proto-gen-exiting {
+  animation: protoGenFadeOut 0.2s ease-in forwards;
+  pointer-events: none;
+}
+
+/* Stable footer slot for the "Notify me when ready" button — reserves min-height
+   so the layout doesn't reflow as steps stream into the list above. */
+.design-agent-surface.proto-gen-overlay .proto-gen-footer {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 20px;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-btn {
+  /* inherits .btn .btn-ghost .btn-sm; no override needed here */
+}
 /* === generation loading overlay (end) ===================================== */
 
 /* =============================================================================

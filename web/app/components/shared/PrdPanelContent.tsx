@@ -104,7 +104,7 @@ function ShareMenuItem({ icon, iconStyle, title, desc, onClick }: { icon: ReactN
   )
 }
 
-function PrototypeSection({ prdId, figmaFileKey }: { prdId: number; figmaFileKey?: string | null }) {
+function PrototypeSection({ prdId, figmaFileKey, externalGeneratingId }: { prdId: number; figmaFileKey?: string | null; externalGeneratingId?: number | null }) {
   const [existing, setExisting] = useState<PrototypeRecord | null>(null)
   const [loading, setLoading] = useState(true)
   const [polling, setPolling] = useState(false)
@@ -144,7 +144,7 @@ function PrototypeSection({ prdId, figmaFileKey }: { prdId: number; figmaFileKey
           </div>
         </div>
       )}
-      <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} />
+      <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} externalGeneratingId={externalGeneratingId} />
     </div>
   )
 }
@@ -263,6 +263,11 @@ export function PrdPanelContent() {
   const prd = content.prd
   const [subTab, setSubTab] = useState<PrdSubTab>("human")
 
+  // Tracks an in-flight prototype id when "Notify me when ready" was clicked in
+  // the loading overlay — surfaces PrototypeGeneratingCard on the PRD without
+  // requiring PrototypeSection to remount.
+  const [notifyGenId, setNotifyGenId] = useState<number | null>(null)
+
   const [prdLoading, setPrdLoading] = useState(false)
 
   useEffect(() => {
@@ -290,6 +295,20 @@ export function PrdPanelContent() {
     const draft = loadDraft(prd.prd_id)
     if (draft) bodyRef.current.innerHTML = draft
   }, [prd?.prd_id])
+
+  useEffect(() => {
+    const onGenerating = (e: Event) => {
+      const id = (e as CustomEvent<{ prototypeId: number }>).detail?.prototypeId
+      if (typeof id === "number") setNotifyGenId(id)
+    }
+    const onDone = () => setNotifyGenId(null)
+    window.addEventListener("da:generating", onGenerating)
+    window.addEventListener("da:generating-done", onDone)
+    return () => {
+      window.removeEventListener("da:generating", onGenerating)
+      window.removeEventListener("da:generating-done", onDone)
+    }
+  }, [])
 
   const handleInput = useCallback(() => {
     setSaveStatus("unsaved")
@@ -481,7 +500,7 @@ export function PrdPanelContent() {
         </div>
       )}
 
-      {prd && <PrototypeSection prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} />}
+      {prd && <PrototypeSection prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} externalGeneratingId={notifyGenId} />}
       </>
       )}
     </div>

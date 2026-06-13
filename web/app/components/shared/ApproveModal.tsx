@@ -172,6 +172,7 @@ export function ApproveModal() {
             { persist: true },
           )
         }
+        window.dispatchEvent(new CustomEvent("da:generating-done"))
         clearTimers()
         return
       }
@@ -193,8 +194,13 @@ export function ApproveModal() {
   // closes the overlay immediately.
   const handleNotifyWhenReady = useCallback(() => {
     notifyModeRef.current = true
+    showToast("Prototype is processing", "We'll let you know when it's ready.")
+    // Signal the on-PRD PrototypeGeneratingCard to appear.
+    if (genProtoId != null) {
+      window.dispatchEvent(new CustomEvent("da:generating", { detail: { prototypeId: genProtoId } }))
+    }
     setGenLoading(false)
-  }, [])
+  }, [showToast, genProtoId])
 
   // Guard for "View Prototype" re-verification: prevents navigating to a stale
   // canvas.

@@ -51,6 +51,10 @@ export type DesignAgentLauncherProps = {
   /** PRD one-line meta, threaded alongside prdSections so the condensed panel
    *  can display the subtitle. Optional so non-PRD callers keep type-checking. */
   prdMetaLine?: string | null
+  /** When set from outside (e.g. notify-mode generation kicked off by
+   *  ApproveModal), shows PrototypeGeneratingCard without requiring the
+   *  launcher's own drawer flow to have kicked off. */
+  externalGeneratingId?: number | null
 }
 
 /** Props the launcher hands to whatever drawer it mounts. Mirrors
@@ -252,6 +256,8 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   onGenerated?: (result: DesignAgentGenResult) => void
   /** In-page status card: prototype_id being generated, null when idle. */
   generatingId?: number | null
+  /** External override — see DesignAgentLauncherProps.externalGeneratingId. */
+  externalGeneratingId?: number | null
   /** Fires immediately after kickoff so the container sets `generatingId`. */
   onKickoff?: (prototypeId: number) => void
   /** P6-08 (Fix #11): the last generation attempt's failure, or null. When set,
@@ -301,6 +307,7 @@ export function DesignAgentLauncherView({
   result = null,
   onGenerated,
   generatingId = null,
+  externalGeneratingId = null,
   onKickoff,
   failure = null,
   onRetry = () => {},
@@ -328,7 +335,7 @@ export function DesignAgentLauncherView({
       {/* In-page generating status card — visible from kickoff until the
           terminal result mounts. Keeps the user informed without relying on
           the transient toast or the "Notify me" opt-in. */}
-      {generatingId !== null && result === null && (
+      {(generatingId !== null || externalGeneratingId !== null) && result === null && (
         <PrototypeGeneratingCard />
       )}
       {/* When the PRD already has a ready prototype (read-only getByPrd), show a
@@ -460,6 +467,7 @@ export function DesignAgentLauncher({
   prdId,
   figmaFileKey,
   prdTitle = null,
+  externalGeneratingId = null,
   renderDrawer,
 }: DesignAgentLauncherProps & {
   renderDrawer?: (props: LauncherDrawerProps) => ReactNode
@@ -593,6 +601,7 @@ export function DesignAgentLauncher({
         result={result}
         onGenerated={handleGenerated}
         generatingId={generatingId}
+        externalGeneratingId={externalGeneratingId}
         onKickoff={setGeneratingId}
         failure={failure}
         onRetry={handleRetry}
