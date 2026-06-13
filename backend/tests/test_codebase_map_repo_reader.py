@@ -584,6 +584,38 @@ def test_detect_frontend_root_app_router_fallback():
     assert _detect_frontend_root(tree, {}) == "web/"
 
 
+def test_detect_frontend_root_prefers_app_router_over_bare_react_sibling():
+    """A real app (next + App-Router pages) wins over an alphabetically-earlier
+    bare-react sibling that ships no pages (a generated prototype-runtime dir).
+
+    Both declare a frontend dep and sit at depth 1, so an alphabetical tie-break
+    would wrongly pick 'prototype-runtime/' (no app/**/page.* → zero nodes). The
+    App-Router + next signal must make 'web/' win deterministically."""
+    import json as _json
+
+    tree = [
+        "prototype-runtime/package.json",
+        "prototype-runtime/src/main.tsx",
+        "web/package.json",
+        "web/app/(app)/page.tsx",
+        "web/app/sources/page.tsx",
+    ]
+    files = {
+        "prototype-runtime/package.json": _json.dumps({"dependencies": {"react": "19"}}),
+        "web/package.json": _json.dumps({"dependencies": {"next": "15", "react": "19"}}),
+    }
+    assert "prototype-runtime/" < "web/"  # the alphabetical trap
+    assert _detect_frontend_root(tree, files) == "web/"
+
+    # Even with only the App-Router signal (no next dep), the page-hosting
+    # sibling still beats the bare-react one.
+    files_no_next = {
+        "prototype-runtime/package.json": _json.dumps({"dependencies": {"react": "19"}}),
+        "web/package.json": _json.dumps({"dependencies": {"react": "19"}}),
+    }
+    assert _detect_frontend_root(tree, files_no_next) == "web/"
+
+
 def test_tree_cap_measures_frontend_after_filter():
     """AC14: a backend-first tree (600 backend paths BEFORE 50 web/app pages)
     keeps the web pages when frontend_root='web/' (cap applied AFTER the prefix
@@ -663,16 +695,22 @@ def test_build_map_nonempty_on_backend_first_monorepo():
 
     backend = [f"backend/app/file{i}.py" for i in range(600)]
     web = ["web/package.json"] + [f"web/app/route{i}/page.tsx" for i in range(10)]
-    tree = backend + web
+    # A bare-react sibling that sorts alphabetically BEFORE web/ and ships no
+    # app/**/page.* — mirrors the real repo's generated prototype-runtime dir.
+    sibling = ["prototype-runtime/package.json", "prototype-runtime/src/main.tsx"]
+    tree = backend + sibling + web
 
     page_body = "export default function Page() { return <div>screen</div> }"
-    pkg_body = json.dumps({"dependencies": {"next": "15.1.6", "react": "19.0.0"}})
+    web_pkg = json.dumps({"dependencies": {"next": "15.1.6", "react": "19.0.0"}})
+    sibling_pkg = json.dumps({"dependencies": {"react": "19.0.0"}})
 
     def _resp(url, **kw):
         if "/commits/" in url:
             return _ok_response({"sha": "monorepoSHA1234567890"})
+        if "prototype-runtime/package.json" in url:
+            return _ok_response(_contents_payload("prototype-runtime/package.json", sibling_pkg))
         if "package.json" in url:
-            return _ok_response(_contents_payload("web/package.json", pkg_body))
+            return _ok_response(_contents_payload("web/package.json", web_pkg))
         return _ok_response(_contents_payload("page", page_body))
 
     mock_requests = MagicMock()

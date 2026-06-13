@@ -142,62 +142,84 @@ def _candidate_package_json_paths(tree_paths: list[str]) -> list[str]:
     return out
 
 
-def _pkg_declares_frontend(body: str) -> bool:
-    """True when a package.json body declares a next or react dependency."""
+def _pkg_deps(body: str) -> dict:
+    """Merged dependency map from a package.json body ({} on any parse error)."""
     try:
         data = json.loads(body)
     except Exception:
-        return False
+        return {}
     if not isinstance(data, dict):
-        return False
+        return {}
+    merged: dict = {}
     for key in ("dependencies", "devDependencies", "peerDependencies"):
         deps = data.get(key)
-        if isinstance(deps, dict) and ("next" in deps or "react" in deps):
-            return True
-    return False
+        if isinstance(deps, dict):
+            merged.update(deps)
+    return merged
+
+
+def _pkg_declares_frontend(body: str) -> bool:
+    """True when a package.json body declares a next or react dependency."""
+    deps = _pkg_deps(body)
+    return "next" in deps or "react" in deps
+
+
+def _app_router_prefixes(tree_paths: list[str]) -> set[str]:
+    """All repo-relative prefixes hosting an app/**/page.* (or src/app/**) file."""
+    return {
+        m.group(1)
+        for m in (_APP_ROUTER_PAGE_RE.match(p) for p in tree_paths)
+        if m is not None
+    }
 
 
 def _app_router_prefix(tree_paths: list[str]) -> str:
     """Shallowest repo-relative prefix hosting an app/**/page.* (or src/app/**)."""
-    best: tuple[int, str] | None = None
-    for p in tree_paths:
-        m = _APP_ROUTER_PAGE_RE.match(p)
-        if not m:
-            continue
-        prefix = m.group(1)
-        depth = prefix.count("/")
-        if best is None or depth < best[0]:
-            best = (depth, prefix)
-    return best[1] if best else ""
+    prefixes = _app_router_prefixes(tree_paths)
+    return min(prefixes, key=lambda s: (s.count("/"), s)) if prefixes else ""
 
 
 def _detect_frontend_root(tree_paths: list[str], files: dict[str, str]) -> str:
     """Return the repo-relative prefix of the frontend app subtree ('web/'), or
     '' for a repo-root app.
 
-    Detection order: (a) a package.json declaring next/react — prefer the
-    shallowest NON-root one (a monorepo's app package) over a root manifest that
-    may only hoist shared deps; a root-only frontend manifest means a repo-root
-    app and returns ''. (b) Else the prefix of the dir hosting app/**/page.* or
-    src/app/**/page.*. (c) Else '' (honest fallback; never raises). When '',
-    callers apply today's flat behaviour with no filtering.
+    Detection order: (a) a package.json declaring next/react — among candidates,
+    PREFER one that hosts an App-Router page (real screens) or declares `next`
+    over a bare-react-only sibling (e.g. a generated prototype-runtime package
+    that declares react but ships no app/**/page.*), then the shallowest, then
+    alphabetical as a stable last resort; a root-only frontend manifest means a
+    repo-root app and returns ''. (b) Else the prefix of the dir hosting
+    app/**/page.* or src/app/**/page.*. (c) Else '' (honest fallback; never
+    raises). When '', callers apply today's flat behaviour with no filtering.
     """
-    non_root: list[tuple[int, str]] = []
+    app_router = _app_router_prefixes(tree_paths)
+    # (prefix, has_app_router, declares_next) for each non-root frontend package.
+    candidates: list[tuple[str, bool, bool]] = []
     root_is_frontend = False
     for p in tree_paths:
         if p != "package.json" and not p.endswith("/package.json"):
             continue
-        body = files.get(p, "")
-        if not body or not _pkg_declares_frontend(body):
+        deps = _pkg_deps(files.get(p, ""))
+        if not ("next" in deps or "react" in deps):
             continue
         prefix = p[: len(p) - len("package.json")]  # '' or 'web/' or 'apps/web/'
         if prefix:
-            non_root.append((prefix.count("/"), prefix))
+            candidates.append((prefix, prefix in app_router, "next" in deps))
         else:
             root_is_frontend = True
-    if non_root:
-        non_root.sort()
-        return non_root[0][1]
+    if candidates:
+        # A real frontend app hosts App-Router pages and/or declares next; a
+        # bare-react sibling (generated output) wins only if nothing better
+        # exists. Ties fall to the shallowest, then alphabetical (stable).
+        candidates.sort(
+            key=lambda c: (
+                0 if c[1] else 1,        # hosts app/**/page.* first
+                0 if c[2] else 1,        # declares next next
+                c[0].count("/"),         # shallower
+                c[0],                    # alphabetical, stable
+            )
+        )
+        return candidates[0][0]
     if root_is_frontend:
         return ""
     return _app_router_prefix(tree_paths)
