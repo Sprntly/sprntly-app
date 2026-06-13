@@ -47,7 +47,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
   const [lastSubmittedQuestion, setLastSubmittedQuestion] = useState<string | null>(null)
 
   // Agent command state — for "generate PRD", "create tickets", etc.
-  type AgentAction = { kind: "prd"; prdId: number; title: string; message: string }
+  type AgentAction = { kind: "prd"; prdId?: number; title: string; message: string }
   const [agentAction, setAgentAction] = useState<AgentAction | null>(null)
   const [agentWorking, setAgentWorking] = useState(false)
   const [layout, setLayout] = useState<AiLayout>(() =>
