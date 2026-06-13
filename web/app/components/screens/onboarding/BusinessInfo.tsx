@@ -12,10 +12,14 @@ import {
 } from "../../../lib/onboarding/product-helpers"
 import { STAGES, TECH_STACK_OPTIONS } from "../../../lib/onboarding/types"
 import {
+  completeOnboarding,
   createWorkspace,
   updateWorkspace,
   upsertPrimaryProduct,
 } from "../../../lib/onboarding/store"
+import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
+
+const DRAFT_KEY = "business-info"
 
 /**
  * Onboarding step 01 — "Company" page (v4 .onb-* design).
@@ -35,24 +39,37 @@ export function BusinessInfo() {
   const auth = useAuth()
   const { workspace, refresh, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
-  const [companyName, setCompanyName] = useState("")
-  const [productName, setProductName] = useState("")
-  const [productWebsite, setProductWebsite] = useState("")
-  const [stage, setStage] = useState("Growth")
-  const [teamSize, setTeamSize] = useState("")
-  const [techStack, setTechStack] = useState<string[]>([])
+  // Restore draft from localStorage (survives tab switches)
+  const draft = loadDraft(DRAFT_KEY)
+  const [companyName, setCompanyName] = useState((draft?.companyName as string) ?? "")
+  const [productName, setProductName] = useState((draft?.productName as string) ?? "")
+  const [productWebsite, setProductWebsite] = useState((draft?.productWebsite as string) ?? "")
+  const [stage, setStage] = useState((draft?.stage as string) ?? "Growth")
+  const [teamSize, setTeamSize] = useState((draft?.teamSize as string) ?? "")
+  const [techStack, setTechStack] = useState<string[]>((draft?.techStack as string[]) ?? [])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Seed from workspace on first load (only if no draft exists)
   useEffect(() => {
     if (!workspace) return
+    if (draft) return // draft takes priority — user already typed something
     setCompanyName(workspace.display_name)
     setProductName(workspace.product?.name ?? workspace.display_name)
     setProductWebsite(workspace.product?.website ?? "")
     setStage(workspace.stage ?? "Growth")
     if (workspace.team_size) setTeamSize(String(workspace.team_size))
     setTechStack(workspace.tech_stack ?? [])
-  }, [workspace])
+  }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Save draft on visibility change (tab switch / minimize) — not on every keystroke
+  useEffect(() => {
+    const onHide = () => {
+      if (document.hidden) saveDraft(DRAFT_KEY, { companyName, productName, productWebsite, stage, teamSize, techStack })
+    }
+    document.addEventListener("visibilitychange", onHide)
+    return () => document.removeEventListener("visibilitychange", onHide)
+  }, [companyName, productName, productWebsite, stage, teamSize, techStack])
 
   const canContinue =
     companyName.trim().length > 0 && productName.trim().length > 0
@@ -114,6 +131,7 @@ export function BusinessInfo() {
         })
         setWorkspace(created)
       }
+      clearDraft(DRAFT_KEY)
       if (andContinue) {
         // Route to the blocking analyzing interstitial; it runs the (now
         // awaited) website analysis, then forwards to the metrics page. No
@@ -126,6 +144,22 @@ export function BusinessInfo() {
       setError(e instanceof Error ? e.message : "Couldn't save workspace.")
     } finally {
       setSaving(false)
+    }
+  }
+
+  const [skipping, setSkipping] = useState(false)
+
+  async function skipToSettings() {
+    if (auth.kind !== "authed") return
+    setSkipping(true)
+    try {
+      // Save minimal workspace if it exists, then mark onboarding complete
+      if (workspace) {
+        await completeOnboarding(workspace.id, auth.user.id)
+      }
+      router.push("/settings")
+    } catch {
+      setSkipping(false)
     }
   }
 
@@ -142,7 +176,21 @@ export function BusinessInfo() {
       }
       subtitle="A name and your website anchor the whole workspace — we'll read the site to draft your industry, metrics, and context for the next step. You can change everything later in Settings."
       footerMeta={
-        canContinue ? "Ready to analyze your business" : "Company & product name required"
+        <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span>{canContinue ? "Ready to analyze your business" : "Company & product name required"}</span>
+          <button
+            type="button"
+            onClick={skipToSettings}
+            disabled={skipping || !workspace}
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              fontSize: 12, color: "var(--accent, #179463)", textDecoration: "underline",
+              padding: 0, fontWeight: 500,
+            }}
+          >
+            {skipping ? "Redirecting…" : "Skip to Settings →"}
+          </button>
+        </span>
       }
       onContinue={() => save(true)}
       continueDisabled={saving}

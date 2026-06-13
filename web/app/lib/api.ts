@@ -222,9 +222,19 @@ export type AskResponse = {
   unanswered: string
 }
 
+export type SkillInfo = {
+  id: string
+  label: string
+  trigger: string
+  description: string
+}
+
 export const askApi = {
   ask: (question: string, company: string = "asurion") =>
     api.post<AskResponse>("/v1/ask", { question, dataset: company }),
+  /** List available skills the chat can route to. */
+  skills: () =>
+    api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),
 }
 
 export type PrdStartResponse = {
@@ -1145,6 +1155,124 @@ export type ManualEditResponse = {
   prototype_id: number
   status: string
   queue_position: number
+}
+
+// ---- ticket push (ClickUp / Jira) ------------------------------------------
+
+export type ClickUpList = {
+  id: string
+  name: string
+  space: string | null
+  folder: string | null
+}
+
+export type TicketPushResult = {
+  created: { ticket: string; task_id: string; url: string }[]
+  errors: { ticket: string; error: string }[]
+}
+
+export type TicketDataResponse = {
+  description: string | null
+  acceptance_criteria: string[] | null
+  attachments: { id: number; label: string; sub: string }[]
+  comments: { id: number; author: string; body: string; time: string }[]
+}
+
+export const ticketDataApi = {
+  /** Get all saved overrides for a ticket (description, attachments, comments). */
+  getData: (ticketKey: string) =>
+    api.get<TicketDataResponse>(`/v1/tickets/${encodeURIComponent(ticketKey)}/data`),
+  /** Save description + acceptance criteria. */
+  saveDescription: (ticketKey: string, description: string, acceptanceCriteria: string[]) =>
+    api.put(`/v1/tickets/${encodeURIComponent(ticketKey)}/description`, {
+      description, acceptance_criteria: acceptanceCriteria,
+    }),
+  /** Add an attachment. */
+  addAttachment: (ticketKey: string, label: string, sub: string) =>
+    api.post<{ id: number; label: string; sub: string }>(
+      `/v1/tickets/${encodeURIComponent(ticketKey)}/attachments`, { label, sub },
+    ),
+  /** Remove an attachment. */
+  removeAttachment: (ticketKey: string, attachmentId: number) =>
+    api.delete(`/v1/tickets/${encodeURIComponent(ticketKey)}/attachments/${attachmentId}`),
+  /** Add a comment. */
+  addComment: (ticketKey: string, author: string, body: string) =>
+    api.post<{ id: number; author: string; body: string; time: string }>(
+      `/v1/tickets/${encodeURIComponent(ticketKey)}/comments`, { author, body },
+    ),
+  /** Remove a comment. */
+  removeComment: (ticketKey: string, commentId: number) =>
+    api.delete(`/v1/tickets/${encodeURIComponent(ticketKey)}/comments/${commentId}`),
+}
+
+export const ticketPushApi = {
+  /** Fetch ClickUp lists the company can push tickets into. 404 when not connected. */
+  listClickUpLists: () =>
+    api.post<{ lists: ClickUpList[] }>("/v1/tickets/lists", {}),
+  /** Push one or more tickets into a ClickUp list. */
+  pushToClickUp: (
+    listId: string,
+    tickets: { title: string; description: string; priority: string }[],
+  ) =>
+    api.post<TicketPushResult>("/v1/tickets/push-clickup", {
+      list_id: listId,
+      tickets,
+    }),
+}
+
+// ── Team members ──────────────────────────────────────────────────────────
+
+export type TeamMemberRecord = {
+  user_id: string
+  role: string
+  display_name: string | null
+  email: string | null
+  avatar_url: string | null
+}
+
+export const teamApi = {
+  /** Fetch all company members enriched with profile data. */
+  list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
+}
+
+// ── Conversations (chat history persistence) ──
+
+export type ConversationRecord = {
+  id: number
+  company_id: string
+  title: string
+  preview: string
+  agent_type: string
+  query: string
+  reply: string
+  pinned: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type ConversationTurn = {
+  id: number
+  conversation_id: number
+  role: "user" | "assistant"
+  content: string
+  created_at: string
+}
+
+export const conversationsApi = {
+  list: () =>
+    api.get<{ conversations: ConversationRecord[] }>("/v1/conversations"),
+  create: (body: { title: string; preview?: string; agent_type?: string; query?: string; reply?: string; pinned?: boolean }) =>
+    api.post<ConversationRecord>("/v1/conversations", body),
+  update: (id: number, body: { title?: string; preview?: string; query?: string; reply?: string; pinned?: boolean }) =>
+    api.patch<ConversationRecord>(`/v1/conversations/${id}`, body),
+  remove: (id: number) =>
+    api.delete(`/v1/conversations/${id}`),
+  /** List all turns (messages) in a conversation, oldest first. */
+  listTurns: (conversationId: number) =>
+    api.get<{ turns: ConversationTurn[] }>(`/v1/conversations/${conversationId}/turns`),
+  /** Add a turn to a conversation. */
+  addTurn: (conversationId: number, role: "user" | "assistant", content: string) =>
+    api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, { role, content }),
 }
 
 // ---- transient-auth resilience (shared primitive) ---------------------------

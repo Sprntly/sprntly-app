@@ -144,6 +144,48 @@ export function Check(props: SVGProps<SVGSVGElement>) {
   )
 }
 
+export function Palette(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 21a9 9 0 0 1 0 -18c4.97 0 9 3.582 9 8c0 1.06 -.474 2.078 -1.318 2.828c-.844 .75 -1.989 1.172 -3.182 1.172h-2.5a2 2 0 0 0 -1 3.75a1.3 1.3 0 0 1 -1 2.25" />
+      <circle cx="7.5" cy="10.5" r="0.6" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="7.5" r="0.6" fill="currentColor" stroke="none" />
+      <circle cx="16.5" cy="10.5" r="0.6" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+export function ChartBar(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="12" width="6" height="8" rx="1" />
+      <rect x="9" y="8" width="6" height="12" rx="1" />
+      <rect x="15" y="4" width="6" height="16" rx="1" />
+      <line x1="4" y1="20" x2="18" y2="20" />
+    </svg>
+  )
+}
+
+export function Settings(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base(props)}>
+      <path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  )
+}
+
+export function FileText(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base(props)}>
+      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+      <line x1="9" y1="13" x2="15" y2="13" />
+      <line x1="9" y1="17" x2="15" y2="17" />
+    </svg>
+  )
+}
+
 export function Trash(props: SVGProps<SVGSVGElement>) {
   return (
     <svg {...base(props)}>

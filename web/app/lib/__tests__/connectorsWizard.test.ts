@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest"
 import {
   categoryTitle,
   clampStep,
+  firstIncompleteCategory,
   hasRequiredConnector,
+  isCategoryUnlocked,
   isLastCategory,
+  markCategoryDone,
   nextStep,
   REQUIRED_CATEGORY_KEY,
   requiredCategoryIds,
@@ -65,6 +68,42 @@ describe("categoryTitle", () => {
   it("uses the bare title when there is no sub-label", () => {
     const plain = { key: "x", title: "Design", items: [] }
     expect(categoryTitle(plain)).toBe("Design")
+  })
+})
+
+describe("accordion helpers (sequential unlock)", () => {
+  it("markCategoryDone adds an index without mutating the original", () => {
+    const a = new Set<number>()
+    const b = markCategoryDone(a, 0)
+    expect(b.has(0)).toBe(true)
+    expect(a.has(0)).toBe(false)
+    // idempotent
+    expect(markCategoryDone(b, 0).size).toBe(1)
+  })
+
+  it("isCategoryUnlocked: first is always unlocked, N+1 needs N done", () => {
+    const none = new Set<number>()
+    expect(isCategoryUnlocked(none, 0)).toBe(true)
+    expect(isCategoryUnlocked(none, 1)).toBe(false)
+    expect(isCategoryUnlocked(none, 2)).toBe(false)
+    const firstDone = new Set([0])
+    expect(isCategoryUnlocked(firstDone, 1)).toBe(true)
+    expect(isCategoryUnlocked(firstDone, 2)).toBe(false)
+  })
+
+  it("isCategoryUnlocked: done categories stay unlocked (re-openable)", () => {
+    const done = new Set([0, 1])
+    expect(isCategoryUnlocked(done, 0)).toBe(true)
+    expect(isCategoryUnlocked(done, 1)).toBe(true)
+    expect(isCategoryUnlocked(done, 2)).toBe(true)
+    expect(isCategoryUnlocked(done, 3)).toBe(false)
+  })
+
+  it("firstIncompleteCategory finds the frontier, null when all done", () => {
+    expect(firstIncompleteCategory(new Set(), 3)).toBe(0)
+    expect(firstIncompleteCategory(new Set([0]), 3)).toBe(1)
+    expect(firstIncompleteCategory(new Set([0, 2]), 3)).toBe(1)
+    expect(firstIncompleteCategory(new Set([0, 1, 2]), 3)).toBeNull()
   })
 })
 

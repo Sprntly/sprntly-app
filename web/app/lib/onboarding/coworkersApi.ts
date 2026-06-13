@@ -85,6 +85,20 @@ export const DEFAULT_COWORKER_NAMES: CoworkerNames = {
   admin: "Ada",
 }
 
+/**
+ * Display-only handle preview for the page-07 pill (e.g. "Maya" → "maya_pm").
+ *
+ * The backend stores plain names (companies.coworker_names) and derives no
+ * handle of its own, so this is purely presentational: lowercase the typed
+ * name, strip everything but [a-z0-9], and append the slot suffix — mirrors
+ * the mock's cwUpdate() (base + "_" + slot), with "name" as the empty base so
+ * the untouched pill reads name_pm / name_pd / … like the design.
+ */
+export function coworkerHandle(slot: CoworkerSlot, name: string): string {
+  const base = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "") || "name"
+  return `${base}_${slot}`
+}
+
 /** Fill any empty/whitespace slot with its default name. */
 export function withCoworkerDefaults(names: CoworkerNames): CoworkerNames {
   const out = { ...names }

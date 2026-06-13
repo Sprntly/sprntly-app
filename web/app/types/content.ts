@@ -530,6 +530,10 @@ export interface AppContentState {
    *  adapter. Evidence carries its own `evidence_id` on the wire and never a
    *  `prd_id`, so it is typed `PrdContent`, not `PrdState`. */
   evidence: PrdContent | null
+  /** True while evidence is being generated from the chat flow (ChatScreen),
+   *  so ContentPanel's EvidenceTab can show a loading state even when
+   *  content.detail is null. */
+  evidenceGenerating: boolean
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]

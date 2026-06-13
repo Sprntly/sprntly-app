@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react"
 import { AppLayout } from "./AppLayout"
 import { IconSortAscendingLetters, IconAdjustments, IconFilter, IconPlus, IconUpload, IconSparkles } from "@tabler/icons-react"
 import { EmptyPane } from "../../shared/EmptyPane"
+import { ticketPushApi, type ClickUpList } from "../../../lib/api"
 
 export type InternalTicket = {
   id: string
@@ -106,11 +107,40 @@ function AddTicketModal({ onClose, onAdd }: { onClose: () => void; onAdd: (t: In
   const [category, setCategory] = useState("Product")
   const [assignee, setAssignee] = useState("")
   const [description, setDescription] = useState("")
+  const [pushClickUp, setPushClickUp] = useState(false)
+  const [clickUpOk, setClickUpOk] = useState(false)
+  const [busy, setBusy] = useState(false)
 
-  const handleSubmit = () => {
+  // Check ClickUp connection on mount
+  useEffect(() => {
+    import("../../../lib/api").then(({ connectorsApi }) => {
+      connectorsApi.list().then((conns) => {
+        const list = Array.isArray(conns) ? conns : (conns as unknown as { connections?: any[] }).connections ?? []
+        if (list.find((c: any) => c.provider === "clickup")) {
+          setClickUpOk(true); setPushClickUp(true)
+        }
+      }).catch(() => {})
+    })
+  }, [])
+
+  const handleSubmit = async () => {
     if (!title.trim()) return
+    setBusy(true)
     const ticket = saveTicket({ title: title.trim(), priority, category, assignee: assignee.trim(), description: description.trim() })
     onAdd(ticket)
+
+    // Auto-push to ClickUp if enabled
+    if (pushClickUp && clickUpOk) {
+      try {
+        const listsRes = await ticketPushApi.listClickUpLists()
+        if (listsRes.lists.length > 0) {
+          await ticketPushApi.pushToClickUp(listsRes.lists[0].id, [{
+            title: ticket.title, description: ticket.description, priority: ticket.priority,
+          }])
+        }
+      } catch { /* silent — saved internally */ }
+    }
+    setBusy(false)
     onClose()
   }
 
@@ -154,12 +184,18 @@ function AddTicketModal({ onClose, onAdd }: { onClose: () => void; onAdd: (t: In
             <textarea style={{ ...inputStyle, minHeight: 90, resize: "vertical", fontFamily: "inherit" }} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What needs to be done?" />
           </div>
         </div>
+        {clickUpOk && (
+          <div style={{ padding: "0 22px 10px", display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="checkbox" id="modal-push-cu" checked={pushClickUp} onChange={(e) => setPushClickUp(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+            <label htmlFor="modal-push-cu" style={{ fontSize: 12.5, color: "var(--ink-2)", cursor: "pointer" }}>Also push to ClickUp</label>
+          </div>
+        )}
         <div style={{ padding: "0 22px 18px", display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button type="button" onClick={onClose} style={{ ...toolBtnStyle, padding: "7px 16px" }}>Cancel</button>
-          <button type="button" onClick={handleSubmit} disabled={!title.trim()} style={{
-            fontSize: 12, padding: "7px 16px", background: title.trim() ? "var(--accent, #179463)" : "#ccc", color: "#fff",
-            border: "none", borderRadius: 7, fontWeight: 600, cursor: title.trim() ? "pointer" : "not-allowed",
-          }}>Create ticket</button>
+          <button type="button" onClick={handleSubmit} disabled={!title.trim() || busy} style={{
+            fontSize: 12, padding: "7px 16px", background: title.trim() && !busy ? "var(--accent, #179463)" : "#ccc", color: "#fff",
+            border: "none", borderRadius: 7, fontWeight: 600, cursor: title.trim() && !busy ? "pointer" : "not-allowed",
+          }}>{busy ? "Creating..." : pushClickUp ? "Create & push to ClickUp" : "Create ticket"}</button>
         </div>
       </div>
     </>
@@ -257,6 +293,52 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
   const [editDesc, setEditDesc] = useState(ticket.description)
   const [editCategory, setEditCategory] = useState(ticket.category)
   const [commentText, setCommentText] = useState("")
+
+  // ── ClickUp push state ──
+  const [showListPicker, setShowListPicker] = useState(false)
+  const [clickUpLists, setClickUpLists] = useState<ClickUpList[]>([])
+  const [listsLoading, setListsLoading] = useState(false)
+  const [listsError, setListsError] = useState<string | null>(null)
+  const [pushStatus, setPushStatus] = useState<"idle" | "pushing" | "done" | "error">("idle")
+  const [pushMessage, setPushMessage] = useState<string | null>(null)
+
+  const handleOpenListPicker = useCallback(async () => {
+    if (showListPicker) { setShowListPicker(false); return }
+    setShowListPicker(true)
+    setListsLoading(true)
+    setListsError(null)
+    try {
+      const res = await ticketPushApi.listClickUpLists()
+      setClickUpLists(res.lists)
+    } catch (err: any) {
+      setListsError(err?.status === 404 ? "ClickUp is not connected. Connect it in Settings." : (err?.message || "Failed to load lists"))
+    } finally {
+      setListsLoading(false)
+    }
+  }, [showListPicker])
+
+  const handlePushToClickUp = useCallback(async (listId: string) => {
+    setShowListPicker(false)
+    setPushStatus("pushing")
+    setPushMessage(null)
+    try {
+      const res = await ticketPushApi.pushToClickUp(listId, [{
+        title: ticket.title,
+        description: ticket.description,
+        priority: ticket.priority,
+      }])
+      if (res.created.length > 0) {
+        setPushStatus("done")
+        setPushMessage(`Pushed to ClickUp`)
+      } else {
+        setPushStatus("error")
+        setPushMessage(res.errors[0]?.error || "Push failed")
+      }
+    } catch (err: any) {
+      setPushStatus("error")
+      setPushMessage(err?.message || "Push failed")
+    }
+  }, [ticket])
 
   // Sync local state when ticket changes
   useEffect(() => {
@@ -402,11 +484,60 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
       </div>
 
       {/* Footer */}
-      <div style={{ padding: "12px 20px", borderTop: "1px solid var(--line, #E8E6E0)", display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12, color: "var(--ink-3, #8C8A84)" }}>
-        <span style={{ color: "#15201b", fontWeight: 400, fontSize: 12 }}><strong style={{ fontWeight: 500 }}>Ticket synced</strong> · PRD attached</span>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 30, border: "1px solid var(--line, #E8E6E0)", background: "var(--surface, #fff)", cursor: "pointer", color: "var(--ink-2, #5A5853)" }}>Send to Jira</button>
+      <div style={{ padding: "12px 20px", borderTop: "1px solid var(--line, #E8E6E0)", display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12, color: "var(--ink-3, #8C8A84)", position: "relative" }}>
+        <span style={{ color: "#15201b", fontWeight: 400, fontSize: 12 }}>
+          {pushStatus === "done" && <span style={{ color: "var(--accent, #179463)", fontWeight: 500 }}>{pushMessage}</span>}
+          {pushStatus === "error" && <span style={{ color: "#DC2626", fontWeight: 500 }}>{pushMessage}</span>}
+          {pushStatus === "pushing" && <span style={{ fontWeight: 500 }}>Pushing...</span>}
+          {pushStatus === "idle" && <><strong style={{ fontWeight: 500 }}>Ticket synced</strong> · PRD attached</>}
+        </span>
+        <div style={{ display: "flex", gap: 8, position: "relative" }}>
+          <button type="button" onClick={handleOpenListPicker} disabled={pushStatus === "pushing"} style={{
+            fontSize: 11.5, padding: "5px 12px", borderRadius: 30,
+            border: "1px solid var(--line, #E8E6E0)", background: showListPicker ? "var(--surface-2, #F4F1EA)" : "var(--surface, #fff)",
+            cursor: pushStatus === "pushing" ? "not-allowed" : "pointer", color: "var(--ink-2, #5A5853)",
+          }}>Send to ClickUp</button>
           <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 30, background: "var(--accent, #179463)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 400 }}>Send to Claude Code</button>
+
+          {/* ClickUp list picker dropdown */}
+          {showListPicker && (
+            <div style={{
+              position: "absolute", bottom: "100%", right: 0, marginBottom: 6,
+              width: 300, maxHeight: 260, overflowY: "auto",
+              background: "#fff", borderRadius: 10, border: "1px solid var(--line, #E8E6E0)",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.12)", zIndex: 100, padding: "6px 0",
+            }}>
+              <div style={{ padding: "8px 14px 6px", fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--ink-3, #8C8A84)" }}>
+                Select ClickUp list
+              </div>
+              {listsLoading && (
+                <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--ink-3, #8C8A84)" }}>Loading lists...</div>
+              )}
+              {listsError && (
+                <div style={{ padding: "12px 14px", fontSize: 12, color: "#DC2626" }}>{listsError}</div>
+              )}
+              {!listsLoading && !listsError && clickUpLists.length === 0 && (
+                <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--ink-3, #8C8A84)" }}>No lists found</div>
+              )}
+              {!listsLoading && clickUpLists.map((list) => (
+                <button key={list.id} type="button" onClick={() => handlePushToClickUp(list.id)} style={{
+                  display: "block", width: "100%", textAlign: "left", padding: "8px 14px",
+                  background: "none", border: "none", cursor: "pointer", fontSize: 12.5,
+                  color: "var(--ink, #1A1A17)", lineHeight: 1.4,
+                }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F4F1EA)" }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none" }}
+                >
+                  <div style={{ fontWeight: 500 }}>{list.name}</div>
+                  {(list.space || list.folder) && (
+                    <div style={{ fontSize: 11, color: "var(--ink-3, #8C8A84)", marginTop: 1 }}>
+                      {[list.space, list.folder].filter(Boolean).join(" / ")}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

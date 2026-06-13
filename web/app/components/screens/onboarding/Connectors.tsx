@@ -1,38 +1,156 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import type { ReactElement, SVGProps } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
-import { InterviewLayout } from "../../onboarding/InterviewLayout"
+import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
 import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
+import { Check } from "../../auth/icons"
 import {
-  categoryTitle,
-  isLastCategory,
-  nextStep,
+  firstIncompleteCategory,
+  isCategoryUnlocked,
+  markCategoryDone,
   toggleSelection,
   wizardCategories,
 } from "../../../lib/onboarding/connectorsWizard"
 
 /**
- * Onboarding "connectors" step — "Connect your tools."
+ * Onboarding "connectors" step (design-v4 page 06) — "Connect your tools."
  *
- * A categorized SEQUENTIAL wizard: the PM works one connector category at
- * a time — "each one opens the next" — with Skip / Done·next per category.
- * Categories + connectors come from CONNECTOR_CATALOG so this tracks the
- * Settings page automatically. At least one Analytics source is required
- * before Continue; live OAuth/API-key wiring happens in Settings after
- * onboarding (selections here pre-stage intent).
+ * A vertical ACCORDION of connector categories with sequential unlock:
+ * the PM works one category at a time — "each one opens the next" — with
+ * Skip / Done·next per category. Done categories collapse with a done
+ * state and stay re-openable; later ones stay locked until the previous
+ * is done/skipped. Categories + connectors come from CONNECTOR_CATALOG
+ * so this page tracks Settings automatically (the design kit's hardcoded
+ * grid is NOT the source of truth).
+ *
+ * Everything is optional: there is deliberately NO required-Analytics
+ * gate on Continue. Connectable providers open the real OAuth/API-key
+ * modal; everything else toggles a "planned" selection that pre-stages
+ * intent for Settings → Connectors.
  */
+
+/** Mockup `.conn-step-info .s` copy per catalog category key. */
+const CATEGORY_DESCRIPTIONS: Record<string, string> = {
+  analytics: "Product behaviour & cohort data — powers your brief",
+  pm: "Roadmap, sprints, capacity",
+  voice: "Tickets, transcripts, NPS, CSAT",
+  revenue: "Billing & subscription data — ties work to revenue",
+  code: "Repos & PRs — so the agent reads real code and ships fixes",
+  monitoring: "Error tracking, APM, paging — powers the On-Call agent",
+  design: "Design system & files — so prototypes match your brand",
+  comms: "Where your weekly brief lands — with a thread to ask follow-ups",
+}
+
+/* Inline SVG category icons (tabler-style strokes) — the design kit's
+   webfont (`ti ti-*`) is intentionally not bundled; this mirrors how the
+   other onboarding pages use inline SVGs from auth/icons.tsx. */
+function iconProps(props: SVGProps<SVGSVGElement>): SVGProps<SVGSVGElement> {
+  return {
+    viewBox: "0 0 24 24",
+    width: 18,
+    height: 18,
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": true,
+    ...props,
+  }
+}
+
+const CATEGORY_ICONS: Record<string, (props: SVGProps<SVGSVGElement>) => ReactElement> = {
+  analytics: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M4 19h16" />
+      <path d="M4 15l4-6 4 2 4-5 4 4" />
+    </svg>
+  ),
+  pm: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M4 4h4v10H4z" />
+      <path d="M10 4h4v6h-4z" />
+      <path d="M16 4h4v13h-4z" />
+    </svg>
+  ),
+  voice: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M3 20l1.3-3.9A8 8 0 1 1 7.9 19z" />
+    </svg>
+  ),
+  revenue: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M12 3v18" />
+      <path d="M17 7.5a3.5 3.5 0 0 0-3.5-3.5h-3a3.5 3.5 0 0 0 0 7h3a3.5 3.5 0 0 1 0 7h-3A3.5 3.5 0 0 1 7 14.5" />
+    </svg>
+  ),
+  code: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M7 8l-4 4 4 4" />
+      <path d="M17 8l4 4-4 4" />
+      <path d="M14 4l-4 16" />
+    </svg>
+  ),
+  monitoring: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+      <path d="M10.4 3.9L1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.6 3.9a2 2 0 0 0-3.2 0z" />
+    </svg>
+  ),
+  design: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M12 21a9 9 0 1 1 9-9c0 1.8-1.2 3-3 3h-2.2a2.2 2.2 0 0 0-1.3 4c.6.5.2 2-2.5 2z" />
+      <path d="M8.5 10.5h.01" />
+      <path d="M12 7.5h.01" />
+      <path d="M15.5 10.5h.01" />
+    </svg>
+  ),
+  comms: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M21 14l-3-3h-7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1z" />
+      <path d="M14 15v2a1 1 0 0 1-1 1H6l-3 3V11a1 1 0 0 1 1-1h2" />
+    </svg>
+  ),
+  default: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M9 7V3" />
+      <path d="M15 7V3" />
+      <path d="M6 7h12v3a6 6 0 0 1-12 0z" />
+      <path d="M12 16v5" />
+    </svg>
+  ),
+}
+
+function CategoryIcon({ catKey }: { catKey: string }) {
+  const Icon = CATEGORY_ICONS[catKey] ?? CATEGORY_ICONS.default
+  return <Icon />
+}
+
+function LockIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...iconProps({ width: 12, height: 12, ...props })}>
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  )
+}
+
 export function Connectors() {
   const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
   const categories = useMemo(() => wizardCategories(), [])
-  const [catStep, setCatStep] = useState(0)
+  // Accordion state: which categories are done/skipped + which is expanded.
+  const [doneCats, setDoneCats] = useState<Set<number>>(new Set())
+  const [openCat, setOpenCat] = useState<number | null>(0)
   const [connected, setConnected] = useState<Set<string>>(new Set())
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [modalProvider, setModalProvider] = useState<string | null>(null)
@@ -81,8 +199,17 @@ export function Connectors() {
     })
   }
 
-  function advanceCategory() {
-    setCatStep((s) => nextStep(s))
+  /** Header click: locked headers are inert; others toggle open/closed. */
+  function toggleCategory(i: number) {
+    if (!isCategoryUnlocked(doneCats, i)) return
+    setOpenCat((cur) => (cur === i ? null : i))
+  }
+
+  /** Skip / Done·next: mark done, collapse, open the next incomplete one. */
+  function completeCategory(i: number) {
+    const nextDone = markCategoryDone(doneCats, i)
+    setDoneCats(nextDone)
+    setOpenCat(firstIncompleteCategory(nextDone, categories.length))
   }
 
   async function go(skipped: boolean) {
@@ -107,145 +234,146 @@ export function Connectors() {
     if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
 
-  if (loading || !workspace) return <div className="ob-shell">Loading…</div>
+  if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
-  const cat = categories[catStep]
-  const onLast = isLastCategory(catStep)
-  const selectedNames: string[] = []
-  for (const c of categories) {
-    for (const item of c.items) {
-      if (selected.has(item.id)) selectedNames.push(item.name)
-    }
-  }
+  const selectedCount = categories
+    .flatMap((c) => c.items)
+    .filter((it) => selected.has(it.id)).length
 
   return (
-    <InterviewLayout
+    <OnboardingChrome
       step={3}
-      eyebrow="Saved"
-      title="Connect your tools"
-      agentMessage="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
-      rightPane={
-        <div>
-          <div className="ob-preview-label">Connection status</div>
-          <p className="ob-stat-lg">{selectedNames.length} selected</p>
-          <ul className="ob-preview-list">
-            {selectedNames.map((n, i) => {
-              const item = categories
-                .flatMap((c) => c.items)
-                .find((it) => it.name === n)
-              const isLive = item ? connected.has(item.id) : false
-              return (
-                <li key={`${n}-${i}`}>
-                  {isLive ? "✓" : "○"} {n}
-                </li>
-              )
-            })}
-          </ul>
-        </div>
+      saveLabel="Saved · auto-saves"
+      title={
+        <>
+          Connect your <em>tools.</em>
+        </>
+      }
+      subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
+      footerMeta={
+        <>
+          {selectedCount} connector{selectedCount === 1 ? "" : "s"} selected ·
+          all optional —{" "}
+          <button
+            type="button"
+            className="onb-skip-link"
+            onClick={() => go(true)}
+            disabled={saving}
+          >
+            Connect later
+          </button>
+        </>
       }
       onBack={() => router.push("/onboarding/metrics")}
       onContinue={() => go(false)}
-      onSkip={() => go(true)}
-      continueLabel="Continue"
-      skipLabel="Connect later"
+      continueDisabled={saving}
       loading={saving}
     >
-      <div className="ob-wiz-progress">
-        Step {catStep + 1} of {categories.length} · {cat.title}
-      </div>
-
-      <div className="ob-conn-group">
-        <div className="ob-group-title">{categoryTitle(cat)}</div>
-        {cat.subtitle && <p className="ob-conn-cat-sub">{cat.subtitle}</p>}
-        <div className="ob-conn-grid">
-          {cat.items.map((item) => {
-            const live = connected.has(item.id)
-            const sel = selected.has(item.id)
-            return (
+      <div className="conn-steps">
+        {categories.map((cat, i) => {
+          const isDone = doneCats.has(i)
+          const isOpen = openCat === i
+          const unlocked = isCategoryUnlocked(doneCats, i)
+          const isLast = i === categories.length - 1
+          return (
+            <div
+              key={cat.key}
+              className={`conn-step ${isOpen ? "open" : ""} ${isDone ? "done" : ""} ${unlocked ? "" : "locked"}`}
+              data-conn={cat.key}
+            >
               <button
-                key={item.id}
                 type="button"
-                className={`ob-conn-card ${sel ? "connected" : ""}`}
-                onClick={() => toggle(item.id)}
+                className="conn-step-h"
+                onClick={() => toggleCategory(i)}
+                aria-expanded={isOpen}
+                disabled={!unlocked}
               >
+                <div className="conn-step-ic">
+                  <CategoryIcon catKey={cat.key} />
+                </div>
+                <div className="conn-step-info">
+                  <div className="t">{cat.title}</div>
+                  <div className="s">
+                    {CATEGORY_DESCRIPTIONS[cat.key] ?? cat.subtitle ?? ""}
+                  </div>
+                </div>
                 <span
-                  className="ob-conn-logo"
-                  style={{ background: item.logoColor ?? "var(--ink)" }}
-                  aria-hidden
+                  className="conn-step-state"
+                  data-state={isDone ? "done" : isOpen ? "open" : unlocked ? "ready" : "locked"}
                 >
-                  {item.logoText ?? item.name.charAt(0)}
+                  {isDone ? (
+                    <>
+                      <Check style={{ width: 12, height: 12 }} aria-hidden /> Done
+                    </>
+                  ) : isOpen ? (
+                    "In progress"
+                  ) : unlocked ? (
+                    "Up next"
+                  ) : (
+                    <LockIcon aria-label="Locked" />
+                  )}
                 </span>
-                <span className="ob-conn-name">{item.name}</span>
-                {live && <span className="ob-conn-badge">Live</span>}
               </button>
-            )
-          })}
-        </div>
 
-        <div className="ob-wiz-actions">
-          {!onLast ? (
-            <>
-              <button type="button" className="btn btn-ghost btn-sm" onClick={advanceCategory}>
-                Skip
-              </button>
-              <button type="button" className="btn btn-sm" onClick={advanceCategory}>
-                Done · next
-              </button>
-            </>
-          ) : (
-            <span className="ob-wiz-done-note">
-              Last category — use Continue below to finish.
-            </span>
-          )}
-        </div>
+              {isOpen && (
+                <div className="conn-step-body">
+                  <div className="conn-grid">
+                    {cat.items.map((item) => {
+                      const live = connected.has(item.id)
+                      const sel = selected.has(item.id)
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={`conn ${sel ? "on" : ""} ${live ? "live" : ""}`}
+                          onClick={() => toggle(item.id)}
+                          aria-pressed={sel}
+                          aria-disabled={live || undefined}
+                        >
+                          <span
+                            className="conn-logo"
+                            style={{ background: item.logoColor ?? "var(--ink)" }}
+                            aria-hidden
+                          >
+                            {item.logoText ?? item.name.charAt(0)}
+                          </span>
+                          <span className="conn-name">{item.name}</span>
+                          {live && <span className="conn-live">Live</span>}
+                          <span className="check" aria-hidden>
+                            <Check style={{ width: 11, height: 11 }} />
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <div className="conn-step-foot">
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => completeCategory(i)}
+                    >
+                      Skip
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-brand"
+                      onClick={() => completeCategory(i)}
+                    >
+                      {isLast ? "Done" : "Done · next"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
 
-      <p className="ob-conn-note">
+      <p className="conn-note">
         OAuth and API-key connections are configured in Settings → Connectors
         after onboarding. Selections here pre-stage what you intend to wire up.
       </p>
 
-      <style jsx>{`
-        .ob-wiz-progress {
-          font-size: 11px;
-          text-transform: uppercase;
-          letter-spacing: 0.1em;
-          color: var(--muted);
-          margin-bottom: 14px;
-        }
-        .ob-conn-cat-sub {
-          font-size: 13px;
-          color: var(--ink-3);
-          margin: 0 0 12px;
-        }
-        .ob-conn-group :global(.ob-conn-card) {
-          display: flex;
-          align-items: center;
-        }
-        .ob-conn-logo {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          width: 22px;
-          height: 22px;
-          border-radius: 6px;
-          color: #fff;
-          font-size: 12px;
-          font-weight: 600;
-          margin-right: 8px;
-          flex-shrink: 0;
-        }
-        .ob-wiz-actions {
-          display: flex;
-          gap: 8px;
-          margin-top: 16px;
-          align-items: center;
-        }
-        .ob-wiz-done-note {
-          font-size: 12px;
-          color: var(--muted);
-        }
-      `}</style>
       <ConnectorConnectModal
         providerId={modalProvider}
         activeCompany={workspace.slug}
@@ -263,6 +391,6 @@ export function Connectors() {
           setModalProvider(null)
         }}
       />
-    </InterviewLayout>
+    </OnboardingChrome>
   )
 }

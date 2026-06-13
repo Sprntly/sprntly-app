@@ -11,8 +11,12 @@ import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
-import { ChatSuggestionIcon, IconSendUp } from "../../shared/app-icons"
-import { ApiError, askApi, type AskResponse } from "../../../lib/api"
+import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
+import { ApiError, askApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { runPrdGeneration } from "../../../lib/runPrdGeneration"
+import { runEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
+import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
+import type { PrdState, PrdContent } from "../../../types/content"
 
 type ThreadTurn = {
   id: string
@@ -21,23 +25,48 @@ type ThreadTurn = {
   error?: string
 }
 
+type BriefMeta = { briefId: number; insightIndex: number }
+
+type ChatTab = {
+  id: string
+  title: string
+  thread: ThreadTurn[]
+  dbConvId: number | null
+  /** Brief finding context — enables PRD/evidence generation for this tab. */
+  briefMeta: BriefMeta | null
+  /** Per-tab cached PRD (not persisted to localStorage — re-generate on reload). */
+  prd: PrdState | null
+  /** Per-tab cached evidence. */
+  evidence: PrdContent | null
+  prdGenerating: boolean
+  evidenceGenerating: boolean
+}
+
 type HomeChipItem = { kind: "home" | "starter"; card: ChatHomeCard }
 
 function buildHomeChips(home: ChatHomeCard[], starterList: ChatHomeCard[]): HomeChipItem[] {
   const out: HomeChipItem[] = []
   for (const card of home) {
-    if (out.length >= 3) break
+    if (out.length >= 4) break
     out.push({ kind: "home", card })
   }
   for (const card of starterList) {
-    if (out.length >= 3) break
+    if (out.length >= 4) break
     out.push({ kind: "starter", card })
   }
   return out
 }
 
+const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
+  { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View weekly brief", desc: "", target: "brief" } },
+  { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
+  { kind: "starter", card: { id: "def-draft", icon: "document", title: "Draft quarterly report", desc: "", target: "ondemand", prompt: "Draft a quarterly product report with key metrics, wins, and next steps." } },
+  { kind: "starter", card: { id: "def-proto", icon: "rocket", title: "Prototype", desc: "", target: "ondemand", prompt: "Help me prototype the top feature in our product roadmap." } },
+]
+
 export function ChatScreen() {
   const {
+    currentScreen,
     goTo,
     setAIBarValue,
     expandAiPanel,
@@ -46,6 +75,7 @@ export function ChatScreen() {
     pendingOndemandDraft,
     setPendingOndemandDraft,
     showToast,
+    openContentPanel,
   } = useNavigation()
   const auth = useAuth()
   const { profile } = useWorkspace()
@@ -53,11 +83,229 @@ export function ChatScreen() {
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
-  const [thread, setThread] = useState<ThreadTurn[]>([])
+  const [tabs, setTabs] = useState<ChatTab[]>(() => {
+    try {
+      const saved = localStorage.getItem("sprntly_chat_tabs")
+      if (!saved) return []
+      // Restore with defaults for fields not persisted (prd/evidence are large — re-generate on reload)
+      return (JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
+        id: t.id ?? "",
+        title: t.title ?? "",
+        thread: t.thread ?? [],
+        dbConvId: t.dbConvId ?? null,
+        briefMeta: t.briefMeta ?? null,
+        prd: null,
+        evidence: null,
+        prdGenerating: false,
+        evidenceGenerating: false,
+      }))
+    } catch { return [] }
+  })
+  // Ref kept in sync so callbacks can read current tabs without adding to deps
+  const tabsRef = useRef<ChatTab[]>(tabs)
+  tabsRef.current = tabs
+  // Track which turn IDs have already been animated so re-mounting a tab doesn't
+  // restart the typing animation from scratch.
+  const animatedTurnIds = useRef<Set<string>>(new Set())
+  const [activeTabId, setActiveTabId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem("sprntly_chat_active_tab") || null
+    } catch { return null }
+  })
+  // Persist tabs to localStorage — strip large/transient fields (prd, evidence, *Generating)
+  useEffect(() => {
+    try {
+      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, ...rest }) => rest)
+      localStorage.setItem("sprntly_chat_tabs", JSON.stringify(slim))
+    } catch { /* ignore */ }
+  }, [tabs])
+  useEffect(() => {
+    try { localStorage.setItem("sprntly_chat_active_tab", activeTabId ?? "") } catch { /* ignore */ }
+  }, [activeTabId])
+
+  const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
+  const thread = activeTab?.thread ?? []
+  const setThread = useCallback((updater: ThreadTurn[] | ((prev: ThreadTurn[]) => ThreadTurn[])) => {
+    setTabs((prev) => prev.map((t) => {
+      if (t.id !== activeTabId) return t
+      const next = typeof updater === "function" ? updater(t.thread) : updater
+      return { ...t, thread: next }
+    }))
+  }, [activeTabId])
   const [draft, setDraft] = useState("")
   const [busy, setBusy] = useState(false)
+  const [showSlash, setShowSlash] = useState(false)
+  const [skills, setSkills] = useState<SkillInfo[]>([])
+  const [slashFilter, setSlashFilter] = useState("")
+  const [recording, setRecording] = useState(false)
+  const [attachments, setAttachments] = useState<{ name: string; content: string }[]>([])
   const askingRef = useRef(false)
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const recognitionRef = useRef<any>(null)
+
+  // Voice: Web Speech API
+  const toggleVoice = useCallback(() => {
+    if (recording) {
+      recognitionRef.current?.stop()
+      setRecording(false)
+      return
+    }
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SR) { showToast("Not supported", "Voice input isn't supported in this browser."); return }
+    const recognition = new SR()
+    recognition.continuous = false
+    recognition.interimResults = true
+    recognition.lang = "en-US"
+    recognition.onresult = (e: any) => {
+      const transcript = Array.from(e.results as SpeechRecognitionResultList)
+        .map((r: any) => r[0].transcript).join("")
+      setDraft((prev) => prev + transcript)
+    }
+    recognition.onerror = () => setRecording(false)
+    recognition.onend = () => setRecording(false)
+    recognitionRef.current = recognition
+    recognition.start()
+    setRecording(true)
+  }, [recording, showToast])
+
+  // Attach: read file as text and add to context
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files) return
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const content = reader.result as string
+        setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000) }])
+        showToast("Attached", `"${file.name}" added as context.`)
+      }
+      reader.readAsText(file)
+    })
+    e.target.value = "" // reset so same file can be re-selected
+  }, [showToast])
+
+  // Load skills on mount
+  useEffect(() => {
+    askApi.skills().then((r) => setSkills(r.skills)).catch(() => {
+      // Hardcoded fallback if endpoint not available
+      setSkills([
+        { id: "prd-author", label: "Generate PRD", trigger: "/prd", description: "Draft a product requirements document" },
+        { id: "prioritize", label: "Prioritize", trigger: "/prioritize", description: "Rank ideas using RICE, ICE, MoSCoW, or WSJF" },
+        { id: "user-stories", label: "User stories", trigger: "/stories", description: "Break a PRD into user stories" },
+        { id: "backlog-triage", label: "Triage backlog", trigger: "/triage", description: "Clean up backlog: cluster, dedupe" },
+        { id: "decision-memo", label: "Decision memo", trigger: "/decide", description: "Structure a build/buy decision" },
+        { id: "feedback-synthesis", label: "Feedback synthesis", trigger: "/feedback", description: "Synthesize feedback into themes" },
+        { id: "competitive-intelligence-review", label: "Competitive analysis", trigger: "/compete", description: "Competitive intelligence review" },
+        { id: "incident-runbook", label: "Incident runbook", trigger: "/incident", description: "Generate incident response runbook" },
+        { id: "fact-check", label: "Fact-check", trigger: "/factcheck", description: "Verify claims against sources" },
+      ])
+    })
+  }, [])
+
+  // Create a new tab or, if a tab with the same title already exists, switch to it
+  const openTab = useCallback((title: string, initialThread?: ThreadTurn[], dbId?: number | null, briefMeta?: BriefMeta | null) => {
+    const existing = tabsRef.current.find((t) => t.title === title)
+    if (existing) {
+      setActiveTabId(existing.id)
+      setDraft("")
+      return existing.id
+    }
+    const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    setTabs((prev) => [...prev, {
+      id, title, thread: initialThread ?? [], dbConvId: dbId ?? null,
+      briefMeta: briefMeta ?? null, prd: null, evidence: null,
+      prdGenerating: false, evidenceGenerating: false,
+    }])
+    setActiveTabId(id)
+    setDraft("")
+    return id
+  }, [])
+
+  const closeTab = useCallback((tabId: string) => {
+    setTabs((prev) => {
+      const next = prev.filter((t) => t.id !== tabId)
+      if (activeTabId === tabId) {
+        setActiveTabId(next.length > 0 ? next[next.length - 1].id : null)
+      }
+      return next
+    })
+  }, [activeTabId])
+
+  // ── Per-tab artifact generation ──────────────────────────────────────────
+  const handleOpenPrd = useCallback(async () => {
+    if (!activeTabId) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab || tab.prdGenerating) return
+    // Already generated — sync to context and open panel
+    if (tab.prd) {
+      setContent({ prd: tab.prd, prdMeta: tab.briefMeta })
+      openContentPanel("prd")
+      return
+    }
+    const defaultKey = pickDefaultDetailKey(content.briefDetails)
+    const meta = tab.briefMeta
+      ?? content.detail?.meta
+      ?? (defaultKey ? content.briefDetails[defaultKey]?.meta ?? null : null)
+    if (!meta) {
+      openContentPanel("prd") // panel will show empty state / prompt
+      return
+    }
+    setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
+    setContent({ prd: null, prdMeta: null })
+    openContentPanel("prd")
+    try {
+      const result = await runPrdGeneration(meta)
+      if (result.ok) {
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd } : t))
+        setContent({ prd: result.prd, prdMeta: meta })
+      } else {
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+        showToast("PRD generation failed", result.message)
+      }
+    } catch (e) {
+      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+      showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
+    }
+  }, [activeTabId, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
+
+  const handleOpenEvidence = useCallback(async () => {
+    if (!activeTabId) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab || tab.evidenceGenerating) return
+    // Already generated — sync to context and open panel
+    if (tab.evidence) {
+      setContent({ evidence: tab.evidence })
+      openContentPanel("evidence")
+      return
+    }
+    const defaultKey = pickDefaultDetailKey(content.briefDetails)
+    const meta = tab.briefMeta
+      ?? content.detail?.meta
+      ?? (defaultKey ? content.briefDetails[defaultKey]?.meta ?? null : null)
+    if (!meta) {
+      openContentPanel("evidence")
+      return
+    }
+    setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: true } : t))
+    setContent({ evidence: null, evidenceGenerating: true })
+    openContentPanel("evidence")
+    try {
+      const result = await runEvidenceGeneration(meta)
+      if (result.ok) {
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+        setContent({ evidence: result.evidence, evidenceGenerating: false })
+      } else {
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
+        setContent({ evidenceGenerating: false })
+        showToast("Evidence generation failed", result.message)
+      }
+    } catch (e) {
+      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
+      setContent({ evidenceGenerating: false })
+      showToast("Evidence generation failed", e instanceof Error ? e.message : "Unknown error")
+    }
+  }, [activeTabId, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
 
   const conversations = content.conversations
   const starters = content.ondemandStarters
@@ -70,35 +318,104 @@ export function ChatScreen() {
     content.userName?.split(/\s+/)[0] ??
     profileName?.split(/\s+/)[0] ??
     "there"
+  const userInitials = profileName
+    ? profileName.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("")
+    : name.slice(0, 1).toUpperCase()
   const homeCards = content.homeStarterCards.filter((c) => c.id !== "home-goto-ask")
+
+  // When the active tab changes, sync its cached artifacts into ContentContext so
+  // ContentPanel always shows the current tab's PRD / evidence.
+  // We do NOT clear content.detail here — it holds the global brief finding context
+  // that handleOpenPrd / handleOpenEvidence use as a fallback generation source.
+  useEffect(() => {
+    const tab = tabsRef.current.find((t) => t.id === activeTabId) ?? null
+    setContent({
+      prd: tab?.prd ?? null,
+      prdMeta: tab?.briefMeta ?? null,
+      evidence: tab?.evidence ?? null,
+      // When switching tabs, reset the generating flag so the panel reflects
+      // this tab's actual state (generating is tracked per-tab in local state).
+      evidenceGenerating: tab?.evidenceGenerating ?? false,
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, setContent])
 
   useEffect(() => {
     if (!pendingSearchHandoff) return
     const { query, reply, convId } = pendingSearchHandoff
     setPendingSearchHandoff(null)
-    setThread([{ id: convId, query, reply }])
+    const title = query.length > 40 ? `${query.slice(0, 37)}…` : query
+    openTab(title, [{ id: convId, query, reply }])
     setActiveConv(0)
-  }, [pendingSearchHandoff, setPendingSearchHandoff])
+  }, [pendingSearchHandoff, setPendingSearchHandoff, openTab])
 
   useEffect(() => {
     if (pendingOndemandDraft == null || !pendingOndemandDraft.trim()) return
-    setDraft(pendingOndemandDraft)
+    const text = pendingOndemandDraft
     setPendingOndemandDraft(null)
-    requestAnimationFrame(() => {
-      const ta = composerRef.current
-      if (ta) {
-        ta.style.height = "auto"
-        ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
-        ta.focus()
+    // If no active tab, pre-fill the composer; user hits Enter to send
+    if (!activeTabId) {
+      setDraft(text)
+      requestAnimationFrame(() => {
+        const ta = composerRef.current
+        if (ta) {
+          ta.style.height = "auto"
+          ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
+          ta.focus()
+        }
+      })
+    } else {
+      // Active tab exists — open a new tab with this as the first message
+      const title = text.length > 40 ? `${text.slice(0, 37)}…` : text
+      openTab(title)
+      setDraft(text)
+    }
+  }, [pendingOndemandDraft, setPendingOndemandDraft, activeTabId, openTab])
+
+  // Track the current Supabase conversation ID for multi-turn persistence
+  const dbConvIdRef = useRef<number | null>(null)
+
+  // Resume a conversation from ChatsScreen or BacklogScreen (loads turns)
+  const checkResume = useCallback(() => {
+    try {
+      const raw = localStorage.getItem("sprntly_resume_conv")
+      if (!raw) return
+      localStorage.removeItem("sprntly_resume_conv")
+      const data = JSON.parse(raw) as { dbId: number; title: string; turns: { role: string; content: string }[] }
+      if (!data.turns || data.turns.length === 0) return
+      dbConvIdRef.current = data.dbId
+      const restored: ThreadTurn[] = []
+      for (let i = 0; i < data.turns.length; i++) {
+        const t = data.turns[i]
+        if (t.role === "user") {
+          const next = data.turns[i + 1]
+          const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
+          restored.push({ id: `resumed-${i}`, query: t.content, reply })
+          if (reply) i++
+        }
       }
-    })
-  }, [pendingOndemandDraft, setPendingOndemandDraft])
+      if (restored.length > 0) {
+        openTab(data.title || "Resumed chat", restored, data.dbId)
+        setActiveConv(0)
+      }
+    } catch { /* ignore corrupt data */ }
+  }, [openTab])
+  // Check on mount + whenever we navigate to this screen
+  useEffect(() => { checkResume() }, [checkResume])
+  // Re-check when the route lands on chat (covers goTo("chat") from ChatsScreen)
+  useEffect(() => {
+    if (currentScreen === "chat") {
+      // Small delay to let localStorage write from ChatsScreen settle
+      const t = setTimeout(checkResume, 50)
+      return () => clearTimeout(t)
+    }
+  }, [currentScreen, checkResume])
 
   const pushPendingConversation = useCallback(
     (turnId: string, query: string) => {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
-      const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      const timeStr = new Date().toISOString()
       const nextCount = prev.length + 1
       setContent({
         conversations: [
@@ -106,6 +423,30 @@ export function ChatScreen() {
           ...prev,
         ],
         sidebarConvCount: nextCount,
+      })
+      // Persist to Supabase — create conversation + first user turn
+      import("../../../lib/api").then(({ conversationsApi }) => {
+        // If this is a follow-up in the same thread, just add a turn
+        if (dbConvIdRef.current) {
+          conversationsApi.addTurn(dbConvIdRef.current, "user", query).catch(() => { })
+          return
+        }
+        // New conversation
+        conversationsApi.create({
+          title,
+          preview: query.slice(0, 200),
+          query,
+          agent_type: "ask",
+        }).then((conv) => {
+          dbConvIdRef.current = conv.id
+          // Tag the in-memory conversation with the DB id so rail can load turns
+          const latest = conversationsRef.current
+          const tagged = latest.map((c) =>
+            c.id === turnId ? { ...c, _dbId: conv.id } as any : c,
+          )
+          setContent({ conversations: tagged })
+          conversationsApi.addTurn(conv.id, "user", query).catch(() => { })
+        }).catch(() => { })
       })
     },
     [setContent],
@@ -127,28 +468,55 @@ export function ChatScreen() {
           return c
         }),
       })
+      // Save assistant reply as a turn in Supabase
+      if (updates.reply && dbConvIdRef.current) {
+        const replyText = typeof updates.reply === "string"
+          ? updates.reply
+          : (updates.reply as any)?.answer || JSON.stringify(updates.reply).slice(0, 2000)
+        import("../../../lib/api").then(({ conversationsApi }) => {
+          conversationsApi.addTurn(dbConvIdRef.current!, "assistant", replyText).catch(() => { })
+        })
+      }
     },
     [setContent],
   )
 
   const submitAsk = useCallback(
     async (rawQuery: string) => {
-      const query = rawQuery.trim()
-      if (query.length < 3) {
-        showToast("Question too short", "Use at least 3 characters.")
-        return
+      // Append attached file content as context
+      let query = rawQuery.trim()
+      if (attachments.length > 0) {
+        const ctx = attachments.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n")
+        query = `${query}\n\n[Attached files]\n${ctx}`
+        setAttachments([]) // clear after sending
       }
+      if (query.length < 1) return
       if (askingRef.current) return
       askingRef.current = true
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       setBusy(true)
-      setThread((t) => [...t, { id, query }])
+      // Capture the target tab ID up-front so async callbacks always write to
+      // the right tab, even if the user switches tabs while the request is in-flight.
+      let targetTabId: string
+      if (!activeTabId) {
+        const title = query.length > 40 ? `${query.slice(0, 37)}…` : query
+        targetTabId = openTab(title, [{ id, query }])
+      } else {
+        targetTabId = activeTabId
+        setTabs((prev) => prev.map((t) =>
+          t.id !== targetTabId ? t : { ...t, thread: [...t.thread, { id, query }] }
+        ))
+      }
       pushPendingConversation(id, query)
       setActiveConv(0)
       try {
         const res = await askApi.ask(query, activeCompany)
-        setThread((t) => t.map((turn) => (turn.id === id ? { ...turn, reply: res } : turn)))
+        setTabs((prev) => prev.map((t) =>
+          t.id !== targetTabId ? t : {
+            ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res } : turn)
+          }
+        ))
         finalizeConversationTurn(id, { reply: res })
       } catch (e) {
         const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
@@ -159,8 +527,8 @@ export function ChatScreen() {
             ? detail
             : Array.isArray(detail)
               ? detail
-                  .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
-                  .join(" · ")
+                .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
+                .join(" · ")
               : null
         const msg =
           e instanceof ApiError
@@ -168,7 +536,11 @@ export function ChatScreen() {
             : e instanceof Error
               ? e.message
               : "Something went wrong"
-        setThread((t) => t.map((turn) => (turn.id === id ? { ...turn, error: msg } : turn)))
+        setTabs((prev) => prev.map((t) =>
+          t.id !== targetTabId ? t : {
+            ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg } : turn)
+          }
+        ))
         finalizeConversationTurn(id, { error: msg })
         showToast("Ask failed", msg.slice(0, 120))
       } finally {
@@ -176,12 +548,12 @@ export function ChatScreen() {
         setBusy(false)
       }
     },
-    [activeCompany, finalizeConversationTurn, pushPendingConversation, showToast],
+    [activeCompany, activeTabId, attachments, finalizeConversationTurn, openTab, pushPendingConversation, showToast],
   )
 
   const handleComposerSubmit = () => {
     const q = draft.trim()
-    if (q.length < 3 || askingRef.current) return
+    if (q.length < 1 || askingRef.current) return
     setDraft("")
     void submitAsk(q)
     const ta = composerRef.current
@@ -199,10 +571,31 @@ export function ChatScreen() {
   }
 
   const handleComposerInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setDraft(e.target.value)
+    const val = e.target.value
+    setDraft(val)
     e.target.style.height = "auto"
     e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"
+    // Slash command detection: show dropdown when text starts with /
+    if (val.startsWith("/")) {
+      setShowSlash(true)
+      setSlashFilter(val.slice(1).toLowerCase())
+    } else {
+      setShowSlash(false)
+    }
   }
+
+  const handleSlashSelect = (skill: SkillInfo) => {
+    setShowSlash(false)
+    setDraft(skill.trigger + " ")
+    composerRef.current?.focus()
+  }
+
+  const filteredSkills = skills.filter((s) =>
+    slashFilter === "" ||
+    s.trigger.toLowerCase().includes("/" + slashFilter) ||
+    s.label.toLowerCase().includes(slashFilter) ||
+    s.description.toLowerCase().includes(slashFilter)
+  )
 
   const handleStarterChip = (text: string) => {
     void submitAsk(text)
@@ -227,16 +620,21 @@ export function ChatScreen() {
   }
 
   const startNewThread = () => {
-    setThread([])
+    // Remove any empty tabs (no messages) to keep things clean
+    setTabs((prev) => prev.filter((t) => t.thread.length > 0))
+    setActiveTabId(null)
     setDraft("")
     setActiveConv(null)
+    dbConvIdRef.current = null
   }
 
   const hasThread = thread.length > 0
-  const displayChips = useMemo(() => buildHomeChips(homeCards, starters), [homeCards, starters])
-  const showChipRow = !hasThread && displayChips.length > 0
-  const showEmptyStarters =
-    !hasThread && homeCards.length === 0 && starters.length === 0
+  const displayChips = useMemo(() => {
+    const chips = buildHomeChips(homeCards, starters)
+    return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
+  }, [homeCards, starters])
+  const showChipRow = !hasThread
+  const showEmptyStarters = false
 
   return (
     <AppLayout
@@ -252,60 +650,60 @@ export function ChatScreen() {
     >
       <div className="home-chat-root">
         <div className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}>
-          <aside
-            className="od-rail"
-            onMouseEnter={() => setRailExpanded(true)}
-            onMouseLeave={() => setRailExpanded(false)}
-          >
-            <div className="od-rail-collapsed-icon" aria-hidden>
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M3 12a9 9 0 1 0 3-6.7" />
-                <path d="M3 4v5h5" />
-                <path d="M12 7v5l3 2" />
-              </svg>
-            </div>
-            <div className="od-rail-head">
-              <h3 className="od-rail-title">Conversations</h3>
-              <button type="button" className="od-rail-newbtn" onClick={startNewThread}>
-                + New
-              </button>
-            </div>
-            <div className="od-rail-body">
-              {conversations.length === 0 ? (
-                <div style={{ padding: "12px 14px", fontSize: 12, color: "var(--muted)" }}>
-                  No saved threads yet.
-                </div>
-              ) : (
-                conversations.map((conv, i) => (
-                  <div
-                    key={conv.id}
-                    className={`od-conv-item ${activeConv === i ? "active" : ""}`}
-                    onClick={() => {
-                      const st = conv.savedTurn
-                      if (st) {
-                        setThread([{ id: st.id, query: st.query, reply: st.reply, error: st.error }])
-                      } else {
-                        setThread([])
-                      }
-                      setActiveConv(i)
+
+          {/* Tab bar — always visible */}
+          <div style={{
+            display: "flex", alignItems: "stretch", gap: 0,
+            borderBottom: "1px solid var(--line, #E8E6E0)", background: "var(--surface, #fff)",
+            height: 40, overflowX: "auto", overflowY: "visible", flexShrink: 0,
+          }}>
+            {tabs.map((tab) => {
+              const isActive = activeTabId === tab.id
+              return (
+                <div
+                  key={tab.id}
+                  onClick={() => { setActiveTabId(tab.id); setDraft("") }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    padding: "0 10px 0 14px", fontSize: 13, cursor: "pointer",
+                    color: isActive ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
+                    fontWeight: isActive ? 500 : 400,
+                    borderBottom: isActive ? "2px solid var(--ink, #1A1A17)" : "2px solid transparent",
+                    marginBottom: -1,
+                    whiteSpace: "nowrap", transition: "color 0.12s, border-color 0.12s",
+                    userSelect: "none", flexShrink: 0,
+                  }}
+                >
+                  <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", lineHeight: "1.3" }}>
+                    {tab.title}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      width: 16, height: 16, flexShrink: 0,
+                      background: "none", border: "none", cursor: "pointer",
+                      fontSize: 13, color: "var(--ink-4, #B0AEA6)", padding: 0, lineHeight: 1,
+                      borderRadius: 3,
                     }}
-                  >
-                    <div className="od-conv-title">{conv.title}</div>
-                    <div className="od-conv-time">{conv.time}</div>
-                  </div>
-                ))
-              )}
-            </div>
-          </aside>
+                    title="Close tab"
+                  >×</button>
+                </div>
+              )
+            })}
+            <button
+              type="button"
+              onClick={startNewThread}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "none", border: "none", cursor: "pointer",
+                width: 32, fontSize: 18, color: "var(--ink-4, #B0AEA6)",
+                flexShrink: 0, marginBottom: -1,
+              }}
+              title="New chat"
+            >+</button>
+          </div>
 
           <main className={`od-center ${hasThread ? "od-center--thread" : "od-center--landing"}`}>
             <div className={`od-center-scroll${!hasThread ? " od-center-scroll--home-landing" : ""}`}>
@@ -314,37 +712,86 @@ export function ChatScreen() {
                   <div className="od-center-inner od-center-inner--home">
                     <div className="chat-greeting">
                       <h1 className="chat-greeting-title">
-                        {content.homeHeadline ? (
-                          content.homeHeadline
-                        ) : (
-                          <>
-                            Hi <span>{name}</span>, what should we build today?
-                          </>
-                        )}
+                        Welcome back, <em>{name}</em>.
                       </h1>
-                      {content.homeSub ? <p className="chat-greeting-sub">{content.homeSub}</p> : null}
+                      <p className="chat-greeting-sub">Let&apos;s build something awesome.</p>
                     </div>
 
                     <div className="home-landing-composer">
-                      <div className="od-composer-row od-composer-row--home-eyeline">
+                      <div className="chat-home-composer" style={{ position: "relative" }}>
+                        {/* Slash command dropdown (home) */}
+                        {showSlash && filteredSkills.length > 0 && (
+                          <div style={{
+                            position: "absolute", bottom: "100%", left: 0, right: 0,
+                            background: "var(--surface, #fff)", borderRadius: 10,
+                            border: "1px solid var(--line, #E8E6E0)",
+                            boxShadow: "0 -4px 20px rgba(0,0,0,0.08)", zIndex: 10,
+                            maxHeight: 280, overflowY: "auto", padding: "6px 0",
+                          }}>
+                            <div style={{ padding: "4px 12px 6px", fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-4)" }}>
+                              Skills
+                            </div>
+                            {filteredSkills.map((s) => (
+                              <button
+                                key={s.id}
+                                type="button"
+                                onClick={() => handleSlashSelect(s)}
+                                style={{
+                                  display: "flex", alignItems: "flex-start", gap: 10, width: "100%",
+                                  padding: "8px 12px", background: "none", border: "none",
+                                  cursor: "pointer", textAlign: "left", fontSize: 13,
+                                }}
+                                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F4F1EA)" }}
+                                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none" }}
+                              >
+                                <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent, #179463)", fontFamily: "var(--font-mono, monospace)", minWidth: 80, flexShrink: 0 }}>
+                                  {s.trigger}
+                                </span>
+                                <span>
+                                  <span style={{ fontWeight: 500, color: "var(--ink)" }}>{s.label}</span>
+                                  <span style={{ display: "block", fontSize: 11.5, color: "var(--ink-3)", marginTop: 1 }}>{s.description}</span>
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
                         <textarea
                           ref={composerRef}
-                          className="od-composer-input"
-                          placeholder="Ask Sprntly anything about your product memory…"
+                          className="chat-home-composer-input"
+                          placeholder="Ask Sprntly anything, or type / for skills…"
                           rows={1}
                           value={draft}
                           onChange={handleComposerInput}
                           onKeyDown={handleComposerKeyDown}
                         />
-                        <button
-                          type="button"
-                          className="od-composer-send"
-                          aria-label="Send"
-                          disabled={busy || draft.trim().length < 3}
-                          onClick={handleComposerSubmit}
-                        >
-                          <IconSendUp size={18} />
-                        </button>
+                        <div className="chat-home-composer-footer">
+                          <div className="chat-home-composer-actions">
+                            <button type="button" className="chat-home-action-btn" aria-label="Voice input">
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                <line x1="12" y1="19" x2="12" y2="23"/>
+                                <line x1="8" y1="23" x2="16" y2="23"/>
+                              </svg>
+                              Voice
+                            </button>
+                            <button type="button" className="chat-home-action-btn" aria-label="Attach file">
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                              </svg>
+                              Attach
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            className="chat-home-composer-send"
+                            aria-label="Send"
+                            disabled={busy || draft.trim().length < 1}
+                            onClick={handleComposerSubmit}
+                          >
+                            <IconSendUp size={16} />
+                          </button>
+                        </div>
                       </div>
                       {showChipRow ? (
                         <div className="home-chip-row home-chip-row--under-chat" role="list">
@@ -380,45 +827,232 @@ export function ChatScreen() {
                   </div>
                 </div>
               ) : (
-                <div className="od-thread">
-                  {thread.map((turn) => (
-                    <div key={turn.id} className="od-turn">
-                      <div className="od-msg od-msg-user">{turn.query}</div>
-                      <div className="od-msg od-msg-assistant">
-                        {turn.error ? <div className="od-msg-error">{turn.error}</div> : null}
-                        {!turn.reply && !turn.error ? <AssistantThinkingSkeleton /> : null}
-                        {turn.reply ? (
-                          <AskReplyBody reply={turn.reply} animateIn simulateTyping />
-                        ) : null}
-                      </div>
-                    </div>
-                  ))}
+                <div className="bc-scroll">
+                  <div className="bc-thread">
+                    {thread.map((turn, idx) => {
+                      const isLast = idx === thread.length - 1
+                      const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
+                      if (hasFreshReply) animatedTurnIds.current.add(turn.id)
+                      return (
+                        <div key={turn.id} className="bc-turn">
+                          <div className="bc-user-head">
+                            <span className="bc-avatar">{userInitials}</span>
+                            <span className="bc-user-name">{name}</span>
+                          </div>
+                          <div className="bc-user-bubble">{turn.query}</div>
+                          <div className="bc-agent-head">
+                            <span className="bc-agent-mark">
+                              <IconSparkle size={14} />
+                            </span>
+                            <span className="bc-agent-name">PM Agent</span>
+                            <span className="bc-agent-badge">
+                              <IconSparkle size={10} />
+                              PM COWORKER
+                            </span>
+                            {!turn.reply && !turn.error ? (
+                              <span className="bc-agent-status">thinking…</span>
+                            ) : null}
+                          </div>
+                          <div className="bc-agent-body">
+                            {turn.error ? <div className="bc-error">{turn.error}</div> : null}
+                            {!turn.reply && !turn.error ? <AssistantThinkingSkeleton compact /> : null}
+                            {turn.reply ? (
+                              <AskReplyBody
+                                reply={turn.reply}
+                                animateIn={hasFreshReply}
+                                simulateTyping={hasFreshReply}
+                              />
+                            ) : null}
+                          </div>
+                          {isLast && turn.reply ? (
+                            <div className="bc-actions">
+                              <button
+                                type="button"
+                                className="bc-action-btn bc-action-btn--primary"
+                                disabled={!!activeTab?.prdGenerating}
+                                onClick={handleOpenPrd}
+                              >
+                                {activeTab?.prdGenerating
+                                  ? "Generating PRD…"
+                                  : activeTab?.prd ? "Open PRD" : "Generate PRD"}
+                              </button>
+                              <button
+                                type="button"
+                                className="bc-action-btn"
+                                disabled={!!activeTab?.prdGenerating || !activeTab?.prd}
+                                onClick={() => {
+                                  if (activeTab?.prd) {
+                                    setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
+                                    openContentPanel("tickets")
+                                  }
+                                }}
+                                title={!activeTab?.prd ? "Generate a PRD first" : undefined}
+                              >
+                                Create tickets
+                              </button>
+                              <button
+                                type="button"
+                                className="bc-action-btn"
+                                disabled={!!activeTab?.evidenceGenerating}
+                                onClick={handleOpenEvidence}
+                              >
+                                {activeTab?.evidenceGenerating
+                                  ? "Generating…"
+                                  : activeTab?.evidence ? "Open evidence" : "View evidence"}
+                              </button>
+                              <button
+                                type="button"
+                                className="bc-action-btn"
+                                onClick={() => goTo("prototype")}
+                              >
+                                Generate prototype
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+                      )
+                    })}
+                  </div>
                 </div>
               )}
             </div>
 
             {hasThread ? (
-              <div className="od-composer od-composer--home">
-                <div className="od-composer-row">
+              <div className="bc-dock">
+                {/* Floating suggest chips — shown when the last turn has a reply */}
+                {thread.length > 0 && thread[thread.length - 1].reply && !busy ? (
+                  <div className="bc-suggest">
+                    <div className="bc-suggest-list">
+                      <button
+                        type="button"
+                        className="bc-suggest-btn bc-suggest-btn--primary"
+                        disabled={!!activeTab?.prdGenerating || !activeTab?.prd}
+                        onClick={() => {
+                          if (activeTab?.prd) {
+                            setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
+                            openContentPanel("tickets")
+                          } else {
+                            handleOpenPrd()
+                          }
+                        }}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1a2 2 0 0 0 0 4v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 0 0-4z" /><path d="M13 7v10" /></svg>
+                        {activeTab?.prd ? "Create ticket" : "Generate PRD first"}
+                      </button>
+                      <button type="button" className="bc-suggest-btn" onClick={() => goTo("prototype")}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></svg>
+                        View prototype
+                      </button>
+                      <button type="button" className="bc-suggest-btn" onClick={() => showToast("Coding agent", "Hand-off to your coding agent once a PRD is ready.")}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
+                        Send to coding agent
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {/* Slash command dropdown */}
+                {showSlash && filteredSkills.length > 0 && (
+                  <div style={{
+                    position: "absolute", bottom: "100%", left: 8, right: 8,
+                    background: "var(--surface, #fff)", borderRadius: 10,
+                    border: "1px solid var(--line, #E8E6E0)",
+                    boxShadow: "0 -4px 20px rgba(0,0,0,0.08)", zIndex: 10,
+                    maxHeight: 280, overflowY: "auto", padding: "6px 0",
+                  }}>
+                    <div style={{ padding: "4px 12px 6px", fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-4, #B0AEA6)" }}>
+                      Skills
+                    </div>
+                    {filteredSkills.map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => handleSlashSelect(s)}
+                        style={{
+                          display: "flex", alignItems: "flex-start", gap: 10, width: "100%",
+                          padding: "8px 12px", background: "none", border: "none",
+                          cursor: "pointer", textAlign: "left", fontSize: 13,
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F4F1EA)" }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none" }}
+                      >
+                        <span style={{
+                          fontSize: 11, fontWeight: 600, color: "var(--accent, #179463)",
+                          fontFamily: "var(--font-mono, monospace)", minWidth: 80, flexShrink: 0,
+                        }}>
+                          {s.trigger}
+                        </span>
+                        <span>
+                          <span style={{ fontWeight: 500, color: "var(--ink, #1A1A17)" }}>{s.label}</span>
+                          <span style={{ display: "block", fontSize: 11.5, color: "var(--ink-3, #8C8A84)", marginTop: 1 }}>{s.description}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="bc-composer">
                   <textarea
                     ref={composerRef}
-                    className="od-composer-input"
-                    placeholder="Ask Sprntly anything about your product memory…"
+                    className="bc-composer-input"
+                    placeholder="Ask Sprntly anything, or type / for skills…"
                     rows={1}
                     value={draft}
                     onChange={handleComposerInput}
                     onKeyDown={handleComposerKeyDown}
                   />
-                  <button
-                    type="button"
-                    className="od-composer-send"
-                    aria-label="Send"
-                    disabled={busy || draft.trim().length < 3}
-                    onClick={handleComposerSubmit}
-                  >
-                    <IconSendUp size={18} />
-                  </button>
+                  <div className="bc-composer-bar">
+                    <div className="bc-composer-tools">
+                      <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx" style={{ display: "none" }} onChange={handleFileSelect} />
+                      <button
+                        type="button"
+                        className="bc-tool"
+                        onClick={toggleVoice}
+                        style={recording ? { color: "#DC2626" } : undefined}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <rect x="9" y="3" width="6" height="11" rx="3" />
+                          <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+                        </svg>
+                        {recording ? "Stop" : "Voice"}
+                      </button>
+                      <button type="button" className="bc-tool" onClick={() => fileInputRef.current?.click()}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" />
+                        </svg>
+                        Attach
+                      </button>
+                      <span className="bc-tool-kbd">
+                        <kbd>⌘</kbd>
+                        <kbd>/</kbd>
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="bc-send"
+                      aria-label="Send"
+                      disabled={busy || draft.trim().length < 1}
+                      onClick={handleComposerSubmit}
+                    >
+                      <IconSendUp size={18} />
+                    </button>
+                  </div>
                 </div>
+                {/* Attached files preview */}
+                {attachments.length > 0 && (
+                  <div style={{ display: "flex", gap: 6, padding: "4px 24px 0", flexWrap: "wrap" }}>
+                    {attachments.map((a, i) => (
+                      <span key={i} style={{
+                        display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11,
+                        padding: "2px 8px", borderRadius: 5, background: "var(--surface-2, #F4F1EA)",
+                        color: "var(--ink-2, #5A5853)", border: "1px solid var(--line, #E8E6E0)",
+                      }}>
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        {a.name}
+                        <button type="button" onClick={() => setAttachments((p) => p.filter((_, idx) => idx !== i))}
+                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "var(--ink-4)", padding: 0, lineHeight: 1 }}>×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : null}
           </main>

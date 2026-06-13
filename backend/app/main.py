@@ -41,6 +41,7 @@ from app.routes import (
     business_context as business_context_routes,
     company,
     connectors,
+    conversations,
     datasets as datasets_routes,
     design_agent,
     ingest,
@@ -51,6 +52,7 @@ from app.routes import (
     stories,
     synthesis,
     team,
+    tickets,
     evidence,
     health,
     internal,
@@ -242,6 +244,8 @@ app.include_router(oncall.router)
 app.include_router(company.router)
 app.include_router(business_context_routes.router)
 app.include_router(onboarding.router)
+app.include_router(tickets.router)
+app.include_router(conversations.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
 
