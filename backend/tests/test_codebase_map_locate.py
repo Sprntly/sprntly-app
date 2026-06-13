@@ -688,6 +688,146 @@ def test_locate_system_carries_classification_rules():
     assert "spans_multi_surface" in LOCATE_SYSTEM
 
 
+def test_locate_system_reconciles_decline_with_empty_array():
+    """The prompt directs a no-host-decline candidate (not an empty array) when nothing hosts."""
+    lower = LOCATE_SYSTEM.lower()
+    assert "no-host-decline" in LOCATE_SYSTEM
+    # It explicitly addresses the previously-silent empty-array case.
+    assert "empty" in lower
+    # And it instructs echoing the surface id shown in square brackets.
+    assert "square brackets" in lower
+
+
+# ---------------------------------------------------------------------------
+# Candidate-validity keyed on node id (admits shell/section; exempts decline)
+# ---------------------------------------------------------------------------
+
+
+def _map_with_typed_nodes() -> MapResult:
+    """A map carrying a routed screen, an in-page section, and the app shell —
+    each with a distinct stable id, mirroring the kind/id node model."""
+    nodes = [
+        ScreenNode(route="/team", entry_component="TeamScreen", composed_components=["A", "B"]),
+        ScreenNode(
+            route="/team",
+            entry_component="TeamMembers",
+            kind="section",
+            id="/team-members",
+        ),
+        ScreenNode(
+            route="(app layout — global chrome, not a route)",
+            entry_component="AppShell",
+            kind="shell",
+            id="app-shell",
+        ),
+    ]
+    shell = ShellModel(brand="Acme", nav_items=[NavItem(label="Team", route="/team")])
+    return MapResult(
+        repo="org/repo", commit_sha="abc123", posture="CLEAN", nodes=nodes, shell=shell
+    )
+
+
+def test_candidate_validity_is_node_id_keyed():
+    """A candidate whose id is in the map's node-id set survives; an unknown id is dropped."""
+    m = _map_with_typed_nodes()
+    payload = {
+        "candidates": [
+            {
+                "route": "/team",
+                "id": "/team",
+                "entry_component": "TeamScreen",
+                "confidence": 90,
+                "rationale": "r",
+                "ambiguous": False,
+            },
+            {
+                "route": "/ghost",
+                "id": "/ghost",
+                "entry_component": "X",
+                "confidence": 88,
+                "rationale": "r",
+                "ambiguous": False,
+            },
+        ],
+        "is_multi_node": False,
+    }
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("prd", m, client=fake)
+
+    ids = {c.id for c in result.candidates}
+    assert "/team" in ids        # real node id survives
+    assert "/ghost" not in ids   # hallucinated id dropped — protection now id-keyed
+
+
+def test_shell_and_section_candidates_survive_id_keying():
+    """A shell-id and a section-id candidate survive — route-string keying dropped them."""
+    m = _map_with_typed_nodes()
+    payload = {
+        "candidates": [
+            {
+                "route": "(app layout — global chrome, not a route)",
+                "id": "app-shell",
+                "entry_component": "AppShell",
+                "confidence": 84,
+                "rationale": "Global chrome hosts the notification center.",
+                "ambiguous": False,
+                "classification": "attach-to-host",
+                "spans_multi_surface": True,
+                "classification_confidence": 80,
+            },
+            {
+                "route": "/team",
+                "id": "/team-members",
+                "entry_component": "TeamMembers",
+                "confidence": 80,
+                "rationale": "r",
+                "ambiguous": False,
+            },
+        ],
+        "is_multi_node": False,
+    }
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("global notification center PRD", m, client=fake)
+
+    ids = {c.id for c in result.candidates}
+    assert "app-shell" in ids       # previously deleted by route-string keying
+    assert "/team-members" in ids
+    # The spans signal on the shell candidate now actually surfaces.
+    shell_cand = next(c for c in result.candidates if c.id == "app-shell")
+    assert shell_cand.spans_multi_surface is True
+
+
+def test_no_host_decline_candidate_survives_without_node():
+    """A no-host-decline candidate has no backing node yet survives as the decline signal."""
+    m = _map_with_typed_nodes()
+    payload = {
+        "candidates": [
+            {
+                "route": "",
+                "id": "",
+                "entry_component": "",
+                "confidence": 0,
+                "rationale": "No surface can host standalone video conferencing.",
+                "ambiguous": False,
+                "classification": "no-host-decline",
+                "spans_multi_surface": False,
+                "classification_confidence": 85,
+            }
+        ],
+        "is_multi_node": False,
+    }
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("standalone video conferencing PRD", m, client=fake)
+
+    assert len(result.candidates) == 1
+    decline = result.candidates[0]
+    assert decline.classification == "no-host-decline"
+    assert decline.classification_confidence == 85
+
+
 # ---------------------------------------------------------------------------
 # Plain-English / integrity
 # ---------------------------------------------------------------------------

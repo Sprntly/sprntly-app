@@ -36,6 +36,12 @@ _COMPACT_MAP_CHAR_CAP = 8000
 
 class LocateCandidate(BaseModel):
     route: str = ""
+    # Stable node id, echoed from the [id] shown at the start of each compact-map
+    # line. The candidate-validity check keys on this id (falling back to `route`
+    # when empty, since a routed node's id IS its route). Carrying the id is what
+    # lets a non-route host — the app shell, an in-page section — survive the
+    # drop; route-only keying silently deleted those.
+    id: str = ""
     entry_component: str = ""
     confidence: int = 0          # 0-100, clamped on parse — certainty in WHICH surface
     rationale: str = ""          # one-line model rationale
@@ -132,7 +138,12 @@ def locate_screen(
         from app.llm_telemetry import RunUsage
 
         map_text = compact_map(map_result)
-        valid_routes = {node.route for node in map_result.nodes}
+        # Validity keys on the stable node id, not the route string. The id set
+        # admits routed screens, in-page sections, and the app shell alike — a
+        # non-route host (shell/section) carries a descriptive, non-route id that
+        # route-string keying would reject. A routed node's id IS its route, so
+        # route-only candidates still match via the `c.id or c.route` fallback.
+        valid_node_ids = {node.id for node in map_result.nodes}
 
         # System blocks: stable prefix ends with the compact map carrying the
         # cache breakpoint. PRD is the volatile user turn — no cache_control.
@@ -223,9 +234,17 @@ def locate_screen(
         # Post-parse normalization.
         candidates = []
         for c in raw_result.candidates:
-            # Drop hallucinated routes that don't appear in the map.
-            if c.route not in valid_routes:
-                continue
+            # A no-host-decline candidate has no backing map node by definition —
+            # it is the representable "nothing in this app can host the feature"
+            # signal, so it is exempt from the node-id membership drop. Every
+            # other candidate must name a real node id (the model echoes the
+            # bracketed id from the compact map); fall back to the route since a
+            # routed node's id IS its route. A candidate that names neither a
+            # real id nor a real route is a hallucination and is dropped.
+            if c.classification != "no-host-decline":
+                candidate_id = c.id or c.route
+                if candidate_id not in valid_node_ids:
+                    continue
             # Clamp confidence to [0, 100]; coerce to int first.
             c.confidence = max(0, min(100, int(c.confidence)))
             # Clamp classification_confidence to [0, 100] independently — it is a

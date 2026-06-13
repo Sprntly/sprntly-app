@@ -770,6 +770,7 @@ Return STRICT JSON matching this schema — raw JSON only, no markdown, no expla
   "candidates": [
     {
       "route": "/the-route",
+      "id": "the-id-in-square-brackets",
       "entry_component": "TheComponent",
       "confidence": 85,
       "rationale": "One sentence explaining why this screen matches.",
@@ -795,9 +796,17 @@ genuinely uncertain. Honest uncertainty is more useful than a false high-confide
 - When the PRD legitimately describes a multi-screen journey (for example, a user flow \
 that spans an onboarding screen, a dashboard, and a settings screen), return all \
 relevant screens and set "is_multi_node": true.
-- Choose ONLY from the SCREENS list provided in this conversation. Never invent a route \
-that does not appear in that list. If no screen in the provided list is a plausible \
-match, return an empty candidates array.
+- Choose ONLY from the SCREENS list provided in this conversation. Each SCREENS line \
+begins with the surface's stable id in square brackets — for every candidate, copy that \
+id EXACTLY into the "id" field, and copy the same line's route into "route". The id is \
+how the surface is identified: a non-route host (the app shell, an in-page section) has a \
+descriptive, non-route id, so the id — not the route — is what you must echo. Never \
+invent an id or a route that does not appear in the list.
+- When NO surface in the list can host the feature at all, do NOT return an empty \
+candidates array. Instead return a single candidate with "classification": \
+"no-host-decline" — leave "id", "route", and "entry_component" empty and set \
+"classification_confidence" to how certain you are that nothing hosts it. This is the \
+representable way to decline: an empty array is silent, a decline candidate is not.
 - "rationale" must be a single sentence with no line breaks.
 
 Classification — for each candidate, also label the KIND of placement the PRD implies:
