@@ -31,7 +31,6 @@ export function SourcesScreen() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [companyName, setCompanyName] = useState<string>(activeCompany)
   const [dirty, setDirty] = useState(false)
-  const [regenerating, setRegenerating] = useState(false)
   const [runningPipeline, setRunningPipeline] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadResult, setUploadResult] = useState<UploadFilesResponse | null>(null)
@@ -99,21 +98,6 @@ export function SourcesScreen() {
       setRunningPipeline(false)
     }
   }, [activeCompany, companyName, runningPipeline, showToast])
-
-  const onRegenerate = useCallback(async () => {
-    if (!activeCompany || regenerating) return
-    setRegenerating(true)
-    try {
-      await companiesApi.generate(activeCompany)
-      setDirty(false)
-      showToast("Regenerating brief", `Sprntly is rewriting the brief for ${companyName}.`)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      showToast("Couldn't regenerate brief", msg)
-    } finally {
-      setRegenerating(false)
-    }
-  }, [activeCompany, companyName, regenerating, showToast])
 
   const onUploadFiles = useCallback(
     async (picked: FileList | File[] | null) => {
@@ -230,14 +214,6 @@ export function SourcesScreen() {
             title="Sync connectors, run Marketing + Competitor agents, build Knowledge Graph, then regenerate brief"
           >
             {runningPipeline ? "Running pipeline…" : "Run pipeline"}
-          </button>
-          <button
-            type="button"
-            className="btn btn-accent"
-            onClick={() => void onRegenerate()}
-            disabled={regenerating || fileCount === 0}
-          >
-            {regenerating ? "Regenerating…" : "Regenerate brief"}
           </button>
         </div>
       </div>
