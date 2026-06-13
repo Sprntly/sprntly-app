@@ -29,6 +29,7 @@ import {
 } from "../../lib/api"
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
+import { openOauthTab } from "../../lib/connectorsOauth"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
@@ -191,8 +192,9 @@ export function ConnectorConnectModalView({
             /* ─── Pre-connect OAuth ─── */
             <>
               <p className="conn-modal-blurb">
-                Sprntly will redirect you to {item.name} to authorize the
-                connection, then bring you back here.
+                Sprntly will open {item.name} in a new tab to authorize the
+                connection. Finish there, then come back to this tab — your
+                onboarding stays right where it is.
               </p>
               {oauthError ? (
                 <p className="conn-modal-error" role="alert">
@@ -381,14 +383,20 @@ export function ConnectorConnectModal({
     setIsConnecting(true)
     setOauthError(null)
     markConnectInFlight(providerId)
+    // Open the provider tab synchronously, while the click gesture is still
+    // live, so the popup blocker doesn't reject it after the startOauth await.
+    const oauthTab = openOauthTab()
     try {
       // Drive uses dataset to scope folder choice; others ignore it.
       const dataset = providerId === "google_drive" ? activeCompany : undefined
       const r = await connectorsApi.startOauth(providerId, dataset, returnTo)
       if (r.authorize_url) {
-        window.location.href = r.authorize_url
+        oauthTab.finish(r.authorize_url)
+      } else {
+        oauthTab.abort()
       }
     } catch (e) {
+      oauthTab.abort()
       const msg =
         e instanceof ApiError
           ? apiErrorMessage(e.status, e.body)

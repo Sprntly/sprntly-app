@@ -652,8 +652,9 @@ export const connectorsApi = {
 
   // ---- Generic start-OAuth ------------------------------------------------
   /**
-   * Returns the provider's OAuth authorize URL as JSON. The caller is
-   * expected to navigate the browser to it (`window.location.href = url`).
+   * Returns the provider's OAuth authorize URL as JSON. The caller opens it
+   * in a new browser tab (see `openOauthTab` in lib/connectorsOauth) so the
+   * user isn't navigated out of onboarding / settings to authorize.
    *
    * Why this exists: the legacy GET /authorize routes 307-redirect to
    * Google/Figma/GitHub, but they require auth — and a browser URL-bar

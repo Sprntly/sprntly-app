@@ -13,7 +13,7 @@
  */
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useContent } from "../../../../context/ContentContext"
 import {
@@ -32,6 +32,7 @@ import type {
   ConnectorCategoryRow,
   ConnectorItemRow,
 } from "../../../../types/content"
+import { openOauthTab } from "../../../../lib/connectorsOauth"
 import { ApiKeyPromptModal } from "../../../connectors/ApiKeyPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 
@@ -187,6 +188,9 @@ export function ConnectorsSettings() {
   >(null)
   const [apiKeyConnectingItem, setApiKeyConnectingItem] =
     useState<ConnectorItemRow | null>(null)
+  // Set when we send the user to a provider's OAuth page in a sibling tab —
+  // tells the visibility listener to refresh connections when they switch back.
+  const oauthInFlight = useRef(false)
 
   // Connector routes resolve the active company entirely from the
   // Supabase JWT (require_company), so the frontend doesn't need to
@@ -215,6 +219,20 @@ export function ConnectorsSettings() {
     void reload()
   }, [reload])
 
+  // When the user returns from authorizing in the sibling tab, pull the fresh
+  // connection list so the just-connected row flips to Active without a manual
+  // refresh. Gated on the in-flight flag so we don't reload on every tab focus.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && oauthInFlight.current) {
+        oauthInFlight.current = false
+        void reload()
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    return () => document.removeEventListener("visibilitychange", onVisible)
+  }, [reload])
+
   const connectionByProvider = new Map<string, ConnectionSummary>()
   for (const c of connections) {
     connectionByProvider.set(c.provider, c)
@@ -234,6 +252,12 @@ export function ConnectorsSettings() {
       }
 
       if (!CONNECTOR_IDS_WITH_OAUTH.has(providerId)) return
+      // Open the provider in a new tab so the user keeps their place in
+      // Settings. Pre-open synchronously (before the startOauth await) so the
+      // popup blocker treats it as part of the click gesture; mark the connect
+      // in flight so we reload connections when the user switches back.
+      const oauthTab = openOauthTab()
+      oauthInFlight.current = true
       // Go through the fetch-then-navigate path so the auth check runs
       // with the Supabase Bearer header before we hand control to the
       // browser's URL bar.
@@ -242,9 +266,14 @@ export function ConnectorsSettings() {
           providerId === "google_drive" ? activeCompany : undefined
         const r = await connectorsApi.startOauth(providerId, dataset)
         if (r.authorize_url) {
-          window.location.href = r.authorize_url
+          oauthTab.finish(r.authorize_url)
+        } else {
+          oauthTab.abort()
+          oauthInFlight.current = false
         }
       } catch (e) {
+        oauthTab.abort()
+        oauthInFlight.current = false
         const msg = e instanceof Error ? e.message : String(e)
         setLoadError(`Could not start ${providerId} connect: ${msg}`)
       }
