@@ -12,7 +12,6 @@ import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { PrdSections } from "../../shared/PrdSections"
 import { DesignAgentLauncher } from "../../design-agent/DesignAgentLauncher"
-import { PostGenerationResult } from "../../design-agent/PostGenerationResult"
 import { useCompany } from "../../../context/CompanyContext"
 import { ApiError, designAgentApi, prdApi, type PrototypeRecord } from "../../../lib/api"
 import { markdownToPrdState } from "../../../lib/prd-adapter"
@@ -518,11 +517,6 @@ function PrototypeSection({
 
   return (
     <div style={{ marginTop: 24 }}>
-      {/* Show the generated prototype if one exists */}
-      {existing && existing.bundle_url && (
-        <PostGenerationResult key={existing.id} prototype={existing} />
-      )}
-
       {/* Show generating spinner while polling */}
       {polling && !existing && (
         <div

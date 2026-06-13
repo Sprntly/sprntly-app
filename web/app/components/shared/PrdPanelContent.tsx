@@ -13,7 +13,6 @@ import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { PrdSections } from "./PrdSections"
 import { DesignAgentLauncher } from "../design-agent/DesignAgentLauncher"
-import { PostGenerationResult } from "../design-agent/PostGenerationResult"
 import { EmptyPane } from "./EmptyPane"
 import { ApiError, designAgentApi, prdApi, type PrototypeRecord } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
@@ -132,7 +131,6 @@ function PrototypeSection({ prdId, figmaFileKey }: { prdId: number; figmaFileKey
   if (loading) return null
   return (
     <div style={{ marginTop: 24 }}>
-      {existing?.bundle_url && <PostGenerationResult key={existing.id} prototype={existing} />}
       {polling && !existing && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 10, border: "1px solid var(--accent-alpha-14)", background: "var(--accent-muted)" }}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden style={{ flexShrink: 0, animation: "da-spin 0.9s linear infinite" }}>
