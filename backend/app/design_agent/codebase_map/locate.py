@@ -11,7 +11,7 @@ import json
 import logging
 import re
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -36,10 +36,33 @@ _COMPACT_MAP_CHAR_CAP = 8000
 
 class LocateCandidate(BaseModel):
     route: str = ""
+    # Stable node id, echoed from the [id] shown at the start of each compact-map
+    # line. The candidate-validity check keys on this id (falling back to `route`
+    # when empty, since a routed node's id IS its route). Carrying the id is what
+    # lets a non-route host — the app shell, an in-page section — survive the
+    # drop; route-only keying silently deleted those.
+    id: str = ""
     entry_component: str = ""
-    confidence: int = 0          # 0-100, clamped on parse
+    confidence: int = 0          # 0-100, clamped on parse — certainty in WHICH surface
     rationale: str = ""          # one-line model rationale
     ambiguous: bool = False      # the model's explicit abstention flag for this candidate
+    # Placement classification: the KIND of placement the PRD implies for this
+    # surface. "modify-existing" and "attach-to-host" both mean a host surface
+    # was located — the difference is an advisory placement hint, not a routing
+    # gate. "no-host-decline" is reserved for a genuinely unhosted feature. An
+    # unrecognized value normalizes back to "modify-existing" on parse.
+    classification: Literal[
+        "modify-existing", "attach-to-host", "no-host-decline"
+    ] = "modify-existing"
+    # True when the feature itself legitimately spans more than one surface.
+    # Distinct from LocateResult.is_multi_node (which says the RESULT is a
+    # screen set); this is a per-candidate signal about the feature.
+    spans_multi_surface: bool = False
+    # 0-100, clamped on parse. Certainty IN THE CLASSIFICATION — a separate
+    # signal from `confidence` (certainty in which surface). A downstream gate
+    # consumes this field; this module only carries the signal, it does not
+    # apply any threshold here.
+    classification_confidence: int = 0
 
 
 class LocateResult(BaseModel):
@@ -115,6 +138,12 @@ def locate_screen(
         from app.llm_telemetry import RunUsage
 
         map_text = compact_map(map_result)
+        # Candidate validity is checked against BOTH the stable node-id set and
+        # the route set. The id set admits a non-route host (an in-page section,
+        # the app shell) that carries a descriptive, non-route id; the route set
+        # keeps backward-compat for a route-only candidate (or any candidate that
+        # echoed a known route but not its id). See the OR-based check below.
+        valid_node_ids = {node.id for node in map_result.nodes}
         valid_routes = {node.route for node in map_result.nodes}
 
         # System blocks: stable prefix ends with the compact map carrying the
@@ -157,26 +186,79 @@ def locate_screen(
         # Parse and validate via the output schema.
         parsed = json.loads(text)
 
-        # Pre-coerce confidence to int before Pydantic validation (the model may
-        # emit a float like 0.92; int(float) truncates cleanly before clamping).
+        # Pre-coerce numeric + enum fields before Pydantic validation. The model
+        # may emit a float like 0.92, an out-of-range int, or an unrecognized
+        # classification label; sanitize here so one stray field never fails the
+        # whole validation (which would drop every candidate).
         if isinstance(parsed, dict):
             for cand in parsed.get("candidates", []):
-                if isinstance(cand, dict) and "confidence" in cand:
+                if not isinstance(cand, dict):
+                    continue
+                if "confidence" in cand:
                     try:
                         cand["confidence"] = int(float(cand["confidence"]))
                     except (ValueError, TypeError):
                         cand["confidence"] = 0
+                # classification_confidence: same int(float) coercion as
+                # confidence (truncates a 0-1 float); clamped post-validate.
+                if "classification_confidence" in cand:
+                    try:
+                        cand["classification_confidence"] = int(
+                            float(cand["classification_confidence"])
+                        )
+                    except (ValueError, TypeError):
+                        cand["classification_confidence"] = 0
+                # Default an unrecognized classification to "modify-existing" so
+                # the Literal type validates and the host-located semantics hold.
+                if "classification" in cand and cand["classification"] not in (
+                    "modify-existing",
+                    "attach-to-host",
+                    "no-host-decline",
+                ):
+                    cand["classification"] = "modify-existing"
+                # Coerce the spans flag to a real bool (avoid the "false" string
+                # truthiness trap while still accepting the common encodings).
+                if "spans_multi_surface" in cand:
+                    raw_spans = cand["spans_multi_surface"]
+                    if isinstance(raw_spans, str):
+                        cand["spans_multi_surface"] = raw_spans.strip().lower() in (
+                            "true",
+                            "1",
+                            "yes",
+                            "on",
+                        )
+                    else:
+                        cand["spans_multi_surface"] = bool(raw_spans)
 
         raw_result = LocateResult.model_validate(parsed)
 
         # Post-parse normalization.
         candidates = []
         for c in raw_result.candidates:
-            # Drop hallucinated routes that don't appear in the map.
-            if c.route not in valid_routes:
+            # A candidate is valid if ANY branch admits it:
+            #   - its id matches a real node id — admits a routed screen, an
+            #     in-page section, or the app shell (the model echoes the
+            #     bracketed id from the compact map); OR
+            #   - its route matches a real route — backward-compat for a
+            #     route-only candidate, or one that echoed a known route but not
+            #     its id; OR
+            #   - it is a no-host-decline candidate, which has no backing map node
+            #     and IS the "nothing in this app can host the feature" signal.
+            # A candidate matching none of these named neither a known id nor a
+            # known route — a true hallucination — and is dropped.
+            if not (
+                c.id in valid_node_ids
+                or c.route in valid_routes
+                or c.classification == "no-host-decline"
+            ):
                 continue
             # Clamp confidence to [0, 100]; coerce to int first.
             c.confidence = max(0, min(100, int(c.confidence)))
+            # Clamp classification_confidence to [0, 100] independently — it is a
+            # separate signal from which-surface confidence.
+            c.classification_confidence = max(
+                0, min(100, int(c.classification_confidence))
+            )
             # Clamp free-text rationale.
             if len(c.rationale) > _MAX_RATIONALE_CHARS:
                 c.rationale = c.rationale[:_MAX_RATIONALE_CHARS]
