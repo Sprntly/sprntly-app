@@ -1,17 +1,19 @@
-// Public prototype viewer (P2-05) — thin SERVER shell. Mirrors the
-// web/app/(app)/onboarding/[step]/page.tsx pattern: a server component that
-// satisfies static export, delegating all behaviour to a co-located client
-// component.
+// Legacy public route `/p/<token>` — thin SERVER shell for a CLIENT redirect to
+// the canonical `/p/<slug>/<token>` form. The canonical viewer now lives at
+// `/p/[slug]/[token]`; this route resolves the token to its company_slug and
+// redirects, so old bookmarks keep working (no real legacy links exist — this is
+// hygiene).
 //
-// WHY a client component (not the SSR fetch the ticket sketched): next.config.ts
-// uses `output: "export"` — the web app is a static SPA with no server runtime,
-// so a request-time server fetch cannot work. The token is unbounded (arbitrary
-// UUIDs), so static export cannot prerender a page per token; this shell is
-// emitted once under a sentinel param, and PublicTokenViewer reads the REAL
-// token from the URL (useParams) at runtime and resolves it client-side. Serving
+// WHY a client redirect: next.config.ts uses `output: "export"` — the static
+// SPA has no server runtime, so a request-time server redirect cannot work. The
+// token is unbounded (arbitrary UUIDs), so static export cannot prerender a page
+// per token; this shell is emitted once under a sentinel param, and
+// LegacyTokenRedirect reads the REAL token from the URL (useParams) at runtime,
+// resolves it client-side, and router.replace()s to /p/<slug>/<token>. Serving
 // arbitrary /p/<uuid> on the static host relies on an nginx SPA-fallback rewrite
-// (/p/* → this shell) — a deploy-config item, recorded in the PR body.
-import { PublicTokenViewer } from "./PublicTokenViewer"
+// (depth-1: /p/<token> → /p/_.html) — a deploy-config item in
+// backend/deploy/nginx.conf.
+import { LegacyTokenRedirect } from "./LegacyTokenRedirect"
 
 // Static export needs ≥1 param to emit the shell. The value is a build-time
 // placeholder only — never read at runtime (the client reads the URL's token).
@@ -19,6 +21,6 @@ export function generateStaticParams() {
   return [{ token: "_" }]
 }
 
-export default function PublicPrototypePage() {
-  return <PublicTokenViewer />
+export default function LegacyPublicPrototypePage() {
+  return <LegacyTokenRedirect />
 }

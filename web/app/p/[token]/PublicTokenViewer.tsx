@@ -12,17 +12,12 @@
 // runGenerateFlow. Relative imports (not `@/…`) match the codebase + vitest.
 import { useEffect, useState } from "react"
 import { notFound, useParams } from "next/navigation"
-import { API_URL } from "../../lib/api"
 import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
 import { ManualEditOverlay } from "../../components/design-agent/ManualEditOverlay"
 import { PasscodeGate } from "./PasscodeGate"
+import { resolveToken, type ResolvedView } from "../resolveToken"
 
-export type ResolvedView = {
-  share_mode: "public" | "passcode"
-  requires_passcode: boolean
-  bundle_url: string | null
-  is_complete: boolean
-}
+export type { ResolvedView }
 
 export type ViewerState =
   | { kind: "loading" }
@@ -30,24 +25,6 @@ export type ViewerState =
   | { kind: "error" }
   | { kind: "passcode" }
   | { kind: "ready"; bundleUrl: string; isComplete: boolean }
-
-// Returns null for a 404 — the caller maps that to notFound(). A non-404 non-OK
-// status is a real backend error and throws (surfaced as the error state).
-export async function resolveToken(
-  token: string,
-  fetchImpl?: typeof fetch,
-): Promise<ResolvedView | null> {
-  const doFetch = fetchImpl ?? fetch
-  const res = await doFetch(
-    `${API_URL}/v1/design-agent/by-token/${encodeURIComponent(token)}`,
-    // never stale: a Resume Iteration can re-publish a new bundle URL behind the
-    // same token.
-    { cache: "no-store" },
-  )
-  if (res.status === 404) return null
-  if (!res.ok) throw new Error(`resolver failed: ${res.status}`)
-  return (await res.json()) as ResolvedView
-}
 
 // Pure reducer over a resolver outcome → the terminal viewer state. Passcode
 // mode arrives with bundle_url === null (the bundle is withheld until POST

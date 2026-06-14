@@ -15,7 +15,10 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 // test convention) rather than touch the shared vitest config.
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { resolveToken, nextViewerState } from "../PublicTokenViewer"
+import { nextViewerState } from "../PublicTokenViewer"
+import { resolveToken } from "../../resolveToken"
+import { legacyRedirectTarget } from "../LegacyTokenRedirect"
+import { generateStaticParams as canonicalStaticParams } from "../../[slug]/[token]/page"
 import { PrototypeViewer } from "../../../components/design-agent/PrototypeViewer"
 import { PasscodeGateView, submitPasscode } from "../PasscodeGate"
 
@@ -35,7 +38,27 @@ afterEach(() => {
 })
 
 describe("resolveToken", () => {
-  it("returns the resolved view on a 200", async () => {
+  it("returns the resolved view on a 200, parsing company_slug", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        share_mode: "public",
+        requires_passcode: false,
+        bundle_url: "https://cdn.example/p/abc/index.html",
+        is_complete: true,
+        company_slug: "sprntly",
+      },
+    })
+    expect(await resolveToken("tok")).toEqual({
+      share_mode: "public",
+      requires_passcode: false,
+      bundle_url: "https://cdn.example/p/abc/index.html",
+      is_complete: true,
+      company_slug: "sprntly",
+    })
+  })
+
+  it("defaults company_slug to '' when the backend omits it", async () => {
     mockFetch({
       status: 200,
       body: {
@@ -45,12 +68,7 @@ describe("resolveToken", () => {
         is_complete: true,
       },
     })
-    expect(await resolveToken("tok")).toEqual({
-      share_mode: "public",
-      requires_passcode: false,
-      bundle_url: "https://cdn.example/p/abc/index.html",
-      is_complete: true,
-    })
+    expect((await resolveToken("tok"))?.company_slug).toBe("")
   })
 
   it("returns null on a 404 (→ notFound upstream)", async () => {
@@ -71,6 +89,7 @@ describe("nextViewerState branch logic", () => {
       requires_passcode: false,
       bundle_url: "https://cdn.example/p/abc/index.html",
       is_complete: true,
+      company_slug: "sprntly",
     })
     expect(state).toEqual({
       kind: "ready",
@@ -101,6 +120,7 @@ describe("nextViewerState branch logic", () => {
         requires_passcode: true,
         bundle_url: null,
         is_complete: false,
+        company_slug: "sprntly",
       }),
     ).toEqual({ kind: "passcode" })
   })
@@ -116,6 +136,7 @@ describe("nextViewerState branch logic", () => {
         requires_passcode: false,
         bundle_url: null,
         is_complete: false,
+        company_slug: "sprntly",
       }),
     ).toEqual({ kind: "notfound" })
   })
@@ -188,6 +209,37 @@ describe("PasscodeGate", () => {
     const result = await submitPasscode({ token: "t", passcode: "x" })
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error).toContain("Too many attempts")
+  })
+})
+
+// Sharing model: the legacy `/p/<token>` route now redirects to the canonical
+// `/p/<slug>/<token>` form. legacyRedirectTarget is the pure target-computation
+// the client redirect calls after resolving the token (the router.replace itself
+// lives in the client component, exercised in E2E).
+describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
+  it("computes /p/<slug>/<token> from a resolved view", () => {
+    expect(
+      legacyRedirectTarget(
+        {
+          share_mode: "public",
+          requires_passcode: false,
+          bundle_url: "https://cdn.example/p/abc/index.html",
+          is_complete: true,
+          company_slug: "sprntly",
+        },
+        "abc",
+      ),
+    ).toBe("/p/sprntly/abc")
+  })
+
+  it("returns null for a 404/null view (the caller calls notFound())", () => {
+    expect(legacyRedirectTarget(null, "abc")).toBeNull()
+  })
+})
+
+describe("canonical /p/[slug]/[token] route", () => {
+  it("generateStaticParams returns the 2-seg sentinel for static export", () => {
+    expect(canonicalStaticParams()).toEqual([{ slug: "_", token: "_" }])
   })
 })
 
