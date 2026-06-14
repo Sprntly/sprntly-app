@@ -58,7 +58,7 @@ from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_TOKEN_LIMITER,
 )
 from app.db.connections import get_connection
-from app.db.prds import get_prd_rendered, reset_prd_to_draft
+from app.db.prds import get_prd_rendered, list_prds_by_brief, reset_prd_to_draft
 from app.db.github import find_github_installation_for_repo
 from app.db.products import get_company_website  # onboarding-website fallback source
 from app.db.prototype_exports import find_prototype_export
@@ -121,6 +121,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/design-agent", tags=["design-agent"])
 
 _VARIANT = "v1"
+
+# PRD_VARIANT is the canonical storage variant for the prd-author agent (v2,
+# as set in prd_runner.PRD_VARIANT). Imported here so GET /brief-prototype-map
+# filters prds by the same variant the PRD generation pipeline writes. Lazy
+# import avoids circular-import risk at module parse time; the value is stable
+# across requests so the import cost is negligible.
+def _prd_variant() -> str:
+    from app.prd_runner import PRD_VARIANT as _PV
+    return _PV
 
 # Strong refs to in-flight background generation tasks. asyncio only holds a
 # weak reference to a bare `create_task` result, so without this the task can be
@@ -470,6 +479,98 @@ def get_by_prd(
     if not row:
         raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
     return row
+
+
+# ─── Brief prototype map (batch read for card rendering) ─────────────────────
+
+
+class PrototypeReadiness(BaseModel):
+    """Prototype presence + preview for one PRD entry.
+
+    `ready` is always True when this object appears — absent prototype is
+    represented by `prototype: null` on the parent entry, not by a
+    `{ready: false}` object, so the frontend never needs to branch on the field.
+    """
+
+    ready: bool = True
+    preview_image_url: str | None = None
+
+
+class BriefPrototypeMapEntry(BaseModel):
+    """One insight that HAS a PRD (status=ready, PRD_VARIANT).
+
+    Insights without a ready PRD are absent from the entries list so the
+    frontend can treat `absent == no PRD` without a null-check branch.
+    """
+
+    insight_index: int
+    prd_id: int
+    prototype: PrototypeReadiness | None = None
+
+
+class BriefPrototypeMapResponse(BaseModel):
+    """Response for GET /v1/design-agent/brief-prototype-map.
+
+    One `entries` item per insight that has a ready PRD.  Empty list when no
+    PRDs exist for the brief.  The prototype field carries readiness + preview
+    URL when a ready prototype exists for that PRD; null otherwise.
+    """
+
+    brief_id: int
+    entries: list[BriefPrototypeMapEntry]
+
+
+@router.get("/brief-prototype-map", response_model=BriefPrototypeMapResponse)
+def get_brief_prototype_map(
+    brief_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> BriefPrototypeMapResponse:
+    """Return which insights have a PRD and whether each PRD has a ready prototype.
+
+    Designed for the brief overview screen: the frontend calls this ONCE per
+    brief on load and uses the result to render context-aware cards (no PRD,
+    PRD without prototype, PRD with prototype + optional preview image).
+
+    Pure read — NO side effects. Never creates a PRD, never creates a prototype.
+    Feature-flag-gated and workspace-isolated identically to GET /by-prd/{prd_id}:
+      - 404 when DESIGN_AGENT_ENABLED is off (feature invisible).
+      - workspace_id resolved from the caller's company membership (require_company).
+      - prototype lookup is workspace-scoped via find_ready_prototype_by_prd.
+
+    Brief ownership check: this endpoint does NOT explicitly verify that brief_id
+    belongs to the caller's workspace. Sibling read routes (e.g. GET /by-prd/{prd_id})
+    follow the same approach — cross-workspace containment is enforced at the
+    prototype layer (find_ready_prototype_by_prd filters by workspace_id), and a
+    foreign-workspace brief simply yields no PRD rows. The caller therefore learns
+    nothing about a brief they don't own — the entries list is empty. FLAG: if an
+    explicit brief→company ownership check is added to sibling routes, add the same
+    check here (see prds table brief_id → briefs table → company/dataset chain).
+    """
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    prd_variant = _prd_variant()
+
+    prds = list_prds_by_brief(brief_id=brief_id, variant=prd_variant)
+
+    entries: list[BriefPrototypeMapEntry] = []
+    for prd in prds:
+        proto_row = find_ready_prototype_by_prd(
+            prd_id=prd["id"], workspace_id=workspace_id
+        )
+        prototype = (
+            PrototypeReadiness(preview_image_url=proto_row.get("preview_image_url"))
+            if proto_row
+            else None
+        )
+        entries.append(
+            BriefPrototypeMapEntry(
+                insight_index=prd["insight_index"],
+                prd_id=prd["id"],
+                prototype=prototype,
+            )
+        )
+
+    return BriefPrototypeMapResponse(brief_id=brief_id, entries=entries)
 
 
 # ─── Figma file listing (Generate modal design-source selector) ──────────────

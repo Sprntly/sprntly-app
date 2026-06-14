@@ -211,6 +211,30 @@ def reset_prd_to_draft(prd_id: int) -> None:
     logger.info("prd_reset_to_draft prd_id=%s", prd_id)
 
 
+@retry_on_disconnect
+def list_prds_by_brief(brief_id: int, variant: str = "v1") -> list[dict]:
+    """Return all ready PRDs for a (brief, variant), ordered by insight_index ascending.
+
+    One query — not per-insight — returning at minimum `id` + `insight_index`.
+    Used by GET /v1/design-agent/brief-prototype-map to build context-aware cards
+    without iterating over every possible insight_index individually.
+
+    Only `status='ready'` rows are returned; generating/failed/invalidated rows are
+    excluded so callers only see PRDs that can back a prototype.
+    """
+    c = require_client()
+    resp = (
+        c.table("prds")
+        .select("id, insight_index, title, status")
+        .eq("brief_id", brief_id)
+        .eq("variant", variant)
+        .eq("status", "ready")
+        .order("insight_index", desc=False)
+        .execute()
+    )
+    return resp.data or []
+
+
 # ── PRD version control ──────────────────────────────────────────────────
 
 def update_prd_content(prd_id: int, title: str, payload_md: str) -> dict | None:
