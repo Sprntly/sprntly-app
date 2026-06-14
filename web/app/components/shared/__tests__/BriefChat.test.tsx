@@ -73,6 +73,19 @@ vi.mock("../../../lib/usePipelineStatus", () => ({
   }),
 }))
 
+// BriefChat now reads the active workspace via useWorkspace(), which throws
+// outside a WorkspaceProvider. These card-render tests never exercise workspace
+// behaviour, so mock the hook to a stable idle workspace rather than dragging
+// the real provider (and its auth/supabase deps) into the harness.
+vi.mock("../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    loading: false,
+    profile: null,
+    workspace: null,
+    refresh: async () => {},
+  }),
+}))
+
 import { ContentProvider, useContent } from "../../../context/ContentContext"
 import { NavigationProvider } from "../../../context/NavigationContext"
 import type {

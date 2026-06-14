@@ -58,6 +58,17 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/brief",
 }))
 
+// BriefChat reads the active workspace via useWorkspace(), which throws outside a
+// WorkspaceProvider; mock it to an idle workspace (these tests don't exercise it).
+vi.mock("../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    loading: false,
+    profile: null,
+    workspace: null,
+    refresh: async () => {},
+  }),
+}))
+
 import { NavigationProvider } from "../../../context/NavigationContext"
 import { ContentProvider, useContent } from "../../../context/ContentContext"
 import type { AppContentState } from "../../../types/content"
