@@ -713,6 +713,7 @@ class GithubExtractor:
         branch: str | None,
         *,
         max_bytes: int = _GITHUB_EXPLICIT_FILE_BYTES,
+        truncate: bool = False,
     ) -> str | None:
         payload = self._github_get_contents(repo_full_name, path, branch) or {}
         if isinstance(payload, list):
@@ -721,13 +722,22 @@ class GithubExtractor:
             size = int(payload.get("size") or 0)
         except (TypeError, ValueError):
             return None
-        if size > max_bytes:
-            return None
         content = payload.get("content")
         if payload.get("encoding") != "base64" or not isinstance(content, str):
             return None
+        # Oversize handling: UI component files (truncate=False) still DROP — a
+        # half-read .tsx is useless. Design/CSS files (truncate=True) TRUNCATE to
+        # max_bytes instead: a large globals.css (e.g. ~300KB) carries its `:root`
+        # design tokens at the very top, so the first max_bytes is enough for the
+        # token gather, whereas dropping it silently lost the brand tokens for any
+        # real-world stylesheet bigger than the cap.
+        if size > max_bytes and not truncate:
+            return None
         try:
-            return base64.b64decode(content).decode("utf-8", errors="ignore")
+            raw = base64.b64decode(content)
+            if truncate and len(raw) > max_bytes:
+                raw = raw[:max_bytes]
+            return raw.decode("utf-8", errors="ignore")
         except Exception:
             return None
 
@@ -878,7 +888,8 @@ class GithubExtractor:
 
         for path in _GITHUB_DESIGN_FILES:
             text = self._fetch_text_file(repo_full_name, f"{prefix}{path}", branch,
-                                         max_bytes=_GITHUB_EXPLICIT_FILE_BYTES)
+                                         max_bytes=_GITHUB_EXPLICIT_FILE_BYTES,
+                                         truncate=True)
             if text is None:
                 continue
             all_design_paths.append(path)

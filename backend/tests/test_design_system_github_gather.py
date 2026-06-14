@@ -276,7 +276,7 @@ def test_only_winning_strategy_files_fetched():
     """
     fetched_paths: list[str] = []
 
-    def _fake_fetch(repo, path, branch, *, max_bytes=128_000):
+    def _fake_fetch(repo, path, branch, *, max_bytes=128_000, truncate=False):
         fetched_paths.append(path)
         if path == "package.json":
             return _make_pkg_json(["tailwindcss", "react"])
@@ -323,7 +323,7 @@ def test_ui_file_count_capped():
 
     fetched_ui: list[str] = []
 
-    def _fake_fetch(repo, path, branch, *, max_bytes=128_000):
+    def _fake_fetch(repo, path, branch, *, max_bytes=128_000, truncate=False):
         if path == "package.json":
             return _make_pkg_json(["tailwindcss"])
         if path in ("tailwind.config.ts", "tailwind.config.js"):
@@ -485,7 +485,7 @@ def test_tailwind_repo_end_to_end_high_confidence():
     """
     fetched_paths: list[str] = []
 
-    def _fake_fetch(repo, path, branch, *, max_bytes=128_000):
+    def _fake_fetch(repo, path, branch, *, max_bytes=128_000, truncate=False):
         fetched_paths.append(path)
         if path == "package.json":
             return _make_pkg_json(["tailwindcss", "react"])
@@ -504,7 +504,7 @@ def test_tailwind_repo_end_to_end_high_confidence():
     # There's no explicit font in the config above, so confidence may be 'medium' (no typography).
     # Let's add a font and re-run to hit 'high'.
 
-    def _fake_fetch_with_font(repo, path, branch, *, max_bytes=128_000):
+    def _fake_fetch_with_font(repo, path, branch, *, max_bytes=128_000, truncate=False):
         if path == "package.json":
             return _make_pkg_json(["tailwindcss", "react"])
         if path in ("tailwind.config.ts",):
@@ -541,7 +541,7 @@ def test_unrecognized_repo_end_to_end_low_confidence():
     AC5 end-to-end: no recognized styling system → degrade gather runs →
     normalize returns a valid DesignSystem (not a hard failure) at low/medium confidence.
     """
-    def _fake_fetch(repo, path, branch, *, max_bytes=128_000):
+    def _fake_fetch(repo, path, branch, *, max_bytes=128_000, truncate=False):
         if path == "package.json":
             return _make_pkg_json(["react", "styled-components"])
         # No tailwind config, no globals.css.
@@ -569,7 +569,7 @@ def test_css_vars_end_to_end_explicit():
     AC2 end-to-end: detection selects CSS-vars strategy → gather maps --primary
     and --border to explicit colors → normalize resolves accent + border.
     """
-    def _fake_fetch(repo, path, branch, *, max_bytes=128_000):
+    def _fake_fetch(repo, path, branch, *, max_bytes=128_000, truncate=False):
         if path == "package.json":
             return _make_pkg_json(["react", "next"])
         if path == "app/globals.css":
@@ -649,7 +649,7 @@ def test_monorepo_web_globals_reaches_parser_confidence_not_low():
             return {"type": "file", "name": "package.json", "path": "web/package.json"}
         return None  # no root package.json, no listable UI dirs
 
-    def _fake_fetch(repo, path, branch, *, max_bytes=128_000):
+    def _fake_fetch(repo, path, branch, *, max_bytes=128_000, truncate=False):
         if path == "web/package.json":
             return _make_pkg_json(["react", "next"])  # no tailwindcss → CSS-vars strategy
         if path == "web/app/globals.css":
@@ -687,7 +687,7 @@ def test_monorepo_prefix_strips_ui_file_keys():
         # _list_ui_files is mocked below, so dir listings here are irrelevant.
         return None
 
-    def _fake_fetch(repo, path, branch, *, max_bytes=128_000):
+    def _fake_fetch(repo, path, branch, *, max_bytes=128_000, truncate=False):
         if path == "web/package.json":
             return _make_pkg_json(["tailwindcss", "react"])
         if path == "web/tailwind.config.ts":
