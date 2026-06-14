@@ -385,13 +385,19 @@ def test_share_passcode_stores_argon2_hash(env, client):
     assert env.proto.verify_share_passcode("hunter2", row["share_passcode_hash"]) is True
 
 
-def test_share_private_nulls_token(env, client):
+def test_share_private_preserves_token(env, client):
+    # 66b04f1: setting a prototype private PRESERVES its share_token so the
+    # /p/<slug>/<token> URL stays static across public↔private toggles — the
+    # mode (not the token) gates visibility (the public resolver 404s private).
     pid = _seed_ready(env, checkpoint_id=1)
-    client.post(f"/v1/design-agent/{pid}/share", json={"mode": "public"})
+    public_resp = client.post(f"/v1/design-agent/{pid}/share", json={"mode": "public"})
+    public_token = public_resp.json()["share_token"]
+    assert public_token is not None
     resp = client.post(f"/v1/design-agent/{pid}/share", json={"mode": "private"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["share_mode"] == "private"
-    assert resp.json()["share_token"] is None
+    # Token is preserved (not nulled) — same stable token across the toggle.
+    assert resp.json()["share_token"] == public_token
 
 
 # ─── Error handling — POST /share (AC #8, #10, #11) ─────────────────────────
