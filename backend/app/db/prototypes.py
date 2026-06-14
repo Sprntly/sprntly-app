@@ -146,6 +146,11 @@ def start_prototype(
         "figma_file_key": figma_file_key,
         "website_url": website_url,
         "github_installation_id": github_installation_id,
+        # Every prototype is born with a stable share_token. share_mode stays its
+        # 'private' default so the token is present but never exposed (the public
+        # resolver 404s private rows); set_share_config flips the mode without
+        # rotating this token, giving one permanent /p/<slug>/<token> URL.
+        "share_token": str(uuid.uuid4()),
     }).execute()
     row_id = resp.data[0]["id"]
     # Inferred-scenario logged for observability; never written to the row.

@@ -166,6 +166,18 @@ def _seed(proto, *, workspace_id="app") -> int:
     return proto.start_prototype(prd_id=1, workspace_id=workspace_id, template_version=1)
 
 
+def test_start_prototype_mints_share_token(proto):
+    # Static-URL invariant: every prototype is BORN with a share_token (share_mode
+    # stays its 'private' default so the token is present but not yet exposed). This
+    # is what lets set_share_config flip the mode without ever rotating the token.
+    pid = _seed(proto)
+    row = proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row is not None
+    assert row["share_token"] is not None
+    assert row["share_mode"] == "private"  # token present but not exposed yet
+    uuid.UUID(str(row["share_token"]))     # a valid UUID
+
+
 def test_set_share_config_public_generates_uuid_token(proto):
     # AC #3
     pid = _seed(proto)
