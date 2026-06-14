@@ -4,8 +4,9 @@ A "dataset" maps 1:1 to a company (or product, or whatever the user is
 modeling). Files live under DATA_DIR/<slug>/, where:
 
   DATA_DIR/<slug>/
-    raw/        ← uploaded originals (.docx, .xlsx, .csv, .pdf, .txt; a .zip is
-                  expanded and its members ingested individually)
+    raw/        ← uploaded originals (any type; rich converters exist for
+                  .docx/.xlsx/.csv/.pdf/.txt/.md, others are stored as-is; a
+                  .zip is expanded and its members ingested individually)
     *.md        ← converted corpus, fed to the LLM
     _reference/ ← optional answer keys (ignored by the corpus loader)
 
@@ -25,7 +26,7 @@ import logging
 
 from app import db
 from app.config import settings
-from app.ingest import SUPPORTED_SUFFIXES, UnsupportedFileType, convert, md_filename
+from app.ingest import UnsupportedFileType, convert, md_filename
 
 logger = logging.getLogger(__name__)
 
@@ -204,14 +205,11 @@ def ingest_zip(
             base = Path(info.filename).name  # basename only → no path traversal
             suffix = Path(base).suffix.lower()
             if suffix == ".zip":
+                # Nested zips are never recursed (zip-bomb guard).
                 errors.append({"filename": base, "error": "Nested zip skipped"})
                 continue
-            if suffix not in SUPPORTED_SUFFIXES:
-                errors.append({
-                    "filename": base,
-                    "error": f"Unsupported file type {suffix!r} in zip",
-                })
-                continue
+            # Any other type is accepted — ingest_file converts what it can and
+            # stores the rest as-is. We no longer reject unknown suffixes here.
             if info.file_size > per_member_max_bytes:
                 errors.append({
                     "filename": base,

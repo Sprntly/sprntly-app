@@ -1,8 +1,9 @@
 """Tests for ZIP archive ingestion — app.datasets.ingest_zip.
 
-A .zip uploaded to Sources is expanded and each supported member is ingested
-individually. These cover: expansion, junk/dir filtering, unsupported-member
-errors, nested-zip skip, per-member size cap, bad/empty archives, and tenancy.
+A .zip uploaded to Sources is expanded and every member is ingested
+individually (unknown types are stored, not rejected). These cover: expansion,
+junk/dir filtering, unknown-type ingestion, nested-zip skip, per-member size
+cap, bad/empty archives, and tenancy.
 """
 from __future__ import annotations
 
@@ -30,21 +31,22 @@ def _zip(files: dict[str, bytes]) -> bytes:
 _BIG = 20 * 1024 * 1024
 
 
-def test_expands_supported_members_and_flags_unsupported(isolated_settings):
+def test_expands_all_members_including_unknown_types(isolated_settings):
     ds = _datasets_module(isolated_settings)
     ds.create_dataset("acme", "Acme")
     data = _zip({
         "notes.md": b"# Notes\nhello",
         "data.csv": b"a,b\n1,2\n",
-        "logo.png": b"\x89PNG not real",          # unsupported → error
-        "__MACOSX/._notes.md": b"junk",            # macOS junk → silently ignored
-        "subdir/": b"",                             # directory entry → ignored
+        "logo.png": b"\x89PNG\r\n\x1a\n\x00binary",  # binary → stored as stub
+        "__MACOSX/._notes.md": b"junk",              # macOS junk → silently ignored
+        "subdir/": b"",                               # directory entry → ignored
     })
     ingested, errors = ds.ingest_zip("acme", "bundle.zip", data, per_member_max_bytes=_BIG)
 
-    assert sorted(f.original_filename for f in ingested) == ["data.csv", "notes.md"]
-    assert all(f.md_chars > 0 for f in ingested)            # actually converted
-    assert any(e["filename"] == "logo.png" for e in errors)  # unsupported reported
+    # Unknown binary member is ingested too, not rejected.
+    assert sorted(f.original_filename for f in ingested) == ["data.csv", "logo.png", "notes.md"]
+    assert all(f.md_chars > 0 for f in ingested)            # all produced markdown
+    assert errors == []                                      # nothing rejected
     assert not any(e["filename"].startswith("._") for e in errors)  # junk not reported
 
 
@@ -66,14 +68,20 @@ def test_per_member_size_cap(isolated_settings):
     assert any(e["filename"] == "big.md" and "limit" in e["error"] for e in errors)
 
 
-def test_unsupported_only_returns_errors_no_raise(isolated_settings):
+def test_unknown_types_are_ingested_not_rejected(isolated_settings):
     ds = _datasets_module(isolated_settings)
     ds.create_dataset("acme", "Acme")
     ingested, errors = ds.ingest_zip(
-        "acme", "b.zip", _zip({"a.png": b"x", "b.exe": b"y"}), per_member_max_bytes=_BIG
+        "acme",
+        "b.zip",
+        _zip({
+            "voice.m4a": b"\x00\x00\x00\x18ftypM4A binary",  # audio → stub
+            "config.yaml": b"name: acme\nenv: prod\n",         # text → passthrough
+        }),
+        per_member_max_bytes=_BIG,
     )
-    assert ingested == []
-    assert len(errors) == 2
+    assert sorted(f.original_filename for f in ingested) == ["config.yaml", "voice.m4a"]
+    assert errors == []
 
 
 def test_bad_archive_raises(isolated_settings):

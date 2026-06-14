@@ -40,9 +40,23 @@ def test_txt_handles_non_utf8():
     assert isinstance(out, str)
 
 
-def test_convert_unsupported_raises():
-    with pytest.raises(ingest.UnsupportedFileType):
-        ingest.convert("foo.exe", b"")
+def test_convert_unknown_textual_passes_through():
+    # yaml/json/etc. have no dedicated converter but decode cleanly → text.
+    out = ingest.convert("config.yaml", b"name: acme\nenv: prod\n")
+    assert "name: acme" in out
+    assert "env: prod" in out
+
+
+def test_convert_unknown_binary_becomes_stub():
+    # Binary content (e.g. audio) is stored but emits a placeholder stub.
+    out = ingest.convert("memo.m4a", b"\x00\x01\x02binary\xff\xfe")
+    assert "memo.m4a" in out
+    assert "not yet parsed" in out
+
+
+def test_convert_never_raises_for_unknown_type():
+    # The old UnsupportedFileType path is gone — nothing is rejected.
+    assert isinstance(ingest.convert("foo.exe", b"\x00\x01"), str)
 
 
 def test_convert_routes_by_extension_case_insensitive():
