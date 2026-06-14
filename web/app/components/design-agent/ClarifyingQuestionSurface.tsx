@@ -24,7 +24,7 @@
  * DELIBERATE P3 CHOICE (AC-documented): NO cost-estimate (AD14) modal in front
  * of the answer. Unlike `IterateComposer`'s re-prompt/Apply flows, the user here
  * is RESPONDING to an agent-initiated pause, not initiating a fresh run — gating
- * an answer behind a cost modal is poor pause-resume UX. If Babajide/Apurva want
+ * an answer behind a cost modal is poor pause-resume UX. If we want
  * the estimate gate here too it is a one-line addition (mirror IterateComposer's
  * `runEstimate → modal → runIterate`); flagged, deferred.
  *

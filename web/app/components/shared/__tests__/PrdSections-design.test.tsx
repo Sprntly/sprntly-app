@@ -16,7 +16,7 @@ import type { PrdSection } from "../../../types/content"
 // in production. This repo's vitest/esbuild transform defaults to the classic
 // runtime (`React.createElement`), so the imported component needs a global
 // `React`. Expose it here rather than modify Sprntly's shared vitest config
-// (outside this engagement's isolation map; DBD keeps its footprint minimal).
+// (out of scope for this change; we keep this footprint minimal).
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 const HERE = dirname(fileURLToPath(import.meta.url))

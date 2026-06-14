@@ -297,7 +297,7 @@ export function DrawerFooter({
  * to the authed AppShell (`DesignAgentNotificationReplay`) so it fires on EVERY
  * authed page, not only the PRD Design section where the drawer mounts.
  *
- * Decision-D(b) (RESOLVED 2026-06-04, Babajide): the toast persists until the
+ * Decision-D(b) (RESOLVED 2026-06-04): the toast persists until the
  * user acknowledges — it is NOT auto-acked on first show (the bug P6-05 fixes).
  * So this:
  *   - skips ids already shown THIS page-load (`wasSeenThisLoad`) so it fires
