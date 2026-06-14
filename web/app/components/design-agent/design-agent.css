@@ -88,6 +88,9 @@
   justify-content: space-between;
 }
 .design-agent-surface .comments-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 13px;
   font-weight: 600;
   color: var(--ink);
@@ -131,7 +134,36 @@
 }
 .design-agent-surface .comment-author { color: var(--ink); font-weight: 600; }
 .design-agent-surface .comment-timestamp { color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; }
-.design-agent-surface .comment-resolve-btn { padding: 4px 10px; font-size: 12px; }
+/* Single consolidated resolve check (David's `.pc-resolve`): circular, bordered,
+   pushed to the right edge of the card header; green-filled when resolved. The
+   `--static` variant is the read-only/public mount (display-only, no hover). */
+.design-agent-surface .comment-resolve-btn {
+  flex-shrink: 0;
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+.design-agent-surface button.comment-resolve-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent-alpha-18);
+  background: var(--accent-soft);
+}
+.design-agent-surface .comment-resolve-btn.resolved {
+  color: var(--surface);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.design-agent-surface .comment-resolve-btn--static { cursor: default; }
 
 /* ── Comment composer (CommentsPanel) ─────────────────────────────────── */
 .design-agent-surface .comment-composer {
@@ -2673,7 +2705,6 @@
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
-  margin-left: 7px;
 }
 
 /* Change 2 — avatar tint variants (cycle by author hash) */
@@ -2703,20 +2734,27 @@
   border-color: var(--line);
 }
 
-/* Change 3 — "Step N" pin chip */
+/* "Step N" pin pill — inline at the start of the comment body (David's
+   `.pc-anchor`): brand-tinted, sits on the first text line. */
 .design-agent-surface .comment-step-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  border: 1px solid var(--line-strong);
-  border-radius: 20px;
-  padding: 2px 8px;
-  font-size: 11px;
-  color: var(--ink-2);
-  margin-bottom: 4px;
+  gap: 3px;
+  border: 1px solid var(--accent-alpha-18);
+  border-radius: 5px;
+  padding: 1px 6px;
+  margin-right: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  vertical-align: middle;
 }
 
-/* Change 4 — resolve-check indicator */
+/* Resolve-check indicator — STILL USED by the PostGenerationResult `.da-right`
+   inline pin-rows (PART 2 consolidation, deferred). CommentsPanel itself no
+   longer renders it (consolidated into the clickable `.comment-resolve-btn`
+   header check), but this rule must stay until PART 2 ports those pin-rows. */
 .design-agent-surface .comment-resolve-indicator {
   flex-shrink: 0;
   width: 16px;
@@ -2729,6 +2767,32 @@
 }
 .design-agent-surface .comment-resolve-indicator--resolved {
   color: var(--accent);
+}
+
+/* Header message icon + close (X) — David's `.proto-comments-panel-top`. */
+.design-agent-surface .comments-panel-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+}
+.design-agent-surface .comments-panel-close {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+.design-agent-surface .comments-panel-close:hover {
+  color: var(--ink);
+  background: var(--surface-2);
 }
 
 /* Change 5 — footer send button + helper */

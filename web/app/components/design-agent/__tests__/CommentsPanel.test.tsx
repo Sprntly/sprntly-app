@@ -90,6 +90,62 @@ describe("CommentsPanelView — rendering", () => {
     expect(withoutResolve).not.toContain('data-testid="comment-resolve-1"')
   })
 
+  it("consolidates resolve into ONE control — a clickable header check on the editor mount, a static display-only one on the public mount (mockup `pc-resolve`)", () => {
+    // Editor mount: a single clickable <button> resolve check, no separate
+    // indicator and no separate actions-row Resolve button.
+    const editor = render({ comments: [comment()], canResolve: true })
+    expect(editor).toContain('data-testid="comment-resolve-1"')
+    expect(editor).toContain('class="comment-resolve-btn"')
+    // Old duplicate controls are gone.
+    expect(editor).not.toContain("comment-resolve-indicator")
+    // No text "Resolve" button in an actions row (the check is the only resolve UI).
+    expect(editor).not.toMatch(/<button[^>]*comment-resolve-btn[^>]*>Resolve<\/button>/)
+
+    // Public/read-only mount: display-only static variant, no click testid.
+    const publicMount = render({ comments: [comment()], canResolve: false })
+    expect(publicMount).toContain("comment-resolve-btn--static")
+    expect(publicMount).not.toContain('data-testid="comment-resolve-1"')
+  })
+
+  it("marks the resolve check green/filled (`resolved` class) when status is resolved", () => {
+    const html = render({
+      comments: [comment({ id: 2, status: "resolved", resolved_at: "2026-05-30T13:00:00Z" })],
+    })
+    expect(html).toMatch(/comment-resolve-btn[^"]*\bresolved\b/)
+  })
+
+  it("renders the mockup header: a message icon, the title, and a total-count pill", () => {
+    const html = render({ comments: [comment({ id: 1 }), comment({ id: 2 })] })
+    expect(html).toContain("comments-panel-icon")
+    expect(html).toContain("comments-panel-title")
+    // Count pill reflects total comments (2), not just open.
+    expect(html).toContain("comments-count-badge")
+    expect(html).toMatch(/comments-count-badge[^>]*>2</)
+  })
+
+  it("renders the Step N pin pill inline at the start of an open comment body", () => {
+    const html = render({ comments: [comment()] })
+    expect(html).toContain("comment-step-chip")
+    expect(html).toContain("Step 1")
+  })
+
+  it("renders a header close (X) only when onClose is supplied", () => {
+    const withClose = render({ comments: [comment()], onClose: () => {} })
+    expect(withClose).toContain('data-testid="comments-panel-close"')
+    const withoutClose = render({ comments: [comment()] })
+    expect(withoutClose).not.toContain('data-testid="comments-panel-close"')
+  })
+
+  it("uses native app-icons SVGs in the panel, never emoji", () => {
+    const html = render({
+      comments: [comment()],
+      canResolve: true,
+      onClose: () => {},
+    })
+    // No emoji code points anywhere in the rendered panel.
+    expect(html).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}✨\u{1F4AC}]/u)
+  })
+
   it("renders the anchored composer when one is active", () => {
     const html = render({
       comments: [],
