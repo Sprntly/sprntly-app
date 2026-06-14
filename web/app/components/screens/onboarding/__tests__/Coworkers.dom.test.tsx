@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 //
 // Container-level mount + behavior tests for the onboarding coworkers step —
-// "Introducing your AI coworkers." (design-v4 page 07 on OnboardingChrome).
+// "Introducing your AI coworker." (design-v4 page 07 on OnboardingChrome).
 // Mounts the real container under jsdom with mocked onboarding/router and the
-// coworkers network client, covering: slot rendering from the COWORKERS
-// catalog, GET prefill, the live handle pill, launch validation (all four
-// must be named), the PUT → advance(5) → /onboarding/first-brief happy path,
-// the PUT-failure path (error shown, no advance), and Back → connectors.
+// coworkers network client, covering: rendering ONLY the visible Product
+// coworker (pd / ds / admin hidden), GET prefill, the live handle pill, launch
+// validation (only Product must be named), the PUT → advance(5) →
+// /onboarding/first-brief happy path — the PUT still sends defaults for the
+// hidden slots so the backend contract stays valid — the PUT-failure path
+// (error shown, no advance), and Back → connectors.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -28,9 +30,9 @@ vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   advanceOnboardingStep: (...args: unknown[]) => advanceMock(...args),
 }))
-// Keep the pure helpers (COWORKERS, emptyCoworkerNames, canLaunchWorkspace,
-// coworkerHandle, withCoworkerDefaults) real; only stub the network client so
-// the mount is offline.
+// Keep the pure helpers (VISIBLE_COWORKERS, emptyCoworkerNames,
+// canLaunchWorkspace, coworkerHandle, withCoworkerDefaults) real; only stub the
+// network client so the mount is offline.
 vi.mock("../../../../lib/onboarding/coworkersApi", async (importOriginal) => {
   const actual = await importOriginal<
     typeof import("../../../../lib/onboarding/coworkersApi")
@@ -46,7 +48,7 @@ vi.mock("../../../../lib/onboarding/coworkersApi", async (importOriginal) => {
 
 import { Coworkers } from "../Coworkers"
 import {
-  COWORKERS,
+  VISIBLE_COWORKERS,
   withCoworkerDefaults,
 } from "../../../../lib/onboarding/coworkersApi"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
@@ -82,13 +84,10 @@ function nameInput(label: string): HTMLInputElement {
   return screen.getByLabelText(`Name for ${label}`) as HTMLInputElement
 }
 
+// Only the Product coworker is surfaced now; naming it is all that launch
+// requires.
 function nameAll() {
   fireEvent.change(nameInput("Product coworker"), { target: { value: "Maya" } })
-  fireEvent.change(nameInput("Design coworker"), { target: { value: "Juno" } })
-  fireEvent.change(nameInput("Data Science coworker"), {
-    target: { value: "Vera" },
-  })
-  fireEvent.change(nameInput("Admin coworker"), { target: { value: "Ada" } })
 }
 
 function launchButton(): HTMLButtonElement {
@@ -100,12 +99,12 @@ function launchButton(): HTMLButtonElement {
 }
 
 describe("Coworkers (container) — coworkers", () => {
-  it("renders the v4 chrome with every slot from the COWORKERS catalog", async () => {
+  it("renders the v4 chrome with ONLY the visible Product coworker", async () => {
     const { container } = await mountLoaded()
 
     const heading = container.querySelector(".onb-h")
     expect(heading?.textContent).toBe(
-      "Introducing your AI coworkers. Give them a name.",
+      "Introducing your AI coworker. Give it a name.",
     )
     // OnboardingChrome shell, coworkers = numbered step 4.
     expect(container.querySelector(".onb-shell")).not.toBeNull()
@@ -113,28 +112,38 @@ describe("Coworkers (container) — coworkers", () => {
       container.querySelector(".onb-dots")?.getAttribute("data-step"),
     ).toBe("4")
 
+    // Exactly one row — the Product coworker — renders.
     const rows = container.querySelectorAll(".cowork-list .cowork")
-    expect(rows.length).toBe(COWORKERS.length)
-    for (const c of COWORKERS) {
+    expect(rows.length).toBe(VISIBLE_COWORKERS.length)
+    expect(rows.length).toBe(1)
+    for (const c of VISIBLE_COWORKERS) {
       expect(screen.getByText(c.label)).not.toBeNull()
       expect(screen.getByText(c.blurb)).not.toBeNull()
       expect(nameInput(c.label)).not.toBeNull()
-    }
-    // Avatar tile per row, with the slot's color variant.
-    for (const c of COWORKERS) {
       expect(container.querySelector(`.cowork-av.${c.color}`)).not.toBeNull()
     }
+
+    // The hidden coworkers do NOT render anywhere in the teammate section.
+    expect(screen.queryByText("Design coworker")).toBeNull()
+    expect(screen.queryByText("Data Science coworker")).toBeNull()
+    expect(screen.queryByText("Admin coworker")).toBeNull()
+    expect(container.querySelector('[data-field="pd"]')).toBeNull()
+    expect(container.querySelector('[data-field="ds"]')).toBeNull()
+    expect(container.querySelector('[data-field="admin"]')).toBeNull()
+
     // Old InterviewLayout shell is gone.
     expect(container.querySelector(".interview-shell")).toBeNull()
   })
 
-  it("prefills names from coworkersApi.get() on mount", async () => {
+  it("prefills the Product name from coworkersApi.get() on mount", async () => {
+    // GET still returns all four slots; only Product surfaces in the UI.
     await mountLoaded({}, { pm: "Maya", ds: "Vera" })
 
     expect(getMock).toHaveBeenCalledTimes(1)
     expect(nameInput("Product coworker").value).toBe("Maya")
-    expect(nameInput("Data Science coworker").value).toBe("Vera")
-    expect(nameInput("Design coworker").value).toBe("")
+    // Hidden slots have no rendered input.
+    expect(screen.queryByLabelText("Name for Data Science coworker")).toBeNull()
+    expect(screen.queryByLabelText("Name for Design coworker")).toBeNull()
   })
 
   it("previews the live handle pill as the user types (Maya → maya_pm)", async () => {
@@ -144,27 +153,22 @@ describe("Coworkers (container) — coworkers", () => {
       Array.from(container.querySelectorAll(".cowork-handle")).map(
         (p) => p.textContent,
       )
-    // Untouched pills read like the mock placeholders.
-    expect(pills()).toEqual(["name_pm", "name_pd", "name_ds", "name_admin"])
-
-    fireEvent.change(nameInput("Product coworker"), { target: { value: "Maya" } })
-    expect(pills()[0]).toBe("maya_pm")
+    // Only the Product pill renders; untouched it reads like the placeholder.
+    expect(pills()).toEqual(["name_pm"])
 
     // Lowercased + sanitized (spaces and punctuation stripped).
-    fireEvent.change(nameInput("Design coworker"), {
+    fireEvent.change(nameInput("Product coworker"), {
       target: { value: "  Jo Ann! " },
     })
-    expect(pills()[1]).toBe("joann_pd")
+    expect(pills()[0]).toBe("joann_pm")
   })
 
-  it("blocks launch with per-row errors until every coworker is named", async () => {
+  it("blocks launch with a Product-row error until it is named", async () => {
     const { container } = await mountLoaded()
 
-    fireEvent.change(nameInput("Product coworker"), { target: { value: "Maya" } })
-    expect(
-      screen.getByText(/1 of 4 named/) ?? null,
-    ).not.toBeNull()
-    expect(screen.getByText(/name each coworker to launch/)).not.toBeNull()
+    // Nothing typed yet: 0 of 1 named, launch disabled.
+    expect(screen.getByText(/0 of 1 named/) ?? null).not.toBeNull()
+    expect(screen.getByText(/name your coworker to launch/)).not.toBeNull()
 
     await act(async () => {
       fireEvent.click(launchButton())
@@ -174,34 +178,42 @@ describe("Coworkers (container) — coworkers", () => {
     expect(putMock).not.toHaveBeenCalled()
     expect(advanceMock).not.toHaveBeenCalled()
     expect(routerMock.push).not.toHaveBeenCalled()
-    // …and the three unnamed rows show an error.
-    expect(container.querySelectorAll(".onb-field-error").length).toBe(3)
-    expect(
-      container.querySelector('[data-field="pd"] .onb-field-error'),
-    ).not.toBeNull()
+    // …and only the (single) Product row shows an error.
+    expect(container.querySelectorAll(".onb-field-error").length).toBe(1)
     expect(
       container.querySelector('[data-field="pm"] .onb-field-error'),
-    ).toBeNull()
+    ).not.toBeNull()
   })
 
-  it("launch PUTs the names, advances to step 5, and routes to first-brief", async () => {
+  it("launches with only Product named — PUT fills hidden-slot defaults, advances to step 5, routes to first-brief", async () => {
     putMock.mockResolvedValue({ ok: true })
     const updated = makeWorkspace({ onboarding_step: 5 })
     advanceMock.mockResolvedValue(updated)
     const setWorkspace = vi.fn()
     await mountLoaded({ setWorkspace })
 
-    nameAll()
-    expect(screen.getByText(/4 of 4 named/)).not.toBeNull()
+    nameAll() // names Product only
+    expect(screen.getByText(/1 of 1 named/)).not.toBeNull()
     expect(screen.getByText(/ready to launch/)).not.toBeNull()
 
     await act(async () => {
       fireEvent.click(launchButton())
     })
 
-    expect(putMock).toHaveBeenCalledWith(
-      withCoworkerDefaults({ pm: "Maya", pd: "Juno", ds: "Vera", admin: "Ada" }),
-    )
+    // The PUT still carries all four slots so the backend contract stays
+    // valid: Product = the typed name, the hidden slots = their defaults.
+    const expected = withCoworkerDefaults({
+      pm: "Maya",
+      pd: "",
+      ds: "",
+      admin: "",
+    })
+    expect(putMock).toHaveBeenCalledWith(expected)
+    expect(expected.pm).toBe("Maya")
+    expect(expected.pd.length).toBeGreaterThan(0)
+    expect(expected.ds.length).toBeGreaterThan(0)
+    expect(expected.admin.length).toBeGreaterThan(0)
+
     expect(advanceMock).toHaveBeenCalledWith("ws-1", 5)
     expect(setWorkspace).toHaveBeenCalledWith(updated)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/first-brief")
