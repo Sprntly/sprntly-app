@@ -206,6 +206,31 @@
   margin: 0;
 }
 
+/* ── Shared spinner ────────────────────────────────────────────────────── */
+@keyframes da-spin { to { transform: rotate(360deg); } }
+.design-agent-surface .da-spinner {
+  flex-shrink: 0;
+  margin-top: 1px;
+  animation: da-spin 0.9s linear infinite;
+}
+
+/* ── Prototype generating card ─────────────────────────────────────────── */
+.design-agent-surface .da-prototype-generating {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-top: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent-alpha-14);
+  background: var(--accent-muted);
+}
+.design-agent-surface .da-prototype-generating-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-ink);
+}
+
 /* ── Completion bar (CompletionBar) ───────────────────────────────────── */
 .design-agent-surface .completion-bar {
   display: flex;

@@ -77,18 +77,7 @@ export type LauncherDrawerProps = {
  *  opt in to the toast notification or wait for the drawer to reopen. */
 function PrototypeGeneratingCard() {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 12,
-        padding: "12px 14px",
-        marginTop: 12,
-        borderRadius: 10,
-        border: "1px solid var(--accent-alpha-14)",
-        background: "var(--accent-muted)",
-      }}
-    >
+    <div className="da-prototype-generating">
       {/* Spinner */}
       <svg
         width="16"
@@ -96,21 +85,12 @@ function PrototypeGeneratingCard() {
         viewBox="0 0 16 16"
         fill="none"
         aria-hidden
-        style={{ flexShrink: 0, marginTop: 1, animation: "da-spin 0.9s linear infinite" }}
+        className="da-spinner"
       >
-        <style>{`@keyframes da-spin { to { transform: rotate(360deg); } }`}</style>
         <circle cx="8" cy="8" r="6" stroke="var(--accent-alpha-28)" strokeWidth="2" />
         <path d="M8 2a6 6 0 0 1 6 6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
       </svg>
-      <div>
-        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--accent-ink)" }}>
-          Generating prototype…
-        </div>
-        <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 3, lineHeight: 1.45 }}>
-          This usually takes 1–2 minutes. You can navigate away — check "Notify me
-          when ready" next time to get a toast when it's done.
-        </div>
-      </div>
+      <div className="da-prototype-generating-title">Generating prototype…</div>
     </div>
   )
 }

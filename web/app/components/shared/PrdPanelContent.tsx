@@ -134,7 +134,6 @@ function PrototypeSection({ prdId, figmaFileKey, externalGeneratingId }: { prdId
       {polling && !existing && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 10, border: "1px solid var(--accent-alpha-14)", background: "var(--accent-muted)" }}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden style={{ flexShrink: 0, animation: "da-spin 0.9s linear infinite" }}>
-            <style>{`@keyframes da-spin { to { transform: rotate(360deg); } }`}</style>
             <circle cx="8" cy="8" r="6" stroke="var(--accent-alpha-28)" strokeWidth="2" />
             <path d="M8 2a6 6 0 0 1 6 6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
           </svg>
