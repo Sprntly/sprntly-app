@@ -30,19 +30,19 @@ function render(props: React.ComponentProps<typeof ShareMenuView>): string {
 
 describe("ShareMenuView — rendering", () => {
   // The visibility selector is the shipped native <input type="radio"> group
-  // (kept so the browser provides arrow-key traversal + roving focus). Each row
-  // container carries a data-testid; the passcode field is progressive-disclosure
-  // — mounted only when mode === "passcode". These presentation assertions match
-  // that markup; the wired-behaviour tests below (runApplyShareMode /
-  // runSelectMode / runCopyShareLink) are unchanged and still prove the share API
-  // plumbing.
-  it("renders three native radio visibility rows", () => {
+  // (kept so the browser provides arrow-key traversal + roving focus). Passcode
+  // is intentionally NOT surfaced in the UI — only Private + Public render (the
+  // "passcode" ShareMode value + its API guard are kept, just never selectable).
+  // These presentation assertions match that markup; the wired-behaviour tests
+  // below (runApplyShareMode / runSelectMode / runCopyShareLink) are unchanged
+  // and still prove the share API plumbing.
+  it("renders two native radio visibility rows (private + public only)", () => {
     const html = render({ mode: "private", passcode: "" })
     const radios = html.match(/type="radio"/g) ?? []
-    expect(radios).toHaveLength(3)
+    expect(radios).toHaveLength(2)
     expect(html).toContain('data-testid="share-mode-private"')
     expect(html).toContain('data-testid="share-mode-public"')
-    expect(html).toContain('data-testid="share-mode-passcode"')
+    expect(html).not.toContain('data-testid="share-mode-passcode"')
   })
 
   it("marks the radio matching the current mode as checked", () => {
@@ -57,15 +57,14 @@ describe("ShareMenuView — rendering", () => {
     expect(pub).not.toMatch(/id="share-mode-private"[^>]*checked/)
   })
 
-  it("hides the passcode input unless mode is passcode (progressive disclosure)", () => {
-    const html = render({ mode: "private", passcode: "" })
-    expect(html).not.toContain('data-testid="passcode-input"')
-  })
-
-  it("shows an enabled passcode input when mode is passcode", () => {
-    const html = render({ mode: "passcode", passcode: "" })
-    expect(html).toContain('data-testid="passcode-input"')
-    expect(html).not.toMatch(/data-testid="passcode-input"[^>]*disabled/)
+  it("never renders a passcode input (passcode mode is not surfaced)", () => {
+    expect(render({ mode: "private", passcode: "" })).not.toContain(
+      'data-testid="passcode-input"',
+    )
+    // Even if the (hidden) passcode mode is the active value, no input renders.
+    expect(render({ mode: "passcode", passcode: "" })).not.toContain(
+      'data-testid="passcode-input"',
+    )
   })
 })
 

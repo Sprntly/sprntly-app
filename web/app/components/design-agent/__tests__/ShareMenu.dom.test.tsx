@@ -64,7 +64,7 @@ describe("ShareMenuView — radio a11y association + click (AC1/AC2)", () => {
     // Regression: the unfixed implicit-label markup gives the radios NO id, so
     // no `label[for=...]` exists. The fix adds explicit id + htmlFor.
     render(React.createElement(ShareMenuView, { mode: "private", passcode: "" }))
-    for (const name of [/private/i, /public/i, /passcode/i]) {
+    for (const name of [/private/i, /public/i]) {
       const radio = screen.getByRole("radio", { name }) as HTMLInputElement
       expect(radio.id).toBeTruthy()
       expect(document.querySelector(`label[for="${radio.id}"]`)).not.toBeNull()
@@ -77,54 +77,42 @@ describe("ShareMenuView — radio a11y association + click (AC1/AC2)", () => {
     render(
       React.createElement(ShareMenuView, { mode: "private", passcode: "", onSelectMode }),
     )
-    await user.click(screen.getByRole("radio", { name: /passcode/i }))
-    expect(onSelectMode).toHaveBeenCalledWith("passcode")
+    // Starting mode is "private" (its radio is checked), so clicking the unchecked
+    // public radio fires the onChange → onSelectMode("public"). Clicking an
+    // already-checked radio is a jsdom no-op, so private (the active mode) is not
+    // re-asserted here.
     await user.click(screen.getByRole("radio", { name: /public/i }))
     expect(onSelectMode).toHaveBeenCalledWith("public")
   })
 })
 
-describe("ShareMenuView — contiguous radio group, passcode field lifted out (AC3)", () => {
-  it("the passcode input is NOT inside any radio label and sits after the three radios (Regression)", () => {
-    render(React.createElement(ShareMenuView, { mode: "passcode", passcode: "" }))
-    const passcodeInput = screen.getByTestId("passcode-input") as HTMLInputElement
-    // Regression: unfixed markup nests the passcode input inside the passcode
-    // radio's <label>; the fix lifts it out so closest("label") is null.
-    expect(passcodeInput.closest("label")).toBeNull()
-    // The three radios are contiguous, in order, with the passcode text field
-    // AFTER them — no foreign focusable element interleaved in the group.
+describe("ShareMenuView — contiguous radio group (AC3)", () => {
+  it("the two radios are contiguous and in order, with no passcode field interleaved", () => {
+    render(React.createElement(ShareMenuView, { mode: "public", passcode: "" }))
+    // Passcode mode is not surfaced → no passcode input is ever mounted.
+    expect(screen.queryByTestId("passcode-input")).toBeNull()
+    // The two radios are contiguous, in order — no foreign focusable element
+    // interleaved in the group.
     const inputs = Array.from(
       document.querySelectorAll<HTMLInputElement>(".share-menu input"),
     )
     const radios = inputs.filter((el) => el.type === "radio")
-    expect(radios.map((r) => r.value)).toEqual(["private", "public", "passcode"])
-    expect(inputs.indexOf(passcodeInput)).toBeGreaterThan(inputs.indexOf(radios[2]))
+    expect(radios.map((r) => r.value)).toEqual(["private", "public"])
   })
 })
 
-describe("ShareMenuView — progressive-disclosure passcode field", () => {
-  it("absent unless passcode mode; present + enabled in passcode mode; disabled while busy", () => {
-    // not passcode mode → the passcode field is not mounted at all (progressive
-    // disclosure). This does not change radio traversal: the field was already
-    // lifted OUT of the radio focus order, so mounting/unmounting it leaves the
-    // three contiguous radios untouched.
+describe("ShareMenuView — passcode field is never surfaced", () => {
+  it("no passcode input mounts in any mode (passcode mode is hidden from the UI)", () => {
     const r1 = render(
       React.createElement(ShareMenuView, { mode: "public", passcode: "" }),
     )
     expect(screen.queryByTestId("passcode-input")).toBeNull()
     r1.unmount()
-    // passcode mode + not busy → present + enabled
-    const r2 = render(
-      React.createElement(ShareMenuView, { mode: "passcode", passcode: "", busy: false }),
-    )
-    expect((screen.getByTestId("passcode-input") as HTMLInputElement).disabled).toBe(false)
-    r2.unmount()
-    // passcode mode + busy → present but disabled (the `busy` term keeps the
-    // field gated through the optimistic window).
+    // Even when the (hidden) passcode value is the active mode, no input renders.
     render(
-      React.createElement(ShareMenuView, { mode: "passcode", passcode: "", busy: true }),
+      React.createElement(ShareMenuView, { mode: "passcode", passcode: "" }),
     )
-    expect((screen.getByTestId("passcode-input") as HTMLInputElement).disabled).toBe(true)
+    expect(screen.queryByTestId("passcode-input")).toBeNull()
   })
 })
 

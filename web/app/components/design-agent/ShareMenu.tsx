@@ -178,9 +178,9 @@ export function ShareMenuView({
     <div className="share-menu" data-testid="share-menu">
       <fieldset className="share-mode-fieldset">
         <legend className="field-label">Sharing</legend>
-        {/* Three contiguous native radios with explicit id+htmlFor association
+        {/* Two contiguous native radios with explicit id+htmlFor association
             (P6-22). Keep them adjacent with no interleaved focusable element so
-            native arrow-key traversal walks Private→Public→Passcode. */}
+            native arrow-key traversal walks Private→Public. */}
         <div className="share-mode-option" data-testid="share-mode-private">
           <input
             type="radio"
@@ -205,42 +205,9 @@ export function ShareMenuView({
           />
           <label htmlFor="share-mode-public">Public — anyone with the link</label>
         </div>
-        <div className="share-mode-option" data-testid="share-mode-passcode">
-          <input
-            type="radio"
-            id="share-mode-passcode"
-            name="share-mode"
-            value="passcode"
-            checked={mode === "passcode"}
-            disabled={busy}
-            onChange={() => onSelectMode?.("passcode")}
-          />
-          <label htmlFor="share-mode-passcode">Passcode — anyone with link + passcode</label>
-        </div>
-        {/* Passcode value field — progressive disclosure: mounted ONLY when
-            Passcode is the selected mode. It stays LIFTED OUT of the passcode
-            radio's <label> so it is never interleaved in the radio focus order;
-            mounting/unmounting it does not change radio arrow-traversal (the
-            three native radios remain contiguous above). While mounted it is a
-            plain text field outside the radio group; the `busy` term keeps it
-            disabled through the optimistic window. */}
-        {mode === "passcode" && (
-          <div className="share-passcode-field">
-            <label htmlFor="share-passcode-input" className="share-passcode-label">
-              Passcode
-            </label>
-            <input
-              type="text"
-              id="share-passcode-input"
-              className="input"
-              data-testid="passcode-input"
-              placeholder="Set passcode"
-              value={passcode}
-              disabled={busy}
-              onChange={(e) => onPasscodeChange?.(e.target.value)}
-            />
-          </div>
-        )}
+        {/* Passcode mode is intentionally NOT surfaced in the UI: only Private +
+            Public radios render. "passcode" stays a valid ShareMode (backend
+            value + runApplyShareMode guard kept), simply never selectable here. */}
       </fieldset>
       {shareUrl && (
         <div className="share-link" data-testid="share-link">
