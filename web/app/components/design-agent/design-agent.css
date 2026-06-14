@@ -477,6 +477,12 @@
 }
 .design-agent-surface .da-public-root { display: flex; flex-direction: column; gap: 16px; }
 
+/* public /p: establish 100dvh root + flex chain so the prototype fills the viewport (no bottom gap) */
+.da-public-root { min-height: 100dvh; display: flex; flex-direction: column; }
+.da-public-root > .design-agent-surface { flex: 1; min-height: 0; }
+.da-public-root .da-prototype-viewer { flex: 1; min-height: 0; }
+.da-public-root .proto-frame { flex: 1; min-height: 0; }
+
 /* ── Empty state (prd-design empty surface) ───────────────────────────── */
 .design-agent-surface .prd-design-empty {
   padding: 28px 24px;
@@ -1354,6 +1360,10 @@
   border: 0;
   border-radius: 0;
 }
+
+/* fill .main's resolved height so .da-ready can grow to viewport — scoped to the in-tab editor mount only */
+.design-agent-surface.da-prototype-page { height: 100%; }
+.design-agent-surface.da-prototype-page .design-agent-result { flex: 1; min-height: 0; }
 
 /* LEFT collapsible sidebar (OPEN by default). Collapses by sliding out, David's
    `.proto-chat.hidden { margin-left:-300px }`. */
