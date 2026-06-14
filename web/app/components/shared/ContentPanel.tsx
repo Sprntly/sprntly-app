@@ -29,6 +29,7 @@ function clampCpanelWidth(px: number): number {
 
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel } = useNavigation()
+  const { content } = useContent()
 
   // Tracks the live pixel width; null = use the CSS default (60vw).
   const widthRef = useRef<number | null>(null)
@@ -116,7 +117,7 @@ export function ContentPanel() {
               ))}
             </div>
           </div>
-            <span className="cpanel-main-name">PRD · Handoff Threshold & Champion Enablement</span>
+            <span className="cpanel-main-name">{content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}</span>
           <div className="cpanel-head-actions">
             <button className="cpanel-action-btn">
               <IconDeviceFloppy size={12} />Save
