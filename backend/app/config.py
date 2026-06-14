@@ -128,6 +128,14 @@ class Settings(BaseSettings):
     # Pipeline scheduler
     scheduler_enabled: bool = False
     pipeline_interval_hours: int = 6
+    # Weekly-brief scheduler (v0 checklist 2.4): the brief fires Monday 09:00 in
+    # each company's configured timezone (companies.notification_settings.timezone,
+    # default UTC). The scheduler ticks every WEEKLY_BRIEF_TICK_MINUTES and, for
+    # each company, asks app.brief_schedule.should_run_weekly_brief whether the
+    # local Monday-09:00 firing window is open. Must be comfortably smaller than
+    # brief_schedule.DUE_WINDOW (1h) so a window is never skipped between ticks;
+    # 15 min gives ~4 chances to catch each window even if a tick runs late.
+    weekly_brief_tick_minutes: int = 15
     scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 

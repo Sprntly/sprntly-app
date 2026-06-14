@@ -1,19 +1,29 @@
 """APScheduler integration for the intelligence pipeline.
 
-Runs inside the FastAPI process. Triggers the full pipeline
-orchestrator on a configurable cron interval (default: every 6 hours).
+Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
 
-Opt-in via SCHEDULER_ENABLED=true in .env.
+  weekly_brief_tick  — fires every WEEKLY_BRIEF_TICK_MINUTES and, for each
+                       company, generates the weekly brief iff the company's
+                       local Monday-09:00 firing window is open (v0 checklist
+                       2.4). Timezone comes from
+                       companies.notification_settings.timezone (default UTC).
+                       All day/time/tz/DST logic lives in the pure, unit-testable
+                       app.brief_schedule module; this job is the thin shell that
+                       ticks a clock and drives it per company.
+  refresh_connectors — re-pulls connector data into the KG every
+                       PIPELINE_INTERVAL_HOURS so the brief reads fresh data.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app import db
+from app.brief_schedule import resolve_timezone, should_run_weekly_brief
 from app.config import settings
 from app.db.companies import list_companies
 from app.kg_ingest.auto_sync import kickoff_sync
@@ -22,6 +32,15 @@ from app.kg_ingest.runner import PULLERS
 logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
+
+# Per-company "last weekly brief fired at" ledger (company_id → aware UTC dt),
+# the once-per-week guard handed to should_run_weekly_brief. In-memory only: a
+# process restart re-evaluates from scratch, which is safe — should_run_weekly_brief
+# keys off the local Monday-09:00 firing WINDOW (default 1h), so a restart can at
+# most regenerate one brief inside an open window, and brief generation is itself
+# idempotent/refresh-gated (synthesis_brief.generate_brief_for skips when the KG
+# is unchanged). Bounded by the company count.
+_last_brief_run: dict[str, datetime] = {}
 
 
 def _refresh_all_company_connectors() -> None:
@@ -120,6 +139,70 @@ async def _run_synthesis_for_all_companies() -> None:
             logger.error("Scheduler: synthesis failed for %s: %s", slug, exc)
 
 
+async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
+    """Generate the weekly brief for every company whose local Monday-09:00
+    firing window is open right now (v0 checklist 2.4).
+
+    Ticks every WEEKLY_BRIEF_TICK_MINUTES. For each company it:
+      1. resolves the timezone from notification_settings (default UTC),
+      2. asks the PURE app.brief_schedule.should_run_weekly_brief whether the
+         company's local Monday-09:00 window is open and not yet fired this week,
+      3. if due, generates that company's brief from current KG state and records
+         the run in the in-memory once-per-week ledger.
+
+    All scheduling intelligence is in the pure function — this shell only owns
+    the clock, the per-company iteration, the ledger, and error isolation. One
+    company raising (unknown slug, empty KG, LLM hiccup) is logged and skipped so
+    the rest of the tick still runs. ``now`` is injectable for tests; defaults to
+    real UTC now.
+    """
+    now = now or datetime.now(timezone.utc)
+
+    try:
+        companies = list_companies()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Weekly brief tick: failed to list companies: %s", exc)
+        return
+
+    if not companies:
+        return
+
+    for company in companies:
+        company_id = company.get("id")
+        slug = company.get("slug") or company_id
+        if not slug:
+            continue
+        tz = resolve_timezone(company.get("notification_settings"))
+        last_run = _last_brief_run.get(company_id) if company_id else None
+        if not should_run_weekly_brief(now, tz, last_run):
+            continue
+
+        logger.info(
+            "Weekly brief tick: company=%s (slug=%s, tz=%s) is due — generating",
+            company_id, slug, tz.key,
+        )
+        try:
+            await _generate_weekly_brief_for_company(slug)
+            if company_id:
+                _last_brief_run[company_id] = now.astimezone(timezone.utc)
+            logger.info("Weekly brief tick: brief for %s → ok", slug)
+        except Exception as exc:  # noqa: BLE001 — per-company isolation
+            logger.error("Weekly brief tick: brief failed for %s: %s", slug, exc)
+
+
+async def _generate_weekly_brief_for_company(slug: str) -> None:
+    """Generate one company's weekly brief via the KG synthesis engine, off the
+    event loop (LLM + Supabase are blocking). Synthesis is the only path since
+    the legacy brief/KG engine was retired (main #321)."""
+    from app.brief_runner import warm_synthesis_drilldowns
+    from app.synthesis_brief import generate_brief_for
+
+    await asyncio.to_thread(generate_brief_for, slug)
+    # Warm evidence/PRD/Ask drill-downs so the first user click is instant.
+    # Error-isolated in the helper.
+    warm_synthesis_drilldowns(slug)
+
+
 async def _run_scheduled_cycle() -> None:
     """Run the scheduled KG-synthesis cycle: seed + run_synthesis per company."""
     await _run_synthesis_for_all_companies()
@@ -134,18 +217,27 @@ def start_scheduler() -> None:
         return
 
     interval_hours = getattr(settings, "pipeline_interval_hours", 6)
-    job_name = f"KG synthesis cycle (every {interval_hours}h)"
+    tick_minutes = getattr(settings, "weekly_brief_tick_minutes", 15)
 
     _scheduler = AsyncIOScheduler()
+    # Weekly brief: tick frequently, generate per company only when that company's
+    # local Monday-09:00 firing window is open (v0 checklist 2.4). The day/time/tz
+    # decision is the pure app.brief_schedule.should_run_weekly_brief, so the
+    # cadence here just has to be finer than the firing window — it does NOT set
+    # the send time. Replaces the old fire-every-N-hours brief cycle.
     _scheduler.add_job(
-        _run_scheduled_cycle,
-        trigger=IntervalTrigger(hours=interval_hours),
-        id="pipeline_full_cycle",
-        name=job_name,
+        _run_weekly_brief_tick,
+        trigger=IntervalTrigger(minutes=tick_minutes),
+        id="weekly_brief_tick",
+        name=(
+            f"Weekly brief — Monday 09:00 per company tz "
+            f"(tick every {tick_minutes}m)"
+        ),
         replace_existing=True,
     )
     # Second job: refresh the KG from upstream connectors so the corpus stays
-    # fresh. Same cadence as the brief cycle.
+    # fresh. Keeps the existing ~6h cadence — connector freshness is decoupled
+    # from the once-a-week brief send time.
     _scheduler.add_job(
         _refresh_all_company_connectors,
         trigger=IntervalTrigger(hours=interval_hours),
@@ -155,8 +247,9 @@ def start_scheduler() -> None:
     )
     _scheduler.start()
     logger.info(
-        "Scheduler started: KG synthesis cycle + connector refresh, every %d hours",
-        interval_hours,
+        "Scheduler started: weekly brief tick every %dm "
+        "(Monday 09:00 per-company tz) + connector refresh every %dh",
+        tick_minutes, interval_hours,
     )
 
 

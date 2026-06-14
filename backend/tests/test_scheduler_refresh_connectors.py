@@ -118,12 +118,13 @@ def test_refresh_skips_providers_without_kg_pullers():
 
 def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
     """When SCHEDULER_ENABLED=true, the connector-refresh job must be
-    wired alongside the brief-synthesis cycle — both jobs on the same
-    interval, distinct IDs so they show up separately in logs."""
+    wired alongside the weekly-brief tick — distinct IDs so they show up
+    separately in logs."""
     from app import scheduler as sched_mod
 
     monkeypatch.setattr(sched_mod.settings, "scheduler_enabled", True)
     monkeypatch.setattr(sched_mod.settings, "pipeline_interval_hours", 6)
+    monkeypatch.setattr(sched_mod.settings, "weekly_brief_tick_minutes", 15)
 
     started: list = []
 
@@ -145,9 +146,9 @@ def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
 
     sched_mod.start_scheduler()
 
-    # Both jobs registered: brief cycle + connector refresh
+    # Both jobs registered: weekly brief tick + connector refresh
     ids = sorted(j["id"] for j in fake.jobs)
-    assert "pipeline_full_cycle" in ids
+    assert "weekly_brief_tick" in ids
     assert "refresh_connectors" in ids
     assert started == [True]
 
