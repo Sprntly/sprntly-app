@@ -263,19 +263,23 @@ export function ChatScreen() {
       return
     }
     setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
-    setContent({ prd: null, prdMeta: null })
+    // Drive the panel's generating spinner via content too (not just per-tab),
+    // so the right rail shows in-progress PRD state immediately on open.
+    setContent({ prd: null, prdMeta: null, prdGenerating: true })
     openContentPanel("prd")
     try {
       const result = await runPrdGeneration(meta)
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd } : t))
-        setContent({ prd: result.prd, prdMeta: meta })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+        setContent({ prdGenerating: false })
         showToast("PRD generation failed", result.message)
       }
     } catch (e) {
       setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+      setContent({ prdGenerating: false })
       showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
     }
   }, [activeTabId, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
