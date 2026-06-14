@@ -19,7 +19,7 @@ import type {
 } from "../../lib/brief-v2-adapter"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
-import { IconClose, IconSendUp, IconSparkle } from "./app-icons"
+import { IconClose, IconSendUp, IconSparkle, IconUndo } from "./app-icons"
 import { IconPlug } from "@tabler/icons-react"
 
 type Finding = BriefV2HeroFinding | BriefV2CompactFinding
@@ -44,7 +44,17 @@ interface ChatTurn {
 }
 
 const STORAGE_PREFIX = "sprntly_brief_chat_"
+// Dismissed finding cards persist (localStorage) per brief so a grey-out survives
+// re-render and reload within the session. The brief V2 payload carries no id, so
+// we namespace by company + week-of (the distinct brief identity) and store the
+// set of dismissed `detailKey`s under it.
+const DISMISS_PREFIX = "sprntly_brief_dismissed_"
 const COMPOSER_MAX_PX = 200
+
+function dismissKeyFor(company: string | null | undefined, weekOf: string | null | undefined): string | null {
+  if (!company) return null
+  return `${DISMISS_PREFIX}${company}::${weekOf ?? "current"}`
+}
 
 function uid(): string {
   return typeof crypto !== "undefined" && crypto.randomUUID
@@ -369,26 +379,45 @@ function FindingPreview({ finding, onOpen }: { finding: Finding; onOpen: () => v
   )
 }
 
+// Data-driven fallback chart for insights whose payload carries no chart_hints.
+// Rather than draw a hardcoded/placeholder shape, derive a real bar chart from
+// the finding's own quantitative fields — the numeric KPI stat tiles (which come
+// straight from `insight.metrics`). Only when there is genuinely no numeric
+// signal do we return null so the card simply renders without a chart.
+function chartFromStatTiles(finding: Finding): BriefV2InlineChart | null {
+  const tiles = finding.statTiles || []
+  const data = tiles
+    .map((t) => ({ label: (t.label || "").trim(), value: firstNumber(t.value) }))
+    .filter((d): d is { label: string; value: number } => d.value != null)
+    .map((d) => ({ label: d.label || "—", value: d.value }))
+  if (data.length === 0) return null
+  return { kind: "bar", title: finding.metricHighlight || finding.title || "", data }
+}
+
 // ── Finding card — matches reference layout ───────────────────────────────────
 function BriefFindingCard({
   finding,
   busy,
   generating,
+  dismissed,
   onAsk,
   onViewEvidence,
   onGeneratePrd,
   onGenerateAll,
   onDismiss,
+  onRestore,
   onPreview,
 }: {
   finding: Finding
   busy: boolean
   generating: boolean
+  dismissed: boolean
   onAsk: () => void
   onViewEvidence: () => void
   onGeneratePrd: () => void
   onGenerateAll: () => void
   onDismiss: () => void
+  onRestore: () => void
   onPreview: () => void
 }) {
   const accent = finding.actionAccent
@@ -396,8 +425,50 @@ function BriefFindingCard({
   const category = finding.category || finding.actionLabel
   const priority = finding.priority || "P0"
   const statTiles = finding.statTiles || []
-  // Every finding carries an inline chart hint (hero and supporting alike).
-  const chart = finding.chart
+  // Real chart from the insight payload (chart_hints → BriefV2InlineChart). When
+  // the insight ships no chart_hints, derive a data-driven bar chart from the
+  // finding's numeric KPI tiles instead of a hardcoded placeholder.
+  const chart = finding.chart ?? chartFromStatTiles(finding)
+
+  // ── Dismissed (greyed) state ──────────────────────────────────────────────
+  // Greys the card out in place — keeps the finding present (not deleted) and
+  // hides the heavy detail/viz, exposing a "click to restore" affordance.
+  // Clicking the card body (or the restore button) un-greys it.
+  if (dismissed) {
+    return (
+      <article
+        className={`fc fc--${accent} fc--dismissed`}
+        role="button"
+        tabIndex={0}
+        title="Dismissed · click to restore"
+        aria-label={`Dismissed finding: ${finding.title}. Click to restore.`}
+        onClick={onRestore}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault()
+            onRestore()
+          }
+        }}
+      >
+        <div className="fc-dismissed-row">
+          <span className="fc-dismissed-title">{finding.title}</span>
+          <button
+            type="button"
+            className="fc-iconbtn fc-restorebtn"
+            title="Restore finding"
+            aria-label="Restore finding"
+            onClick={(e) => {
+              e.stopPropagation()
+              onRestore()
+            }}
+          >
+            <IconUndo size={13} />
+          </button>
+        </div>
+        <span className="fc-dismissed-hint">Dismissed · click to restore</span>
+      </article>
+    )
+  }
 
   return (
     <article className={`fc fc--${accent}`}>
@@ -598,6 +669,8 @@ export function BriefChat() {
   const mountedRef = useRef(true)
   const loadedKeyRef = useRef<string | null>(null)
   const skipPersistRef = useRef(false)
+  const dismissKeyRef = useRef<string | null>(null)
+  const skipDismissPersistRef = useRef(false)
 
   const greetTime = useMemo(() => nowTime(), [])
 
@@ -625,7 +698,8 @@ export function BriefChat() {
     skipPersistRef.current = true
     loadedKeyRef.current = key
     setTurns(restored)
-    setDismissed(new Set())
+    // Dismissed-card state is loaded by its own effect (keyed on the brief), so
+    // a dismissal survives reload rather than being cleared on company change.
   }, [activeCompany])
 
   // ── Persist terminal turns (skip the write a fresh restore triggers) ──────
@@ -645,6 +719,41 @@ export function BriefChat() {
       /* best effort */
     }
   }, [turns])
+
+  // ── Restore dismissed finding cards for the active brief ───────────────────
+  // Keyed by company + week-of so a grey-out persists across re-render/reload.
+  const dismissKey = dismissKeyFor(activeCompany, content.briefV2?.weekOf)
+  useEffect(() => {
+    if (!dismissKey) return
+    let restored = new Set<string>()
+    try {
+      const raw = localStorage.getItem(dismissKey)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) restored = new Set(parsed.filter((k) => typeof k === "string"))
+      }
+    } catch {
+      /* ignore corrupt storage */
+    }
+    skipDismissPersistRef.current = true
+    dismissKeyRef.current = dismissKey
+    setDismissed(restored)
+  }, [dismissKey])
+
+  // ── Persist dismissed set (skip the write a fresh restore triggers) ────────
+  useEffect(() => {
+    const key = dismissKeyRef.current
+    if (!key) return
+    if (skipDismissPersistRef.current) {
+      skipDismissPersistRef.current = false
+      return
+    }
+    try {
+      localStorage.setItem(key, JSON.stringify([...dismissed]))
+    } catch {
+      /* best effort */
+    }
+  }, [dismissed])
 
   const scrollToEnd = useCallback(() => {
     requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }))
@@ -1041,12 +1150,26 @@ export function BriefChat() {
     [content.briefDetails, showToast],
   )
 
+  // Dismiss greys the card out in place (it stays in the list); restore un-greys
+  // it. Toggling the dismissed set drives both — and the persist effect writes it.
   const cardDismiss = useCallback((finding: Finding) => {
     const key = finding.detailKey
     if (!key) return
     setDismissed((s) => {
+      if (s.has(key)) return s
       const next = new Set(s)
       next.add(key)
+      return next
+    })
+  }, [])
+
+  const cardRestore = useCallback((finding: Finding) => {
+    const key = finding.detailKey
+    if (!key) return
+    setDismissed((s) => {
+      if (!s.has(key)) return s
+      const next = new Set(s)
+      next.delete(key)
       return next
     })
   }, [])
@@ -1087,7 +1210,8 @@ export function BriefChat() {
     if (!v2) return []
     return [v2.hero, ...v2.supporting].filter(Boolean) as Finding[]
   }, [v2])
-  const visibleFindings = findings.filter((f) => !(f.detailKey && dismissed.has(f.detailKey)))
+  // Dismissed cards stay in the list (greyed out via the dismissed prop), so the
+  // finding is never removed — only collapsed until restored.
 
   const userInitials = content.userInitials ?? (content.userName ? content.userName.slice(0, 2).toUpperCase() : "You")
   const userName = content.userName ?? "You"
@@ -1098,7 +1222,7 @@ export function BriefChat() {
   // The brief is being generated when hydration reports "generating" AND we
   // don't yet have a brief to show. Once findings arrive (ready), the WIP
   // indicator is replaced by the real brief. The failed state never trips this.
-  const generatingBrief = content.briefHydration === "generating" && visibleFindings.length === 0
+  const generatingBrief = content.briefHydration === "generating" && findings.length === 0
 
   return (
     <section className="briefx" aria-label="Weekly brief">
@@ -1159,19 +1283,21 @@ export function BriefChat() {
                 ) : (
                 <>
                 <p className="bc-greeting">{greeting}</p>
-                {visibleFindings.length > 0 ? (
+                {findings.length > 0 ? (
                   <div className="fc-stack">
-                    {visibleFindings.map((f) => (
+                    {findings.map((f) => (
                       <BriefFindingCard
                         key={f.detailKey ?? `${f.tagType}-${f.title}`}
                         finding={f}
                         busy={busy}
                         generating={cardBusyKey === f.detailKey}
+                        dismissed={!!f.detailKey && dismissed.has(f.detailKey)}
                         onAsk={() => cardAsk(f)}
                         onViewEvidence={() => cardViewEvidence(f)}
                         onGeneratePrd={() => cardGeneratePrd(f)}
                         onGenerateAll={() => cardGenerateAll(f)}
                         onDismiss={() => cardDismiss(f)}
+                        onRestore={() => cardRestore(f)}
                         onPreview={cardPreview}
                       />
                     ))}
