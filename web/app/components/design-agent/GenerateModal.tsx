@@ -404,6 +404,42 @@ export function GenerateModal({
 
   if (!open) return null
 
+  // Suppress the picker UI while a saved preference is pending evaluation or
+  // about to auto-skip. This eliminates the flash that occurs when the modal
+  // renders immediately but the auto-skip effect fires only after connector
+  // data (connections / repos) finishes loading.
+  //
+  // pendingAutoSkip is true when ALL of the following hold:
+  //   1. savedPreference exists (otherwise there is nothing to auto-skip).
+  //   2. Either connector data is still loading (we cannot yet decide), OR the
+  //      saved source is healthy by the SAME criteria the auto-skip effect uses
+  //      (so the effect will fire and close the modal — no need to show the UI).
+  //
+  // When savedPreference exists but turns out unhealthy after loading (e.g.
+  // Figma disconnected, repo no longer accessible), pendingAutoSkip becomes
+  // false and the picker renders normally as a fallback.
+  //
+  // Health checks mirror the auto-skip effect exactly (lines 330-336) — any
+  // change to the effect's criteria must be mirrored here.
+  if (savedPreference) {
+    const src = savedPreference.design_source
+    const dataStillLoading =
+      connections === null || (src === "github" && repos === null)
+
+    // Reuse the same health expressions as the auto-skip effect.
+    const figmaHealthy = src === "figma" && figmaActive && !!savedPreference.figma_file_key
+    const githubHealthy =
+      src === "github" &&
+      githubActive &&
+      !!savedPreference.github_repo &&
+      !!repos?.find((r) => r.full_name === savedPreference.github_repo)
+    const websiteHealthy = src === "website"
+    const prefHealthy = figmaHealthy || githubHealthy || websiteHealthy
+
+    const pendingAutoSkip = dataStillLoading || prefHealthy
+    if (pendingAutoSkip) return null
+  }
+
   // Figma + GitHub row state (connected vs not + account label) from the shared
   // row helper applied to each provider's live connection.
   const figmaRow = getGenerateConnectorRowState(connFor("figma"))
