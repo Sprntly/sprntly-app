@@ -4,8 +4,7 @@ Covers the "Roles & Access" checklist item: assert who can mutate the
 company's org-wide configuration and that no caller can ever reach another
 company's config (cross-tenant isolation).
 
-Routes under test (all behind `require_company` only — see
-app/routes/company.py + app/routes/business_context.py):
+Routes under test (see app/routes/company.py + app/routes/business_context.py):
 
   PUT  /v1/company/kpi-tree
   PUT  /v1/company/coworkers
@@ -21,18 +20,15 @@ config, so there is no cross-tenant *path* to leak through. The
 cross-tenant tests below pin that invariant (two seeded companies, each
 caller only ever sees its own row).
 
-⚠️ ROLE-BOUNDARY FINDING (flagged for triage, NOT a product fix here):
-Unlike the Settings → Team write routes (which gate non-admins with 403 —
-see test_team_writes.py / test_team_viewer_role.py), these org-wide config
-routes are gated on `require_company` ALONE. They do NOT call
-`_require_admin`, so a `member` — and even a `viewer` (documented as
-"read-only, can comment but not edit", see test_team_viewer_role.py) — can
-mutate org-wide config today. The `test_*_is_currently_open_to_*`
-characterization tests below PIN that ACTUAL behavior (200, write
-persisted) so the gap is visible and a future fix that adds the admin gate
-will turn these red on purpose, prompting them to be flipped to assert 403.
-These are intentionally written as characterization tests, not as the
-desired contract.
+Scope note: this file covers the ORDER-INDEPENDENT boundary facts — the
+auth gate, the membership gate, owner/admin can write, reads are open to
+members/viewers, and cross-tenant isolation. These hold whether or not the
+org-config admin gate is in place.
+
+The ROLE gate itself (member/viewer → 403 on mutations) is enforced + tested
+in test_org_config_access_boundary_fix.py, which ships with the admin-gate
+fix (PR #332). This file deliberately does NOT assert the member/viewer
+mutation outcome so it stays green regardless of merge order with that fix.
 """
 from __future__ import annotations
 
@@ -119,53 +115,9 @@ def test_admin_can_write_coworkers(isolated_settings, monkeypatch):
     assert r.json()["coworker_names"]["pm"] == "Ada"
 
 
-# ─────────────────── Role-boundary CHARACTERIZATION (flagged gap) ───────────────────
-#
-# These assert the ACTUAL current behavior, which is that non-admins CAN
-# mutate org-wide config. They are written so a future admin-gate fix flips
-# them red, surfacing the boundary for triage. See the module docstring.
-
-
-def test_member_can_currently_write_kpi_tree_FLAGGED(isolated_settings, monkeypatch):
-    """⚠️ Characterization: a MEMBER can mutate org-wide KPI tree today (200).
-
-    Expected end-state once the admin gate lands: 403. Until then this pins
-    the open boundary so the regression is visible."""
-    ctx = company_client(monkeypatch)
-    _set_role(company_id=ctx.company_id, user_id=ctx.user_id, role="member")
-    r = ctx.client.put("/v1/company/kpi-tree", json=_KPI_BODY)
-    assert r.status_code == 200, (
-        "FLAGGED: member is currently allowed to mutate org-wide config. "
-        "If this is now 403, the admin gate landed — flip this test to "
-        "assert 403."
-    )
-    assert _stored_kpi(ctx.company_id) is not None
-
-
-def test_viewer_can_currently_write_business_context_FLAGGED(isolated_settings, monkeypatch):
-    """⚠️ Characterization: a VIEWER (read-only by design) can overwrite the
-    org-wide Business Context today (200). Expected end-state: 403."""
-    ctx = company_client(monkeypatch)
-    _set_role(company_id=ctx.company_id, user_id=ctx.user_id, role="viewer")
-    r = ctx.client.put("/v1/company/business-context", json=_bc_body())
-    assert r.status_code == 200, (
-        "FLAGGED: viewer is currently allowed to mutate org-wide config. "
-        "If this is now 403, the admin gate landed — flip this test to "
-        "assert 403."
-    )
-
-
-def test_viewer_can_currently_write_coworkers_FLAGGED(isolated_settings, monkeypatch):
-    """⚠️ Characterization: a VIEWER can rewrite coworker names today (200).
-    Expected end-state: 403."""
-    ctx = company_client(monkeypatch)
-    _set_role(company_id=ctx.company_id, user_id=ctx.user_id, role="viewer")
-    r = ctx.client.put("/v1/company/coworkers", json=_COWORKERS_BODY)
-    assert r.status_code == 200, (
-        "FLAGGED: viewer is currently allowed to mutate org-wide config. "
-        "If this is now 403, the admin gate landed — flip this test to "
-        "assert 403."
-    )
+# NOTE: the member/viewer → 403 mutation assertions intentionally live in
+# test_org_config_access_boundary_fix.py (ships with the admin-gate fix, PR
+# #332), not here, so this file stays merge-order-independent. See docstring.
 
 
 # ─────────────────────── Read access is open to all members ───────────────────────
