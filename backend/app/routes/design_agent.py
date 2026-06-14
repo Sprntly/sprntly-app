@@ -501,10 +501,15 @@ class BriefPrototypeMapEntry(BaseModel):
 
     Insights without a ready PRD are absent from the entries list so the
     frontend can treat `absent == no PRD` without a null-check branch.
+
+    `prd_title` mirrors the PRD's title field so the brief card tile can
+    display the same title as the editor's da-titlebar-title without an
+    independent source — the two can never diverge.
     """
 
     insight_index: int
     prd_id: int
+    prd_title: str
     prototype: PrototypeReadiness | None = None
 
 
@@ -566,6 +571,7 @@ def get_brief_prototype_map(
             BriefPrototypeMapEntry(
                 insight_index=prd["insight_index"],
                 prd_id=prd["id"],
+                prd_title=prd["title"] or "",
                 prototype=prototype,
             )
         )

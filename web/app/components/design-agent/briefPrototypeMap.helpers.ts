@@ -5,6 +5,7 @@ export type InsightPrototypeState = {
   prdId: number | null
   prototypeReady: boolean
   previewImageUrl: string | null
+  prdTitle: string | null
 }
 
 /**
@@ -29,6 +30,7 @@ export function prototypeStateForInsight(
       prdId: null,
       prototypeReady: false,
       previewImageUrl: null,
+      prdTitle: null,
     }
   }
 
@@ -38,6 +40,7 @@ export function prototypeStateForInsight(
       prdId: entry.prd_id,
       prototypeReady: false,
       previewImageUrl: null,
+      prdTitle: entry.prd_title || null,
     }
   }
 
@@ -46,5 +49,6 @@ export function prototypeStateForInsight(
     prdId: entry.prd_id,
     prototypeReady: entry.prototype.ready,
     previewImageUrl: entry.prototype.preview_image_url,
+    prdTitle: entry.prd_title || null,
   }
 }

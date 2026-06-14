@@ -10,18 +10,20 @@ describe("prototypeStateForInsight", () => {
       prdId: null,
       prototypeReady: false,
       previewImageUrl: null,
+      prdTitle: null,
     })
   })
 
   it("returns hasPrd:true + prototypeReady:false when entry has no prototype", () => {
     const map = new Map<number, BriefPrototypeMapEntry>([
-      [2, { insight_index: 2, prd_id: 42, prototype: null }],
+      [2, { insight_index: 2, prd_id: 42, prd_title: "Patient discharge flow", prototype: null }],
     ])
     expect(prototypeStateForInsight(map, 2)).toEqual({
       hasPrd: true,
       prdId: 42,
       prototypeReady: false,
       previewImageUrl: null,
+      prdTitle: "Patient discharge flow",
     })
   })
 
@@ -32,6 +34,7 @@ describe("prototypeStateForInsight", () => {
         {
           insight_index: 5,
           prd_id: 99,
+          prd_title: "My Cool Prototype",
           prototype: {
             ready: true,
             preview_image_url: "https://cdn.example.com/thumb.png",
@@ -44,6 +47,7 @@ describe("prototypeStateForInsight", () => {
       prdId: 99,
       prototypeReady: true,
       previewImageUrl: "https://cdn.example.com/thumb.png",
+      prdTitle: "My Cool Prototype",
     })
   })
 
@@ -54,6 +58,7 @@ describe("prototypeStateForInsight", () => {
         {
           insight_index: 1,
           prd_id: 7,
+          prd_title: "Handoff latency PRD",
           prototype: { ready: true, preview_image_url: null },
         },
       ],
@@ -61,5 +66,6 @@ describe("prototypeStateForInsight", () => {
     const result = prototypeStateForInsight(map, 1)
     expect(result.prototypeReady).toBe(true)
     expect(result.previewImageUrl).toBeNull()
+    expect(result.prdTitle).toBe("Handoff latency PRD")
   })
 })

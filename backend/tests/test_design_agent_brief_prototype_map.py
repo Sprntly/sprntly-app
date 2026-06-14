@@ -185,6 +185,7 @@ def test_brief_prototype_map_full_shape(client):
     # Entry A: PRD + prototype with preview URL.
     entry_a = entries[0]
     assert entry_a["prd_id"] == prd_a
+    assert entry_a["prd_title"] == "Test PRD"
     assert entry_a["prototype"] is not None
     assert entry_a["prototype"]["ready"] is True
     assert entry_a["prototype"]["preview_image_url"] == "https://storage.example/preview-a.png"
@@ -192,6 +193,7 @@ def test_brief_prototype_map_full_shape(client):
     # Entry B: PRD but no prototype.
     entry_b = entries[1]
     assert entry_b["prd_id"] == prd_b
+    assert entry_b["prd_title"] == "Test PRD"
     assert entry_b["prototype"] is None
 
 

@@ -865,6 +865,7 @@ export type BriefPrototypeReadiness = { ready: boolean; preview_image_url: strin
 export type BriefPrototypeMapEntry = {
   insight_index: number
   prd_id: number
+  prd_title: string
   prototype: BriefPrototypeReadiness | null
 }
 export type BriefPrototypeMap = { brief_id: number; entries: BriefPrototypeMapEntry[] }
