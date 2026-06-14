@@ -448,7 +448,7 @@ def set_share_config(
     path — see find_prototype_by_share_token for that).
 
     Behaviour by mode:
-      - 'private'  → share_mode=private; share_token=NULL; share_passcode_hash=NULL
+      - 'private'  → share_mode=private; share_token PRESERVED (was: nulled); share_passcode_hash=NULL
       - 'public'   → share_mode=public;  share_token=uuid4() if NULL else preserved; hash=NULL
       - 'passcode' → share_mode=passcode; share_token=uuid4() if NULL else preserved; hash=argon2(passcode)
     Re-setting public→public (or passcode→passcode) does NOT rotate share_token
@@ -466,7 +466,9 @@ def set_share_config(
 
     patch: dict[str, Any] = {"share_mode": share_mode}
     if share_mode == "private":
-        patch["share_token"] = None
+        # share_token is PRESERVED on private (static-URL invariant): the public
+        # URL is stable across public→private→public toggles. Only the passcode
+        # hash is cleared so a re-public does not silently retain a stale gate.
         patch["share_passcode_hash"] = None
     else:
         # Preserve an existing token (F7) — only mint one when none exists yet.

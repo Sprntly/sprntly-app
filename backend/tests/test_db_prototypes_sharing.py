@@ -191,14 +191,36 @@ def test_set_share_config_passcode_stores_argon2_hash(proto):
     assert proto.verify_share_passcode("hunter2", row["share_passcode_hash"]) is True
 
 
-def test_set_share_config_private_nulls_token_and_hash(proto):
+def test_set_share_config_private_preserves_token_and_nulls_hash(proto):
+    # Static-URL invariant: going private PRESERVES the share_token (the URL is
+    # stable across toggles) and only clears the passcode hash.
     pid = _seed(proto)
-    # Make it public first so there is a token to null out.
-    proto.set_share_config(prototype_id=pid, workspace_id="app", share_mode="public")
+    # Make it public first so there is a token in place.
+    pub = proto.set_share_config(prototype_id=pid, workspace_id="app", share_mode="public")
+    token = pub["share_token"]
     row = proto.set_share_config(prototype_id=pid, workspace_id="app", share_mode="private")
     assert row["share_mode"] == "private"
-    assert row["share_token"] is None
+    assert row["share_token"] is not None       # preserved, not nulled
+    assert row["share_token"] == token          # same token, not rotated
     assert row["share_passcode_hash"] is None
+
+
+def test_set_share_config_token_stable_across_public_private_toggles(proto):
+    # One stable URL across toggles: public (mint T) → private (keep T) →
+    # public again (still T). The /p/<slug>/<token> URL never changes.
+    pid = _seed(proto)
+    token = proto.set_share_config(
+        prototype_id=pid, workspace_id="app", share_mode="public"
+    )["share_token"]
+    assert token is not None
+    after_private = proto.set_share_config(
+        prototype_id=pid, workspace_id="app", share_mode="private"
+    )
+    assert after_private["share_token"] == token
+    after_public_again = proto.set_share_config(
+        prototype_id=pid, workspace_id="app", share_mode="public"
+    )
+    assert after_public_again["share_token"] == token
 
 
 def test_set_share_config_public_idempotent_preserves_token(proto):
