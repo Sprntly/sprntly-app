@@ -38,9 +38,9 @@ import {
   runGenerateFlow,
   buildGenerateParams,
   DEFAULT_PLATFORM,
-  redirectToConnect,
   type TargetPlatform,
 } from "./DesignAgentDrawer"
+import { SourceConnectHint } from "./SourceConnectHint"
 import { getGenerateConnectorRowState } from "../../lib/generateConnectorRowState"
 import { IconClose } from "../shared/app-icons"
 import {
@@ -620,16 +620,7 @@ export function GenerateModal({
                     </span>
                   </>
                 ) : (
-                  <>
-                    <span className="src-not-connected">⚠ Not connected</span>
-                    <button
-                      type="button"
-                      className="src-connect-btn"
-                      onClick={() => void redirectToConnect("figma")}
-                    >
-                      Connect Figma →
-                    </button>
-                  </>
+                  <SourceConnectHint provider="figma" />
                 )}
               </div>
             )}
@@ -679,16 +670,7 @@ export function GenerateModal({
                     </span>
                   </>
                 ) : (
-                  <>
-                    <span className="src-not-connected muted">Not connected</span>
-                    <button
-                      type="button"
-                      className="src-connect-btn ghost"
-                      onClick={() => void redirectToConnect("github")}
-                    >
-                      Connect a repo →
-                    </button>
-                  </>
+                  <SourceConnectHint provider="github" />
                 )}
               </div>
             )}

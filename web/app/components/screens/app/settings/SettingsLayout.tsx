@@ -63,7 +63,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     groupLabel: "Data & Integrations",
     items: [
       { id: "connectors", label: "Connectors", available: true },
-      { id: "design-source", label: "Prototyping Agent", available: true },
+      { id: "design-source", label: "Prototypes", available: true },
     ],
   },
   {

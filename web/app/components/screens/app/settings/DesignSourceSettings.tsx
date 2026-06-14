@@ -14,6 +14,7 @@ import { updateWorkspace } from "../../../../lib/onboarding/store"
 import type { DesignSourcePreference } from "../../../../lib/onboarding/types"
 import { SettingsMessage, SettingsSection } from "./SettingsLayout"
 import { SourceTypePills } from "../../../design-agent/SourceTypePills"
+import { SourceConnectHint } from "../../../design-agent/SourceConnectHint"
 
 function extractFigmaKey(url: string): string | null {
   const m = url.match(/(?:file|design)\/([A-Za-z0-9]+)/)
@@ -163,7 +164,7 @@ export function DesignSourceSettings() {
   if (loading) return <p className="settings-loading">Loading…</p>
   if (!workspace) {
     return (
-      <SettingsSection title="Prototyping Agent" sub="Complete onboarding to set a design source preference.">
+      <SettingsSection title="Prototypes" sub="Complete onboarding to set a design source preference.">
         <p className="settings-placeholder">
           <a href="/onboarding/business-info">Continue onboarding →</a>
         </p>
@@ -173,7 +174,7 @@ export function DesignSourceSettings() {
 
   return (
     <SettingsSection
-      title="Prototyping Agent"
+      title="Prototypes"
       sub="Choose the default source used when generating prototypes. First generation always asks; this preference skips the picker on repeat runs."
     >
       <form onSubmit={(e) => void onSave(e)}>
@@ -211,9 +212,7 @@ export function DesignSourceSettings() {
                 )}
               </>
             ) : (
-              <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
-                Connect Figma in Integrations to use this source.
-              </p>
+              <SourceConnectHint provider="figma" />
             )}
           </div>
         )}
@@ -250,9 +249,7 @@ export function DesignSourceSettings() {
                 )}
               </select>
             ) : (
-              <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
-                Connect GitHub in Integrations to use this source.
-              </p>
+              <SourceConnectHint provider="github" />
             )}
           </div>
         )}
