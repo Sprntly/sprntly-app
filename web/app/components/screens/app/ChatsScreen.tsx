@@ -499,16 +499,6 @@ export function ChatsScreen() {
       <div style={{ maxWidth: 780, margin: "0 auto", padding: "0 4px" }}>
         {/* Top bar */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 16, fontWeight: 600, color: "var(--ink, #1A1A17)" }}>All chats</span>
-            <span style={{
-              fontSize: 12, fontWeight: 500, color: "var(--ink-3, #8C8A84)",
-              background: "var(--surface-2, #F0EDE7)", padding: "2px 8px", borderRadius: 20,
-            }}>
-              {tab === "artifacts" ? artifacts.length : allChats.length}
-            </span>
-          </div>
-
           {/* Chats | Artifacts tab switcher */}
           <div style={{
             display: "flex", gap: 2, padding: 2, borderRadius: 8,
