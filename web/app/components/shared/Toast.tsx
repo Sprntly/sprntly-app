@@ -23,7 +23,7 @@ export function Toast() {
               {toast.onAction ? (
                 <button
                   type="button"
-                  className="toast-link"
+                  className="btn btn-accent btn-sm"
                   onClick={() => { toast.onAction!(); hideToast() }}
                 >
                   {toast.link}
