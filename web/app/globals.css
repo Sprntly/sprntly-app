@@ -239,7 +239,7 @@
     border-color: var(--accent);
   }
 
-  .btn-accent:hover {
+  .btn-accent:hover:not(:disabled) {
     background: var(--accent-hover);
     border-color: var(--accent-hover);
   }
