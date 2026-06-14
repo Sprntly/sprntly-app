@@ -289,6 +289,36 @@ describe("orchestration helpers", () => {
     expect(next).toEqual([created])
   })
 
+  it("runCreateComment threads viewerName onto the payload as viewer_name when present (Phase 3)", async () => {
+    const created = comment({ id: 9 })
+    const createCommentByToken = vi.fn().mockResolvedValue(created)
+    await runCreateComment({
+      token: "tok",
+      anchorId: "fb3007b5",
+      body: "make it bigger",
+      viewerName: "Ada Lovelace",
+      api: { createCommentByToken },
+    })
+    expect(createCommentByToken).toHaveBeenCalledWith("tok", {
+      anchor_id: "fb3007b5",
+      body: "make it bigger",
+      viewer_name: "Ada Lovelace",
+    })
+  })
+
+  it("runCreateComment omits viewer_name when no viewerName is supplied (signed-in mount unchanged)", async () => {
+    const created = comment({ id: 9 })
+    const createCommentByToken = vi.fn().mockResolvedValue(created)
+    await runCreateComment({
+      token: "tok",
+      anchorId: "a",
+      body: "hi",
+      api: { createCommentByToken },
+    })
+    // No viewer_name key on the payload — byte-for-byte the prior signed-in shape.
+    expect(createCommentByToken).toHaveBeenCalledWith("tok", { anchor_id: "a", body: "hi" })
+  })
+
   it("runResolveComment calls api.resolveComment(prototypeId, commentId) (AC7)", async () => {
     const resolved = comment({ id: 7, status: "resolved" })
     const resolveComment = vi.fn().mockResolvedValue(resolved)

@@ -238,6 +238,49 @@
   margin: 0;
 }
 
+/* ── Public viewer name-capture form (PublicTokenViewer) ──────────────────
+   Reuses the .comment-composer block idiom + .comment-composer-input field
+   idiom so the anon name prompt reads as native to the comments surface. */
+.design-agent-surface .da-viewer-name-form {
+  border-top: 1px solid var(--line);
+  padding: 12px 13px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.design-agent-surface .da-viewer-name-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0;
+}
+.design-agent-surface .da-viewer-name-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.design-agent-surface .da-viewer-name-input {
+  flex: 1 1 120px;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 12.5px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+}
+.design-agent-surface .da-viewer-name-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.design-agent-surface .da-viewer-name-submit { align-self: flex-end; }
+.design-agent-surface .da-viewer-name-notice {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin: 0;
+}
+
 /* ── Shared spinner ────────────────────────────────────────────────────── */
 @keyframes da-spin { to { transform: rotate(360deg); } }
 .design-agent-surface .da-spinner {

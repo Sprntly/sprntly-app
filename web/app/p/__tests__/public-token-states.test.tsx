@@ -380,6 +380,86 @@ describe("C2b public marking — shared hook + token create-fn", () => {
   })
 })
 
+// ── Phase 3: anon public writes — first-comment name capture ─────────────────
+// Node-env vitest can't drive the resolver effect (ready state), the commentsOpen
+// toggle, or the localStorage hydration effect, so — per the file's source-
+// invariant convention — we assert the shipped PublicTokenViewer.tsx wires the
+// name-capture form, the localStorage persistence, the PII notice, and threads the
+// viewer name onto BOTH create paths; and we live-render the presentational name
+// form fragment to prove it composes with first/last inputs + the PII notice.
+describe("Phase 3 name capture + viewer_name threading", () => {
+  it("test_name_capture_form_gated_on_first_comment_no_stored_name: the form renders when commentsOpen && no stored name", () => {
+    // needsName = commentsOpen && !viewerName drives the form.
+    expect(publicViewerSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*!viewerName/)
+    expect(publicViewerSrc).toMatch(/commentsOpen\s*&&\s*needsName\s*&&/)
+    expect(publicViewerSrc).toContain('data-testid="viewer-name-form"')
+    // first + last name inputs.
+    expect(publicViewerSrc).toContain('data-testid="viewer-first-name-input"')
+    expect(publicViewerSrc).toContain('data-testid="viewer-last-name-input"')
+  })
+
+  it("test_viewer_name_persists_to_localstorage: name is read from + written to the da-viewer-name key", () => {
+    expect(publicViewerSrc).toContain('"da-viewer-name"')
+    expect(publicViewerSrc).toMatch(/localStorage\.getItem\(VIEWER_NAME_KEY\)/)
+    expect(publicViewerSrc).toMatch(/localStorage\.setItem\(VIEWER_NAME_KEY/)
+    // on submit, persist THEN set state (so the panel renders next).
+    expect(publicViewerSrc).toMatch(/persistViewerName\(name\)/)
+    expect(publicViewerSrc).toMatch(/setViewerName\(name\)/)
+  })
+
+  it("test_pii_notice_present: the capture form discloses where the name + comment go", () => {
+    expect(publicViewerSrc).toContain('data-testid="viewer-name-notice"')
+    expect(publicViewerSrc).toMatch(/Your name and comment are shared with the prototype/)
+  })
+
+  it("test_viewer_name_threads_into_both_create_paths: pin onCreate AND CommentsPanel mount carry the viewer name", () => {
+    // Pin create path: createCommentByToken(token, { ...payload, viewer_name: viewerName }).
+    expect(publicViewerSrc).toMatch(
+      /createCommentByToken\([^)]*\{\s*\.\.\.payload,\s*viewer_name:\s*viewerName\s*\}/,
+    )
+    // CommentsPanel mount path: viewerName prop threaded.
+    const mountMatch = publicViewerSrc.match(/<CommentsPanel[\s\S]*?\/>/)
+    expect(mountMatch).not.toBeNull()
+    expect(mountMatch![0]).toMatch(/viewerName=\{viewerName\}/)
+    // still NO prototypeId on the public mount (min-disclosure preserved).
+    expect(mountMatch![0]).not.toContain("prototypeId")
+  })
+
+  it("test_name_form_fragment_composes_with_inputs_and_notice: live-renders first/last inputs + PII notice", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(
+        "form",
+        { className: "design-agent-surface da-viewer-name-form", "data-testid": "viewer-name-form" },
+        React.createElement("input", { "data-testid": "viewer-first-name-input", placeholder: "First name" }),
+        React.createElement("input", { "data-testid": "viewer-last-name-input", placeholder: "Last name" }),
+        React.createElement(
+          "button",
+          { type: "submit", "data-testid": "viewer-name-submit" },
+          "Continue",
+        ),
+        React.createElement(
+          "p",
+          { "data-testid": "viewer-name-notice" },
+          "Your name and comment are shared with the prototype's owner.",
+        ),
+      ),
+    )
+    expect(html).toContain('data-testid="viewer-first-name-input"')
+    expect(html).toContain('data-testid="viewer-last-name-input"')
+    expect(html).toContain('data-testid="viewer-name-notice"')
+    expect(html).toContain("design-agent-surface")
+  })
+
+  it("test_min_disclosure_holds_on_public_mount: resolve/apply/ignore/delete stay hidden", () => {
+    // The writable-anon CommentsPanel mount must not pass a prototypeId, which is
+    // what gates the resolve/apply/ignore/delete affordances OFF on the public surface.
+    const mountMatch = publicViewerSrc.match(/<CommentsPanel[\s\S]*?\/>/)
+    expect(mountMatch).not.toBeNull()
+    expect(mountMatch![0]).toContain("canComment")
+    expect(mountMatch![0]).not.toContain("prototypeId")
+  })
+})
+
 describe("P6-18 behaviour unchanged (AC5 — CSS-only fix, no logic drift)", () => {
   // Canonical coverage of the resolver/passcode contract lives in
   // page.test.tsx; these parity checks re-assert the contract is untouched by

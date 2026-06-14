@@ -2148,6 +2148,11 @@ class CommentCreate(BaseModel):
     pin_x_pct: float | None = Field(default=None, ge=0, le=100)
     pin_y_pct: float | None = Field(default=None, ge=0, le=100)
     resolved_anchor_id: str | None = Field(default=None, max_length=64)
+    # Public-surface only: the anonymous viewer's self-supplied display name,
+    # mapped onto the EXISTING `author` column (no new column / no migration).
+    # The authed route ignores it — internal authors come from the session
+    # identity. Length-capped so it can't be used as an oversized log/store vector.
+    viewer_name: str | None = Field(default=None, max_length=80)
 
 
 class CommentOut(BaseModel):
@@ -2283,14 +2288,21 @@ def delete_comment_route(
 def post_comment_public(token: str, body: CommentCreate, request: Request) -> CommentOut:
     """Public comment write. Resolves token → prototype; rejects when the
     prototype is private or not ready (404, matching get_by_token's posture).
-    The comment is attributed to the anonymous external author label, and the
-    workspace_id is taken from the resolved row — never a session claim.
+    The comment is attributed to the viewer's self-supplied name (or
+    "Anonymous"), and the workspace_id is taken from the resolved row — never a
+    session claim.
 
-    Intentionally disabled: anonymous public comment WRITES stay gated off
-    (404, indistinguishable from missing/private) pending a product decision —
-    re-enabling this opens an unauthenticated write endpoint. The resolution +
-    rate-limit logic below is built and ready for when it's enabled."""
-    raise HTTPException(status_code=404, detail="Not found")
+    Anonymous public comment WRITES are ENABLED: the share token IS the access
+    primitive (F8 — anyone with the URL can comment). This is an unauthenticated
+    write endpoint by design; the abuse controls are unchanged and load-bearing:
+      - the feature-flag gate (`_require_feature_enabled`) — invisible when off;
+      - the resolution 404-posture (missing / private / not-ready all 404,
+        indistinguishable from each other, so brute-force scanning discloses
+        nothing — Rule #15 / F6);
+      - the per-IP `PUBLIC_COMMENT_LIMITER` (10/hour/IP), mounted after the 404
+        resolution and before the write;
+      - log hygiene: the token is hashed (never raw) and neither the comment body
+        nor the viewer name (PII) is ever logged."""
     _require_feature_enabled()
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
@@ -2313,12 +2325,15 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
             detail={"error": "rate_limit", "retry_after_seconds": retry_after},
         )
     PUBLIC_COMMENT_LIMITER.register(client_ip)
+    # Viewer-supplied display name → the existing `author` column. Trimmed and
+    # falling back to "Anonymous" for blank/omitted names. NEVER logged (PII).
+    author = (body.viewer_name or "").strip() or "Anonymous"
     row = insert_comment(
         prototype_id=proto["id"],
         workspace_id=proto["workspace_id"],   # from the resolved row, not a session
         anchor_id=body.anchor_id,
         body=body.body,
-        author="external",
+        author=author,
         pin_x_pct=body.pin_x_pct,
         pin_y_pct=body.pin_y_pct,
         resolved_anchor_id=body.resolved_anchor_id,

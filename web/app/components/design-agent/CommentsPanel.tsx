@@ -188,18 +188,23 @@ export async function runCreateComment({
   token,
   anchorId,
   body,
+  viewerName,
   api,
   comments = [],
 }: {
   token: string
   anchorId: string
   body: string
+  /** Public surface only: the viewer's self-supplied display name. Threaded onto
+   *  the by-token create payload only when present; the signed-in mount omits it. */
+  viewerName?: string
   api: Pick<typeof designAgentApi, "createCommentByToken">
   comments?: CommentRecord[]
 }): Promise<CommentRecord[]> {
   const created = await api.createCommentByToken(token, {
     anchor_id: anchorId,
     body,
+    ...(viewerName ? { viewer_name: viewerName } : {}),
   })
   return [created, ...comments]
 }
@@ -589,6 +594,11 @@ export type CommentsPanelProps = {
    *  exactly for the signed-in mount (create already on) and the prior public
    *  mount (create off). Has no effect when `readOnly` is true. */
   canComment?: boolean
+  /** Public surface only (Phase 3): the viewer's self-supplied display name,
+   *  threaded onto the by-token create payload so anon comments are attributed to
+   *  a name (server falls back to "Anonymous"). Omitted on the signed-in mount →
+   *  no change there. Additive. */
+  viewerName?: string
 }
 
 function toMessage(err: unknown, fallback: string): string {
@@ -606,6 +616,7 @@ export function CommentsPanel({
   iterateBusy = false,
   readOnly = false,
   canComment,
+  viewerName,
 }: CommentsPanelProps) {
   // Writable-anon resolution: create is enabled when not read-only AND either a
   // prototypeId is present (signed-in mount) OR the host opted into anon create
@@ -667,6 +678,7 @@ export function CommentsPanel({
         token,
         anchorId: composer.anchorId,
         body: composer.body,
+        viewerName,
         api: designAgentApi,
         comments,
       })

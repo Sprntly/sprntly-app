@@ -976,10 +976,13 @@ export const designAgentApi = {
   // ── F8 anchored comments (P3-03) ──────────────────────────────────────────
   /** Public-route comment write (external viewer on `/p/<token>`): the token
    *  is the access primitive (F6), so no auth is required. Hits the P3-02
-   *  public route; the backend attributes the comment to the `external` author. */
+   *  public route. Phase 3: an optional `viewer_name` is the viewer's self-
+   *  supplied display name; the backend maps it onto the comment author (falling
+   *  back to "Anonymous"). Omitted on the signed-in surface. Additive field. */
   createCommentByToken: (token: string, body: {
     anchor_id: string; body: string;
     pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+    viewer_name?: string;
   }) =>
     api.post<CommentRecord>(
       `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,

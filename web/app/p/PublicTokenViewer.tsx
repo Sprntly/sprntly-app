@@ -10,7 +10,7 @@
 // nextViewerState) so they are unit-testable in the node-env vitest run, which
 // has no DOM/router — the same split convention as DesignAgentDrawer's
 // runGenerateFlow. Relative imports (not `@/…`) match the codebase + vitest.
-import { useEffect, useState } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { notFound, useParams } from "next/navigation"
 import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
 import { ManualEditOverlay } from "../components/design-agent/ManualEditOverlay"
@@ -48,6 +48,28 @@ export function nextViewerState(
   return { kind: "ready", bundleUrl: view.bundle_url, isComplete: view.is_complete }
 }
 
+// localStorage key for the anon viewer's display name. Persisted once on first
+// comment so a returning viewer is not re-prompted. Reading is wrapped in a
+// try/catch — localStorage can throw (private mode / disabled storage) and the
+// viewer must still function (it just re-prompts).
+const VIEWER_NAME_KEY = "da-viewer-name"
+
+function readStoredViewerName(): string {
+  try {
+    return (window.localStorage.getItem(VIEWER_NAME_KEY) ?? "").trim()
+  } catch {
+    return ""
+  }
+}
+
+function persistViewerName(name: string): void {
+  try {
+    window.localStorage.setItem(VIEWER_NAME_KEY, name)
+  } catch {
+    /* storage unavailable — proceed without persistence */
+  }
+}
+
 export function PublicTokenViewer() {
   const params = useParams<{ token: string | string[] }>()
   const token = Array.isArray(params.token) ? params.token[0] : params.token
@@ -55,6 +77,28 @@ export function PublicTokenViewer() {
   // C2a public-viewer chrome state. `commentsOpen` toggles the writable-anon
   // CommentsPanel.
   const [commentsOpen, setCommentsOpen] = useState(false)
+  // Phase 3 (anon public writes): the viewer's display name, hydrated from
+  // localStorage. Empty until the viewer supplies it via the name-capture form,
+  // which is shown the first time they open the writable comments surface with no
+  // stored name. Threaded onto BOTH create paths (the pin onCreate + the
+  // CommentsPanel mount) so anon comments are attributed to a name.
+  const [viewerName, setViewerName] = useState("")
+  const [firstName, setFirstName] = useState("")
+  const [lastName, setLastName] = useState("")
+  useEffect(() => {
+    setViewerName(readStoredViewerName())
+  }, [])
+
+  // Capture form is shown when the writable comments surface is open but no name
+  // is known yet. On submit we persist then proceed; the panel renders next.
+  const needsName = commentsOpen && !viewerName
+  function handleNameSubmit(e: FormEvent) {
+    e.preventDefault()
+    const name = `${firstName.trim()} ${lastName.trim()}`.trim()
+    if (!name) return
+    persistViewerName(name)
+    setViewerName(name)
+  }
   // C2b: real marking, driven by the shared usePinMarking hook. The create-fn is
   // the public createCommentByToken (no prototypeId / auth) — distinct from the
   // signed-in editor's withAuthRetry(createComment(prototype.id)). No
@@ -62,7 +106,7 @@ export function PublicTokenViewer() {
   // Ignore stay hidden (editorMode=false). Entering mark mode + dropping a pin
   // both reveal the comments sidebar so the new pin row is visible.
   const pin = usePinMarking({
-    onCreate: (payload) => designAgentApi.createCommentByToken(token as string, payload),
+    onCreate: (payload) => designAgentApi.createCommentByToken(token as string, { ...payload, viewer_name: viewerName }),
     onEnterMarkMode: () => setCommentsOpen(true),
     onPinDropped: () => setCommentsOpen(true),
   })
@@ -162,7 +206,57 @@ export function PublicTokenViewer() {
               canComment enables create while resolve/apply/ignore/delete stay
               hidden (all gated on prototypeId). The head Comment toggle collapses
               the panel by flipping commentsOpen. */}
-          {commentsOpen && (
+          {commentsOpen && needsName && (
+            /* Phase 3: first-comment name capture. Shown when the writable comments
+               surface is open but no name is stored yet. On submit we persist the
+               name to localStorage and proceed; a returning viewer is not re-prompted.
+               A short PII notice sets expectations about where the name + comment go. */
+            <form
+              className="design-agent-surface da-viewer-name-form"
+              data-testid="viewer-name-form"
+              onSubmit={handleNameSubmit}
+            >
+              <label className="da-viewer-name-label" htmlFor="da-viewer-first-name">
+                Add your name to comment
+              </label>
+              <div className="da-viewer-name-fields">
+                <input
+                  id="da-viewer-first-name"
+                  className="da-viewer-name-input"
+                  data-testid="viewer-first-name-input"
+                  type="text"
+                  placeholder="First name"
+                  value={firstName}
+                  onChange={(e) => setFirstName(e.target.value)}
+                  maxLength={40}
+                  autoComplete="given-name"
+                />
+                <input
+                  id="da-viewer-last-name"
+                  className="da-viewer-name-input"
+                  data-testid="viewer-last-name-input"
+                  type="text"
+                  placeholder="Last name"
+                  value={lastName}
+                  onChange={(e) => setLastName(e.target.value)}
+                  maxLength={40}
+                  autoComplete="family-name"
+                />
+              </div>
+              <button
+                type="submit"
+                className="btn btn-accent da-viewer-name-submit"
+                data-testid="viewer-name-submit"
+                disabled={!firstName.trim() && !lastName.trim()}
+              >
+                Continue
+              </button>
+              <p className="da-viewer-name-notice" data-testid="viewer-name-notice">
+                Your name and comment are shared with the prototype&rsquo;s owner.
+              </p>
+            </form>
+          )}
+          {commentsOpen && !needsName && (
             <>
               {/* C2b: the dropped-pin comment rows (draft composer + saved rows).
                   editorMode=false + canResolve=false → Apply / Ignore / resolve
@@ -179,6 +273,7 @@ export function PublicTokenViewer() {
               <CommentsPanel
                 token={token as string}
                 canComment
+                viewerName={viewerName}
               />
             </>
           )}

@@ -295,16 +295,41 @@ def test_patch_resolve_other_workspace_returns_404(client):
 
 
 def test_post_comment_public_no_auth_persists_external_comment(unauth):
-    # B9b: public comment CREATE is now disabled (returns 404).
-    # The route still exists (no import errors) but immediately raises 404 so
-    # unauthenticated external viewers cannot write comments.
+    # Phase 3: anonymous public comment CREATE is ENABLED (the token is the access
+    # primitive, F8). A no-auth POST to a public+ready prototype returns 200 with a
+    # CommentOut and persists a row. With no viewer_name, the author is "Anonymous".
     proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
     resp = unauth.post(
         f"/v1/design-agent/by-token/{proto.token}/comments",
         json={"anchor_id": "deadbeef", "body": "love this"},
     )
-    assert resp.status_code == 404
-    assert _count_comments(proto.id) == 0  # nothing written
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "open"
+    assert body["author"] == "Anonymous"   # blank/omitted name → Anonymous
+    assert body["anchor_id"] == "deadbeef"
+    assert body["body"] == "love this"
+    assert _count_comments(proto.id) == 1   # the row was written
+
+
+def test_post_comment_public_viewer_name_maps_to_author(unauth):
+    # Phase 3: a supplied viewer_name is trimmed and stored on the EXISTING author
+    # column (no new column / no migration). A blank name still falls back to
+    # "Anonymous".
+    proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
+    resp = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "deadbeef", "body": "tighten the header", "viewer_name": "  Ada Lovelace  "},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["author"] == "Ada Lovelace"   # trimmed
+
+    blank = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "deadbeef", "body": "and the footer", "viewer_name": "   "},
+    )
+    assert blank.status_code == 200, blank.text
+    assert blank.json()["author"] == "Anonymous"   # whitespace-only → Anonymous
 
 
 def test_post_comment_public_private_mode_returns_404(unauth):
@@ -391,18 +416,24 @@ def test_post_comment_empty_anchor_returns_422(client):
 
 
 def test_public_write_logs_token_hash_not_raw(unauth, caplog):
-    # B9b: public comment CREATE is disabled → 404 before any logging.
-    # The log-hygiene invariant (token never raw, body never logged) is vacuously
-    # satisfied because the route never reaches the insert or log statement.
+    # AC10: the public write logs token_hash= (never the raw token), and never the
+    # comment body NOR the viewer name (both PII). Now that the write is ENABLED the
+    # log line actually fires, so this is a live (not vacuous) hygiene assertion.
     proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
     with caplog.at_level(logging.INFO, logger="app.routes.design_agent"):
         resp = unauth.post(
             f"/v1/design-agent/by-token/{proto.token}/comments",
-            json={"anchor_id": "deadbeef", "body": "secret comment text"},
+            json={
+                "anchor_id": "deadbeef",
+                "body": "secret comment text",
+                "viewer_name": "Grace Hopper",
+            },
         )
-    assert resp.status_code == 404
-    assert proto.token not in caplog.text      # raw token never in any log line
+    assert resp.status_code == 200, resp.text
+    assert "comment_created_public" in caplog.text   # the correlation line fired
+    assert proto.token not in caplog.text            # raw token never in any log line
     assert "secret comment text" not in caplog.text  # comment body never logged
+    assert "Grace Hopper" not in caplog.text         # viewer name (PII) never logged
 
 
 # ─── Non-breakage (AC9) ─────────────────────────────────────────────────────
@@ -516,8 +547,8 @@ def test_post_comment_authed_round_trips_position(client):
 
 
 def test_post_comment_public_round_trips_position(unauth):
-    # B9b: public comment CREATE is disabled → 404 regardless of payload shape.
-    # Position fields are irrelevant; nothing is persisted.
+    # Phase 3: public comment CREATE is enabled → position fields round-trip on the
+    # public surface exactly like the authed route.
     proto = _seed_prototype(workspace_id="tenant-pub", share_mode="public", status="ready")
     resp = unauth.post(
         f"/v1/design-agent/by-token/{proto.token}/comments",
@@ -529,8 +560,12 @@ def test_post_comment_public_round_trips_position(unauth):
             "resolved_anchor_id": "ef567890",
         },
     )
-    assert resp.status_code == 404
-    assert _count_comments(proto.id) == 0  # nothing written
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pin_x_pct"] == pytest.approx(10.0)
+    assert body["pin_y_pct"] == pytest.approx(20.0)
+    assert body["resolved_anchor_id"] == "ef567890"
+    assert _count_comments(proto.id) == 1
 
 
 def test_post_comment_omitted_position_defaults_null(client):

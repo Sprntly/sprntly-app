@@ -394,12 +394,14 @@ async def test_p3_full_loop_comment_apply_iterate_orphan_patch_checkpoint(env, m
         token = share.json()["share_token"]
         uuid.UUID(str(token))  # opaque UUID (F6)
 
-        # ── AC3: create second comment via authed route (public creation disabled) ──
+        # ── AC3: create second comment via the PUBLIC token route (Phase 3 — anon
+        # public writes enabled). A supplied viewer_name maps onto the author column. ──
         c2 = await ac.post(
-            f"/v1/design-agent/{proto_id}/comments",
-            json={"anchor_id": _ANCHOR_KEPT, "body": "love the hero"},
+            f"/v1/design-agent/by-token/{token}/comments",
+            json={"anchor_id": _ANCHOR_KEPT, "body": "love the hero", "viewer_name": "Linus"},
         )
         assert c2.status_code == 200, c2.text
+        assert c2.json()["author"] == "Linus"
 
         both = await ac.get(f"/v1/design-agent/{proto_id}/comments")
         assert both.status_code == 200, both.text
