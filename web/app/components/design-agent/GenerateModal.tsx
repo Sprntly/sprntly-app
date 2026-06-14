@@ -346,12 +346,79 @@ export function GenerateModal({
     if (src === "github" && savedPreference.github_repo) {
       setRepoSel(savedPreference.github_repo)
     }
+
+    if (prdId == null) return
+
+    // GitHub auto-skip MUST go through locate first — generating directly here
+    // is the fidelity bug: no chosen_screen reaches the payload, so the backend
+    // recreate branch never fires and the output is generic. Do NOT onClose
+    // upfront: at low confidence (ranked_confirm/unmapped) we keep the modal
+    // open so the picker / unmapped hint can render. We never auto-pick a screen
+    // at low confidence — that would ground generation on the wrong screen.
+    if (src === "github") {
+      const repo = savedPreference.github_repo!
+      const localPrdId = prdId
+      void runCodebaseLocateThenGenerate({
+        prdId: localPrdId,
+        repo,
+        onProceed: (route, sha, id) => {
+          // High-confidence: close, fire the loading signal the manual path
+          // uses (onGenStart), then generate WITH the codebase augmentation.
+          // We replicate the generate call rather than reuse runGenerateForRoute
+          // because designSource/githubActive are set above via setState and
+          // have NOT re-rendered this closure yet — codebaseGenerate would read
+          // stale. We know the source is github here, so wire it explicitly.
+          onClose()
+          onGenStart?.({
+            figmaFileKey: null,
+            githubRepo: repo,
+            chosenScreenRoute: route,
+          })
+          const baseParams = buildGenerateParams({
+            prdId: localPrdId,
+            platform,
+            instructions,
+            figmaFileKey: null,
+            figmaNodeId: null,
+            websiteUrl: "",
+            manualColor: "",
+            manualFont: "",
+            githubRepo: repo,
+            designSource: "github",
+          })
+          const retainedSha = sha || null
+          const params =
+            route || id
+              ? {
+                  ...baseParams,
+                  chosen_screen_route: route,
+                  ...(id ? { chosen_screen_id: id } : {}),
+                  ...(retainedSha ? { map_commit_sha: retainedSha } : {}),
+                }
+              : baseParams
+          void runGenerateFlow({
+            params,
+            generate: designAgentApi.generate,
+            runGeneration: runDesignAgentGeneration,
+            onOpenChange: () => {},
+            showToast,
+            setSubmitting,
+            notifyOnReady: false,
+            notifyOnKickoff: false,
+            onKickoff,
+            onGenerated: (result) => onGenDone?.(result),
+          }).catch(() => { onGenDone?.() })
+        },
+      })
+      return
+    }
+
+    // Figma + Website auto-skip: unchanged — no locate, generate directly.
     onClose()
     setTimeout(() => {
-      if (prdId == null) return
       onGenStart?.({
         figmaFileKey: src === "figma" ? savedPreference.figma_file_key ?? null : null,
-        githubRepo: src === "github" ? savedPreference.github_repo ?? null : null,
+        githubRepo: null,
       })
       const baseParams = buildGenerateParams({
         prdId,
@@ -362,7 +429,7 @@ export function GenerateModal({
         websiteUrl: "",
         manualColor: "",
         manualFont: "",
-        githubRepo: src === "github" ? savedPreference.github_repo ?? "" : "",
+        githubRepo: "",
         designSource: src,
       })
       void runGenerateFlow({
@@ -436,7 +503,17 @@ export function GenerateModal({
     const websiteHealthy = src === "website"
     const prefHealthy = figmaHealthy || githubHealthy || websiteHealthy
 
-    const pendingAutoSkip = dataStillLoading || prefHealthy
+    // A healthy github saved-pref no longer auto-closes silently: it routes
+    // through locate, which can resolve to ranked_confirm / unmapped — and then
+    // the picker / unmapped hint MUST be visible. So suppression only holds
+    // while locate is still pre-flight or non-blocking (idle = not started yet,
+    // analysing = in flight, chip = auto-proceeded and already generating). Once
+    // locate lands on ranked_confirm or unmapped we release suppression so the
+    // modal renders for the PM to pick. figma/website never call locate, so
+    // their locateState stays "idle" and suppression behaves exactly as before.
+    const locateNeedsModal =
+      locateState === "ranked_confirm" || locateState === "unmapped"
+    const pendingAutoSkip = (dataStillLoading || prefHealthy) && !locateNeedsModal
     if (pendingAutoSkip) return null
   }
 
@@ -455,9 +532,14 @@ export function GenerateModal({
     chosenRoute: string | null,
     overrideSha?: string | null,
     chosenId?: string | null,
+    // Repo override for the saved-preference auto-skip path, where setRepoSel()
+    // has not yet re-rendered the closure when generation fires. The manual
+    // path omits it and falls back to the settled repoSel — identical behaviour.
+    repoOverride?: string,
   ) {
     if (prdId == null) return
     const codebaseGenerate = designSource === "github" && githubActive
+    const effectiveRepo = repoOverride ?? repoSel
     // Auto-proceed path passes the SHA explicitly because it fires before the
     // setLocateResult re-render lands; the picker path reads from locateResult
     // state which is already populated by the time onChoose fires.
@@ -467,7 +549,7 @@ export function GenerateModal({
         : null) || null
     onGenStart?.({
       figmaFileKey: designSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
-      githubRepo: codebaseGenerate ? repoSel : null,
+      githubRepo: codebaseGenerate ? effectiveRepo : null,
       chosenScreenRoute: chosenRoute,
     })
     const baseParams = buildGenerateParams({
@@ -482,7 +564,7 @@ export function GenerateModal({
       websiteUrl: "",
       manualColor: "",
       manualFont: "",
-      githubRepo: codebaseGenerate ? repoSel : "",
+      githubRepo: codebaseGenerate ? effectiveRepo : "",
       designSource,
     })
     // Fire the recreate wiring when EITHER a route or a stable id was chosen —
@@ -534,48 +616,79 @@ export function GenerateModal({
     })
   }
 
+  // Shared codebase locate→generate sequence. Both the manual Generate click
+  // (handleGenerate) and the saved-preference auto-skip effect funnel through
+  // this so a github prototype is NEVER generated without first calling locate
+  // (which is what resolves the chosen screen the recreate branch needs).
+  //
+  // Params are explicit because the auto-skip path sets designSource/repoSel via
+  // setState in the same effect tick — those values have not re-rendered the
+  // closure yet, so we pass the repo (and a generate callback that uses it)
+  // directly instead of reading stale closure state. The manual path passes its
+  // settled repoSel for identical behaviour.
+  //
+  //   - auto_proceed | proceed_with_note → onProceed(route, sha, id)
+  //   - ranked_confirm                   → set ranked_confirm state (block on pick)
+  //   - unmapped                         → set unmapped state (no auto-pick)
+  //
+  // onProceed lets the two callers differ only in what "proceed" means: the
+  // manual path calls runGenerateForRoute (which closes on completion via
+  // onOpenChange); the auto-skip path closes the modal first, then generates.
+  async function runCodebaseLocateThenGenerate(opts: {
+    prdId: number
+    repo: string
+    onProceed: (route: string | null, sha: string | null, id: string | null) => void
+  }) {
+    setLocateError(null)
+    setLocateState("analysing")
+    try {
+      const result = await designAgentApi.locate({ prd_id: opts.prdId, github_repo: opts.repo })
+      setLocateResult(result)
+      if (result.unmapped) {
+        setLocateState("unmapped")
+        return
+      }
+      if (result.decision === "auto_proceed" || result.decision === "proceed_with_note") {
+        const route = result.chosen[0]?.route ?? null
+        const id = result.chosen[0]?.id ?? null
+        setChosenRouteForChip(route)
+        setLocateState("chip")
+        // Immediately start generation — chip is non-blocking and informational.
+        // Pass the SHA explicitly because the state update queued above has
+        // not yet re-rendered the closure. Carry the chosen candidate's id so
+        // a non-route host resolves on the backend.
+        opts.onProceed(route, result.commit_sha || null, id)
+      } else {
+        // ranked_confirm: block until PM picks a candidate.
+        setLocateState("ranked_confirm")
+      }
+    } catch {
+      setLocateError("Couldn't analyse the codebase — pick a screen or switch source")
+      setLocateState("idle")
+    }
+  }
+
   const handleGenerate = () => {
     if (submitting || prdId == null) return
 
     if (codebaseMode) {
       // Codebase mode: gate generation through the locate pipeline before starting.
-      setLocateError(null)
-      setLocateState("analysing")
-      void (async () => {
-        try {
-          const result = await designAgentApi.locate({ prd_id: prdId, github_repo: repoSel })
-          setLocateResult(result)
-          if (result.unmapped) {
-            setLocateState("unmapped")
-            return
-          }
-          if (result.decision === "auto_proceed" || result.decision === "proceed_with_note") {
-            const route = result.chosen[0]?.route ?? null
-            const id = result.chosen[0]?.id ?? null
-            setChosenRouteForChip(route)
-            setLocateState("chip")
-            // Immediately start generation — chip is non-blocking and informational.
-            // Pass the SHA explicitly because the state update queued above has
-            // not yet re-rendered the closure. Carry the chosen candidate's id so
-            // a non-route host resolves on the backend.
-            void onSavePreference?.({
-              design_source: designSource,
-              // codebaseMode ⟹ designSource is "github" here (TS narrows the aliased const
-              // condition), so figma is never the source in this branch.
-              figma_file_key: null,
-              github_repo: designSource === "github" ? (repoSel || null) : null,
-              website_url: null,
-            })
-            runGenerateForRoute(route, result.commit_sha || null, id)
-          } else {
-            // ranked_confirm: block until PM picks a candidate.
-            setLocateState("ranked_confirm")
-          }
-        } catch {
-          setLocateError("Couldn't analyse the codebase — pick a screen or switch source")
-          setLocateState("idle")
-        }
-      })()
+      const localPrdId = prdId
+      void runCodebaseLocateThenGenerate({
+        prdId: localPrdId,
+        repo: repoSel,
+        onProceed: (route, sha, id) => {
+          void onSavePreference?.({
+            design_source: designSource,
+            // codebaseMode ⟹ designSource is "github" here (TS narrows the aliased const
+            // condition), so figma is never the source in this branch.
+            figma_file_key: null,
+            github_repo: designSource === "github" ? (repoSel || null) : null,
+            website_url: null,
+          })
+          runGenerateForRoute(route, sha, id)
+        },
+      })
       return
     }
 
