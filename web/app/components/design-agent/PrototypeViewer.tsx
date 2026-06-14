@@ -56,6 +56,12 @@ type Props = {
    *  toggle is NOT rendered (it has been lifted into the control bar). The stage
    *  class still tracks `platform`, so canvas width still switches. */
   hideToggle?: boolean
+  /** C2a: optional control group rendered in the browser-frame head, to the
+   *  right of the platform toggle (e.g. the public viewer's Mark + Comment
+   *  buttons). Purely additive — when undefined nothing extra renders, so the
+   *  signed-in PostGenerationResult call site (which passes no headControls) is
+   *  byte-for-byte unchanged. */
+  headControls?: ReactNode
 }
 
 export function PrototypeViewer({
@@ -67,6 +73,7 @@ export function PrototypeViewer({
   platform: platformProp,
   onPlatformChange,
   hideToggle = false,
+  headControls,
 }: Props) {
   // UX-EXPLORE (throwaway — REVERT): controlled when a `platform` prop is given;
   // otherwise own the state locally as before. Either way `platform` below is the
@@ -121,6 +128,12 @@ export function PrototypeViewer({
                 Mobile
               </button>
             </div>
+          )}
+          {/* C2a: right-aligned head control group (public viewer's Mark +
+              Comment buttons). The `.proto-url` flex:1 pushes this to the right
+              edge alongside the toggle. Renders nothing when omitted. */}
+          {headControls && (
+            <div className="proto-head-controls">{headControls}</div>
           )}
         </div>
         {/* The chrome slot is ALWAYS rendered (even when `chrome` is undefined)

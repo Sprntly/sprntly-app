@@ -827,6 +827,21 @@
   color: var(--ink);
   box-shadow: var(--shadow-sm);
 }
+/* C2a: wrapper for the head control group (public viewer Mark + Comment). Sits
+   to the right of the platform toggle in the frame head; the inner group reuses
+   the `.platform-toggle` look. Icon-only buttons get a square-ish hit area. */
+.design-agent-surface .proto-head-controls {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+.design-agent-surface .proto-head-controls-group button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 10px;
+}
 .design-agent-surface .proto-stage {
   position: relative;
   flex: 1;

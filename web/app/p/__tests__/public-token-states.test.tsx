@@ -29,6 +29,10 @@ import { dirname, resolve } from "node:path"
 import { PasscodeGateView } from "../PasscodeGate"
 import { submitPasscode } from "../PasscodeGate"
 import { nextViewerState } from "../PublicTokenViewer"
+import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
+import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
+import { ManualEditOverlay } from "../../components/design-agent/ManualEditOverlay"
+import { IconMessage, IconPin } from "../../components/shared/app-icons"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CSS_PATH = resolve(HERE, "../../components/design-agent/design-agent.css")
@@ -193,6 +197,84 @@ describe("P6-18 no-drift / canonical", () => {
         expect(trimmed.startsWith(".design-agent-surface")).toBe(true)
       }
     }
+  })
+})
+
+// ── C2a: public-viewer Mark + Comment head controls + writable-anon panel ───
+// Node-env vitest can't drive the resolver effect (ready state) nor a real
+// button click (commentsOpen toggle), so — mirroring the repo's source-invariant
+// + initialPlatform-seam convention — we (a) assert the shipped ready-state JSX
+// in PublicTokenViewer.tsx carries the two head buttons + the writable-anon
+// CommentsPanel mount, and (b) live-render the EQUIVALENT ready-state fragment
+// (headControls + chrome) through PrototypeViewer to prove it composes.
+describe("C2a public head controls + writable-anon comments", () => {
+  it("test_ready_state_jsx_has_mark_and_comment_buttons: PublicTokenViewer renders both head toggles with aria-pressed", () => {
+    expect(publicViewerSrc).toContain('data-testid="public-mark-toggle"')
+    expect(publicViewerSrc).toContain('data-testid="public-comments-toggle"')
+    // both buttons reflect their toggle state via aria-pressed
+    expect(publicViewerSrc).toMatch(/aria-pressed=\{markMode\}/)
+    expect(publicViewerSrc).toMatch(/aria-pressed=\{commentsOpen\}/)
+    // controls are handed to PrototypeViewer via the new additive headControls prop
+    expect(publicViewerSrc).toMatch(/headControls=\{/)
+  })
+
+  it("test_public_comments_mount_is_writable_anon: CommentsPanel mounts with canComment + token, NO prototypeId", () => {
+    // The panel is gated behind commentsOpen and mounted with canComment (create
+    // on) and the token (routes via createCommentByToken). It must NOT receive a
+    // prototypeId — that keeps resolve/apply/ignore/delete hidden on the public
+    // surface.
+    expect(publicViewerSrc).toMatch(/commentsOpen\s*&&/)
+    const mountMatch = publicViewerSrc.match(/<CommentsPanel[\s\S]*?\/>/)
+    expect(mountMatch).not.toBeNull()
+    const mount = mountMatch![0]
+    expect(mount).toContain("token=")
+    expect(mount).toContain("canComment")
+    expect(mount).not.toContain("prototypeId")
+  })
+
+  it("test_ready_fragment_composes_through_prototype_viewer: head buttons in the frame head + writable-anon panel in the chrome slot", () => {
+    // The exact fragment PublicTokenViewer mounts in its ready state.
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeViewer, {
+        bundleUrl: "https://cdn.example/p/abc/index.html",
+        isComplete: true,
+        headControls: React.createElement(
+          "div",
+          { className: "platform-toggle proto-head-controls-group", role: "group" },
+          React.createElement(
+            "button",
+            { type: "button", "data-testid": "public-mark-toggle", "aria-pressed": false },
+            React.createElement(IconPin, { size: 14 }),
+          ),
+          React.createElement(
+            "button",
+            { type: "button", "data-testid": "public-comments-toggle", "aria-pressed": true },
+            React.createElement(IconMessage, { size: 14 }),
+          ),
+        ),
+        chrome: React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(ManualEditOverlay, { isComplete: true }),
+          // commentsOpen === true → writable-anon panel
+          React.createElement(CommentsPanel, { token: "tok-abc", canComment: true }),
+        ),
+      }),
+    )
+    // head buttons land inside the frame head
+    expect(html).toContain('class="proto-head-controls"')
+    expect(html).toContain('data-testid="public-mark-toggle"')
+    expect(html).toContain('data-testid="public-comments-toggle"')
+    // the comments panel mounts in the chrome slot
+    expect(html).toContain('data-testid="prototype-chrome"')
+    expect(html).toContain('data-testid="comments-panel"')
+    // writable-anon: NO resolve affordance, NO apply/ignore/delete buttons, and
+    // the inert ManualEditOverlay leaks no edit toggle.
+    expect(html).not.toContain("comment-resolve-")
+    expect(html).not.toContain("comment-apply-")
+    expect(html).not.toContain("comment-ignore-")
+    expect(html).not.toContain("comment-delete-")
+    expect(html).not.toContain('data-testid="manual-edit-toggle"')
   })
 })
 

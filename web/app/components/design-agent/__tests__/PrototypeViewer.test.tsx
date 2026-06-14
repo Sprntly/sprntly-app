@@ -121,6 +121,39 @@ describe("chrome slot (AC4)", () => {
   })
 })
 
+// ── C2a: optional headControls render in the frame head (additive) ─────────
+describe("head controls (C2a)", () => {
+  it("test_head_controls_render_in_frame_head — passed headControls appear inside proto-frame-head", () => {
+    const controls = React.createElement(
+      "button",
+      { "data-testid": "sentinel-head-control", type: "button" },
+      "Comment",
+    )
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeViewer, {
+        bundleUrl: BUNDLE,
+        isComplete: false,
+        headControls: controls,
+      }),
+    )
+    expect(html).toContain('class="proto-head-controls"')
+    expect(html).toContain('data-testid="sentinel-head-control"')
+    // the control nests inside the frame head (after it opens, before the chrome slot)
+    const headIdx = html.indexOf("proto-frame-head")
+    const ctrlIdx = html.indexOf("sentinel-head-control")
+    const chromeIdx = html.indexOf("da-prototype-chrome")
+    expect(headIdx).toBeGreaterThanOrEqual(0)
+    expect(ctrlIdx).toBeGreaterThan(headIdx)
+    expect(ctrlIdx).toBeLessThan(chromeIdx)
+  })
+
+  it("test_head_controls_absent_is_byte_for_byte_unchanged — omitting headControls renders nothing extra (signed-in non-regression)", () => {
+    const without = renderViewer()
+    // no wrapper, no leak — the signed-in PostGenerationResult passes no headControls.
+    expect(without).not.toContain("proto-head-controls")
+  })
+})
+
 // ── AC2: Desktop/Mobile toggle swaps the stage class ──────────────────────
 describe("platform toggle (AC2)", () => {
   it("test_stage_class_pure_mapping — stageClass maps each platform", () => {

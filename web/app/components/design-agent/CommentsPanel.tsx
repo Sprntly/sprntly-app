@@ -581,6 +581,14 @@ export type CommentsPanelProps = {
    *  affordance). Used on the public /p/<token> surface where comment create is
    *  disabled (B9b/B9c). Read-only viewers can still read all comments. */
   readOnly?: boolean
+  /** C2a (writable-anon): enables comment CREATE on the public surface — the
+   *  contextmenu→anchored-composer flow routes via `createCommentByToken(token)`
+   *  (no prototypeId needed). Resolve/Apply/Ignore/Delete stay gated on
+   *  `prototypeId != null`, so they remain HIDDEN on the public mount. Additive:
+   *  defaults to `prototypeId != null`, which reproduces the prior behaviour
+   *  exactly for the signed-in mount (create already on) and the prior public
+   *  mount (create off). Has no effect when `readOnly` is true. */
+  canComment?: boolean
 }
 
 function toMessage(err: unknown, fallback: string): string {
@@ -597,7 +605,14 @@ export function CommentsPanel({
   onIterateComment,
   iterateBusy = false,
   readOnly = false,
+  canComment,
 }: CommentsPanelProps) {
+  // Writable-anon resolution: create is enabled when not read-only AND either a
+  // prototypeId is present (signed-in mount) OR the host opted into anon create
+  // (public viewer). Defaulting `canComment` to `prototypeId != null` keeps both
+  // prior call sites byte-for-byte (signed-in: on; old public: off).
+  const commentingEnabled =
+    !readOnly && (canComment ?? prototypeId != null)
   // (see handleApply / handleIgnore below for the CHANGE C resolve wiring)
   const [comments, setComments] = useState<CommentRecord[]>([])
   const [refreshKey, setRefreshKey] = useState(0)
@@ -632,7 +647,7 @@ export function CommentsPanel({
   // Currently this captures same-origin DOM under the panel/parent document; the
   // cross-iframe bridge is a follow-up (see scope note above).
   useEffect(() => {
-    if (readOnly) return
+    if (!commentingEnabled) return
     function onContextMenu(e: MouseEvent) {
       const anchorId = captureAnchorId(e.target as Element | null)
       if (!anchorId) return
@@ -641,7 +656,7 @@ export function CommentsPanel({
     }
     document.addEventListener("contextmenu", onContextMenu)
     return () => document.removeEventListener("contextmenu", onContextMenu)
-  }, [readOnly])
+  }, [commentingEnabled])
 
   async function handleSubmit() {
     if (!composer || !composer.body.trim()) return
@@ -795,7 +810,7 @@ export function CommentsPanel({
       )}
       <CommentsPanelView
         comments={comments}
-        composer={readOnly ? null : composer}
+        composer={commentingEnabled ? composer : null}
         busy={busy || iterateBusy}
         error={error}
         canResolve={prototypeId != null}

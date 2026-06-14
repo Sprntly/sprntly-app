@@ -14,8 +14,10 @@ import { useEffect, useState } from "react"
 import { notFound, useParams } from "next/navigation"
 import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
 import { ManualEditOverlay } from "../components/design-agent/ManualEditOverlay"
+import { CommentsPanel } from "../components/design-agent/CommentsPanel"
 import { PasscodeGate } from "./PasscodeGate"
 import { resolveToken, type ResolvedView } from "./resolveToken"
+import { IconMessage, IconPin } from "../components/shared/app-icons"
 
 export type { ResolvedView }
 
@@ -43,6 +45,11 @@ export function PublicTokenViewer() {
   const params = useParams<{ token: string | string[] }>()
   const token = Array.isArray(params.token) ? params.token[0] : params.token
   const [state, setState] = useState<ViewerState>({ kind: "loading" })
+  // C2a public-viewer chrome state. `commentsOpen` toggles the writable-anon
+  // CommentsPanel; `markMode` is a placeholder toggle — C2b wires the actual
+  // pin/mark overlay to it (no overlay yet, by design for this slice).
+  const [commentsOpen, setCommentsOpen] = useState(false)
+  const [markMode, setMarkMode] = useState(false)
 
   useEffect(() => {
     if (!token) {
@@ -83,11 +90,39 @@ export function PublicTokenViewer() {
       <PrototypeViewer
         bundleUrl={state.bundleUrl}
         isComplete={state.isComplete}
-      // Public-viewer chrome: work-status pill (CompletionBar) and read-only
-      // CommentsPanel are intentionally omitted from the public surface (Phase 1
-      // cleanup). ManualEditOverlay is kept — it renders nothing without a
-      // prototypeId (public resolver is minimum-disclosure), so it is non-breaking.
-      // Mark/Comment controls + anon-write affordances come in a later phase.
+        // C2a: Mark + Comment controls in the browser-frame head. Styled like the
+        // platform toggle (.platform-toggle group look). aria-pressed reflects the
+        // toggle state. Comment opens the writable-anon CommentsPanel below.
+        // Mark just flips markMode for now — C2b wires the actual pin/mark overlay
+        // to markMode (no overlay yet, by design for this slice).
+        headControls={
+          <div
+            className="platform-toggle proto-head-controls-group"
+            role="group"
+            aria-label="Prototype tools"
+          >
+            <button
+              type="button"
+              className={markMode ? "active" : ""}
+              aria-pressed={markMode}
+              data-testid="public-mark-toggle"
+              onClick={() => setMarkMode((v) => !v)}
+              title="Mark"
+            >
+              <IconPin size={14} />
+            </button>
+            <button
+              type="button"
+              className={commentsOpen ? "active" : ""}
+              aria-pressed={commentsOpen}
+              data-testid="public-comments-toggle"
+              onClick={() => setCommentsOpen((v) => !v)}
+              title="Comments"
+            >
+              <IconMessage size={14} />
+            </button>
+          </div>
+        }
       chrome={
         <>
           {/* F13 manual edit (P4-01) is INTERNAL-ONLY: it renders its toggle only
@@ -97,6 +132,17 @@ export function PublicTokenViewer() {
               nothing (AC10, non-breaking). The signed-in surface mounts it with a
               real prototypeId + isComplete to enable edit mode. */}
           <ManualEditOverlay isComplete={state.isComplete} />
+          {/* C2a writable-anon comments. No prototypeId on this surface (minimum-
+              disclosure), so create routes via createCommentByToken(token);
+              canComment enables create while resolve/apply/ignore/delete stay
+              hidden (all gated on prototypeId). The head Comment toggle collapses
+              the panel by flipping commentsOpen. */}
+          {commentsOpen && (
+            <CommentsPanel
+              token={token as string}
+              canComment
+            />
+          )}
         </>
       }
       />
