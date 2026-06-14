@@ -14,6 +14,7 @@ import { AskReplyBody } from "../../shared/AskReplyBody"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
 import { ApiError, askApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
+import { isComposerBusy, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
@@ -134,13 +135,22 @@ export function ChatScreen() {
     }))
   }, [activeTabId])
   const [draft, setDraft] = useState("")
-  const [busy, setBusy] = useState(false)
+  // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
+  // composer's busy/disabled state is derived from the ACTIVE tab only (see the
+  // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
+  // composer even while another tab is still loading.
+  const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
+  // Composer busy/disabled + "thinking" indicator reflect ONLY the active tab's
+  // in-flight status. Another tab being mid-ask must not disable this composer.
+  const busy = isComposerBusy(busyTabs, activeTabId)
   const [showSlash, setShowSlash] = useState(false)
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
   const [recording, setRecording] = useState(false)
   const [attachments, setAttachments] = useState<{ name: string; content: string }[]>([])
-  const askingRef = useRef(false)
+  // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
+  // ask while its own is still in flight, while letting OTHER tabs send concurrently.
+  const askingTabsRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const recognitionRef = useRef<any>(null)
@@ -495,11 +505,13 @@ export function ChatScreen() {
         setAttachments([]) // clear after sending
       }
       if (query.length < 1) return
-      if (askingRef.current) return
-      askingRef.current = true
+      // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
+      // before doing any work. (Authoritative per-tab guard happens once
+      // targetTabId is resolved below — needed for the no-active-tab case where
+      // openTab creates the target.)
+      if (activeTabId != null && askingTabsRef.current.has(activeTabId)) return
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-      setBusy(true)
       // Capture the target tab ID up-front so async callbacks always write to
       // the right tab, even if the user switches tabs while the request is in-flight.
       let targetTabId: string
@@ -514,50 +526,60 @@ export function ChatScreen() {
       }
       pushPendingConversation(id, query, targetTabId)
       setActiveConv(0)
-      try {
-        const res = await askApi.ask(query, activeCompany)
-        setTabs((prev) => prev.map((t) =>
-          t.id !== targetTabId ? t : {
-            ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res } : turn)
-          }
-        ))
-        finalizeConversationTurn(id, { reply: res }, targetTabId)
-      } catch (e) {
-        const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
-          ? (e.body as { detail: unknown }).detail
-          : null
-        const detailStr =
-          typeof detail === "string"
-            ? detail
-            : Array.isArray(detail)
+      // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
+      // It returns false (running nothing) if this tab already has an ask in
+      // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
+      // and routes the reply/error to the captured targetTabId. The guard, busy
+      // toggling, and cleanup (even if the tab is closed mid-flight) all live in
+      // the helper so the concurrency contract is unit-tested in one place.
+      await runTabAsk({
+        targetTabId,
+        asking: askingTabsRef.current,
+        setBusy: setBusyTabs,
+        ask: () => askApi.ask(query, activeCompany),
+        onResult: (tabId, res) => {
+          setTabs((prev) => prev.map((t) =>
+            t.id !== tabId ? t : {
+              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res } : turn)
+            }
+          ))
+          finalizeConversationTurn(id, { reply: res }, tabId)
+        },
+        onError: (tabId, e) => {
+          const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
+            ? (e.body as { detail: unknown }).detail
+            : null
+          const detailStr =
+            typeof detail === "string"
               ? detail
-                .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
-                .join(" · ")
-              : null
-        const msg =
-          e instanceof ApiError
-            ? detailStr || e.message
-            : e instanceof Error
-              ? e.message
-              : "Something went wrong"
-        setTabs((prev) => prev.map((t) =>
-          t.id !== targetTabId ? t : {
-            ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg } : turn)
-          }
-        ))
-        finalizeConversationTurn(id, { error: msg }, targetTabId)
-        showToast("Ask failed", msg.slice(0, 120))
-      } finally {
-        askingRef.current = false
-        setBusy(false)
-      }
+              : Array.isArray(detail)
+                ? detail
+                  .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
+                  .join(" · ")
+                : null
+          const msg =
+            e instanceof ApiError
+              ? detailStr || e.message
+              : e instanceof Error
+                ? e.message
+                : "Something went wrong"
+          setTabs((prev) => prev.map((t) =>
+            t.id !== tabId ? t : {
+              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg } : turn)
+            }
+          ))
+          finalizeConversationTurn(id, { error: msg }, tabId)
+          showToast("Ask failed", msg.slice(0, 120))
+        },
+      })
     },
     [activeCompany, activeTabId, attachments, finalizeConversationTurn, openTab, pushPendingConversation, showToast],
   )
 
   const handleComposerSubmit = () => {
     const q = draft.trim()
-    if (q.length < 1 || askingRef.current) return
+    // Cheap active-tab guard; submitAsk re-checks per the resolved target tab.
+    if (q.length < 1 || (activeTabId != null && askingTabsRef.current.has(activeTabId))) return
     setDraft("")
     void submitAsk(q)
     const ta = composerRef.current
