@@ -89,3 +89,39 @@ def test_extract_ui_primitives_only_strict_ui_dirs():
 
     result = extractor.extract_ui_primitives("owner/repo")
     assert result == {}
+
+
+def test_extract_ui_primitives_resolves_under_monorepo_web_prefix():
+    """Monorepo regression: primitives under web/app/components/ui must resolve.
+
+    Before frontend-prefix detection was applied to extract_ui_primitives, the
+    strict-UI-dir probe was root-relative, so a monorepo whose frontend lives
+    under web/ had every probe 404 and the method returned {}. With the fix,
+    _detect_frontend_prefix picks 'web/', the listing is probed at
+    web/app/components/ui, and the bodies are fetched at their (prefix-inclusive)
+    API paths — yielding the extracted primitives keyed canonically.
+    """
+    extractor = GithubExtractor(installation_id=42)
+    # GitHub returns full repo paths, so listing items carry the web/ prefix.
+    listing = _make_listing(
+        "button.tsx", "card.tsx", directory="web/app/components/ui"
+    )
+
+    def fake_get_contents(repo, path, branch):
+        # Prefix detection: only web/package.json exists (root has none).
+        if path == "web/package.json":
+            return {"type": "file", "name": "package.json", "path": "web/package.json"}
+        # Strict-UI-dir listing only resolves under the detected web/ prefix.
+        if path == "web/app/components/ui":
+            return listing
+        return None
+
+    extractor._github_get_contents = fake_get_contents
+    extractor._fetch_text_file = MagicMock(return_value="content")
+
+    result = extractor.extract_ui_primitives("owner/repo")
+    assert set(result.keys()) == {
+        "src/components/ui/button.tsx",
+        "src/components/ui/card.tsx",
+    }
+    assert all(v == "content" for v in result.values())

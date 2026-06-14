@@ -815,11 +815,21 @@ class GithubExtractor:
         if not repo_full_name or "/" not in repo_full_name:
             return {}
 
+        # Detect the frontend subdir (monorepo-aware) exactly as extract_raw_signals
+        # does: monorepos keep the UI primitives under a subdir like "web/", so we
+        # probe "<prefix>package.json" once and prepend the winning prefix to every
+        # strict-UI-dir listing below. Non-monorepo repos resolve prefix="" and
+        # behave identically. The fetch path uses the GitHub-API-returned (already
+        # prefix-inclusive) item path, so bodies still resolve under the subdir.
+        prefix = self._detect_frontend_prefix(repo_full_name, branch)
+
         _STRICT_UI_DIRS = ("components/ui", "src/components/ui", "app/components/ui")
         out: dict[str, str] = {}
 
         for directory in _STRICT_UI_DIRS:
-            payload = self._github_get_contents(repo_full_name, directory, branch)
+            payload = self._github_get_contents(
+                repo_full_name, f"{prefix}{directory}", branch
+            )
             if not isinstance(payload, list):
                 continue
             for item in payload:
