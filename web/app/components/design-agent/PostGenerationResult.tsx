@@ -235,6 +235,8 @@ export type PostGenerationResultProps = {
    *  state-driven handoff buttons (Mark Complete / Export / Undo) and drops the
    *  "..." Actions popover + Done button. Launcher/public keep the classic bar. */
   isInTab?: boolean
+  /** Navigate back to the previous page (in-tab title-bar back button). Absent on launcher/public paths. */
+  onBack?: () => void
 }
 
 export type PostGenerationResultViewProps = {
@@ -329,6 +331,8 @@ export type PostGenerationResultViewProps = {
    *  state-driven handoff buttons (Mark Complete / Export / Undo) and drops the
    *  "..." Actions popover + Done button. Launcher/public keep the classic bar. */
   isInTab?: boolean
+  /** Navigate back to the previous page (in-tab title-bar back button). Absent on launcher/public paths. */
+  onBack?: () => void
 }
 
 /**
@@ -719,6 +723,8 @@ export function DaControlBar({
   onOpenFullscreen,
   onDone,
   isInTab,
+  onBack,
+  prdTitle,
 }: {
   prototypeId: number
   isComplete: boolean
@@ -739,15 +745,36 @@ export function DaControlBar({
   /** True only for the in-tab /prototype editor. When set, replaces the
    *  "..." Actions popover + Done with state-driven handoff buttons. */
   isInTab?: boolean
+  /** Navigate back to the previous page (in-tab title-bar back button). */
+  onBack?: () => void
+  /** PRD title shown in the in-tab title bar next to the back button. */
+  prdTitle?: string | null
 }) {
   // NOTE: DaControlBar is intentionally hook-free so it can be called as a
   // plain function in node-env vitest (the test suite calls it directly to
   // walk the returned element tree). All hook usage for the in-tab path lives
   // in <InTabHandoffCluster> above.
   return (
-    <div className="da-controlbar" data-testid="da-controlbar">
-      {/* LEFT cluster — compact Desktop/Mobile segmented control. */}
+    <div className={`da-controlbar${isInTab ? " da-controlbar--titlebar" : ""}`} data-testid="da-controlbar">
+      {/* LEFT cluster — compact Desktop/Mobile segmented control, + back button when in-tab. */}
       <div className="da-controlbar-l">
+        {isInTab && (
+          <button
+            type="button"
+            className="da-ctl-back"
+            data-testid="da-titlebar-back"
+            title="Back"
+            aria-label="Back"
+            onClick={() => onBack?.()}
+          >
+            <IconChevronLeft size={16} />
+          </button>
+        )}
+        {isInTab && (
+          <span className="da-titlebar-title" title={prdTitle ?? undefined} data-testid="da-titlebar-title">
+            {prdTitle ?? "Untitled prototype"}
+          </span>
+        )}
         <div
           className="platform-toggle da-controlbar-platform"
           role="group"
@@ -788,7 +815,7 @@ export function DaControlBar({
           onClick={() => onToggleMark?.()}
         >
           <IconPin size={15} />
-          <span className="da-ctl-label">Mark</span>
+          {!isInTab && <span className="da-ctl-label">Mark</span>}
         </button>
 
         {/* comments-toggle — ALWAYS toggles the right sidebar (Problem 2). */}
@@ -801,7 +828,7 @@ export function DaControlBar({
           onClick={() => onToggleComments?.()}
         >
           <IconMessage size={16} />
-          <span className="da-ctl-label">Comments</span>
+          {!isInTab && <span className="da-ctl-label">Comments</span>}
         </button>
 
         {/* Share — compact button opening a DROPDOWN with the visibility options
@@ -817,8 +844,8 @@ export function DaControlBar({
               data-testid="da-share-toggle"
             >
               <IconShare size={15} />
-              <span className="da-ctl-label">Share</span>
-              <IconChevronDown size={13} />
+              {!isInTab && <span className="da-ctl-label">Share</span>}
+              {!isInTab && <IconChevronDown size={13} />}
             </button>
           )}
         >
@@ -1121,6 +1148,7 @@ export function PostGenerationResultView({
   leftPanelRef,
   hideBreadcrumb,
   isInTab,
+  onBack,
 }: PostGenerationResultViewProps) {
   // cache-bust the iframe src so a
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
@@ -1204,6 +1232,8 @@ export function PostGenerationResultView({
       onOpenFullscreen={onOpenFullscreen}
       onDone={onDone}
       isInTab={isInTab}
+      onBack={onBack}
+      prdTitle={prdTitle}
     />
   )
 
@@ -1241,8 +1271,11 @@ export function PostGenerationResultView({
         >
           <div className="da-left-top">
             <span className="da-left-title">
-              {prdTitle || "PRD"}
+              {isInTab ? "Prototype" : (prdTitle || "PRD")}
             </span>
+            {isInTab && (
+              <span className="da-left-badge">DESIGN AGENT</span>
+            )}
             {iterateRunning && (
               <span className="da-left-running-pill" aria-live="polite">
                 <span className="da-activity-spinner" aria-hidden="true" />
@@ -1610,6 +1643,7 @@ export function PostGenerationResult({
   onFullscreenChange,
   hideBreadcrumb,
   isInTab,
+  onBack,
 }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
@@ -1942,6 +1976,7 @@ export function PostGenerationResult({
       leftPanelRef={leftPanelRef}
       hideBreadcrumb={hideBreadcrumb}
       isInTab={isInTab}
+      onBack={onBack}
     />
   )
 }

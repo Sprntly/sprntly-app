@@ -860,3 +860,112 @@ describe("Mark-and-comment pin flow — view layer", () => {
     expect(fnBody).toContain("resolved_anchor_id:")
   })
 })
+
+// ─── In-tab title-bar restructure tests ──────────────────────────────────────
+describe("DaControlBar + PostGenerationResultView — isInTab title-bar restructure", () => {
+  it("isInTab: renders the back button (da-titlebar-back) in the title bar", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, {
+        prototypeId: 42,
+        isComplete: false,
+        shareMode: "private" as const,
+        shareToken: null,
+        platform: "desktop" as const,
+        commentsOpen: false,
+        markMode: false,
+        canOpen: false,
+        isInTab: true,
+        onBack: () => {},
+      }),
+    )
+    expect(html).toContain('data-testid="da-titlebar-back"')
+  })
+
+  it("isInTab: the right-cluster icon buttons are present", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, {
+        prototypeId: 42,
+        isComplete: false,
+        shareMode: "private" as const,
+        shareToken: null,
+        platform: "desktop" as const,
+        commentsOpen: false,
+        markMode: false,
+        canOpen: false,
+        isInTab: true,
+      }),
+    )
+    expect(html).toContain('data-testid="da-mark-toggle"')
+    expect(html).toContain('data-testid="da-comments-toggle"')
+    expect(html).toContain('data-testid="proto-fullscreen-trigger"')
+  })
+
+  it("isInTab: the da-ctl-label spans are NOT present", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, {
+        prototypeId: 42,
+        isComplete: false,
+        shareMode: "private" as const,
+        shareToken: null,
+        platform: "desktop" as const,
+        commentsOpen: false,
+        markMode: false,
+        canOpen: false,
+        isInTab: true,
+      }),
+    )
+    expect(html).not.toContain('class="da-ctl-label"')
+  })
+
+  it("NOT isInTab: the back button is ABSENT and the classic labeled bar is present", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, {
+        prototypeId: 42,
+        isComplete: false,
+        shareMode: "private" as const,
+        shareToken: null,
+        platform: "desktop" as const,
+        commentsOpen: false,
+        markMode: false,
+        canOpen: false,
+        isInTab: false,
+      }),
+    )
+    expect(html).not.toContain('data-testid="da-titlebar-back"')
+    expect(html).toContain('class="da-ctl-label"')
+    expect(html).toContain('data-testid="da-actions-toggle"')
+  })
+
+  it("isInTab via PostGenerationResultView: back button present end-to-end", () => {
+    const html = renderView({ isInTab: true })
+    expect(html).toContain('data-testid="da-titlebar-back"')
+  })
+
+  it("NOT isInTab via PostGenerationResultView: back button absent end-to-end", () => {
+    const html = renderView({ isInTab: false })
+    expect(html).not.toContain('data-testid="da-titlebar-back"')
+  })
+
+  it("isInTab + prdTitle: renders the title span with the given title text", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto(),
+        isInTab: true,
+        prdTitle: "My Cool PRD",
+      }),
+    )
+    expect(html).toContain('data-testid="da-titlebar-title"')
+    expect(html).toContain("My Cool PRD")
+  })
+
+  it("NOT isInTab: the title-bar title span is absent", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto(),
+        isInTab: false,
+        prdTitle: "My Cool PRD",
+      }),
+    )
+    expect(html).not.toContain('data-testid="da-titlebar-title"')
+  })
+})

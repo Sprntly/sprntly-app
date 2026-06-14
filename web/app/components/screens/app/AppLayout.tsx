@@ -19,9 +19,11 @@ interface AppLayoutProps {
   inlineChat?: boolean
   /** When set, the chrome-strip title renders as a back affordance (e.g. the /prototype canvas route). */
   onTitleBack?: () => void
+  /** When true, suppresses the MainChromeStrip entirely (e.g. the /prototype canvas where the DA control bar owns the top bar). */
+  hideChromeStrip?: boolean
 }
 
-export function AppLayout({ children, style, mainStyle, mainClassName, mainColumnClassName, inlineChat, onTitleBack }: AppLayoutProps) {
+export function AppLayout({ children, style, mainStyle, mainClassName, mainColumnClassName, inlineChat, onTitleBack, hideChromeStrip }: AppLayoutProps) {
   const { sidebarCollapsed, contentPanelTab } = useNavigation()
   const { activeCompany, setActiveCompany } = useCompany()
   const mainCls = ["main", mainClassName].filter(Boolean).join(" ")
@@ -33,7 +35,7 @@ export function AppLayout({ children, style, mainStyle, mainClassName, mainColum
     >
       <Sidebar activeCompany={activeCompany} onSwitchCompany={setActiveCompany} />
       <div className={mainColumnCls}>
-        <MainChromeStrip onTitleBack={onTitleBack} />
+        {!hideChromeStrip && <MainChromeStrip onTitleBack={onTitleBack} />}
         {inlineChat ? (
           <div className="main-with-inline-chat">
             <main className={mainCls} style={mainStyle}>

@@ -2803,3 +2803,81 @@
   padding: 4px 0 0;
   z-index: 1;
 }
+
+/* ── In-tab title bar (isInTab=true only — .da-controlbar--titlebar) ───────────
+   Overrides the shared .da-controlbar sizing+padding for the /prototype page.
+   The launcher (.da-controlbar without this modifier) is BYTE-IDENTICAL. */
+.design-agent-surface .da-controlbar--titlebar {
+  height: 54px;
+  padding: 0 22px;
+  gap: 10px;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: var(--surface);
+}
+
+/* Back icon button (in-tab title bar left) */
+.design-agent-surface .da-ctl-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  color: var(--ink-3);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+.design-agent-surface .da-ctl-back:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+/* Icon-only right-cluster buttons (in-tab: no labels, 30x30) */
+.design-agent-surface .da-controlbar--titlebar .da-ctl-icon {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 7px;
+}
+.design-agent-surface .da-controlbar--titlebar .da-ctl-icon--square {
+  width: 30px;
+  height: 30px;
+}
+
+/* Platform toggle: left-of-center (small margin from the back button) */
+.design-agent-surface .da-controlbar--titlebar .da-controlbar-l {
+  gap: 14px;
+}
+
+/* PRD title display in the in-tab title bar */
+.design-agent-surface .da-titlebar-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+
+/* Left panel badge (DESIGN AGENT pill) */
+.design-agent-surface .da-left-badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-radius: 30px;
+  padding: 1px 8px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
