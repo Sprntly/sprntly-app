@@ -138,6 +138,32 @@ async def upload_files(
                 "error": f"File exceeds {MAX_UPLOAD_BYTES // (1024*1024)}MB limit",
             })
             continue
+
+        # A .zip is expanded and each supported member ingested individually.
+        if Path(filename).suffix.lower() == ".zip":
+            try:
+                z_ingested, z_errors = datasets.ingest_zip(
+                    slug, filename, data, per_member_max_bytes=MAX_UPLOAD_BYTES
+                )
+            except datasets.DatasetNotFound as e:
+                raise HTTPException(404, str(e))
+            except datasets.DatasetError as e:
+                errors.append({"filename": filename, "error": str(e)})
+                continue
+            except Exception as e:  # pragma: no cover — surfaced to the user
+                logger.exception("Zip ingest failed for %s/%s", slug, filename)
+                errors.append({"filename": filename, "error": f"Could not read zip: {e}"})
+                continue
+            for ing in z_ingested:
+                results.append({
+                    "filename": ing.original_filename,
+                    "md_path": ing.md_path,
+                    "md_chars": ing.md_chars,
+                    "from_zip": Path(filename).name,
+                })
+            errors.extend(z_errors)
+            continue
+
         try:
             ingested = datasets.ingest_file(slug, filename, data)
         except datasets.DatasetNotFound as e:
