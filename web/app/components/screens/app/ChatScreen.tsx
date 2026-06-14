@@ -13,6 +13,7 @@ import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleto
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
 import { ApiError, askApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
@@ -372,8 +373,34 @@ export function ChatScreen() {
     }
   }, [pendingOndemandDraft, setPendingOndemandDraft, activeTabId, openTab])
 
-  // Track the current Supabase conversation ID for multi-turn persistence
-  const dbConvIdRef = useRef<number | null>(null)
+  // ── Per-tab Supabase persistence ─────────────────────────────────────────
+  // Each tab maps to its OWN conversation, tracked via ChatTab.dbConvId. The
+  // persistence helper reads/writes that per-tab id (never a shared ref), so
+  // parallel chats record into separate conversations. A single in-flight create
+  // per tab keeps the user + assistant turns in ONE conversation under the
+  // fire-and-forget timing (see chatPersistence.ts).
+  const setTabConvId = useCallback((tabId: string, convId: number) => {
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, dbConvId: convId } : t))
+  }, [])
+  // Stable single instance — its per-tab in-flight-create map must persist across
+  // renders, so we build it once (lazy ref init) rather than per render.
+  const persistenceRef = useRef<ReturnType<typeof createChatPersistence> | null>(null)
+  if (persistenceRef.current === null) {
+    persistenceRef.current = createChatPersistence({
+      getApi: () => import("../../../lib/api").then((m) => m.conversationsApi),
+      getTabConvId: (tabId) => tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null,
+      setTabConvId: (tabId, convId) => setTabConvId(tabId, convId),
+      onConversationCreated: (turnId, convId) => {
+        // Tag the in-memory conversation with the DB id so the rail can load turns.
+        const latest = conversationsRef.current
+        const tagged = latest.map((c) =>
+          c.id === turnId ? { ...c, _dbId: convId } as any : c,
+        )
+        setContent({ conversations: tagged })
+      },
+    })
+  }
+  const persistence = persistenceRef.current
 
   // Resume a conversation from ChatsScreen or BacklogScreen (loads turns)
   const checkResume = useCallback(() => {
@@ -383,7 +410,8 @@ export function ChatScreen() {
       localStorage.removeItem("sprntly_resume_conv")
       const data = JSON.parse(raw) as { dbId: number; title: string; turns: { role: string; content: string }[] }
       if (!data.turns || data.turns.length === 0) return
-      dbConvIdRef.current = data.dbId
+      // The resumed tab's dbConvId is set via openTab(..., data.dbId) below —
+      // per-tab now, no shared ref.
       const restored: ThreadTurn[] = []
       for (let i = 0; i < data.turns.length; i++) {
         const t = data.turns[i]
@@ -412,7 +440,7 @@ export function ChatScreen() {
   }, [currentScreen, checkResume])
 
   const pushPendingConversation = useCallback(
-    (turnId: string, query: string) => {
+    (turnId: string, query: string, targetTabId: string) => {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toISOString()
@@ -424,36 +452,15 @@ export function ChatScreen() {
         ],
         sidebarConvCount: nextCount,
       })
-      // Persist to Supabase — create conversation + first user turn
-      import("../../../lib/api").then(({ conversationsApi }) => {
-        // If this is a follow-up in the same thread, just add a turn
-        if (dbConvIdRef.current) {
-          conversationsApi.addTurn(dbConvIdRef.current, "user", query).catch(() => { })
-          return
-        }
-        // New conversation
-        conversationsApi.create({
-          title,
-          preview: query.slice(0, 200),
-          query,
-          agent_type: "ask",
-        }).then((conv) => {
-          dbConvIdRef.current = conv.id
-          // Tag the in-memory conversation with the DB id so rail can load turns
-          const latest = conversationsRef.current
-          const tagged = latest.map((c) =>
-            c.id === turnId ? { ...c, _dbId: conv.id } as any : c,
-          )
-          setContent({ conversations: tagged })
-          conversationsApi.addTurn(conv.id, "user", query).catch(() => { })
-        }).catch(() => { })
-      })
+      // Persist to Supabase against THIS tab's conversation (create-once per tab).
+      // Fire-and-forget — failures are swallowed inside the helper.
+      void persistence.pushUserTurn(targetTabId, { turnId, title, query })
     },
-    [setContent],
+    [setContent, persistence],
   )
 
   const finalizeConversationTurn = useCallback(
-    (turnId: string, updates: { reply?: AskResponse; error?: string }) => {
+    (turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string) => {
       const prev = conversationsRef.current
       setContent({
         conversations: prev.map((c) => {
@@ -468,17 +475,14 @@ export function ChatScreen() {
           return c
         }),
       })
-      // Save assistant reply as a turn in Supabase
-      if (updates.reply && dbConvIdRef.current) {
-        const replyText = typeof updates.reply === "string"
-          ? updates.reply
-          : (updates.reply as any)?.answer || JSON.stringify(updates.reply).slice(0, 2000)
-        import("../../../lib/api").then(({ conversationsApi }) => {
-          conversationsApi.addTurn(dbConvIdRef.current!, "assistant", replyText).catch(() => { })
-        })
+      // Save assistant reply as a turn in this tab's Supabase conversation.
+      // The helper awaits any in-flight create so the assistant turn lands in the
+      // SAME conversation as its user turn.
+      if (updates.reply) {
+        void persistence.pushAssistantTurn(targetTabId, replyToText(updates.reply))
       }
     },
-    [setContent],
+    [setContent, persistence],
   )
 
   const submitAsk = useCallback(
@@ -508,7 +512,7 @@ export function ChatScreen() {
           t.id !== targetTabId ? t : { ...t, thread: [...t.thread, { id, query }] }
         ))
       }
-      pushPendingConversation(id, query)
+      pushPendingConversation(id, query, targetTabId)
       setActiveConv(0)
       try {
         const res = await askApi.ask(query, activeCompany)
@@ -517,7 +521,7 @@ export function ChatScreen() {
             ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res } : turn)
           }
         ))
-        finalizeConversationTurn(id, { reply: res })
+        finalizeConversationTurn(id, { reply: res }, targetTabId)
       } catch (e) {
         const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
           ? (e.body as { detail: unknown }).detail
@@ -541,7 +545,7 @@ export function ChatScreen() {
             ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg } : turn)
           }
         ))
-        finalizeConversationTurn(id, { error: msg })
+        finalizeConversationTurn(id, { error: msg }, targetTabId)
         showToast("Ask failed", msg.slice(0, 120))
       } finally {
         askingRef.current = false
@@ -625,7 +629,7 @@ export function ChatScreen() {
     setActiveTabId(null)
     setDraft("")
     setActiveConv(null)
-    dbConvIdRef.current = null
+    // No shared conv-id to reset — each tab tracks its own dbConvId.
   }
 
   const hasThread = thread.length > 0
