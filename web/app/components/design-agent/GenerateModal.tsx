@@ -560,7 +560,9 @@ export function GenerateModal({
             // a non-route host resolves on the backend.
             void onSavePreference?.({
               design_source: designSource,
-              figma_file_key: designSource === "figma" ? (figmaUrlKey || figmaFileKey || null) : null,
+              // codebaseMode ⟹ designSource is "github" here (TS narrows the aliased const
+              // condition), so figma is never the source in this branch.
+              figma_file_key: null,
               github_repo: designSource === "github" ? (repoSel || null) : null,
               website_url: null,
             })
