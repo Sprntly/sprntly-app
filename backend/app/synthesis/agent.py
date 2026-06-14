@@ -27,6 +27,7 @@ from app.graph.types import Entity, Relationship
 from app.prompts import BRIEF_SCHEMA_VERSION
 from app.synthesis.convergence import ThemeConvergence, compute_convergence
 from app.synthesis.delivery import deliver_brief_to_slack
+from app.synthesis.email_delivery import deliver_brief_to_email
 from app.synthesis.backlog import sequence_backlog
 from app.synthesis.scoring import classify_theme_fit, score_candidates
 
@@ -309,4 +310,15 @@ def run_synthesis(
     ):
         logger.warning("brief slack delivery: %s", delivery)
     brief["_slack_delivery"] = delivery
+
+    # Email is a SECOND, independent delivery channel (v0 checklist 2.4). Same
+    # side-effect contract as Slack: never raises, never blocks the brief. Gated
+    # per-company by notification_settings.email_enabled (default OFF), so it is
+    # a clean no-op until a company opts in.
+    email_delivery = deliver_brief_to_email(enterprise_id, brief)
+    if not email_delivery.get("delivered") and email_delivery.get("reason") not in (
+        "email_disabled", "no_recipients", "resend_not_configured"
+    ):
+        logger.warning("brief email delivery: %s", email_delivery)
+    brief["_email_delivery"] = email_delivery
     return brief
