@@ -861,6 +861,14 @@ export type FigmaFile = {
   name: string
 }
 
+export type BriefPrototypeReadiness = { ready: boolean; preview_image_url: string | null }
+export type BriefPrototypeMapEntry = {
+  insight_index: number
+  prd_id: number
+  prototype: BriefPrototypeReadiness | null
+}
+export type BriefPrototypeMap = { brief_id: number; entries: BriefPrototypeMapEntry[] }
+
 export const designAgentApi = {
   /** Kicks off prototype generation in the background; returns immediately
    *  with a prototype_id. Client should poll designAgentApi.get(id) (via
@@ -1092,6 +1100,10 @@ export const designAgentApi = {
    *  the caller should fall back to the manual-picker flow in that case. */
   locate: (body: { prd_id: number; github_repo: string; ref?: string | null }) =>
     api.post<LocateResponse>("/v1/design-agent/locate", body),
+  briefPrototypeMap: (briefId: number): Promise<BriefPrototypeMap> =>
+    api.get<BriefPrototypeMap>(
+      `/v1/design-agent/brief-prototype-map?brief_id=${encodeURIComponent(String(briefId))}`,
+    ),
 }
 
 /** One ranked screen candidate from the locate pipeline (map → LLM → gate). */
