@@ -144,7 +144,7 @@ export async function runSelectMode({
   }
 }
 
-// INTENTIONAL slug exposure (Babajide-approved): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
+// INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
 /** Build the public share URL from the opaque token (F6) + the company slug. */
 export function buildShareUrl(token: string, origin: string, companySlug: string): string {
   return `${origin}/p/${companySlug}/${token}`

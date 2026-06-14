@@ -380,7 +380,7 @@ export function reseedStep(
 export function resolveViewHref(
   bundleUrl: string | null,
   shareToken: string | null,
-  // INTENTIONAL slug exposure (Babajide-approved): companies.slug is the cosmetic /p/<slug>/<token> segment — the one surface overriding the "slug is internal" convention.
+  // INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic /p/<slug>/<token> segment — the one surface overriding the "slug is internal" convention.
   companySlug: string,
 ): string | null {
   if (bundleUrl) return bundleUrl
