@@ -12,7 +12,6 @@ import {
 } from "../../../lib/onboarding/product-helpers"
 import { STAGES, TECH_STACK_OPTIONS } from "../../../lib/onboarding/types"
 import {
-  completeOnboarding,
   createWorkspace,
   updateWorkspace,
   upsertPrimaryProduct,
@@ -70,9 +69,6 @@ export function BusinessInfo() {
     document.addEventListener("visibilitychange", onHide)
     return () => document.removeEventListener("visibilitychange", onHide)
   }, [companyName, productName, productWebsite, stage, teamSize, techStack])
-
-  const canContinue =
-    companyName.trim().length > 0 && productName.trim().length > 0
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(
     () => [
@@ -147,22 +143,6 @@ export function BusinessInfo() {
     }
   }
 
-  const [skipping, setSkipping] = useState(false)
-
-  async function skipToSettings() {
-    if (auth.kind !== "authed") return
-    setSkipping(true)
-    try {
-      // Save minimal workspace if it exists, then mark onboarding complete
-      if (workspace) {
-        await completeOnboarding(workspace.id, auth.user.id)
-      }
-      router.push("/settings")
-    } catch {
-      setSkipping(false)
-    }
-  }
-
   if (loading) return <div className="onb-shell">Loading…</div>
 
   return (
@@ -175,23 +155,6 @@ export function BusinessInfo() {
         </>
       }
       subtitle="A name and your website anchor the whole workspace — we'll read the site to draft your industry, metrics, and context for the next step. You can change everything later in Settings."
-      footerMeta={
-        <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span>{canContinue ? "Ready to analyze your business" : "Company & product name required"}</span>
-          <button
-            type="button"
-            onClick={skipToSettings}
-            disabled={skipping || !workspace}
-            style={{
-              background: "none", border: "none", cursor: "pointer",
-              fontSize: 12, color: "var(--accent, #179463)", textDecoration: "underline",
-              padding: 0, fontWeight: 500,
-            }}
-          >
-            {skipping ? "Redirecting…" : "Skip to Settings →"}
-          </button>
-        </span>
-      }
       onContinue={() => save(true)}
       continueDisabled={saving}
       loading={saving}
