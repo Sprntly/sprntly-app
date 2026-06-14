@@ -24,7 +24,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { activeCompany } = useCompany()
   const { profile, workspace } = useWorkspace()
   const { setContent } = useContent()
-  useBriefHydration(activeCompany)
+  // useBriefHydration is the single owner of brief loading/polling (and the
+  // auto-regenerate side effect). Call it ONCE here and mirror its coarse kind
+  // into ContentContext so the brief surface can render a WIP indicator without
+  // re-invoking the side-effectful hook (which would double-trigger generation).
+  const briefHydration = useBriefHydration(activeCompany)
+  useEffect(() => {
+    setContent({ briefHydration: briefHydration.kind })
+  }, [briefHydration.kind, setContent])
 
   useEffect(() => {
     if (auth.kind !== "authed") return
