@@ -80,8 +80,10 @@ describe("BacklogScreen — Proposed tab", () => {
 
     await waitFor(() => expect(screen.getByText("Rank-4 idea")).toBeTruthy())
     expect(screen.getByText("Rank-5 idea")).toBeTruthy()
-    // The count badge reflects the loaded list, not a hardcoded number.
-    expect(screen.getByText(/2 ideas/)).toBeTruthy()
+    // The count reflects the loaded list, not a hardcoded number. It surfaces
+    // in two legitimate places — the top-bar count badge and the info-bar
+    // summary line — so assert at least one carries the live count.
+    expect(screen.getAllByText(/2 ideas/).length).toBeGreaterThan(0)
     expect(listMock).toHaveBeenCalledTimes(1)
   })
 
