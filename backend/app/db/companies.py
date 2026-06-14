@@ -92,6 +92,29 @@ def slug_for_company_id(company_id: str) -> str | None:
 
 
 @retry_on_disconnect
+def get_notification_settings(company_id: str) -> dict:
+    """Read a company's `notification_settings` JSONB (per-company delivery
+    config). Returns `{}` when the company is missing or the column is unset —
+    callers apply their own defaults (e.g. email_enabled, recipients).
+
+    Shape consumed by brief email delivery:
+      {"email_enabled": bool, "email_recipients": ["a@x.com", ...]}
+    A missing `email_recipients` ⇒ default to the company's members' emails.
+    """
+    client = require_client()
+    result = (
+        client.table("companies")
+        .select("notification_settings")
+        .eq("id", company_id)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return {}
+    return result.data[0].get("notification_settings") or {}
+
+
+@retry_on_disconnect
 def memberships_for_user(user_id: str) -> list[dict]:
     """All company memberships for a Supabase user id.
 
