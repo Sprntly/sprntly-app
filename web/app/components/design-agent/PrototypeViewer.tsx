@@ -62,6 +62,13 @@ type Props = {
    *  signed-in PostGenerationResult call site (which passes no headControls) is
    *  byte-for-byte unchanged. */
   headControls?: ReactNode
+  /** C2b: optional overlay rendered INSIDE `.proto-stage` (which is
+   *  position:relative), layered OVER the iframe. The public viewer passes the
+   *  mark overlay + pin layer here so marking renders on top of the prototype.
+   *  Purely additive — undefined renders nothing, so the signed-in
+   *  PostGenerationResult call site (which keeps its own `.da-stage` overlay and
+   *  passes no stageOverlay) is byte-for-byte unchanged. */
+  stageOverlay?: ReactNode
 }
 
 export function PrototypeViewer({
@@ -74,6 +81,7 @@ export function PrototypeViewer({
   onPlatformChange,
   hideToggle = false,
   headControls,
+  stageOverlay,
 }: Props) {
   // UX-EXPLORE (throwaway — REVERT): controlled when a `platform` prop is given;
   // otherwise own the state locally as before. Either way `platform` below is the
@@ -157,6 +165,9 @@ export function PrototypeViewer({
             sandbox="allow-scripts allow-same-origin allow-forms"
             className="da-prototype-iframe"
           />
+          {/* C2b: optional marking overlay, layered over the iframe inside the
+              position:relative stage. Undefined → nothing (signed-in path). */}
+          {stageOverlay}
         </div>
       </div>
     </div>

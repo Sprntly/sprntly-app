@@ -15,6 +15,13 @@ import { notFound, useParams } from "next/navigation"
 import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
 import { ManualEditOverlay } from "../components/design-agent/ManualEditOverlay"
 import { CommentsPanel } from "../components/design-agent/CommentsPanel"
+// C2b: the public surface drives the SAME pin engine as the signed-in editor via
+// the shared usePinMarking hook + the extracted MarkOverlay / PinLayer /
+// PrototypeMarkLayer leaves. The only per-surface difference is the create-fn:
+// the public viewer routes via createCommentByToken (no prototypeId / auth).
+import { usePinMarking } from "../components/design-agent/usePinMarking"
+import { MarkOverlay, PinLayer, PrototypeMarkLayer } from "../components/design-agent/PrototypeMarkLayer"
+import { designAgentApi } from "../lib/api"
 import { PasscodeGate } from "./PasscodeGate"
 import { resolveToken, type ResolvedView } from "./resolveToken"
 import { IconMessage, IconPin } from "../components/shared/app-icons"
@@ -46,10 +53,19 @@ export function PublicTokenViewer() {
   const token = Array.isArray(params.token) ? params.token[0] : params.token
   const [state, setState] = useState<ViewerState>({ kind: "loading" })
   // C2a public-viewer chrome state. `commentsOpen` toggles the writable-anon
-  // CommentsPanel; `markMode` is a placeholder toggle — C2b wires the actual
-  // pin/mark overlay to it (no overlay yet, by design for this slice).
+  // CommentsPanel.
   const [commentsOpen, setCommentsOpen] = useState(false)
-  const [markMode, setMarkMode] = useState(false)
+  // C2b: real marking, driven by the shared usePinMarking hook. The create-fn is
+  // the public createCommentByToken (no prototypeId / auth) — distinct from the
+  // signed-in editor's withAuthRetry(createComment(prototype.id)). No
+  // onPinIterate / onPinApply on this surface, so PrototypeMarkLayer's Apply /
+  // Ignore stay hidden (editorMode=false). Entering mark mode + dropping a pin
+  // both reveal the comments sidebar so the new pin row is visible.
+  const pin = usePinMarking({
+    onCreate: (payload) => designAgentApi.createCommentByToken(token as string, payload),
+    onEnterMarkMode: () => setCommentsOpen(true),
+    onPinDropped: () => setCommentsOpen(true),
+  })
 
   useEffect(() => {
     if (!token) {
@@ -93,8 +109,8 @@ export function PublicTokenViewer() {
         // C2a: Mark + Comment controls in the browser-frame head. Styled like the
         // platform toggle (.platform-toggle group look). aria-pressed reflects the
         // toggle state. Comment opens the writable-anon CommentsPanel below.
-        // Mark just flips markMode for now — C2b wires the actual pin/mark overlay
-        // to markMode (no overlay yet, by design for this slice).
+        // C2b: Mark now drives the real pin/mark overlay via the shared hook
+        // (pin.toggleMark / pin.markMode), mounted in the stageOverlay below.
         headControls={
           <div
             className="platform-toggle proto-head-controls-group"
@@ -103,10 +119,10 @@ export function PublicTokenViewer() {
           >
             <button
               type="button"
-              className={markMode ? "active" : ""}
-              aria-pressed={markMode}
+              className={pin.markMode ? "active" : ""}
+              aria-pressed={pin.markMode}
               data-testid="public-mark-toggle"
-              onClick={() => setMarkMode((v) => !v)}
+              onClick={() => pin.toggleMark()}
               title="Mark"
             >
               <IconPin size={14} />
@@ -123,6 +139,15 @@ export function PublicTokenViewer() {
             </button>
           </div>
         }
+        // C2b: the marking overlay renders INSIDE `.proto-stage`, layered over the
+        // iframe. MarkOverlay is click-inert except in mark mode (where it
+        // hit-tests the iframe + drops a pin); PinLayer renders the numbered pins.
+        stageOverlay={
+          <>
+            <MarkOverlay markMode={pin.markMode} onStageClick={pin.handleStageClick} />
+            <PinLayer pins={pin.pins} computedPinPositions={pin.computedPinPositions} />
+          </>
+        }
       chrome={
         <>
           {/* F13 manual edit (P4-01) is INTERNAL-ONLY: it renders its toggle only
@@ -138,10 +163,24 @@ export function PublicTokenViewer() {
               hidden (all gated on prototypeId). The head Comment toggle collapses
               the panel by flipping commentsOpen. */}
           {commentsOpen && (
-            <CommentsPanel
-              token={token as string}
-              canComment
-            />
+            <>
+              {/* C2b: the dropped-pin comment rows (draft composer + saved rows).
+                  editorMode=false + canResolve=false → Apply / Ignore / resolve
+                  are hidden on the public surface; only the draft → submit (via
+                  createCommentByToken) + saved display remain. */}
+              <PrototypeMarkLayer
+                pins={pin.pins}
+                editorMode={false}
+                canResolve={false}
+                onPinDraftChange={pin.handlePinDraftChange}
+                onSubmitComment={pin.handlePinSubmit}
+                onPinRemove={pin.handlePinRemove}
+              />
+              <CommentsPanel
+                token={token as string}
+                canComment
+              />
+            </>
           )}
         </>
       }

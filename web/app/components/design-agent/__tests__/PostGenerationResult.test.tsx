@@ -447,6 +447,15 @@ const RESULT_SRC = readFileSync(
   join(HERE, "..", "PostGenerationResult.tsx"),
   "utf8",
 )
+// C2b — the pin/mark logic was extracted VERBATIM into the shared usePinMarking
+// hook so BOTH the signed-in editor and the public viewer drive ONE
+// implementation. The handler-body source-invariants therefore read the hook;
+// the create-fn injection (withAuthRetry(createComment(prototype.id))) is the
+// per-surface seam and stays a source-invariant on PostGenerationResult.tsx.
+const HOOK_SRC = readFileSync(
+  join(HERE, "..", "usePinMarking.ts"),
+  "utf8",
+)
 
 describe("design-agent.css — two-column design-pane appended + scoped (AC2)", () => {
   it("defines a scoped .design-pane grid at 1fr/320px (test_css_design_pane_appended_and_scoped)", () => {
@@ -755,18 +764,20 @@ describe("viewer src + remount key — follows the live build path", () => {
 })
 
 describe("pin-comment create stays wrapped in the auth-retry (preservation)", () => {
-  it("test_pin_comment_create_wrapped_in_auth_retry — handlePinSubmit wraps createComment in withAuthRetry", () => {
-    // The node-env run cannot exercise the bearer-refresh path, so assert the
-    // wrapping as a source invariant (the repo's source-assertion convention for
-    // behaviour that can't be driven in node-env). A bearer token can expire
-    // mid-interaction; the pin-comment create must stay inside withAuthRetry(() =>
-    // …) so a transient 401 retries once through the refresh instead of silently
-    // losing a saved comment.
-    expect(RESULT_SRC).toContain("async function handlePinSubmit")
-    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
-    const body = RESULT_SRC.slice(start, start + 1200)
-    expect(body).toMatch(
-      /withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(/,
+  it("test_pin_comment_create_wrapped_in_auth_retry — the SIGNED-IN onCreate wraps createComment in withAuthRetry", () => {
+    // C2b: the create-fn is now INJECTED into usePinMarking per surface. The
+    // node-env run cannot exercise the bearer-refresh path, so assert the wrapping
+    // as a source invariant (the repo's source-assertion convention). On the
+    // signed-in container the onCreate handed to usePinMarking must stay inside
+    // withAuthRetry(() => designAgentApi.createComment(prototype.id, …)) so a
+    // transient 401 retries once through the refresh instead of silently losing a
+    // saved comment. (The PUBLIC surface threads createCommentByToken — asserted
+    // in the public-token-states suite.)
+    expect(RESULT_SRC).toContain("usePinMarking({")
+    const start = RESULT_SRC.indexOf("usePinMarking({")
+    const call = RESULT_SRC.slice(start, start + 600)
+    expect(call).toMatch(
+      /onCreate:\s*\(payload\)\s*=>\s*\n?\s*withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(prototype\.id,\s*payload\)\s*\)/,
     )
     // the helper is imported from the shared api module (the import must stay intact)
     expect(RESULT_SRC).toMatch(
@@ -836,29 +847,31 @@ describe("Mark-and-comment pin flow — view layer", () => {
     expect(html).toContain('data-testid="da-pin-ignore-2"')
   })
 
-  it("test_pin_submit_uses_auth_retry_create_with_pin_anchor — handlePinSubmit sends anchor_id=pin-N (synthetic marker) via auth-retry", () => {
-    // Source-invariant check: the submit function still uses the synthetic pin-<n>
-    // anchor_id marker and wraps the call in withAuthRetry. Position fields are
-    // now also sent (verified in the adjacent test).
-    expect(RESULT_SRC).toContain("async function handlePinSubmit")
-    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
-    const body = RESULT_SRC.slice(start, start + 1200)
+  it("test_pin_submit_uses_auth_retry_create_with_pin_anchor — handlePinSubmit sends anchor_id=pin-N (synthetic marker) + the signed-in onCreate is auth-retried", () => {
+    // C2b: handlePinSubmit moved VERBATIM into usePinMarking. It still uses the
+    // synthetic pin-<n> anchor_id marker and now calls the injected onCreate; the
+    // withAuthRetry wrapping is the signed-in container's onCreate seam.
+    expect(HOOK_SRC).toContain("async function handlePinSubmit")
+    const start = HOOK_SRC.indexOf("async function handlePinSubmit")
+    const body = HOOK_SRC.slice(start, start + 1200)
     // anchor_id is the unchanged synthetic pin marker — back-compat with the list keying
     expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
-    // auth-retry wrapping still present
-    expect(body).toMatch(/withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(/)
+    // the submit calls the injected create-fn (per-surface transport)
+    expect(body).toMatch(/await onCreate\(/)
+    // the SIGNED-IN container threads the auth-retried createComment into onCreate
+    expect(RESULT_SRC).toMatch(/withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(prototype\.id,\s*payload\)/)
   })
 
   it("test_create_comment_body_sends_position_fields — handlePinSubmit includes pin_x_pct, pin_y_pct, resolved_anchor_id", () => {
-    // Verify that the submit function sends all three durable position fields
-    // alongside the unchanged synthetic anchor_id and body. Pin position is now
-    // persisted so every viewer sees the same pin location.
-    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
-    const fnBody = RESULT_SRC.slice(start, start + 1400)
+    // Verify that the submit function (now in usePinMarking) sends all three
+    // durable position fields alongside the unchanged synthetic anchor_id and
+    // body. Pin position is persisted so every viewer sees the same pin location.
+    const start = HOOK_SRC.indexOf("async function handlePinSubmit")
+    const fnBody = HOOK_SRC.slice(start, start + 1400)
     // anchor_id (synthetic pin marker) and body are still present — back-compat.
     expect(fnBody).toContain("anchor_id:")
     expect(fnBody).toContain("body:")
-    // Position fields are now included in the createComment payload.
+    // Position fields are now included in the create payload.
     expect(fnBody).toContain("pin_x_pct:")
     expect(fnBody).toContain("pin_y_pct:")
     expect(fnBody).toContain("resolved_anchor_id:")
@@ -896,10 +909,11 @@ describe("PostGenerationResult container — pin-anchor threading through the le
     // The whole point of the slice: the stage click must still capture the anchor
     // and the click position WITHIN the anchored element so the persisted comment
     // can re-anchor the pin. If handleStageClick stopped capturing these, the
-    // payload below would have nothing to ship.
-    const start = RESULT_SRC.indexOf("function handleStageClick")
+    // payload below would have nothing to ship. C2b: this logic now lives in the
+    // shared usePinMarking hook (moved verbatim).
+    const start = HOOK_SRC.indexOf("function handleStageClick")
     expect(start).toBeGreaterThanOrEqual(0)
-    const body = RESULT_SRC.slice(start, start + 1400)
+    const body = HOOK_SRC.slice(start, start + 1400)
     expect(body).toContain("getClickOffsetInElement")
     expect(body).toContain("xPctInEl")
     expect(body).toContain("yPctInEl")
@@ -909,8 +923,9 @@ describe("PostGenerationResult container — pin-anchor threading through the le
 
   it("handlePinSubmit ships anchor_id + pin_x_pct + pin_y_pct + resolved_anchor_id (the captured anchor reaches the create)", () => {
     // End of the thread: the fields captured at click time are sent on create.
-    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
-    const body = RESULT_SRC.slice(start, start + 1400)
+    // C2b: handlePinSubmit lives in the shared usePinMarking hook now.
+    const start = HOOK_SRC.indexOf("async function handlePinSubmit")
+    const body = HOOK_SRC.slice(start, start + 1400)
     expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
     expect(body).toContain("pin_x_pct:")
     expect(body).toContain("pin_y_pct:")

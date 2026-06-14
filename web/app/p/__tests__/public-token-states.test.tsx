@@ -32,6 +32,11 @@ import { nextViewerState } from "../PublicTokenViewer"
 import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
 import { ManualEditOverlay } from "../../components/design-agent/ManualEditOverlay"
+import {
+  MarkOverlay,
+  PinLayer,
+  PrototypeMarkLayer,
+} from "../../components/design-agent/PrototypeMarkLayer"
 import { IconMessage, IconPin } from "../../components/shared/app-icons"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -211,8 +216,9 @@ describe("C2a public head controls + writable-anon comments", () => {
   it("test_ready_state_jsx_has_mark_and_comment_buttons: PublicTokenViewer renders both head toggles with aria-pressed", () => {
     expect(publicViewerSrc).toContain('data-testid="public-mark-toggle"')
     expect(publicViewerSrc).toContain('data-testid="public-comments-toggle"')
-    // both buttons reflect their toggle state via aria-pressed
-    expect(publicViewerSrc).toMatch(/aria-pressed=\{markMode\}/)
+    // both buttons reflect their toggle state via aria-pressed. C2b: Mark is now
+    // driven by the shared hook (pin.markMode); Comment stays local (commentsOpen).
+    expect(publicViewerSrc).toMatch(/aria-pressed=\{pin\.markMode\}/)
     expect(publicViewerSrc).toMatch(/aria-pressed=\{commentsOpen\}/)
     // controls are handed to PrototypeViewer via the new additive headControls prop
     expect(publicViewerSrc).toMatch(/headControls=\{/)
@@ -275,6 +281,102 @@ describe("C2a public head controls + writable-anon comments", () => {
     expect(html).not.toContain("comment-ignore-")
     expect(html).not.toContain("comment-delete-")
     expect(html).not.toContain('data-testid="manual-edit-toggle"')
+  })
+})
+
+// ── C2b: public marking via the shared usePinMarking hook ────────────────────
+// The pin/mark logic is now ONE implementation (usePinMarking); the public
+// surface injects createCommentByToken as the create-fn (NOT the signed-in
+// createComment(prototype.id)). Node-env vitest can't drive the resolver effect
+// to reach the ready state nor a real overlay click, so — mirroring the repo's
+// source-invariant convention — we (a) assert PublicTokenViewer.tsx threads the
+// hook with the token-based create-fn and mounts the overlay + read-only mark
+// layer, and (b) live-render the EQUIVALENT ready fragment (stageOverlay +
+// PrototypeMarkLayer) through PrototypeViewer to prove it composes with the
+// Apply / Ignore / resolve affordances hidden.
+describe("C2b public marking — shared hook + token create-fn", () => {
+  it("test_public_threads_token_create_fn_NOT_authed_create: onCreate routes via createCommentByToken(token), never createComment(prototype.id)", () => {
+    // Prove-it-fails-on-the-bug: if someone wires the AUTHED createComment on the
+    // public surface, this fails. The public viewer has no prototypeId and must
+    // not call the authed create.
+    expect(publicViewerSrc).toContain("usePinMarking({")
+    const start = publicViewerSrc.indexOf("usePinMarking({")
+    const call = publicViewerSrc.slice(start, start + 500)
+    // the injected create-fn is the by-token public route
+    expect(call).toMatch(/onCreate:\s*\(payload\)\s*=>\s*designAgentApi\.createCommentByToken\(/)
+    // and NOT the authed prototype-id create (the wrong-create-fn bug)
+    expect(call).not.toContain("createComment(prototype")
+    // the whole file must not reach for the authed create on this surface
+    expect(publicViewerSrc).not.toMatch(/designAgentApi\.createComment\(/)
+  })
+
+  it("test_public_mark_button_drives_hook: the Mark head toggle is wired to pin.toggleMark / pin.markMode", () => {
+    expect(publicViewerSrc).toMatch(/aria-pressed=\{pin\.markMode\}/)
+    expect(publicViewerSrc).toMatch(/onClick=\{\(\)\s*=>\s*pin\.toggleMark\(\)\}/)
+  })
+
+  it("test_public_mounts_overlay_via_stageOverlay: MarkOverlay + PinLayer are handed to PrototypeViewer's stageOverlay", () => {
+    expect(publicViewerSrc).toMatch(/stageOverlay=\{/)
+    const start = publicViewerSrc.indexOf("stageOverlay={")
+    const block = publicViewerSrc.slice(start, start + 400)
+    expect(block).toContain("<MarkOverlay")
+    expect(block).toContain("onStageClick={pin.handleStageClick}")
+    expect(block).toContain("<PinLayer")
+  })
+
+  it("test_public_mark_layer_is_read_only: PrototypeMarkLayer mounts with editorMode=false + canResolve=false (Apply/Ignore/resolve hidden)", () => {
+    expect(publicViewerSrc).toContain("<PrototypeMarkLayer")
+    const start = publicViewerSrc.indexOf("<PrototypeMarkLayer")
+    const mount = publicViewerSrc.slice(start, start + 400)
+    expect(mount).toContain("editorMode={false}")
+    expect(mount).toContain("canResolve={false}")
+    expect(mount).toContain("onSubmitComment={pin.handlePinSubmit}")
+    // no Apply/Ignore wiring on this surface (those are signed-in only)
+    expect(mount).not.toContain("onPinApply")
+    expect(mount).not.toContain("onPinIgnore")
+  })
+
+  it("test_public_ready_fragment_composes_with_marking_hidden_controls: stageOverlay over the iframe + read-only mark rows", () => {
+    const savedPin = {
+      n: 1,
+      xPct: 50,
+      yPct: 50,
+      draft: "",
+      body: "Move this up",
+      saved: true,
+      busy: false,
+      error: null,
+      author: "external",
+      createdAt: "2026-06-06T08:00:00Z",
+    }
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeViewer, {
+        bundleUrl: "https://cdn.example/p/abc/index.html",
+        isComplete: true,
+        stageOverlay: React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(MarkOverlay, { markMode: true, onStageClick: () => {} }),
+          React.createElement(PinLayer, { pins: [savedPin] as never }),
+        ),
+        chrome: React.createElement(PrototypeMarkLayer, {
+          pins: [savedPin] as never,
+          editorMode: false,
+          canResolve: false,
+        }),
+      }),
+    )
+    // the overlay + pin render inside the proto-stage (over the iframe)
+    expect(html).toContain('data-testid="proto-stage"')
+    expect(html).toContain('data-testid="da-mark-overlay"')
+    expect(html).toContain('data-testid="da-pin-1"')
+    // the saved row renders, but Apply / Ignore / clickable resolve are hidden
+    expect(html).toContain('data-testid="da-pin-comments"')
+    expect(html).not.toContain('data-testid="da-pin-apply-1"')
+    expect(html).not.toContain('data-testid="da-pin-ignore-1"')
+    expect(html).not.toContain('data-testid="da-pin-resolve-1"')
+    // read-only resolve indicator is the static (non-button) variant
+    expect(html).toContain("comment-resolve-btn--static")
   })
 })
 

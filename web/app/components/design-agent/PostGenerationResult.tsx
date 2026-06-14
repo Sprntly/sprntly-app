@@ -24,7 +24,7 @@
  * introduced.
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { CompletionBar } from "./CompletionBar"
 import { useHandoffActions, STALE_MESSAGE } from "./handoff-actions"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
@@ -40,15 +40,6 @@ import { PrdSections } from "../shared/PrdSections"
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
-import {
-  getAnchorPosition,
-  getClickOffsetInElement,
-  getAnchorPositionWithOffset,
-  findByAnchor,
-  getElementDescription,
-  serializeAnchor,
-  clearElementHighlight,
-} from "./pinAnchorBridge"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
@@ -56,6 +47,10 @@ import { IterateActivityStream } from "./IterateActivityStream"
 // C1 Slice B — the mark-and-comment view, extracted from this file: the stage
 // overlay + pin layer (CENTER) + the pin-comment rows (RIGHT). See module header.
 import { MarkOverlay, PinLayer, PrototypeMarkLayer } from "./PrototypeMarkLayer"
+// C2b — the shared mark-and-comment pin engine, extracted from this container so
+// the public viewer drives the SAME implementation. The create-fn is injected
+// per surface (signed-in: withAuthRetry(createComment); public: createCommentByToken).
+import { usePinMarking } from "./usePinMarking"
 import type { PendingQuestion } from "../../lib/api"
 import {
   IconMessage,
@@ -1516,49 +1511,21 @@ export function PostGenerationResult({
   const [commentsOpen, setCommentsOpen] = useState<boolean>(false)
   const [platform, setPlatform] = useState<Platform>("desktop")
 
-  // mark-and-comment pin flow state.
-  // `markMode` toggles the crosshair overlay; `pins` holds the dropped pins +
-  // their (optimistic) comment drafts. Entering mark mode force-opens the right
-  // comments sidebar (David's behaviour) so the new comment row is visible.
-  const [markMode, setMarkMode] = useState<boolean>(false)
-  const [pins, setPins] = useState<PinComment[]>([])
-  const pinCounter = useRef<number>(0)
-  const [computedPinPositions, setComputedPinPositions] = useState<Record<number, { xPct: number; yPct: number }>>({})
+  // mark-and-comment pin flow — now driven by the shared usePinMarking hook (C2b)
+  // so the public viewer runs the SAME implementation. The signed-in create-fn is
+  // injected here: createComment(prototype.id) wrapped in withAuthRetry. The
+  // surface side effects (open the comments sidebar on enter-mark / pin-drop) +
+  // the Apply runner / pre-fill seam are injected too — they are the ONLY things
+  // that differ from the public surface.
+  const pin = usePinMarking({
+    onCreate: (payload) =>
+      withAuthRetry(() => designAgentApi.createComment(prototype.id, payload)),
+    onEnterMarkMode: () => setCommentsOpen(true),
+    onPinDropped: () => setCommentsOpen(true),
+    onPinIterate,
+    onPinApply,
+  })
   const leftPanelRef = useRef<HTMLDivElement>(null)
-
-  const recomputePinPositions = useCallback(() => {
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    const updates: Record<number, { xPct: number; yPct: number }> = {}
-    for (const pin of pins) {
-      if (pin.anchor) {
-        const pos =
-          pin.xPctInEl != null && pin.yPctInEl != null
-            ? getAnchorPositionWithOffset(iframe, pin.anchor, pin.xPctInEl, pin.yPctInEl)
-            : getAnchorPosition(iframe, pin.anchor)
-        if (pos) updates[pin.n] = pos
-      }
-    }
-    setComputedPinPositions(updates)
-  }, [pins])
-
-  useEffect(() => {
-    recomputePinPositions()
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    const win = iframe?.contentWindow
-    win?.addEventListener("scroll", recomputePinPositions, { passive: true })
-    window.addEventListener("resize", recomputePinPositions, { passive: true })
-    return () => {
-      win?.removeEventListener("scroll", recomputePinPositions)
-      window.removeEventListener("resize", recomputePinPositions)
-    }
-  }, [recomputePinPositions])
-
-  useEffect(() => {
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    if (!iframe) return
-    iframe.addEventListener("load", recomputePinPositions)
-    return () => iframe.removeEventListener("load", recomputePinPositions)
-  }, [recomputePinPositions])
 
   // Escape closes the full-screen
   // overlay (in addition to the visible × close button). Bound only while open.
@@ -1574,11 +1541,6 @@ export function PostGenerationResult({
     return () => document.removeEventListener("keydown", onKey)
   }, [fullscreenOpen, onFullscreenChange])
 
-  // Clear any active element highlight whenever mark mode is exited.
-  useEffect(() => {
-    if (!markMode) clearElementHighlight()
-  }, [markMode])
-
   // Scroll to the activity section when the FIRST SSE event arrives so the
   // user sees the stream without having to scroll. Only fires on the transition
   // from 0 → 1 events (length === 1). The leftPanelRef is attached to the
@@ -1591,166 +1553,6 @@ export function PostGenerationResult({
     }
   }, [iterateActivity?.length])
 
-  function toggleMark() {
-    setMarkMode((on) => {
-      const next = !on
-      if (next) setCommentsOpen(true) // mark mode reveals the comments sidebar
-      return next
-    })
-  }
-
-  // Drop a numbered pin at the clicked stage location + open its comment composer.
-  function handleStageClick(xPct: number, yPct: number, viewportX: number, viewportY: number, anchor: { type: 'anchor-id' | 'xpath'; value: string } | null) {
-    const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
-    let xPctInEl: number | null = null
-    let yPctInEl: number | null = null
-    let finalXPct = xPct
-    let finalYPct = yPct
-    let elementFriendly: string | null = null
-    let elementTechnical: string | null = null
-    if (anchor && iframe) {
-      const offset = getClickOffsetInElement(iframe, viewportX, viewportY, anchor)
-      if (offset) {
-        xPctInEl = offset.xPctInEl
-        yPctInEl = offset.yPctInEl
-        const pos = getAnchorPositionWithOffset(iframe, anchor, xPctInEl, yPctInEl)
-        if (pos) { finalXPct = pos.xPct; finalYPct = pos.yPct }
-      }
-      const anchorEl = findByAnchor(iframe, anchor)
-      const desc = getElementDescription(anchorEl)
-      elementFriendly = desc?.friendly ?? null
-      elementTechnical = desc?.technical ?? null
-    }
-    pinCounter.current += 1
-    const n = pinCounter.current
-    setPins((prev) => [
-      ...prev,
-      { n, xPct: finalXPct, yPct: finalYPct, xPctInEl, yPctInEl, anchor, elementFriendly, elementTechnical, draft: "", body: "", saved: false, busy: false, error: null },
-    ])
-    setCommentsOpen(true)
-    setMarkMode(false)
-    clearElementHighlight()
-  }
-
-  function handlePinDraftChange(n: number, value: string) {
-    setPins((prev) => prev.map((p) => (p.n === n ? { ...p, draft: value } : p)))
-  }
-
-  function handlePinRemove(n: number) {
-    setPins((prev) => prev.filter((p) => p.n !== n))
-  }
-
-  // Submit a pin's comment to the AUTHED create endpoint. The anchor_id carries a
-  // synthetic pin marker (`pin-<n>`) — the iframe click cannot resolve a real
-  // data-anchor-id across the sandbox boundary. The pin's on-canvas position IS
-  // persisted via `pin_x_pct`/`pin_y_pct` alongside the comment body. The row
-  // stays optimistic until the create resolves.
-  async function handlePinSubmit(n: number) {
-    const pin = pins.find((p) => p.n === n)
-    if (!pin || !pin.draft.trim()) return
-    setPins((prev) =>
-      prev.map((p) => (p.n === n ? { ...p, busy: true, error: null } : p)),
-    )
-    try {
-      // the authed create returns the
-      // CommentRecord with the server-attributed author + created_at — mirror them
-      // onto the pin so the saved row shows real identity + a relative timestamp.
-      // A bearer token can expire mid-interaction; retry once through the
-      // refresh so a transient 401 doesn't silently lose a saved comment.
-      const created = await withAuthRetry(() =>
-        designAgentApi.createComment(prototype.id, {
-          anchor_id: `pin-${n}`,
-          body: pin.draft.trim(),
-          pin_x_pct: pin.xPct,
-          pin_y_pct: pin.yPct,
-          resolved_anchor_id: serializeAnchor(pin.anchor),
-        }),
-      )
-      setPins((prev) =>
-        prev.map((p) =>
-          p.n === n
-            ? {
-                ...p,
-                body: p.draft.trim(),
-                saved: true,
-                busy: false,
-                error: null,
-                author: created?.author ?? "demo",
-                createdAt: created?.created_at ?? new Date().toISOString(),
-              }
-            : p,
-        ),
-      )
-    } catch (e) {
-      // Keep the optimistic pin + draft so nothing is lost; surface the error.
-      setPins((prev) =>
-        prev.map((p) =>
-          p.n === n
-            ? {
-                ...p,
-                busy: false,
-                error: e instanceof Error ? e.message : "Could not save comment",
-              }
-            : p,
-        ),
-      )
-    }
-  }
-
-  // describe WHERE a pin sits on the
-  // canvas so the agent knows where the comment applies. The raw x/y ARE also
-  // persisted on the comment; here we compose a human region hint from the
-  // LOCAL pin state for the agent instruction.
-  function pinRegionHint(xPct: number, yPct: number): string {
-    const v = yPct < 33 ? "top" : yPct < 66 ? "middle" : "bottom"
-    const h = xPct < 33 ? "left" : xPct < 66 ? "centre" : "right"
-    return `${v} ${h}`
-  }
-
-  // Apply a saved pin comment —
-  // pre-fill the LEFT IterateComposer (via the SAME applyTarget seam CommentsPanel
-  // uses; ApproveModal threads `onPinApply → setApplyTarget`) with an instruction
-  // that includes the pin number + on-canvas position + the comment text, THEN
-  // mark the pin resolved. The synthetic CommentRecord's `body` is the composed
-  // instruction; `id` is negative so it never collides with a real comment id and
-  // is harmless if forwarded as applied_comment_id (the backend treats unknown ids
-  // as "no linked comment").
-  function handlePinApply(n: number) {
-    const pin = pins.find((p) => p.n === n)
-    if (!pin || !pin.saved) return
-    const region = pinRegionHint(pin.xPct, pin.yPct)
-    const elPart = pin.elementFriendly ? ` on ${pin.elementFriendly}` : ''
-    const instruction = pin.elementTechnical
-      ? `Re: pin #${pin.n}${elPart} (${region}):\n${pin.body}\n[ref: ${pin.elementTechnical}]`
-      : `Re: pin #${pin.n}${elPart} (${region}): ${pin.body}`
-    // pin Apply now runs the iterate
-    // IMMEDIATELY through the shared runner (pin context + body as the
-    // instruction) when `onPinIterate` is supplied — same fixed path as the
-    // composer + comment Apply. Falls back to the old applyTarget pre-fill
-    // (`onPinApply`) only when no runner is wired. The agent decides
-    // applicability; the client fabricates no change. Then mark the pin resolved.
-    if (onPinIterate) {
-      onPinIterate(instruction, null)
-    } else {
-      const synthetic: CommentRecord = {
-        id: -pin.n,
-        anchor_id: `pin-${pin.n}`,
-        body: instruction,
-        author: pin.author ?? "demo",
-        status: "open",
-        created_at: pin.createdAt ?? new Date().toISOString(),
-        resolved_at: null,
-      }
-      onPinApply?.(synthetic)
-    }
-    setPins((prev) => prev.map((p) => (p.n === n ? { ...p, resolved: true } : p)))
-  }
-
-  // Ignore — mark the pin resolved
-  // WITHOUT pre-filling the composer.
-  function handlePinIgnore(n: number) {
-    setPins((prev) => prev.map((p) => (p.n === n ? { ...p, resolved: true } : p)))
-  }
 
   // P6-05 (#5): when the launcher refetches after an iterate/clarify and hands a
   // fresh prop down (same id, new `bundle_url`), re-seed the local `isComplete`
@@ -1800,18 +1602,18 @@ export function PostGenerationResult({
       onToggleComments={() => setCommentsOpen((v) => !v)}
       platform={platform}
       onPlatformChange={(p) => setPlatform(p)}
-      markMode={markMode}
-      onToggleMark={toggleMark}
-      onStageClick={handleStageClick}
-      pins={pins}
-      onPinDraftChange={handlePinDraftChange}
-      onPinSubmit={handlePinSubmit}
-      onPinRemove={handlePinRemove}
-      onPinApply={handlePinApply}
-      onPinIgnore={handlePinIgnore}
+      markMode={pin.markMode}
+      onToggleMark={pin.toggleMark}
+      onStageClick={pin.handleStageClick}
+      pins={pin.pins}
+      onPinDraftChange={pin.handlePinDraftChange}
+      onPinSubmit={pin.handlePinSubmit}
+      onPinRemove={pin.handlePinRemove}
+      onPinApply={pin.handlePinApply}
+      onPinIgnore={pin.handlePinIgnore}
       // the consolidated resolve control on a saved pin row resolves it WITHOUT
       // pre-filling the composer — same semantic as Ignore.
-      onPinResolve={handlePinIgnore}
+      onPinResolve={pin.handlePinIgnore}
       // mount the clarifying-
       // question surface. It self-gates on `prototype.pending_question` (renders
       // null when none/locked), so it's safe to always pass. When the launcher's
@@ -1829,7 +1631,7 @@ export function PostGenerationResult({
       onAnswerQuestion={onAnswerQuestion}
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
-      computedPinPositions={computedPinPositions}
+      computedPinPositions={pin.computedPinPositions}
       leftPanelRef={leftPanelRef}
       hideBreadcrumb={hideBreadcrumb}
       isInTab={isInTab}
