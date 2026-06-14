@@ -4,7 +4,9 @@ Mirrors the offline `scripts/convert_dataset.py` flow but exposes it as a
 library so the upload endpoint can convert in-process. Each public converter
 returns markdown as a string; the caller decides where to write it.
 
-Supported types (v1): .docx, .xlsx, .pdf, .txt, .md
+Supported types (v1): .docx, .xlsx, .csv, .pdf, .txt, .md. A .zip is not a
+converter here — it's expanded by `app.datasets.ingest_zip`, which feeds each
+supported member back through these converters.
 """
 from __future__ import annotations
 
