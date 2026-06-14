@@ -74,6 +74,17 @@ vi.mock("../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "meridian", setActiveCompany: vi.fn() }),
 }))
 
+// BriefChat reads the active workspace via useWorkspace(), which throws outside a
+// WorkspaceProvider; mock it to an idle workspace alongside the other contexts.
+vi.mock("../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    loading: false,
+    profile: null,
+    workspace: null,
+    refresh: async () => {},
+  }),
+}))
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => "/",
