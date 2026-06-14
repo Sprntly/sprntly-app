@@ -20,12 +20,28 @@ describe("openOauthTab", () => {
 
     const pending = openOauthTab()
     // The tab is opened immediately (inside the user gesture), before any URL
-    // is known — so the popup blocker treats it as gesture-initiated.
+    // is known — so the popup blocker treats it as gesture-initiated. Always a
+    // NEW tab (_blank), never the current one.
     expect(open).toHaveBeenCalledWith("about:blank", "_blank")
     expect(fakeTab.location.href).toBe("")
 
     pending.finish(AUTH_URL)
     expect(fakeTab.location.href).toBe(AUTH_URL)
+  })
+
+  it("severs the opener link on the new tab (reverse-tabnabbing protection)", () => {
+    const fakeTab: {
+      closed: boolean
+      location: { href: string }
+      opener: unknown
+      close: ReturnType<typeof vi.fn>
+    } = { closed: false, location: { href: "" }, opener: window, close: vi.fn() }
+    vi.spyOn(window, "open").mockReturnValue(fakeTab as unknown as Window)
+
+    openOauthTab()
+    // The security half of `noopener,noreferrer`: the provider tab must not be
+    // able to reach back into the app tab via window.opener.
+    expect(fakeTab.opener).toBeNull()
   })
 
   it("abort() closes the pre-opened tab", () => {
