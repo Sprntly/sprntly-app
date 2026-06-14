@@ -194,11 +194,26 @@ def test_create_task_raises_on_clickup_error(monkeypatch):
 
     from app.connectors import clickup_oauth
 
+    # A generic upstream failure (5xx) raises HTTPException so push isolates it
+    # as a per-task error.
+    monkeypatch.setattr(
+        clickup_oauth.requests, "post",
+        lambda *a, **k: SimpleNamespace(ok=False, status_code=500, text="boom"),
+    )
+    with pytest.raises(HTTPException):
+        clickup_oauth.create_task("t", "l", name="n")
+
+
+def test_create_task_raises_auth_expired_on_401(monkeypatch):
+    # A rejected token (401/403) is distinct: ClickUp has no refresh token, so
+    # we surface ClickUpAuthExpiredError → the route turns it into a reconnect.
+    from app.connectors import clickup_oauth
+
     monkeypatch.setattr(
         clickup_oauth.requests, "post",
         lambda *a, **k: SimpleNamespace(ok=False, status_code=401, text="nope"),
     )
-    with pytest.raises(HTTPException):
+    with pytest.raises(clickup_oauth.ClickUpAuthExpiredError):
         clickup_oauth.create_task("t", "l", name="n")
 
 

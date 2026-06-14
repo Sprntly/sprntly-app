@@ -1080,12 +1080,14 @@ function TicketsTab() {
       const list = (pushState as { kind: "picking"; lists: ClickUpList[] }).lists.find(l => l.id === selectedListId)
       setPushState({ kind: "pushing", listName: list?.name ?? selectedListId })
       try {
-        const tickets = MOCK_TICKETS.map(t => ({
+        const tasks = MOCK_TICKETS.map(t => ({
+          task_id: t.id,
           title: t.title,
-          description: `${t.description}\n\nAcceptance criteria:\n${t.acceptanceCriteria.map(c => `• ${c}`).join("\n")}`,
+          description: t.description,
+          acceptance_criteria: t.acceptanceCriteria,
           priority: t.priority,
         }))
-        const result = await ticketPushApi.pushToClickUp(selectedListId, tickets)
+        const result = await ticketPushApi.pushToClickUp(selectedListId, tasks)
         setPushState({ kind: "done", created: result.created.length, errors: result.errors.length })
         if (result.errors.length > 0) {
           showToast("ClickUp sync partial", `${result.created.length} created, ${result.errors.length} failed.`)

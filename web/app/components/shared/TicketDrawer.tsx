@@ -65,6 +65,7 @@ function InternalTicketForm({ onClose }: { onClose: () => void }) {
         if (lists.length > 0) {
           const targetList = lists[0] // Use first available list
           const result = await ticketPushApi.pushToClickUp(targetList.id, [{
+            task_id: ticket.id,
             title: ticket.title,
             description: ticket.description,
             priority: ticket.priority,

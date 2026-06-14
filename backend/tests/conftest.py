@@ -517,6 +517,36 @@ CREATE TABLE backlog_items (
     UNIQUE (enterprise_id, theme_id)
 );
 CREATE INDEX backlog_items_rank_idx ON backlog_items (enterprise_id, rank);
+
+-- Mirrors supabase/migrations/20260611100000_ticket_data.sql (SQLite-ized).
+-- Ticket overrides keyed by a stable ticket_key + company_id.
+CREATE TABLE ticket_edits (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id          TEXT NOT NULL,
+    ticket_key          TEXT NOT NULL,
+    description         TEXT NOT NULL DEFAULT '',
+    acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, ticket_key)
+);
+CREATE TABLE ticket_attachments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  TEXT NOT NULL,
+    ticket_key  TEXT NOT NULL,
+    label       TEXT NOT NULL,
+    sub         TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_ticket_attachments_key ON ticket_attachments (company_id, ticket_key);
+CREATE TABLE ticket_comments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  TEXT NOT NULL,
+    ticket_key  TEXT NOT NULL,
+    author      TEXT NOT NULL DEFAULT 'user',
+    body        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_ticket_comments_key ON ticket_comments (company_id, ticket_key);
 """
 
 

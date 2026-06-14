@@ -208,12 +208,20 @@ def list_lists(access_token: str) -> list[dict[str, Any]]:
     return [item for item in out if item.get("id")]
 
 
+class ClickUpAuthExpiredError(RuntimeError):
+    """The stored ClickUp token was rejected (401/403). ClickUp issues no
+    refresh token, so the only remedy is the user re-authorizing via Connect.
+    Raised so the caller can surface a "reconnect ClickUp" message instead of
+    a generic upstream failure."""
+
+
 def create_task(
     access_token: str,
     list_id: str,
     *,
     name: str,
     description: str | None = None,
+    markdown_description: str | None = None,
     priority: int | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -221,11 +229,23 @@ def create_task(
 
     POST https://api.clickup.com/api/v2/list/{list_id}/task with the raw
     token in `Authorization` (no `Bearer `). `priority` is ClickUp's 1–4
-    scale (1=urgent … 4=low); omitted when None. Raises HTTPException on a
-    non-OK response so the caller can isolate per-story failures.
+    scale (1=urgent … 4=low); omitted when None.
+
+    `markdown_description` uses ClickUp's `markdown_content` field so the body
+    renders as rich text (headings, bullet acceptance criteria); when given it
+    takes precedence over the plain-text `description`.
+
+    Token handling: ClickUp tokens carry no expiry and ClickUp issues no
+    refresh token, so there is nothing to silently refresh — we read the
+    freshest stored token at push time (see app.stories.push). If ClickUp
+    rejects it anyway (401/403), we raise ClickUpAuthExpiredError so the caller
+    can tell the user to reconnect. Any other non-OK response raises
+    HTTPException(502) so per-task failures stay isolated.
     """
     body: dict[str, Any] = {"name": name}
-    if description is not None:
+    if markdown_description is not None:
+        body["markdown_content"] = markdown_description
+    elif description is not None:
         body["description"] = description
     if priority is not None:
         body["priority"] = priority
@@ -237,6 +257,14 @@ def create_task(
         headers={"Authorization": access_token},
         timeout=_WRITE_TIMEOUT,
     )
+    if resp.status_code in (401, 403):
+        logger.warning(
+            "ClickUp create_task auth rejected: %s %s",
+            resp.status_code, resp.text[:200],
+        )
+        raise ClickUpAuthExpiredError(
+            "ClickUp rejected the stored token — reconnect ClickUp to continue"
+        )
     if not resp.ok:
         logger.warning(
             "ClickUp create_task failed: %s %s", resp.status_code, resp.text[:300]

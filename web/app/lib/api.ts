@@ -1162,8 +1162,20 @@ export type ClickUpList = {
 }
 
 export type TicketPushResult = {
-  created: { ticket: string; task_id: string; url: string }[]
-  errors: { ticket: string; error: string }[]
+  ok: boolean
+  created: { task_id: string; clickup_task_id: string; url: string; title: string }[]
+  errors: { task_id: string; title: string; error: string }[]
+}
+
+/** One task to push into ClickUp. `task_id` is the stable ticket key the user
+ *  selected; the backend merges its saved edits/comments over these base
+ *  fields before creating the ClickUp task. */
+export type TicketPushTask = {
+  task_id: string
+  title: string
+  description?: string
+  acceptance_criteria?: string[]
+  priority?: string
 }
 
 export type TicketDataResponse = {
@@ -1204,14 +1216,13 @@ export const ticketPushApi = {
   /** Fetch ClickUp lists the company can push tickets into. 404 when not connected. */
   listClickUpLists: () =>
     api.post<{ lists: ClickUpList[] }>("/v1/tickets/lists", {}),
-  /** Push one or more tickets into a ClickUp list. */
-  pushToClickUp: (
-    listId: string,
-    tickets: { title: string; description: string; priority: string }[],
-  ) =>
+  /** Push the selected tasks into a ClickUp list. The backend merges each
+   *  task's saved edits/comments over the supplied base fields, then creates
+   *  the ClickUp tasks and returns their ids + URLs so the UI can confirm. */
+  pushToClickUp: (listId: string, tasks: TicketPushTask[]) =>
     api.post<TicketPushResult>("/v1/tickets/push-clickup", {
       list_id: listId,
-      tickets,
+      tasks,
     }),
 }
 
