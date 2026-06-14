@@ -1,8 +1,10 @@
 "use client"
 
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { AppLayout } from "./AppLayout"
 import { useNavigation } from "../../../context/NavigationContext"
+import { useCompany } from "../../../context/CompanyContext"
+import { backlogApi, type BacklogItem, type BacklogTag } from "../../../lib/api"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -69,6 +71,32 @@ const COMPLETED: CompletedInitiative[] = [
   { id: "c5", title: "Auto-flag stale care plans",              sub: "Reduced missed plan updates",              type: "Bug",            shipped: "Jan 12, 2026", impactDelivered: "-18% misses",       impactDir: "down" },
   { id: "c6", title: "SSO via Okta + SCIM provisioning",        sub: "Cleared security gate for enterprise",     type: "Infra",          shipped: "Dec 8, 2025",  impactDelivered: "3 deals unblocked", impactDir: "up"   },
 ]
+
+// ── API → idea mapping ────────────────────────────────────────────────────────
+// Backlog items come from the weekly analysis: ranks ≥ 4 (the top 3 go into the
+// brief). The backend returns an empty list when no brief exists for the
+// company, so an empty backlog here means "no analysis has run yet".
+
+const TAG_TO_TYPE: Record<BacklogTag, IdeaType> = {
+  something_broken: "Bug",          // FIX
+  something_new:    "New initiative", // BUILD
+  something_better: "UI",           // OPTIMIZE
+}
+
+function backlogItemToIdea(item: BacklogItem): BacklogIdea {
+  return {
+    id: item.id,
+    rank: item.rank,
+    title: item.title,
+    sub: item.reasoning ?? "",
+    // Every backlog item is the analysis remainder — sourced from the backlog,
+    // not a person or the brief top-3.
+    source: "backlog",
+    type: item.tag ? TAG_TO_TYPE[item.tag] : "New initiative",
+    impact: "—",
+    impactClass: "neutral",
+  }
+}
 
 // ── Prioritization frameworks ─────────────────────────────────────────────────
 // Each framework scores ideas on different dimensions. The user picks a framework
@@ -368,20 +396,53 @@ function AddIdeaCard({
 
 // ── Proposed tab — table only (add card rendered outside scroll in BacklogScreen) ──
 
+type LoadState = "loading" | "ready" | "error"
+
 function ProposedContent({
   addHandlerRef,
   onSelectIdea,
   selectedIdeaId,
+  onCountChange,
 }: {
   addHandlerRef: React.MutableRefObject<((title: string, type: IdeaType) => void) | null>
   onSelectIdea: (idea: BacklogIdea) => void
   selectedIdeaId: string | null
+  onCountChange?: (count: number) => void
 }) {
   const { showToast }               = useNavigation()
-  const [ideas, setIdeas]           = useState<BacklogIdea[]>(INITIAL_IDEAS)
+  const { activeCompany }           = useCompany()
+  const [ideas, setIdeas]           = useState<BacklogIdea[]>([])
+  const [load, setLoad]             = useState<LoadState>("loading")
   const [group, setGroup]           = useState(GROUP_OPTIONS[0])
   const dragId                      = useRef<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
+
+  // Fetch the backlog (ranks ≥ 4 of the latest analysis). The route is
+  // session-scoped to the company; `activeCompany` is only a re-fetch trigger.
+  useEffect(() => {
+    let cancelled = false
+    setLoad("loading")
+    backlogApi
+      .list()
+      .then((res) => {
+        if (cancelled) return
+        const mapped = res.items
+          .slice()
+          .sort((a, b) => a.rank - b.rank)
+          .map(backlogItemToIdea)
+        setIdeas(mapped)
+        setLoad("ready")
+      })
+      .catch(() => {
+        if (cancelled) return
+        setIdeas([])
+        setLoad("error")
+      })
+    return () => { cancelled = true }
+  }, [activeCompany])
+
+  // Keep the parent's count badge in sync with the loaded list.
+  useEffect(() => { onCountChange?.(ideas.length) }, [ideas.length, onCountChange])
 
   const handleTypeChange = (id: string, type: IdeaType) =>
     setIdeas((prev) => prev.map((i) => i.id === id ? { ...i, type } : i))
@@ -413,6 +474,40 @@ function ProposedContent({
     showToast("Idea added", `"${title}" added to the backlog.`)
   }
 
+  if (load === "loading") {
+    return (
+      <div className="bl-empty" role="status" aria-live="polite" style={{ padding: "48px 24px", textAlign: "center", color: "var(--ink-3)" }}>
+        Loading your backlog…
+      </div>
+    )
+  }
+
+  // Empty state — no weekly brief has been generated yet, so the analysis has
+  // produced no backlog items (the backend returns an empty list with no brief).
+  if (load === "ready" && ideas.length === 0) {
+    return (
+      <div className="bl-empty" role="status" style={{ padding: "56px 24px", textAlign: "center", maxWidth: 480, margin: "0 auto", color: "var(--ink-2)" }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--ink)", margin: "0 0 8px" }}>
+          No backlog yet
+        </h2>
+        <p style={{ fontSize: 13, lineHeight: 1.55, margin: 0 }}>
+          Your backlog is built from the weekly analysis — the top 3 insights go
+          into your brief, and the rest land here. Once a brief has been
+          generated for your company, the remaining prioritized ideas will show
+          up automatically.
+        </p>
+      </div>
+    )
+  }
+
+  if (load === "error") {
+    return (
+      <div className="bl-empty" role="alert" style={{ padding: "48px 24px", textAlign: "center", color: "var(--ink-3)" }}>
+        Couldn&apos;t load the backlog. Please try again.
+      </div>
+    )
+  }
+
   return (
     <>
       <div className="bl-info-bar">
@@ -435,7 +530,7 @@ function ProposedContent({
             setIdeas((prev) => {
               const scored = prev.map((idea, i) => ({
                 ...idea,
-                _score: generateScores(idea, INITIAL_IDEAS.findIndex((init) => init.id === idea.id)),
+                _score: generateScores(idea, i),
               }))
               scored.sort((a, b) => (b._score[fw] ?? 0) - (a._score[fw] ?? 0))
               return scored.map((item, idx) => ({ ...item, rank: idx + 1 }))
@@ -559,6 +654,7 @@ function SyncingOverlay() {
 export function BacklogScreen() {
   const { showToast, openContentPanel }     = useNavigation()
   const [tab, setTab]                       = useState<BacklogTab>("proposed")
+  const [proposedCount, setProposedCount]   = useState<number | null>(null)
   const [showAddIdea, setShowAddIdea]       = useState(false)
   const [isSyncing, setIsSyncing]           = useState(false)
   const [chatValue, setChatValue]           = useState("")
@@ -597,7 +693,9 @@ export function BacklogScreen() {
           <div className="bl-topbar-left">
             <h1 className="bl-title">Briefs</h1>
             <span className="bl-count-badge">
-              {tab === "proposed" ? `${INITIAL_IDEAS.length} ideas` : `${COMPLETED.length} shipped`}
+              {tab === "proposed"
+                ? `${proposedCount ?? 0} ideas`
+                : `${COMPLETED.length} shipped`}
             </span>
             <div className="bl-tabs">
               <button
@@ -635,7 +733,7 @@ export function BacklogScreen() {
         <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
           <div className="bl-body" style={{ flex: 1, overflow: "auto" }}>
             {tab === "proposed"
-              ? <ProposedContent addHandlerRef={addHandlerRef} onSelectIdea={handleSelectIdea} selectedIdeaId={selectedIdea?.id ?? null} />
+              ? <ProposedContent addHandlerRef={addHandlerRef} onSelectIdea={handleSelectIdea} selectedIdeaId={selectedIdea?.id ?? null} onCountChange={setProposedCount} />
               : <CompletedContent />}
           </div>
 

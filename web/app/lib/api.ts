@@ -213,6 +213,40 @@ export const briefApi = {
       .then((b) => ({ ...briefFromWire(b), brief_id: b.brief_id })),
 }
 
+// ---- backlog ----------------------------------------------------------------
+//
+// The backlog is the REMAINDER of the same weekly-analysis ranking that feeds
+// the brief: the top 3 ranked insights go into the brief, ranks 4..N are
+// sequenced into the backlog. The backend gates the list on a brief existing,
+// so a company that has never had a brief returns an empty backlog.
+//
+// The route is tenant-scoped via the session (no company param) — the backend
+// resolves the company from the authenticated user.
+
+export type BacklogTag = "something_new" | "something_better" | "something_broken"
+export type BacklogStatus = "backlog" | "in_progress" | "done" | "dismissed"
+
+export type BacklogItem = {
+  id: string
+  theme_id: string
+  title: string
+  tag: BacklogTag | null
+  rank: number
+  score: number
+  status: BacklogStatus
+  reasoning: string | null
+}
+
+export type BacklogList = { items: BacklogItem[]; count: number }
+
+export const backlogApi = {
+  /** Ranked backlog items (rank-ascending). Empty when no brief exists. */
+  list: () => api.get<BacklogList>("/v1/backlog"),
+  /** Move one item to a new status (in_progress | done | dismissed). */
+  setStatus: (itemId: string, status: Exclude<BacklogStatus, "backlog">) =>
+    api.patch<BacklogItem>(`/v1/backlog/${encodeURIComponent(itemId)}`, { status }),
+}
+
 export type AskCitation = { source: string; evidence: string }
 export type AskResponse = {
   answer: string
