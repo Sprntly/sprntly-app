@@ -89,7 +89,7 @@ const READY_BRIEF: BriefV2State = {
     chart: null,
     convergence: [],
     secondaryCtaLabel: "",
-    secondaryCtaBehavior: "evidence",
+    secondaryCtaBehavior: "open_analysis",
     askQuestion: "Why is retention slipping?",
     quote: null,
   },

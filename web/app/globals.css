@@ -5483,6 +5483,47 @@
     box-shadow: var(--shadow-sm);
   }
 
+  /* Dismissed (greyed) finding card — collapsed, muted, dashed border, with a
+     "click to restore" affordance. Heavy detail/viz are not rendered. */
+  .fc--dismissed {
+    gap: 6px;
+    padding: 12px 16px;
+    background: var(--surface-1, var(--surface-2));
+    border-style: dashed;
+    box-shadow: none;
+    opacity: 0.55;
+    cursor: pointer;
+    transition: opacity 0.12s ease;
+  }
+
+  .fc--dismissed:hover,
+  .fc--dismissed:focus-visible {
+    opacity: 0.78;
+  }
+
+  .fc-dismissed-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .fc-dismissed-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .fc-dismissed-hint {
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
   .fc-top {
     display: flex;
     align-items: center;
