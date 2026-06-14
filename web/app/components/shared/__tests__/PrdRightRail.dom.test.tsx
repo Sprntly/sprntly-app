@@ -53,13 +53,20 @@ vi.mock("../../../context/NavigationContext", () => ({
   }),
 }))
 
+// `setContent` MUST be a stable reference across renders. `ContentPanel`'s
+// evidence-loading effect lists `setContent` in its dependency array; if the
+// mock handed back a fresh closure on every render, the effect would re-run
+// each render, call `setContent`, re-render, and spin forever — allocating
+// until the worker OOMs. A single hoisted function keeps the identity stable,
+// exactly like the real ContentProvider's memoized setter.
+const stableSetContent = (patch: Record<string, unknown>) => {
+  setContent(patch)
+  content = { ...content, ...patch }
+}
 vi.mock("../../../context/ContentContext", () => ({
   useContent: () => ({
     content,
-    setContent: (patch: Record<string, unknown>) => {
-      setContent(patch)
-      content = { ...content, ...patch }
-    },
+    setContent: stableSetContent,
   }),
 }))
 

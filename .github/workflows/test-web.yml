@@ -26,6 +26,13 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Vitest
         working-directory: web
+        # Defensive headroom: raise the vitest worker's V8 heap above Node's
+        # ~2GB default so the growing web suite has margin on the ~7GB
+        # ubuntu-latest runner. The actual OOM root cause (an infinite
+        # render/effect loop in PrdRightRail.dom.test.tsx) is fixed in the test
+        # itself; this bump is cheap insurance, not the fix.
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: npm test
       - name: Build (smoke)
         working-directory: web
