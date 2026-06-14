@@ -322,12 +322,25 @@ def _seed_item(db, cid, theme_id, rank, score, *, status="backlog"):
     return iid
 
 
+def _seed_brief(db, slug):
+    """Seed a current weekly brief for a company slug (briefs.dataset == slug).
+
+    The backlog GET route gates on a brief existing, so the no-brief →
+    empty-backlog invariant holds; this helper lets the populated-backlog tests
+    satisfy that gate (a backlog is the by-product of a real analysis).
+    """
+    from app.db.briefs import save_brief
+    save_brief(slug, "Week of test", {"summary_headline": "h", "insights": []},
+               schema_version=1)
+
+
 def test_get_backlog_returns_rank_ordered(isolated_settings, _override_company):
     from fastapi.testclient import TestClient
     import app.main as main_mod
 
     cid = _override_company
     db = isolated_settings["supabase"]
+    _seed_brief(db, f"slug-{cid}")   # a brief exists → backlog (the rest) shows
     _seed_item(db, cid, "t2", rank=2, score=0.3)
     _seed_item(db, cid, "t1", rank=1, score=0.9)
 
@@ -338,6 +351,73 @@ def test_get_backlog_returns_rank_ordered(isolated_settings, _override_company):
     assert body["count"] == 2
     assert [i["rank"] for i in body["items"]] == [1, 2]   # rank-ascending
     assert body["items"][0]["theme_id"] == "t1"
+
+
+def test_get_backlog_empty_when_no_brief(isolated_settings, _override_company):
+    """No weekly brief has ever been generated → the backlog is empty even if
+    stale/orphaned backlog_items rows exist for the tenant."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    # Rows exist in the table, but NO brief for this company.
+    _seed_item(db, cid, "t1", rank=1, score=0.9)
+    _seed_item(db, cid, "t2", rank=2, score=0.3)
+
+    client = TestClient(main_mod.app)
+    r = client.get("/v1/backlog")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"items": [], "count": 0}   # gated on a brief existing
+
+
+def test_get_backlog_returns_rank_4plus_when_brief_exists(
+    isolated_settings, _override_company,
+):
+    """End-to-end split: a synthesis run puts the top 3 in the brief and the
+    rest (rank ≥ 4) in the backlog; the route then surfaces exactly those."""
+    from fastapi.testclient import TestClient
+    import app.main as main_mod
+    from app.synthesis import agent as synth
+    from app.synthesis import backlog as bl
+
+    cid = _override_company
+    db = isolated_settings["supabase"]
+    from app.graph import GraphFacade
+    facade = GraphFacade()
+
+    # Five themes: the LLM judge picks the top 3 for the brief, the sequencer
+    # puts the remaining two into the backlog.
+    themes = [
+        _seed_theme_with_signals(facade, cid, f"theme-{i}", [
+            ("revenue", "deal_blocker", {"revenue_at_risk_usd": 900000 - i}, 0),
+        ])
+        for i in range(5)
+    ]
+    top3 = themes[:3]
+    rest = themes[3:]
+    ranked = {
+        "summary_headline": "h",
+        "insights": [
+            {**_RANKED["insights"][0], "theme_id": t.id, "is_headline": i == 0,
+             "title": f"brief-{i}"}
+            for i, t in enumerate(top3)
+        ],
+    }
+
+    with patch.object(synth, "llm_call", return_value=_llm_result(ranked)), \
+         patch.object(bl, "llm_call",
+                      return_value=_llm_result(_triage_for(*[t.id for t in rest]))):
+        synth.run_synthesis(facade, cid, dataset_slug=f"slug-{cid}")
+
+    client = TestClient(main_mod.app)
+    body = client.get("/v1/backlog").json()
+    backlog_ids = {i["theme_id"] for i in body["items"]}
+    # The top-3 brief themes are EXCLUDED; only ranks ≥ 4 remain in the backlog.
+    assert backlog_ids == {t.id for t in rest}
+    for t in top3:
+        assert t.id not in backlog_ids
 
 
 def test_patch_backlog_updates_status(isolated_settings, _override_company):
