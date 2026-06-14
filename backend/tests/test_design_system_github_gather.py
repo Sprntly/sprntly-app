@@ -712,3 +712,40 @@ def test_monorepo_prefix_strips_ui_file_keys():
         f"UI file under web/ must reach gather keyed root-relative; "
         f"inference_files={raw.signals.get('inference_files')}"
     )
+
+
+def test_fetch_text_file_truncates_oversize_design_css_but_drops_oversize_ui():
+    """Regression (bc029b1): a real globals.css can blow past the 128KB explicit
+    cap (sprntly-app's is ~305KB). Design/CSS files must TRUNCATE to max_bytes so
+    the top-of-file :root tokens still reach the parser; UI .tsx files must still
+    DROP on oversize (a half-read component is useless). The earlier fixtures used
+    tiny files and never exercised the cap."""
+    import base64
+    from app.design_agent.design_system.adapters import (
+        GithubExtractor,
+        _GITHUB_EXPLICIT_FILE_BYTES,
+    )
+
+    big = (
+        ":root{--accent:#179463;--surface:#F6F7F6;}\n"
+        + ("/* filler */\n" * 30_000)  # push well past the 128KB cap
+    ).encode("utf-8")
+    assert len(big) > _GITHUB_EXPLICIT_FILE_BYTES
+    payload = {
+        "type": "file",
+        "encoding": "base64",
+        "size": len(big),
+        "content": base64.b64encode(big).decode("ascii"),
+    }
+    ex = GithubExtractor(installation_id=1)
+    ex._github_get_contents = lambda repo, path, branch: payload  # type: ignore[assignment]
+
+    # Design/CSS file with truncate=True -> truncated to the cap, top :root survives.
+    css = ex._fetch_text_file("o/r", "app/globals.css", None, truncate=True)
+    assert css is not None
+    assert len(css.encode("utf-8")) <= _GITHUB_EXPLICIT_FILE_BYTES
+    assert "--accent:#179463" in css  # the brand token at the top is preserved
+
+    # UI component file (default truncate=False) -> oversize is dropped.
+    dropped = ex._fetch_text_file("o/r", "components/ui/button.tsx", None)
+    assert dropped is None
