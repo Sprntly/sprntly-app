@@ -26,6 +26,20 @@ export function openOauthTab(): PendingOauthTab {
   const tab =
     typeof window !== "undefined" ? window.open("about:blank", "_blank") : null
 
+  // Sever the opener link — the security half of `noopener,noreferrer`. We
+  // can't pass that feature string to window.open() here because it makes the
+  // call return null, and we need the handle to point the pre-opened tab at
+  // the authorize URL once startOauth resolves. Nulling `opener` after the
+  // fact gives the same reverse-tabnabbing protection without losing the
+  // handle.
+  if (tab) {
+    try {
+      tab.opener = null
+    } catch {
+      // Some environments expose `opener` as read-only — best-effort only.
+    }
+  }
+
   return {
     finish: (authorizeUrl: string) => {
       if (tab && !tab.closed) {
