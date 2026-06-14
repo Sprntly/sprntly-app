@@ -17,6 +17,7 @@
 
 import { useState } from "react"
 import { designAgentApi } from "../../lib/api"
+import { useCompany } from "../../context/CompanyContext"
 
 export type ShareMode = "private" | "public" | "passcode"
 
@@ -30,6 +31,10 @@ export type ShareMenuProps = {
    *  the share-gated CommentsPanel mounts without a re-mount. Optional so the
    *  public-viewer composition and existing callers keep type-checking. */
   onShared?: (token: string | null) => void
+  /** Cosmetic company slug for the public /p/<slug>/<token> URL. Optional — when
+   *  omitted the container self-sources it from `useCompany().activeCompany`
+   *  (safe outside a provider: it returns the demo default, never throws). */
+  companySlug?: string
 }
 
 export type ShareMenuViewProps = {
@@ -139,22 +144,25 @@ export async function runSelectMode({
   }
 }
 
-/** Build the public share URL from the opaque token (F6). */
-export function buildShareUrl(token: string, origin: string): string {
-  return `${origin}/p/${token}`
+// INTENTIONAL slug exposure (Babajide-approved): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
+/** Build the public share URL from the opaque token (F6) + the company slug. */
+export function buildShareUrl(token: string, origin: string, companySlug: string): string {
+  return `${origin}/p/${companySlug}/${token}`
 }
 
 /** Copy the public share URL to the clipboard. Resolves with the copied URL. */
 export async function runCopyShareLink({
   token,
   origin,
+  companySlug,
   clipboard,
 }: {
   token: string
   origin: string
+  companySlug: string
   clipboard: Pick<Clipboard, "writeText">
 }): Promise<string> {
-  const url = buildShareUrl(token, origin)
+  const url = buildShareUrl(token, origin, companySlug)
   await clipboard.writeText(url)
   return url
 }
@@ -236,13 +244,17 @@ export function ShareMenuView({
 
 /** Public component. Wires React state to the orchestration helpers and the
  *  canonical `designAgentApi`, then delegates rendering to the pure view. */
-export function ShareMenu({ prototypeId, initialMode, initialToken, onShared }: ShareMenuProps) {
+export function ShareMenu({ prototypeId, initialMode, initialToken, onShared, companySlug }: ShareMenuProps) {
   const [mode, setMode] = useState<ShareMode>(initialMode)
   const [token, setToken] = useState<string | null>(initialToken ?? null)
   const [passcode, setPasscode] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  // Prefer an explicitly-passed slug; otherwise self-source from the company
+  // context (returns the demo default outside a provider — never throws).
+  const { activeCompany } = useCompany()
+  const slug = companySlug ?? activeCompany
 
   async function selectMode(next: ShareMode) {
     await runSelectMode({
@@ -265,6 +277,7 @@ export function ShareMenu({ prototypeId, initialMode, initialToken, onShared }: 
       await runCopyShareLink({
         token,
         origin: window.location.origin,
+        companySlug: slug,
         clipboard: navigator.clipboard,
       })
       setCopied(true)
@@ -276,7 +289,7 @@ export function ShareMenu({ prototypeId, initialMode, initialToken, onShared }: 
 
   const shareUrl =
     mode !== "private" && token && typeof window !== "undefined"
-      ? buildShareUrl(token, window.location.origin)
+      ? buildShareUrl(token, window.location.origin, slug)
       : null
 
   return (

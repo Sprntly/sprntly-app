@@ -129,21 +129,27 @@ describe("ShareMenuView — share link", () => {
 })
 
 describe("share-link helpers", () => {
-  it("buildShareUrl composes origin + /p/ + token (F6)", () => {
-    expect(buildShareUrl("tok-abc", "https://app.sprntly.ai")).toBe(
-      "https://app.sprntly.ai/p/tok-abc",
+  it("buildShareUrl composes origin + /p/ + slug + token (F6)", () => {
+    // The public link now carries the cosmetic company slug between /p/ and the
+    // opaque token: /p/<slug>/<token> (intentional slug exposure — the one
+    // surface that renders companies.slug; sourced from useCompany().activeCompany).
+    expect(buildShareUrl("tok-abc", "https://app.sprntly.ai", "sprntly")).toBe(
+      "https://app.sprntly.ai/p/sprntly/tok-abc",
     )
   })
 
-  it("runCopyShareLink writes the share URL to the clipboard (AC12)", async () => {
+  it("runCopyShareLink writes the slug'd share URL to the clipboard (AC12)", async () => {
     const writeText = vi.fn(async (_: string) => {})
     const url = await runCopyShareLink({
       token: "tok-abc",
       origin: "https://app.sprntly.ai",
+      companySlug: "sprntly",
       clipboard: { writeText },
     })
-    expect(writeText).toHaveBeenCalledWith("https://app.sprntly.ai/p/tok-abc")
-    expect(url).toBe("https://app.sprntly.ai/p/tok-abc")
+    expect(writeText).toHaveBeenCalledWith(
+      "https://app.sprntly.ai/p/sprntly/tok-abc",
+    )
+    expect(url).toBe("https://app.sprntly.ai/p/sprntly/tok-abc")
   })
 })
 

@@ -374,15 +374,17 @@ export function reseedStep(
 
 /**
  * Resolve the "View prototype" href: the built bundle if present, else the
- * public `/p/<token>` link once the prototype has been shared. Returns null
- * when neither is available yet (nothing to link to → the affordance hides).
+ * public `/p/<slug>/<token>` link once the prototype has been shared. Returns
+ * null when neither is available yet (nothing to link to → the affordance hides).
  */
 export function resolveViewHref(
   bundleUrl: string | null,
   shareToken: string | null,
+  // INTENTIONAL slug exposure (Babajide-approved): companies.slug is the cosmetic /p/<slug>/<token> segment — the one surface overriding the "slug is internal" convention.
+  companySlug: string,
 ): string | null {
   if (bundleUrl) return bundleUrl
-  if (shareToken) return `/p/${shareToken}`
+  if (shareToken) return `/p/${companySlug}/${shareToken}`
   return null
 }
 
@@ -1159,8 +1161,10 @@ export function PostGenerationResultView({
   // / dead link — the #6 bug). It is gated only on a built bundle existing:
   // enabled "View full screen" when `bundleUrl` is present, otherwise a DISABLED
   // "Prototype building…" control — never a removed element. `resolveViewHref`
-  // (below) is KEPT byte-for-byte but no longer consumed here; its null-return no
-  // longer hides the control. The real shared URL stays reachable via ShareMenu.
+  // (below) is KEPT but no longer consumed here; its null-return no longer hides
+  // the control. The real shared URL stays reachable via ShareMenu, which sources
+  // the company slug from `useCompany().activeCompany` for the /p/<slug>/<token>
+  // link; `resolveViewHref` now takes that same slug for its (test-only) parity.
   const canOpen = bundleUrl != null
   // P4-10 — the EDITABLE viewer, rendered only when a built bundle exists. This
   // surface only renders inside (app)/AuthGate, so it is internal by

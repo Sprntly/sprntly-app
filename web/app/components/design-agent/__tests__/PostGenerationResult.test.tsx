@@ -415,13 +415,17 @@ describe("PostGenerationResult — forwards onShared down to ShareMenu (P6-20 AC
 
 describe("resolveViewHref (pure)", () => {
   it("prefers the bundle url", () => {
-    expect(resolveViewHref("https://b/x", "tok")).toBe("https://b/x")
+    expect(resolveViewHref("https://b/x", "tok", "sprntly")).toBe("https://b/x")
   })
-  it("falls back to the public token link", () => {
-    expect(resolveViewHref(null, "tok")).toBe("/p/tok")
+  it("falls back to the slug'd public token link", () => {
+    // The public link now carries the cosmetic company slug:
+    // /p/<slug>/<token> (intentional slug exposure — the one surface that
+    // renders companies.slug). The slug is sourced at the call site from
+    // useCompany().activeCompany.
+    expect(resolveViewHref(null, "tok", "sprntly")).toBe("/p/sprntly/tok")
   })
   it("returns null when neither is available", () => {
-    expect(resolveViewHref(null, null)).toBeNull()
+    expect(resolveViewHref(null, null, "sprntly")).toBeNull()
   })
 })
 
