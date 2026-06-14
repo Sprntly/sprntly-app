@@ -410,7 +410,6 @@ function BriefFindingCard({
   dismissed,
   onAsk,
   onViewEvidence,
-  onGeneratePrd,
   onGenerateAll,
   onDismiss,
   onRestore,
@@ -423,7 +422,6 @@ function BriefFindingCard({
   dismissed: boolean
   onAsk: () => void
   onViewEvidence: () => void
-  onGeneratePrd: () => void
   onGenerateAll: () => void
   onDismiss: () => void
   onRestore: () => void
@@ -550,21 +548,12 @@ function BriefFindingCard({
             <button
               type="button"
               className={`fc-btn-prd fc-btn-prd--${accent}`}
-              onClick={onGeneratePrd}
+              onClick={onGenerateAll}
               disabled={busy}
+              title="Generates the full system: PRD + Evidence + Technical Design + QA Test Cases + Risk Analysis + Traceability Matrix"
             >
               <IconFileText size={14} />
               {generating ? "Generating…" : "Generate PRD"}
-            </button>
-            <button
-              type="button"
-              className="fc-btn-prd fc-btn-prd--aggressive"
-              onClick={onGenerateAll}
-              disabled={busy}
-              title="Multi-Agent: PRD + Evidence + Technical Design + QA Test Cases + Risk Analysis + Traceability Matrix"
-            >
-              <IconSparkle size={14} />
-              Generate PRD first
             </button>
             <button type="button" className="fc-btn-secondary" onClick={onPreview}>
               <IconTerminalPrompt size={13} />
@@ -1132,6 +1121,10 @@ export function BriefChat() {
     [content.briefDetails, content.detail?.meta, openContentPanel, setContent],
   )
 
+  // Lightweight single-PRD generation. The card's visible "Generate PRD" button
+  // runs the full multi-agent system (cardGenerateAll); this helper is the PRD
+  // scaffold used by the prototype-preview flow's "no PRD yet → make one first"
+  // path, where the full 7-agent suite would be overkill.
   const cardGeneratePrd = useCallback(
     async (finding: Finding) => {
       const key = finding.detailKey
@@ -1402,7 +1395,6 @@ export function BriefChat() {
                           dismissed={!!f.detailKey && dismissed.has(f.detailKey)}
                           onAsk={() => cardAsk(f)}
                           onViewEvidence={() => cardViewEvidence(f)}
-                          onGeneratePrd={() => cardGeneratePrd(f)}
                           onGenerateAll={() => cardGenerateAll(f)}
                           onDismiss={() => cardDismiss(f)}
                           onRestore={() => cardRestore(f)}
