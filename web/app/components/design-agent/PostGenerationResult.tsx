@@ -36,30 +36,26 @@ import { PrototypeViewer, type Platform } from "./PrototypeViewer"
 // title + meta + the prd-tldr (Problem/Fix/Impact) block. PrdSections import is
 // kept only for the optional "View full PRD" expander.
 import { PrdSections } from "../shared/PrdSections"
-// reuse the comment identity helpers
-// (avatar + relative time) so pin-comment rows render WHO + WHEN like David's.
-import { CommentAvatar, shortRelativeTime } from "./CommentsPanel"
 // the clarifying-question answer
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
 import {
-  getElementAtIframePoint,
-  getElementAnchor,
   getAnchorPosition,
   getClickOffsetInElement,
   getAnchorPositionWithOffset,
   findByAnchor,
   getElementDescription,
-  parseStoredAnchor,
   serializeAnchor,
-  setElementHighlight,
   clearElementHighlight,
 } from "./pinAnchorBridge"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
 import { IterateActivityStream } from "./IterateActivityStream"
+// C1 Slice B — the mark-and-comment view, extracted from this file: the stage
+// overlay + pin layer (CENTER) + the pin-comment rows (RIGHT). See module header.
+import { MarkOverlay, PinLayer, PrototypeMarkLayer } from "./PrototypeMarkLayer"
 import type { PendingQuestion } from "../../lib/api"
 import {
   IconMessage,
@@ -301,6 +297,9 @@ export type PostGenerationResultViewProps = {
    *  (pre-fill composer w/ pin context + resolve) / Ignore (resolve only). */
   onPinApply?: (n: number) => void
   onPinIgnore?: (n: number) => void
+  /** Resolve a saved pin comment from the consolidated `.comment-resolve-btn`
+   *  header control (resolve-only semantic, like Ignore). */
+  onPinResolve?: (n: number) => void
   /** the clarifying-question
    *  surface node (the container's <ClarifyingQuestionSurface>). Mounted in the
    *  LEFT sidebar just above the IterateComposer; when null nothing renders. */
@@ -1139,6 +1138,7 @@ export function PostGenerationResultView({
   onPinRemove,
   onPinApply,
   onPinIgnore,
+  onPinResolve,
   clarifying,
   iterateActivity = [],
   iterateRunning = false,
@@ -1367,58 +1367,20 @@ export function PostGenerationResultView({
         >
           {viewer}
           {/* IFRAME NUANCE (critical): the prototype is an <iframe>, so clicks
-              inside it can't be captured directly. This transparent overlay sits
-              ABOVE the iframe; it is click-inert normally (pointer-events:none via
-              CSS) and click-active ONLY in mark mode (`.da-mark-overlay.active`,
-              pointer-events:auto + crosshair). On click we hit-test the overlay's
-              own rect → x/y percentages → drop a pin there. */}
+              inside it can't be captured directly. The <MarkOverlay> sits ABOVE
+              the iframe; it is click-inert normally (pointer-events:none via CSS)
+              and click-active ONLY in mark mode (`.da-mark-overlay.active`,
+              pointer-events:auto + crosshair). Its click hit-tests the iframe →
+              stage-relative x/y + resolved anchor → onStageClick (handleStageClick
+              captures xPctInEl/yPctInEl/anchor). */}
           {viewer && (
-            <div
-              className={`da-mark-overlay${markMode ? " active" : ""}`}
-              data-testid="da-mark-overlay"
-              aria-hidden={markMode ? "false" : "true"}
-              onClick={(e) => {
-                if (!markMode) return
-                const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
-                const ir = iframe?.getBoundingClientRect()
-                if (!ir) return
-                if (e.clientX < ir.left || e.clientX > ir.left + ir.width ||
-                    e.clientY < ir.top || e.clientY > ir.top + ir.height) return
-                const el = getElementAtIframePoint(iframe, e.clientX, e.clientY)
-                const anchor = el ? getElementAnchor(el) : null
-                const xPct = Math.max(0, Math.min(100, ((e.clientX - ir.left) / ir.width) * 100))
-                const yPct = Math.max(0, Math.min(100, ((e.clientY - ir.top) / ir.height) * 100))
-                clearElementHighlight()
-                onStageClick?.(xPct, yPct, e.clientX, e.clientY, anchor)
-              }}
-              onMouseMove={(e) => {
-                if (!markMode) return
-                const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
-                const el = getElementAtIframePoint(iframe, e.clientX, e.clientY)
-                setElementHighlight(el)
-              }}
-              onMouseLeave={() => clearElementHighlight()}
-            />
+            <MarkOverlay markMode={markMode} onStageClick={onStageClick} />
           )}
           {/* Pin layer — numbered teardrops positioned absolutely over the canvas.
               `placed` triggers David's `pinDrop` animation. Always rendered above
               the overlay so pins stay visible after mark mode exits. */}
-          {viewer && pins.length > 0 && (
-            <div className="da-pin-layer" data-testid="da-pin-layer" aria-hidden="true">
-              {pins.map((pin) => {
-                const pos = computedPinPositions[pin.n] ?? { xPct: pin.xPct, yPct: pin.yPct }
-                return (
-                  <span
-                    key={pin.n}
-                    className="pc-pin placed"
-                    data-testid={`da-pin-${pin.n}`}
-                    style={{ left: `${pos.xPct}%`, top: `${pos.yPct}%` }}
-                  >
-                    <span className="pc-pin-num">{pin.n}</span>
-                  </span>
-                )
-              })}
-            </div>
+          {viewer && (
+            <PinLayer pins={pins} computedPinPositions={computedPinPositions} />
           )}
         </div>
 
@@ -1453,137 +1415,25 @@ export function PostGenerationResultView({
           </div>
           <div className="da-right-body">
             {/* the mark-and-comment pin
-                rows. Each pin dropped on the canvas appears here with its number +
-                a composer (auto-focused) to type the comment. Submit wires to the
-                authed create endpoint (api.createComment); the row stays optimistic
-                until confirmed. This is the CREATE path; the existing CommentsPanel
-                below stays the resolve/list surface for shared prototypes. */}
-            {pins.length > 0 && (
-              <ul className="proto-comment-list" data-testid="da-pin-comments">
-                {pins.map((pin) => (
-                  <li
-                    key={pin.n}
-                    className={`proto-comment${pin.saved ? " saved" : ""}${pin.resolved ? " resolved" : ""}`}
-                    data-testid={`da-pin-comment-${pin.n}`}
-                    data-status={pin.resolved ? "resolved" : pin.saved ? "open" : "draft"}
-                  >
-                    <div className="proto-comment-main">
-                      {pin.saved ? (
-                        <>
-                          {/* author +
-                              avatar + relative time on the saved pin comment. */}
-                          <div className="proto-comment-au-row">
-                            <div className="comment-step-chip">
-                              <svg width="10" height="12" viewBox="0 0 10 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                                <path d="M5 0C2.79 0 1 1.79 1 4c0 3 4 8 4 8s4-5 4-8c0-2.21-1.79-4-4-4zm0 5.5A1.5 1.5 0 1 1 5 2.5a1.5 1.5 0 0 1 0 3z" fill="currentColor"/>
-                              </svg>
-                              Step {pin.n}
-                            </div>
-                            <CommentAvatar author={pin.author ?? "demo"} />
-                            <span className="proto-comment-au">{pin.author ?? "demo"}</span>
-                            <time
-                              className="proto-comment-time"
-                              dateTime={pin.createdAt ?? undefined}
-                              title={pin.createdAt ?? undefined}
-                            >
-                              {shortRelativeTime(pin.createdAt)}
-                            </time>
-                            <span
-                              className={`comment-resolve-indicator${pin.resolved ? " comment-resolve-indicator--resolved" : ""}`}
-                              aria-hidden="true"
-                            >
-                              {pin.resolved ? (
-                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                                  <circle cx="8" cy="8" r="8" fill="currentColor"/>
-                                  <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                                </svg>
-                              ) : (
-                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                                  <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/>
-                                  <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                                </svg>
-                              )}
-                            </span>
-                          </div>
-                          <p className="proto-comment-body">{pin.body}</p>
-                          {/* Apply /
-                              Ignore on a saved, unresolved pin comment. Apply
-                              pre-fills the composer with the pin context (CHANGE D)
-                              + marks resolved; Ignore marks resolved only. */}
-                          {!pin.resolved && (
-                            <div className="proto-comment-actions">
-                              <button
-                                type="button"
-                                className="btn btn-accent"
-                                data-testid={`da-pin-apply-${pin.n}`}
-                                onClick={() => onPinApply?.(pin.n)}
-                              >
-                                Apply
-                              </button>
-                              <button
-                                type="button"
-                                className="btn"
-                                data-testid={`da-pin-ignore-${pin.n}`}
-                                onClick={() => onPinIgnore?.(pin.n)}
-                              >
-                                Ignore
-                              </button>
-                            </div>
-                          )}
-                          {pin.resolved && (
-                            <p className="proto-comment-resolved-note">Resolved</p>
-                          )}
-                        </>
-                      ) : (
-                        <form
-                          className="proto-comment-form"
-                          onSubmit={(e) => {
-                            e.preventDefault()
-                            onPinSubmit?.(pin.n)
-                          }}
-                        >
-                          <textarea
-                            className="proto-comment-input"
-                            data-testid={`da-pin-input-${pin.n}`}
-                            value={pin.draft}
-                            placeholder="Add a comment, or click a pin on the canvas…"
-                            autoFocus
-                            onChange={(e) =>
-                              onPinDraftChange?.(pin.n, e.target.value)
-                            }
-                          />
-                          <span className="comment-composer-helper">Click anywhere on the canvas to pin a comment</span>
-                          <div className="proto-comment-actions">
-                            <button
-                              type="submit"
-                              className="comment-composer-send-btn"
-                              data-testid={`da-pin-submit-${pin.n}`}
-                              disabled={pin.busy || !pin.draft.trim()}
-                              aria-label="Send comment"
-                            >
-                              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                                <path d="M2 8l10-6-3 6 3 6-10-6z" fill="currentColor"/>
-                              </svg>
-                            </button>
-                            <button
-                              type="button"
-                              className="btn"
-                              data-testid={`da-pin-cancel-${pin.n}`}
-                              onClick={() => onPinRemove?.(pin.n)}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </form>
-                      )}
-                      {pin.error && (
-                        <p className="proto-comment-error error">{pin.error}</p>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
+                rows (C1 Slice B — extracted to <PrototypeMarkLayer>). Each pin
+                dropped on the canvas appears here with its number + a composer
+                (auto-focused) to type the comment. Submit wires to the authed
+                create endpoint (api.createComment) via onPinSubmit; the row stays
+                optimistic until confirmed. This is the CREATE path; the existing
+                CommentsPanel below stays the resolve/list surface for shared
+                prototypes. The resolve control now reuses the shared
+                `.comment-resolve-btn` (Part 2 consolidation). */}
+            <PrototypeMarkLayer
+              pins={pins}
+              editorMode
+              canResolve
+              onPinDraftChange={onPinDraftChange}
+              onSubmitComment={onPinSubmit}
+              onPinRemove={onPinRemove}
+              onPinApply={onPinApply}
+              onPinIgnore={onPinIgnore}
+              onPinResolve={onPinResolve ?? onPinIgnore}
+            />
             {comments ? (
               comments
             ) : (
@@ -1959,6 +1809,9 @@ export function PostGenerationResult({
       onPinRemove={handlePinRemove}
       onPinApply={handlePinApply}
       onPinIgnore={handlePinIgnore}
+      // the consolidated resolve control on a saved pin row resolves it WITHOUT
+      // pre-filling the composer — same semantic as Ignore.
+      onPinResolve={handlePinIgnore}
       // mount the clarifying-
       // question surface. It self-gates on `prototype.pending_question` (renders
       // null when none/locked), so it's safe to always pass. When the launcher's

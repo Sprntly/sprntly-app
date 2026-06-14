@@ -2751,23 +2751,9 @@
   vertical-align: middle;
 }
 
-/* Resolve-check indicator — STILL USED by the PostGenerationResult `.da-right`
-   inline pin-rows (PART 2 consolidation, deferred). CommentsPanel itself no
-   longer renders it (consolidated into the clickable `.comment-resolve-btn`
-   header check), but this rule must stay until PART 2 ports those pin-rows. */
-.design-agent-surface .comment-resolve-indicator {
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--line-strong);
-}
-.design-agent-surface .comment-resolve-indicator--resolved {
-  color: var(--accent);
-}
+/* (C1 Slice B / PART 2) The `.comment-resolve-indicator` rules were removed here:
+   the PostGenerationResult `.da-right` pin-rows now reuse the shared
+   `.comment-resolve-btn` (defined above), so the inline indicator class is dead. */
 
 /* Header message icon + close (X) — David's `.proto-comments-panel-top`. */
 .design-agent-surface .comments-panel-icon {

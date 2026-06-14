@@ -865,6 +865,79 @@ describe("Mark-and-comment pin flow — view layer", () => {
   })
 })
 
+// ─── C1 Slice B: pin-anchor threading survives the container→view→leaf split ──
+// After extracting the overlay + pin layer + pin-comment rows into
+// PrototypeMarkLayer, the load-bearing risk is the "prop dropped mid-tree" class
+// of bug: a leaf (PrototypeMarkLayer) test passes while the container silently
+// stops threading onStageClick / onPinSubmit into MarkOverlay / PrototypeMarkLayer.
+//
+// node-env vitest has no DOM and can't simulate a real click. So we guard the
+// whole path two ways: (1) render the REAL PostGenerationResult container via
+// renderToStaticMarkup and assert the extracted leaves actually mount inside it
+// (the overlay element + the pin-comment rows for a real pin) — proving the
+// container→view→leaf wiring renders end to end, not just in an isolated leaf
+// test; and (2) source-invariants that handleStageClick captures the anchor +
+// per-element offsets and handlePinSubmit ships them, since the click→state→
+// payload data flow itself can't be driven without a DOM.
+describe("PostGenerationResult container — pin-anchor threading through the leaf split", () => {
+  it("the REAL container renders <MarkOverlay> on the stage (overlay click → anchor capture is mounted, not dropped)", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE }),
+      }),
+    )
+    // The extracted overlay mounts inside the real container's center stage. A
+    // dropped-prop / unmounted-leaf bug would lose this element.
+    expect(html).toContain('data-testid="da-canvas-center"')
+    expect(html).toContain('data-testid="da-mark-overlay"')
+  })
+
+  it("handleStageClick captures the resolved anchor + the per-element click offsets (source invariant)", () => {
+    // The whole point of the slice: the stage click must still capture the anchor
+    // and the click position WITHIN the anchored element so the persisted comment
+    // can re-anchor the pin. If handleStageClick stopped capturing these, the
+    // payload below would have nothing to ship.
+    const start = RESULT_SRC.indexOf("function handleStageClick")
+    expect(start).toBeGreaterThanOrEqual(0)
+    const body = RESULT_SRC.slice(start, start + 1400)
+    expect(body).toContain("getClickOffsetInElement")
+    expect(body).toContain("xPctInEl")
+    expect(body).toContain("yPctInEl")
+    // the anchor is stored on the new pin
+    expect(body).toMatch(/anchor[,\s}]/)
+  })
+
+  it("handlePinSubmit ships anchor_id + pin_x_pct + pin_y_pct + resolved_anchor_id (the captured anchor reaches the create)", () => {
+    // End of the thread: the fields captured at click time are sent on create.
+    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
+    const body = RESULT_SRC.slice(start, start + 1400)
+    expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
+    expect(body).toContain("pin_x_pct:")
+    expect(body).toContain("pin_y_pct:")
+    expect(body).toMatch(/resolved_anchor_id:\s*serializeAnchor\(pin\.anchor\)/)
+  })
+
+  it("the VIEW threads the capture callbacks into the extracted leaves (onStageClick→MarkOverlay, onPinSubmit→PrototypeMarkLayer onSubmitComment)", () => {
+    // WHY this test exists: the two integration tests above prove the leaves
+    // MOUNT and the handlers EXIST — but a leaf renders fine and the handler
+    // stays defined even if PostGenerationResultView stops passing the callback
+    // down. That's the load-bearing "prop dropped mid-tree" bug: the click→submit
+    // thread is silently severed while every other test stays green. The ONLY
+    // thing that proves the view→leaf wiring is the wiring itself in the source.
+    //
+    // Tolerant against the ACTUAL formatting in PostGenerationResult.tsx:
+    //   MarkOverlay is a single-line element; PrototypeMarkLayer is multi-line
+    //   (so [\s\S]*? bridges the tag name and the prop). Both fail if the
+    //   respective prop wiring is removed.
+    const markOverlayWiring =
+      /<MarkOverlay[\s\S]*?onStageClick=\{onStageClick\}[\s\S]*?\/>/
+    const markLayerWiring =
+      /<PrototypeMarkLayer[\s\S]*?onSubmitComment=\{onPinSubmit\}[\s\S]*?\/>/
+    expect(RESULT_SRC).toMatch(markOverlayWiring)
+    expect(RESULT_SRC).toMatch(markLayerWiring)
+  })
+})
+
 // ─── In-tab title-bar restructure tests ──────────────────────────────────────
 describe("DaControlBar + PostGenerationResultView — isInTab title-bar restructure", () => {
   it("isInTab: renders the back button (da-titlebar-back) in the title bar", () => {
