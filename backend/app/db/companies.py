@@ -12,18 +12,39 @@ from app.db.client import require_client, retry_on_disconnect
 
 @retry_on_disconnect
 def list_companies() -> list[dict]:
-    """All companies (tenants), shaped {id, slug, display_name}.
+    """All companies (tenants), shaped {id, slug, display_name,
+    notification_settings}.
 
-    Used by the scheduler to iterate every tenant for the KG-synthesis cycle.
+    Used by the scheduler to iterate every tenant for the KG-synthesis cycle and
+    to read each company's configured timezone (notification_settings.timezone)
+    so the weekly brief fires Monday 09:00 in the company's local time.
+
+    notification_settings is selected best-effort: the fake test Supabase + any
+    older schema without the column would 400 on an explicit select, so we fall
+    back to the legacy three-column select and default notification_settings to
+    {} (resolve_timezone then uses the UTC default). The live schema has the
+    JSONB column (20260525150000_onboarding_workspace.sql), so prod returns it.
     """
     client = require_client()
-    result = (
-        client.table("companies")
-        .select("id, slug, display_name")
-        .order("slug", desc=False)
-        .execute()
-    )
-    return result.data or []
+    try:
+        result = (
+            client.table("companies")
+            .select("id, slug, display_name, notification_settings")
+            .order("slug", desc=False)
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        result = (
+            client.table("companies")
+            .select("id, slug, display_name")
+            .order("slug", desc=False)
+            .execute()
+        )
+        rows = result.data or []
+        for row in rows:
+            row.setdefault("notification_settings", {})
+        return rows
 
 
 @retry_on_disconnect
