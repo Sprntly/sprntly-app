@@ -56,6 +56,19 @@ type Props = {
    *  toggle is NOT rendered (it has been lifted into the control bar). The stage
    *  class still tracks `platform`, so canvas width still switches. */
   hideToggle?: boolean
+  /** C2a: optional control group rendered in the browser-frame head, to the
+   *  right of the platform toggle (e.g. the public viewer's Mark + Comment
+   *  buttons). Purely additive — when undefined nothing extra renders, so the
+   *  signed-in PostGenerationResult call site (which passes no headControls) is
+   *  byte-for-byte unchanged. */
+  headControls?: ReactNode
+  /** C2b: optional overlay rendered INSIDE `.proto-stage` (which is
+   *  position:relative), layered OVER the iframe. The public viewer passes the
+   *  mark overlay + pin layer here so marking renders on top of the prototype.
+   *  Purely additive — undefined renders nothing, so the signed-in
+   *  PostGenerationResult call site (which keeps its own `.da-stage` overlay and
+   *  passes no stageOverlay) is byte-for-byte unchanged. */
+  stageOverlay?: ReactNode
 }
 
 export function PrototypeViewer({
@@ -67,6 +80,8 @@ export function PrototypeViewer({
   platform: platformProp,
   onPlatformChange,
   hideToggle = false,
+  headControls,
+  stageOverlay,
 }: Props) {
   // UX-EXPLORE (throwaway — REVERT): controlled when a `platform` prop is given;
   // otherwise own the state locally as before. Either way `platform` below is the
@@ -122,6 +137,12 @@ export function PrototypeViewer({
               </button>
             </div>
           )}
+          {/* C2a: right-aligned head control group (public viewer's Mark +
+              Comment buttons). The `.proto-url` flex:1 pushes this to the right
+              edge alongside the toggle. Renders nothing when omitted. */}
+          {headControls && (
+            <div className="proto-head-controls">{headControls}</div>
+          )}
         </div>
         {/* The chrome slot is ALWAYS rendered (even when `chrome` is undefined)
             so the testid stays queryable and the overlay has a stable mount
@@ -144,6 +165,9 @@ export function PrototypeViewer({
             sandbox="allow-scripts allow-same-origin allow-forms"
             className="da-prototype-iframe"
           />
+          {/* C2b: optional marking overlay, layered over the iframe inside the
+              position:relative stage. Undefined → nothing (signed-in path). */}
+          {stageOverlay}
         </div>
       </div>
     </div>

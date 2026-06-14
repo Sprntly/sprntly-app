@@ -78,6 +78,16 @@ _GITHUB_MAX_UI_FILES = 12
 _GITHUB_MAX_UI_FILE_BYTES = 96_000
 _GITHUB_EXPLICIT_FILE_BYTES = 128_000
 
+# Monorepo frontend-subdir probe order. The gather only knows how to parse
+# root-relative paths (e.g. "app/globals.css"), but monorepos keep the frontend
+# under a subdir. We detect the winning subdir by probing "<prefix>package.json"
+# in this order and pick the FIRST that exists. "" (repo root) stays first so a
+# plain single-package repo behaves exactly as before. The detected prefix is
+# prepended to every fetch path, then STRIPPED back off when keying the fetched
+# dict / detection-path list so github_gather.py keeps seeing root-relative keys
+# and needs no change.
+_GITHUB_FRONTEND_PREFIXES = ("", "web/", "apps/web/", "frontend/", "client/")
+
 
 
 def _luminance(hex_color: str) -> float:
@@ -703,6 +713,7 @@ class GithubExtractor:
         branch: str | None,
         *,
         max_bytes: int = _GITHUB_EXPLICIT_FILE_BYTES,
+        truncate: bool = False,
     ) -> str | None:
         payload = self._github_get_contents(repo_full_name, path, branch) or {}
         if isinstance(payload, list):
@@ -711,20 +722,59 @@ class GithubExtractor:
             size = int(payload.get("size") or 0)
         except (TypeError, ValueError):
             return None
-        if size > max_bytes:
-            return None
         content = payload.get("content")
         if payload.get("encoding") != "base64" or not isinstance(content, str):
             return None
+        # Oversize handling: UI component files (truncate=False) still DROP — a
+        # half-read .tsx is useless. Design/CSS files (truncate=True) TRUNCATE to
+        # max_bytes instead: a large globals.css (e.g. ~300KB) carries its `:root`
+        # design tokens at the very top, so the first max_bytes is enough for the
+        # token gather, whereas dropping it silently lost the brand tokens for any
+        # real-world stylesheet bigger than the cap.
+        if size > max_bytes and not truncate:
+            return None
         try:
-            return base64.b64decode(content).decode("utf-8", errors="ignore")
+            raw = base64.b64decode(content)
+            if truncate and len(raw) > max_bytes:
+                raw = raw[:max_bytes]
+            return raw.decode("utf-8", errors="ignore")
         except Exception:
             return None
 
-    def _list_ui_files(self, repo_full_name: str, branch: str | None) -> list[tuple[str, str]]:
+    def _detect_frontend_prefix(self, repo_full_name: str, branch: str | None) -> str:
+        """Return the winning frontend-subdir prefix for this repo.
+
+        Probes ``<prefix>package.json`` across ``_GITHUB_FRONTEND_PREFIXES`` (root
+        first) and returns the FIRST prefix whose ``package.json`` exists. Falls
+        back to ``""`` (repo root) when none is found, so non-monorepo repos behave
+        exactly as before. Uses the lightweight contents-metadata call rather than a
+        body fetch so prefix detection costs at most one HEAD-equivalent per prefix.
+        """
+        for prefix in _GITHUB_FRONTEND_PREFIXES:
+            if not prefix:
+                continue  # root is the implicit fallback; only confirm subdirs
+            payload = self._github_get_contents(
+                repo_full_name, f"{prefix}package.json", branch
+            )
+            if isinstance(payload, dict) and payload.get("type") == "file":
+                return prefix
+        return ""
+
+    def _list_ui_files(
+        self, repo_full_name: str, branch: str | None, prefix: str = ""
+    ) -> list[tuple[str, str]]:
+        """List candidate UI component files under the (prefixed) UI dirs.
+
+        Probes ``<prefix><dir>`` for each ``_GITHUB_UI_DIRS`` entry but returns
+        each file keyed by its ROOT-RELATIVE path (prefix stripped) so downstream
+        gather strategies — which match on root-relative paths — keep working
+        unchanged in a monorepo.
+        """
         out: list[tuple[str, str]] = []
         for directory in _GITHUB_UI_DIRS:
-            payload = self._github_get_contents(repo_full_name, directory, branch)
+            payload = self._github_get_contents(
+                repo_full_name, f"{prefix}{directory}", branch
+            )
             if not isinstance(payload, list):
                 continue
             for item in payload:
@@ -738,7 +788,10 @@ class GithubExtractor:
                     continue
                 if not self._is_likely_component_file(name):
                     continue
-                out.append((path, name))
+                # Strip the detected prefix so the returned (path, name) is
+                # root-relative; the adapter fetches at <prefix><path> below.
+                rel_path = path[len(prefix):] if prefix and path.startswith(prefix) else path
+                out.append((rel_path, name))
         return out
 
     def _is_likely_component_file(self, name: str) -> bool:
@@ -762,11 +815,21 @@ class GithubExtractor:
         if not repo_full_name or "/" not in repo_full_name:
             return {}
 
+        # Detect the frontend subdir (monorepo-aware) exactly as extract_raw_signals
+        # does: monorepos keep the UI primitives under a subdir like "web/", so we
+        # probe "<prefix>package.json" once and prepend the winning prefix to every
+        # strict-UI-dir listing below. Non-monorepo repos resolve prefix="" and
+        # behave identically. The fetch path uses the GitHub-API-returned (already
+        # prefix-inclusive) item path, so bodies still resolve under the subdir.
+        prefix = self._detect_frontend_prefix(repo_full_name, branch)
+
         _STRICT_UI_DIRS = ("components/ui", "src/components/ui", "app/components/ui")
         out: dict[str, str] = {}
 
         for directory in _STRICT_UI_DIRS:
-            payload = self._github_get_contents(repo_full_name, directory, branch)
+            payload = self._github_get_contents(
+                repo_full_name, f"{prefix}{directory}", branch
+            )
             if not isinstance(payload, list):
                 continue
             for item in payload:
@@ -815,19 +878,28 @@ class GithubExtractor:
         if not repo_full_name or "/" not in repo_full_name:
             return RawSignals(provider=self.provider, ref=ref, signals={})
 
+        # ── Step 0: Detect the frontend subdir (monorepo-aware) ──
+        # Monorepos keep the frontend (and its globals.css / tailwind config /
+        # package.json) under a subdir like "web/". Detect it once; everything
+        # below probes "<prefix><root-relative-path>" but keys the fetched dict
+        # and the detection-path list by the ROOT-RELATIVE path so the gather
+        # strategies (which match exact root-relative paths) need no change.
+        prefix = self._detect_frontend_prefix(repo_full_name, branch)
+
         # ── Step 1: Fetch package.json and the bounded design-file listing ──
         # Read package.json first so we can extract deps for detection.
         # Then fetch each design-file path within the explicit-file byte cap.
         # We record which paths are present (regardless of whether their body
         # fits the cap) so the strategy detector can do path-glob checks.
 
-        fetched_design: dict[str, str] = {}  # path -> text (already-fetched bodies)
-        all_design_paths: list[str] = []     # paths that exist in the repo (for detection)
+        fetched_design: dict[str, str] = {}  # root-rel path -> text (already-fetched bodies)
+        all_design_paths: list[str] = []     # root-rel paths present in the repo (for detection)
         deps: set[str] = set()
 
         for path in _GITHUB_DESIGN_FILES:
-            text = self._fetch_text_file(repo_full_name, path, branch,
-                                         max_bytes=_GITHUB_EXPLICIT_FILE_BYTES)
+            text = self._fetch_text_file(repo_full_name, f"{prefix}{path}", branch,
+                                         max_bytes=_GITHUB_EXPLICIT_FILE_BYTES,
+                                         truncate=True)
             if text is None:
                 continue
             all_design_paths.append(path)
@@ -852,7 +924,15 @@ class GithubExtractor:
         # which strategy won.  The file listing is already bounded to _GITHUB_MAX_UI_FILES
         # inside _list_ui_files; we enforce the cap here as well so callers that
         # substitute a test double cannot accidentally exceed it.
-        ui_listing = self._list_ui_files(repo_full_name, branch)
+        # _list_ui_files returns ROOT-RELATIVE paths (prefix already stripped); we
+        # fetch each body at "<prefix><path>" but key it back by the root-relative
+        # path so the gather strategies see unchanged keys.
+        # Pass the prefix only when non-empty so the common (root) path keeps the
+        # historical two-argument call shape that existing callers / test doubles expect.
+        if prefix:
+            ui_listing = self._list_ui_files(repo_full_name, branch, prefix)
+        else:
+            ui_listing = self._list_ui_files(repo_full_name, branch)
         ui_fetched = 0
         for path, _name in ui_listing:
             if ui_fetched >= _GITHUB_MAX_UI_FILES:
@@ -860,7 +940,7 @@ class GithubExtractor:
             if path in fetched_design:
                 continue  # already fetched above (counts against the cap only once)
             text = self._fetch_text_file(
-                repo_full_name, path, branch, max_bytes=_GITHUB_MAX_UI_FILE_BYTES
+                repo_full_name, f"{prefix}{path}", branch, max_bytes=_GITHUB_MAX_UI_FILE_BYTES
             )
             if text is not None:
                 fetched_design[path] = text

@@ -88,6 +88,9 @@
   justify-content: space-between;
 }
 .design-agent-surface .comments-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 13px;
   font-weight: 600;
   color: var(--ink);
@@ -131,7 +134,36 @@
 }
 .design-agent-surface .comment-author { color: var(--ink); font-weight: 600; }
 .design-agent-surface .comment-timestamp { color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; }
-.design-agent-surface .comment-resolve-btn { padding: 4px 10px; font-size: 12px; }
+/* Single consolidated resolve check (David's `.pc-resolve`): circular, bordered,
+   pushed to the right edge of the card header; green-filled when resolved. The
+   `--static` variant is the read-only/public mount (display-only, no hover). */
+.design-agent-surface .comment-resolve-btn {
+  flex-shrink: 0;
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+.design-agent-surface button.comment-resolve-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent-alpha-18);
+  background: var(--accent-soft);
+}
+.design-agent-surface .comment-resolve-btn.resolved {
+  color: var(--surface);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.design-agent-surface .comment-resolve-btn--static { cursor: default; }
 
 /* ── Comment composer (CommentsPanel) ─────────────────────────────────── */
 .design-agent-surface .comment-composer {
@@ -204,6 +236,74 @@
   background: var(--danger-soft);
   border-radius: var(--radius-sm);
   margin: 0;
+}
+
+/* ── Public viewer name-capture form (PublicTokenViewer) ──────────────────
+   Reuses the .comment-composer block idiom + .comment-composer-input field
+   idiom so the anon name prompt reads as native to the comments surface. */
+.design-agent-surface .da-viewer-name-form {
+  border-top: 1px solid var(--line);
+  padding: 12px 13px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.design-agent-surface .da-viewer-name-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0;
+}
+.design-agent-surface .da-viewer-name-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.design-agent-surface .da-viewer-name-input {
+  flex: 1 1 120px;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 12.5px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+}
+.design-agent-surface .da-viewer-name-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.design-agent-surface .da-viewer-name-submit { align-self: flex-end; }
+.design-agent-surface .da-viewer-name-notice {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin: 0;
+}
+
+/* ── Shared spinner ────────────────────────────────────────────────────── */
+@keyframes da-spin { to { transform: rotate(360deg); } }
+.design-agent-surface .da-spinner {
+  flex-shrink: 0;
+  margin-top: 1px;
+  animation: da-spin 0.9s linear infinite;
+}
+
+/* ── Prototype generating card ─────────────────────────────────────────── */
+.design-agent-surface .da-prototype-generating {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-top: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent-alpha-14);
+  background: var(--accent-muted);
+}
+.design-agent-surface .da-prototype-generating-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-ink);
 }
 
 /* ── Completion bar (CompletionBar) ───────────────────────────────────── */
@@ -452,6 +552,12 @@
 }
 .design-agent-surface .da-public-root { display: flex; flex-direction: column; gap: 16px; }
 
+/* public /p: establish 100dvh root + flex chain so the prototype fills the viewport (no bottom gap) */
+.da-public-root { min-height: 100dvh; display: flex; flex-direction: column; }
+.da-public-root > .design-agent-surface { flex: 1; min-height: 0; }
+.da-public-root .da-prototype-viewer { flex: 1; min-height: 0; }
+.da-public-root .proto-frame { flex: 1; min-height: 0; }
+
 /* ── Empty state (prd-design empty surface) ───────────────────────────── */
 .design-agent-surface .prd-design-empty {
   padding: 28px 24px;
@@ -545,7 +651,7 @@
   width: 100%;
   margin-top: 2px;
 }
-.design-agent-surface .src-not-connected {
+.src-not-connected {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -553,13 +659,13 @@
   font-size: 12.5px;
   font-weight: 500;
 }
-.design-agent-surface .src-not-connected.muted { color: var(--muted); }
+.src-not-connected.muted { color: var(--muted); }
 .design-agent-surface .src-connected {
   color: var(--ink-2);
   font-size: 12.5px;
   font-weight: 500;
 }
-.design-agent-surface .src-connect-btn {
+.src-connect-btn {
   padding: 7px 13px;
   border: 1px solid var(--ink);
   background: var(--ink);
@@ -569,13 +675,13 @@
   font-weight: 500;
   cursor: pointer;
 }
-.design-agent-surface .src-connect-btn:hover { background: var(--ink-2); }
-.design-agent-surface .src-connect-btn.ghost {
+.src-connect-btn:hover { background: var(--ink-2); }
+.src-connect-btn.ghost {
   background: var(--surface);
   color: var(--ink-2);
   border-color: var(--line-strong);
 }
-.design-agent-surface .src-connect-btn.ghost:hover {
+.src-connect-btn.ghost:hover {
   border-color: var(--ink-3);
   background: var(--surface-3);
 }
@@ -763,6 +869,21 @@
   background: var(--surface);
   color: var(--ink);
   box-shadow: var(--shadow-sm);
+}
+/* C2a: wrapper for the head control group (public viewer Mark + Comment). Sits
+   to the right of the platform toggle in the frame head; the inner group reuses
+   the `.platform-toggle` look. Icon-only buttons get a square-ish hit area. */
+.design-agent-surface .proto-head-controls {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+.design-agent-surface .proto-head-controls-group button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 10px;
 }
 .design-agent-surface .proto-stage {
   position: relative;
@@ -1058,6 +1179,44 @@
   flex-shrink: 0;
 }
 
+/* ── Shared radio-group / radio-pill (SourceTypePills) — unscoped / global ──
+ * The modal-scoped rules above bind `.radio-group` / `.radio-pill` under the
+ * compound `.design-agent-surface.modal`, so they only matched the generate
+ * modal. This block is FULLY UNSCOPED (no `.design-agent-surface` ancestor) so
+ * the pills render identically wherever the component appears — including the
+ * Settings pane (DesignSourceSettings), which is NOT inside any
+ * `.design-agent-surface`. The modal-scoped rules above remain untouched and
+ * continue to win via specificity for the modal, so the modal looks identical.
+ * Token-only; no colour literals. */
+.radio-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.radio-pill {
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  font-family: var(--font-body);
+}
+.radio-pill:hover {
+  border-color: var(--ink-3);
+}
+.radio-pill.selected {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--surface);
+}
+/* The modal-scoped overrides (padding, gen-inline-field layout) still apply
+   via the higher-specificity `.design-agent-surface.modal .radio-pill` rules
+   above — no changes needed there. */
+
 /* ===========================================================================
  * David's post-gen prototype-section layout.
  * Replaces the prior `.da-canvas` 3-equal-column grid. Replicates the MECHANICS
@@ -1282,6 +1441,19 @@
   border-radius: var(--radius-lg);
   background: var(--surface);
 }
+
+/* In-tab prototype editor (PrototypeRoute, wrapped in .da-prototype-page) fills
+   the content area flush: paired with .main--flush (no gutter) it drops the card
+   boxing too. The launcher/overlay mount is NOT under .da-prototype-page, so its
+   .da-ready stays boxed. */
+.design-agent-surface.da-prototype-page .da-ready {
+  border: 0;
+  border-radius: 0;
+}
+
+/* fill .main's resolved height so .da-ready can grow to viewport — scoped to the in-tab editor mount only */
+.design-agent-surface.da-prototype-page { height: 100%; }
+.design-agent-surface.da-prototype-page .design-agent-result { flex: 1; min-height: 0; }
 
 /* LEFT collapsible sidebar (OPEN by default). Collapses by sliding out, David's
    `.proto-chat.hidden { margin-left:-300px }`. */
@@ -1687,6 +1859,34 @@
 }
 .design-agent-surface.proto-gen-overlay .proto-gen-step--entering {
   animation: protoGenStepEnter 0.25s ease-out forwards;
+}
+/* Exit animation: played when the user clicks "Notify me when ready" */
+@keyframes protoGenFadeOut {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.97); }
+}
+.design-agent-surface.proto-gen-overlay.proto-gen-exiting {
+  animation: protoGenFadeOut 0.2s ease-in forwards;
+  pointer-events: none;
+}
+
+/* Stable footer slot for the "Notify me when ready" button — reserves min-height
+   so the layout doesn't reflow as steps stream into the list above. */
+.design-agent-surface.proto-gen-overlay .proto-gen-footer {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 20px;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-btn {
+  /* inherits .btn .btn-ghost .btn-sm; no override needed here */
+}
+/* Hover: plain underlined text — no background/border box. */
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-btn:hover {
+  text-decoration: underline;
+  background: transparent;
+  border-color: transparent;
 }
 /* === generation loading overlay (end) ===================================== */
 
@@ -2563,7 +2763,6 @@
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
-  margin-left: 7px;
 }
 
 /* Change 2 — avatar tint variants (cycle by author hash) */
@@ -2593,32 +2792,51 @@
   border-color: var(--line);
 }
 
-/* Change 3 — "Step N" pin chip */
+/* "Step N" pin pill — inline at the start of the comment body (David's
+   `.pc-anchor`): brand-tinted, sits on the first text line. */
 .design-agent-surface .comment-step-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  border: 1px solid var(--line-strong);
-  border-radius: 20px;
-  padding: 2px 8px;
-  font-size: 11px;
-  color: var(--ink-2);
-  margin-bottom: 4px;
+  gap: 3px;
+  border: 1px solid var(--accent-alpha-18);
+  border-radius: 5px;
+  padding: 1px 6px;
+  margin-right: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  vertical-align: middle;
 }
 
-/* Change 4 — resolve-check indicator */
-.design-agent-surface .comment-resolve-indicator {
+/* (C1 Slice B / PART 2) The `.comment-resolve-indicator` rules were removed here:
+   the PostGenerationResult `.da-right` pin-rows now reuse the shared
+   `.comment-resolve-btn` (defined above), so the inline indicator class is dead. */
+
+/* Header message icon + close (X) — David's `.proto-comments-panel-top`. */
+.design-agent-surface .comments-panel-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+}
+.design-agent-surface .comments-panel-close {
   flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--line-strong);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
 }
-.design-agent-surface .comment-resolve-indicator--resolved {
-  color: var(--accent);
+.design-agent-surface .comments-panel-close:hover {
+  color: var(--ink);
+  background: var(--surface-2);
 }
 
 /* Change 5 — footer send button + helper */
@@ -2664,3 +2882,129 @@
   box-shadow: var(--shadow-sm);
 }
 /* ── end CommentsPanel visual polish ─────────────────────────────────────── */
+
+/* ── In-tab handoff buttons (DaControlBar isInTab=true) ──────────────────────
+   Only the export + undo variants need dedicated classes; copy reuses
+   .da-ctl-icon (icon-only square) which already exists above. */
+
+/* Export — same height/padding as .da-ctl-done but neutral ink (not accent). */
+.design-agent-surface .da-ctl-export {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 14px;
+  font-size: 12.5px;
+}
+
+/* Undo — same dimensions as Export; icon + label inline-flex. */
+.design-agent-surface .da-ctl-undo {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+/* Stale-handoff banner row — appears directly under the control bar
+   (in-tab only; the launcher/overlay uses CompletionBar's own .stale-banner).
+   The row is inside .da-controlbar-r (a flex row), so we break it out via
+   position:absolute anchored to .da-controlbar (which gets position:relative). */
+.design-agent-surface .da-controlbar {
+  position: relative;
+}
+.design-agent-surface .da-stale-row {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  padding: 4px 0 0;
+  z-index: 1;
+}
+
+/* ── In-tab title bar (isInTab=true only — .da-controlbar--titlebar) ───────────
+   Overrides the shared .da-controlbar sizing+padding for the /prototype page.
+   The launcher (.da-controlbar without this modifier) is BYTE-IDENTICAL. */
+.design-agent-surface .da-controlbar--titlebar {
+  height: 54px;
+  padding: 0 22px;
+  gap: 10px;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: var(--surface);
+}
+
+/* Back icon button (in-tab title bar left) */
+.design-agent-surface .da-ctl-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  color: var(--ink-3);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+.design-agent-surface .da-ctl-back:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+/* Icon-only right-cluster buttons (in-tab: no labels, 30x30) */
+.design-agent-surface .da-controlbar--titlebar .da-ctl-icon {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 7px;
+}
+.design-agent-surface .da-controlbar--titlebar .da-ctl-icon--square {
+  width: 30px;
+  height: 30px;
+}
+
+/* Platform toggle: left-of-center (small margin from the back button) */
+.design-agent-surface .da-controlbar--titlebar .da-controlbar-l {
+  gap: 14px;
+}
+
+/* PRD title display in the in-tab title bar */
+.design-agent-surface .da-titlebar-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+
+/* Left panel badge (DESIGN AGENT pill) */
+.design-agent-surface .da-left-badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-radius: 30px;
+  padding: 1px 8px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Brief-card static prototype preview image */
+.fc-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 6px;
+  display: block;
+}

@@ -184,7 +184,11 @@ CREATE TABLE prototypes (
     pending_question       TEXT,
     error                  TEXT,
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
-    completed_at           TEXT
+    completed_at           TEXT,
+    share_mode             TEXT NOT NULL DEFAULT 'private'
+                           CHECK (share_mode IN ('private', 'public', 'passcode')),
+    share_token            TEXT UNIQUE,
+    share_passcode_hash    TEXT
 );
 """
 

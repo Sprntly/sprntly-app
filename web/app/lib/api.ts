@@ -861,6 +861,15 @@ export type FigmaFile = {
   name: string
 }
 
+export type BriefPrototypeReadiness = { ready: boolean; preview_image_url: string | null }
+export type BriefPrototypeMapEntry = {
+  insight_index: number
+  prd_id: number
+  prd_title: string
+  prototype: BriefPrototypeReadiness | null
+}
+export type BriefPrototypeMap = { brief_id: number; entries: BriefPrototypeMapEntry[] }
+
 export const designAgentApi = {
   /** Kicks off prototype generation in the background; returns immediately
    *  with a prototype_id. Client should poll designAgentApi.get(id) (via
@@ -967,10 +976,13 @@ export const designAgentApi = {
   // ── F8 anchored comments (P3-03) ──────────────────────────────────────────
   /** Public-route comment write (external viewer on `/p/<token>`): the token
    *  is the access primitive (F6), so no auth is required. Hits the P3-02
-   *  public route; the backend attributes the comment to the `external` author. */
+   *  public route. Phase 3: an optional `viewer_name` is the viewer's self-
+   *  supplied display name; the backend maps it onto the comment author (falling
+   *  back to "Anonymous"). Omitted on the signed-in surface. Additive field. */
   createCommentByToken: (token: string, body: {
     anchor_id: string; body: string;
     pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+    viewer_name?: string;
   }) =>
     api.post<CommentRecord>(
       `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
@@ -991,6 +1003,11 @@ export const designAgentApi = {
     api.get<CommentRecord[]>(
       `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
     ),
+  /** Authed comment read for the signed-in editor: lists every comment for the
+   *  prototype (all statuses). Hits the authed route `GET /v1/design-agent/{id}/comments`
+   *  — the by-token route 404s in the editor context where there is no share token. */
+  listComments: (prototypeId: number) =>
+    api.get<CommentRecord[]>(`/v1/design-agent/${prototypeId}/comments`),
   /** Internal (authed) resolve — external viewers cannot resolve (spec §4
    *  Stage 2). Addressed by prototype id; renders only on the signed-in mount
    *  where a `prototypeId` is supplied. */
@@ -1092,6 +1109,10 @@ export const designAgentApi = {
    *  the caller should fall back to the manual-picker flow in that case. */
   locate: (body: { prd_id: number; github_repo: string; ref?: string | null }) =>
     api.post<LocateResponse>("/v1/design-agent/locate", body),
+  briefPrototypeMap: (briefId: number): Promise<BriefPrototypeMap> =>
+    api.get<BriefPrototypeMap>(
+      `/v1/design-agent/brief-prototype-map?brief_id=${encodeURIComponent(String(briefId))}`,
+    ),
 }
 
 /** One ranked screen candidate from the locate pipeline (map → LLM → gate). */

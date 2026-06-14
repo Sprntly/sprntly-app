@@ -33,6 +33,16 @@ function render(
   )
 }
 
+// Intentionally shared across the DA surface + the design-source settings pane (DesignSourceSettings, cd1cc20) + BriefChat — these render outside .design-agent-surface, so the strict surface-scope check exempts them BY NAME (any other unscoped selector still fails).
+const UNSCOPED_SRC_ALLOWLIST = new Set([
+  ".src-not-connected {",
+  ".src-not-connected.muted { color: var(--muted); }",
+  ".src-connect-btn {",
+  ".src-connect-btn:hover { background: var(--ink-2); }",
+  ".src-connect-btn.ghost {",
+  ".src-connect-btn.ghost:hover {",
+])
+
 const drawerSource = readFileSync(
   resolve(here, "../DesignAgentDrawer.tsx"),
   "utf8",
@@ -234,18 +244,26 @@ describe("appended src-* CSS is scoped + token-only (AC6)", () => {
     const selectorLines = block
       .split("\n")
       .filter((l) => l.includes("{") && l.includes(".src-"))
+      // Exempt the intentionally-shared, unscoped src-* selectors BY NAME
+      // (exact-match Set, not a `.src-` prefix — a NEW `.src-foo {` leak still fails).
+      .filter((l) => !UNSCOPED_SRC_ALLOWLIST.has(l.trim()))
     expect(selectorLines.length).toBeGreaterThan(0)
     for (const line of selectorLines) {
       expect(line.trim().startsWith(".design-agent-surface")).toBe(true)
     }
+    // Exact-match guard: a NEW accidental unscoped src-* selector is NOT exempt.
+    expect(UNSCOPED_SRC_ALLOWLIST.has(".src-foo {")).toBe(false)
     // No literal colour anywhere in the appended block — all var(--…).
     expect(block).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
     expect(block).not.toMatch(/\brgba?\(/)
     expect(block).not.toMatch(/\bhsla?\(/)
-    // The src-* family is present.
+    // The src-* family is present. `.src-connect-btn` is intentionally
+    // UNSCOPED (shared with DesignSourceSettings, cd1cc20 — see allowlist), so
+    // it appears bare; the scoped-only members keep their `.design-agent-surface`
+    // ancestor.
     for (const sel of [
       ".design-agent-surface .src-block",
-      ".design-agent-surface .src-connect-btn",
+      ".src-connect-btn",
       ".design-agent-surface .src-fallback-note",
     ]) {
       expect(block).toContain(sel)

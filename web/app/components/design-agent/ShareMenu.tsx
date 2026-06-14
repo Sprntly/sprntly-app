@@ -17,6 +17,7 @@
 
 import { useState } from "react"
 import { designAgentApi } from "../../lib/api"
+import { useCompany } from "../../context/CompanyContext"
 
 export type ShareMode = "private" | "public" | "passcode"
 
@@ -30,6 +31,10 @@ export type ShareMenuProps = {
    *  the share-gated CommentsPanel mounts without a re-mount. Optional so the
    *  public-viewer composition and existing callers keep type-checking. */
   onShared?: (token: string | null) => void
+  /** Cosmetic company slug for the public /p/<slug>/<token> URL. Optional — when
+   *  omitted the container self-sources it from `useCompany().activeCompany`
+   *  (safe outside a provider: it returns the demo default, never throws). */
+  companySlug?: string
 }
 
 export type ShareMenuViewProps = {
@@ -139,22 +144,25 @@ export async function runSelectMode({
   }
 }
 
-/** Build the public share URL from the opaque token (F6). */
-export function buildShareUrl(token: string, origin: string): string {
-  return `${origin}/p/${token}`
+// INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
+/** Build the public share URL from the opaque token (F6) + the company slug. */
+export function buildShareUrl(token: string, origin: string, companySlug: string): string {
+  return `${origin}/p/${companySlug}/${token}`
 }
 
 /** Copy the public share URL to the clipboard. Resolves with the copied URL. */
 export async function runCopyShareLink({
   token,
   origin,
+  companySlug,
   clipboard,
 }: {
   token: string
   origin: string
+  companySlug: string
   clipboard: Pick<Clipboard, "writeText">
 }): Promise<string> {
-  const url = buildShareUrl(token, origin)
+  const url = buildShareUrl(token, origin, companySlug)
   await clipboard.writeText(url)
   return url
 }
@@ -178,9 +186,9 @@ export function ShareMenuView({
     <div className="share-menu" data-testid="share-menu">
       <fieldset className="share-mode-fieldset">
         <legend className="field-label">Sharing</legend>
-        {/* Three contiguous native radios with explicit id+htmlFor association
+        {/* Two contiguous native radios with explicit id+htmlFor association
             (P6-22). Keep them adjacent with no interleaved focusable element so
-            native arrow-key traversal walks Private→Public→Passcode. */}
+            native arrow-key traversal walks Private→Public. */}
         <div className="share-mode-option" data-testid="share-mode-private">
           <input
             type="radio"
@@ -205,42 +213,9 @@ export function ShareMenuView({
           />
           <label htmlFor="share-mode-public">Public — anyone with the link</label>
         </div>
-        <div className="share-mode-option" data-testid="share-mode-passcode">
-          <input
-            type="radio"
-            id="share-mode-passcode"
-            name="share-mode"
-            value="passcode"
-            checked={mode === "passcode"}
-            disabled={busy}
-            onChange={() => onSelectMode?.("passcode")}
-          />
-          <label htmlFor="share-mode-passcode">Passcode — anyone with link + passcode</label>
-        </div>
-        {/* Passcode value field — progressive disclosure: mounted ONLY when
-            Passcode is the selected mode. It stays LIFTED OUT of the passcode
-            radio's <label> so it is never interleaved in the radio focus order;
-            mounting/unmounting it does not change radio arrow-traversal (the
-            three native radios remain contiguous above). While mounted it is a
-            plain text field outside the radio group; the `busy` term keeps it
-            disabled through the optimistic window. */}
-        {mode === "passcode" && (
-          <div className="share-passcode-field">
-            <label htmlFor="share-passcode-input" className="share-passcode-label">
-              Passcode
-            </label>
-            <input
-              type="text"
-              id="share-passcode-input"
-              className="input"
-              data-testid="passcode-input"
-              placeholder="Set passcode"
-              value={passcode}
-              disabled={busy}
-              onChange={(e) => onPasscodeChange?.(e.target.value)}
-            />
-          </div>
-        )}
+        {/* Passcode mode is intentionally NOT surfaced in the UI: only Private +
+            Public radios render. "passcode" stays a valid ShareMode (backend
+            value + runApplyShareMode guard kept), simply never selectable here. */}
       </fieldset>
       {shareUrl && (
         <div className="share-link" data-testid="share-link">
@@ -269,13 +244,17 @@ export function ShareMenuView({
 
 /** Public component. Wires React state to the orchestration helpers and the
  *  canonical `designAgentApi`, then delegates rendering to the pure view. */
-export function ShareMenu({ prototypeId, initialMode, initialToken, onShared }: ShareMenuProps) {
+export function ShareMenu({ prototypeId, initialMode, initialToken, onShared, companySlug }: ShareMenuProps) {
   const [mode, setMode] = useState<ShareMode>(initialMode)
   const [token, setToken] = useState<string | null>(initialToken ?? null)
   const [passcode, setPasscode] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  // Prefer an explicitly-passed slug; otherwise self-source from the company
+  // context (returns the demo default outside a provider — never throws).
+  const { activeCompany } = useCompany()
+  const slug = companySlug ?? activeCompany
 
   async function selectMode(next: ShareMode) {
     await runSelectMode({
@@ -298,6 +277,7 @@ export function ShareMenu({ prototypeId, initialMode, initialToken, onShared }: 
       await runCopyShareLink({
         token,
         origin: window.location.origin,
+        companySlug: slug,
         clipboard: navigator.clipboard,
       })
       setCopied(true)
@@ -309,7 +289,7 @@ export function ShareMenu({ prototypeId, initialMode, initialToken, onShared }: 
 
   const shareUrl =
     mode !== "private" && token && typeof window !== "undefined"
-      ? buildShareUrl(token, window.location.origin)
+      ? buildShareUrl(token, window.location.origin, slug)
       : null
 
   return (

@@ -35,6 +35,7 @@ export function makeWorkspace(
       claude_code_handoff: false,
     },
     notification_settings: {},
+    design_source: null,
     onboarding_step: 1,
     onboarding_completed_at: null,
     ...over,

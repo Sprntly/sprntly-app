@@ -146,6 +146,11 @@ def start_prototype(
         "figma_file_key": figma_file_key,
         "website_url": website_url,
         "github_installation_id": github_installation_id,
+        # Every prototype is born with a stable share_token. share_mode stays its
+        # 'private' default so the token is present but never exposed (the public
+        # resolver 404s private rows); set_share_config flips the mode without
+        # rotating this token, giving one permanent /p/<slug>/<token> URL.
+        "share_token": str(uuid.uuid4()),
     }).execute()
     row_id = resp.data[0]["id"]
     # Inferred-scenario logged for observability; never written to the row.
@@ -448,7 +453,7 @@ def set_share_config(
     path — see find_prototype_by_share_token for that).
 
     Behaviour by mode:
-      - 'private'  → share_mode=private; share_token=NULL; share_passcode_hash=NULL
+      - 'private'  → share_mode=private; share_token PRESERVED (was: nulled); share_passcode_hash=NULL
       - 'public'   → share_mode=public;  share_token=uuid4() if NULL else preserved; hash=NULL
       - 'passcode' → share_mode=passcode; share_token=uuid4() if NULL else preserved; hash=argon2(passcode)
     Re-setting public→public (or passcode→passcode) does NOT rotate share_token
@@ -466,7 +471,9 @@ def set_share_config(
 
     patch: dict[str, Any] = {"share_mode": share_mode}
     if share_mode == "private":
-        patch["share_token"] = None
+        # share_token is PRESERVED on private (static-URL invariant): the public
+        # URL is stable across public→private→public toggles. Only the passcode
+        # hash is cleared so a re-public does not silently retain a stale gate.
         patch["share_passcode_hash"] = None
     else:
         # Preserve an existing token (F7) — only mint one when none exists yet.

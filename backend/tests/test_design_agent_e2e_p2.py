@@ -371,7 +371,9 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
         assert token, "public share must return a token"
         uuid.UUID(str(token))  # opaque UUID (F6)
 
-        # 8. UNAUTHENTICATED resolver → 200, minimum-disclosure 4-key body. (AC #3, #8)
+        # 8. UNAUTHENTICATED resolver → 200, minimum-disclosure body. (AC #3, #8)
+        # f7ed6e5 added company_slug — the cosmetic /p/<slug>/<token> URL segment
+        # (the one intentional disclosure beyond the original 4-key minimum).
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test"
         ) as unauth:
@@ -379,7 +381,8 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
             assert res.status_code == 200, res.text
             body = res.json()
             assert set(body.keys()) == {
-                "share_mode", "requires_passcode", "bundle_url", "is_complete"
+                "share_mode", "requires_passcode", "bundle_url", "is_complete",
+                "company_slug",
             }
             assert body["share_mode"] == "public"
             assert body["requires_passcode"] is False

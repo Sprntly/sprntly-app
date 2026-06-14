@@ -23,7 +23,20 @@
  */
 
 import { useState } from "react"
-import { designAgentApi } from "../../lib/api"
+// Re-export pure helpers for test compat — CompletionBar.test.tsx imports
+// runMarkComplete, runResume, runDownloadMarkdown, runCopyMarkdown from this module.
+export {
+  runMarkComplete,
+  runResume,
+  runDownloadMarkdown,
+  runCopyMarkdown,
+  STALE_MESSAGE,
+} from "./handoff-actions"
+import {
+  STALE_MESSAGE,
+  toMessage,
+  useHandoffActions,
+} from "./handoff-actions"
 
 export type CompletionBarProps = {
   /** Required only when `editable` is true (the mutation routes are addressed
@@ -50,79 +63,7 @@ export type CompletionBarViewProps = {
   onCopy?: () => void
 }
 
-/** Shown in both editable + read-only branches when a handoff was reopened
- *  (F15). The "out of date" wording is asserted by the stale-handoff AC. */
-const STALE_MESSAGE =
-  "This prototype was reopened after a handoff. The export bundle may be out of date."
-
-function toMessage(err: unknown, fallback: string): string {
-  return err instanceof Error ? err.message : fallback
-}
-
-// ---- orchestration helpers (pure, dependency-injected, SSR-free) ------------
-
-/** F14 — mark the prototype complete. */
-export async function runMarkComplete({
-  prototypeId,
-  api,
-}: {
-  prototypeId: number
-  api: Pick<typeof designAgentApi, "complete">
-}) {
-  return api.complete(prototypeId)
-}
-
-/** F15 — resume iteration on a completed prototype. */
-export async function runResume({
-  prototypeId,
-  api,
-}: {
-  prototypeId: number
-  api: Pick<typeof designAgentApi, "resume">
-}) {
-  return api.resume(prototypeId)
-}
-
-/**
- * F16 — fetch the markdown export and trigger a browser download. Uses the
- * global `document` / `URL` / `Blob` so tests can stub `document.createElement`
- * and `URL.createObjectURL` directly. Resolves with the markdown body; rejects
- * (propagating the underlying error, e.g. a 409 WIP) if the export fails.
- */
-export async function runDownloadMarkdown({
-  prototypeId,
-  api,
-}: {
-  prototypeId: number
-  api: Pick<typeof designAgentApi, "exportMarkdown">
-}): Promise<string> {
-  const md = await api.exportMarkdown(prototypeId)
-  const blob = new Blob([md], { type: "text/markdown;charset=utf-8" })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement("a")
-  a.href = url
-  a.download = `prototype-${prototypeId}-design-brief.md`
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-  return md
-}
-
-/** F16 — fetch the markdown export and copy it to the clipboard. */
-export async function runCopyMarkdown({
-  prototypeId,
-  api,
-  clipboard,
-}: {
-  prototypeId: number
-  api: Pick<typeof designAgentApi, "exportMarkdown">
-  clipboard: Pick<Clipboard, "writeText">
-}): Promise<string> {
-  const md = await api.exportMarkdown(prototypeId)
-  await clipboard.writeText(md)
-  return md
-}
+// ---- helpers and hook delegated to ./handoff-actions (see re-export above) --
 
 // ---- pure view --------------------------------------------------------------
 
@@ -256,9 +197,7 @@ export function CompletionBar({
   editable = true,
   onStateChange,
 }: CompletionBarProps) {
-  const [busy, setBusy] = useState(false)
   const [localComplete, setLocalComplete] = useState(isComplete)
-  const [error, setError] = useState<string | null>(null)
 
   if (
     editable &&
@@ -272,67 +211,10 @@ export function CompletionBar({
     )
   }
 
-  const canMutate = prototypeId != null
-
-  async function handleMarkComplete() {
-    if (!canMutate) return
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await runMarkComplete({ prototypeId: prototypeId!, api: designAgentApi })
-      setLocalComplete(res.is_complete)
-      onStateChange?.({ isComplete: res.is_complete, staleHandoff: false })
-    } catch (e) {
-      setError(toMessage(e, "Failed to mark complete"))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleResume() {
-    if (!canMutate) return
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await runResume({ prototypeId: prototypeId!, api: designAgentApi })
-      setLocalComplete(res.is_complete)
-      onStateChange?.({ isComplete: res.is_complete, staleHandoff: false })
-    } catch (e) {
-      setError(toMessage(e, "Failed to resume"))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleDownload() {
-    if (!canMutate) return
-    setBusy(true)
-    setError(null)
-    try {
-      await runDownloadMarkdown({ prototypeId: prototypeId!, api: designAgentApi })
-    } catch (e) {
-      setError(toMessage(e, "Failed to download"))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleCopy() {
-    if (!canMutate) return
-    setBusy(true)
-    setError(null)
-    try {
-      await runCopyMarkdown({
-        prototypeId: prototypeId!,
-        api: designAgentApi,
-        clipboard: navigator.clipboard,
-      })
-    } catch (e) {
-      setError(toMessage(e, "Failed to copy"))
-    } finally {
-      setBusy(false)
-    }
-  }
+  const { busy, error, markComplete, resume, download, copy } = useHandoffActions({
+    prototypeId,
+    onStateChange: (s) => { setLocalComplete(s.isComplete); onStateChange?.(s) },
+  })
 
   return (
     <CompletionBarView
@@ -342,10 +224,10 @@ export function CompletionBar({
       isStaleHandoff={isStaleHandoff}
       busy={busy}
       error={error}
-      onMarkComplete={handleMarkComplete}
-      onResume={handleResume}
-      onDownload={handleDownload}
-      onCopy={handleCopy}
+      onMarkComplete={markComplete}
+      onResume={resume}
+      onDownload={download}
+      onCopy={copy}
     />
   )
 }

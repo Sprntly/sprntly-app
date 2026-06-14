@@ -17,12 +17,12 @@ class Settings(BaseSettings):
     # AD15 backstop (P6-06): hard USD ceiling ABOVE the $0.50 soft cap. When a
     # run's projected next-iteration spend reaches this, agent_loop ABORTS (clean
     # terminal status, partial bundle salvaged) rather than degrade-and-continue.
-    # Default 2.00 only catches PATHOLOGICAL runs: the worst observed-legit run
+    # Default 5.00 only catches PATHOLOGICAL runs: the worst observed-legit run
     # hit $0.76 realized → $1.52 projected (2× projection), so the cap MUST stay
-    # > $1.52; 2.00 ⇒ abort fires only when realized ≥ $1.00 (2× worst legit, 4×
-    # the soft cap). Env-overridable via DESIGN_AGENT_HARD_CAP_USD; never lower
-    # below $1.52 (would catch legit runs).
-    design_agent_hard_cap_usd: float = 2.00
+    # > $1.52; 5.00 ⇒ abort fires only when realized ≥ $2.50 (well above the worst
+    # legit run, 10× the soft cap). Env-overridable via DESIGN_AGENT_HARD_CAP_USD;
+    # never lower than the soft cap, and never below the $1.52 legit-run floor.
+    design_agent_hard_cap_usd: float = 5.00
     # Vite build budget for a prototype gen (P6-21). Default 120s — the typical
     # scaffold builds in ~5-15s, but a cold node start, a large single-file emit,
     # or a busy host (esp. the colder prod EC2 build host) can exceed the prior

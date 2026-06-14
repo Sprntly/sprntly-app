@@ -38,15 +38,18 @@ import {
   runGenerateFlow,
   buildGenerateParams,
   DEFAULT_PLATFORM,
-  redirectToConnect,
   type TargetPlatform,
 } from "./DesignAgentDrawer"
+import { SourceConnectHint } from "./SourceConnectHint"
 import { getGenerateConnectorRowState } from "../../lib/generateConnectorRowState"
 import { IconClose } from "../shared/app-icons"
 import {
   LocateConfirmView,
   type LocateConfirmCandidate,
 } from "./ClarifyingQuestionSurface"
+import type { DesignSourcePreference } from "../../lib/onboarding/types"
+import { SourceTypePills } from "./SourceTypePills"
+import { GenerateLoadingState } from "./GenerateLoadingState"
 
 const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "desktop", label: "Desktop" },
@@ -54,13 +57,27 @@ const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "both", label: "Both" },
 ]
 
-const SOURCE_OPTIONS: { value: "figma" | "github" | "website"; label: string }[] = [
-  { value: "figma", label: "Figma" },
-  { value: "github", label: "From our codebase" },
-  { value: "website", label: "Website" },
-]
-
-type LocateFlowState = "idle" | "analysing" | "chip" | "ranked_confirm" | "unmapped"
+/**
+ * Single-modal phase machine for the generate-entry flow.
+ *
+ *   config            → the source/platform/instructions form (the resting state)
+ *   locating          → loading UI is visible while the screen-resolve call runs
+ *   picker            → an ambiguous match needs the user to pick a screen
+ *   unmapped-resolve  → no match; pick a screen or switch back to config
+ *   generating        → a real run exists; hand off to the loading screen + drawer
+ *
+ * The modal stays MOUNTED across every phase and only hands off (onGenStart /
+ * onKickoff / onGenDone) once a real prototype run has been kicked off. The key
+ * fix this encodes: the loading SCREEN is decoupled from the resolve CALL —
+ * `locating` mounts immediately on generate-click, and the resolve call fires
+ * behind it, so the user never stares at a frozen form.
+ */
+type FlowPhase =
+  | "config"
+  | "locating"
+  | "picker"
+  | "unmapped-resolve"
+  | "generating"
 
 /** Maps LocateCandidate[] to the shape LocateConfirmView expects. */
 export function mapLocateCandidates(ranked: LocateCandidate[]): LocateConfirmCandidate[] {
@@ -92,6 +109,11 @@ export function GenerateModal({
   onGenStart,
   onKickoff,
   onGenDone,
+  // Persisted design source preference. When set and the named source is
+  // healthy (connected + key/repo valid), the modal fires generation immediately
+  // without user interaction and closes itself. Pass null to always show.
+  savedPreference,
+  onSavePreference,
   // Injected for testing — bypass the async useEffect cycle so node-env vitest
   // can render the modal in a known connector/repo/source state without a DOM.
   // Omit in production; defaults preserve real behaviour.
@@ -99,10 +121,11 @@ export function GenerateModal({
   _testRepos,
   _testInitSource,
   _testInitRepoSel,
-  _testLocateState,
+  _testFlowPhase,
   _testLocateResult,
   _testLocateError,
-  _testChosenRouteForChip,
+  _testMatchedRoute,
+  _testProceedNote,
 }: {
   open: boolean
   onClose: () => void
@@ -122,15 +145,21 @@ export function GenerateModal({
   // the parent can reveal the full-screen post-generation canvas on success. May
   // be undefined if the flow rejects before producing a result.
   onGenDone?: (result?: DesignAgentGenResult) => void
+  savedPreference?: DesignSourcePreference | null
+  onSavePreference?: (pref: DesignSourcePreference) => Promise<void>
   _testConnections?: ConnectionSummary[] | null
   _testRepos?: GitHubRepo[] | null
   _testInitSource?: "figma" | "github" | "website"
   _testInitRepoSel?: string
-  // Locate-state injection for node-env vitest (bypasses async effects).
-  _testLocateState?: LocateFlowState
+  // Phase-state injection for node-env vitest (bypasses async effects so a
+  // given phase can be rendered directly without driving the resolve call).
+  _testFlowPhase?: FlowPhase
   _testLocateResult?: LocateResponse | null
   _testLocateError?: string | null
-  _testChosenRouteForChip?: string | null
+  // The resolved screen shown on the transient "matched" line in locating.
+  _testMatchedRoute?: string | null
+  // The optional explanatory note shown beneath the matched line.
+  _testProceedNote?: string | null
 }) {
   const { showToast } = useNavigation()
 
@@ -141,15 +170,30 @@ export function GenerateModal({
   const [instructions, setInstructions] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
-  // Locate-UX state machine for codebase mode.
-  // idle → analysing → chip (auto-proceed; generation already started)
-  //                  → ranked_confirm (block until PM picks)
-  //                  → unmapped (no map; show search/fallback)
-  // A locate error falls back to idle with locateError set.
-  const [locateState, setLocateState] = useState<LocateFlowState>(_testLocateState ?? "idle")
+  // Single-modal phase machine (see FlowPhase). The modal stays mounted across
+  // every phase; `config` is the resting state. Codebase generate drives it
+  // through locating → (picker | unmapped-resolve) → generating.
+  const [flowPhase, setFlowPhase] = useState<FlowPhase>(_testFlowPhase ?? "config")
   const [locateResult, setLocateResult] = useState<LocateResponse | null>(_testLocateResult ?? null)
   const [locateError, setLocateError] = useState<string | null>(_testLocateError ?? null)
-  const [chosenRouteForChip, setChosenRouteForChip] = useState<string | null>(_testChosenRouteForChip ?? null)
+  // The screen the resolve call matched, shown on the transient "matched" line
+  // as the flow transitions locating → generating.
+  const [matchedRoute, setMatchedRoute] = useState<string | null>(_testMatchedRoute ?? null)
+  // Optional explanatory note (a lower-confidence proceed note), shown as
+  // subtext beneath the matched line.
+  const [proceedNote, setProceedNote] = useState<string | null>(_testProceedNote ?? null)
+
+  // Re-entry guard. Each resolve call is an independent model sample, so
+  // re-firing it can flip a genuinely sub-threshold (ambiguous) match into an
+  // auto-proceed by pure sampling variance — silently defeating the wrong-screen
+  // guard. These refs enforce EXACTLY ONE resolve call per loading-flow entry:
+  //   - locateInFlightRef is true from the moment a flow enters loading until it
+  //     resolves (or errors), so a second enterLoadingFlow() is a no-op.
+  //   - flowTokenRef is bumped on each entry; the resolve continuation checks its
+  //     captured token against the current one and ignores stale results (a
+  //     superseded flow can never write phase/result state for a newer one).
+  const locateInFlightRef = useRef(false)
+  const flowTokenRef = useRef(0)
 
   // Figma URL paste state — URL input, extracted key, extracted node-id,
   // resolved label, and validating flag. When figmaUrlKey is set it is
@@ -314,6 +358,105 @@ export function GenerateModal({
 
   const figmaActive = getGenerateConnectorRowState(connFor("figma")).connected
 
+  // Auto-generate effect: fires when open=true and connector data is loaded.
+  // When the saved preference's source is healthy, fires generation immediately
+  // and closes the modal without user interaction.
+  useEffect(() => {
+    if (!open) return
+    if (!savedPreference) return
+    if (connections === null) return
+    const src = savedPreference.design_source
+    if (src === "github" && repos === null) return
+
+    const figmaHealthy = src === "figma" && figmaActive && !!savedPreference.figma_file_key
+    const githubHealthy =
+      src === "github" &&
+      githubActive &&
+      !!savedPreference.github_repo &&
+      !!repos?.find((r) => r.full_name === savedPreference.github_repo)
+    const websiteHealthy = src === "website"
+
+    if (!figmaHealthy && !githubHealthy && !websiteHealthy) {
+      return
+    }
+
+    setDesignSource(src)
+    if (src === "figma" && savedPreference.figma_file_key) {
+      setFigmaUrlKey(savedPreference.figma_file_key)
+    }
+    if (src === "github" && savedPreference.github_repo) {
+      setRepoSel(savedPreference.github_repo)
+    }
+
+    if (prdId == null) return
+
+    // GitHub auto-skip MUST go through the SAME guarded loading flow the manual
+    // Generate click uses — NOT its own bare locate-then-generate that closes
+    // the modal first. Funnelling through enterLoadingFlow() means:
+    //   - the loading UI (locating phase) mounts immediately instead of the
+    //     modal closing to nothing while the resolve call runs (the dead-air
+    //     bug), and
+    //   - the re-entry guard applies here too: this effect re-runs whenever its
+    //     deps (connections / repos) settle, but enterLoadingFlow() fires the
+    //     resolve call at most once per flow, so dep churn cannot re-sample a
+    //     sub-threshold match into an auto-proceed.
+    // The repo is passed explicitly because setRepoSel() above has not yet
+    // re-rendered this closure.
+    if (src === "github") {
+      const repo = savedPreference.github_repo!
+      enterLoadingFlow({ repo })
+      return
+    }
+
+    // Figma + Website auto-skip: unchanged — no locate, generate directly.
+    onClose()
+    setTimeout(() => {
+      onGenStart?.({
+        figmaFileKey: src === "figma" ? savedPreference.figma_file_key ?? null : null,
+        githubRepo: null,
+      })
+      const baseParams = buildGenerateParams({
+        prdId,
+        platform,
+        instructions,
+        figmaFileKey: src === "figma" ? savedPreference.figma_file_key ?? null : null,
+        figmaNodeId: null,
+        websiteUrl: "",
+        manualColor: "",
+        manualFont: "",
+        githubRepo: "",
+        designSource: src,
+      })
+      void runGenerateFlow({
+        params: baseParams,
+        generate: designAgentApi.generate,
+        runGeneration: runDesignAgentGeneration,
+        onOpenChange: () => {},
+        showToast,
+        setSubmitting,
+        notifyOnReady: false,
+        notifyOnKickoff: false,
+        onKickoff,
+        onGenerated: (result) => onGenDone?.(result),
+      }).catch(() => { onGenDone?.() })
+    }, 0)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, connections, repos, savedPreference])
+
+  // When connector data loads and there's no saved preference, default the
+  // source selection to the first healthy source: github → figma → website.
+  useEffect(() => {
+    if (connections === null) return
+    if (savedPreference) return
+    if (_testInitSource !== undefined) return
+    // Re-derive health from the loaded connection state
+    const fActive = getGenerateConnectorRowState(connections.find((c) => c.provider === "figma")).connected
+    const gActive = getGenerateConnectorRowState(connections.find((c) => c.provider === "github")).connected
+    const healthy: "figma" | "github" | "website" = gActive ? "github" : fActive ? "figma" : "website"
+    setDesignSource(healthy)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connections, savedPreference])
+
   // 'From our codebase' = github source with the locate gate enabled.
   // design_source stays 'github' on the wire — no backend enum change in this
   // ticket; locate is keyed off the repo, not a new enum value. The locate gate
@@ -322,6 +465,36 @@ export function GenerateModal({
   const codebaseMode = designSource === "github" && githubActive
 
   if (!open) return null
+
+  // Suppress the modal only for the figma/website auto-skip paths, which still
+  // close the modal and generate directly (no resolve call). For those, showing
+  // the form for a frame before the effect closes it would flash.
+  //
+  // The github saved-preference path is the redesign's whole point: it NO LONGER
+  // suppresses. Instead it stays open and drives the locating phase immediately
+  // (the loading UI is the point), so there is nothing to hide. Once we are in
+  // any loading phase (past config) the modal must always render its phase UI.
+  //
+  // Health checks mirror the auto-skip effect.
+  if (savedPreference && flowPhase === "config") {
+    const src = savedPreference.design_source
+
+    // github never suppresses now — it renders the loading phase in-modal.
+    if (src !== "github") {
+      const dataStillLoading = connections === null
+
+      const figmaHealthy = src === "figma" && figmaActive && !!savedPreference.figma_file_key
+      const websiteHealthy = src === "website"
+      const prefHealthy = figmaHealthy || websiteHealthy
+
+      // While connector data is still loading we cannot decide, so suppress to
+      // avoid a form flash; once loaded, suppress only if the saved source is
+      // healthy (the effect will close + generate). An unhealthy saved pref
+      // falls through and the form renders as a fallback.
+      const pendingAutoSkip = dataStillLoading || prefHealthy
+      if (pendingAutoSkip) return null
+    }
+  }
 
   // Figma + GitHub row state (connected vs not + account label) from the shared
   // row helper applied to each provider's live connection.
@@ -334,13 +507,32 @@ export function GenerateModal({
   // LocatedScreen and feed the recreate pre-seed branch of generate_prototype.
   // The SHA is only sent when non-empty (unmapped → omit; the backend has no
   // snapshot to pin against). Non-codebase paths never carry either key.
+  //
+  // forCodebase forces the codebase wiring on even when designSource/githubActive
+  // have not yet re-rendered this closure (the auto-skip path sets them via
+  // setState in the same tick). The manual path omits it and the live
+  // designSource/githubActive decide.
   function runGenerateForRoute(
     chosenRoute: string | null,
     overrideSha?: string | null,
     chosenId?: string | null,
+    // Repo override for the saved-preference auto-skip path, where setRepoSel()
+    // has not yet re-rendered the closure when generation fires. The manual
+    // path omits it and falls back to the settled repoSel — identical behaviour.
+    repoOverride?: string,
+    forCodebase?: boolean,
   ) {
     if (prdId == null) return
-    const codebaseGenerate = designSource === "github" && githubActive
+    const codebaseGenerate = forCodebase || (designSource === "github" && githubActive)
+    const effectiveRepo = repoOverride ?? repoSel
+    // When the codebase path forces generation on (auto-skip / picker pick), the
+    // live designSource may not have re-rendered from setDesignSource("github")
+    // yet — pin the wire source to github so the body never goes out as the
+    // stale default. The manual path leaves designSource as the live selection.
+    const effectiveSource = forCodebase ? "github" : designSource
+    // A real run is being kicked off — move to the generating phase so the modal
+    // shows the handoff state, not the form or the picker.
+    setFlowPhase("generating")
     // Auto-proceed path passes the SHA explicitly because it fires before the
     // setLocateResult re-render lands; the picker path reads from locateResult
     // state which is already populated by the time onChoose fires.
@@ -349,8 +541,8 @@ export function GenerateModal({
         ? (overrideSha ?? locateResult?.commit_sha)
         : null) || null
     onGenStart?.({
-      figmaFileKey: designSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
-      githubRepo: codebaseGenerate ? repoSel : null,
+      figmaFileKey: effectiveSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
+      githubRepo: codebaseGenerate ? effectiveRepo : null,
       chosenScreenRoute: chosenRoute,
     })
     const baseParams = buildGenerateParams({
@@ -359,14 +551,14 @@ export function GenerateModal({
       instructions,
       // Only send the chosen source's specific input; the other is cleared to
       // null so the backend receives a clean single-source request.
-      figmaFileKey: designSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
+      figmaFileKey: effectiveSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
       // figmaNodeId only applies when Figma is the chosen source AND a URL was pasted.
-      figmaNodeId: designSource === "figma" && figmaUrlKey ? figmaNodeId : null,
+      figmaNodeId: effectiveSource === "figma" && figmaUrlKey ? figmaNodeId : null,
       websiteUrl: "",
       manualColor: "",
       manualFont: "",
-      githubRepo: codebaseGenerate ? repoSel : "",
-      designSource,
+      githubRepo: codebaseGenerate ? effectiveRepo : "",
+      designSource: effectiveSource,
     })
     // Fire the recreate wiring when EITHER a route or a stable id was chosen —
     // a non-route host (the app shell, an in-page section) has an empty route,
@@ -417,44 +609,125 @@ export function GenerateModal({
     })
   }
 
+  // THE single shared loading-flow entry. Both the manual Generate click
+  // (handleGenerate) and the saved-preference auto-skip effect funnel through
+  // here so that:
+  //   1. The loading SCREEN is decoupled from the resolve CALL — we move to the
+  //      locating phase IMMEDIATELY (so the loading UI mounts), THEN fire the
+  //      resolve call behind it. It never blocks the render. The old auto-skip
+  //      path closed the modal and awaited the call (dead air); now it drives
+  //      this same locating phase.
+  //   2. A github prototype is NEVER generated without first resolving the
+  //      chosen screen the recreate branch needs.
+  //
+  // RE-ENTRY GUARD (correctness, not just UX): each resolve call is an
+  // independent model sample, so re-firing it can promote a genuinely
+  // sub-threshold (ambiguous) match into an auto-proceed by pure variance —
+  // silently defeating the wrong-screen guard. So:
+  //   - locateInFlightRef ⇒ EXACTLY ONE resolve call per entry. A second call
+  //     while one is pending (or after it resolved into a later phase) is a
+  //     no-op. This is what stops the auto-skip effect's dep-change re-runs from
+  //     re-sampling.
+  //   - flowTokenRef ⇒ a stale continuation (from a superseded flow) is ignored,
+  //     so it can never write phase/result state for a newer flow.
+  // The FIRST ranked_confirm goes straight to the picker — never re-sample for a
+  // luckier confidence.
+  function enterLoadingFlow(opts: { repo: string }) {
+    if (prdId == null) return
+    // Re-entry guard: one resolve call per flow. Covers the auto-skip effect
+    // re-running on connections/repos churn and an accidental double-click.
+    if (locateInFlightRef.current) return
+    if (flowPhase !== "config") return
+
+    const localPrdId = prdId
+    const token = ++flowTokenRef.current
+    locateInFlightRef.current = true
+
+    // Move to locating FIRST so the loading UI mounts before the (slow) resolve
+    // call runs. Reset any stale carry-over from a previous flow.
+    setLocateError(null)
+    setLocateResult(null)
+    setMatchedRoute(null)
+    setProceedNote(null)
+    setFlowPhase("locating")
+
+    // Fire the resolve call behind the loading UI — NOT awaited before render.
+    void (async () => {
+      try {
+        const result = await designAgentApi.locate({
+          prd_id: localPrdId,
+          github_repo: opts.repo,
+        })
+        // Ignore a stale result from a superseded flow.
+        if (token !== flowTokenRef.current) return
+        locateInFlightRef.current = false
+        setLocateResult(result)
+
+        if (result.unmapped) {
+          setFlowPhase("unmapped-resolve")
+          return
+        }
+        if (
+          result.decision === "auto_proceed" ||
+          result.decision === "proceed_with_note"
+        ) {
+          const route = result.chosen[0]?.route ?? null
+          const id = result.chosen[0]?.id ?? null
+          setMatchedRoute(route)
+          if (result.decision === "proceed_with_note") {
+            const note = result.chosen[0]?.rationale ?? null
+            setProceedNote(note)
+          }
+          // Persist the source preference now that a confident match exists.
+          void onSavePreference?.({
+            design_source: "github",
+            figma_file_key: null,
+            github_repo: opts.repo || null,
+            website_url: null,
+          })
+          // Transition locating → generating and kick off the real run. The SHA
+          // is passed explicitly because the setLocateResult above has not yet
+          // re-rendered this closure. forCodebase=true forces the github wiring
+          // on even when the auto-skip path's setState has not re-rendered.
+          runGenerateForRoute(
+            route,
+            result.commit_sha || null,
+            id,
+            opts.repo,
+            true,
+          )
+          return
+        }
+        // FIRST ranked_confirm → straight to the picker. Never re-sample.
+        setFlowPhase("picker")
+      } catch {
+        if (token !== flowTokenRef.current) return
+        locateInFlightRef.current = false
+        setLocateError(
+          "Couldn't analyse the codebase — pick a screen or switch source",
+        )
+        setFlowPhase("config")
+      }
+    })()
+  }
+
   const handleGenerate = () => {
     if (submitting || prdId == null) return
 
     if (codebaseMode) {
-      // Codebase mode: gate generation through the locate pipeline before starting.
-      setLocateError(null)
-      setLocateState("analysing")
-      void (async () => {
-        try {
-          const result = await designAgentApi.locate({ prd_id: prdId, github_repo: repoSel })
-          setLocateResult(result)
-          if (result.unmapped) {
-            setLocateState("unmapped")
-            return
-          }
-          if (result.decision === "auto_proceed" || result.decision === "proceed_with_note") {
-            const route = result.chosen[0]?.route ?? null
-            const id = result.chosen[0]?.id ?? null
-            setChosenRouteForChip(route)
-            setLocateState("chip")
-            // Immediately start generation — chip is non-blocking and informational.
-            // Pass the SHA explicitly because the state update queued above has
-            // not yet re-rendered the closure. Carry the chosen candidate's id so
-            // a non-route host resolves on the backend.
-            runGenerateForRoute(route, result.commit_sha || null, id)
-          } else {
-            // ranked_confirm: block until PM picks a candidate.
-            setLocateState("ranked_confirm")
-          }
-        } catch {
-          setLocateError("Couldn't analyse the codebase — pick a screen or switch source")
-          setLocateState("idle")
-        }
-      })()
+      // Codebase mode: enter the shared loading flow (loading UI immediate,
+      // resolve call behind it, picker only when ambiguous).
+      enterLoadingFlow({ repo: repoSel })
       return
     }
 
     // Non-codebase path — runs as before, chosenScreenRoute is null.
+    void onSavePreference?.({
+      design_source: designSource,
+      figma_file_key: designSource === "figma" ? (figmaUrlKey || figmaFileKey || null) : null,
+      github_repo: designSource === "github" ? (repoSel || null) : null,
+      website_url: null,
+    })
     runGenerateForRoute(null)
   }
 
@@ -480,6 +753,11 @@ export function GenerateModal({
         </div>
 
         <div className="modal-body">
+          {/* config phase — the source/platform/instructions form. In every
+              other phase the form is replaced by the phase UI below so the modal
+              never shows a stale, interactive form behind a running flow. */}
+          {flowPhase === "config" && (
+          <>
           {/* Platform label + pills on one row (gen-inline-field): label left,
               pills inline right. */}
           <div className="field gen-inline-field">
@@ -502,29 +780,14 @@ export function GenerateModal({
             </div>
           </div>
 
-          {/* Design source — single-select picker using the same radio-pill
-              vocabulary as the Platform selector above. Connector-status rows
-              always visible so the user can connect a not-yet-connected provider
-              before picking it; the source-specific input beneath each row is
-              gated on the matching selection. */}
+          {/* Design source — single-select picker using the shared SourceTypePills
+              component (same radio-pill vocabulary as the Platform selector above).
+              Connector-status rows always visible so the user can connect a
+              not-yet-connected provider before picking it; the source-specific
+              input beneath each row is gated on the matching selection. */}
           <div className="field">
             <label className="field-label">Design source</label>
-            <div className="radio-group">
-              {SOURCE_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  className={
-                    "radio-pill" + (designSource === opt.value ? " selected" : "")
-                  }
-                  data-val={opt.value}
-                  aria-pressed={designSource === opt.value}
-                  onClick={() => setDesignSource(opt.value)}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
+            <SourceTypePills value={designSource} onChange={setDesignSource} />
 
             {/* Figma connector status — shown only when Figma is the selected
                 source. Displays connected state or a connect affordance when
@@ -542,16 +805,7 @@ export function GenerateModal({
                     </span>
                   </>
                 ) : (
-                  <>
-                    <span className="src-not-connected">⚠ Not connected</span>
-                    <button
-                      type="button"
-                      className="src-connect-btn"
-                      onClick={() => void redirectToConnect("figma")}
-                    >
-                      Connect Figma →
-                    </button>
-                  </>
+                  <SourceConnectHint provider="figma" />
                 )}
               </div>
             )}
@@ -601,16 +855,7 @@ export function GenerateModal({
                     </span>
                   </>
                 ) : (
-                  <>
-                    <span className="src-not-connected muted">Not connected</span>
-                    <button
-                      type="button"
-                      className="src-connect-btn ghost"
-                      onClick={() => void redirectToConnect("github")}
-                    >
-                      Connect a repo →
-                    </button>
-                  </>
+                  <SourceConnectHint provider="github" />
                 )}
               </div>
             )}
@@ -670,49 +915,85 @@ export function GenerateModal({
             />
           </div>
 
-          {/* Locate-UX state indicators (codebase mode only). -------------------- */}
+          {/* A resolve error from a prior attempt drops back to config with the
+              message shown above the form so the user can retry / switch source. */}
           {locateError && (
             <p className="locate-error" data-testid="locate-error" role="alert">
               {locateError}
             </p>
           )}
-          {locateState === "analysing" && (
-            <p className="locate-hint" data-testid="locate-analysing">
-              Analysing your codebase&hellip;
-            </p>
+          </>
           )}
-          {locateState === "chip" && (
-            <p className="locate-chip" data-testid="locate-chip">
-              Generating on top of{" "}
-              <strong data-testid="locate-chip-route">
-                {chosenRouteForChip ?? "…"}
-              </strong>
-              {" · Not this screen?"}
-              {/* The correction path is deferred to the mid-run iteration feature. */}
-            </p>
+
+          {/* locating / generating phases — loading UI is visible immediately on
+              generate-click while the (slow) resolve call runs behind it. Once a
+              screen resolves, the transient "matched" line shows as the flow
+              transitions into generation. */}
+          {(flowPhase === "locating" || flowPhase === "generating") && (
+            <GenerateLoadingState
+              matchedRoute={matchedRoute}
+              note={proceedNote}
+            />
           )}
-          {locateState === "ranked_confirm" && locateResult && (
+
+          {/* picker phase — an ambiguous match; the user picks the screen. Reuses
+              the existing inline confirm view. */}
+          {flowPhase === "picker" && locateResult && (
             <LocateConfirmView
               candidates={mapLocateCandidates(locateResult.ranked)}
               onChoose={(route, id) => {
-                setChosenRouteForChip(route)
-                setLocateState("chip")
-                runGenerateForRoute(route, undefined, id)
+                // Pick → generating. forCodebase=true so the github wiring is on.
+                runGenerateForRoute(route, undefined, id, repoSel, true)
               }}
               onSearchOther={() => {
-                setLocateState("idle")
+                // Switch source = a phase change BACK to config (not a remount).
+                // Clearing the in-flight guard lets a fresh flow start later.
+                locateInFlightRef.current = false
+                flowTokenRef.current++
                 setLocateResult(null)
+                setFlowPhase("config")
               }}
             />
           )}
-          {locateState === "unmapped" && (
-            <p className="locate-hint" data-testid="locate-unmapped">
-              We couldn&apos;t map your codebase to a screen — search for
-              another screen or switch source.
-            </p>
+
+          {/* unmapped-resolve phase — no match. Pick a screen (from the ranked
+              fallbacks, if any) or switch source back to config. */}
+          {flowPhase === "unmapped-resolve" && (
+            <div data-testid="unmapped-resolve">
+              <p className="locate-hint" data-testid="locate-unmapped">
+                We couldn&apos;t match your codebase to a screen — pick a screen
+                or switch source.
+              </p>
+              {locateResult && locateResult.ranked.length > 0 && (
+                <LocateConfirmView
+                  question="Pick the closest screen:"
+                  candidates={mapLocateCandidates(locateResult.ranked)}
+                  onChoose={(route, id) => {
+                    // unmapped has no snapshot to pin against → omit the SHA.
+                    runGenerateForRoute(route, null, id, repoSel, true)
+                  }}
+                />
+              )}
+              <button
+                type="button"
+                className="btn"
+                data-testid="unmapped-switch-source"
+                onClick={() => {
+                  locateInFlightRef.current = false
+                  flowTokenRef.current++
+                  setLocateResult(null)
+                  setFlowPhase("config")
+                }}
+              >
+                Switch source
+              </button>
+            </div>
           )}
         </div>
 
+        {/* The action footer belongs to the config phase only — once a flow is
+            running there is nothing to submit; the phase UI carries any action. */}
+        {flowPhase === "config" && (
         <div className="modal-foot">
           <span
             style={{ fontSize: 11.5, color: "var(--muted)" }}
@@ -739,15 +1020,14 @@ export function GenerateModal({
               disabled={
                 submitting ||
                 prdId == null ||
-                (codebaseMode && !repoSel) ||
-                locateState === "analysing" ||
-                locateState === "ranked_confirm"
+                (codebaseMode && !repoSel)
               }
             >
               {submitting ? "Generating…" : "Generate →"}
             </button>
           </div>
         </div>
+        )}
       </div>
     </div>
   )

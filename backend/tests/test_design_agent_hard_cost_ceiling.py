@@ -14,7 +14,7 @@ The fail-closed BACKSTOP above the P5-03 soft cap. Three surfaces:
    (the soft `cost_guard.degraded` still records first on a single iteration
    crossing both caps); the abort then wins (returns immediately).
 
-3. The `design_agent_hard_cap_usd` env knob on `Settings` (default 2.00).
+3. The `design_agent_hard_cap_usd` env knob on `Settings` (default 5.00).
 
 The Anthropic client is replaced by a recording fake whose `messages.create` is
 a sync callable (the runner invokes it via `asyncio.to_thread`). Mirrors
@@ -59,10 +59,10 @@ TELEMETRY_LOGGER = "app.llm_telemetry"
 SONNET = "claude-sonnet-4-6"
 
 # At sonnet output pricing (15.0 / 1M = 1.5e-5 $/tok):
-#   70_000 out  → $1.05 realized → projection (2x) = $2.10 >= $2.00 hard cap.
-#   50_667 out  → $0.7600 realized → projection = $1.52 < $2.00 (observed-legit run).
-#    1_000 out  → $0.015 realized → projection = $0.03 (far under both caps).
-_ABORT_OUT = 70_000
+#   200_000 out → $3.00 realized → projection (2x) = $6.00 >= $5.00 hard cap.
+#    50_667 out → $0.7600 realized → projection = $1.52 < $5.00 (observed-legit run).
+#     1_000 out → $0.015 realized → projection = $0.03 (far under both caps).
+_ABORT_OUT = 200_000
 _LEGIT_076_OUT = 50_667
 _UNDER_CAP_OUT = 1_000
 
@@ -178,7 +178,7 @@ def _records(caplog, logger_name, needle):
 
 
 def test_should_abort_true_at_and_above_cap():
-    # Clearly above: realized $1.05 → projection $2.10 >= $2.00.
+    # Clearly above: realized $3.00 → projection $6.00 >= the $2.00 arg.
     over = RunUsage(output_tokens=_ABORT_OUT)
     assert should_abort(over, SONNET, 2.00) is True
     # Boundary-exact (inclusive): cap == projection -> True. Computed from the
@@ -188,7 +188,7 @@ def test_should_abort_true_at_and_above_cap():
 
 
 def test_should_abort_false_below_cap():
-    # Observed-legit run: realized $0.76 → projection $1.52 < $2.00.
+    # Observed-legit run: realized $0.76 → projection $1.52 < the $2.00 arg.
     legit = RunUsage(output_tokens=_LEGIT_076_OUT)
     assert should_abort(legit, SONNET, 2.00) is False
     # Just above the projection the cap is not reached.
@@ -233,9 +233,9 @@ def test_single_pricing_table():
 
 def test_hard_cap_implies_soft_cap():
     # For any usage: if should_abort(hard) is True, should_wrap_up(soft) is too —
-    # both use the same projection and HARD_CAP_USD (2.00) > SOFT_CAP_USD (0.50),
+    # both use the same projection and HARD_CAP_USD (5.00) > SOFT_CAP_USD (0.50),
     # so the hard cap can never fire before the soft nudge for a given run.
-    assert HARD_CAP_USD == 2.00
+    assert HARD_CAP_USD == 5.00
     assert SOFT_CAP_USD == 0.50
     for out in (_ABORT_OUT, _ABORT_OUT * 2, _ABORT_OUT * 5):
         usage = RunUsage(output_tokens=out)
@@ -249,7 +249,7 @@ def test_hard_cap_implies_soft_cap():
 def test_runaway_run_aborts_over_hard_cap(monkeypatch):
     # Every response is tool_use with a pathological output size; the LAST entry
     # replays so an unfixed loop runs to max_iters. With the hard cap, iter1's
-    # projected spend ($2.10) crosses $2.00 and the loop ABORTS.
+    # projected spend ($6.00) crosses $5.00 and the loop ABORTS.
     client = _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})],
              usage=_usage(out=_ABORT_OUT)),
@@ -299,7 +299,7 @@ def test_agent_loop_aborts_with_salvaged_content(monkeypatch, caplog):
     assert "prototype_id=1" in msg
     assert "mode=scaffold" in msg
     assert "est_cost_usd=" in msg
-    assert "hard_cap=2.00" in msg
+    assert "hard_cap=5.00" in msg
     assert "soft_cap=0.50" in msg
     assert "iters=1" in msg
     # WARNING level — a budget kill is worth surfacing above the degrade nudge.
@@ -328,7 +328,7 @@ def test_agent_loop_does_not_raise_on_abort(monkeypatch):
 
 
 def test_legit_076_run_does_not_abort(monkeypatch, caplog):
-    # Realized $0.76 (projects to $1.52 < $2.00) — a legit run must NOT abort.
+    # Realized $0.76 (projects to $1.52 < $5.00) — a legit run must NOT abort.
     # The soft-cap degrade MAY fire ($1.52 >= $0.50), but no abort.
     client = _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})],
@@ -353,7 +353,7 @@ def test_soft_nudge_recorded_before_abort(monkeypatch, caplog):
     # loop does not run a further iteration.
     client = _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})],
-             usage=_usage(out=_ABORT_OUT)),  # projects $2.10 — crosses soft AND hard
+             usage=_usage(out=_ABORT_OUT)),  # projects $6.00 — crosses soft AND hard
         _msg("end_turn", [_text("should never be reached")]),
     ])
     _stub_dispatch(monkeypatch)
@@ -408,7 +408,7 @@ def test_cost_summary_still_emitted_on_abort(monkeypatch, caplog):
     assert "prototype_id=77" in abort_msg
     assert "mode=scaffold" in abort_msg
     assert "est_cost_usd=" in abort_msg
-    assert "hard_cap=2.00" in abort_msg
+    assert "hard_cap=5.00" in abort_msg
     assert "SECRET_SYSTEM_PROMPT_BODY" not in abort_msg
     assert "jane.doe@example.com" not in abort_msg
 
@@ -416,11 +416,11 @@ def test_cost_summary_still_emitted_on_abort(monkeypatch, caplog):
 # ─── Config / env knob ───────────────────────────────────────────────────────
 
 
-def test_hard_cap_default_is_two_dollars(monkeypatch):
-    # No env set → default 2.00. _env_file=None disables .env so a local
+def test_hard_cap_default_is_five_dollars(monkeypatch):
+    # No env set → default 5.00. _env_file=None disables .env so a local
     # backend/.env can never perturb the default assertion.
     monkeypatch.delenv("DESIGN_AGENT_HARD_CAP_USD", raising=False)
-    assert Settings(_env_file=None).design_agent_hard_cap_usd == 2.00
+    assert Settings(_env_file=None).design_agent_hard_cap_usd == 5.00
 
 
 def test_hard_cap_env_override(monkeypatch):

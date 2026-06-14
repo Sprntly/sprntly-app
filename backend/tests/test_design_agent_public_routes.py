@@ -119,8 +119,15 @@ def _seed(
     """
     from tests import _fake_supabase
 
+    db = _fake_supabase.get_fake_db()
+    # The owning company so the resolver can map workspace_id → slug. Idempotent
+    # so multiple seeds in one test (same workspace) don't collide on the PK.
+    db.execute(
+        "INSERT OR IGNORE INTO companies (id, slug, display_name) VALUES (?, ?, ?)",
+        [workspace_id, f"slug-{workspace_id}", f"Company {workspace_id}"],
+    )
     token = str(uuid.uuid4())
-    _fake_supabase.get_fake_db().execute(
+    db.execute(
         "INSERT INTO prototypes "
         "(prd_id, workspace_id, template_version, status, share_mode, share_token, "
         " share_passcode_hash, bundle_url, is_complete) "
@@ -149,10 +156,21 @@ def test_get_by_token_returns_200_unauthenticated_for_public_mode(unauth):
 
 
 def test_response_body_keys_are_minimum_disclosure(unauth):
-    # AC5 — EXACTLY the four fields; no prototype_id / prd_id / workspace_id leak.
+    # AC5 — EXACTLY the disclosed fields; no prototype_id / prd_id / workspace_id
+    # leak. company_slug is the one intentional addition (cosmetic URL segment).
     token = _seed(share_mode="public")
     body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
-    assert set(body.keys()) == {"share_mode", "requires_passcode", "bundle_url", "is_complete"}
+    assert set(body.keys()) == {
+        "share_mode", "requires_passcode", "bundle_url", "is_complete", "company_slug",
+    }
+
+
+def test_get_by_token_returns_owning_company_slug(unauth):
+    # company_slug is the cosmetic /p/<slug>/<token> segment — it must be the
+    # OWNING company's slug, resolved from the prototype's workspace_id.
+    token = _seed(share_mode="public", workspace_id="acme")
+    body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
+    assert body["company_slug"] == "slug-acme"  # _seed creates company id=acme slug=slug-acme
 
 
 def test_get_by_token_passcode_mode_withholds_bundle_url(unauth):
@@ -208,7 +226,9 @@ def test_verify_passcode_returns_bundle_url_on_correct_passcode(unauth, env):
     body = resp.json()
     assert body["bundle_url"] == _DEFAULT_BUNDLE
     assert body["is_complete"] is True
-    assert set(body.keys()) == {"share_mode", "requires_passcode", "bundle_url", "is_complete"}
+    assert set(body.keys()) == {
+        "share_mode", "requires_passcode", "bundle_url", "is_complete", "company_slug",
+    }
 
 
 def test_verify_passcode_returns_401_on_wrong_passcode(unauth, env):

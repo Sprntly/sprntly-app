@@ -10,7 +10,7 @@
  * mounts once in `AppShell` (inside `NavigationProvider`, on EVERY authed page),
  * so the replay fires regardless of which page the reload lands on. Renders null.
  *
- * Decision-D(b) (LOCKED 2026-06-04, Babajide — ack-on-toast-clear, ZERO
+ * Decision-D(b) (LOCKED 2026-06-04 — ack-on-toast-clear, ZERO
  * `NavigationContext.tsx` touch): the toast is NOT auto-acked on first show
  * (`replayCompletedNotifications` no longer calls `acknowledge`). Instead the
  * replay acks its OWN last-shown id when that toast clears. The single-slot

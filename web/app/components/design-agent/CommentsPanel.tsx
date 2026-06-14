@@ -36,6 +36,7 @@ import { useEffect, useRef, useState } from "react"
 import { designAgentApi, type CommentRecord } from "../../lib/api"
 import { CommentClarifyDialog } from "./CommentClarifyDialog"
 import { findByAnchor, parseStoredAnchor, getElementDescription } from "./pinAnchorBridge"
+import { IconMessage, IconClose, IconPin, IconCheck, IconSendUp } from "../shared/app-icons"
 
 // ---- Author identity helpers -------------------------------------------------
 // Comment rows show author label + avatar chip + relative timestamp. The backend
@@ -161,15 +162,21 @@ export function buildPinModel(matches: Element[]): {
 
 // ---- orchestration helpers (pure, dependency-injected, SSR-free) ------------
 
-/** Load every comment for the token's prototype (all statuses). */
+/** Load every comment for the prototype (all statuses). In the signed-in editor
+ *  context a `prototypeId` is available, so read via the authed route; the public
+ *  /p/<token> viewer has no prototypeId and reads via the by-token route. */
 export async function runLoadComments({
   token,
+  prototypeId,
   api,
 }: {
   token: string
-  api: Pick<typeof designAgentApi, "listCommentsByToken">
+  prototypeId?: number
+  api: Pick<typeof designAgentApi, "listCommentsByToken" | "listComments">
 }): Promise<CommentRecord[]> {
-  return api.listCommentsByToken(token)
+  return prototypeId != null
+    ? api.listComments(prototypeId)
+    : api.listCommentsByToken(token)
 }
 
 /**
@@ -181,18 +188,23 @@ export async function runCreateComment({
   token,
   anchorId,
   body,
+  viewerName,
   api,
   comments = [],
 }: {
   token: string
   anchorId: string
   body: string
+  /** Public surface only: the viewer's self-supplied display name. Threaded onto
+   *  the by-token create payload only when present; the signed-in mount omits it. */
+  viewerName?: string
   api: Pick<typeof designAgentApi, "createCommentByToken">
   comments?: CommentRecord[]
 }): Promise<CommentRecord[]> {
   const created = await api.createCommentByToken(token, {
     anchor_id: anchorId,
     body,
+    ...(viewerName ? { viewer_name: viewerName } : {}),
   })
   return [created, ...comments]
 }
@@ -238,6 +250,9 @@ export type CommentsPanelViewProps = {
    *  on the signed-in mount (alongside `onApply`). Absent → no Ignore button. */
   onIgnore?: (comment: CommentRecord) => void
   onDelete?: (commentId: number) => void
+  /** When supplied, the header renders a close (X) affordance (David's panel-top
+   *  `ti-x`). The parent owns the actual collapse — absent → no X rendered. */
+  onClose?: () => void
 }
 
 function CommentThread({
@@ -289,7 +304,11 @@ function CommentThread({
       }}
       style={{ cursor: comment.resolved_anchor_id ? 'pointer' : 'default' }}
     >
-      {/* Author + avatar + relative timestamp header. The avatar uses author initials, brand-tinted. */}
+      {/* Author + avatar + relative timestamp header + a single resolve check.
+          The avatar uses author initials, brand-tinted. The resolve check is the
+          ONE consolidated control (David's `pc-resolve`): clickable on the editor
+          mount (canResolve), display-only on the public/read-only mount. It is
+          green-filled when status==="resolved". */}
       <div className="comment-meta comment-meta-head">
         <CommentAvatar author={comment.author} />
         <span className="comment-author proto-comment-au">{comment.author}</span>
@@ -300,40 +319,44 @@ function CommentThread({
         >
           {shortRelativeTime(comment.created_at)}
         </time>
-        {/* Change 4 — resolve-check indicator: visual state only, no click handler */}
-        <span
-          className={`comment-resolve-indicator${resolved ? " comment-resolve-indicator--resolved" : ""}`}
-          aria-hidden="true"
-        >
-          {resolved ? (
-            /* Filled green circle-check when resolved */
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="8" cy="8" r="8" fill="currentColor"/>
-              <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          ) : (
-            /* Outline gray circle-check when open */
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/>
-              <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          )}
-        </span>
+        {canResolve ? (
+          <button
+            type="button"
+            className={`comment-resolve-btn${resolved ? " resolved" : ""}`}
+            data-testid={`comment-resolve-${comment.id}`}
+            title={resolved ? "Resolved" : "Resolve"}
+            aria-label={resolved ? "Resolved" : "Resolve comment"}
+            aria-pressed={resolved}
+            onClick={(e) => { e.stopPropagation(); onResolve?.(comment.id) }}
+          >
+            <IconCheck size={13} />
+          </button>
+        ) : (
+          /* Read-only mount: display-only state, no click affordance. */
+          <span
+            className={`comment-resolve-btn comment-resolve-btn--static${resolved ? " resolved" : ""}`}
+            title={resolved ? "Resolved" : undefined}
+            aria-hidden="true"
+          >
+            <IconCheck size={13} />
+          </span>
+        )}
       </div>
-      {/* Change 3 — "Step N" pin chip: shown for open comments with a pin */}
-      {withPin && stepNumber != null && (
-        <div className="comment-step-chip">
-          <svg width="10" height="12" viewBox="0 0 10 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-            <path d="M5 0C2.79 0 1 1.79 1 4c0 3 4 8 4 8s4-5 4-8c0-2.21-1.79-4-4-4zm0 5.5A1.5 1.5 0 1 1 5 2.5a1.5 1.5 0 0 1 0 3z" fill="currentColor"/>
-          </svg>
-          Step {stepNumber}
-        </div>
-      )}
-      <div className="comment-body">{comment.body}</div>
+      <div className="comment-body">
+        {/* "Step N" pin pill, inline at the start of the body (David's `pc-anchor`). */}
+        {withPin && stepNumber != null && (
+          <span className="comment-step-chip">
+            <IconPin size={11} />
+            Step {stepNumber}
+          </span>
+        )}
+        {comment.body}
+      </div>
       {/* Apply / Ignore actions. Apply calls the parent handler (pre-fill or
           immediate-iterate) then resolves; Ignore resolves only. Both rendered
-          only on the signed-in mount (onApply/onIgnore supplied) + open comments. */}
-      {(onApply || onIgnore || (canResolve && !resolved)) && !resolved && (
+          only on the signed-in mount (onApply/onIgnore supplied) + open comments.
+          The resolve action itself now lives in the header check above. */}
+      {(onApply || onIgnore || onDelete) && !resolved && (
         <div className="comment-actions" data-testid={`comment-actions-${comment.id}`}>
           {onApply && (
             <button
@@ -355,17 +378,6 @@ function CommentThread({
               onClick={(e) => { e.stopPropagation(); onIgnore(comment) }}
             >
               Ignore
-            </button>
-          )}
-          {/* Keep the original explicit Resolve for non-Apply/Ignore mounts. */}
-          {!onApply && !onIgnore && canResolve && (
-            <button
-              type="button"
-              className="btn comment-resolve-btn"
-              data-testid={`comment-resolve-${comment.id}`}
-              onClick={(e) => { e.stopPropagation(); onResolve?.(comment.id) }}
-            >
-              Resolve
             </button>
           )}
           {onDelete && (
@@ -400,6 +412,7 @@ export function CommentsPanelView({
   onApply,
   onIgnore,
   onDelete,
+  onClose,
 }: CommentsPanelViewProps) {
   const byNewestFirst = (a: CommentRecord, b: CommentRecord) =>
     new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
@@ -409,16 +422,31 @@ export function CommentsPanelView({
 
   return (
     <aside className="comments-panel" data-testid="comments-panel">
+      {/* Header: message icon + "Comments" + count pill + close (X) — David's
+          `.proto-comments-panel-top`. The count pill reflects the total comments. */}
       <header className="comments-panel-header">
         <h2 className="comments-panel-title">
+          <span className="comments-panel-icon" aria-hidden="true">
+            <IconMessage size={16} />
+          </span>
           Comments
-          {/* Change 1 — count badge: only shows when there are open (non-resolved, non-orphaned) comments */}
-          {open.length > 0 && (
-            <span className="comments-count-badge" aria-label={`${open.length} open comments`}>
-              {open.length}
+          {comments.length > 0 && (
+            <span className="comments-count-badge" aria-label={`${comments.length} comments`}>
+              {comments.length}
             </span>
           )}
         </h2>
+        {onClose && (
+          <button
+            type="button"
+            className="comments-panel-close"
+            data-testid="comments-panel-close"
+            aria-label="Close comments"
+            onClick={() => onClose()}
+          >
+            <IconClose size={14} />
+          </button>
+        )}
       </header>
 
       {composer && (
@@ -558,6 +586,19 @@ export type CommentsPanelProps = {
    *  affordance). Used on the public /p/<token> surface where comment create is
    *  disabled (B9b/B9c). Read-only viewers can still read all comments. */
   readOnly?: boolean
+  /** C2a (writable-anon): enables comment CREATE on the public surface — the
+   *  contextmenu→anchored-composer flow routes via `createCommentByToken(token)`
+   *  (no prototypeId needed). Resolve/Apply/Ignore/Delete stay gated on
+   *  `prototypeId != null`, so they remain HIDDEN on the public mount. Additive:
+   *  defaults to `prototypeId != null`, which reproduces the prior behaviour
+   *  exactly for the signed-in mount (create already on) and the prior public
+   *  mount (create off). Has no effect when `readOnly` is true. */
+  canComment?: boolean
+  /** Public surface only (Phase 3): the viewer's self-supplied display name,
+   *  threaded onto the by-token create payload so anon comments are attributed to
+   *  a name (server falls back to "Anonymous"). Omitted on the signed-in mount →
+   *  no change there. Additive. */
+  viewerName?: string
 }
 
 function toMessage(err: unknown, fallback: string): string {
@@ -574,7 +615,15 @@ export function CommentsPanel({
   onIterateComment,
   iterateBusy = false,
   readOnly = false,
+  canComment,
+  viewerName,
 }: CommentsPanelProps) {
+  // Writable-anon resolution: create is enabled when not read-only AND either a
+  // prototypeId is present (signed-in mount) OR the host opted into anon create
+  // (public viewer). Defaulting `canComment` to `prototypeId != null` keeps both
+  // prior call sites byte-for-byte (signed-in: on; old public: off).
+  const commentingEnabled =
+    !readOnly && (canComment ?? prototypeId != null)
   // (see handleApply / handleIgnore below for the CHANGE C resolve wiring)
   const [comments, setComments] = useState<CommentRecord[]>([])
   const [refreshKey, setRefreshKey] = useState(0)
@@ -592,7 +641,7 @@ export function CommentsPanel({
   // Load existing comments on mount and after a freeform submit.
   useEffect(() => {
     let active = true
-    runLoadComments({ token, api: designAgentApi })
+    runLoadComments({ token, prototypeId, api: designAgentApi })
       .then((list) => {
         if (active) setComments(list)
       })
@@ -602,14 +651,14 @@ export function CommentsPanel({
     return () => {
       active = false
     }
-  }, [token, refreshKey])
+  }, [token, prototypeId, refreshKey])
 
   // Right-click anywhere with a reachable anchor id opens the composer for that
   // anchor. Suppressed in readOnly mode (public viewer — comment create disabled).
   // Currently this captures same-origin DOM under the panel/parent document; the
   // cross-iframe bridge is a follow-up (see scope note above).
   useEffect(() => {
-    if (readOnly) return
+    if (!commentingEnabled) return
     function onContextMenu(e: MouseEvent) {
       const anchorId = captureAnchorId(e.target as Element | null)
       if (!anchorId) return
@@ -618,7 +667,7 @@ export function CommentsPanel({
     }
     document.addEventListener("contextmenu", onContextMenu)
     return () => document.removeEventListener("contextmenu", onContextMenu)
-  }, [readOnly])
+  }, [commentingEnabled])
 
   async function handleSubmit() {
     if (!composer || !composer.body.trim()) return
@@ -629,6 +678,7 @@ export function CommentsPanel({
         token,
         anchorId: composer.anchorId,
         body: composer.body,
+        viewerName,
         api: designAgentApi,
         comments,
       })
@@ -756,10 +806,7 @@ export function CommentsPanel({
               data-testid="da-comment-submit"
               aria-label={freeformBusy ? "Posting…" : "Send comment"}
             >
-              {/* Up-arrow SVG */}
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <path d="M8 13V3M8 3L3.5 7.5M8 3L12.5 7.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
+              <IconSendUp size={15} />
             </button>
           </div>
           {/* Change 5 — helper line below composer */}
@@ -775,7 +822,7 @@ export function CommentsPanel({
       )}
       <CommentsPanelView
         comments={comments}
-        composer={readOnly ? null : composer}
+        composer={commentingEnabled ? composer : null}
         busy={busy || iterateBusy}
         error={error}
         canResolve={prototypeId != null}

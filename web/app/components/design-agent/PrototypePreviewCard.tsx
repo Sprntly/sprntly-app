@@ -26,6 +26,12 @@ export type PrototypePreviewCardProps = {
   /** Open the full-screen canvas for this prototype (skips the loading screen). */
   onOpen: () => void
   onDelete?: () => Promise<void>
+  /** When set, renders a static image instead of the live iframe thumbnail.
+   *  Pass the preview image URL, or null to show a "Prototype ready" placeholder.
+   *  Use for brief-card right rails where an iframe is too heavy. */
+  staticPreviewUrl?: string | null
+  /** Activate static-image/placeholder mode (no iframe rendered). */
+  briefTileMode?: boolean
 }
 
 /** Derive a stable version-ish label for the sub-line. The prototype row has no
@@ -40,6 +46,8 @@ export function PrototypePreviewCard({
   prdTitle,
   onOpen,
   onDelete,
+  staticPreviewUrl,
+  briefTileMode,
 }: PrototypePreviewCardProps) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -64,7 +72,11 @@ export function PrototypePreviewCard({
         aria-label={`Open the design for ${prdTitle?.trim() || "this PRD"}`}
       >
         <div className="da-preview-thumb" aria-hidden="true">
-          {prototype.bundle_url ? (
+          {briefTileMode && staticPreviewUrl ? (
+            <img className="da-preview-img" src={staticPreviewUrl} alt="" />
+          ) : briefTileMode ? (
+            <div className="da-preview-thumb-empty" />
+          ) : prototype.bundle_url ? (
             // Scaled, click-inert live preview of the bundle. The bundle's scripts
             // must be allowed to run for the preview to render — an empty sandbox
             // blocks all JS and leaves the thumbnail blank. `allow-same-origin`

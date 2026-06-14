@@ -30,6 +30,13 @@ export type WorkspaceProduct = {
   is_primary: boolean
 }
 
+export type DesignSourcePreference = {
+  design_source: "figma" | "github" | "website"
+  figma_file_key?: string | null
+  github_repo?: string | null
+  website_url?: string | null
+}
+
 export type WorkspaceCompany = {
   id: string
   slug: string
@@ -52,6 +59,7 @@ export type WorkspaceCompany = {
   kpi_tree: KpiTree
   feature_flags: FeatureFlags
   notification_settings: Record<string, unknown>
+  design_source: DesignSourcePreference | null
   onboarding_step: number
   onboarding_completed_at: string | null
 }
@@ -225,4 +233,17 @@ export function parseKpiTree(raw: unknown): KpiTree {
 export function parseFeatureFlags(raw: unknown): FeatureFlags {
   if (!raw || typeof raw !== "object") return { ...DEFAULT_FEATURE_FLAGS }
   return { ...DEFAULT_FEATURE_FLAGS, ...(raw as Partial<FeatureFlags>) }
+}
+
+export function parseDesignSourcePreference(raw: unknown): DesignSourcePreference | null {
+  if (!raw || typeof raw !== "object") return null
+  const o = raw as Record<string, unknown>
+  const ds = o.design_source
+  if (ds !== "figma" && ds !== "github" && ds !== "website") return null
+  return {
+    design_source: ds,
+    figma_file_key: (o.figma_file_key as string | null | undefined) ?? null,
+    github_repo: (o.github_repo as string | null | undefined) ?? null,
+    website_url: (o.website_url as string | null | undefined) ?? null,
+  }
 }

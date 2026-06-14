@@ -51,6 +51,7 @@ export function GenerationLoadingScreen({
   githubRepo,
   mode = "generate",
   prototypeId,
+  onNotifyWhenReady,
 }: {
   open: boolean
   /** Optional: fired once the exit fade completes (cosmetic hook). */
@@ -64,6 +65,9 @@ export function GenerationLoadingScreen({
   /** When provided, the component subscribes to the backend SSE stream and
    *  renders live friendly step text instead of the cosmetic checklist. */
   prototypeId?: number | null
+  /** When provided and mode === "generate", renders a "Notify me when ready"
+   *  button that dismisses the overlay and arms background-completion notification. */
+  onNotifyWhenReady?: () => void
 }) {
   // ── Cosmetic fallback (used when no SSE stream is active) ──────────────────
   const steps = mode === "refresh" ? REFRESH_STEPS : STEPS
@@ -110,6 +114,7 @@ export function GenerationLoadingScreen({
   // ── Live SSE steps ─────────────────────────────────────────────────────────
   const [liveSteps, setLiveSteps] = useState<LiveStep[]>([])
   const [isLiveDone, setIsLiveDone] = useState(false)
+  const [exiting, setExiting] = useState(false)
   const esRef = useRef<EventSource | null>(null)
 
   useEffect(() => {
@@ -195,6 +200,15 @@ export function GenerationLoadingScreen({
     prevOpen.current = open
   }, [open, onDone])
 
+  const handleNotifyClick = () => {
+    if (!onNotifyWhenReady) return
+    setExiting(true)
+    setTimeout(() => {
+      setExiting(false)
+      onNotifyWhenReady()
+    }, 200)
+  }
+
   if (!open) return null
 
   const isLive = liveSteps.length > 0
@@ -222,7 +236,7 @@ export function GenerationLoadingScreen({
 
   return (
     <div
-      className="proto-gen-overlay design-agent-surface"
+      className={`proto-gen-overlay design-agent-surface${exiting ? " proto-gen-exiting" : ""}`}
       role="status"
       aria-live="polite"
       aria-label={headline}
@@ -282,6 +296,17 @@ export function GenerationLoadingScreen({
                 )
               })}
         </div>
+        {onNotifyWhenReady && mode === "generate" && (
+          <div className="proto-gen-footer">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm proto-gen-notify-btn"
+              onClick={handleNotifyClick}
+            >
+              Notify me when ready
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )

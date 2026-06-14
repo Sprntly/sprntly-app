@@ -168,6 +168,7 @@ function InTabCanvas({
   proto,
   onProtoChange,
   onDone,
+  onBack,
   searchParams,
   router,
 }: {
@@ -177,6 +178,8 @@ function InTabCanvas({
   onProtoChange: (next: PrototypeRecord) => void
   /** Return the tab to its empty/landing state (clears the in-tab prototype). */
   onDone: () => void
+  /** Navigate back to the previous page (the in-tab title bar back button). */
+  onBack?: () => void
   /** The current URL search params — threaded from PrototypeRoute so InTabCanvas
    *  reads the same snapshot that seeded the parent render (SSR-safe: the parent
    *  already called useSearchParams). */
@@ -291,6 +294,9 @@ function InTabCanvas({
   return (
     <PostGenerationResult
       prototype={proto}
+      hideBreadcrumb
+      isInTab
+      onBack={onBack}
       defaultFullscreen={fsParamToFullscreen(searchParams.get("fs"))}
       onFullscreenChange={(open) => {
         const next = new URLSearchParams(searchParams.toString())
@@ -468,13 +474,14 @@ export function PrototypeRoute() {
   // prototype id forces a clean remount (fresh iterate runner) per prototype.
   if (proto) {
     return (
-      <AppLayout>
+      <AppLayout mainClassName="main--flush" mainColumnClassName="main-column--flush" hideChromeStrip>
         <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
           <InTabCanvas
             key={proto.id}
             proto={proto}
             onProtoChange={setProto}
             onDone={() => setProto(null)}
+            onBack={() => router.back()}
             searchParams={search}
             router={router}
           />

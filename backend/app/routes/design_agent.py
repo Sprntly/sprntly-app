@@ -57,8 +57,9 @@ from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
+from app.db.companies import slug_for_company_id
 from app.db.connections import get_connection
-from app.db.prds import get_prd_rendered, reset_prd_to_draft
+from app.db.prds import get_prd_rendered, list_prds_by_brief, reset_prd_to_draft
 from app.db.github import find_github_installation_for_repo
 from app.db.products import get_company_website  # onboarding-website fallback source
 from app.db.prototype_exports import find_prototype_export
@@ -121,6 +122,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/design-agent", tags=["design-agent"])
 
 _VARIANT = "v1"
+
+# PRD_VARIANT is the canonical storage variant for the prd-author agent (v2,
+# as set in prd_runner.PRD_VARIANT). Imported here so GET /brief-prototype-map
+# filters prds by the same variant the PRD generation pipeline writes. Lazy
+# import avoids circular-import risk at module parse time; the value is stable
+# across requests so the import cost is negligible.
+def _prd_variant() -> str:
+    from app.prd_runner import PRD_VARIANT as _PV
+    return _PV
 
 # Strong refs to in-flight background generation tasks. asyncio only holds a
 # weak reference to a bare `create_task` result, so without this the task can be
@@ -470,6 +480,104 @@ def get_by_prd(
     if not row:
         raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
     return row
+
+
+# ─── Brief prototype map (batch read for card rendering) ─────────────────────
+
+
+class PrototypeReadiness(BaseModel):
+    """Prototype presence + preview for one PRD entry.
+
+    `ready` is always True when this object appears — absent prototype is
+    represented by `prototype: null` on the parent entry, not by a
+    `{ready: false}` object, so the frontend never needs to branch on the field.
+    """
+
+    ready: bool = True
+    preview_image_url: str | None = None
+
+
+class BriefPrototypeMapEntry(BaseModel):
+    """One insight that HAS a PRD (status=ready, PRD_VARIANT).
+
+    Insights without a ready PRD are absent from the entries list so the
+    frontend can treat `absent == no PRD` without a null-check branch.
+
+    `prd_title` mirrors the PRD's title field so the brief card tile can
+    display the same title as the editor's da-titlebar-title without an
+    independent source — the two can never diverge.
+    """
+
+    insight_index: int
+    prd_id: int
+    prd_title: str
+    prototype: PrototypeReadiness | None = None
+
+
+class BriefPrototypeMapResponse(BaseModel):
+    """Response for GET /v1/design-agent/brief-prototype-map.
+
+    One `entries` item per insight that has a ready PRD.  Empty list when no
+    PRDs exist for the brief.  The prototype field carries readiness + preview
+    URL when a ready prototype exists for that PRD; null otherwise.
+    """
+
+    brief_id: int
+    entries: list[BriefPrototypeMapEntry]
+
+
+@router.get("/brief-prototype-map", response_model=BriefPrototypeMapResponse)
+def get_brief_prototype_map(
+    brief_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> BriefPrototypeMapResponse:
+    """Return which insights have a PRD and whether each PRD has a ready prototype.
+
+    Designed for the brief overview screen: the frontend calls this ONCE per
+    brief on load and uses the result to render context-aware cards (no PRD,
+    PRD without prototype, PRD with prototype + optional preview image).
+
+    Pure read — NO side effects. Never creates a PRD, never creates a prototype.
+    Feature-flag-gated and workspace-isolated identically to GET /by-prd/{prd_id}:
+      - 404 when DESIGN_AGENT_ENABLED is off (feature invisible).
+      - workspace_id resolved from the caller's company membership (require_company).
+      - prototype lookup is workspace-scoped via find_ready_prototype_by_prd.
+
+    Brief ownership check: this endpoint does NOT explicitly verify that brief_id
+    belongs to the caller's workspace. Sibling read routes (e.g. GET /by-prd/{prd_id})
+    follow the same approach — cross-workspace containment is enforced at the
+    prototype layer (find_ready_prototype_by_prd filters by workspace_id), and a
+    foreign-workspace brief simply yields no PRD rows. The caller therefore learns
+    nothing about a brief they don't own — the entries list is empty. FLAG: if an
+    explicit brief→company ownership check is added to sibling routes, add the same
+    check here (see prds table brief_id → briefs table → company/dataset chain).
+    """
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    prd_variant = _prd_variant()
+
+    prds = list_prds_by_brief(brief_id=brief_id, variant=prd_variant)
+
+    entries: list[BriefPrototypeMapEntry] = []
+    for prd in prds:
+        proto_row = find_ready_prototype_by_prd(
+            prd_id=prd["id"], workspace_id=workspace_id
+        )
+        prototype = (
+            PrototypeReadiness(preview_image_url=proto_row.get("preview_image_url"))
+            if proto_row
+            else None
+        )
+        entries.append(
+            BriefPrototypeMapEntry(
+                insight_index=prd["insight_index"],
+                prd_id=prd["id"],
+                prd_title=prd["title"] or "",
+                prototype=prototype,
+            )
+        )
+
+    return BriefPrototypeMapResponse(brief_id=brief_id, entries=entries)
 
 
 # ─── Figma file listing (Generate modal design-source selector) ──────────────
@@ -1209,12 +1317,15 @@ async def _stage_complete_run(
                 )
                 log_parity = logger.info if parity.ok else logger.warning
                 log_parity(
-                    "design_agent.structural_parity prototype_id=%s matched=%d missing=%d extra=%d ok=%s",
+                    "design_agent.structural_parity prototype_id=%s matched=%d missing=%d extra=%d ok=%s "
+                    "missing_refs=%s extra_refs=%s",
                     prototype_id,
                     len(parity.matched),
                     len(parity.missing),
                     len(parity.extra),
                     str(parity.ok).lower(),
+                    parity.missing,
+                    parity.extra,
                 )
             except Exception:  # noqa: BLE001 — non-fatal: never fail a row on a self-check bug
                 logger.warning(
@@ -1695,6 +1806,7 @@ class PublicPrototypeView(BaseModel):
     requires_passcode: bool                    # true iff share_mode == "passcode"
     bundle_url: str | None                     # null until a passcode is verified
     is_complete: bool
+    company_slug: str                          # cosmetic segment of /p/<slug>/<token>
 
 
 class PasscodeAttempt(BaseModel):
@@ -1748,6 +1860,8 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         # signed URL — re-sign on read so the iframe never 403s once the TTL lapses.
         bundle_url=_public_bundle_url(row) if mode == "public" else None,
         is_complete=bool(row.get("is_complete")),
+        # INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
+        company_slug=slug_for_company_id(row["workspace_id"]) or "",
     )
 
 
@@ -1788,6 +1902,7 @@ def verify_passcode(
         # Permanent share, 24h stored signed URL — re-sign on read (see get_by_token).
         bundle_url=_public_bundle_url(row),
         is_complete=bool(row.get("is_complete")),
+        company_slug=slug_for_company_id(row["workspace_id"]) or "",
     )
 
 
@@ -2033,6 +2148,11 @@ class CommentCreate(BaseModel):
     pin_x_pct: float | None = Field(default=None, ge=0, le=100)
     pin_y_pct: float | None = Field(default=None, ge=0, le=100)
     resolved_anchor_id: str | None = Field(default=None, max_length=64)
+    # Public-surface only: the anonymous viewer's self-supplied display name,
+    # mapped onto the EXISTING `author` column (no new column / no migration).
+    # The authed route ignores it — internal authors come from the session
+    # identity. Length-capped so it can't be used as an oversized log/store vector.
+    viewer_name: str | None = Field(default=None, max_length=80)
 
 
 class CommentOut(BaseModel):
@@ -2168,14 +2288,21 @@ def delete_comment_route(
 def post_comment_public(token: str, body: CommentCreate, request: Request) -> CommentOut:
     """Public comment write. Resolves token → prototype; rejects when the
     prototype is private or not ready (404, matching get_by_token's posture).
-    The comment is attributed to the anonymous external author label, and the
-    workspace_id is taken from the resolved row — never a session claim.
+    The comment is attributed to the viewer's self-supplied name (or
+    "Anonymous"), and the workspace_id is taken from the resolved row — never a
+    session claim.
 
-    Intentionally disabled: anonymous public comment WRITES stay gated off
-    (404, indistinguishable from missing/private) pending a product decision —
-    re-enabling this opens an unauthenticated write endpoint. The resolution +
-    rate-limit logic below is built and ready for when it's enabled."""
-    raise HTTPException(status_code=404, detail="Not found")
+    Anonymous public comment WRITES are ENABLED: the share token IS the access
+    primitive (F8 — anyone with the URL can comment). This is an unauthenticated
+    write endpoint by design; the abuse controls are unchanged and load-bearing:
+      - the feature-flag gate (`_require_feature_enabled`) — invisible when off;
+      - the resolution 404-posture (missing / private / not-ready all 404,
+        indistinguishable from each other, so brute-force scanning discloses
+        nothing — Rule #15 / F6);
+      - the per-IP `PUBLIC_COMMENT_LIMITER` (10/hour/IP), mounted after the 404
+        resolution and before the write;
+      - log hygiene: the token is hashed (never raw) and neither the comment body
+        nor the viewer name (PII) is ever logged."""
     _require_feature_enabled()
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
@@ -2198,12 +2325,15 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
             detail={"error": "rate_limit", "retry_after_seconds": retry_after},
         )
     PUBLIC_COMMENT_LIMITER.register(client_ip)
+    # Viewer-supplied display name → the existing `author` column. Trimmed and
+    # falling back to "Anonymous" for blank/omitted names. NEVER logged (PII).
+    author = (body.viewer_name or "").strip() or "Anonymous"
     row = insert_comment(
         prototype_id=proto["id"],
         workspace_id=proto["workspace_id"],   # from the resolved row, not a session
         anchor_id=body.anchor_id,
         body=body.body,
-        author="external",
+        author=author,
         pin_x_pct=body.pin_x_pct,
         pin_y_pct=body.pin_y_pct,
         resolved_anchor_id=body.resolved_anchor_id,

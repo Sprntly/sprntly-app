@@ -20,9 +20,19 @@ export function Toast() {
           {toast.link && (
             <>
               {" "}
-              <a className="toast-link" href="#">
-                {toast.link}
-              </a>
+              {toast.onAction ? (
+                <button
+                  type="button"
+                  className="btn btn-accent btn-sm"
+                  onClick={() => { toast.onAction!(); hideToast() }}
+                >
+                  {toast.link}
+                </button>
+              ) : (
+                <a className="toast-link" href="#">
+                  {toast.link}
+                </a>
+              )}
             </>
           )}
         </div>

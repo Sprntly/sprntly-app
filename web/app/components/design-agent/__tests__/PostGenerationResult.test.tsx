@@ -415,13 +415,17 @@ describe("PostGenerationResult — forwards onShared down to ShareMenu (P6-20 AC
 
 describe("resolveViewHref (pure)", () => {
   it("prefers the bundle url", () => {
-    expect(resolveViewHref("https://b/x", "tok")).toBe("https://b/x")
+    expect(resolveViewHref("https://b/x", "tok", "sprntly")).toBe("https://b/x")
   })
-  it("falls back to the public token link", () => {
-    expect(resolveViewHref(null, "tok")).toBe("/p/tok")
+  it("falls back to the slug'd public token link", () => {
+    // The public link now carries the cosmetic company slug:
+    // /p/<slug>/<token> (intentional slug exposure — the one surface that
+    // renders companies.slug). The slug is sourced at the call site from
+    // useCompany().activeCompany.
+    expect(resolveViewHref(null, "tok", "sprntly")).toBe("/p/sprntly/tok")
   })
   it("returns null when neither is available", () => {
-    expect(resolveViewHref(null, null)).toBeNull()
+    expect(resolveViewHref(null, null, "sprntly")).toBeNull()
   })
 })
 
@@ -436,11 +440,20 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const APP_DIR = join(HERE, "..", "..", "..")
 const CSS = readFileSync(join(HERE, "..", "design-agent.css"), "utf8")
 const PUBLIC_VIEWER = readFileSync(
-  join(APP_DIR, "p", "[token]", "PublicTokenViewer.tsx"),
+  join(APP_DIR, "p", "PublicTokenViewer.tsx"),
   "utf8",
 )
 const RESULT_SRC = readFileSync(
   join(HERE, "..", "PostGenerationResult.tsx"),
+  "utf8",
+)
+// C2b — the pin/mark logic was extracted VERBATIM into the shared usePinMarking
+// hook so BOTH the signed-in editor and the public viewer drive ONE
+// implementation. The handler-body source-invariants therefore read the hook;
+// the create-fn injection (withAuthRetry(createComment(prototype.id))) is the
+// per-surface seam and stays a source-invariant on PostGenerationResult.tsx.
+const HOOK_SRC = readFileSync(
+  join(HERE, "..", "usePinMarking.ts"),
   "utf8",
 )
 
@@ -619,6 +632,74 @@ describe("PostGenerationResult container — defaults from the prototype record 
   })
 })
 
+// ─── isInTab prop-threading integration: container → View → DaControlBar ──────
+// Regression guard for the prop-threading bug where `isInTab` was set on the
+// PostGenerationResult CONTAINER but dropped before reaching DaControlBar,
+// causing the in-tab toolbar to silently render the OLD launcher bar. Leaf-only
+// unit tests (mounting DaControlBar/InTabHandoffCluster with isInTab=true
+// directly) cannot catch this — only rendering the full container end-to-end can.
+describe("PostGenerationResult container — isInTab prop threads through to DaControlBar (regression: dropped-prop bug)", () => {
+  const READY_PROTO = proto({ bundle_url: "https://cdn/p/42/index.html", is_complete: false })
+
+  it("isInTab=true renders the in-tab Mark Complete button and NOT the launcher Actions/Done bar", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: READY_PROTO,
+        isInTab: true,
+      }),
+    )
+    // The in-tab cluster must be present.
+    expect(html).toContain('data-testid="da-mark-complete"')
+    // The launcher bar buttons must be absent.
+    expect(html).not.toContain('data-testid="da-control-done"')
+    expect(html).not.toContain('data-testid="da-actions-toggle"')
+  })
+
+  it("isInTab absent (launcher path) renders the Actions/Done bar and NOT the in-tab Mark Complete button", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: READY_PROTO,
+      }),
+    )
+    // The classic launcher bar must be present.
+    expect(html).toContain('data-testid="da-actions-toggle"')
+    // The in-tab cluster must be absent.
+    expect(html).not.toContain('data-testid="da-mark-complete"')
+  })
+
+  it("isInTab=true + is_complete=true renders Export/Undo (and NOT the launcher Actions/Done bar)", () => {
+    const COMPLETE_PROTO = proto({ bundle_url: "https://cdn/p/42/index.html", is_complete: true })
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: COMPLETE_PROTO,
+        isInTab: true,
+      }),
+    )
+    // Complete in-tab cluster: Export + Undo must be present.
+    expect(html).toContain('data-testid="da-export"')
+    expect(html).toContain('data-testid="da-undo"')
+    // Copy is also rendered in the complete branch.
+    expect(html).toContain('data-testid="da-copy"')
+    // The launcher bar (old path) must be absent.
+    expect(html).not.toContain('data-testid="da-actions-toggle"')
+    expect(html).not.toContain('data-testid="da-control-done"')
+  })
+
+  it("is_complete=true WITHOUT isInTab (launcher path) renders the Actions toggle and NOT the in-tab Export button", () => {
+    const COMPLETE_PROTO = proto({ bundle_url: "https://cdn/p/42/index.html", is_complete: true })
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: COMPLETE_PROTO,
+      }),
+    )
+    // The classic launcher bar must be present.
+    expect(html).toContain('data-testid="da-actions-toggle"')
+    // The in-tab complete cluster must be absent.
+    expect(html).not.toContain('data-testid="da-export"')
+    expect(html).not.toContain('data-testid="da-undo"')
+  })
+})
+
 // ─── viewer iframe src + remount key: follow the live build path ─────────────
 
 // Pull the inline viewer iframe's `src` out of the SSR markup. The inline viewer
@@ -683,18 +764,20 @@ describe("viewer src + remount key — follows the live build path", () => {
 })
 
 describe("pin-comment create stays wrapped in the auth-retry (preservation)", () => {
-  it("test_pin_comment_create_wrapped_in_auth_retry — handlePinSubmit wraps createComment in withAuthRetry", () => {
-    // The node-env run cannot exercise the bearer-refresh path, so assert the
-    // wrapping as a source invariant (the repo's source-assertion convention for
-    // behaviour that can't be driven in node-env). A bearer token can expire
-    // mid-interaction; the pin-comment create must stay inside withAuthRetry(() =>
-    // …) so a transient 401 retries once through the refresh instead of silently
-    // losing a saved comment.
-    expect(RESULT_SRC).toContain("async function handlePinSubmit")
-    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
-    const body = RESULT_SRC.slice(start, start + 1200)
-    expect(body).toMatch(
-      /withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(/,
+  it("test_pin_comment_create_wrapped_in_auth_retry — the SIGNED-IN onCreate wraps createComment in withAuthRetry", () => {
+    // C2b: the create-fn is now INJECTED into usePinMarking per surface. The
+    // node-env run cannot exercise the bearer-refresh path, so assert the wrapping
+    // as a source invariant (the repo's source-assertion convention). On the
+    // signed-in container the onCreate handed to usePinMarking must stay inside
+    // withAuthRetry(() => designAgentApi.createComment(prototype.id, …)) so a
+    // transient 401 retries once through the refresh instead of silently losing a
+    // saved comment. (The PUBLIC surface threads createCommentByToken — asserted
+    // in the public-token-states suite.)
+    expect(RESULT_SRC).toContain("usePinMarking({")
+    const start = RESULT_SRC.indexOf("usePinMarking({")
+    const call = RESULT_SRC.slice(start, start + 600)
+    expect(call).toMatch(
+      /onCreate:\s*\(payload\)\s*=>\s*\n?\s*withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(prototype\.id,\s*payload\)\s*\)/,
     )
     // the helper is imported from the shared api module (the import must stay intact)
     expect(RESULT_SRC).toMatch(
@@ -764,31 +847,217 @@ describe("Mark-and-comment pin flow — view layer", () => {
     expect(html).toContain('data-testid="da-pin-ignore-2"')
   })
 
-  it("test_pin_submit_uses_auth_retry_create_with_pin_anchor — handlePinSubmit sends anchor_id=pin-N (synthetic marker) via auth-retry", () => {
-    // Source-invariant check: the submit function still uses the synthetic pin-<n>
-    // anchor_id marker and wraps the call in withAuthRetry. Position fields are
-    // now also sent (verified in the adjacent test).
-    expect(RESULT_SRC).toContain("async function handlePinSubmit")
-    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
-    const body = RESULT_SRC.slice(start, start + 1200)
+  it("test_pin_submit_uses_auth_retry_create_with_pin_anchor — handlePinSubmit sends anchor_id=pin-N (synthetic marker) + the signed-in onCreate is auth-retried", () => {
+    // C2b: handlePinSubmit moved VERBATIM into usePinMarking. It still uses the
+    // synthetic pin-<n> anchor_id marker and now calls the injected onCreate; the
+    // withAuthRetry wrapping is the signed-in container's onCreate seam.
+    expect(HOOK_SRC).toContain("async function handlePinSubmit")
+    const start = HOOK_SRC.indexOf("async function handlePinSubmit")
+    const body = HOOK_SRC.slice(start, start + 1200)
     // anchor_id is the unchanged synthetic pin marker — back-compat with the list keying
     expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
-    // auth-retry wrapping still present
-    expect(body).toMatch(/withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(/)
+    // the submit calls the injected create-fn (per-surface transport)
+    expect(body).toMatch(/await onCreate\(/)
+    // the SIGNED-IN container threads the auth-retried createComment into onCreate
+    expect(RESULT_SRC).toMatch(/withAuthRetry\(\s*\(\)\s*=>\s*designAgentApi\.createComment\(prototype\.id,\s*payload\)/)
   })
 
   it("test_create_comment_body_sends_position_fields — handlePinSubmit includes pin_x_pct, pin_y_pct, resolved_anchor_id", () => {
-    // Verify that the submit function sends all three durable position fields
-    // alongside the unchanged synthetic anchor_id and body. Pin position is now
-    // persisted so every viewer sees the same pin location.
-    const start = RESULT_SRC.indexOf("async function handlePinSubmit")
-    const fnBody = RESULT_SRC.slice(start, start + 1400)
+    // Verify that the submit function (now in usePinMarking) sends all three
+    // durable position fields alongside the unchanged synthetic anchor_id and
+    // body. Pin position is persisted so every viewer sees the same pin location.
+    const start = HOOK_SRC.indexOf("async function handlePinSubmit")
+    const fnBody = HOOK_SRC.slice(start, start + 1400)
     // anchor_id (synthetic pin marker) and body are still present — back-compat.
     expect(fnBody).toContain("anchor_id:")
     expect(fnBody).toContain("body:")
-    // Position fields are now included in the createComment payload.
+    // Position fields are now included in the create payload.
     expect(fnBody).toContain("pin_x_pct:")
     expect(fnBody).toContain("pin_y_pct:")
     expect(fnBody).toContain("resolved_anchor_id:")
+  })
+})
+
+// ─── C1 Slice B: pin-anchor threading survives the container→view→leaf split ──
+// After extracting the overlay + pin layer + pin-comment rows into
+// PrototypeMarkLayer, the load-bearing risk is the "prop dropped mid-tree" class
+// of bug: a leaf (PrototypeMarkLayer) test passes while the container silently
+// stops threading onStageClick / onPinSubmit into MarkOverlay / PrototypeMarkLayer.
+//
+// node-env vitest has no DOM and can't simulate a real click. So we guard the
+// whole path two ways: (1) render the REAL PostGenerationResult container via
+// renderToStaticMarkup and assert the extracted leaves actually mount inside it
+// (the overlay element + the pin-comment rows for a real pin) — proving the
+// container→view→leaf wiring renders end to end, not just in an isolated leaf
+// test; and (2) source-invariants that handleStageClick captures the anchor +
+// per-element offsets and handlePinSubmit ships them, since the click→state→
+// payload data flow itself can't be driven without a DOM.
+describe("PostGenerationResult container — pin-anchor threading through the leaf split", () => {
+  it("the REAL container renders <MarkOverlay> on the stage (overlay click → anchor capture is mounted, not dropped)", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE }),
+      }),
+    )
+    // The extracted overlay mounts inside the real container's center stage. A
+    // dropped-prop / unmounted-leaf bug would lose this element.
+    expect(html).toContain('data-testid="da-canvas-center"')
+    expect(html).toContain('data-testid="da-mark-overlay"')
+  })
+
+  it("handleStageClick captures the resolved anchor + the per-element click offsets (source invariant)", () => {
+    // The whole point of the slice: the stage click must still capture the anchor
+    // and the click position WITHIN the anchored element so the persisted comment
+    // can re-anchor the pin. If handleStageClick stopped capturing these, the
+    // payload below would have nothing to ship. C2b: this logic now lives in the
+    // shared usePinMarking hook (moved verbatim).
+    const start = HOOK_SRC.indexOf("function handleStageClick")
+    expect(start).toBeGreaterThanOrEqual(0)
+    const body = HOOK_SRC.slice(start, start + 1400)
+    expect(body).toContain("getClickOffsetInElement")
+    expect(body).toContain("xPctInEl")
+    expect(body).toContain("yPctInEl")
+    // the anchor is stored on the new pin
+    expect(body).toMatch(/anchor[,\s}]/)
+  })
+
+  it("handlePinSubmit ships anchor_id + pin_x_pct + pin_y_pct + resolved_anchor_id (the captured anchor reaches the create)", () => {
+    // End of the thread: the fields captured at click time are sent on create.
+    // C2b: handlePinSubmit lives in the shared usePinMarking hook now.
+    const start = HOOK_SRC.indexOf("async function handlePinSubmit")
+    const body = HOOK_SRC.slice(start, start + 1400)
+    expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
+    expect(body).toContain("pin_x_pct:")
+    expect(body).toContain("pin_y_pct:")
+    expect(body).toMatch(/resolved_anchor_id:\s*serializeAnchor\(pin\.anchor\)/)
+  })
+
+  it("the VIEW threads the capture callbacks into the extracted leaves (onStageClick→MarkOverlay, onPinSubmit→PrototypeMarkLayer onSubmitComment)", () => {
+    // WHY this test exists: the two integration tests above prove the leaves
+    // MOUNT and the handlers EXIST — but a leaf renders fine and the handler
+    // stays defined even if PostGenerationResultView stops passing the callback
+    // down. That's the load-bearing "prop dropped mid-tree" bug: the click→submit
+    // thread is silently severed while every other test stays green. The ONLY
+    // thing that proves the view→leaf wiring is the wiring itself in the source.
+    //
+    // Tolerant against the ACTUAL formatting in PostGenerationResult.tsx:
+    //   MarkOverlay is a single-line element; PrototypeMarkLayer is multi-line
+    //   (so [\s\S]*? bridges the tag name and the prop). Both fail if the
+    //   respective prop wiring is removed.
+    const markOverlayWiring =
+      /<MarkOverlay[\s\S]*?onStageClick=\{onStageClick\}[\s\S]*?\/>/
+    const markLayerWiring =
+      /<PrototypeMarkLayer[\s\S]*?onSubmitComment=\{onPinSubmit\}[\s\S]*?\/>/
+    expect(RESULT_SRC).toMatch(markOverlayWiring)
+    expect(RESULT_SRC).toMatch(markLayerWiring)
+  })
+})
+
+// ─── In-tab title-bar restructure tests ──────────────────────────────────────
+describe("DaControlBar + PostGenerationResultView — isInTab title-bar restructure", () => {
+  it("isInTab: renders the back button (da-titlebar-back) in the title bar", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, {
+        prototypeId: 42,
+        isComplete: false,
+        shareMode: "private" as const,
+        shareToken: null,
+        platform: "desktop" as const,
+        commentsOpen: false,
+        markMode: false,
+        canOpen: false,
+        isInTab: true,
+        onBack: () => {},
+      }),
+    )
+    expect(html).toContain('data-testid="da-titlebar-back"')
+  })
+
+  it("isInTab: the right-cluster icon buttons are present", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, {
+        prototypeId: 42,
+        isComplete: false,
+        shareMode: "private" as const,
+        shareToken: null,
+        platform: "desktop" as const,
+        commentsOpen: false,
+        markMode: false,
+        canOpen: false,
+        isInTab: true,
+      }),
+    )
+    expect(html).toContain('data-testid="da-mark-toggle"')
+    expect(html).toContain('data-testid="da-comments-toggle"')
+    expect(html).toContain('data-testid="proto-fullscreen-trigger"')
+  })
+
+  it("isInTab: the da-ctl-label spans are NOT present", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, {
+        prototypeId: 42,
+        isComplete: false,
+        shareMode: "private" as const,
+        shareToken: null,
+        platform: "desktop" as const,
+        commentsOpen: false,
+        markMode: false,
+        canOpen: false,
+        isInTab: true,
+      }),
+    )
+    expect(html).not.toContain('class="da-ctl-label"')
+  })
+
+  it("NOT isInTab: the back button is ABSENT and the classic labeled bar is present", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, {
+        prototypeId: 42,
+        isComplete: false,
+        shareMode: "private" as const,
+        shareToken: null,
+        platform: "desktop" as const,
+        commentsOpen: false,
+        markMode: false,
+        canOpen: false,
+        isInTab: false,
+      }),
+    )
+    expect(html).not.toContain('data-testid="da-titlebar-back"')
+    expect(html).toContain('class="da-ctl-label"')
+    expect(html).toContain('data-testid="da-actions-toggle"')
+  })
+
+  it("isInTab via PostGenerationResultView: back button present end-to-end", () => {
+    const html = renderView({ isInTab: true })
+    expect(html).toContain('data-testid="da-titlebar-back"')
+  })
+
+  it("NOT isInTab via PostGenerationResultView: back button absent end-to-end", () => {
+    const html = renderView({ isInTab: false })
+    expect(html).not.toContain('data-testid="da-titlebar-back"')
+  })
+
+  it("isInTab + prdTitle: renders the title span with the given title text", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto(),
+        isInTab: true,
+        prdTitle: "My Cool PRD",
+      }),
+    )
+    expect(html).toContain('data-testid="da-titlebar-title"')
+    expect(html).toContain("My Cool PRD")
+  })
+
+  it("NOT isInTab: the title-bar title span is absent", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: proto(),
+        isInTab: false,
+        prdTitle: "My Cool PRD",
+      }),
+    )
+    expect(html).not.toContain('data-testid="da-titlebar-title"')
   })
 })

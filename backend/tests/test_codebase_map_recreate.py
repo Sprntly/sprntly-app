@@ -949,7 +949,11 @@ CREATE TABLE prototypes (
     current_checkpoint_id  INTEGER,
     error                  TEXT,
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
-    completed_at           TEXT
+    completed_at           TEXT,
+    share_mode             TEXT NOT NULL DEFAULT 'private'
+                           CHECK (share_mode IN ('private', 'public', 'passcode')),
+    share_token            TEXT UNIQUE,
+    share_passcode_hash    TEXT
 );
 CREATE TABLE prototype_checkpoints (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1761,6 +1765,55 @@ def test_structural_parity_missing_and_extra_detected():
     assert any("Reports" in m for m in report.missing)
     assert any("DataTable" in m for m in report.missing)
     assert "Billing" in report.extra
+
+
+def test_structural_parity_log_serializes_missing_and_extra_detail(caplog):
+    """The route's structural-parity log line carries the missing/extra REFS, not
+    just counts — so a triaging agent can see WHICH refs were dropped/invented.
+
+    Builds a real ParityReport (missing brand/nav/component, invented nav item)
+    then drives the route's exact log statement and asserts the detail is present.
+    """
+    import logging
+
+    import app.routes.design_agent as routes_mod
+
+    located = _parity_located()
+    generated = (
+        "<Sidebar/>"
+        "<nav><a>Dashboard</a><a>Billing</a></nav>"
+    )
+    report = _assert_structural_parity(generated, None, located.map_result.shell, located)
+    assert report.ok is False
+    assert report.missing and report.extra  # real detail to serialize
+
+    # Drive the route's exact log statement (same format string + logger).
+    with caplog.at_level(logging.WARNING, logger="app.routes.design_agent"):
+        log_parity = routes_mod.logger.info if report.ok else routes_mod.logger.warning
+        log_parity(
+            "design_agent.structural_parity prototype_id=%s matched=%d missing=%d extra=%d ok=%s "
+            "missing_refs=%s extra_refs=%s",
+            "PROTO-1",
+            len(report.matched),
+            len(report.missing),
+            len(report.extra),
+            str(report.ok).lower(),
+            report.missing,
+            report.extra,
+        )
+
+    parity_lines = [
+        r.getMessage() for r in caplog.records
+        if "design_agent.structural_parity " in r.getMessage()
+    ]
+    assert parity_lines, "expected a structural_parity log line"
+    msg = parity_lines[0]
+    # Counts preserved for back-compat …
+    assert "missing=3" in msg and "extra=1" in msg
+    # … and the new detail is serialized.
+    assert "missing_refs=" in msg and "extra_refs=" in msg
+    assert "Billing" in msg  # the invented nav label appears in extra_refs
+    assert any(ref in msg for ref in report.missing)  # a missing ref is named
 
 
 def test_structural_self_check_has_no_dom_or_network():

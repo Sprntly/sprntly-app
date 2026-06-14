@@ -340,14 +340,25 @@ describe("AC5 — locked prototype hides the surface", () => {
 
 describe("AC6 — external-viewer exclusion (F12 internal-only)", () => {
   it("test_public_token_page_does_not_mount_clarifying_question_surface", () => {
-    // vitest runs from web/ (cwd); the public route lives at app/p/[token].
-    const dir = join(process.cwd(), "app", "p", "[token]")
-    const files = readdirSync(dir).filter(
-      (f) => f.endsWith(".ts") || f.endsWith(".tsx"),
-    )
-    expect(files).toContain("page.tsx")
+    // vitest runs from web/ (cwd). The public route was collapsed onto a shared
+    // [slug] first segment, so its source files live across app/p/ and its
+    // [slug]/[token] subtree — walk the whole subtree (excluding tests).
+    const root = join(process.cwd(), "app", "p")
+    function walk(dir: string): string[] {
+      const out: string[] = []
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "__tests__") continue
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) out.push(...walk(full))
+        else if (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx"))
+          out.push(full)
+      }
+      return out
+    }
+    const files = walk(root)
+    expect(files.some((f) => f.endsWith(join("[slug]", "[token]", "page.tsx")))).toBe(true)
     for (const f of files) {
-      const src = readFileSync(join(dir, f), "utf8")
+      const src = readFileSync(f, "utf8")
       expect(src).not.toContain("ClarifyingQuestionSurface")
     }
   })

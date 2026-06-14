@@ -20,6 +20,7 @@ export type SettingsSectionId =
   | "goals-metrics"
   | "team"
   | "connectors"
+  | "design-source"
   | "billing"
   | "security"
   // Dormant (kept for component-file compatibility, not linked)
@@ -62,6 +63,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     groupLabel: "Data & Integrations",
     items: [
       { id: "connectors", label: "Connectors", available: true },
+      { id: "design-source", label: "Prototypes", available: true },
     ],
   },
   {

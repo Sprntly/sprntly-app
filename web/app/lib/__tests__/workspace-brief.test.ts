@@ -28,6 +28,7 @@ const workspace: WorkspaceCompany = {
   },
   feature_flags: DEFAULT_FEATURE_FLAGS,
   notification_settings: {},
+  design_source: null,
   onboarding_step: 8,
   onboarding_completed_at: null,
 }

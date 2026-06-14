@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
+import { useWorkspace } from "../../context/WorkspaceContext"
 import { ApiError, askApi, briefApi, type AskResponse } from "../../lib/api"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
@@ -20,6 +21,13 @@ import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
 import { IconClose, IconSendUp, IconSparkle } from "./app-icons"
 import { IconPlug } from "@tabler/icons-react"
+import { useBriefPrototypeMap } from "../design-agent/useBriefPrototypeMap"
+import { prototypeStateForInsight } from "../design-agent/briefPrototypeMap.helpers"
+import { GenerateModal } from "../design-agent/GenerateModal"
+import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
+import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
+import { prototypePath } from "../../lib/routes"
+import { useRouter } from "next/navigation"
 
 type Finding = BriefV2HeroFinding | BriefV2CompactFinding
 
@@ -236,11 +244,6 @@ function compactMetricValue(raw: string): string {
 }
 
 // A short prototype-style name for the preview caption (drop trailing clauses).
-function previewName(finding: Finding): string {
-  const t = finding.title.split(/\s+[—–:]\s+/)[0].trim()
-  return t.length > 30 ? `${t.slice(0, 28)}…` : t
-}
-
 const num = (v: number | string) => (typeof v === "number" ? v : Number(v) || 0)
 
 // Compact ring / donut — share-of-whole or progress (card 2's "3/4 answered").
@@ -340,34 +343,6 @@ function FindingMiniChart({ chart }: { chart: BriefV2InlineChart }) {
   return ringKind ? <FindingMiniRing chart={chart} /> : <FindingMiniBars chart={chart} />
 }
 
-// Right-rail prototype preview — a browser-style mock + caption, mirroring the
-// "First-Handoff Wizard" teaser in the reference. Clicking opens the prototype
-// flow (which routes to the PRD-first message when no PRD exists yet).
-function FindingPreview({ finding, onOpen }: { finding: Finding; onOpen: () => void }) {
-  return (
-    <button type="button" className="fc-preview" onClick={onOpen} title="Open prototype preview">
-      <span className="fc-preview-mock" aria-hidden>
-        <span className="fc-preview-mock-bar">
-          <i /><i /><i />
-        </span>
-        <span className="fc-preview-mock-body">
-          <span className="fc-preview-line fc-preview-line--a" />
-          <span className="fc-preview-line fc-preview-line--b" />
-          <span className="fc-preview-line fc-preview-line--c" />
-          <span className="fc-preview-line fc-preview-line--d" />
-        </span>
-      </span>
-      <span className="fc-preview-foot">
-        <span className="fc-preview-title">
-          <span className="fc-preview-glyph" aria-hidden>{">_"}</span>
-          {previewName(finding)}
-        </span>
-        <span className="fc-preview-sub">Prototype preview · open design</span>
-      </span>
-    </button>
-  )
-}
-
 // ── Finding card — matches reference layout ───────────────────────────────────
 function BriefFindingCard({
   finding,
@@ -378,6 +353,7 @@ function BriefFindingCard({
   onGeneratePrd,
   onDismiss,
   onPreview,
+  insightState,
 }: {
   finding: Finding
   busy: boolean
@@ -387,6 +363,13 @@ function BriefFindingCard({
   onGeneratePrd: () => void
   onDismiss: () => void
   onPreview: () => void
+  insightState?: {
+    hasPrd: boolean
+    prdId: number | null
+    prototypeReady: boolean
+    previewImageUrl: string | null
+    prdTitle: string | null
+  } | null
 }) {
   const accent = finding.actionAccent
   const pct = Math.round((finding.confidence ?? 0) * 100)
@@ -477,8 +460,25 @@ function BriefFindingCard({
           </div>
         </div>
 
-        {/* Right rail — prototype preview with title */}
-        <FindingPreview finding={finding} onOpen={onPreview} />
+        {/* Right rail — only rendered when there is a ready prototype WITH a real preview image.
+            Every other state (ready-but-no-image, PRD-exists-but-not-ready, no PRD, map not
+            yet loaded) renders nothing — no mock, no shimmer, no stand-in. */}
+        {insightState?.hasPrd && insightState.prototypeReady && insightState.previewImageUrl ? (
+          <button type="button" className="fc-preview" onClick={onPreview} title="Open prototype">
+            <img
+              className="fc-preview-img"
+              src={insightState.previewImageUrl}
+              alt="Prototype preview"
+            />
+            <span className="fc-preview-foot">
+              <span className="fc-preview-title">
+                <span className="fc-preview-glyph" aria-hidden>{">_"}</span>
+                {insightState.prdTitle ?? "Untitled prototype"}
+              </span>
+              <span className="fc-preview-sub">Prototype preview · open design</span>
+            </span>
+          </button>
+        ) : null}
       </div>
     </article>
   )
@@ -550,8 +550,10 @@ function SuggestIcon({ name }: { name: SuggestSpec["icon"] }) {
 
 export function BriefChat() {
   const { aiBarValue, setAIBarValue, openContentPanel, showToast, goTo } = useNavigation()
+  const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
+  const { workspace } = useWorkspace()
   const pipeline = usePipelineStatus(activeCompany)
 
   const [turns, setTurns] = useState<ChatTurn[]>([])
@@ -566,6 +568,45 @@ export function BriefChat() {
   const mountedRef = useRef(true)
   const loadedKeyRef = useRef<string | null>(null)
   const skipPersistRef = useRef(false)
+
+  // Derive briefId from the first available detail meta (briefDetails are keyed by detailKey)
+  const briefId = useMemo(() => {
+    const details = content.briefDetails
+    for (const key of Object.keys(details)) {
+      const meta = details[key]?.meta
+      if (meta?.briefId != null) return meta.briefId
+    }
+    return null
+  }, [content.briefDetails])
+
+  // One fetch per brief — drives the per-card right-rail state
+  const { entriesByInsight } = useBriefPrototypeMap(briefId)
+
+  // GenerateModal / LoadingScreen state — mounted once at BriefChat level
+  const genLoadingRef = useRef(false)
+  const [genLoading, setGenLoading] = useState(false)
+  const [genPrdId, setGenPrdId] = useState<number | null>(null)
+  const [genFigmaKey, setGenFigmaKey] = useState<string | null>(null)
+  const [genGithubRepo, setGenGithubRepo] = useState<string | null>(null)
+  const [genProtoId, setGenProtoId] = useState<number | null>(null)
+  const [genModalOpen, setGenModalOpen] = useState(false)
+
+  const handleGenStart = useCallback((ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => {
+    setGenFigmaKey(ctx?.figmaFileKey ?? null)
+    setGenGithubRepo(ctx?.githubRepo ?? null)
+    setGenProtoId(null)
+    genLoadingRef.current = true
+    setGenLoading(true)
+  }, [])
+
+  const handleGenDone = useCallback((result?: DesignAgentGenResult) => {
+    genLoadingRef.current = false
+    setGenLoading(false)
+    setGenModalOpen(false)
+    if (result?.ok && genPrdId != null) {
+      goTo("prototype")
+    }
+  }, [genPrdId, goTo])
 
   const greetTime = useMemo(() => nowTime(), [])
 
@@ -909,11 +950,39 @@ export function BriefChat() {
     })
   }, [])
 
-  // Prototype-preview click → run the prototype flow (gated; routes to the
-  // PRD-first message when no PRD exists yet).
-  const cardPreview = useCallback(() => {
-    void runGate(() => prototypeFlow())
-  }, [prototypeFlow, runGate])
+  // Prototype-preview click — context-aware routing:
+  //   case 1: ready prototype → open it
+  //   case 2: PRD exists, no prototype → open generate modal
+  //   case 3: no PRD → PRD-first flow
+  const cardPreview = useCallback(
+    (finding: Finding) => {
+      const key = finding.detailKey
+      const detail = key ? content.briefDetails?.[key] : null
+      const meta = detail?.meta
+      if (!meta) {
+        // case 3: no detail meta — fall back to PRD-first flow
+        void runGate(() => prototypeFlow())
+        return
+      }
+      const state = prototypeStateForInsight(entriesByInsight, meta.insightIndex)
+      if (state.hasPrd && state.prototypeReady && state.prdId != null) {
+        // case 1: prototype ready → open it in the in-tab canvas at
+        // /prototype?prd=<id>, matching the PRD-drawer preview card's nav
+        // (ApproveModal / DesignAgentLauncher use router.push(prototypePath(prdId))).
+        // goTo("prototype") alone navigates the screen WITHOUT the ?prd= param, so
+        // PrototypeRoute has no PRD to resolve and the editor never loads.
+        router.push(prototypePath(state.prdId))
+      } else if (state.hasPrd && !state.prototypeReady && state.prdId != null) {
+        // case 2: PRD exists but no prototype → open generate modal
+        setGenPrdId(state.prdId)
+        setGenModalOpen(true)
+      } else {
+        // case 3: no PRD → PRD-first flow
+        void runGate(() => cardGeneratePrd(finding))
+      }
+    },
+    [content.briefDetails, entriesByInsight, router, prototypeFlow, runGate, cardGeneratePrd],
+  )
 
   // ── Composer handlers ─────────────────────────────────────────────────────
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1009,19 +1078,27 @@ export function BriefChat() {
                 <p className="bc-greeting">{greeting}</p>
                 {visibleFindings.length > 0 ? (
                   <div className="fc-stack">
-                    {visibleFindings.map((f) => (
-                      <BriefFindingCard
-                        key={f.detailKey ?? `${f.tagType}-${f.title}`}
-                        finding={f}
-                        busy={busy}
-                        generating={cardBusyKey === f.detailKey}
-                        onAsk={() => cardAsk(f)}
-                        onViewEvidence={() => cardViewEvidence(f)}
-                        onGeneratePrd={() => cardGeneratePrd(f)}
-                        onDismiss={() => cardDismiss(f)}
-                        onPreview={cardPreview}
-                      />
-                    ))}
+                    {visibleFindings.map((f) => {
+                      const key = f.detailKey
+                      const meta = key ? content.briefDetails?.[key]?.meta : undefined
+                      const insightState = meta != null
+                        ? prototypeStateForInsight(entriesByInsight, meta.insightIndex)
+                        : undefined
+                      return (
+                        <BriefFindingCard
+                          key={f.detailKey ?? `${f.tagType}-${f.title}`}
+                          finding={f}
+                          busy={busy}
+                          generating={cardBusyKey === f.detailKey}
+                          onAsk={() => cardAsk(f)}
+                          onViewEvidence={() => cardViewEvidence(f)}
+                          onGeneratePrd={() => cardGeneratePrd(f)}
+                          onDismiss={() => cardDismiss(f)}
+                          onPreview={() => cardPreview(f)}
+                          insightState={insightState}
+                        />
+                      )
+                    })}
                   </div>
                 ) : null}
                 {v2?.sourcesLine ? (
@@ -1126,6 +1203,26 @@ export function BriefChat() {
             </span>
           </div>
         </div>
+      {genModalOpen && genPrdId != null && (
+        <GenerateModal
+          open={genModalOpen}
+          onClose={() => {
+            if (!genLoadingRef.current) setGenModalOpen(false)
+          }}
+          prdId={genPrdId}
+          figmaFileKey={genFigmaKey}
+          savedPreference={workspace?.design_source ?? null}
+          onGenStart={handleGenStart}
+          onKickoff={(id) => setGenProtoId(id)}
+          onGenDone={handleGenDone}
+        />
+      )}
+      <GenerationLoadingScreen
+        open={genLoading}
+        figmaFileKey={genFigmaKey}
+        githubRepo={genGithubRepo}
+        prototypeId={genProtoId}
+      />
     </section>
   )
 }

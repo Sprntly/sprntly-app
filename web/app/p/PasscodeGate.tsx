@@ -7,8 +7,8 @@
 // Relative imports (not `@/…`) to match the codebase + the vitest resolver.
 import { useState } from "react"
 import type { FormEvent, ReactNode } from "react"
-import { API_URL } from "../../lib/api"
-import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
+import { API_URL } from "../lib/api"
+import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
 
 export type PasscodeResult =
   | { ok: true; bundleUrl: string; isComplete: boolean }

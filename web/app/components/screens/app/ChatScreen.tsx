@@ -17,6 +17,13 @@ import { runPrdGeneration } from "../../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { PrdState, PrdContent } from "../../../types/content"
+import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
+import { prototypePath } from "../../../lib/routes"
+import { useRouter } from "next/navigation"
+import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
+import { GenerateModal } from "../../design-agent/GenerateModal"
+import { GenerationLoadingScreen } from "../../design-agent/GenerationLoadingScreen"
+import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
 
 type ThreadTurn = {
   id: string
@@ -77,8 +84,9 @@ export function ChatScreen() {
     showToast,
     openContentPanel,
   } = useNavigation()
+  const router = useRouter()
   const auth = useAuth()
-  const { profile } = useWorkspace()
+  const { profile, workspace } = useWorkspace()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
@@ -125,6 +133,53 @@ export function ChatScreen() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const thread = activeTab?.thread ?? []
+
+  // ── Prototype map for the active tab's brief (one fetch per briefId) ───────
+  const chatBriefId = activeTab?.briefMeta?.briefId ?? null
+  const { entriesByInsight: chatEntriesByInsight } = useBriefPrototypeMap(chatBriefId)
+
+  const chatInsightState = useMemo(() => {
+    if (!activeTab?.briefMeta) return null
+    return prototypeStateForInsight(chatEntriesByInsight, activeTab.briefMeta.insightIndex)
+  }, [activeTab?.briefMeta, chatEntriesByInsight])
+
+  // GenerateModal / LoadingScreen state for the chat surface
+  const chatGenLoadingRef = useRef(false)
+  const [chatGenLoading, setChatGenLoading] = useState(false)
+  const [chatGenPrdId, setChatGenPrdId] = useState<number | null>(null)
+  const [chatGenFigmaKey, setChatGenFigmaKey] = useState<string | null>(null)
+  const [chatGenGithubRepo, setChatGenGithubRepo] = useState<string | null>(null)
+  const [chatGenProtoId, setChatGenProtoId] = useState<number | null>(null)
+  const [chatGenModalOpen, setChatGenModalOpen] = useState(false)
+
+  const handleChatGenStart = useCallback((ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => {
+    setChatGenFigmaKey(ctx?.figmaFileKey ?? null)
+    setChatGenGithubRepo(ctx?.githubRepo ?? null)
+    setChatGenProtoId(null)
+    chatGenLoadingRef.current = true
+    setChatGenLoading(true)
+  }, [])
+
+  const handleChatGenDone = useCallback((result?: DesignAgentGenResult) => {
+    chatGenLoadingRef.current = false
+    setChatGenLoading(false)
+    setChatGenModalOpen(false)
+    if (result?.ok && chatGenPrdId != null) {
+      router.push(prototypePath(chatGenPrdId))
+    }
+  }, [chatGenPrdId, router])
+
+  const handleChatPrototype = useCallback(() => {
+    if (chatInsightState?.hasPrd && chatInsightState.prototypeReady && chatInsightState.prdId != null) {
+      router.push(prototypePath(chatInsightState.prdId))
+    } else if (chatInsightState?.hasPrd && !chatInsightState.prototypeReady && chatInsightState.prdId != null) {
+      setChatGenPrdId(chatInsightState.prdId)
+      setChatGenModalOpen(true)
+    } else {
+      goTo("prototype")
+    }
+  }, [chatInsightState, router, goTo])
+
   const setThread = useCallback((updater: ThreadTurn[] | ((prev: ThreadTurn[]) => ThreadTurn[])) => {
     setTabs((prev) => prev.map((t) => {
       if (t.id !== activeTabId) return t
@@ -903,9 +958,11 @@ export function ChatScreen() {
                               <button
                                 type="button"
                                 className="bc-action-btn"
-                                onClick={() => goTo("prototype")}
+                                onClick={handleChatPrototype}
                               >
-                                Generate prototype
+                                {chatInsightState?.hasPrd && chatInsightState.prototypeReady
+                                  ? "View prototype"
+                                  : "Generate prototype"}
                               </button>
                             </div>
                           ) : null}
@@ -939,9 +996,9 @@ export function ChatScreen() {
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1a2 2 0 0 0 0 4v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 0 0-4z" /><path d="M13 7v10" /></svg>
                         {activeTab?.prd ? "Create ticket" : "Generate PRD first"}
                       </button>
-                      <button type="button" className="bc-suggest-btn" onClick={() => goTo("prototype")}>
+                      <button type="button" className="bc-suggest-btn" onClick={handleChatPrototype}>
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></svg>
-                        View prototype
+                        {chatInsightState?.hasPrd && chatInsightState.prototypeReady ? "View prototype" : "Generate prototype"}
                       </button>
                       <button type="button" className="bc-suggest-btn" onClick={() => showToast("Coding agent", "Hand-off to your coding agent once a PRD is ready.")}>
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
@@ -1058,6 +1115,24 @@ export function ChatScreen() {
           </main>
         </div>
       </div>
+      {chatGenModalOpen && chatGenPrdId != null && (
+        <GenerateModal
+          open={chatGenModalOpen}
+          onClose={() => { if (!chatGenLoadingRef.current) setChatGenModalOpen(false) }}
+          prdId={chatGenPrdId}
+          figmaFileKey={chatGenFigmaKey}
+          savedPreference={workspace?.design_source ?? null}
+          onGenStart={handleChatGenStart}
+          onKickoff={(id) => setChatGenProtoId(id)}
+          onGenDone={handleChatGenDone}
+        />
+      )}
+      <GenerationLoadingScreen
+        open={chatGenLoading}
+        figmaFileKey={chatGenFigmaKey}
+        githubRepo={chatGenGithubRepo}
+        prototypeId={chatGenProtoId}
+      />
     </AppLayout>
   )
 }

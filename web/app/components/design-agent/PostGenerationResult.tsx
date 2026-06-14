@@ -24,8 +24,9 @@
  * introduced.
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { CompletionBar } from "./CompletionBar"
+import { useHandoffActions, STALE_MESSAGE } from "./handoff-actions"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
 import { PrototypeViewer, type Platform } from "./PrototypeViewer"
 // ManualEditOverlay import dropped —
@@ -35,30 +36,21 @@ import { PrototypeViewer, type Platform } from "./PrototypeViewer"
 // title + meta + the prd-tldr (Problem/Fix/Impact) block. PrdSections import is
 // kept only for the optional "View full PRD" expander.
 import { PrdSections } from "../shared/PrdSections"
-// reuse the comment identity helpers
-// (avatar + relative time) so pin-comment rows render WHO + WHEN like David's.
-import { CommentAvatar, shortRelativeTime } from "./CommentsPanel"
 // the clarifying-question answer
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
-import {
-  getElementAtIframePoint,
-  getElementAnchor,
-  getAnchorPosition,
-  getClickOffsetInElement,
-  getAnchorPositionWithOffset,
-  findByAnchor,
-  getElementDescription,
-  parseStoredAnchor,
-  serializeAnchor,
-  setElementHighlight,
-  clearElementHighlight,
-} from "./pinAnchorBridge"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
 import { IterateActivityStream } from "./IterateActivityStream"
+// C1 Slice B — the mark-and-comment view, extracted from this file: the stage
+// overlay + pin layer (CENTER) + the pin-comment rows (RIGHT). See module header.
+import { MarkOverlay, PinLayer, PrototypeMarkLayer } from "./PrototypeMarkLayer"
+// C2b — the shared mark-and-comment pin engine, extracted from this container so
+// the public viewer drives the SAME implementation. The create-fn is injected
+// per surface (signed-in: withAuthRetry(createComment); public: createCommentByToken).
+import { usePinMarking } from "./usePinMarking"
 import type { PendingQuestion } from "../../lib/api"
 import {
   IconMessage,
@@ -70,6 +62,8 @@ import {
   IconShare,
   IconMore,
   IconPin,
+  IconCopy,
+  IconUndo,
 } from "../shared/app-icons"
 // subtle breadcrumb at the top of the
 // canvas ("PRDs / {PRD title} / Design"). Clicking a crumb closes the canvas and
@@ -226,6 +220,14 @@ export type PostGenerationResultProps = {
    *  external state (e.g. a URL query param) without taking control of the
    *  internal `fullscreenOpen` state. */
   onFullscreenChange?: (open: boolean) => void
+  /** When true (the in-tab /prototype route), the top breadcrumb is suppressed — the back affordance lives in the app chrome-strip title instead. Absent (launcher/overlay) → the breadcrumb renders. */
+  hideBreadcrumb?: boolean
+  /** True only for the in-tab /prototype editor. Switches the control bar to the
+   *  state-driven handoff buttons (Mark Complete / Export / Undo) and drops the
+   *  "..." Actions popover + Done button. Launcher/public keep the classic bar. */
+  isInTab?: boolean
+  /** Navigate back to the previous page (in-tab title-bar back button). Absent on launcher/public paths. */
+  onBack?: () => void
 }
 
 export type PostGenerationResultViewProps = {
@@ -290,6 +292,9 @@ export type PostGenerationResultViewProps = {
    *  (pre-fill composer w/ pin context + resolve) / Ignore (resolve only). */
   onPinApply?: (n: number) => void
   onPinIgnore?: (n: number) => void
+  /** Resolve a saved pin comment from the consolidated `.comment-resolve-btn`
+   *  header control (resolve-only semantic, like Ignore). */
+  onPinResolve?: (n: number) => void
   /** the clarifying-question
    *  surface node (the container's <ClarifyingQuestionSurface>). Mounted in the
    *  LEFT sidebar just above the IterateComposer; when null nothing renders. */
@@ -314,6 +319,14 @@ export type PostGenerationResultViewProps = {
    *  when the first SSE event arrives. Threaded through the pure view without a
    *  hook so the view stays SSR-renderable. */
   leftPanelRef?: RefObject<HTMLDivElement | null>
+  /** When true (the in-tab /prototype route), the top breadcrumb is suppressed — the back affordance lives in the app chrome-strip title instead. Absent (launcher/overlay) → the breadcrumb renders. */
+  hideBreadcrumb?: boolean
+  /** True only for the in-tab /prototype editor. Switches the control bar to the
+   *  state-driven handoff buttons (Mark Complete / Export / Undo) and drops the
+   *  "..." Actions popover + Done button. Launcher/public keep the classic bar. */
+  isInTab?: boolean
+  /** Navigate back to the previous page (in-tab title-bar back button). Absent on launcher/public paths. */
+  onBack?: () => void
 }
 
 /**
@@ -355,15 +368,17 @@ export function reseedStep(
 
 /**
  * Resolve the "View prototype" href: the built bundle if present, else the
- * public `/p/<token>` link once the prototype has been shared. Returns null
- * when neither is available yet (nothing to link to → the affordance hides).
+ * public `/p/<slug>/<token>` link once the prototype has been shared. Returns
+ * null when neither is available yet (nothing to link to → the affordance hides).
  */
 export function resolveViewHref(
   bundleUrl: string | null,
   shareToken: string | null,
+  // INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic /p/<slug>/<token> segment — the one surface overriding the "slug is internal" convention.
+  companySlug: string,
 ): string | null {
   if (bundleUrl) return bundleUrl
-  if (shareToken) return `/p/${shareToken}`
+  if (shareToken) return `/p/${companySlug}/${shareToken}`
   return null
 }
 
@@ -604,6 +619,89 @@ function DaPopover({
  * Forest-green tokens only; no coral. The full CompletionBar + full ShareMenu
  * are NEVER rendered directly in the bar row — only inside their popovers.
  */
+/**
+ * In-tab handoff buttons cluster (Mark Complete / Export / Copy / Undo).
+ * Extracted into its own component so DaControlBar itself stays hook-free and
+ * can be called as a plain function in node-env vitest without a React renderer.
+ * All hooks (useHandoffActions, useState) live HERE, not in DaControlBar.
+ *
+ * The stale-handoff banner is rendered here (after the action buttons) and
+ * positioned BELOW the control bar via `position: absolute` + the parent
+ * `.da-controlbar` having `position: relative` (set in design-agent.css).
+ */
+function InTabHandoffCluster({
+  prototypeId,
+  isComplete,
+  onStateChange,
+}: {
+  prototypeId: number
+  isComplete: boolean
+  onStateChange?: (state: { isComplete: boolean; staleHandoff: boolean }) => void
+}) {
+  const { busy, markComplete, resume, download, copy } = useHandoffActions({
+    prototypeId,
+    onStateChange,
+  })
+  const [stale, setStale] = useState(false)
+  return (
+    <>
+      {!isComplete ? (
+        <button
+          type="button"
+          className="btn btn-accent da-ctl-done"
+          data-testid="da-mark-complete"
+          disabled={busy}
+          onClick={async () => { await markComplete(); setStale(false) }}
+        >
+          Mark Complete
+        </button>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="btn da-ctl-export"
+            data-testid="da-export"
+            disabled={busy}
+            onClick={() => download()}
+          >
+            Export
+          </button>
+          <button
+            type="button"
+            className="da-ctl-icon"
+            data-testid="da-copy"
+            title="Copy markdown"
+            aria-label="Copy markdown"
+            disabled={busy}
+            onClick={() => copy()}
+          >
+            <IconCopy size={16} />
+          </button>
+          <button
+            type="button"
+            className="btn da-ctl-undo"
+            data-testid="da-undo"
+            disabled={busy}
+            onClick={async () => {
+              const r = await resume()
+              if (r) setStale(!!r.handoffs_flagged_stale)
+            }}
+          >
+            <IconUndo size={16} /> Undo
+          </button>
+        </>
+      )}
+      {stale && (
+        <div className="da-stale-row" data-testid="da-stale-row">
+          <div className="stale-banner" data-testid="stale-banner-intab">
+            {STALE_MESSAGE}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 export function DaControlBar({
   prototypeId,
   isComplete,
@@ -620,6 +718,9 @@ export function DaControlBar({
   canOpen,
   onOpenFullscreen,
   onDone,
+  isInTab,
+  onBack,
+  prdTitle,
 }: {
   prototypeId: number
   isComplete: boolean
@@ -637,11 +738,39 @@ export function DaControlBar({
   canOpen: boolean
   onOpenFullscreen?: () => void
   onDone?: () => void
+  /** True only for the in-tab /prototype editor. When set, replaces the
+   *  "..." Actions popover + Done with state-driven handoff buttons. */
+  isInTab?: boolean
+  /** Navigate back to the previous page (in-tab title-bar back button). */
+  onBack?: () => void
+  /** PRD title shown in the in-tab title bar next to the back button. */
+  prdTitle?: string | null
 }) {
+  // NOTE: DaControlBar is intentionally hook-free so it can be called as a
+  // plain function in node-env vitest (the test suite calls it directly to
+  // walk the returned element tree). All hook usage for the in-tab path lives
+  // in <InTabHandoffCluster> above.
   return (
-    <div className="da-controlbar" data-testid="da-controlbar">
-      {/* LEFT cluster — compact Desktop/Mobile segmented control. */}
+    <div className={`da-controlbar${isInTab ? " da-controlbar--titlebar" : ""}`} data-testid="da-controlbar">
+      {/* LEFT cluster — compact Desktop/Mobile segmented control, + back button when in-tab. */}
       <div className="da-controlbar-l">
+        {isInTab && (
+          <button
+            type="button"
+            className="da-ctl-back"
+            data-testid="da-titlebar-back"
+            title="Back"
+            aria-label="Back"
+            onClick={() => onBack?.()}
+          >
+            <IconChevronLeft size={16} />
+          </button>
+        )}
+        {isInTab && (
+          <span className="da-titlebar-title" title={prdTitle ?? undefined} data-testid="da-titlebar-title">
+            {prdTitle ?? "Untitled prototype"}
+          </span>
+        )}
         <div
           className="platform-toggle da-controlbar-platform"
           role="group"
@@ -682,7 +811,7 @@ export function DaControlBar({
           onClick={() => onToggleMark?.()}
         >
           <IconPin size={15} />
-          <span className="da-ctl-label">Mark</span>
+          {!isInTab && <span className="da-ctl-label">Mark</span>}
         </button>
 
         {/* comments-toggle — ALWAYS toggles the right sidebar (Problem 2). */}
@@ -695,7 +824,7 @@ export function DaControlBar({
           onClick={() => onToggleComments?.()}
         >
           <IconMessage size={16} />
-          <span className="da-ctl-label">Comments</span>
+          {!isInTab && <span className="da-ctl-label">Comments</span>}
         </button>
 
         {/* Share — compact button opening a DROPDOWN with the visibility options
@@ -711,8 +840,8 @@ export function DaControlBar({
               data-testid="da-share-toggle"
             >
               <IconShare size={15} />
-              <span className="da-ctl-label">Share</span>
-              <IconChevronDown size={13} />
+              {!isInTab && <span className="da-ctl-label">Share</span>}
+              {!isInTab && <IconChevronDown size={13} />}
             </button>
           )}
         >
@@ -727,30 +856,57 @@ export function DaControlBar({
           />
         </DaPopover>
 
-        {/* Actions overflow (⋯) — Mark Complete / Export / Download / Copy, kept
-            reachable but compact (the full CompletionBar lives in the popover). */}
-        <DaPopover
-          align="right"
-          testId="da-actions-popover"
-          trigger={(open) => (
-            <button
-              type="button"
-              className={`da-ctl-icon da-ctl-icon--square${open ? " on" : ""}`}
-              title="Actions"
-              aria-label="Actions"
-              data-testid="da-actions-toggle"
-            >
-              <IconMore size={16} />
-            </button>
-          )}
-        >
-          <div className="da-popover-title">Handoff</div>
-          <CompletionBar
+        {/* Actions / handoff cluster — conditional on isInTab.
+            isInTab=TRUE  → <InTabHandoffCluster> (hook-owning child component)
+                            with state-driven Mark Complete / Export / Copy / Undo
+                            + its own stale-banner below the cluster.
+            isInTab=FALSE → classic "..." Actions popover + Done (launcher path). */}
+        {isInTab ? (
+          <InTabHandoffCluster
             prototypeId={prototypeId}
             isComplete={isComplete}
             onStateChange={onStateChange}
           />
-        </DaPopover>
+        ) : (
+          <>
+            {/* Actions overflow (⋯) — Mark Complete / Export / Download / Copy, kept
+                reachable but compact (the full CompletionBar lives in the popover). */}
+            <DaPopover
+              align="right"
+              testId="da-actions-popover"
+              trigger={(open) => (
+                <button
+                  type="button"
+                  className={`da-ctl-icon da-ctl-icon--square${open ? " on" : ""}`}
+                  title="Actions"
+                  aria-label="Actions"
+                  data-testid="da-actions-toggle"
+                >
+                  <IconMore size={16} />
+                </button>
+              )}
+            >
+              <div className="da-popover-title">Handoff</div>
+              <CompletionBar
+                prototypeId={prototypeId}
+                isComplete={isComplete}
+                onStateChange={onStateChange}
+              />
+            </DaPopover>
+
+            {/* Done — closes the canvas back to the PRD. */}
+            {onDone && (
+              <button
+                type="button"
+                className="btn btn-accent da-ctl-done"
+                data-testid="da-control-done"
+                onClick={() => onDone()}
+              >
+                Done
+              </button>
+            )}
+          </>
+        )}
 
         {/* Fullscreen — reuses the existing open-fullscreen trigger. */}
         <button
@@ -764,18 +920,6 @@ export function DaControlBar({
         >
           <IconFullscreen size={15} />
         </button>
-
-        {/* Done — closes the canvas back to the PRD. */}
-        {onDone && (
-          <button
-            type="button"
-            className="btn btn-accent da-ctl-done"
-            data-testid="da-control-done"
-            onClick={() => onDone()}
-          >
-            Done
-          </button>
-        )}
       </div>
     </div>
   )
@@ -989,6 +1133,7 @@ export function PostGenerationResultView({
   onPinRemove,
   onPinApply,
   onPinIgnore,
+  onPinResolve,
   clarifying,
   iterateActivity = [],
   iterateRunning = false,
@@ -998,6 +1143,9 @@ export function PostGenerationResultView({
   bundleReloadNonce = 0,
   computedPinPositions = {},
   leftPanelRef,
+  hideBreadcrumb,
+  isInTab,
+  onBack,
 }: PostGenerationResultViewProps) {
   // cache-bust the iframe src so a
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
@@ -1008,8 +1156,10 @@ export function PostGenerationResultView({
   // / dead link — the #6 bug). It is gated only on a built bundle existing:
   // enabled "View full screen" when `bundleUrl` is present, otherwise a DISABLED
   // "Prototype building…" control — never a removed element. `resolveViewHref`
-  // (below) is KEPT byte-for-byte but no longer consumed here; its null-return no
-  // longer hides the control. The real shared URL stays reachable via ShareMenu.
+  // (below) is KEPT but no longer consumed here; its null-return no longer hides
+  // the control. The real shared URL stays reachable via ShareMenu, which sources
+  // the company slug from `useCompany().activeCompany` for the /p/<slug>/<token>
+  // link; `resolveViewHref` now takes that same slug for its (test-only) parity.
   const canOpen = bundleUrl != null
   // P4-10 — the EDITABLE viewer, rendered only when a built bundle exists. This
   // surface only renders inside (app)/AuthGate, so it is internal by
@@ -1080,6 +1230,9 @@ export function PostGenerationResultView({
       canOpen={canOpen}
       onOpenFullscreen={onOpenFullscreen}
       onDone={onDone}
+      isInTab={isInTab}
+      onBack={onBack}
+      prdTitle={prdTitle}
     />
   )
 
@@ -1099,7 +1252,9 @@ export function PostGenerationResultView({
           of the canvas — "PRDs / {PRD title} / Design". The PRDs / PRD crumbs close
           the canvas (onDone → ApproveModal.closeCanvas / launcher close) and return
           to the PRD screen. */}
-      <DaBreadcrumb prdTitle={prdTitle ?? null} onDone={onDone} />
+      {hideBreadcrumb ? null : (
+        <DaBreadcrumb prdTitle={prdTitle ?? null} onDone={onDone} />
+      )}
       {controlBar}
       <div
         className="da-ready"
@@ -1115,8 +1270,11 @@ export function PostGenerationResultView({
         >
           <div className="da-left-top">
             <span className="da-left-title">
-              {prdTitle || "PRD"}
+              {isInTab ? "Prototype" : (prdTitle || "PRD")}
             </span>
+            {isInTab && (
+              <span className="da-left-badge">DESIGN AGENT</span>
+            )}
             {iterateRunning && (
               <span className="da-left-running-pill" aria-live="polite">
                 <span className="da-activity-spinner" aria-hidden="true" />
@@ -1204,58 +1362,20 @@ export function PostGenerationResultView({
         >
           {viewer}
           {/* IFRAME NUANCE (critical): the prototype is an <iframe>, so clicks
-              inside it can't be captured directly. This transparent overlay sits
-              ABOVE the iframe; it is click-inert normally (pointer-events:none via
-              CSS) and click-active ONLY in mark mode (`.da-mark-overlay.active`,
-              pointer-events:auto + crosshair). On click we hit-test the overlay's
-              own rect → x/y percentages → drop a pin there. */}
+              inside it can't be captured directly. The <MarkOverlay> sits ABOVE
+              the iframe; it is click-inert normally (pointer-events:none via CSS)
+              and click-active ONLY in mark mode (`.da-mark-overlay.active`,
+              pointer-events:auto + crosshair). Its click hit-tests the iframe →
+              stage-relative x/y + resolved anchor → onStageClick (handleStageClick
+              captures xPctInEl/yPctInEl/anchor). */}
           {viewer && (
-            <div
-              className={`da-mark-overlay${markMode ? " active" : ""}`}
-              data-testid="da-mark-overlay"
-              aria-hidden={markMode ? "false" : "true"}
-              onClick={(e) => {
-                if (!markMode) return
-                const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
-                const ir = iframe?.getBoundingClientRect()
-                if (!ir) return
-                if (e.clientX < ir.left || e.clientX > ir.left + ir.width ||
-                    e.clientY < ir.top || e.clientY > ir.top + ir.height) return
-                const el = getElementAtIframePoint(iframe, e.clientX, e.clientY)
-                const anchor = el ? getElementAnchor(el) : null
-                const xPct = Math.max(0, Math.min(100, ((e.clientX - ir.left) / ir.width) * 100))
-                const yPct = Math.max(0, Math.min(100, ((e.clientY - ir.top) / ir.height) * 100))
-                clearElementHighlight()
-                onStageClick?.(xPct, yPct, e.clientX, e.clientY, anchor)
-              }}
-              onMouseMove={(e) => {
-                if (!markMode) return
-                const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
-                const el = getElementAtIframePoint(iframe, e.clientX, e.clientY)
-                setElementHighlight(el)
-              }}
-              onMouseLeave={() => clearElementHighlight()}
-            />
+            <MarkOverlay markMode={markMode} onStageClick={onStageClick} />
           )}
           {/* Pin layer — numbered teardrops positioned absolutely over the canvas.
               `placed` triggers David's `pinDrop` animation. Always rendered above
               the overlay so pins stay visible after mark mode exits. */}
-          {viewer && pins.length > 0 && (
-            <div className="da-pin-layer" data-testid="da-pin-layer" aria-hidden="true">
-              {pins.map((pin) => {
-                const pos = computedPinPositions[pin.n] ?? { xPct: pin.xPct, yPct: pin.yPct }
-                return (
-                  <span
-                    key={pin.n}
-                    className="pc-pin placed"
-                    data-testid={`da-pin-${pin.n}`}
-                    style={{ left: `${pos.xPct}%`, top: `${pos.yPct}%` }}
-                  >
-                    <span className="pc-pin-num">{pin.n}</span>
-                  </span>
-                )
-              })}
-            </div>
+          {viewer && (
+            <PinLayer pins={pins} computedPinPositions={computedPinPositions} />
           )}
         </div>
 
@@ -1290,137 +1410,25 @@ export function PostGenerationResultView({
           </div>
           <div className="da-right-body">
             {/* the mark-and-comment pin
-                rows. Each pin dropped on the canvas appears here with its number +
-                a composer (auto-focused) to type the comment. Submit wires to the
-                authed create endpoint (api.createComment); the row stays optimistic
-                until confirmed. This is the CREATE path; the existing CommentsPanel
-                below stays the resolve/list surface for shared prototypes. */}
-            {pins.length > 0 && (
-              <ul className="proto-comment-list" data-testid="da-pin-comments">
-                {pins.map((pin) => (
-                  <li
-                    key={pin.n}
-                    className={`proto-comment${pin.saved ? " saved" : ""}${pin.resolved ? " resolved" : ""}`}
-                    data-testid={`da-pin-comment-${pin.n}`}
-                    data-status={pin.resolved ? "resolved" : pin.saved ? "open" : "draft"}
-                  >
-                    <div className="proto-comment-main">
-                      {pin.saved ? (
-                        <>
-                          {/* author +
-                              avatar + relative time on the saved pin comment. */}
-                          <div className="proto-comment-au-row">
-                            <div className="comment-step-chip">
-                              <svg width="10" height="12" viewBox="0 0 10 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                                <path d="M5 0C2.79 0 1 1.79 1 4c0 3 4 8 4 8s4-5 4-8c0-2.21-1.79-4-4-4zm0 5.5A1.5 1.5 0 1 1 5 2.5a1.5 1.5 0 0 1 0 3z" fill="currentColor"/>
-                              </svg>
-                              Step {pin.n}
-                            </div>
-                            <CommentAvatar author={pin.author ?? "demo"} />
-                            <span className="proto-comment-au">{pin.author ?? "demo"}</span>
-                            <time
-                              className="proto-comment-time"
-                              dateTime={pin.createdAt ?? undefined}
-                              title={pin.createdAt ?? undefined}
-                            >
-                              {shortRelativeTime(pin.createdAt)}
-                            </time>
-                            <span
-                              className={`comment-resolve-indicator${pin.resolved ? " comment-resolve-indicator--resolved" : ""}`}
-                              aria-hidden="true"
-                            >
-                              {pin.resolved ? (
-                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                                  <circle cx="8" cy="8" r="8" fill="currentColor"/>
-                                  <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                                </svg>
-                              ) : (
-                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                                  <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/>
-                                  <path d="M4.5 8l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                                </svg>
-                              )}
-                            </span>
-                          </div>
-                          <p className="proto-comment-body">{pin.body}</p>
-                          {/* Apply /
-                              Ignore on a saved, unresolved pin comment. Apply
-                              pre-fills the composer with the pin context (CHANGE D)
-                              + marks resolved; Ignore marks resolved only. */}
-                          {!pin.resolved && (
-                            <div className="proto-comment-actions">
-                              <button
-                                type="button"
-                                className="btn btn-accent"
-                                data-testid={`da-pin-apply-${pin.n}`}
-                                onClick={() => onPinApply?.(pin.n)}
-                              >
-                                Apply
-                              </button>
-                              <button
-                                type="button"
-                                className="btn"
-                                data-testid={`da-pin-ignore-${pin.n}`}
-                                onClick={() => onPinIgnore?.(pin.n)}
-                              >
-                                Ignore
-                              </button>
-                            </div>
-                          )}
-                          {pin.resolved && (
-                            <p className="proto-comment-resolved-note">Resolved</p>
-                          )}
-                        </>
-                      ) : (
-                        <form
-                          className="proto-comment-form"
-                          onSubmit={(e) => {
-                            e.preventDefault()
-                            onPinSubmit?.(pin.n)
-                          }}
-                        >
-                          <textarea
-                            className="proto-comment-input"
-                            data-testid={`da-pin-input-${pin.n}`}
-                            value={pin.draft}
-                            placeholder="Add a comment, or click a pin on the canvas…"
-                            autoFocus
-                            onChange={(e) =>
-                              onPinDraftChange?.(pin.n, e.target.value)
-                            }
-                          />
-                          <span className="comment-composer-helper">Click anywhere on the canvas to pin a comment</span>
-                          <div className="proto-comment-actions">
-                            <button
-                              type="submit"
-                              className="comment-composer-send-btn"
-                              data-testid={`da-pin-submit-${pin.n}`}
-                              disabled={pin.busy || !pin.draft.trim()}
-                              aria-label="Send comment"
-                            >
-                              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                                <path d="M2 8l10-6-3 6 3 6-10-6z" fill="currentColor"/>
-                              </svg>
-                            </button>
-                            <button
-                              type="button"
-                              className="btn"
-                              data-testid={`da-pin-cancel-${pin.n}`}
-                              onClick={() => onPinRemove?.(pin.n)}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </form>
-                      )}
-                      {pin.error && (
-                        <p className="proto-comment-error error">{pin.error}</p>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
+                rows (C1 Slice B — extracted to <PrototypeMarkLayer>). Each pin
+                dropped on the canvas appears here with its number + a composer
+                (auto-focused) to type the comment. Submit wires to the authed
+                create endpoint (api.createComment) via onPinSubmit; the row stays
+                optimistic until confirmed. This is the CREATE path; the existing
+                CommentsPanel below stays the resolve/list surface for shared
+                prototypes. The resolve control now reuses the shared
+                `.comment-resolve-btn` (Part 2 consolidation). */}
+            <PrototypeMarkLayer
+              pins={pins}
+              editorMode
+              canResolve
+              onPinDraftChange={onPinDraftChange}
+              onSubmitComment={onPinSubmit}
+              onPinRemove={onPinRemove}
+              onPinApply={onPinApply}
+              onPinIgnore={onPinIgnore}
+              onPinResolve={onPinResolve ?? onPinIgnore}
+            />
             {comments ? (
               comments
             ) : (
@@ -1482,6 +1490,9 @@ export function PostGenerationResult({
   onStateChange,
   defaultFullscreen,
   onFullscreenChange,
+  hideBreadcrumb,
+  isInTab,
+  onBack,
 }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
@@ -1500,49 +1511,21 @@ export function PostGenerationResult({
   const [commentsOpen, setCommentsOpen] = useState<boolean>(false)
   const [platform, setPlatform] = useState<Platform>("desktop")
 
-  // mark-and-comment pin flow state.
-  // `markMode` toggles the crosshair overlay; `pins` holds the dropped pins +
-  // their (optimistic) comment drafts. Entering mark mode force-opens the right
-  // comments sidebar (David's behaviour) so the new comment row is visible.
-  const [markMode, setMarkMode] = useState<boolean>(false)
-  const [pins, setPins] = useState<PinComment[]>([])
-  const pinCounter = useRef<number>(0)
-  const [computedPinPositions, setComputedPinPositions] = useState<Record<number, { xPct: number; yPct: number }>>({})
+  // mark-and-comment pin flow — now driven by the shared usePinMarking hook (C2b)
+  // so the public viewer runs the SAME implementation. The signed-in create-fn is
+  // injected here: createComment(prototype.id) wrapped in withAuthRetry. The
+  // surface side effects (open the comments sidebar on enter-mark / pin-drop) +
+  // the Apply runner / pre-fill seam are injected too — they are the ONLY things
+  // that differ from the public surface.
+  const pin = usePinMarking({
+    onCreate: (payload) =>
+      withAuthRetry(() => designAgentApi.createComment(prototype.id, payload)),
+    onEnterMarkMode: () => setCommentsOpen(true),
+    onPinDropped: () => setCommentsOpen(true),
+    onPinIterate,
+    onPinApply,
+  })
   const leftPanelRef = useRef<HTMLDivElement>(null)
-
-  const recomputePinPositions = useCallback(() => {
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    const updates: Record<number, { xPct: number; yPct: number }> = {}
-    for (const pin of pins) {
-      if (pin.anchor) {
-        const pos =
-          pin.xPctInEl != null && pin.yPctInEl != null
-            ? getAnchorPositionWithOffset(iframe, pin.anchor, pin.xPctInEl, pin.yPctInEl)
-            : getAnchorPosition(iframe, pin.anchor)
-        if (pos) updates[pin.n] = pos
-      }
-    }
-    setComputedPinPositions(updates)
-  }, [pins])
-
-  useEffect(() => {
-    recomputePinPositions()
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    const win = iframe?.contentWindow
-    win?.addEventListener("scroll", recomputePinPositions, { passive: true })
-    window.addEventListener("resize", recomputePinPositions, { passive: true })
-    return () => {
-      win?.removeEventListener("scroll", recomputePinPositions)
-      window.removeEventListener("resize", recomputePinPositions)
-    }
-  }, [recomputePinPositions])
-
-  useEffect(() => {
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    if (!iframe) return
-    iframe.addEventListener("load", recomputePinPositions)
-    return () => iframe.removeEventListener("load", recomputePinPositions)
-  }, [recomputePinPositions])
 
   // Escape closes the full-screen
   // overlay (in addition to the visible × close button). Bound only while open.
@@ -1558,11 +1541,6 @@ export function PostGenerationResult({
     return () => document.removeEventListener("keydown", onKey)
   }, [fullscreenOpen, onFullscreenChange])
 
-  // Clear any active element highlight whenever mark mode is exited.
-  useEffect(() => {
-    if (!markMode) clearElementHighlight()
-  }, [markMode])
-
   // Scroll to the activity section when the FIRST SSE event arrives so the
   // user sees the stream without having to scroll. Only fires on the transition
   // from 0 → 1 events (length === 1). The leftPanelRef is attached to the
@@ -1575,166 +1553,6 @@ export function PostGenerationResult({
     }
   }, [iterateActivity?.length])
 
-  function toggleMark() {
-    setMarkMode((on) => {
-      const next = !on
-      if (next) setCommentsOpen(true) // mark mode reveals the comments sidebar
-      return next
-    })
-  }
-
-  // Drop a numbered pin at the clicked stage location + open its comment composer.
-  function handleStageClick(xPct: number, yPct: number, viewportX: number, viewportY: number, anchor: { type: 'anchor-id' | 'xpath'; value: string } | null) {
-    const iframe = document.querySelector<HTMLIFrameElement>('.da-prototype-iframe')
-    let xPctInEl: number | null = null
-    let yPctInEl: number | null = null
-    let finalXPct = xPct
-    let finalYPct = yPct
-    let elementFriendly: string | null = null
-    let elementTechnical: string | null = null
-    if (anchor && iframe) {
-      const offset = getClickOffsetInElement(iframe, viewportX, viewportY, anchor)
-      if (offset) {
-        xPctInEl = offset.xPctInEl
-        yPctInEl = offset.yPctInEl
-        const pos = getAnchorPositionWithOffset(iframe, anchor, xPctInEl, yPctInEl)
-        if (pos) { finalXPct = pos.xPct; finalYPct = pos.yPct }
-      }
-      const anchorEl = findByAnchor(iframe, anchor)
-      const desc = getElementDescription(anchorEl)
-      elementFriendly = desc?.friendly ?? null
-      elementTechnical = desc?.technical ?? null
-    }
-    pinCounter.current += 1
-    const n = pinCounter.current
-    setPins((prev) => [
-      ...prev,
-      { n, xPct: finalXPct, yPct: finalYPct, xPctInEl, yPctInEl, anchor, elementFriendly, elementTechnical, draft: "", body: "", saved: false, busy: false, error: null },
-    ])
-    setCommentsOpen(true)
-    setMarkMode(false)
-    clearElementHighlight()
-  }
-
-  function handlePinDraftChange(n: number, value: string) {
-    setPins((prev) => prev.map((p) => (p.n === n ? { ...p, draft: value } : p)))
-  }
-
-  function handlePinRemove(n: number) {
-    setPins((prev) => prev.filter((p) => p.n !== n))
-  }
-
-  // Submit a pin's comment to the AUTHED create endpoint. The anchor_id carries a
-  // synthetic pin marker (`pin-<n>`) — the iframe click cannot resolve a real
-  // data-anchor-id across the sandbox boundary. The pin's on-canvas position IS
-  // persisted via `pin_x_pct`/`pin_y_pct` alongside the comment body. The row
-  // stays optimistic until the create resolves.
-  async function handlePinSubmit(n: number) {
-    const pin = pins.find((p) => p.n === n)
-    if (!pin || !pin.draft.trim()) return
-    setPins((prev) =>
-      prev.map((p) => (p.n === n ? { ...p, busy: true, error: null } : p)),
-    )
-    try {
-      // the authed create returns the
-      // CommentRecord with the server-attributed author + created_at — mirror them
-      // onto the pin so the saved row shows real identity + a relative timestamp.
-      // A bearer token can expire mid-interaction; retry once through the
-      // refresh so a transient 401 doesn't silently lose a saved comment.
-      const created = await withAuthRetry(() =>
-        designAgentApi.createComment(prototype.id, {
-          anchor_id: `pin-${n}`,
-          body: pin.draft.trim(),
-          pin_x_pct: pin.xPct,
-          pin_y_pct: pin.yPct,
-          resolved_anchor_id: serializeAnchor(pin.anchor),
-        }),
-      )
-      setPins((prev) =>
-        prev.map((p) =>
-          p.n === n
-            ? {
-                ...p,
-                body: p.draft.trim(),
-                saved: true,
-                busy: false,
-                error: null,
-                author: created?.author ?? "demo",
-                createdAt: created?.created_at ?? new Date().toISOString(),
-              }
-            : p,
-        ),
-      )
-    } catch (e) {
-      // Keep the optimistic pin + draft so nothing is lost; surface the error.
-      setPins((prev) =>
-        prev.map((p) =>
-          p.n === n
-            ? {
-                ...p,
-                busy: false,
-                error: e instanceof Error ? e.message : "Could not save comment",
-              }
-            : p,
-        ),
-      )
-    }
-  }
-
-  // describe WHERE a pin sits on the
-  // canvas so the agent knows where the comment applies. The raw x/y ARE also
-  // persisted on the comment; here we compose a human region hint from the
-  // LOCAL pin state for the agent instruction.
-  function pinRegionHint(xPct: number, yPct: number): string {
-    const v = yPct < 33 ? "top" : yPct < 66 ? "middle" : "bottom"
-    const h = xPct < 33 ? "left" : xPct < 66 ? "centre" : "right"
-    return `${v} ${h}`
-  }
-
-  // Apply a saved pin comment —
-  // pre-fill the LEFT IterateComposer (via the SAME applyTarget seam CommentsPanel
-  // uses; ApproveModal threads `onPinApply → setApplyTarget`) with an instruction
-  // that includes the pin number + on-canvas position + the comment text, THEN
-  // mark the pin resolved. The synthetic CommentRecord's `body` is the composed
-  // instruction; `id` is negative so it never collides with a real comment id and
-  // is harmless if forwarded as applied_comment_id (the backend treats unknown ids
-  // as "no linked comment").
-  function handlePinApply(n: number) {
-    const pin = pins.find((p) => p.n === n)
-    if (!pin || !pin.saved) return
-    const region = pinRegionHint(pin.xPct, pin.yPct)
-    const elPart = pin.elementFriendly ? ` on ${pin.elementFriendly}` : ''
-    const instruction = pin.elementTechnical
-      ? `Re: pin #${pin.n}${elPart} (${region}):\n${pin.body}\n[ref: ${pin.elementTechnical}]`
-      : `Re: pin #${pin.n}${elPart} (${region}): ${pin.body}`
-    // pin Apply now runs the iterate
-    // IMMEDIATELY through the shared runner (pin context + body as the
-    // instruction) when `onPinIterate` is supplied — same fixed path as the
-    // composer + comment Apply. Falls back to the old applyTarget pre-fill
-    // (`onPinApply`) only when no runner is wired. The agent decides
-    // applicability; the client fabricates no change. Then mark the pin resolved.
-    if (onPinIterate) {
-      onPinIterate(instruction, null)
-    } else {
-      const synthetic: CommentRecord = {
-        id: -pin.n,
-        anchor_id: `pin-${pin.n}`,
-        body: instruction,
-        author: pin.author ?? "demo",
-        status: "open",
-        created_at: pin.createdAt ?? new Date().toISOString(),
-        resolved_at: null,
-      }
-      onPinApply?.(synthetic)
-    }
-    setPins((prev) => prev.map((p) => (p.n === n ? { ...p, resolved: true } : p)))
-  }
-
-  // Ignore — mark the pin resolved
-  // WITHOUT pre-filling the composer.
-  function handlePinIgnore(n: number) {
-    setPins((prev) => prev.map((p) => (p.n === n ? { ...p, resolved: true } : p)))
-  }
 
   // P6-05 (#5): when the launcher refetches after an iterate/clarify and hands a
   // fresh prop down (same id, new `bundle_url`), re-seed the local `isComplete`
@@ -1784,15 +1602,18 @@ export function PostGenerationResult({
       onToggleComments={() => setCommentsOpen((v) => !v)}
       platform={platform}
       onPlatformChange={(p) => setPlatform(p)}
-      markMode={markMode}
-      onToggleMark={toggleMark}
-      onStageClick={handleStageClick}
-      pins={pins}
-      onPinDraftChange={handlePinDraftChange}
-      onPinSubmit={handlePinSubmit}
-      onPinRemove={handlePinRemove}
-      onPinApply={handlePinApply}
-      onPinIgnore={handlePinIgnore}
+      markMode={pin.markMode}
+      onToggleMark={pin.toggleMark}
+      onStageClick={pin.handleStageClick}
+      pins={pin.pins}
+      onPinDraftChange={pin.handlePinDraftChange}
+      onPinSubmit={pin.handlePinSubmit}
+      onPinRemove={pin.handlePinRemove}
+      onPinApply={pin.handlePinApply}
+      onPinIgnore={pin.handlePinIgnore}
+      // the consolidated resolve control on a saved pin row resolves it WITHOUT
+      // pre-filling the composer — same semantic as Ignore.
+      onPinResolve={pin.handlePinIgnore}
       // mount the clarifying-
       // question surface. It self-gates on `prototype.pending_question` (renders
       // null when none/locked), so it's safe to always pass. When the launcher's
@@ -1810,8 +1631,11 @@ export function PostGenerationResult({
       onAnswerQuestion={onAnswerQuestion}
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
-      computedPinPositions={computedPinPositions}
+      computedPinPositions={pin.computedPinPositions}
       leftPanelRef={leftPanelRef}
+      hideBreadcrumb={hideBreadcrumb}
+      isInTab={isInTab}
+      onBack={onBack}
     />
   )
 }

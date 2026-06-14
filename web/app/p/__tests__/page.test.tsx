@@ -15,9 +15,12 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 // test convention) rather than touch the shared vitest config.
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { resolveToken, nextViewerState } from "../PublicTokenViewer"
-import { PrototypeViewer } from "../../../components/design-agent/PrototypeViewer"
-import { CompletionBar } from "../../../components/design-agent/CompletionBar"
+import { nextViewerState } from "../PublicTokenViewer"
+import { resolveToken } from "../resolveToken"
+import { legacyRedirectTarget } from "../[slug]/LegacyTokenRedirect"
+import { generateStaticParams as canonicalStaticParams } from "../[slug]/[token]/page"
+import { generateStaticParams as legacyStaticParams } from "../[slug]/page"
+import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
 import { PasscodeGateView, submitPasscode } from "../PasscodeGate"
 
 function mockFetch(res: { status: number; ok?: boolean; body?: unknown }) {
@@ -36,7 +39,27 @@ afterEach(() => {
 })
 
 describe("resolveToken", () => {
-  it("returns the resolved view on a 200", async () => {
+  it("returns the resolved view on a 200, parsing company_slug", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        share_mode: "public",
+        requires_passcode: false,
+        bundle_url: "https://cdn.example/p/abc/index.html",
+        is_complete: true,
+        company_slug: "sprntly",
+      },
+    })
+    expect(await resolveToken("tok")).toEqual({
+      share_mode: "public",
+      requires_passcode: false,
+      bundle_url: "https://cdn.example/p/abc/index.html",
+      is_complete: true,
+      company_slug: "sprntly",
+    })
+  })
+
+  it("defaults company_slug to '' when the backend omits it", async () => {
     mockFetch({
       status: 200,
       body: {
@@ -46,12 +69,7 @@ describe("resolveToken", () => {
         is_complete: true,
       },
     })
-    expect(await resolveToken("tok")).toEqual({
-      share_mode: "public",
-      requires_passcode: false,
-      bundle_url: "https://cdn.example/p/abc/index.html",
-      is_complete: true,
-    })
+    expect((await resolveToken("tok"))?.company_slug).toBe("")
   })
 
   it("returns null on a 404 (→ notFound upstream)", async () => {
@@ -72,6 +90,7 @@ describe("nextViewerState branch logic", () => {
       requires_passcode: false,
       bundle_url: "https://cdn.example/p/abc/index.html",
       is_complete: true,
+      company_slug: "sprntly",
     })
     expect(state).toEqual({
       kind: "ready",
@@ -102,6 +121,7 @@ describe("nextViewerState branch logic", () => {
         requires_passcode: true,
         bundle_url: null,
         is_complete: false,
+        company_slug: "sprntly",
       }),
     ).toEqual({ kind: "passcode" })
   })
@@ -117,6 +137,7 @@ describe("nextViewerState branch logic", () => {
         requires_passcode: false,
         bundle_url: null,
         is_complete: false,
+        company_slug: "sprntly",
       }),
     ).toEqual({ kind: "notfound" })
   })
@@ -192,6 +213,47 @@ describe("PasscodeGate", () => {
   })
 })
 
+// Sharing model: the legacy `/p/<token>` route now redirects to the canonical
+// `/p/<slug>/<token>` form. The legacy route's shared first segment is named
+// [slug] (Next same-name rule), so the client component reads the share token
+// from params.slug; legacyRedirectTarget is the pure target-computation it calls
+// after resolving that token (the router.replace itself lives in the client
+// component, exercised in E2E).
+describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
+  it("computes /p/<slug>/<token> from a resolved view", () => {
+    expect(
+      legacyRedirectTarget(
+        {
+          share_mode: "public",
+          requires_passcode: false,
+          bundle_url: "https://cdn.example/p/abc/index.html",
+          is_complete: true,
+          company_slug: "sprntly",
+        },
+        "abc",
+      ),
+    ).toBe("/p/sprntly/abc")
+  })
+
+  it("returns null for a 404/null view (the caller calls notFound())", () => {
+    expect(legacyRedirectTarget(null, "abc")).toBeNull()
+  })
+})
+
+describe("canonical /p/[slug]/[token] route", () => {
+  it("generateStaticParams returns the 2-seg sentinel for static export", () => {
+    expect(canonicalStaticParams()).toEqual([{ slug: "_", token: "_" }])
+  })
+})
+
+// The legacy 1-segment route lives at /p/[slug] (the shared first segment is
+// named [slug] to satisfy Next's same-name rule; the value is the share token).
+describe("legacy /p/[slug] route", () => {
+  it("generateStaticParams returns the 1-seg sentinel for static export", () => {
+    expect(legacyStaticParams()).toEqual([{ slug: "_" }])
+  })
+})
+
 describe("PrototypeViewer chrome slot (AC9)", () => {
   it("renders the chrome prop inside the always-present chrome slot", () => {
     const html = renderToStaticMarkup(
@@ -216,40 +278,39 @@ describe("PrototypeViewer chrome slot (AC9)", () => {
   })
 })
 
-// P2-10: the public viewer mounts a read-only CompletionBar as the chrome —
-// a status badge only, no prototypeId, no mutation affordances (AC19, AC3).
-describe("P2-10 read-only CompletionBar chrome mount (AC19)", () => {
-  it("renders the read-only complete badge inside the chrome slot", () => {
+// Phase-1 chrome cleanup: the public viewer no longer mounts the work-status
+// pill (CompletionBar) or the read-only CommentsPanel. The chrome slot is still
+// present (ManualEditOverlay mounts but renders nothing without a prototypeId).
+// These tests assert the removed elements are ABSENT on the public surface.
+describe("Phase-1 chrome cleanup: status pill + comments box absent from public viewer", () => {
+  it("does NOT render the completion-bar-readonly pill in the public chrome slot", () => {
     const html = renderToStaticMarkup(
       React.createElement(PrototypeViewer, {
         bundleUrl: "https://cdn.example/p/abc/index.html",
         isComplete: true,
-        chrome: React.createElement(CompletionBar, {
-          isComplete: true,
-          editable: false,
-        }),
+        // No CompletionBar or CommentsPanel passed — matches the cleaned-up
+        // PublicTokenViewer chrome slot (Phase 1).
+        chrome: React.createElement(React.Fragment, null),
       }),
     )
     expect(html).toContain('data-testid="prototype-chrome"')
-    expect(html).toContain('data-testid="completion-bar-readonly"')
-    expect(html).toContain("Marked Complete")
-    // No mutating affordances leak into the public viewer.
-    expect(html).not.toContain('data-testid="mark-complete-btn"')
-    expect(html).not.toContain('data-testid="resume-btn"')
+    expect(html).not.toContain('data-testid="completion-bar-readonly"')
+    expect(html).not.toContain("Marked Complete")
+    expect(html).not.toContain("Work in progress")
   })
 
-  it("renders the read-only WIP badge for an incomplete prototype", () => {
+  it("does NOT render the read-only CommentsPanel in the public chrome slot", () => {
     const html = renderToStaticMarkup(
       React.createElement(PrototypeViewer, {
         bundleUrl: "https://cdn.example/p/abc/index.html",
         isComplete: false,
-        chrome: React.createElement(CompletionBar, {
-          isComplete: false,
-          editable: false,
-        }),
+        chrome: React.createElement(React.Fragment, null),
       }),
     )
-    expect(html).toContain('data-testid="completion-bar-readonly"')
-    expect(html).toContain("Work in progress")
+    expect(html).toContain('data-testid="prototype-chrome"')
+    // The CommentsPanel renders a da-comments-panel root — absent here.
+    expect(html).not.toContain("da-comments-panel")
+    // The instructional copy that appears in the read-only panel is gone.
+    expect(html).not.toContain("Right-click any element")
   })
 })
