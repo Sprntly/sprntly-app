@@ -78,19 +78,19 @@ def test_upload_files_happy_path(tenant_client):
     assert all(item["md_chars"] > 0 for item in body["ingested"])
 
 
-def test_upload_unsupported_returns_per_file_error(tenant_client):
+def test_upload_unknown_type_is_stored_not_rejected(tenant_client):
     t = tenant_client.make(slug="acme")
     t.client.post("/v1/datasets", json={"slug": "acme", "display_name": "Acme"})
     files = [
         ("files", ("good.txt", io.BytesIO(b"ok"), "text/plain")),
-        ("files", ("bad.exe", io.BytesIO(b"\x00"), "application/octet-stream")),
+        ("files", ("bad.exe", io.BytesIO(b"\x00\x01binary"), "application/octet-stream")),
     ]
     r = t.client.post("/v1/datasets/acme/files", files=files)
     assert r.status_code == 200
     body = r.json()
-    assert len(body["ingested"]) == 1
-    assert len(body["errors"]) == 1
-    assert body["errors"][0]["filename"] == "bad.exe"
+    # Unknown binary type is now stored as a stub, not rejected.
+    assert sorted(f["filename"] for f in body["ingested"]) == ["bad.exe", "good.txt"]
+    assert body["errors"] == []
 
 
 def test_upload_zip_is_expanded(tenant_client):
@@ -103,16 +103,16 @@ def test_upload_zip_is_expanded(tenant_client):
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("one.md", b"# One")
         zf.writestr("two.txt", b"two")
-        zf.writestr("skip.exe", b"\x00")  # unsupported member → error, not fatal
+        zf.writestr("extra.bin", b"\x00\x01binary")  # unknown member → stored, not skipped
     files = [("files", ("bundle.zip", io.BytesIO(buf.getvalue()), "application/zip"))]
 
     r = t.client.post("/v1/datasets/acme/files", files=files)
     assert r.status_code == 200, r.text
     body = r.json()
-    # the zip expanded into its two supported members, each tagged with from_zip
-    assert sorted(f["filename"] for f in body["ingested"]) == ["one.md", "two.txt"]
+    # every member is expanded and ingested, each tagged with from_zip
+    assert sorted(f["filename"] for f in body["ingested"]) == ["extra.bin", "one.md", "two.txt"]
     assert all(f["from_zip"] == "bundle.zip" for f in body["ingested"])
-    assert any(e["filename"] == "skip.exe" for e in body["errors"])
+    assert body["errors"] == []
 
 
 def test_upload_too_large_rejected(tenant_client):
