@@ -26,6 +26,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { CompletionBar } from "./CompletionBar"
+import { useHandoffActions, STALE_MESSAGE } from "./handoff-actions"
 import { ShareMenu, type ShareMode } from "./ShareMenu"
 import { PrototypeViewer, type Platform } from "./PrototypeViewer"
 // ManualEditOverlay import dropped —
@@ -70,6 +71,8 @@ import {
   IconShare,
   IconMore,
   IconPin,
+  IconCopy,
+  IconUndo,
 } from "../shared/app-icons"
 // subtle breadcrumb at the top of the
 // canvas ("PRDs / {PRD title} / Design"). Clicking a crumb closes the canvas and
@@ -228,6 +231,10 @@ export type PostGenerationResultProps = {
   onFullscreenChange?: (open: boolean) => void
   /** When true (the in-tab /prototype route), the top breadcrumb is suppressed — the back affordance lives in the app chrome-strip title instead. Absent (launcher/overlay) → the breadcrumb renders. */
   hideBreadcrumb?: boolean
+  /** True only for the in-tab /prototype editor. Switches the control bar to the
+   *  state-driven handoff buttons (Mark Complete / Export / Undo) and drops the
+   *  "..." Actions popover + Done button. Launcher/public keep the classic bar. */
+  isInTab?: boolean
 }
 
 export type PostGenerationResultViewProps = {
@@ -318,6 +325,10 @@ export type PostGenerationResultViewProps = {
   leftPanelRef?: RefObject<HTMLDivElement | null>
   /** When true (the in-tab /prototype route), the top breadcrumb is suppressed — the back affordance lives in the app chrome-strip title instead. Absent (launcher/overlay) → the breadcrumb renders. */
   hideBreadcrumb?: boolean
+  /** True only for the in-tab /prototype editor. Switches the control bar to the
+   *  state-driven handoff buttons (Mark Complete / Export / Undo) and drops the
+   *  "..." Actions popover + Done button. Launcher/public keep the classic bar. */
+  isInTab?: boolean
 }
 
 /**
@@ -608,6 +619,89 @@ function DaPopover({
  * Forest-green tokens only; no coral. The full CompletionBar + full ShareMenu
  * are NEVER rendered directly in the bar row — only inside their popovers.
  */
+/**
+ * In-tab handoff buttons cluster (Mark Complete / Export / Copy / Undo).
+ * Extracted into its own component so DaControlBar itself stays hook-free and
+ * can be called as a plain function in node-env vitest without a React renderer.
+ * All hooks (useHandoffActions, useState) live HERE, not in DaControlBar.
+ *
+ * The stale-handoff banner is rendered here (after the action buttons) and
+ * positioned BELOW the control bar via `position: absolute` + the parent
+ * `.da-controlbar` having `position: relative` (set in design-agent.css).
+ */
+function InTabHandoffCluster({
+  prototypeId,
+  isComplete,
+  onStateChange,
+}: {
+  prototypeId: number
+  isComplete: boolean
+  onStateChange?: (state: { isComplete: boolean; staleHandoff: boolean }) => void
+}) {
+  const { busy, markComplete, resume, download, copy } = useHandoffActions({
+    prototypeId,
+    onStateChange,
+  })
+  const [stale, setStale] = useState(false)
+  return (
+    <>
+      {!isComplete ? (
+        <button
+          type="button"
+          className="btn btn-accent da-ctl-done"
+          data-testid="da-mark-complete"
+          disabled={busy}
+          onClick={async () => { await markComplete(); setStale(false) }}
+        >
+          Mark Complete
+        </button>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="btn da-ctl-export"
+            data-testid="da-export"
+            disabled={busy}
+            onClick={() => download()}
+          >
+            Export
+          </button>
+          <button
+            type="button"
+            className="da-ctl-icon"
+            data-testid="da-copy"
+            title="Copy markdown"
+            aria-label="Copy markdown"
+            disabled={busy}
+            onClick={() => copy()}
+          >
+            <IconCopy size={16} />
+          </button>
+          <button
+            type="button"
+            className="btn da-ctl-undo"
+            data-testid="da-undo"
+            disabled={busy}
+            onClick={async () => {
+              const r = await resume()
+              if (r) setStale(!!r.handoffs_flagged_stale)
+            }}
+          >
+            <IconUndo size={16} /> Undo
+          </button>
+        </>
+      )}
+      {stale && (
+        <div className="da-stale-row" data-testid="da-stale-row">
+          <div className="stale-banner" data-testid="stale-banner-intab">
+            {STALE_MESSAGE}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 export function DaControlBar({
   prototypeId,
   isComplete,
@@ -624,6 +718,7 @@ export function DaControlBar({
   canOpen,
   onOpenFullscreen,
   onDone,
+  isInTab,
 }: {
   prototypeId: number
   isComplete: boolean
@@ -641,7 +736,14 @@ export function DaControlBar({
   canOpen: boolean
   onOpenFullscreen?: () => void
   onDone?: () => void
+  /** True only for the in-tab /prototype editor. When set, replaces the
+   *  "..." Actions popover + Done with state-driven handoff buttons. */
+  isInTab?: boolean
 }) {
+  // NOTE: DaControlBar is intentionally hook-free so it can be called as a
+  // plain function in node-env vitest (the test suite calls it directly to
+  // walk the returned element tree). All hook usage for the in-tab path lives
+  // in <InTabHandoffCluster> above.
   return (
     <div className="da-controlbar" data-testid="da-controlbar">
       {/* LEFT cluster — compact Desktop/Mobile segmented control. */}
@@ -731,30 +833,57 @@ export function DaControlBar({
           />
         </DaPopover>
 
-        {/* Actions overflow (⋯) — Mark Complete / Export / Download / Copy, kept
-            reachable but compact (the full CompletionBar lives in the popover). */}
-        <DaPopover
-          align="right"
-          testId="da-actions-popover"
-          trigger={(open) => (
-            <button
-              type="button"
-              className={`da-ctl-icon da-ctl-icon--square${open ? " on" : ""}`}
-              title="Actions"
-              aria-label="Actions"
-              data-testid="da-actions-toggle"
-            >
-              <IconMore size={16} />
-            </button>
-          )}
-        >
-          <div className="da-popover-title">Handoff</div>
-          <CompletionBar
+        {/* Actions / handoff cluster — conditional on isInTab.
+            isInTab=TRUE  → <InTabHandoffCluster> (hook-owning child component)
+                            with state-driven Mark Complete / Export / Copy / Undo
+                            + its own stale-banner below the cluster.
+            isInTab=FALSE → classic "..." Actions popover + Done (launcher path). */}
+        {isInTab ? (
+          <InTabHandoffCluster
             prototypeId={prototypeId}
             isComplete={isComplete}
             onStateChange={onStateChange}
           />
-        </DaPopover>
+        ) : (
+          <>
+            {/* Actions overflow (⋯) — Mark Complete / Export / Download / Copy, kept
+                reachable but compact (the full CompletionBar lives in the popover). */}
+            <DaPopover
+              align="right"
+              testId="da-actions-popover"
+              trigger={(open) => (
+                <button
+                  type="button"
+                  className={`da-ctl-icon da-ctl-icon--square${open ? " on" : ""}`}
+                  title="Actions"
+                  aria-label="Actions"
+                  data-testid="da-actions-toggle"
+                >
+                  <IconMore size={16} />
+                </button>
+              )}
+            >
+              <div className="da-popover-title">Handoff</div>
+              <CompletionBar
+                prototypeId={prototypeId}
+                isComplete={isComplete}
+                onStateChange={onStateChange}
+              />
+            </DaPopover>
+
+            {/* Done — closes the canvas back to the PRD. */}
+            {onDone && (
+              <button
+                type="button"
+                className="btn btn-accent da-ctl-done"
+                data-testid="da-control-done"
+                onClick={() => onDone()}
+              >
+                Done
+              </button>
+            )}
+          </>
+        )}
 
         {/* Fullscreen — reuses the existing open-fullscreen trigger. */}
         <button
@@ -768,18 +897,6 @@ export function DaControlBar({
         >
           <IconFullscreen size={15} />
         </button>
-
-        {/* Done — closes the canvas back to the PRD. */}
-        {onDone && (
-          <button
-            type="button"
-            className="btn btn-accent da-ctl-done"
-            data-testid="da-control-done"
-            onClick={() => onDone()}
-          >
-            Done
-          </button>
-        )}
       </div>
     </div>
   )
@@ -1003,6 +1120,7 @@ export function PostGenerationResultView({
   computedPinPositions = {},
   leftPanelRef,
   hideBreadcrumb,
+  isInTab,
 }: PostGenerationResultViewProps) {
   // cache-bust the iframe src so a
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
@@ -1085,6 +1203,7 @@ export function PostGenerationResultView({
       canOpen={canOpen}
       onOpenFullscreen={onOpenFullscreen}
       onDone={onDone}
+      isInTab={isInTab}
     />
   )
 
@@ -1490,6 +1609,7 @@ export function PostGenerationResult({
   defaultFullscreen,
   onFullscreenChange,
   hideBreadcrumb,
+  isInTab,
 }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
@@ -1821,6 +1941,7 @@ export function PostGenerationResult({
       computedPinPositions={computedPinPositions}
       leftPanelRef={leftPanelRef}
       hideBreadcrumb={hideBreadcrumb}
+      isInTab={isInTab}
     />
   )
 }

@@ -2764,3 +2764,42 @@
   box-shadow: var(--shadow-sm);
 }
 /* ── end CommentsPanel visual polish ─────────────────────────────────────── */
+
+/* ── In-tab handoff buttons (DaControlBar isInTab=true) ──────────────────────
+   Only the export + undo variants need dedicated classes; copy reuses
+   .da-ctl-icon (icon-only square) which already exists above. */
+
+/* Export — same height/padding as .da-ctl-done but neutral ink (not accent). */
+.design-agent-surface .da-ctl-export {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 14px;
+  font-size: 12.5px;
+}
+
+/* Undo — same dimensions as Export; icon + label inline-flex. */
+.design-agent-surface .da-ctl-undo {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+/* Stale-handoff banner row — appears directly under the control bar
+   (in-tab only; the launcher/overlay uses CompletionBar's own .stale-banner).
+   The row is inside .da-controlbar-r (a flex row), so we break it out via
+   position:absolute anchored to .da-controlbar (which gets position:relative). */
+.design-agent-surface .da-controlbar {
+  position: relative;
+}
+.design-agent-surface .da-stale-row {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  padding: 4px 0 0;
+  z-index: 1;
+}

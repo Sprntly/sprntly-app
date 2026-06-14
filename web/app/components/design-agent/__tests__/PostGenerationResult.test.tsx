@@ -619,6 +619,74 @@ describe("PostGenerationResult container — defaults from the prototype record 
   })
 })
 
+// ─── isInTab prop-threading integration: container → View → DaControlBar ──────
+// Regression guard for the prop-threading bug where `isInTab` was set on the
+// PostGenerationResult CONTAINER but dropped before reaching DaControlBar,
+// causing the in-tab toolbar to silently render the OLD launcher bar. Leaf-only
+// unit tests (mounting DaControlBar/InTabHandoffCluster with isInTab=true
+// directly) cannot catch this — only rendering the full container end-to-end can.
+describe("PostGenerationResult container — isInTab prop threads through to DaControlBar (regression: dropped-prop bug)", () => {
+  const READY_PROTO = proto({ bundle_url: "https://cdn/p/42/index.html", is_complete: false })
+
+  it("isInTab=true renders the in-tab Mark Complete button and NOT the launcher Actions/Done bar", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: READY_PROTO,
+        isInTab: true,
+      }),
+    )
+    // The in-tab cluster must be present.
+    expect(html).toContain('data-testid="da-mark-complete"')
+    // The launcher bar buttons must be absent.
+    expect(html).not.toContain('data-testid="da-control-done"')
+    expect(html).not.toContain('data-testid="da-actions-toggle"')
+  })
+
+  it("isInTab absent (launcher path) renders the Actions/Done bar and NOT the in-tab Mark Complete button", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: READY_PROTO,
+      }),
+    )
+    // The classic launcher bar must be present.
+    expect(html).toContain('data-testid="da-actions-toggle"')
+    // The in-tab cluster must be absent.
+    expect(html).not.toContain('data-testid="da-mark-complete"')
+  })
+
+  it("isInTab=true + is_complete=true renders Export/Undo (and NOT the launcher Actions/Done bar)", () => {
+    const COMPLETE_PROTO = proto({ bundle_url: "https://cdn/p/42/index.html", is_complete: true })
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: COMPLETE_PROTO,
+        isInTab: true,
+      }),
+    )
+    // Complete in-tab cluster: Export + Undo must be present.
+    expect(html).toContain('data-testid="da-export"')
+    expect(html).toContain('data-testid="da-undo"')
+    // Copy is also rendered in the complete branch.
+    expect(html).toContain('data-testid="da-copy"')
+    // The launcher bar (old path) must be absent.
+    expect(html).not.toContain('data-testid="da-actions-toggle"')
+    expect(html).not.toContain('data-testid="da-control-done"')
+  })
+
+  it("is_complete=true WITHOUT isInTab (launcher path) renders the Actions toggle and NOT the in-tab Export button", () => {
+    const COMPLETE_PROTO = proto({ bundle_url: "https://cdn/p/42/index.html", is_complete: true })
+    const html = renderToStaticMarkup(
+      React.createElement(PostGenerationResult, {
+        prototype: COMPLETE_PROTO,
+      }),
+    )
+    // The classic launcher bar must be present.
+    expect(html).toContain('data-testid="da-actions-toggle"')
+    // The in-tab complete cluster must be absent.
+    expect(html).not.toContain('data-testid="da-export"')
+    expect(html).not.toContain('data-testid="da-undo"')
+  })
+})
+
 // ─── viewer iframe src + remount key: follow the live build path ─────────────
 
 // Pull the inline viewer iframe's `src` out of the SSR markup. The inline viewer

@@ -292,6 +292,7 @@ function InTabCanvas({
     <PostGenerationResult
       prototype={proto}
       hideBreadcrumb
+      isInTab
       defaultFullscreen={fsParamToFullscreen(searchParams.get("fs"))}
       onFullscreenChange={(open) => {
         const next = new URLSearchParams(searchParams.toString())
