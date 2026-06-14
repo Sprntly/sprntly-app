@@ -57,6 +57,7 @@ from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
+from app.db.companies import slug_for_company_id
 from app.db.connections import get_connection
 from app.db.prds import get_prd_rendered, list_prds_by_brief, reset_prd_to_draft
 from app.db.github import find_github_installation_for_repo
@@ -1802,6 +1803,7 @@ class PublicPrototypeView(BaseModel):
     requires_passcode: bool                    # true iff share_mode == "passcode"
     bundle_url: str | None                     # null until a passcode is verified
     is_complete: bool
+    company_slug: str                          # cosmetic segment of /p/<slug>/<token>
 
 
 class PasscodeAttempt(BaseModel):
@@ -1855,6 +1857,8 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         # signed URL — re-sign on read so the iframe never 403s once the TTL lapses.
         bundle_url=_public_bundle_url(row) if mode == "public" else None,
         is_complete=bool(row.get("is_complete")),
+        # INTENTIONAL slug exposure (Babajide-approved): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
+        company_slug=slug_for_company_id(row["workspace_id"]) or "",
     )
 
 
@@ -1895,6 +1899,7 @@ def verify_passcode(
         # Permanent share, 24h stored signed URL — re-sign on read (see get_by_token).
         bundle_url=_public_bundle_url(row),
         is_complete=bool(row.get("is_complete")),
+        company_slug=slug_for_company_id(row["workspace_id"]) or "",
     )
 
 
