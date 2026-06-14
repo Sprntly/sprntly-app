@@ -513,6 +513,11 @@ export interface AppContentState {
    *  formats on BriefScreen doesn't require a second fetch. `null` until
    *  the first brief load completes. */
   briefV2: import("../lib/brief-v2-adapter").BriefV2State | null
+  /** Coarse lifecycle of the current brief load, mirrored from
+   *  `useBriefHydration` (called once in AppShell) so the brief surface can
+   *  render a "generating…" WIP indicator without re-invoking the
+   *  side-effectful hydration hook. `null` until the first hydration tick. */
+  briefHydration: "idle" | "loading" | "ready" | "generating" | "failed" | "empty" | null
   pastWeeks: PastWeekRow[]
   shipped: ShippedState
   conversations: ConversationRow[]

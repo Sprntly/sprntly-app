@@ -554,6 +554,25 @@ const SUGGEST_ACTION: Record<Exclude<SuggestKind, "coding">, AgentAction> = {
   "view-prd": "prd",
 }
 
+// ── Brief generating / WIP indicator ─────────────────────────────────────────
+// Shown on the brief surface while the backend is generating this week's brief
+// (hydration kind === "generating"). Visually distinct from the empty greeting
+// ("no brief yet") and the failed state: a live spinner + reassuring copy that
+// is REPLACED by the real brief the moment hydration flips to ready.
+function BriefGeneratingState() {
+  return (
+    <div className="bc-generating" role="status" aria-live="polite">
+      <span className="bc-generating-spinner" aria-hidden />
+      <div className="bc-generating-copy">
+        <p className="bc-generating-title">Generating your Monday brief…</p>
+        <p className="bc-generating-sub">
+          Analyzing your sources — this usually takes a minute.
+        </p>
+      </div>
+    </div>
+  )
+}
+
 function SuggestIcon({ name }: { name: SuggestSpec["icon"] }) {
   if (name === "code") return <IconCode size={14} />
   if (name === "terminal") return <IconTerminalPrompt size={14} />
@@ -1062,6 +1081,10 @@ export function BriefChat() {
   const week = weekLabel(v2?.weekOf ?? null)
   const heading = briefTitle(v2?.weekOf ?? null)
   const refreshing = (pipeline.runStatus as { status?: string } | null)?.status === "running"
+  // The brief is being generated when hydration reports "generating" AND we
+  // don't yet have a brief to show. Once findings arrive (ready), the WIP
+  // indicator is replaced by the real brief. The failed state never trips this.
+  const generatingBrief = content.briefHydration === "generating" && visibleFindings.length === 0
 
   return (
     <section className="briefx" aria-label="Weekly brief">
@@ -1112,9 +1135,15 @@ export function BriefChat() {
                   <IconSparkle size={10} />
                   PM COWORKER
                 </span>
-                <span className="bc-agent-status">Monday brief · {greetTime}</span>
+                <span className="bc-agent-status">
+                  Monday brief · {generatingBrief ? "generating…" : greetTime}
+                </span>
               </div>
               <div className="bc-agent-body">
+                {generatingBrief ? (
+                  <BriefGeneratingState />
+                ) : (
+                <>
                 <p className="bc-greeting">{greeting}</p>
                 {visibleFindings.length > 0 ? (
                   <div className="fc-stack">
@@ -1140,6 +1169,8 @@ export function BriefChat() {
                     <span>{v2.sourcesLine}</span>
                   </div>
                 ) : null}
+                </>
+                )}
               </div>
             </div>
 
