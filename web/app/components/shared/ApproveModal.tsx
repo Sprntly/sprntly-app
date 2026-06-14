@@ -205,8 +205,58 @@ export function ApproveModal() {
   // Guard for "View Prototype" re-verification: prevents navigating to a stale
   // canvas.
   const [viewBusy, setViewBusy] = useState(false)
+  // True while a background (notify-mode) prototype generation is in flight for
+  // this PRD. Disables the Generate/View Prototype card and relabels it
+  // "Generating Prototype". Driven by two mechanisms:
+  //   1. Window CustomEvents: "da:generating" sets it true; "da:generating-done"
+  //      clears it. Listeners are added once on mount and survive modal
+  //      close/reopen (ApproveModal never unmounts — it just toggles what it
+  //      renders via the activeModal guard at the top).
+  //   2. getByPrd seed: when the modal opens, we check the current prototype
+  //      status. If it is "generating", we set isGenerating=true. This handles
+  //      the reopen-after-a-transient-event case where a fresh listener would
+  //      have missed the past "da:generating" dispatch.
+  const [isGenerating, setIsGenerating] = useState(false)
 
   const prd = content.prd
+
+  // Window CustomEvent listeners for notify-mode generation state. Mounted once
+  // on component mount and removed on unmount (though ApproveModal never
+  // actually unmounts — it returns early based on activeModal). Surviving
+  // close/reopen is intentional: a "da:generating" that fires while the approve
+  // modal is closed must still be caught so the card is disabled on reopen.
+  useEffect(() => {
+    const onGenerating = () => setIsGenerating(true)
+    const onDone = () => setIsGenerating(false)
+    window.addEventListener("da:generating", onGenerating)
+    window.addEventListener("da:generating-done", onDone)
+    return () => {
+      window.removeEventListener("da:generating", onGenerating)
+      window.removeEventListener("da:generating-done", onDone)
+    }
+  }, [])
+
+  // Seed isGenerating on modal open: if a background generation fired its
+  // "da:generating" event while the modal was closed (and we therefore missed
+  // the transient event), check the prototype's current status and set
+  // isGenerating=true when it is "generating". Belt-and-braces — the window
+  // listener above is the primary mechanism; this ensures a stale open state
+  // is not shown when the user reopens the modal mid-generation.
+  useEffect(() => {
+    const prdId = prd?.prd_id
+    if (activeModal !== "approve" || prdId == null) return
+    let cancelled = false
+    designAgentApi
+      .getByPrd(prdId)
+      .then((proto) => {
+        if (cancelled) return
+        if (proto && proto.status === "generating") setIsGenerating(true)
+      })
+      .catch(() => {/* ignore — isGenerating stays at its current value */})
+    return () => {
+      cancelled = true
+    }
+  }, [activeModal, prd?.prd_id])
 
   // Resolve the PRD's existing ready prototype read-only while the approve modal
   // is open. `getByPrd` swallows a 404 → null, so this never kicks a generation;
@@ -265,6 +315,7 @@ export function ApproveModal() {
   // "Generate Prototype" and surface a toast. Otherwise falls through to
   // GenerateModal.
   const handleClaudeClick = async () => {
+    if (isGenerating) return
     if (existing) {
       const prdId = prd?.prd_id
       if (prdId == null) return
@@ -320,21 +371,32 @@ export function ApproveModal() {
           </p>
         </div>
         <div className="modal-options">
+          <div style={isGenerating ? { cursor: "not-allowed" } : undefined}>
           <div
-            className={`modal-option${viewBusy ? " opacity-50 pointer-events-none" : ""}`}
+            className={`modal-option${viewBusy || isGenerating ? " opacity-50 pointer-events-none" : ""}`}
             onClick={handleClaudeClick}
           >
-            <div className="modal-option-icon">
+            <div
+              className="modal-option-icon"
+              style={isGenerating ? { background: "var(--surface-3)", color: "var(--ink-3)" } : undefined}
+            >
               <IconSparkle size={18} />
             </div>
-            <div className="modal-option-name">
-              {existing ? "View Prototype" : "Generate Prototype"}
+            <div
+              className="modal-option-name"
+              style={isGenerating ? { color: "var(--ink-3)" } : undefined}
+            >
+              {isGenerating ? "Generating Prototype" : existing ? "View Prototype" : "Generate Prototype"}
             </div>
-            <div className="modal-option-desc">
+            <div
+              className="modal-option-desc"
+              style={isGenerating ? { color: "var(--ink-3)" } : undefined}
+            >
               {existing
                 ? "Open the interactive prototype already generated from this PRD."
                 : "Full context package → Claude Code scopes, implements, opens a PR against main."}
             </div>
+          </div>
           </div>
           <div className="modal-option" onClick={handleTicketClick}>
             <div className="modal-option-icon">J</div>
