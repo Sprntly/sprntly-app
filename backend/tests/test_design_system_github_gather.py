@@ -595,7 +595,7 @@ def test_css_vars_end_to_end_explicit():
 
 
 def _make_monorepo_globals_css() -> str:
-    """Synthetic web/app/globals.css mirroring DisposableByDefault/sprntly-app's real tokens."""
+    """Synthetic web/app/globals.css mirroring a representative monorepo's real tokens."""
     return """:root {
   --accent: #179463;
   --background: #ffffff;

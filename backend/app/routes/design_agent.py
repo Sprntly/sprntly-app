@@ -1860,7 +1860,7 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         # signed URL — re-sign on read so the iframe never 403s once the TTL lapses.
         bundle_url=_public_bundle_url(row) if mode == "public" else None,
         is_complete=bool(row.get("is_complete")),
-        # INTENTIONAL slug exposure (Babajide-approved): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
+        # INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
         company_slug=slug_for_company_id(row["workspace_id"]) or "",
     )
 
