@@ -34,7 +34,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const APP_DIR = join(HERE, "..", "..", "..")
 const CSS_PATH = join(HERE, "..", "design-agent.css")
 const LAYOUT_PATH = join(APP_DIR, "layout.tsx")
-const PUBLIC_VIEWER_PATH = join(APP_DIR, "p", "[token]", "PublicTokenViewer.tsx")
+const PUBLIC_VIEWER_PATH = join(APP_DIR, "p", "PublicTokenViewer.tsx")
 
 const GLOBALS_PATH = join(APP_DIR, "globals.css")
 

@@ -440,7 +440,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const APP_DIR = join(HERE, "..", "..", "..")
 const CSS = readFileSync(join(HERE, "..", "design-agent.css"), "utf8")
 const PUBLIC_VIEWER = readFileSync(
-  join(APP_DIR, "p", "[token]", "PublicTokenViewer.tsx"),
+  join(APP_DIR, "p", "PublicTokenViewer.tsx"),
   "utf8",
 )
 const RESULT_SRC = readFileSync(
