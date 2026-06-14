@@ -156,6 +156,29 @@ class Settings(BaseSettings):
     # 15 min gives ~4 chances to catch each window even if a tick runs late.
     weekly_brief_tick_minutes: int = 15
     scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
+
+    # ── Onboarding drip / nudge emails (v0 checklist 2.1) ────────────────
+    # Recurring onboarding emails to newly-joined company members on a cadence
+    # (default day-1 / day-3 / day-7). Sent via Resend; tracked per member ×
+    # step in drip_email_sends so steps never double-send. See app/drip_email.py.
+    #
+    # Opt-in: the drip scheduler job is registered only when DRIP_EMAILS_ENABLED
+    # is true AND SCHEDULER_ENABLED is on (the APScheduler itself must be
+    # running). RESEND_API_KEY drives the transport; when unset, sends are
+    # recorded as "skipped" so flipping the key on later does not retro-blast
+    # historical steps.
+    drip_emails_enabled: bool = False
+    resend_api_key: str = ""
+    # From: header for drip emails. Empty → "Sprntly <onboarding@sprntly.ai>".
+    drip_from_email: str = ""
+    # Comma-separated day offsets, e.g. "1,3,7". Empty → DEFAULT_CADENCE.
+    # Per-company overrides in companies.notification_settings["drip"] win over
+    # this (see app/drip_email.py:resolve_cadence).
+    drip_cadence_days: str = ""
+    # How often the drip job runs. Hourly+ is fine: a step fires the first
+    # cycle after a member crosses its day_offset, and de-dup makes extra
+    # cycles cheap no-ops.
+    drip_interval_hours: int = 6
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)

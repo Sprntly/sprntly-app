@@ -203,6 +203,24 @@ async def _generate_weekly_brief_for_company(slug: str) -> None:
     warm_synthesis_drilldowns(slug)
 
 
+async def _run_drip_email_cycle() -> None:
+    """Onboarding drip / nudge email cycle (v0 checklist 2.1).
+
+    Runs the per-company drip sender for every tenant: members who have
+    crossed a cadence step's day_offset and haven't yet received it get the
+    email, tracked in drip_email_sends so steps never double-send. The whole
+    pass is error-isolated inside run_drip_cycle; the blocking Supabase +
+    Resend HTTP work is pushed off the event loop so it can't stall the
+    scheduler thread. Independent of BRIEF_ENGINE."""
+    from app.drip_email import run_drip_cycle
+
+    try:
+        summary = await asyncio.to_thread(run_drip_cycle)
+        logger.info("Scheduler: drip cycle → %s", summary)
+    except Exception as exc:  # noqa: BLE001 — never let one cycle kill the job
+        logger.error("Scheduler: drip cycle failed: %s", exc)
+
+
 async def _run_scheduled_cycle() -> None:
     """Run the scheduled KG-synthesis cycle: seed + run_synthesis per company."""
     await _run_synthesis_for_all_companies()
@@ -245,11 +263,26 @@ def start_scheduler() -> None:
         name=f"Refresh connector data (every {interval_hours}h)",
         replace_existing=True,
     )
+    # Third job: onboarding drip / nudge emails (v0 checklist 2.1). Opt-in via
+    # DRIP_EMAILS_ENABLED, on its own cadence (DRIP_INTERVAL_HOURS) since the
+    # drip pass is cheap and benefits from finer granularity than the brief
+    # cycle. Independent of BRIEF_ENGINE.
+    if settings.drip_emails_enabled:
+        drip_hours = getattr(settings, "drip_interval_hours", 6) or 6
+        _scheduler.add_job(
+            _run_drip_email_cycle,
+            trigger=IntervalTrigger(hours=drip_hours),
+            id="drip_emails",
+            name=f"Onboarding drip emails (every {drip_hours}h)",
+            replace_existing=True,
+        )
+
     _scheduler.start()
     logger.info(
         "Scheduler started: weekly brief tick every %dm "
-        "(Monday 09:00 per-company tz) + connector refresh every %dh",
+        "(Monday 09:00 per-company tz) + connector refresh every %dh%s",
         tick_minutes, interval_hours,
+        " + drip emails" if settings.drip_emails_enabled else "",
     )
 
 
