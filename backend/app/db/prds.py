@@ -205,6 +205,33 @@ def find_existing_prd(
     return resp.data[0] if resp.data else None
 
 
+def clone_prd(src: dict, *, brief_id: int, insight_index: int) -> int:
+    """Insert a READY copy of PRD row `src` keyed to (brief_id, insight_index).
+
+    Used by PRD reuse across brief regenerations: the clone is a fresh row (its
+    own id, versions, and patches) so the original's history stays attached to
+    the original. Callers pass a RENDERED src (get_prd_rendered) so user edits
+    and applied patches carry into the copy. Returns the new row's id.
+    """
+    c = require_client()
+    resp = c.table("prds").insert({
+        "brief_id": brief_id,
+        "insight_index": insight_index,
+        "title": src.get("title") or "",
+        "payload_md": src.get("payload_md") or "",
+        "llm_part": src.get("llm_part") or "",
+        "status": "ready",
+        "template_version": src.get("template_version"),
+        "variant": src.get("variant") or "v1",
+    }).execute()
+    new_id = resp.data[0]["id"]
+    logger.info(
+        "prd_cloned src_prd_id=%s new_prd_id=%s brief_id=%s insight_index=%s",
+        src.get("id"), new_id, brief_id, insight_index,
+    )
+    return new_id
+
+
 def reset_prd_to_draft(prd_id: int) -> None:
     c = require_client()
     c.table("prds").update({"status": "draft"}).eq("id", prd_id).execute()

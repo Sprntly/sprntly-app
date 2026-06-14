@@ -58,7 +58,7 @@ from app.config import settings
 from app.corpus import load_corpus
 from app.db import complete_prd_2part, get_brief_by_id
 from app.db.companies import company_id_for_slug
-from app.db.prds import fail_prd, find_existing_prd, start_prd
+from app.db.prds import clone_prd, fail_prd, find_existing_prd, get_prd_rendered, start_prd
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
@@ -450,6 +450,111 @@ def _top_insight_indices(insights: list, count: int) -> list[int]:
     return ranked[:count]
 
 
+def _normalize_title(title) -> str:
+    """Whitespace/case-insensitive form for insight-sameness comparison."""
+    return " ".join(str(title or "").split()).lower()
+
+
+def _matching_insight_index(prev_insights: list, insight: dict) -> int | None:
+    """Index of the insight in `prev_insights` that is "the same" as `insight`:
+    normalized title AND tag match. Conservative on purpose — a fuzzy match
+    risks serving a PRD written for a different finding."""
+    want_title = _normalize_title(insight.get("title"))
+    want_tag = insight.get("tag")
+    if not want_title:
+        return None
+    for i, prev in enumerate(prev_insights):
+        prev = prev or {}
+        if (
+            _normalize_title(prev.get("title")) == want_title
+            and prev.get("tag") == want_tag
+        ):
+            return i
+    return None
+
+
+def try_reuse_prd(brief: dict, insight_index: int) -> int | None:
+    """Clone a previous brief's ready PRD when this brief's insight is the same.
+
+    Brief regenerations mint a new brief_id, which orphans every PRD keyed to
+    the old one — even when the insight itself is unchanged. When a recent
+    prior brief of the same dataset carries the same insight (normalized title
+    + tag) with a ready PRD, copy its RENDERED content (user edits + applied
+    patches included) into a fresh ready row for (this brief, insight_index)
+    and return the new id — instant, no LLM call. Returns None whenever reuse
+    doesn't apply; callers then generate normally. Best-effort: any failure
+    logs and returns None, never blocks generation.
+    """
+    if not settings.prd_reuse_enabled:
+        return None
+    brief_id = brief.get("id")
+    dataset = brief.get("dataset")
+    insights = brief.get("insights") or []
+    if not brief_id or not dataset or not (0 <= insight_index < len(insights)):
+        return None
+    insight = insights[insight_index] or {}
+    try:
+        from app.db.briefs import recent_briefs_for_dataset
+
+        for prev in recent_briefs_for_dataset(dataset, exclude_id=brief_id):
+            prev_idx = _matching_insight_index(prev.get("insights") or [], insight)
+            if prev_idx is None:
+                continue
+            src = find_existing_prd(prev["id"], prev_idx, variant=PRD_VARIANT)
+            if not src or src.get("status") != "ready":
+                continue
+            rendered = get_prd_rendered(src["id"]) or src
+            new_id = clone_prd(
+                rendered, brief_id=brief_id, insight_index=insight_index
+            )
+            logger.info(
+                "PRD reused src_prd_id=%s new_prd_id=%s brief_id=%s "
+                "insight_index=%s (matched brief_id=%s idx=%s)",
+                src["id"], new_id, brief_id, insight_index, prev["id"], prev_idx,
+            )
+            _log_reuse_decision(
+                dataset=dataset, brief_id=brief_id, insight_index=insight_index,
+                src=src, new_id=new_id, matched_brief_id=prev["id"],
+            )
+            return new_id
+    except Exception:  # noqa: BLE001 — reuse is an optimization, never a gate
+        logger.exception(
+            "PRD reuse check failed brief_id=%s insight_index=%s — generating fresh",
+            brief_id, insight_index,
+        )
+    return None
+
+
+def _log_reuse_decision(
+    *, dataset: str, brief_id: int, insight_index: int,
+    src: dict, new_id: int, matched_brief_id: int,
+) -> None:
+    """§4d audit row for a reuse (error-isolated — never undoes the clone)."""
+    try:
+        company_id = company_id_for_slug(dataset)
+        if not company_id:
+            return
+        log_agent_decision(
+            enterprise_id=company_id,
+            agent=_AGENT,
+            decision_type="reuse_prd",
+            factors={
+                "prd_id": new_id,
+                "src_prd_id": src.get("id"),
+                "brief_id": brief_id,
+                "insight_index": insight_index,
+                "matched_brief_id": matched_brief_id,
+                "skill": _SKILL,
+            },
+            output={"title": src.get("title"), "prd_id": new_id},
+            model="none (cloned)",
+            prompt_version=PROMPT_VERSION,
+            kg_refs=[],
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("PRD reuse decision-log failed prd_id=%s", new_id)
+
+
 async def warm_prds_for_brief(brief: dict) -> None:
     """Pre-generate PRDs for the top insights of a freshly-saved brief.
 
@@ -475,6 +580,10 @@ async def warm_prds_for_brief(brief: dict) -> None:
     for i in _top_insight_indices(insights, count):
         try:
             if find_existing_prd(brief_id, i, variant=PRD_VARIANT):
+                continue
+            # Reuse beats regeneration: an unchanged insight's PRD clones over
+            # from the previous brief for free — no warm LLM spend at all.
+            if await asyncio.to_thread(try_reuse_prd, brief, i):
                 continue
             title = (insights[i] or {}).get("title") or f"Insight #{i + 1}"
             prd_id = start_prd(

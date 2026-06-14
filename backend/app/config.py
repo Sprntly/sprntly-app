@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # brief generation (hero first, then confidence). Warm calls run in the
     # LLM gate's background lane so they never delay a user's click. 0 disables.
     prd_warm_count: int = 2
+    # Reuse a previous brief's ready PRD when a regenerated brief carries the
+    # same insight (normalized title + tag match) instead of regenerating —
+    # the click goes from ~2.5 min to instant. Env-overridable kill switch.
+    prd_reuse_enabled: bool = True
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 

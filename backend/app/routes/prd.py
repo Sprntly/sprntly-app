@@ -36,7 +36,7 @@ from app.db.prds import (
     update_prd_content,
 )
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
-from app.prd_runner import PRD_VARIANT, generate_prd
+from app.prd_runner import PRD_VARIANT, generate_prd, try_reuse_prd
 from app.prompts import PRD_TEMPLATE_VERSION
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,20 @@ async def generate(
                 "prd_id": existing["id"],
                 "status": existing["status"],
                 "title": existing["title"],
+                "variant": PRD_VARIANT,
+            }
+        # No PRD for this brief yet — but if a recent prior brief carried the
+        # SAME insight with a ready PRD, clone it instead of regenerating
+        # (instant vs ~2.5 min). `force=true` skips this and regenerates.
+        reused_id = await asyncio.to_thread(
+            try_reuse_prd, brief, body.insight_index
+        )
+        if reused_id:
+            reused = get_prd(reused_id)
+            return {
+                "prd_id": reused_id,
+                "status": "ready",
+                "title": (reused or {}).get("title") or "",
                 "variant": PRD_VARIANT,
             }
 
