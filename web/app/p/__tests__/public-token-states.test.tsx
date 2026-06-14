@@ -31,7 +31,7 @@ import { submitPasscode } from "../PasscodeGate"
 import { nextViewerState } from "../PublicTokenViewer"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const CSS_PATH = resolve(HERE, "../../../components/design-agent/design-agent.css")
+const CSS_PATH = resolve(HERE, "../../components/design-agent/design-agent.css")
 const PUBLIC_VIEWER_PATH = resolve(HERE, "../PublicTokenViewer.tsx")
 const PASSCODE_GATE_PATH = resolve(HERE, "../PasscodeGate.tsx")
 

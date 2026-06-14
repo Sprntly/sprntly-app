@@ -13,7 +13,7 @@
 // ignored for resolution). Serving arbitrary /p/<slug>/<token> on the static
 // host relies on an nginx SPA-fallback rewrite (depth-2: /p/<slug>/<token> →
 // /p/_/_.html) — a deploy-config item in backend/deploy/nginx.conf.
-import { PublicTokenViewer } from "../../[token]/PublicTokenViewer"
+import { PublicTokenViewer } from "../../PublicTokenViewer"
 
 // Static export needs ≥1 param to emit the shell. Both values are build-time
 // placeholders only — never read at runtime (the client reads the URL's token;

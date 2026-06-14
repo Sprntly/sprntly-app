@@ -16,10 +16,11 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import { nextViewerState } from "../PublicTokenViewer"
-import { resolveToken } from "../../resolveToken"
-import { legacyRedirectTarget } from "../LegacyTokenRedirect"
-import { generateStaticParams as canonicalStaticParams } from "../../[slug]/[token]/page"
-import { PrototypeViewer } from "../../../components/design-agent/PrototypeViewer"
+import { resolveToken } from "../resolveToken"
+import { legacyRedirectTarget } from "../[slug]/LegacyTokenRedirect"
+import { generateStaticParams as canonicalStaticParams } from "../[slug]/[token]/page"
+import { generateStaticParams as legacyStaticParams } from "../[slug]/page"
+import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
 import { PasscodeGateView, submitPasscode } from "../PasscodeGate"
 
 function mockFetch(res: { status: number; ok?: boolean; body?: unknown }) {
@@ -213,9 +214,11 @@ describe("PasscodeGate", () => {
 })
 
 // Sharing model: the legacy `/p/<token>` route now redirects to the canonical
-// `/p/<slug>/<token>` form. legacyRedirectTarget is the pure target-computation
-// the client redirect calls after resolving the token (the router.replace itself
-// lives in the client component, exercised in E2E).
+// `/p/<slug>/<token>` form. The legacy route's shared first segment is named
+// [slug] (Next same-name rule), so the client component reads the share token
+// from params.slug; legacyRedirectTarget is the pure target-computation it calls
+// after resolving that token (the router.replace itself lives in the client
+// component, exercised in E2E).
 describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
   it("computes /p/<slug>/<token> from a resolved view", () => {
     expect(
@@ -240,6 +243,14 @@ describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
 describe("canonical /p/[slug]/[token] route", () => {
   it("generateStaticParams returns the 2-seg sentinel for static export", () => {
     expect(canonicalStaticParams()).toEqual([{ slug: "_", token: "_" }])
+  })
+})
+
+// The legacy 1-segment route lives at /p/[slug] (the shared first segment is
+// named [slug] to satisfy Next's same-name rule; the value is the share token).
+describe("legacy /p/[slug] route", () => {
+  it("generateStaticParams returns the 1-seg sentinel for static export", () => {
+    expect(legacyStaticParams()).toEqual([{ slug: "_" }])
   })
 })
 

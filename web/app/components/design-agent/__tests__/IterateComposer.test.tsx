@@ -323,16 +323,27 @@ describe("success handoff — no self-poll (AC5)", () => {
 // ---- external-viewer exclusion (AC7) ----------------------------------------
 
 describe("external-viewer exclusion (F10 internal-only, AC7)", () => {
-  it("the public /p/[token] route does not import IterateComposer (test_public_token_page_does_not_mount_iterate_composer)", () => {
-    // vitest runs from web/ (cwd), so the public route lives at app/p/[token].
-    const dir = join(process.cwd(), "app", "p", "[token]")
-    const files = readdirSync(dir).filter(
-      (f) => f.endsWith(".ts") || f.endsWith(".tsx"),
-    )
-    // sanity: the public route files exist (page + viewer)
-    expect(files).toContain("page.tsx")
+  it("the public /p route does not import IterateComposer (test_public_token_page_does_not_mount_iterate_composer)", () => {
+    // vitest runs from web/ (cwd). The public route was collapsed onto a shared
+    // [slug] first segment, so its source files are spread across app/p/ and its
+    // [slug]/[slug]/[token] subtree — walk the whole subtree (excluding tests).
+    const root = join(process.cwd(), "app", "p")
+    function walk(dir: string): string[] {
+      const out: string[] = []
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "__tests__") continue
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) out.push(...walk(full))
+        else if (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx"))
+          out.push(full)
+      }
+      return out
+    }
+    const files = walk(root)
+    // sanity: the canonical viewer page exists in the subtree.
+    expect(files.some((f) => f.endsWith(join("[slug]", "[token]", "page.tsx")))).toBe(true)
     for (const f of files) {
-      const src = readFileSync(join(dir, f), "utf8")
+      const src = readFileSync(f, "utf8")
       expect(src).not.toContain("IterateComposer")
     }
   })

@@ -12,10 +12,10 @@
 // runGenerateFlow. Relative imports (not `@/…`) match the codebase + vitest.
 import { useEffect, useState } from "react"
 import { notFound, useParams } from "next/navigation"
-import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
-import { ManualEditOverlay } from "../../components/design-agent/ManualEditOverlay"
+import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
+import { ManualEditOverlay } from "../components/design-agent/ManualEditOverlay"
 import { PasscodeGate } from "./PasscodeGate"
-import { resolveToken, type ResolvedView } from "../resolveToken"
+import { resolveToken, type ResolvedView } from "./resolveToken"
 
 export type { ResolvedView }
 

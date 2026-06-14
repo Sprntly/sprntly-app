@@ -9,6 +9,10 @@
 // redirect MUST be client-side. The pure target-computation (legacyRedirectTarget)
 // is split out so it is node-env unit-testable (no DOM/router), matching the
 // public-viewer split convention. Relative imports match the codebase + vitest.
+//
+// NOTE: this route is /p/<token> (legacy 1-segment). The shared dynamic segment
+// is named [slug] to satisfy Next's same-name rule with the canonical
+// /p/[slug]/[token] route, but HERE the value IS the share token.
 import { useEffect, useRef } from "react"
 import { notFound, useParams, useRouter } from "next/navigation"
 import { resolveToken, type ResolvedView } from "../resolveToken"
@@ -25,8 +29,10 @@ export function legacyRedirectTarget(
 }
 
 export function LegacyTokenRedirect() {
-  const params = useParams<{ token: string | string[] }>()
-  const token = Array.isArray(params.token) ? params.token[0] : params.token
+  // The legacy /p/<token> URL matches the shared [slug] segment, so the share
+  // token arrives as params.slug here (see the NOTE in the file header).
+  const params = useParams<{ slug: string | string[] }>()
+  const token = Array.isArray(params.slug) ? params.slug[0] : params.slug
   const router = useRouter()
   // Guard against a notFound() throw across a re-render once we've already 404'd.
   const done = useRef(false)
