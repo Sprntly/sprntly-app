@@ -194,6 +194,22 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+describe("BriefChat finding card — single full-system PRD button", () => {
+  it("test_one_generate_prd_button: the card shows exactly one 'Generate PRD' button and no duplicate 'Generate PRD first'", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+
+    const card = cardFor(HERO.title)
+    // Exactly one PRD button — the old duplicate "Generate PRD first" is gone.
+    const prdButtons = within(card).getAllByRole("button", { name: /generate prd/i })
+    expect(prdButtons).toHaveLength(1)
+    expect(within(card).queryByRole("button", { name: /generate prd first/i })).toBeNull()
+    // The single button runs the full multi-agent system (tooltip names the suite).
+    expect(prdButtons[0].getAttribute("title")).toMatch(/full system/i)
+  })
+})
+
 describe("BriefChat finding card — dismiss / restore (Task A)", () => {
   it("test_dismiss_greys_card_and_hides_detail: clicking X adds fc--dismissed and removes the heavy detail", async () => {
     await act(async () => {
