@@ -8,6 +8,7 @@ import { useCompany } from "../../../context/CompanyContext"
 import {
   conversationsApi,
   artifactsApi,
+  briefApi,
   prdApi,
   evidenceApi,
   type ConversationRecord,
@@ -117,6 +118,40 @@ function formatTime(timeStr: string): string {
 }
 
 const GROUP_ORDER = ["Pinned", "Today", "Yesterday", "This week", "Earlier"] as const
+
+// ── Weekly-brief pin ──
+//
+// The current weekly brief is surfaced as a synthetic, always-pinned entry at
+// the very top of the chats list (above per-conversation pins). It is NOT a
+// conversation row — it links to the brief surface (`goTo("brief")`). It stays
+// at the top for the entire week: `/v1/brief/current` always returns this
+// week's brief, and when a new brief lands the entry simply reflects the new
+// one (same top spot). We additionally require the brief to belong to the
+// current calendar week so a stale brief is never shown as "this week's".
+
+/** The minimal current-brief shape needed to render the pinned entry. */
+export type BriefEntry = {
+  /** Brief id (for keys / debugging); not otherwise used by the row. */
+  id: number
+  /** Human week label, e.g. "Week of May 20". */
+  weekLabel: string
+  /** Brief headline shown as the row's description. */
+  headline: string
+  /** ISO timestamp the brief was generated. */
+  generatedAt: string
+}
+
+/** True when `generatedAt` falls within the current (Sun-start) calendar week.
+ *  Used to decide whether the current brief is genuinely "this week's brief"
+ *  and should hold the pinned top slot for the entire week. */
+export function isCurrentWeekBrief(generatedAt: string, now: Date = new Date()): boolean {
+  const date = new Date(generatedAt)
+  if (Number.isNaN(date.getTime())) return false
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const weekStart = new Date(todayStart.getTime() - todayStart.getDay() * 86400000)
+  const weekEnd = new Date(weekStart.getTime() + 7 * 86400000)
+  return date >= weekStart && date < weekEnd
+}
 
 // ── Artifacts tab ──
 
@@ -316,6 +351,224 @@ export function ArtifactsView({
   )
 }
 
+// ── Chats list (presentational) ──
+
+/** The synthetic, always-pinned brief row. Pure so it renders in both
+ *  renderToStaticMarkup and jsdom tests. Identified by `data-brief-pin`. */
+function BriefPinRow({ entry, onOpen }: { entry: BriefEntry; onOpen: () => void }) {
+  const cfg = AGENT_CONFIG.pm
+  return (
+    <div
+      data-brief-pin="true"
+      onClick={onOpen}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter") onOpen() }}
+      style={{
+        display: "flex", alignItems: "flex-start", gap: 14,
+        padding: "14px 10px", borderRadius: 10, cursor: "pointer",
+        transition: "background 0.12s",
+      }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" }}
+    >
+      <AgentIcon agent="pm" />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
+          marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          This week's brief
+        </div>
+        <div style={{
+          fontSize: 12.5, color: "var(--ink-2, #5A5853)", lineHeight: 1.45,
+          marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis",
+          display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+        }}>
+          {entry.headline}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{
+            fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+            letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
+            background: cfg.bg, color: cfg.color,
+          }}>
+            {cfg.label}
+          </span>
+          <span style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
+            {entry.weekLabel}
+          </span>
+        </div>
+      </div>
+      {/* Pinned indicator (filled, always-on — this row can't be unpinned). */}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0, paddingTop: 2 }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent, #179463)" stroke="none" aria-hidden>
+          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
+        </svg>
+      </div>
+    </div>
+  )
+}
+
+/** Presentational chats list — pure (no hooks/fetching), extracted from
+ *  ChatsScreen so it can be unit-tested with renderToStaticMarkup + jsdom
+ *  clicks, mirroring `ArtifactsView`. Owns grouping (Pinned first, then by
+ *  date) and renders the always-pinned `briefEntry` at the very top of Pinned. */
+export function ChatsListView({
+  rows,
+  briefEntry,
+  onRowClick,
+  onPin,
+  onDelete,
+  onOpenBrief,
+}: {
+  rows: ConversationRow[]
+  /** The current weekly brief, pinned to the top; null when there's none. */
+  briefEntry: BriefEntry | null
+  onRowClick: (row: ConversationRow) => void
+  onPin: (row: ConversationRow) => void
+  onDelete: (row: ConversationRow) => void
+  onOpenBrief: () => void
+}) {
+  const grouped = useMemo(() => {
+    const map = new Map<string, ConversationRow[]>()
+    for (const g of GROUP_ORDER) map.set(g, [])
+    for (const row of rows) {
+      if ((row as any)._pinned) {
+        map.get("Pinned")!.push(row)
+      } else {
+        map.get(dateGroup(row.time))!.push(row)
+      }
+    }
+    return map
+  }, [rows])
+
+  return (
+    <>
+      {GROUP_ORDER.map((group) => {
+        const dataRows = grouped.get(group) ?? []
+        // The brief pin lives at the head of the Pinned group. The group is
+        // rendered whenever it has rows OR a brief pin to show.
+        const showBriefPin = group === "Pinned" && !!briefEntry
+        if (dataRows.length === 0 && !showBriefPin) return null
+        return (
+          <div key={group}>
+            {/* Group header with line */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 12,
+              padding: "18px 0 8px", margin: "0 0 2px",
+            }}>
+              <span style={{
+                fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+                letterSpacing: "0.06em", color: "var(--ink-3, #8C8A84)",
+                whiteSpace: "nowrap",
+              }}>
+                {group}
+              </span>
+              <div style={{ flex: 1, height: 1, background: "var(--line, #E8E6E0)" }} />
+            </div>
+
+            {/* Always-pinned weekly brief, at the very top of Pinned. */}
+            {showBriefPin && briefEntry && (
+              <BriefPinRow entry={briefEntry} onOpen={onOpenBrief} />
+            )}
+
+            {dataRows.map((row) => {
+              const agent = detectAgent(row.title)
+              const cfg = AGENT_CONFIG[agent]
+              const isPinned = group === "Pinned"
+              const extraMeta = getExtraMeta(row, agent)
+
+              return (
+                <div
+                  key={row.id}
+                  onClick={() => onRowClick(row)}
+                  style={{
+                    display: "flex", alignItems: "flex-start", gap: 14,
+                    padding: "14px 10px", borderRadius: 10, cursor: "pointer",
+                    transition: "background 0.12s",
+                  }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" }}
+                >
+                  <AgentIcon agent={agent} />
+
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {/* Title */}
+                    <div style={{
+                      fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
+                      marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>
+                      {row.title}
+                    </div>
+
+                    {/* Description */}
+                    <div style={{
+                      fontSize: 12.5, color: "var(--ink-2, #5A5853)", lineHeight: 1.45,
+                      marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis",
+                      display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+                    }}>
+                      {row.savedTurn?.query || row.title}
+                    </div>
+
+                    {/* Agent pill + extra meta */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                        letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
+                        background: cfg.bg, color: cfg.color,
+                      }}>
+                        {cfg.label}
+                      </span>
+                      {extraMeta.map((m, i) => (
+                        <span key={i} style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
+                          {i > 0 && <span style={{ margin: "0 2px" }}>·</span>}
+                          {m}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Time + actions */}
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0, paddingTop: 2 }}>
+                    <span style={{ fontSize: 11, color: "var(--ink-4, #B0AEA6)", whiteSpace: "nowrap" }}>
+                      {formatTime(row.time)}
+                    </span>
+                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      {/* Pin toggle */}
+                      <button
+                        type="button"
+                        title={isPinned ? "Unpin" : "Pin"}
+                        onClick={(e) => { e.stopPropagation(); onPin(row) }}
+                        style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 1 }}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? "var(--accent, #179463)" : "none"} stroke={isPinned ? "none" : "var(--ink-4, #B0AEA6)"} strokeWidth="2">
+                          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
+                        </svg>
+                      </button>
+                      {/* Delete */}
+                      {(row as any)._dbId && (
+                        <button
+                          type="button"
+                          title="Delete"
+                          onClick={(e) => { e.stopPropagation(); onDelete(row) }}
+                          style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 1, color: "var(--ink-4, #B0AEA6)", fontSize: 14 }}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
 // ── Screen ──
 
 export function ChatsScreen() {
@@ -326,6 +579,9 @@ export function ChatsScreen() {
   const [search, setSearch] = useState("")
   const [dbChats, setDbChats] = useState<ConversationRecord[]>([])
   const [loaded, setLoaded] = useState(false)
+
+  // ── Current weekly brief (drives the always-pinned top entry) ──
+  const [briefEntry, setBriefEntry] = useState<BriefEntry | null>(null)
 
   // ── Tab + artifacts state ──
   const [tab, setTab] = useState<TabId>("chats")
@@ -385,6 +641,34 @@ export function ChatsScreen() {
     return () => { cancelled = true }
   }, [])
 
+  // Fetch the current weekly brief so we can pin it to the top of the list.
+  // `/v1/brief/current` always returns this week's brief, so the pinned entry
+  // automatically stays put for the whole week and swaps to the new brief when
+  // one is generated. We only surface it when the brief belongs to the current
+  // calendar week — a 404 (no brief yet) or a stale brief leaves it unpinned,
+  // so we never render a broken/empty pinned row. The brief page owns its own
+  // generating/empty states, so we don't duplicate them here.
+  useEffect(() => {
+    if (!activeCompany) return
+    let cancelled = false
+    briefApi.current(activeCompany)
+      .then((brief) => {
+        if (cancelled) return
+        if (!isCurrentWeekBrief(brief.generated_at)) { setBriefEntry(null); return }
+        setBriefEntry({
+          id: brief.id,
+          weekLabel: brief.week_label || "This week",
+          headline: brief.summary_headline || "Your weekly brief is ready.",
+          generatedAt: brief.generated_at,
+        })
+      })
+      .catch(() => {
+        // 404 = no brief yet this week; any other error → just omit the entry.
+        if (!cancelled) setBriefEntry(null)
+      })
+    return () => { cancelled = true }
+  }, [activeCompany])
+
   // Map DB records to ConversationRow shape
   const dbRows: ConversationRow[] = useMemo(() =>
     dbChats.map((c) => ({
@@ -441,19 +725,8 @@ export function ChatsScreen() {
     )
   }, [allChats, search])
 
-  // Group: pinned items first, rest by date
-  const grouped = useMemo(() => {
-    const map = new Map<string, ConversationRow[]>()
-    for (const g of GROUP_ORDER) map.set(g, [])
-    for (const row of filtered) {
-      if ((row as any)._pinned) {
-        map.get("Pinned")!.push(row)
-      } else {
-        map.get(dateGroup(row.time))!.push(row)
-      }
-    }
-    return map
-  }, [filtered])
+  // Opening the pinned weekly-brief entry → the brief surface (`/brief`).
+  const openBrief = useCallback(() => { goTo("brief") }, [goTo])
 
   const handleRowClick = async (row: ConversationRow) => {
     const dbId = (row as any)._dbId as number | undefined
@@ -626,119 +899,17 @@ export function ChatsScreen() {
           </div>
         )}
 
-        {/* Grouped list */}
-        {!loaded ? null : GROUP_ORDER.map((group) => {
-          const rows = grouped.get(group)
-          if (!rows || rows.length === 0) return null
-          return (
-            <div key={group}>
-              {/* Group header with line */}
-              <div style={{
-                display: "flex", alignItems: "center", gap: 12,
-                padding: "18px 0 8px", margin: "0 0 2px",
-              }}>
-                <span style={{
-                  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-                  letterSpacing: "0.06em", color: "var(--ink-3, #8C8A84)",
-                  whiteSpace: "nowrap",
-                }}>
-                  {group}
-                </span>
-                <div style={{ flex: 1, height: 1, background: "var(--line, #E8E6E0)" }} />
-              </div>
-
-              {rows.map((row) => {
-                const agent = detectAgent(row.title)
-                const cfg = AGENT_CONFIG[agent]
-                const isPinned = group === "Pinned"
-                const extraMeta = getExtraMeta(row, agent)
-
-                return (
-                  <div
-                    key={row.id}
-                    onClick={() => handleRowClick(row)}
-                    style={{
-                      display: "flex", alignItems: "flex-start", gap: 14,
-                      padding: "14px 10px", borderRadius: 10, cursor: "pointer",
-                      transition: "background 0.12s",
-                    }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" }}
-                  >
-                    <AgentIcon agent={agent} />
-
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      {/* Title */}
-                      <div style={{
-                        fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
-                        marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                      }}>
-                        {row.title}
-                      </div>
-
-                      {/* Description */}
-                      <div style={{
-                        fontSize: 12.5, color: "var(--ink-2, #5A5853)", lineHeight: 1.45,
-                        marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis",
-                        display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
-                      }}>
-                        {row.savedTurn?.query || row.title}
-                      </div>
-
-                      {/* Agent pill + extra meta */}
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <span style={{
-                          fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-                          letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
-                          background: cfg.bg, color: cfg.color,
-                        }}>
-                          {cfg.label}
-                        </span>
-                        {extraMeta.map((m, i) => (
-                          <span key={i} style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
-                            {i > 0 && <span style={{ margin: "0 2px" }}>·</span>}
-                            {m}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Time + actions */}
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0, paddingTop: 2 }}>
-                      <span style={{ fontSize: 11, color: "var(--ink-4, #B0AEA6)", whiteSpace: "nowrap" }}>
-                        {formatTime(row.time)}
-                      </span>
-                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                        {/* Pin toggle */}
-                        <button
-                          type="button"
-                          title={isPinned ? "Unpin" : "Pin"}
-                          onClick={(e) => { e.stopPropagation(); handlePin(row) }}
-                          style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 1 }}
-                        >
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? "var(--accent, #179463)" : "none"} stroke={isPinned ? "none" : "var(--ink-4, #B0AEA6)"} strokeWidth="2">
-                            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
-                          </svg>
-                        </button>
-                        {/* Delete */}
-                        {(row as any)._dbId && (
-                          <button
-                            type="button"
-                            title="Delete"
-                            onClick={(e) => { e.stopPropagation(); handleDelete(row) }}
-                            style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 1, color: "var(--ink-4, #B0AEA6)", fontSize: 14 }}
-                          >
-                            ×
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )
-        })}
+        {/* Grouped list — Pinned (incl. the weekly brief) first, then by date */}
+        {loaded && (
+          <ChatsListView
+            rows={filtered}
+            briefEntry={briefEntry}
+            onRowClick={handleRowClick}
+            onPin={handlePin}
+            onDelete={handleDelete}
+            onOpenBrief={openBrief}
+          />
+        )}
         </>
         )}
       </div>
