@@ -177,6 +177,19 @@
     line-height: 1.2;
   }
 
+  .app-main-chrome-title--back {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+  }
+  .app-main-chrome-title--back:hover {
+    opacity: 0.7;
+  }
+
   .screen {
     display: none;
     min-height: 100vh;
@@ -1082,6 +1095,14 @@
     padding-left: 202px;
   }
 
+  /* Prototype editor route: the rail is permanently 60px (Sidebar renders
+     sidebar--collapsed unconditionally), so the default-state 202px reservation
+     above leaves a phantom gutter. Scope the gutter to the real rail width on
+     this route only — the global rule above is intentionally left as-is. */
+  .app:not(.app--sidebar-collapsed) .main-column.main-column--flush {
+    padding-left: 60px;
+  }
+
   .main-column {
     display: flex;
     flex-direction: column;
@@ -1882,6 +1903,10 @@
   .main.main--reading {
     max-width: 1120px;
     padding: 12px 24px 56px;
+  }
+
+  .main.main--flush {
+    padding: 0;
   }
 
   .main.main--reading .main-header {

@@ -1346,6 +1346,15 @@
   background: var(--surface);
 }
 
+/* In-tab prototype editor (PrototypeRoute, wrapped in .da-prototype-page) fills
+   the content area flush: paired with .main--flush (no gutter) it drops the card
+   boxing too. The launcher/overlay mount is NOT under .da-prototype-page, so its
+   .da-ready stays boxed. */
+.design-agent-surface.da-prototype-page .da-ready {
+  border: 0;
+  border-radius: 0;
+}
+
 /* LEFT collapsible sidebar (OPEN by default). Collapses by sliding out, David's
    `.proto-chat.hidden { margin-left:-300px }`. */
 .design-agent-surface .da-left {

@@ -291,6 +291,7 @@ function InTabCanvas({
   return (
     <PostGenerationResult
       prototype={proto}
+      hideBreadcrumb
       defaultFullscreen={fsParamToFullscreen(searchParams.get("fs"))}
       onFullscreenChange={(open) => {
         const next = new URLSearchParams(searchParams.toString())
@@ -468,7 +469,7 @@ export function PrototypeRoute() {
   // prototype id forces a clean remount (fresh iterate runner) per prototype.
   if (proto) {
     return (
-      <AppLayout>
+      <AppLayout mainClassName="main--flush" mainColumnClassName="main-column--flush" onTitleBack={() => router.back()}>
         <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
           <InTabCanvas
             key={proto.id}

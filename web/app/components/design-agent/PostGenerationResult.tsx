@@ -226,6 +226,8 @@ export type PostGenerationResultProps = {
    *  external state (e.g. a URL query param) without taking control of the
    *  internal `fullscreenOpen` state. */
   onFullscreenChange?: (open: boolean) => void
+  /** When true (the in-tab /prototype route), the top breadcrumb is suppressed — the back affordance lives in the app chrome-strip title instead. Absent (launcher/overlay) → the breadcrumb renders. */
+  hideBreadcrumb?: boolean
 }
 
 export type PostGenerationResultViewProps = {
@@ -314,6 +316,8 @@ export type PostGenerationResultViewProps = {
    *  when the first SSE event arrives. Threaded through the pure view without a
    *  hook so the view stays SSR-renderable. */
   leftPanelRef?: RefObject<HTMLDivElement | null>
+  /** When true (the in-tab /prototype route), the top breadcrumb is suppressed — the back affordance lives in the app chrome-strip title instead. Absent (launcher/overlay) → the breadcrumb renders. */
+  hideBreadcrumb?: boolean
 }
 
 /**
@@ -998,6 +1002,7 @@ export function PostGenerationResultView({
   bundleReloadNonce = 0,
   computedPinPositions = {},
   leftPanelRef,
+  hideBreadcrumb,
 }: PostGenerationResultViewProps) {
   // cache-bust the iframe src so a
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
@@ -1099,7 +1104,9 @@ export function PostGenerationResultView({
           of the canvas — "PRDs / {PRD title} / Design". The PRDs / PRD crumbs close
           the canvas (onDone → ApproveModal.closeCanvas / launcher close) and return
           to the PRD screen. */}
-      <DaBreadcrumb prdTitle={prdTitle ?? null} onDone={onDone} />
+      {hideBreadcrumb ? null : (
+        <DaBreadcrumb prdTitle={prdTitle ?? null} onDone={onDone} />
+      )}
       {controlBar}
       <div
         className="da-ready"
@@ -1482,6 +1489,7 @@ export function PostGenerationResult({
   onStateChange,
   defaultFullscreen,
   onFullscreenChange,
+  hideBreadcrumb,
 }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
@@ -1812,6 +1820,7 @@ export function PostGenerationResult({
       bundleReloadNonce={bundleReloadNonce}
       computedPinPositions={computedPinPositions}
       leftPanelRef={leftPanelRef}
+      hideBreadcrumb={hideBreadcrumb}
     />
   )
 }
