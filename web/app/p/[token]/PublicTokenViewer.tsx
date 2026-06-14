@@ -14,8 +14,6 @@ import { useEffect, useState } from "react"
 import { notFound, useParams } from "next/navigation"
 import { API_URL } from "../../lib/api"
 import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
-import { CompletionBar } from "../../components/design-agent/CompletionBar"
-import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
 import { ManualEditOverlay } from "../../components/design-agent/ManualEditOverlay"
 import { PasscodeGate } from "./PasscodeGate"
 
@@ -108,15 +106,13 @@ export function PublicTokenViewer() {
       <PrototypeViewer
         bundleUrl={state.bundleUrl}
         isComplete={state.isComplete}
-      // Public-viewer chrome: a read-only CompletionBar status badge (P2-10) +
-      // the F8 CommentsPanel (P3-03). Neither passes a prototypeId — the public
-      // resolver is minimum-disclosure, so the CompletionBar stays read-only and
-      // the panel offers create + read only (no internal resolve affordance).
-      // Editable/internal chrome lives on the signed-in surface (follow-up).
+      // Public-viewer chrome: work-status pill (CompletionBar) and read-only
+      // CommentsPanel are intentionally omitted from the public surface (Phase 1
+      // cleanup). ManualEditOverlay is kept — it renders nothing without a
+      // prototypeId (public resolver is minimum-disclosure), so it is non-breaking.
+      // Mark/Comment controls + anon-write affordances come in a later phase.
       chrome={
         <>
-          <CompletionBar isComplete={state.isComplete} editable={false} />
-          <CommentsPanel token={token as string} readOnly />
           {/* F13 manual edit (P4-01) is INTERNAL-ONLY: it renders its toggle only
               when a prototypeId is supplied. The public resolver is minimum-
               disclosure and exposes no prototypeId / signed-in primitive on this

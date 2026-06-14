@@ -17,7 +17,6 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { resolveToken, nextViewerState } from "../PublicTokenViewer"
 import { PrototypeViewer } from "../../../components/design-agent/PrototypeViewer"
-import { CompletionBar } from "../../../components/design-agent/CompletionBar"
 import { PasscodeGateView, submitPasscode } from "../PasscodeGate"
 
 function mockFetch(res: { status: number; ok?: boolean; body?: unknown }) {
@@ -216,40 +215,39 @@ describe("PrototypeViewer chrome slot (AC9)", () => {
   })
 })
 
-// P2-10: the public viewer mounts a read-only CompletionBar as the chrome —
-// a status badge only, no prototypeId, no mutation affordances (AC19, AC3).
-describe("P2-10 read-only CompletionBar chrome mount (AC19)", () => {
-  it("renders the read-only complete badge inside the chrome slot", () => {
+// Phase-1 chrome cleanup: the public viewer no longer mounts the work-status
+// pill (CompletionBar) or the read-only CommentsPanel. The chrome slot is still
+// present (ManualEditOverlay mounts but renders nothing without a prototypeId).
+// These tests assert the removed elements are ABSENT on the public surface.
+describe("Phase-1 chrome cleanup: status pill + comments box absent from public viewer", () => {
+  it("does NOT render the completion-bar-readonly pill in the public chrome slot", () => {
     const html = renderToStaticMarkup(
       React.createElement(PrototypeViewer, {
         bundleUrl: "https://cdn.example/p/abc/index.html",
         isComplete: true,
-        chrome: React.createElement(CompletionBar, {
-          isComplete: true,
-          editable: false,
-        }),
+        // No CompletionBar or CommentsPanel passed — matches the cleaned-up
+        // PublicTokenViewer chrome slot (Phase 1).
+        chrome: React.createElement(React.Fragment, null),
       }),
     )
     expect(html).toContain('data-testid="prototype-chrome"')
-    expect(html).toContain('data-testid="completion-bar-readonly"')
-    expect(html).toContain("Marked Complete")
-    // No mutating affordances leak into the public viewer.
-    expect(html).not.toContain('data-testid="mark-complete-btn"')
-    expect(html).not.toContain('data-testid="resume-btn"')
+    expect(html).not.toContain('data-testid="completion-bar-readonly"')
+    expect(html).not.toContain("Marked Complete")
+    expect(html).not.toContain("Work in progress")
   })
 
-  it("renders the read-only WIP badge for an incomplete prototype", () => {
+  it("does NOT render the read-only CommentsPanel in the public chrome slot", () => {
     const html = renderToStaticMarkup(
       React.createElement(PrototypeViewer, {
         bundleUrl: "https://cdn.example/p/abc/index.html",
         isComplete: false,
-        chrome: React.createElement(CompletionBar, {
-          isComplete: false,
-          editable: false,
-        }),
+        chrome: React.createElement(React.Fragment, null),
       }),
     )
-    expect(html).toContain('data-testid="completion-bar-readonly"')
-    expect(html).toContain("Work in progress")
+    expect(html).toContain('data-testid="prototype-chrome"')
+    // The CommentsPanel renders a da-comments-panel root — absent here.
+    expect(html).not.toContain("da-comments-panel")
+    // The instructional copy that appears in the read-only panel is gone.
+    expect(html).not.toContain("Right-click any element")
   })
 })
