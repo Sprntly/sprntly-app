@@ -1317,12 +1317,15 @@ async def _stage_complete_run(
                 )
                 log_parity = logger.info if parity.ok else logger.warning
                 log_parity(
-                    "design_agent.structural_parity prototype_id=%s matched=%d missing=%d extra=%d ok=%s",
+                    "design_agent.structural_parity prototype_id=%s matched=%d missing=%d extra=%d ok=%s "
+                    "missing_refs=%s extra_refs=%s",
                     prototype_id,
                     len(parity.matched),
                     len(parity.missing),
                     len(parity.extra),
                     str(parity.ok).lower(),
+                    parity.missing,
+                    parity.extra,
                 )
             except Exception:  # noqa: BLE001 — non-fatal: never fail a row on a self-check bug
                 logger.warning(
