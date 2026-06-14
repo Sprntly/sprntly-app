@@ -282,6 +282,97 @@ def test_generate_brief_for_seeds_then_runs_synthesis(isolated_settings):
     assert kwargs["dataset_slug"] == "acme"
 
 
+# ── refresh-gating: skip synthesis when KG unchanged ────────────────────────
+
+def test_generate_brief_for_no_prior_brief_always_synthesizes(isolated_settings):
+    """First generation (no current brief) ALWAYS runs synthesis, regardless of
+    whether the KG has new signals."""
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    with patch.object(sb, "get_current_brief", return_value=None), \
+         patch.object(sb, "seed_incremental", return_value={"corpus": {}}), \
+         patch.object(sb, "run_synthesis",
+                      return_value={"summary_headline": "fresh"}) as run, \
+         patch("app.graph.facade.GraphFacade.has_signals_since") as has:
+        out = sb.generate_brief_for("acme")
+    assert out["summary_headline"] == "fresh"
+    run.assert_called_once()
+    has.assert_not_called()  # no prior brief → no gating check needed
+
+
+def test_generate_brief_for_unchanged_kg_skips_synthesis(isolated_settings):
+    """Prior brief exists + NO new signals since its generated_at → synthesis is
+    NOT called; the existing brief is returned unchanged."""
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    prior = {"id": 42, "generated_at": "2026-06-10T00:00:00+00:00",
+             "summary_headline": "existing"}
+    with patch.object(sb, "get_current_brief", return_value=prior), \
+         patch.object(sb, "seed_incremental", return_value={"corpus": {}}), \
+         patch.object(sb, "run_synthesis") as run, \
+         patch("app.graph.facade.GraphFacade.has_signals_since",
+               return_value=False) as has:
+        out = sb.generate_brief_for("acme")
+    run.assert_not_called()                 # synthesis skipped
+    assert out is prior                     # existing brief returned unchanged
+    # gating checked against the prior brief's generated_at
+    has.assert_called_once_with("co-1", "2026-06-10T00:00:00+00:00")
+
+
+def test_generate_brief_for_new_signals_runs_synthesis(isolated_settings):
+    """Prior brief exists + NEW signals since its generated_at → synthesis IS
+    called (seed added data, or another path wrote signals)."""
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    prior = {"id": 42, "generated_at": "2026-06-10T00:00:00+00:00",
+             "summary_headline": "stale"}
+    with patch.object(sb, "get_current_brief", return_value=prior), \
+         patch.object(sb, "seed_incremental", return_value={"corpus": {"docs": 1}}), \
+         patch.object(sb, "run_synthesis",
+                      return_value={"summary_headline": "regenerated"}) as run, \
+         patch("app.graph.facade.GraphFacade.has_signals_since",
+               return_value=True) as has:
+        out = sb.generate_brief_for("acme")
+    run.assert_called_once()
+    assert out["summary_headline"] == "regenerated"
+    has.assert_called_once_with("co-1", "2026-06-10T00:00:00+00:00")
+
+
+def test_has_signals_since_is_tenant_scoped(isolated_settings):
+    """Facade has_signals_since: True iff a signal's created_at is strictly
+    after the ts, and only for the queried enterprise."""
+    from app.graph.facade import GraphFacade
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    _seed_company(isolated_settings["supabase"], company_id="co-2", slug="globex")
+    db = isolated_settings["supabase"]
+
+    # Insert kg_signal rows directly with explicit created_at values so the
+    # comparison is deterministic (bypasses the DB default).
+    def _sig(sid, ent, created_at):
+        db.table("kg_signal").insert({
+            "id": sid, "enterprise_id": ent, "source_type": "revenue",
+            "kind": "x", "content": "y",
+            "valid_at": "2026-06-01T00:00:00+00:00",
+            "transaction_at": "2026-06-01T00:00:00+00:00",
+            "created_at": created_at,
+        }).execute()
+
+    cutoff = "2026-06-10T00:00:00+00:00"
+    facade = GraphFacade()
+
+    # Only a pre-cutoff signal → False.
+    _sig("s-old", "co-1", "2026-06-09T00:00:00+00:00")
+    assert facade.has_signals_since("co-1", cutoff) is False
+
+    # A post-cutoff signal → True.
+    _sig("s-new", "co-1", "2026-06-11T00:00:00+00:00")
+    assert facade.has_signals_since("co-1", cutoff) is True
+
+    # Tenant-scoped: co-2 has ONLY a post-cutoff signal of its own, but co-1's
+    # result above never depended on it; and co-2 with only a pre-cutoff signal
+    # of its own stays False even though co-1 has a newer one.
+    _sig("s-other", "co-2", "2026-06-09T00:00:00+00:00")  # co-2: pre-cutoff only
+    assert facade.has_signals_since("co-2", cutoff) is False  # co-1's s-new invisible
+
+
 def test_generate_brief_for_resolves_slug_to_company_id(isolated_settings):
     _seed_company(isolated_settings["supabase"], company_id="co-xyz", slug="globex")
     cid, slug = sb.resolve_company("globex")

@@ -32,6 +32,7 @@ import logging
 import uuid
 
 from app.corpus import load_corpus
+from app.db.briefs import get_current_brief
 from app.db.companies import company_id_for_slug, slug_for_company_id
 from app.graph.extractor import _NS, extract_document
 from app.graph.facade import GraphFacade
@@ -238,8 +239,38 @@ def generate_brief_for(company_id_or_slug: str) -> dict:
     the `briefs` table the UI reads). Returns the brief payload. Raises
     ValueError if the identifier is unknown or if the KG is still empty after
     seeding (run_synthesis raises on no themes).
+
+    Refresh-gating: if a current brief already exists AND no new signal has
+    entered the KG since it was generated, synthesis is skipped and the
+    existing brief is returned unchanged (an unchanged company keeps its brief
+    instead of regenerating an identical one). Seeding still runs first — it is
+    what CREATES the new signals we then detect — so a newly-uploaded doc adds
+    fresh signals, `has_signals_since` becomes True, and we synthesize. The
+    check is timestamp-based, so it also catches signals written by other paths
+    (DS agent, connector sync) since the last brief. The first-ever brief
+    (no prior) always synthesizes, preserving EmptyKnowledgeGraphError on an
+    empty KG.
     """
     company_id, slug = resolve_company(company_id_or_slug)
     facade = GraphFacade()
+
+    # Capture the current brief (if any) + its timestamp BEFORE seeding, so the
+    # comparison point is the moment the existing brief was generated.
+    prior = get_current_brief(slug)
+    prior_ts = prior.get("generated_at") if prior else None
+
     seed_incremental(facade, company_id, slug)
+
+    # Skip the expensive synthesis when nothing new has entered the KG since the
+    # current brief was generated.
+    if prior is not None and prior_ts and not facade.has_signals_since(
+        company_id, prior_ts
+    ):
+        logger.info(
+            "KG unchanged since brief %s (generated_at=%s) for company=%s "
+            "(slug=%s) — skipping synthesis, returning existing brief",
+            prior.get("id"), prior_ts, company_id, slug,
+        )
+        return prior
+
     return run_synthesis(facade, company_id, dataset_slug=slug)
