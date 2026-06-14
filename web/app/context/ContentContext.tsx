@@ -48,6 +48,7 @@ const EMPTY: AppContentState = {
   briefDetails: {},
   prd: null,
   prdMeta: null,
+  prdGenerating: false,
   evidence: null,
   evidenceGenerating: false,
   teamMembers: [],

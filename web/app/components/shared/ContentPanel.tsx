@@ -196,12 +196,17 @@ function EvidenceTab() {
       return
     }
     setGeneratingPrd(true)
+    // Switch the rail to the PRD tab immediately and show its generating spinner
+    // there, so the in-progress PRD is always on the right.
+    setContent({ prd: null, prdMeta: null, prdGenerating: true })
+    openContentPanel("prd")
     try {
       const result = await runPrdGeneration(detail.meta)
-      if (!result.ok) { showToast("PRD generation failed", result.message.slice(0, 200)); return }
-      setContent({ prd: result.prd, prdMeta: detail.meta })
+      if (!result.ok) { setContent({ prdGenerating: false }); showToast("PRD generation failed", result.message.slice(0, 200)); return }
+      setContent({ prd: result.prd, prdMeta: detail.meta, prdGenerating: false })
       openContentPanel("prd")
     } catch (e) {
+      setContent({ prdGenerating: false })
       showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     } finally {
       setGeneratingPrd(false)

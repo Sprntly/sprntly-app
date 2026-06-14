@@ -268,7 +268,10 @@ export function PrdPanelContent() {
   const [prdLoading, setPrdLoading] = useState(false)
 
   useEffect(() => {
-    if (prd || !activeCompany) return
+    // Skip the "load latest PRD" fetch while a generation is actively in flight —
+    // the in-progress flow will populate `content.prd` itself, and we don't want
+    // to race it with a stale latest record.
+    if (prd || !activeCompany || content.prdGenerating) return
     let cancelled = false
     setPrdLoading(true)
     prdApi.latest(activeCompany).then((record) => {
@@ -278,7 +281,7 @@ export function PrdPanelContent() {
       if (e instanceof ApiError && e.status === 404) return
     }).finally(() => { if (!cancelled) setPrdLoading(false) })
     return () => { cancelled = true }
-  }, [prd, activeCompany, setContent])
+  }, [prd, activeCompany, content.prdGenerating, setContent])
 
   const bodyRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -390,7 +393,11 @@ export function PrdPanelContent() {
           </>
         ) : (
           <div className="prd-body" style={{ minHeight: 280 }}>
-            {prdLoading ? (
+            {content.prdGenerating ? (
+              <div data-testid="prd-generating" style={{ display: "flex", alignItems: "center", gap: 12, padding: 32, color: "var(--ink-2)" }}>
+                <span className="prd-loader" aria-hidden /> Generating PRD…
+              </div>
+            ) : prdLoading ? (
               <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 32, color: "var(--ink-2)" }}>
                 <span className="prd-loader" aria-hidden /> Loading PRD…
               </div>

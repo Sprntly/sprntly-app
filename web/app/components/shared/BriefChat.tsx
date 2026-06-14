@@ -677,9 +677,17 @@ export function BriefChat() {
   // ── Composer agent flows (mirror the old AIBar command logic) ─────────────
   const prdFlow = useCallback(async () => {
     const aId = uid()
-    setTurns((t) => [...t, { id: aId, role: "agent", persona: "pm", status: "generating PRD…", state: "thinking" }])
+    // Open the right rail immediately and show a generating spinner THERE — the
+    // PRD (in-progress + final) lives in the panel, never as a bottom message.
+    // The inline turn is a lightweight pointer to the panel, not the PRD itself.
+    setContent({ prd: null, prdMeta: null, prdGenerating: true })
+    openContentPanel("prd")
+    setTurns((t) => [...t, { id: aId, role: "agent", persona: "pm", status: "generating PRD… (opening in the panel)", state: "thinking" }])
     scrollToEnd()
-    const fail = (error: string) => setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error } : x)))
+    const fail = (error: string) => {
+      setContent({ prdGenerating: false })
+      setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error } : x)))
+    }
     try {
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
@@ -693,7 +701,7 @@ export function BriefChat() {
         fail(result.message)
         return
       }
-      setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex: 0 } })
+      setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex: 0 }, prdGenerating: false })
       openContentPanel("prd")
       setTurns((t) =>
         t.map((x) =>
@@ -969,15 +977,21 @@ export function BriefChat() {
       busyRef.current = true
       setBusy(true)
       setCardBusyKey(key ?? null)
+      // Open the right rail up front with a generating spinner so the PRD always
+      // surfaces on the right while it's being drafted — not just when it's ready.
+      setContent({ prd: null, prdMeta: null, prdGenerating: true })
+      openContentPanel("prd")
       try {
         const result = await runPrdGeneration(meta)
         if (!result.ok) {
+          setContent({ prdGenerating: false })
           showToast("PRD generation failed", result.message.slice(0, 200))
           return
         }
-        setContent({ prd: result.prd, prdMeta: meta })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
         openContentPanel("prd")
       } catch (e) {
+        setContent({ prdGenerating: false })
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       } finally {
         busyRef.current = false
