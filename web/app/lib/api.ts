@@ -1000,6 +1000,11 @@ export const designAgentApi = {
     api.get<CommentRecord[]>(
       `/v1/design-agent/by-token/${encodeURIComponent(token)}/comments`,
     ),
+  /** Authed comment read for the signed-in editor: lists every comment for the
+   *  prototype (all statuses). Hits the authed route `GET /v1/design-agent/{id}/comments`
+   *  — the by-token route 404s in the editor context where there is no share token. */
+  listComments: (prototypeId: number) =>
+    api.get<CommentRecord[]>(`/v1/design-agent/${prototypeId}/comments`),
   /** Internal (authed) resolve — external viewers cannot resolve (spec §4
    *  Stage 2). Addressed by prototype id; renders only on the signed-in mount
    *  where a `prototypeId` is supplied. */

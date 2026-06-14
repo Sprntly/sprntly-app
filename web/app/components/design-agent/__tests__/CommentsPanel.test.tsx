@@ -230,11 +230,30 @@ describe("public-viewer chrome composition (AC10)", () => {
 })
 
 describe("orchestration helpers", () => {
-  it("runLoadComments calls api.listCommentsByToken(token) and returns the list (AC6)", async () => {
+  it("runLoadComments reads by-token in the public viewer (no prototypeId) (AC6)", async () => {
     const list = [comment()]
     const listCommentsByToken = vi.fn().mockResolvedValue(list)
-    const r = await runLoadComments({ token: "tok", api: { listCommentsByToken } })
+    const listComments = vi.fn().mockResolvedValue([])
+    const r = await runLoadComments({
+      token: "tok",
+      api: { listCommentsByToken, listComments },
+    })
     expect(listCommentsByToken).toHaveBeenCalledWith("tok")
+    expect(listComments).not.toHaveBeenCalled()
+    expect(r).toEqual(list)
+  })
+
+  it("runLoadComments reads the authed route in the editor (prototypeId present) (AC6)", async () => {
+    const list = [comment()]
+    const listCommentsByToken = vi.fn().mockResolvedValue([])
+    const listComments = vi.fn().mockResolvedValue(list)
+    const r = await runLoadComments({
+      token: "tok",
+      prototypeId: 42,
+      api: { listCommentsByToken, listComments },
+    })
+    expect(listComments).toHaveBeenCalledWith(42)
+    expect(listCommentsByToken).not.toHaveBeenCalled()
     expect(r).toEqual(list)
   })
 

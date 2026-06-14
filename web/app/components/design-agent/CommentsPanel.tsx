@@ -162,15 +162,21 @@ export function buildPinModel(matches: Element[]): {
 
 // ---- orchestration helpers (pure, dependency-injected, SSR-free) ------------
 
-/** Load every comment for the token's prototype (all statuses). */
+/** Load every comment for the prototype (all statuses). In the signed-in editor
+ *  context a `prototypeId` is available, so read via the authed route; the public
+ *  /p/<token> viewer has no prototypeId and reads via the by-token route. */
 export async function runLoadComments({
   token,
+  prototypeId,
   api,
 }: {
   token: string
-  api: Pick<typeof designAgentApi, "listCommentsByToken">
+  prototypeId?: number
+  api: Pick<typeof designAgentApi, "listCommentsByToken" | "listComments">
 }): Promise<CommentRecord[]> {
-  return api.listCommentsByToken(token)
+  return prototypeId != null
+    ? api.listComments(prototypeId)
+    : api.listCommentsByToken(token)
 }
 
 /**
@@ -609,7 +615,7 @@ export function CommentsPanel({
   // Load existing comments on mount and after a freeform submit.
   useEffect(() => {
     let active = true
-    runLoadComments({ token, api: designAgentApi })
+    runLoadComments({ token, prototypeId, api: designAgentApi })
       .then((list) => {
         if (active) setComments(list)
       })
@@ -619,7 +625,7 @@ export function CommentsPanel({
     return () => {
       active = false
     }
-  }, [token, refreshKey])
+  }, [token, prototypeId, refreshKey])
 
   // Right-click anywhere with a reachable anchor id opens the composer for that
   // anchor. Suppressed in readOnly mode (public viewer — comment create disabled).
