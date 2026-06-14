@@ -282,7 +282,7 @@ export function SourcesScreen() {
         <span>
           {uploading
             ? "Uploading…"
-            : "Click to choose files or drag-and-drop (.docx, .xlsx, .csv, .pdf, .txt, .md, or a .zip of them)"}
+            : "Click to choose files or drag-and-drop (.docx, .xlsx, .csv, .pdf, .txt, .md, or a .zip containing any files)"}
         </span>
       </label>
 
