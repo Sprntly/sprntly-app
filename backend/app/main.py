@@ -19,7 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import auth, db, datasets as datasets_service
-from app.brief_runner import auto_generate_all
 from app.config import settings
 from app.db.prototypes import (
     invalidate_orphan_generating_prototypes,
@@ -68,19 +67,14 @@ logger = logging.getLogger(__name__)
 
 
 async def _startup_generate_briefs() -> None:
-    """Generate startup briefs with the engine selected by BRIEF_ENGINE.
+    """Generate startup briefs via the KG synthesis path per company.
 
-    "synthesis" (default) runs the KG synthesis path per company (off the event
-    loop — it makes blocking LLM/Supabase calls); "legacy" keeps the corpus→
-    Claude auto_generate_all. Error-isolated: a failure here is logged and
-    never blocks or breaks startup.
+    Runs off the event loop (it makes blocking LLM/Supabase calls).
+    Error-isolated: a failure here is logged and never blocks or breaks startup.
     """
     try:
-        if settings.brief_engine == "synthesis":
-            from app.synthesis_brief import generate_all_synthesis_briefs
-            await asyncio.to_thread(generate_all_synthesis_briefs)
-        else:
-            await auto_generate_all()
+        from app.synthesis_brief import generate_all_synthesis_briefs
+        await asyncio.to_thread(generate_all_synthesis_briefs)
     except Exception:  # noqa: BLE001 — startup must never break on brief gen
         logger.exception("Startup brief generation failed")
 
@@ -95,8 +89,8 @@ async def lifespan(app: FastAPI):
         logger.info(
             "Seeded %d on-disk dataset(s) into the datasets table", seeded)
     # Demote any cached brief whose payload schema doesn't match the current
-    # code. auto_generate_all will then treat affected datasets as empty and
-    # regenerate them under the new schema on the next tick.
+    # code. Startup brief generation will then treat affected datasets as empty
+    # and regenerate them under the new schema on the next tick.
     invalidated = db.invalidate_stale_briefs(BRIEF_SCHEMA_VERSION)
     if invalidated:
         logger.info("Invalidated %d stale brief(s) (schema bump → v%d)",
@@ -187,11 +181,10 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
     # Kick off brief generation in the background so the service starts fast.
-    # Honor BRIEF_ENGINE so a fresh deploy/restart produces the SAME engine's
-    # brief as /regenerate + the scheduler: "synthesis" → KG synthesis per
-    # company; "legacy" → the corpus→Claude path (idempotent: skips datasets
-    # that already have a cached brief at the current schema version).
-    # Error-isolated: startup must never block on brief generation.
+    # Runs the KG synthesis path per company — the SAME path as /regenerate +
+    # the scheduler — so a fresh deploy/restart produces an identical brief
+    # (idempotent: skips datasets that already have a cached brief at the
+    # current schema version). Error-isolated: startup must never block on it.
     asyncio.create_task(_startup_generate_briefs())
 
     # Start the pipeline scheduler if enabled (opt-in via SCHEDULER_ENABLED=true).

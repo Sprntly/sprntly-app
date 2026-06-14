@@ -1,6 +1,8 @@
-"""Background brief generation. Kicked off on app startup; ensures a brief
-exists for each configured dataset, and also warms the per-insight
-evidence drill-downs so the first user click renders instantly.
+"""Brief generation status + drill-down warming helpers.
+
+After a synthesis brief is generated and saved (by the brief route, the
+scheduler, or the startup pass), `warm_synthesis_drilldowns` warms the
+per-insight evidence/Ask drill-downs so the first user click renders instantly.
 
 PRDs are NOT pre-warmed: a PRD is the most expensive drill-down (a large
 2-part LLM generation, minutes each), so warming one per insight floods the
@@ -12,23 +14,15 @@ acquire `_WARM_SEMA`), so a click runs immediately.
 import asyncio
 import logging
 
-from app.corpus import load_corpus
 from app.db import (
     find_existing_evidence,
     get_current_brief,
-    save_brief,
     start_evidence,
 )
 from app.ask_runner import warm_brief_dynamic_asks, warm_predefined_asks
 from app.evidence_runner import generate_evidence
-from app.llm import call_json
 from app.prd_runner import warm_prds_for_brief
-from app.prompts import (
-    BRIEF_SCHEMA_VERSION,
-    BRIEF_SYSTEM,
-    BRIEF_USER_TEMPLATE,
-    EVIDENCE_TEMPLATE_VERSION,
-)
+from app.prompts import EVIDENCE_TEMPLATE_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -73,38 +67,14 @@ def get_status(dataset: str) -> dict:
 def set_status(dataset: str, status: str, *, error: str | None = None) -> None:
     """Update the in-memory brief generation status for a dataset.
 
-    Used by both the legacy and synthesis brief generation paths so the
-    frontend poll endpoint (/v1/brief/status) always reflects progress.
+    Used by the synthesis brief generation path so the frontend poll endpoint
+    (/v1/brief/status) always reflects progress.
     """
     _status[dataset] = status
     if error is not None:
         _errors[dataset] = error[:300]
     elif dataset in _errors:
         _errors.pop(dataset, None)
-
-
-def _run_sync(dataset: str) -> None:
-    corpus = load_corpus(dataset)
-
-    # Signal fusion: rank sources by freshness, confidence, and diversity
-    try:
-        from app.signal_fusion import fuse_signals
-        signal_context = fuse_signals(dataset)
-    except Exception:
-        signal_context = ""
-
-    user = BRIEF_USER_TEMPLATE.format(
-        dataset=dataset,
-        signal_context=signal_context,
-        corpus=corpus.joined(),
-    )
-    payload = call_json(system=BRIEF_SYSTEM, user=user)
-    save_brief(
-        dataset,
-        payload.get("week_label", ""),
-        payload,
-        schema_version=BRIEF_SCHEMA_VERSION,
-    )
 
 
 async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
@@ -194,9 +164,9 @@ async def _warm_drilldowns_to_completion(brief: dict, dataset: str | None = None
 def warm_synthesis_drilldowns(dataset: str) -> None:
     """Warm evidence/Ask drill-downs for the synthesis brief of `dataset`.
 
-    Parity with the legacy path: after a synthesis brief is generated+saved,
-    pre-generate the per-insight drill-downs so the first user click renders
-    instantly. Reads the freshly-saved brief back (so it carries the DB id +
+    After a synthesis brief is generated+saved, pre-generate the per-insight
+    drill-downs so the first user click renders instantly. Reads the
+    freshly-saved brief back (so it carries the DB id +
     insight titles _warm_drilldowns needs) and fans out the same warming.
 
     Works from either context: when a loop is already running (the synthesis
@@ -226,44 +196,3 @@ def warm_synthesis_drilldowns(dataset: str) -> None:
     except Exception:  # noqa: BLE001 — warming is best-effort; brief must survive
         logger.exception("Synthesis drill-down warming failed for %s", dataset)
 
-
-async def auto_generate_brief(dataset: str) -> None:
-    """Generate a brief for `dataset` if one doesn't already exist, then warm
-    the per-insight drill-downs (evidence + Asks; PRDs are on-demand only).
-
-    Errors during brief generation are logged and stored on `_errors[dataset]`;
-    the service keeps serving. Drill-down warming failures are logged inside
-    the runners and don't block subsequent work.
-    """
-    brief = get_current_brief(dataset)
-    if brief is None:
-        _status[dataset] = "generating"
-        _errors.pop(dataset, None)
-        logger.info("Auto-generating brief for %s ...", dataset)
-        try:
-            await asyncio.to_thread(_run_sync, dataset)
-            _status[dataset] = "ready"
-            logger.info("Brief generated for %s", dataset)
-        except Exception as exc:
-            _status[dataset] = "failed"
-            _errors[dataset] = f"{type(exc).__name__}: {exc}"[:300]
-            logger.exception("Brief generation failed for %s", dataset)
-            return
-        brief = get_current_brief(dataset)
-    else:
-        logger.info("Brief already cached for %s, skipping auto-generate", dataset)
-    if brief is None:
-        return
-    _warm_drilldowns(brief, dataset=dataset)
-
-
-async def auto_generate_all() -> None:
-    """Generate briefs for every dataset registered in the DB.
-
-    Replaces the previous hardcoded `AUTO_DATASETS = ("asurion",)` tuple.
-    A startup hook in main.py seeds the table from disk first, so existing
-    on-disk corpora are picked up automatically.
-    """
-    from app.db import list_dataset_slugs
-    for dataset in list_dataset_slugs():
-        await auto_generate_brief(dataset)

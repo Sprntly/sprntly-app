@@ -1,8 +1,9 @@
 """Tests for app.brief_runner.
 
-Focus on the DB-driven auto_generate_all behavior (the old AUTO_DATASETS
-tuple was hardcoded). Brief generation itself is end-to-end async — we test
-that it picks up registered slugs and that the brief lands in the DB.
+The legacy corpus→Claude brief path (auto_generate_brief / auto_generate_all)
+has been retired — synthesis is the only engine. brief_runner now provides
+status tracking + the drill-down warming fan-out (evidence + Asks; PRDs are
+on-demand). These tests pin that warming behaviour.
 """
 from __future__ import annotations
 
@@ -10,58 +11,7 @@ import asyncio
 
 import pytest
 
-
-@pytest.mark.asyncio
-async def test_auto_generate_all_processes_registered_slugs(isolated_settings, fake_llm):
-    import importlib
-    import app.brief_runner as br
-    importlib.reload(br)
-
-    db = isolated_settings["db"]
-    db.insert_dataset("acme", "Acme")
-    # corpus.load_corpus expects at least one .md in the dataset dir
-    (isolated_settings["data_dir"] / "acme").mkdir(exist_ok=True)
-    (isolated_settings["data_dir"] / "acme" / "ctx.md").write_text("# ctx")
-
-    fake_llm["payload"] = {
-        "week_label": "Demo Week",
-        "_schema_version": br.BRIEF_SCHEMA_VERSION,
-        "insights": [],
-    }
-    await br.auto_generate_all()
-
-    brief = db.get_current_brief("acme")
-    assert brief is not None
-    assert brief["week_label"] == "Demo Week"
-
-
-@pytest.mark.asyncio
-async def test_auto_generate_all_skips_existing(isolated_settings, fake_llm):
-    import importlib
-    import app.brief_runner as br
-    importlib.reload(br)
-
-    db = isolated_settings["db"]
-    db.insert_dataset("acme", "Acme")
-    (isolated_settings["data_dir"] / "acme").mkdir(exist_ok=True)
-    (isolated_settings["data_dir"] / "acme" / "ctx.md").write_text("# ctx")
-
-    # Pre-seed an existing brief so the runner short-circuits.
-    db.save_brief("acme", "Pre", {"insights": []}, schema_version=br.BRIEF_SCHEMA_VERSION)
-    fake_llm["calls"] = []
-    await br.auto_generate_all()
-    # No LLM call was needed.
-    assert fake_llm["calls"] == []
-
-
-@pytest.mark.asyncio
-async def test_auto_generate_all_no_datasets_no_calls(isolated_settings, fake_llm):
-    import importlib
-    import app.brief_runner as br
-    importlib.reload(br)
-    fake_llm["calls"] = []
-    await br.auto_generate_all()
-    assert fake_llm["calls"] == []
+from app.prompts import BRIEF_SCHEMA_VERSION
 
 
 def test_get_status_empty_for_unknown(isolated_settings):
@@ -109,7 +59,7 @@ def test_warm_drilldowns_does_not_create_any_prd_row(isolated_settings):
     brief_id = db.save_brief(
         "acme", "Test Week",
         {"insights": [{"title": "A"}, {"title": "B"}, {"title": "C"}]},
-        schema_version=br.BRIEF_SCHEMA_VERSION,
+        schema_version=BRIEF_SCHEMA_VERSION,
     )
     brief = db.get_current_brief("acme")
 
@@ -137,7 +87,7 @@ def test_warm_drilldowns_warms_evidence_but_not_prd(isolated_settings, monkeypat
     db.save_brief(
         "acme", "Test Week",
         {"insights": [{"title": "A"}, {"title": "B"}]},
-        schema_version=br.BRIEF_SCHEMA_VERSION,
+        schema_version=BRIEF_SCHEMA_VERSION,
     )
     brief = db.get_current_brief("acme")
 
@@ -177,7 +127,7 @@ def test_warm_drilldowns_warms_predefined_and_dynamic_asks(isolated_settings, mo
     db.insert_dataset("acme", "Acme")
     db.save_brief(
         "acme", "Test Week", {"insights": [{"title": "A"}]},
-        schema_version=br.BRIEF_SCHEMA_VERSION,
+        schema_version=BRIEF_SCHEMA_VERSION,
     )
     brief = db.get_current_brief("acme")
 
@@ -219,7 +169,7 @@ def test_warm_drilldowns_skips_asks_without_dataset(isolated_settings, monkeypat
     db.insert_dataset("acme", "Acme")
     db.save_brief(
         "acme", "Test Week", {"insights": [{"title": "A"}]},
-        schema_version=br.BRIEF_SCHEMA_VERSION,
+        schema_version=BRIEF_SCHEMA_VERSION,
     )
     brief = db.get_current_brief("acme")
 
@@ -262,7 +212,7 @@ async def test_on_demand_prd_generate_runs_immediately_with_no_existing(
     db.insert_dataset("acme", "Acme")
     brief_id = db.save_brief(
         "acme", "Test Week", {"insights": [{"title": "A"}]},
-        schema_version=__import__("app.brief_runner", fromlist=["x"]).BRIEF_SCHEMA_VERSION,
+        schema_version=BRIEF_SCHEMA_VERSION,
     )
     brief = db.get_current_brief("acme")
 

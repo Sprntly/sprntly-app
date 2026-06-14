@@ -404,11 +404,12 @@ def test_generate_evidence_kg_records_failure(isolated_settings, monkeypatch):
     assert "ValueError" in (row["error"] or "")
 
 
-# ---------- route dispatch by brief_engine ----------
+# ---------- route dispatch ----------
 
-def test_route_dispatches_to_kg_under_synthesis(tenant_client, isolated_settings,
-                                                 monkeypatch):
-    """Default engine = synthesis → POST /generate schedules the KG runner."""
+def test_route_dispatches_to_kg(tenant_client, isolated_settings, monkeypatch):
+    """POST /generate always schedules the KG runner (synthesis is the only
+    engine; generate_evidence_kg itself falls back to the corpus path when the
+    KG has no backing for the insight)."""
     from app.routes import evidence as evidence_route
     # Seed a company whose slug == the brief's dataset so require_owned_brief
     # resolves the brief to the caller's company.
@@ -420,43 +421,18 @@ def test_route_dispatches_to_kg_under_synthesis(tenant_client, isolated_settings
     async def fake_kg(evidence_id, b_id, idx):
         scheduled["runner"] = "kg"
     monkeypatch.setattr(evidence_route, "generate_evidence_kg", fake_kg)
-    monkeypatch.setattr(evidence_route, "generate_evidence",
-                        lambda *a, **k: scheduled.__setitem__("runner", "legacy"))
 
     resp = t.client.post("/v1/evidence/generate",
                          json={"brief_id": brief_id, "insight_index": 0})
     assert resp.status_code == 200
     assert resp.json()["status"] in ("generating", "ready")
-
-
-def test_route_dispatches_to_legacy_under_legacy_engine(
-    tenant_client, isolated_settings, monkeypatch
-):
-    from app.config import settings
-    from app.routes import evidence as evidence_route
-    monkeypatch.setattr(settings, "brief_engine", "legacy")
-    t = tenant_client.make(slug="acme")
-    db_mod = isolated_settings["db"]
-    brief_id = _seed_brief(db_mod, dataset="acme")
-
-    picked = {}
-    async def fake_kg(*a, **k):
-        picked["runner"] = "kg"
-    async def fake_legacy(*a, **k):
-        picked["runner"] = "legacy"
-    monkeypatch.setattr(evidence_route, "generate_evidence_kg", fake_kg)
-    monkeypatch.setattr(evidence_route, "generate_evidence", fake_legacy)
-
-    resp = t.client.post("/v1/evidence/generate",
-                         json={"brief_id": brief_id, "insight_index": 0})
-    assert resp.status_code == 200
-    # Let the scheduled task run so we can observe which runner was chosen.
+    # Let the scheduled task run so we can observe the KG runner was chosen.
     import time
     for _ in range(20):
-        if picked:
+        if scheduled:
             break
         time.sleep(0.01)
-    assert picked.get("runner") == "legacy"
+    assert scheduled.get("runner") == "kg"
 
 
 def test_payload_md_shape_matches_ui_contract(isolated_settings, monkeypatch):

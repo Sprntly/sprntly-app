@@ -6,7 +6,7 @@ Trigger via:
     GET  /v1/evidence/{evidence_id}
 
 The POST is fire-and-forget: it inserts a row in `generating` state,
-schedules `generate_evidence` in the background, and returns the
+schedules `generate_evidence_kg` in the background, and returns the
 evidence_id immediately. Poll the GET until status == 'ready'.
 
 Rows live in the `evidences` table. New rows are stored with
@@ -21,14 +21,12 @@ from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
-from app.config import settings
 from app.db import (
     find_existing_evidence,
     start_evidence,
 )
 from app.deps.ownership import require_owned_brief, require_owned_evidence
 from app.evidence_kg import generate_evidence_kg
-from app.evidence_runner import generate_evidence
 from app.prompts import EVIDENCE_TEMPLATE_VERSION
 
 router = APIRouter(prefix="/v1/evidence", tags=["evidence"])
@@ -88,18 +86,12 @@ async def generate(
         template_version=EVIDENCE_TEMPLATE_VERSION,
         variant=_VARIANT,
     )
-    # Engine selection (BRIEF_ENGINE): "synthesis" (default) grounds evidence
-    # in the knowledge graph — the provenance trail (SUPPORTS signals + theme
-    # convergence) behind the insight. generate_evidence_kg itself falls back
-    # to the legacy corpus path when the KG has no backing for the insight, so
-    # this never hard-fails. "legacy" keeps the corpus-only runner.
-    runner = (
-        generate_evidence_kg
-        if settings.brief_engine == "synthesis"
-        else generate_evidence
-    )
+    # Ground evidence in the knowledge graph — the provenance trail (SUPPORTS
+    # signals + theme convergence) behind the insight. generate_evidence_kg
+    # itself falls back to the corpus path when the KG has no backing for the
+    # insight, so this never hard-fails.
     task = asyncio.create_task(
-        runner(evidence_id, body.brief_id, body.insight_index)
+        generate_evidence_kg(evidence_id, body.brief_id, body.insight_index)
     )
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)

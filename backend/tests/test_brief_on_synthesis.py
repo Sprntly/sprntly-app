@@ -1,10 +1,11 @@
-"""Tests for the BRIEF_ENGINE rewire: weekly brief on KG synthesis.
+"""Tests for the weekly brief on KG synthesis — the only engine.
 
-Covers the synthesis-engine write path (/generate, /regenerate), the
-seed-if-empty trigger, the legacy fallback flag, the scheduler synthesis cycle
-with per-company error isolation, and the unchanged UI read path
-(/current, /status, /{id}). LLM/gateway/run_synthesis are all mocked — no test
-hits Anthropic or Supabase.
+Covers the synthesis write path (/generate, /regenerate), the seed-if-empty
+trigger, the scheduler synthesis cycle with per-company error isolation, and
+the unchanged UI read path (/current, /status, /{id}). The legacy brief/KG
+engine has been retired, so these assert synthesis runs UNCONDITIONALLY (no
+engine flag). LLM/gateway/run_synthesis are all mocked — no test hits Anthropic
+or Supabase.
 """
 from __future__ import annotations
 
@@ -13,11 +14,8 @@ from unittest.mock import patch
 
 import pytest
 
-import pytest
-
 import app.main as main_mod
 import app.routes.brief as brief_routes
-import app.routes.datasets as datasets_routes
 import app.scheduler as scheduler_mod
 import app.synthesis_brief as sb
 
@@ -44,13 +42,6 @@ def _seed_company(db, *, company_id: str, slug: str) -> None:
         ).execute()
 
 
-def _set_engine(monkeypatch, value: str) -> None:
-    """Flip BRIEF_ENGINE on the live settings object the route + scheduler close
-    over (no module reload needed — same pattern as the bearer-secret seam)."""
-    monkeypatch.setattr(brief_routes.settings, "brief_engine", value, raising=False)
-    monkeypatch.setattr(scheduler_mod.settings, "brief_engine", value, raising=False)
-
-
 def _fake_synthesis_payload(dataset_slug: str) -> dict:
     return {
         "week_label": "Week of June 8, 2026",
@@ -67,7 +58,6 @@ def _fake_synthesis_payload(dataset_slug: str) -> dict:
 def test_generate_synthesis_path_runs_run_synthesis(app_client, isolated_settings, monkeypatch):
     db = isolated_settings["supabase"]
     _seed_company(db, company_id="co-1", slug="acme")
-    _set_engine(monkeypatch, "synthesis")
 
     def _fake_gen(slug):
         # mirror run_synthesis: persist into briefs, return payload
@@ -90,7 +80,6 @@ def test_generate_synthesis_path_runs_run_synthesis(app_client, isolated_setting
 def test_generate_synthesis_then_current_reads_back(app_client, isolated_settings, monkeypatch):
     db = isolated_settings["supabase"]
     _seed_company(db, company_id="co-1", slug="acme")
-    _set_engine(monkeypatch, "synthesis")
 
     def _fake_gen(slug):
         payload = _fake_synthesis_payload("acme")
@@ -110,7 +99,6 @@ def test_generate_unowned_dataset_returns_404(app_client, monkeypatch):
     # After the tenant-isolation fix, a dataset slug that isn't the caller's
     # company is rejected by the ownership gate (404) before generate_brief_for
     # is ever reached — the gate supersedes the old unknown-company 409.
-    _set_engine(monkeypatch, "synthesis")
     with patch.object(brief_routes, "generate_brief_for") as gen:
         r = app_client.post("/v1/brief/generate?dataset=ghost")
     assert r.status_code == 404
@@ -121,24 +109,20 @@ def test_generate_unowned_dataset_returns_404(app_client, monkeypatch):
 
 def test_regenerate_synthesis_path_starts_synthesis_bg(app_client, isolated_settings, monkeypatch):
     _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
-    _set_engine(monkeypatch, "synthesis")
     seen: list[str] = []
 
     async def _fake_bg(dataset):
         seen.append(dataset)
 
-    # patch the synthesis bg runner; assert /regenerate routes to it (not legacy)
-    with patch.object(brief_routes, "_synthesis_generate_bg", side_effect=_fake_bg), \
-         patch.object(brief_routes, "auto_generate_brief") as legacy:
+    # /regenerate always routes to the synthesis bg runner.
+    with patch.object(brief_routes, "_synthesis_generate_bg", side_effect=_fake_bg):
         r = app_client.post("/v1/brief/regenerate?dataset=acme")
 
     assert r.status_code == 200
     assert r.json() == {"started": True, "dataset": "acme"}
-    legacy.assert_not_called()
 
 
 def test_synthesis_bg_runner_invokes_generate_brief_for(isolated_settings, monkeypatch):
-    _set_engine(monkeypatch, "synthesis")
     with patch.object(brief_routes, "generate_brief_for") as gen:
         asyncio.run(brief_routes._synthesis_generate_bg("acme"))
     gen.assert_called_once_with("acme")
@@ -466,53 +450,18 @@ def test_list_sources_is_tenant_scoped_and_filters_by_type(isolated_settings):
     assert corpus_co1[0].config == {"content_sha": "h1"}
 
 
-# ── legacy fallback flag ─────────────────────────────────────────────────────
-
-def test_generate_legacy_path_calls_auto_generate_brief_engine(app_client, isolated_settings, monkeypatch):
-    # /generate legacy path goes through call_json (the placeholder brief).
-    _set_engine(monkeypatch, "legacy")
-    # legacy /generate needs a corpus on disk
-    data_dir = isolated_settings["data_dir"]
-    (data_dir / "acme").mkdir()
-    (data_dir / "acme" / "notes.md").write_text("some corpus", encoding="utf-8")
-
-    with patch.object(brief_routes, "generate_brief_for") as synth_gen:
-        r = app_client.post("/v1/brief/generate?dataset=acme")
-
-    assert r.status_code == 200, r.text
-    synth_gen.assert_not_called()  # legacy path must NOT touch synthesis engine
-
-
-def test_regenerate_legacy_path_calls_auto_generate_brief(app_client, monkeypatch):
-    _set_engine(monkeypatch, "legacy")
-
-    async def _noop(dataset):
-        return None
-
-    with patch.object(brief_routes, "auto_generate_brief", side_effect=_noop) as legacy, \
-         patch.object(brief_routes, "_synthesis_generate_bg") as synth_bg:
-        r = app_client.post("/v1/brief/regenerate?dataset=acme")
-
-    assert r.status_code == 200
-    legacy.assert_called_once_with("acme")
-    synth_bg.assert_not_called()
-
-
 # ── scheduler synthesis cycle ────────────────────────────────────────────────
 
-def test_scheduler_synthesis_iterates_companies(isolated_settings, monkeypatch):
+def test_scheduler_cycle_iterates_companies(isolated_settings, monkeypatch):
     db = isolated_settings["supabase"]
     _seed_company(db, company_id="co-1", slug="acme")
     _seed_company(db, company_id="co-2", slug="globex")
-    _set_engine(monkeypatch, "synthesis")
 
     seen: list[str] = []
-    with patch.object(scheduler_mod, "_run_pipeline_for_all_datasets") as legacy:
-        with patch("app.synthesis_brief.generate_brief_for",
-                   side_effect=lambda slug: seen.append(slug)):
-            asyncio.run(scheduler_mod._run_scheduled_cycle())
+    with patch("app.synthesis_brief.generate_brief_for",
+               side_effect=lambda slug: seen.append(slug)):
+        asyncio.run(scheduler_mod._run_scheduled_cycle())
     assert sorted(seen) == ["acme", "globex"]
-    legacy.assert_not_called()
 
 
 def test_scheduler_synthesis_isolates_per_company_failure(isolated_settings, monkeypatch):
@@ -520,7 +469,6 @@ def test_scheduler_synthesis_isolates_per_company_failure(isolated_settings, mon
     _seed_company(db, company_id="co-1", slug="acme")
     _seed_company(db, company_id="co-2", slug="globex")
     _seed_company(db, company_id="co-3", slug="initech")
-    _set_engine(monkeypatch, "synthesis")
 
     seen: list[str] = []
 
@@ -535,17 +483,7 @@ def test_scheduler_synthesis_isolates_per_company_failure(isolated_settings, mon
     assert sorted(seen) == ["acme", "initech"]
 
 
-def test_scheduler_legacy_path_runs_pipeline(isolated_settings, monkeypatch):
-    _set_engine(monkeypatch, "legacy")
-    with patch.object(scheduler_mod, "_run_synthesis_for_all_companies") as synth, \
-         patch.object(scheduler_mod, "_run_pipeline_for_all_datasets") as legacy:
-        asyncio.run(scheduler_mod._run_scheduled_cycle())
-    legacy.assert_called_once()
-    synth.assert_not_called()
-
-
 def test_scheduler_synthesis_no_companies_is_noop(isolated_settings, monkeypatch):
-    _set_engine(monkeypatch, "synthesis")
     with patch("app.synthesis_brief.generate_brief_for") as gen:
         asyncio.run(scheduler_mod._run_synthesis_for_all_companies())
     gen.assert_not_called()
@@ -554,7 +492,6 @@ def test_scheduler_synthesis_no_companies_is_noop(isolated_settings, monkeypatch
 # ── UI read path unchanged ───────────────────────────────────────────────────
 
 def test_read_endpoints_unchanged_under_synthesis(app_client, isolated_settings, monkeypatch):
-    _set_engine(monkeypatch, "synthesis")
     db = isolated_settings["db"]
     brief_id = db.save_brief("acme", "Week 1", {"insights": [], "_generated_by": "synthesis_agent"},
                              schema_version=1)
@@ -570,33 +507,16 @@ def test_read_endpoints_unchanged_under_synthesis(app_client, isolated_settings,
     assert r.status_code == 200 and r.json()["status"] == "ready"
 
 
-# ── startup engine dispatch (BUG 2 — main.py) ───────────────────────────────
+# ── startup brief generation (main.py) ──────────────────────────────────────
 
-def test_startup_synthesis_engine_runs_synthesis_not_legacy(isolated_settings, monkeypatch):
-    monkeypatch.setattr(main_mod.settings, "brief_engine", "synthesis", raising=False)
-    with patch.object(sb, "generate_all_synthesis_briefs") as synth, \
-         patch.object(main_mod, "auto_generate_all") as legacy:
+def test_startup_runs_synthesis_briefs(isolated_settings, monkeypatch):
+    with patch.object(sb, "generate_all_synthesis_briefs") as synth:
         asyncio.run(main_mod._startup_generate_briefs())
     synth.assert_called_once()
-    legacy.assert_not_called()
-
-
-def test_startup_legacy_engine_runs_auto_generate_all(isolated_settings, monkeypatch):
-    monkeypatch.setattr(main_mod.settings, "brief_engine", "legacy", raising=False)
-
-    async def _noop():
-        return None
-
-    with patch.object(main_mod, "auto_generate_all", side_effect=_noop) as legacy, \
-         patch.object(sb, "generate_all_synthesis_briefs") as synth:
-        asyncio.run(main_mod._startup_generate_briefs())
-    legacy.assert_called_once()
-    synth.assert_not_called()
 
 
 def test_startup_brief_generation_swallows_errors(isolated_settings, monkeypatch):
     # startup must never break on brief generation
-    monkeypatch.setattr(main_mod.settings, "brief_engine", "synthesis", raising=False)
     with patch.object(sb, "generate_all_synthesis_briefs",
                       side_effect=RuntimeError("boom")):
         asyncio.run(main_mod._startup_generate_briefs())  # no raise
@@ -636,45 +556,22 @@ def test_generate_all_synthesis_briefs_isolates_failure(isolated_settings, monke
     assert seen == ["globex"]  # failing company skipped, rest still run
 
 
-# ── dataset-create engine dispatch (BUG 2 — datasets route) ──────────────────
+# ── dataset-create brief generation (datasets route) ─────────────────────────
 
-def test_dataset_generate_synthesis_routes_to_synthesis_bg(app_client, isolated_settings, monkeypatch):
+def test_dataset_generate_routes_to_synthesis_bg(app_client, isolated_settings, monkeypatch):
     db = isolated_settings["db"]
     db.insert_dataset(slug="acme", display_name="Acme")
-    monkeypatch.setattr(datasets_routes.settings, "brief_engine", "synthesis",
-                        raising=False)
 
     seen: list[str] = []
 
     async def _fake_bg(dataset):
         seen.append(dataset)
 
-    with patch.object(brief_routes, "_synthesis_generate_bg", side_effect=_fake_bg), \
-         patch.object(datasets_routes, "auto_generate_brief") as legacy:
+    with patch.object(brief_routes, "_synthesis_generate_bg", side_effect=_fake_bg):
         r = app_client.post("/v1/datasets/acme/generate")
 
     assert r.status_code == 200, r.text
     assert r.json() == {"started": True, "dataset": "acme"}
-    legacy.assert_not_called()
-
-
-def test_dataset_generate_legacy_routes_to_auto_generate_brief(app_client, isolated_settings, monkeypatch):
-    db = isolated_settings["db"]
-    db.insert_dataset(slug="acme", display_name="Acme")
-    monkeypatch.setattr(datasets_routes.settings, "brief_engine", "legacy",
-                        raising=False)
-
-    async def _noop(dataset):
-        return None
-
-    with patch.object(datasets_routes, "auto_generate_brief",
-                      side_effect=_noop) as legacy, \
-         patch.object(brief_routes, "_synthesis_generate_bg") as synth_bg:
-        r = app_client.post("/v1/datasets/acme/generate")
-
-    assert r.status_code == 200, r.text
-    legacy.assert_called_once_with("acme")
-    synth_bg.assert_not_called()
 
 
 # ── warm-drilldowns parity (BUG 3) ───────────────────────────────────────────
@@ -703,7 +600,6 @@ def test_synthesis_bg_skips_warm_when_generate_fails(isolated_settings):
 def test_scheduler_synthesis_warms_drilldowns(isolated_settings, monkeypatch):
     db = isolated_settings["supabase"]
     _seed_company(db, company_id="co-1", slug="acme")
-    _set_engine(monkeypatch, "synthesis")
 
     warmed: list[str] = []
     with patch("app.synthesis_brief.generate_brief_for"), \
