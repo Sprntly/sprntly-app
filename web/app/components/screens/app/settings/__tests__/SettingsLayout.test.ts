@@ -25,9 +25,9 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
     ])
   })
 
-  it("Data & Integrations group contains only Connectors", () => {
+  it("Data & Integrations group contains Connectors and the design source (Prototypes)", () => {
     const dat = SETTINGS_NAV.find((g) => g.groupLabel === "Data & Integrations")!
-    expect(dat.items.map((i) => i.id)).toEqual(["connectors"])
+    expect(dat.items.map((i) => i.id)).toEqual(["connectors", "design-source"])
   })
 
   it("Account group contains Billing and Security", () => {
@@ -45,6 +45,7 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       "goals-metrics": "Goals & metrics",
       team: "Team & roles",
       connectors: "Connectors",
+      "design-source": "Prototypes",
       billing: "Billing",
       security: "Security",
     })

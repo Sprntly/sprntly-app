@@ -44,6 +44,20 @@ const PUBLIC_VIEWER = readFileSync(PUBLIC_VIEWER_PATH, "utf8")
 const GLOBALS = readFileSync(GLOBALS_PATH, "utf8")
 
 const DOT_HEXES = ["#E5806B", "#E8C24A", "#6FBF8F"]
+// Intentionally shared across the DA surface + the design-source settings pane (DesignSourceSettings, cd1cc20) + BriefChat — these render outside .design-agent-surface, so the strict surface-scope check exempts them BY NAME (any other unscoped selector still fails).
+const UNSCOPED_ALLOWLIST = new Set([
+  ".src-not-connected {",
+  ".src-not-connected.muted {",
+  ".src-connect-btn {",
+  ".src-connect-btn:hover {",
+  ".src-connect-btn.ghost {",
+  ".src-connect-btn.ghost:hover {",
+  ".radio-group {",
+  ".radio-pill {",
+  ".radio-pill:hover {",
+  ".radio-pill.selected {",
+  ".fc-preview-img {",
+])
 // DA-emitted classnames that MUST NOT appear as rules in globals.css (the
 // scoped sheet owns them). If any leaked into globals, the ticket touched a
 // hot file it must never open.
@@ -124,9 +138,18 @@ describe("no :root redefinition (AC5)", () => {
 describe("scoping invariant", () => {
   it("test_css_scopes_every_rule_under_surface — every selector line starts with .design-agent-surface", () => {
     const offenders = selectorLines(CSS).filter(
-      (l) => !l.startsWith(".design-agent-surface"),
+      (l) => !l.startsWith(".design-agent-surface") && !UNSCOPED_ALLOWLIST.has(l),
     )
     expect(offenders).toEqual([])
+  })
+
+  it("allowlist is exact-match, not a prefix/blanket — a new accidental unscoped selector still fails", () => {
+    // The exemption is a Set of exact selector strings, NOT a `.src-`/`.radio-`
+    // prefix. A NEW unscoped leak (e.g. `.src-foo {` or `.totally-unscoped-xyz`)
+    // is NOT exempted and would surface as an offender.
+    expect(UNSCOPED_ALLOWLIST.has(".totally-unscoped-xyz {")).toBe(false)
+    expect(UNSCOPED_ALLOWLIST.has(".src-foo {")).toBe(false)
+    expect(UNSCOPED_ALLOWLIST.has(".radio-foo {")).toBe(false)
   })
 })
 
