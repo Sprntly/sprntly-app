@@ -94,7 +94,7 @@ describe("Metrics (container) — consolidated metrics", () => {
     })
     onboardingMock.mockReturnValue(ctx)
     const { container, rerender } = render(React.createElement(Metrics))
-    const n = (ctx.websiteAnalysis as ReturnType<typeof makeAnalysis>).suggested_metrics.length
+    const n = (ctx.websiteAnalysis as unknown as ReturnType<typeof makeAnalysis>).suggested_metrics.length
 
     // delete the first target
     const del = container.querySelector(".mt-target .mt-target-del") as HTMLButtonElement

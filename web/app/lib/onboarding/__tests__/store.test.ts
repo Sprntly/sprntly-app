@@ -138,8 +138,9 @@ describe("createWorkspace slug generation", () => {
     })
     await createWorkspace(baseInput("  -Acme  "))
     expect(capturedRow).not.toBeNull()
-    expect((capturedRow as Record<string, unknown>).display_name).toBe("-Acme")
-    expect((capturedRow as Record<string, unknown>).slug).toMatch(SLUG_FORMAT)
+    const row = capturedRow as unknown as Record<string, unknown>
+    expect(row.display_name).toBe("-Acme")
+    expect(row.slug).toMatch(SLUG_FORMAT)
     supabaseStub.from = orig
   })
 

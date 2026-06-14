@@ -87,7 +87,7 @@ const FAKE_PRD = {
   sections: [],
   figma_file_key: undefined,
 }
-const runPrdGeneration = vi.fn(async () => ({ ok: true as const, prd: FAKE_PRD }))
+const runPrdGeneration = vi.fn(async (_meta: unknown) => ({ ok: true as const, prd: FAKE_PRD }))
 vi.mock("../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (meta: unknown) => runPrdGeneration(meta),
 }))
@@ -109,7 +109,7 @@ vi.mock("../../../lib/api", async () => {
     },
     prdApi: {
       ...actual.prdApi,
-      latest: vi.fn(async () => { throw new actual.ApiError("none", 404) }),
+      latest: vi.fn(async () => { throw new actual.ApiError(404, "none") }),
     },
   }
 })

@@ -12,7 +12,7 @@
 import * as React from "react"
 import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest"
 
 // Sprntly components carry no `import React`; expose it globally (repo test
 // convention — esbuild's classic JSX runtime).
@@ -36,7 +36,7 @@ import { ConnectorConnectModal } from "../ConnectorConnectModal"
 // letting jsdom actually navigate.
 type FakeTab = { closed: boolean; location: { href: string }; opener: unknown; close: ReturnType<typeof vi.fn> }
 let fakeTab: FakeTab
-let openSpy: ReturnType<typeof vi.spyOn>
+let openSpy: MockInstance<typeof window.open>
 let hrefSetter: ReturnType<typeof vi.fn>
 
 beforeEach(() => {

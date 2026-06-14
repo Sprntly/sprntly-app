@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { BacklogItem, BacklogList } from "../../../../lib/api"
 
-const listMock = vi.fn<[], Promise<BacklogList>>()
+const listMock = vi.fn<() => Promise<BacklogList>>()
 
 // Mock the API client — the screen reads the backlog through backlogApi.list().
 vi.mock("../../../../lib/api", () => ({
