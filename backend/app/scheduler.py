@@ -39,10 +39,7 @@ def _refresh_all_company_connectors() -> None:
     Per-company isolated: a db.list_connections raise for one tenant is
     logged and the loop moves on. kickoff_sync itself is fire-and-forget
     (spawns a daemon thread; see auto_sync.py) and never raises — so this
-    function returns quickly without waiting on any provider's HTTP call.
-
-    Independent of BRIEF_ENGINE — runs whether briefs use synthesis or
-    the legacy pipeline path."""
+    function returns quickly without waiting on any provider's HTTP call."""
     try:
         companies = list_companies() or []
     except Exception:
@@ -123,42 +120,9 @@ async def _run_synthesis_for_all_companies() -> None:
             logger.error("Scheduler: synthesis failed for %s: %s", slug, exc)
 
 
-async def _run_pipeline_for_all_datasets() -> None:
-    """Run the legacy full pipeline for every registered dataset."""
-    from app import db
-    from app.pipeline import run_full_pipeline
-
-    try:
-        slugs = db.list_dataset_slugs()
-    except Exception as exc:
-        logger.error("Scheduler: failed to list datasets: %s", exc)
-        return
-
-    if not slugs:
-        logger.info("Scheduler: no datasets found, skipping pipeline")
-        return
-
-    logger.info("Scheduler: starting pipeline for %d datasets: %s", len(slugs), slugs)
-
-    for slug in slugs:
-        try:
-            result = await run_full_pipeline(slug, trigger="scheduled")
-            status = result.get("status", "unknown")
-            logger.info("Scheduler: pipeline for %s → %s", slug, status)
-        except Exception as exc:
-            logger.error("Scheduler: pipeline failed for %s: %s", slug, exc)
-
-
 async def _run_scheduled_cycle() -> None:
-    """Dispatch the scheduled cycle to the engine selected by BRIEF_ENGINE.
-
-    "synthesis" (default) → KG seed + run_synthesis per company.
-    "legacy"              → the placeholder full pipeline per dataset.
-    """
-    if settings.brief_engine == "synthesis":
-        await _run_synthesis_for_all_companies()
-    else:
-        await _run_pipeline_for_all_datasets()
+    """Run the scheduled KG-synthesis cycle: seed + run_synthesis per company."""
+    await _run_synthesis_for_all_companies()
 
 
 def start_scheduler() -> None:
@@ -170,12 +134,7 @@ def start_scheduler() -> None:
         return
 
     interval_hours = getattr(settings, "pipeline_interval_hours", 6)
-    engine = settings.brief_engine
-    job_name = (
-        f"KG synthesis cycle (every {interval_hours}h)"
-        if engine == "synthesis"
-        else f"Full pipeline cycle (every {interval_hours}h)"
-    )
+    job_name = f"KG synthesis cycle (every {interval_hours}h)"
 
     _scheduler = AsyncIOScheduler()
     _scheduler.add_job(
@@ -185,9 +144,8 @@ def start_scheduler() -> None:
         name=job_name,
         replace_existing=True,
     )
-    # Second job: refresh the KG from upstream connectors. Independent of
-    # BRIEF_ENGINE so the corpus stays fresh whether briefs are synthesis
-    # or legacy. Same cadence as the brief cycle.
+    # Second job: refresh the KG from upstream connectors so the corpus stays
+    # fresh. Same cadence as the brief cycle.
     _scheduler.add_job(
         _refresh_all_company_connectors,
         trigger=IntervalTrigger(hours=interval_hours),
@@ -197,8 +155,8 @@ def start_scheduler() -> None:
     )
     _scheduler.start()
     logger.info(
-        "Scheduler started: %s engine + connector refresh, every %d hours",
-        engine, interval_hours,
+        "Scheduler started: KG synthesis cycle + connector refresh, every %d hours",
+        interval_hours,
     )
 
 

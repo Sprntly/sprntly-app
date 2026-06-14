@@ -4,14 +4,10 @@ import logging
 from fastapi import Depends, APIRouter, HTTPException
 
 from app.auth import CompanyContext, require_company
-from app.brief_runner import auto_generate_brief, get_status, set_status, warm_synthesis_drilldowns
-from app.config import settings
-from app.corpus import load_corpus
-from app.db import get_current_brief, save_brief
+from app.brief_runner import get_status, set_status, warm_synthesis_drilldowns
+from app.db import get_current_brief
 from app.db.companies import display_name_for_slug
 from app.deps.ownership import require_owned_brief, require_owned_dataset
-from app.llm import call_json
-from app.prompts import BRIEF_SCHEMA_VERSION, BRIEF_SYSTEM, BRIEF_USER_TEMPLATE
 from app.synthesis.agent import EmptyKnowledgeGraphError
 from app.synthesis_brief import generate_brief_for
 
@@ -44,8 +40,8 @@ def _with_company_name(brief: dict) -> dict:
 async def _synthesis_generate_bg(dataset: str) -> None:
     """Background body for /regenerate under the synthesis engine.
 
-    Mirrors auto_generate_brief's posture: seed-if-empty + run_synthesis runs
-    off the event loop (it makes blocking LLM/Supabase calls); failures are
+    Seed-if-empty + run_synthesis runs off the event loop (it makes blocking
+    LLM/Supabase calls); failures are
     logged, never raised — the service keeps serving the prior cached brief.
     run_synthesis save_brief()s the new brief, so /current picks it up.
     """
@@ -67,8 +63,8 @@ async def _synthesis_generate_bg(dataset: str) -> None:
                    error="Brief generation failed — check server logs.")
         logger.exception("Synthesis brief generation failed for %s", dataset)
         return
-    # Parity with the legacy auto_generate_brief: warm the per-insight
-    # drill-downs so the first click is instant. Error-isolated inside the
+    # Warm the per-insight drill-downs so the first click is instant.
+    # Error-isolated inside the
     # helper, so it can never undo the brief we just generated.
     warm_synthesis_drilldowns(dataset)
 
@@ -120,15 +116,10 @@ async def regenerate(
     service. Existing cached brief (if any) stays in place until the new
     generation completes successfully.
 
-    Engine selection (BRIEF_ENGINE): "synthesis" (default) runs the KG
-    seed-if-empty → run_synthesis path; "legacy" keeps the placeholder
-    corpus→Claude path. Response contract is identical either way.
+    Runs the KG seed-if-empty → run_synthesis path in the background.
     """
     require_owned_dataset(dataset, company.company_id)
-    if settings.brief_engine == "synthesis":
-        _track(asyncio.create_task(_synthesis_generate_bg(dataset)))
-    else:
-        _track(asyncio.create_task(auto_generate_brief(dataset)))
+    _track(asyncio.create_task(_synthesis_generate_bg(dataset)))
     return {"started": True, "dataset": dataset}
 
 
@@ -152,37 +143,16 @@ def generate(
     Note: invokes Claude. Costs tokens. Blocks until done (~30s). Use
     /v1/brief/regenerate for fire-and-forget behavior instead.
 
-    Engine selection (BRIEF_ENGINE): "synthesis" (default) runs the KG
-    seed-if-empty → run_synthesis path (which save_brief()s the result); we
-    then read it back to preserve the {brief_id, **payload} response shape.
-    "legacy" keeps the placeholder corpus→Claude path.
+    Runs the KG seed-if-empty → run_synthesis path (which save_brief()s the
+    result); we then read it back to preserve the {brief_id, **payload}
+    response shape.
     """
     require_owned_dataset(dataset, company.company_id)
-    if settings.brief_engine == "synthesis":
-        try:
-            payload = generate_brief_for(dataset)
-        except ValueError as e:
-            # Unknown dataset/company or an empty KG even after seeding.
-            raise HTTPException(409, str(e)) from e
-        saved = get_current_brief(dataset)
-        brief_id = saved.get("id") if saved else None
-        return _with_company_name({"brief_id": brief_id, "dataset": dataset, **payload})
-
-    corpus = load_corpus(dataset)
     try:
-        from app.signal_fusion import fuse_signals
-        signal_context = fuse_signals(dataset)
-    except Exception:
-        signal_context = ""
-    user = BRIEF_USER_TEMPLATE.format(
-        dataset=dataset, signal_context=signal_context, corpus=corpus.joined(),
-    )
-    payload = call_json(system=BRIEF_SYSTEM, user=user)
-    week_label = payload.get("week_label", "")
-    brief_id = save_brief(
-        dataset=dataset,
-        week_label=week_label,
-        payload=payload,
-        schema_version=BRIEF_SCHEMA_VERSION,
-    )
+        payload = generate_brief_for(dataset)
+    except ValueError as e:
+        # Unknown dataset/company or an empty KG even after seeding.
+        raise HTTPException(409, str(e)) from e
+    saved = get_current_brief(dataset)
+    brief_id = saved.get("id") if saved else None
     return _with_company_name({"brief_id": brief_id, "dataset": dataset, **payload})

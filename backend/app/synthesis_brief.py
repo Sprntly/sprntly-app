@@ -1,8 +1,7 @@
 """KG-synthesis brief engine — the read path the UI already speaks.
 
-This is the production engine behind the weekly brief when
-``settings.brief_engine == "synthesis"`` (the default). It bridges the UI's
-dataset-slug world to the knowledge-graph world:
+This is the engine behind the weekly brief. It bridges the UI's dataset-slug
+world to the knowledge-graph world:
 
     slug → company_id  (companies.slug is the tenant key + the dataset slug)
     seed-incremental   (always extract corpus docs not yet ingested — tracked
@@ -198,11 +197,10 @@ def seed_incremental(facade: GraphFacade, company_id: str, slug: str) -> dict:
 def generate_all_synthesis_briefs() -> None:
     """Generate a synthesis brief for every company, warming drill-downs.
 
-    The startup counterpart to the legacy ``brief_runner.auto_generate_all``,
-    selected when ``settings.brief_engine == "synthesis"``. Mirrors the
-    scheduler's per-company synthesis cycle: error-isolated per company so one
-    bad slug/empty-KG/LLM hiccup is logged and skipped without aborting the
-    rest, and the whole pass never blocks or breaks startup.
+    The startup brief-generation pass. Mirrors the scheduler's per-company
+    synthesis cycle: error-isolated per company so one bad slug/empty-KG/LLM
+    hiccup is logged and skipped without aborting the rest, and the whole pass
+    never blocks or breaks startup.
     """
     from app.brief_runner import warm_synthesis_drilldowns
     from app.db.companies import list_companies

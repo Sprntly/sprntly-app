@@ -25,7 +25,6 @@ import logging
 import uuid
 from typing import Any, Optional
 
-from app.config import settings
 from app.db import get_brief_by_id
 from app.db.companies import company_id_for_slug
 from app.db.evidences import complete_evidence, fail_evidence, get_evidence, start_evidence
@@ -281,13 +280,9 @@ async def run_multi_agent_generation(
 async def _generate_evidence_safe(
     evidence_id: int, brief_id: int, insight_index: int
 ) -> None:
-    """Run evidence generation with engine selection, matching the evidence route."""
-    if settings.brief_engine == "synthesis":
-        from app.evidence_kg import generate_evidence_kg
-        await generate_evidence_kg(evidence_id, brief_id, insight_index)
-    else:
-        from app.evidence_runner import generate_evidence
-        await generate_evidence(evidence_id, brief_id, insight_index)
+    """Run KG-grounded evidence generation, matching the evidence route."""
+    from app.evidence_kg import generate_evidence_kg
+    await generate_evidence_kg(evidence_id, brief_id, insight_index)
 
 
 async def _generate_stories_safe(company_id: str, prd: dict) -> str:

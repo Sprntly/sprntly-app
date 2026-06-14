@@ -124,7 +124,6 @@ def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
 
     monkeypatch.setattr(sched_mod.settings, "scheduler_enabled", True)
     monkeypatch.setattr(sched_mod.settings, "pipeline_interval_hours", 6)
-    monkeypatch.setattr(sched_mod.settings, "brief_engine", "synthesis")
 
     started: list = []
 

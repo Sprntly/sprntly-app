@@ -23,8 +23,6 @@ from pydantic import BaseModel
 
 from app import datasets
 from app.auth import CompanyContext, require_company
-from app.brief_runner import auto_generate_brief
-from app.config import settings
 from app.db.companies import slug_for_company_id
 from app.deps.ownership import require_owned_dataset
 from app.ingest import UnsupportedFileType, md_filename
@@ -285,22 +283,18 @@ async def generate(
 ):
     """Fire-and-forget brief generation. Frontend polls /v1/brief/status?dataset=slug.
 
-    Honors BRIEF_ENGINE so a newly-created dataset produces the SAME engine's
-    brief as /regenerate + the scheduler: "synthesis" (default) runs the KG
-    seed-if-empty → run_synthesis path (+ drill-down warming); "legacy" keeps
-    the corpus→Claude auto_generate_brief.
+    Runs the KG seed-if-empty → run_synthesis path (+ drill-down warming), the
+    SAME path as /regenerate + the scheduler, so a newly-created dataset
+    produces an identical brief.
     """
     require_owned_dataset(slug, company.company_id)
     from app import db
     if not db.dataset_exists(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")
-    if settings.brief_engine == "synthesis":
-        # Reuse the brief route's synthesis background body (run_synthesis +
-        # warm-drilldowns, error-isolated) so both write paths stay identical.
-        from app.routes.brief import _synthesis_generate_bg
-        task = asyncio.create_task(_synthesis_generate_bg(slug))
-    else:
-        task = asyncio.create_task(auto_generate_brief(slug))
+    # Reuse the brief route's synthesis background body (run_synthesis +
+    # warm-drilldowns, error-isolated) so both write paths stay identical.
+    from app.routes.brief import _synthesis_generate_bg
+    task = asyncio.create_task(_synthesis_generate_bg(slug))
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
     return {"started": True, "dataset": slug}
