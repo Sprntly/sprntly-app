@@ -286,6 +286,33 @@ class GraphFacade:
             kept.append(self._row_to_signal(r))
         return kept
 
+    def has_signals_since(self, enterprise_id: str, iso_ts: str) -> bool:
+        """True if any `kg_signal` for this enterprise has `created_at > iso_ts`.
+
+        The refresh-gate for the synthesis brief: if no signal has entered the
+        KG since the current brief was generated, regeneration is a no-op and
+        can be skipped. Tenant-scoped — only this enterprise's signals are
+        considered, never another tenant's.
+
+        Filtered in Python (mirrors `active_signals`) so it works against both
+        real Supabase and the in-memory test fake (which has no `gt`/`OR`).
+        Per-enterprise volumes are bounded (§20 NFR), so the scan is fine.
+        """
+        cutoff = _parse_iso(iso_ts)
+        if cutoff is None:
+            # No comparison point → treat as "changed" so we don't wrongly skip.
+            return True
+        rows = (
+            self._tbl("kg_signal").select("created_at")
+            .eq("enterprise_id", enterprise_id)
+            .execute().data or []
+        )
+        for r in rows:
+            created = _parse_iso(r.get("created_at"))
+            if created and created > cutoff:
+                return True
+        return False
+
     def load_session_context(self, enterprise_id: str) -> dict[str, Any]:
         """Spec §20: enterprise + top 10 active hypotheses + last 5 decisions
         + last 3 measured outcomes. Hard latency budget: ≤500ms."""
