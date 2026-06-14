@@ -589,3 +589,126 @@ def test_css_vars_end_to_end_explicit():
     assert ds.tokens.colors.border == "#dddddd", (
         f"Expected border #dddddd from --border, got {ds.tokens.colors.border}"
     )
+
+
+# ── Monorepo (frontend-subdir) tests ───────────────────────────────────────────
+
+
+def _make_monorepo_globals_css() -> str:
+    """Synthetic web/app/globals.css mirroring DisposableByDefault/sprntly-app's real tokens."""
+    return """:root {
+  --accent: #179463;
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --border: #e5e5e5;
+  --muted: #737373;
+}
+body { font-family: Geist, system-ui, sans-serif; }
+"""
+
+
+def test_detect_frontend_prefix_picks_web_subdir():
+    """The prefix detector returns 'web/' when web/package.json exists and root has none."""
+    def _fake_contents(repo, path, branch):
+        if path == "web/package.json":
+            return {"type": "file", "name": "package.json", "path": "web/package.json"}
+        return None  # root package.json absent
+
+    extractor = GithubExtractor(installation_id=140102699)
+    extractor._github_get_contents = _fake_contents
+    assert extractor._detect_frontend_prefix("org/repo", None) == "web/"
+
+
+def test_detect_frontend_prefix_defaults_to_root():
+    """Non-monorepo repo (root package.json present) → prefix is '' (unchanged behaviour)."""
+    def _fake_contents(repo, path, branch):
+        # No subdir package.json exists; only the root would, but the detector
+        # never probes root (it's the implicit fallback) → returns "".
+        return None
+
+    extractor = GithubExtractor(installation_id=140102699)
+    extractor._github_get_contents = _fake_contents
+    assert extractor._detect_frontend_prefix("org/repo", None) == ""
+
+
+def test_monorepo_web_globals_reaches_parser_confidence_not_low():
+    """Monorepo with tokens under web/ → gather reaches the CSS parser → accent #179463, confidence ≥ medium.
+
+    This is the regression fix: before the monorepo-aware gather, web/app/globals.css
+    (the file carrying the real --accent: #179463 + Geist) was never fetched because the
+    adapter only probed REPO-ROOT-relative paths, so the gather saw an empty bag, defaults
+    leaked in, and confidence floored to 'low' (pre-seed skipped → stock Tailwind render).
+
+    With the fix, _detect_frontend_prefix picks 'web/', the body is fetched at
+    web/app/globals.css but keyed root-relative as app/globals.css, the CSS-vars strategy
+    parses --accent → explicit accent #179463, and confidence rises out of 'low'.
+    """
+    # Simulate a repo whose frontend lives under web/.
+    def _fake_contents(repo, path, branch):
+        if path == "web/package.json":
+            return {"type": "file", "name": "package.json", "path": "web/package.json"}
+        return None  # no root package.json, no listable UI dirs
+
+    def _fake_fetch(repo, path, branch, *, max_bytes=128_000):
+        if path == "web/package.json":
+            return _make_pkg_json(["react", "next"])  # no tailwindcss → CSS-vars strategy
+        if path == "web/app/globals.css":
+            return _make_monorepo_globals_css()
+        return None  # everything else (incl. root-relative paths) absent
+
+    extractor = GithubExtractor(installation_id=140102699)
+    extractor._github_get_contents = _fake_contents
+    extractor._fetch_text_file = _fake_fetch
+    extractor._list_ui_files = lambda repo, branch, prefix="": []
+
+    raw = extractor.extract_raw_signals("org/repo")
+
+    # The fetched bag must be keyed ROOT-RELATIVE (prefix stripped) so the gather matched it.
+    assert "app/globals.css" in raw.signals.get("files_present", []), (
+        f"web/app/globals.css must reach the parser keyed root-relative; "
+        f"files_present={raw.signals.get('files_present')}"
+    )
+
+    ds = extractor.normalize(raw)
+
+    assert ds.tokens.colors.accent == "#179463", (
+        f"Expected accent #179463 from web/app/globals.css --accent, got {ds.tokens.colors.accent}"
+    )
+    assert ds.confidence in {"medium", "high"}, (
+        f"Monorepo tokens reaching the parser must lift confidence out of 'low'; got '{ds.confidence}'"
+    )
+
+
+def test_monorepo_prefix_strips_ui_file_keys():
+    """UI files discovered under web/ are keyed root-relative so gather's UI-source path matches."""
+    def _fake_contents(repo, path, branch):
+        if path == "web/package.json":
+            return {"type": "file", "name": "package.json", "path": "web/package.json"}
+        # _list_ui_files is mocked below, so dir listings here are irrelevant.
+        return None
+
+    def _fake_fetch(repo, path, branch, *, max_bytes=128_000):
+        if path == "web/package.json":
+            return _make_pkg_json(["tailwindcss", "react"])
+        if path == "web/tailwind.config.ts":
+            return _make_tailwind_config(with_theme=True)
+        if path == "web/app/components/ui/button.tsx":
+            return _ui_file_text()
+        return None
+
+    extractor = GithubExtractor(installation_id=140102699)
+    extractor._github_get_contents = _fake_contents
+    extractor._fetch_text_file = _fake_fetch
+    # Mimic the real _list_ui_files contract: returns ROOT-RELATIVE paths (prefix stripped).
+    extractor._list_ui_files = lambda repo, branch, prefix="": [
+        ("app/components/ui/button.tsx", "button.tsx"),
+    ]
+
+    raw = extractor.extract_raw_signals("org/repo")
+
+    # The UI body must have been fetched (proving the adapter re-prefixed for the network call)
+    # and recorded as an inference file under its root-relative key.
+    assert "app/components/ui/button.tsx" in raw.signals.get("inference_files", []), (
+        f"UI file under web/ must reach gather keyed root-relative; "
+        f"inference_files={raw.signals.get('inference_files')}"
+    )
