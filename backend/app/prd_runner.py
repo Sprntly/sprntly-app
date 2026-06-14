@@ -31,10 +31,9 @@ convergence signals, each with content/source_type/provenance/confidence) via
 PRD's problem/evidence section then cites the actual data-source signals that
 also back the brief insight.
 
-Resilient: gated on `settings.brief_engine` (synthesis → KG grounding, legacy →
-corpus), and KG-first-with-fallback even under synthesis — if the insight has
-no KG backing (empty trail), the runner falls back to the corpus grounding so a
-PRD never hard-fails.
+Resilient: KG-first-with-fallback — if the insight has no KG backing (empty
+trail), the runner falls back to the corpus grounding so a PRD never
+hard-fails.
 
 Assembly + resilience:
   - Part A output → `payload_md`  — what the frontend renders, unchanged.
@@ -170,8 +169,9 @@ def _split_2part(md: str) -> tuple[str, str]:
 
 
 def _corpus_grounding(dataset: str) -> str:
-    """The legacy grounding: the per-dataset markdown corpus, as a labelled
-    block. Used when brief_engine='legacy' OR the KG trail is empty."""
+    """Corpus fallback grounding: the per-dataset markdown corpus, as a
+    labelled block. Used when the KG trail is empty (no KG backing for the
+    insight, a legacy corpus dataset, or any KG read error)."""
     corpus = load_corpus(dataset)
     return _CORPUS_BLOCK.format(corpus=corpus.joined())
 
@@ -204,17 +204,14 @@ def _resolve_grounding(
 ) -> tuple[str, dict | None]:
     """Resolve the evidence block + (the KG trail it came from, or None).
 
-    Gated on `settings.brief_engine`, consistent with brief/evidence/ask:
-      - synthesis (default) → KG-first: the insight's evidence trail when it has
-        backing, else corpus fallback.
-      - legacy              → corpus grounding, no KG read.
-    The returned trail (None on the corpus path) drives kg_refs in the
-    decision log.
+    KG-first, consistent with brief/evidence/ask: the insight's evidence trail
+    when it has backing, else corpus fallback (an empty KG, a legacy corpus
+    dataset, or any KG read error). The returned trail (None on the corpus
+    fallback) drives kg_refs in the decision log.
     """
-    if settings.brief_engine == "synthesis":
-        trail = _kg_trail(dataset, brief, insight_index)
-        if trail is not None:
-            return render_evidence_trail_section(trail), trail
+    trail = _kg_trail(dataset, brief, insight_index)
+    if trail is not None:
+        return render_evidence_trail_section(trail), trail
     return _corpus_grounding(dataset), None
 
 
@@ -350,7 +347,6 @@ def _finalize(prd_id: int, brief_id: int, insight_index: int, ctx: dict,
             "has_llm_part": bool(llm_part),
             "grounding": "kg" if trail is not None else "corpus",
             "kg_signals": len((trail or {}).get("signals") or []),
-            "brief_engine": settings.brief_engine,
             # Two-call generation: record whether Part B failed (None on success)
             # so the audit row never hides a half-complete generation.
             "part_b_error": part_b_error,

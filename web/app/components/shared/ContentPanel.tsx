@@ -197,12 +197,17 @@ function EvidenceTab() {
       return
     }
     setGeneratingPrd(true)
+    // Switch the rail to the PRD tab immediately and show its generating spinner
+    // there, so the in-progress PRD is always on the right.
+    setContent({ prd: null, prdMeta: null, prdGenerating: true })
+    openContentPanel("prd")
     try {
       const result = await runPrdGeneration(detail.meta)
-      if (!result.ok) { showToast("PRD generation failed", result.message.slice(0, 200)); return }
-      setContent({ prd: result.prd, prdMeta: detail.meta })
+      if (!result.ok) { setContent({ prdGenerating: false }); showToast("PRD generation failed", result.message.slice(0, 200)); return }
+      setContent({ prd: result.prd, prdMeta: detail.meta, prdGenerating: false })
       openContentPanel("prd")
     } catch (e) {
+      setContent({ prdGenerating: false })
       showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     } finally {
       setGeneratingPrd(false)
@@ -1076,12 +1081,14 @@ function TicketsTab() {
       const list = (pushState as { kind: "picking"; lists: ClickUpList[] }).lists.find(l => l.id === selectedListId)
       setPushState({ kind: "pushing", listName: list?.name ?? selectedListId })
       try {
-        const tickets = MOCK_TICKETS.map(t => ({
+        const tasks = MOCK_TICKETS.map(t => ({
+          task_id: t.id,
           title: t.title,
-          description: `${t.description}\n\nAcceptance criteria:\n${t.acceptanceCriteria.map(c => `• ${c}`).join("\n")}`,
+          description: t.description,
+          acceptance_criteria: t.acceptanceCriteria,
           priority: t.priority,
         }))
-        const result = await ticketPushApi.pushToClickUp(selectedListId, tickets)
+        const result = await ticketPushApi.pushToClickUp(selectedListId, tasks)
         setPushState({ kind: "done", created: result.created.length, errors: result.errors.length })
         if (result.errors.length > 0) {
           showToast("ClickUp sync partial", `${result.created.length} created, ${result.errors.length} failed.`)

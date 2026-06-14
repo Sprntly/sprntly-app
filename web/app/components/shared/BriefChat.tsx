@@ -10,6 +10,7 @@ import { useWorkspace } from "../../context/WorkspaceContext"
 import { ApiError, askApi, briefApi, type AskResponse } from "../../lib/api"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
+import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
 import type {
   BriefV2CompactFinding,
@@ -19,7 +20,7 @@ import type {
 } from "../../lib/brief-v2-adapter"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
-import { IconClose, IconSendUp, IconSparkle } from "./app-icons"
+import { IconClose, IconSendUp, IconSparkle, IconUndo } from "./app-icons"
 import { IconPlug } from "@tabler/icons-react"
 import { useBriefPrototypeMap } from "../design-agent/useBriefPrototypeMap"
 import { prototypeStateForInsight } from "../design-agent/briefPrototypeMap.helpers"
@@ -32,7 +33,7 @@ import { useRouter } from "next/navigation"
 type Finding = BriefV2HeroFinding | BriefV2CompactFinding
 
 // ── Turn model ─────────────────────────────────────────────────────────────
-type AgentAction = "prd" | "evidence" | "tickets" | "prototype"
+type AgentAction = "prd" | "evidence" | "tickets" | "prototype" | "multi-agent"
 type Persona = "ds" | "pm"
 
 interface ChatTurn {
@@ -51,7 +52,17 @@ interface ChatTurn {
 }
 
 const STORAGE_PREFIX = "sprntly_brief_chat_"
+// Dismissed finding cards persist (localStorage) per brief so a grey-out survives
+// re-render and reload within the session. The brief V2 payload carries no id, so
+// we namespace by company + week-of (the distinct brief identity) and store the
+// set of dismissed `detailKey`s under it.
+const DISMISS_PREFIX = "sprntly_brief_dismissed_"
 const COMPOSER_MAX_PX = 200
+
+function dismissKeyFor(company: string | null | undefined, weekOf: string | null | undefined): string | null {
+  if (!company) return null
+  return `${DISMISS_PREFIX}${company}::${weekOf ?? "current"}`
+}
 
 function uid(): string {
   return typeof crypto !== "undefined" && crypto.randomUUID
@@ -244,6 +255,11 @@ function compactMetricValue(raw: string): string {
 }
 
 // A short prototype-style name for the preview caption (drop trailing clauses).
+function previewName(finding: Finding): string {
+  const t = finding.title.split(/\s+[—–:]\s+/)[0].trim()
+  return t.length > 30 ? `${t.slice(0, 28)}…` : t
+}
+
 const num = (v: number | string) => (typeof v === "number" ? v : Number(v) || 0)
 
 // Compact ring / donut — share-of-whole or progress (card 2's "3/4 answered").
@@ -343,25 +359,74 @@ function FindingMiniChart({ chart }: { chart: BriefV2InlineChart }) {
   return ringKind ? <FindingMiniRing chart={chart} /> : <FindingMiniBars chart={chart} />
 }
 
+// Right-rail prototype preview — a browser-style mock + caption, mirroring the
+// "First-Handoff Wizard" teaser in the reference. Clicking opens the prototype
+// flow (which routes to the PRD-first message when no PRD exists yet).
+function FindingPreview({ finding, onOpen }: { finding: Finding; onOpen: () => void }) {
+  return (
+    <button type="button" className="fc-preview" onClick={onOpen} title="Open prototype preview">
+      <span className="fc-preview-mock" aria-hidden>
+        <span className="fc-preview-mock-bar">
+          <i /><i /><i />
+        </span>
+        <span className="fc-preview-mock-body">
+          <span className="fc-preview-line fc-preview-line--a" />
+          <span className="fc-preview-line fc-preview-line--b" />
+          <span className="fc-preview-line fc-preview-line--c" />
+          <span className="fc-preview-line fc-preview-line--d" />
+        </span>
+      </span>
+      <span className="fc-preview-foot">
+        <span className="fc-preview-title">
+          <span className="fc-preview-glyph" aria-hidden>{">_"}</span>
+          {previewName(finding)}
+        </span>
+        <span className="fc-preview-sub">Prototype preview · open design</span>
+      </span>
+    </button>
+  )
+}
+
+// Data-driven fallback chart for insights whose payload carries no chart_hints.
+// Rather than draw a hardcoded/placeholder shape, derive a real bar chart from
+// the finding's own quantitative fields — the numeric KPI stat tiles (which come
+// straight from `insight.metrics`). Only when there is genuinely no numeric
+// signal do we return null so the card simply renders without a chart.
+function chartFromStatTiles(finding: Finding): BriefV2InlineChart | null {
+  const tiles = finding.statTiles || []
+  const data = tiles
+    .map((t) => ({ label: (t.label || "").trim(), value: firstNumber(t.value) }))
+    .filter((d): d is { label: string; value: number } => d.value != null)
+    .map((d) => ({ label: d.label || "—", value: d.value }))
+  if (data.length === 0) return null
+  return { kind: "bar", title: finding.metricHighlight || finding.title || "", data }
+}
+
 // ── Finding card — matches reference layout ───────────────────────────────────
 function BriefFindingCard({
   finding,
   busy,
   generating,
+  dismissed,
   onAsk,
   onViewEvidence,
   onGeneratePrd,
+  onGenerateAll,
   onDismiss,
+  onRestore,
   onPreview,
   insightState,
 }: {
   finding: Finding
   busy: boolean
   generating: boolean
+  dismissed: boolean
   onAsk: () => void
   onViewEvidence: () => void
   onGeneratePrd: () => void
+  onGenerateAll: () => void
   onDismiss: () => void
+  onRestore: () => void
   onPreview: () => void
   insightState?: {
     hasPrd: boolean
@@ -376,8 +441,50 @@ function BriefFindingCard({
   const category = finding.category || finding.actionLabel
   const priority = finding.priority || "P0"
   const statTiles = finding.statTiles || []
-  // Every finding carries an inline chart hint (hero and supporting alike).
-  const chart = finding.chart
+  // Real chart from the insight payload (chart_hints → BriefV2InlineChart). When
+  // the insight ships no chart_hints, derive a data-driven bar chart from the
+  // finding's numeric KPI tiles instead of a hardcoded placeholder.
+  const chart = finding.chart ?? chartFromStatTiles(finding)
+
+  // ── Dismissed (greyed) state ──────────────────────────────────────────────
+  // Greys the card out in place — keeps the finding present (not deleted) and
+  // hides the heavy detail/viz, exposing a "click to restore" affordance.
+  // Clicking the card body (or the restore button) un-greys it.
+  if (dismissed) {
+    return (
+      <article
+        className={`fc fc--${accent} fc--dismissed`}
+        role="button"
+        tabIndex={0}
+        title="Dismissed · click to restore"
+        aria-label={`Dismissed finding: ${finding.title}. Click to restore.`}
+        onClick={onRestore}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault()
+            onRestore()
+          }
+        }}
+      >
+        <div className="fc-dismissed-row">
+          <span className="fc-dismissed-title">{finding.title}</span>
+          <button
+            type="button"
+            className="fc-iconbtn fc-restorebtn"
+            title="Restore finding"
+            aria-label="Restore finding"
+            onClick={(e) => {
+              e.stopPropagation()
+              onRestore()
+            }}
+          >
+            <IconUndo size={13} />
+          </button>
+        </div>
+        <span className="fc-dismissed-hint">Dismissed · click to restore</span>
+      </article>
+    )
+  }
 
   return (
     <article className={`fc fc--${accent}`}>
@@ -447,7 +554,17 @@ function BriefFindingCard({
               disabled={busy}
             >
               <IconFileText size={14} />
-              {generating ? "Generating…" : "View PRD"}
+              {generating ? "Generating…" : "Generate PRD"}
+            </button>
+            <button
+              type="button"
+              className="fc-btn-prd fc-btn-prd--aggressive"
+              onClick={onGenerateAll}
+              disabled={busy}
+              title="Multi-Agent: PRD + Evidence + Technical Design + QA Test Cases + Risk Analysis + Traceability Matrix"
+            >
+              <IconSparkle size={14} />
+              Generate PRD first
             </button>
             <button type="button" className="fc-btn-secondary" onClick={onPreview}>
               <IconTerminalPrompt size={13} />
@@ -541,6 +658,25 @@ const SUGGEST_ACTION: Record<Exclude<SuggestKind, "coding">, AgentAction> = {
   "view-prd": "prd",
 }
 
+// ── Brief generating / WIP indicator ─────────────────────────────────────────
+// Shown on the brief surface while the backend is generating this week's brief
+// (hydration kind === "generating"). Visually distinct from the empty greeting
+// ("no brief yet") and the failed state: a live spinner + reassuring copy that
+// is REPLACED by the real brief the moment hydration flips to ready.
+function BriefGeneratingState() {
+  return (
+    <div className="bc-generating" role="status" aria-live="polite">
+      <span className="bc-generating-spinner" aria-hidden />
+      <div className="bc-generating-copy">
+        <p className="bc-generating-title">Generating your Monday brief…</p>
+        <p className="bc-generating-sub">
+          Analyzing your sources — this usually takes a minute.
+        </p>
+      </div>
+    </div>
+  )
+}
+
 function SuggestIcon({ name }: { name: SuggestSpec["icon"] }) {
   if (name === "code") return <IconCode size={14} />
   if (name === "terminal") return <IconTerminalPrompt size={14} />
@@ -568,6 +704,8 @@ export function BriefChat() {
   const mountedRef = useRef(true)
   const loadedKeyRef = useRef<string | null>(null)
   const skipPersistRef = useRef(false)
+  const dismissKeyRef = useRef<string | null>(null)
+  const skipDismissPersistRef = useRef(false)
 
   // Derive briefId from the first available detail meta (briefDetails are keyed by detailKey)
   const briefId = useMemo(() => {
@@ -634,7 +772,8 @@ export function BriefChat() {
     skipPersistRef.current = true
     loadedKeyRef.current = key
     setTurns(restored)
-    setDismissed(new Set())
+    // Dismissed-card state is loaded by its own effect (keyed on the brief), so
+    // a dismissal survives reload rather than being cleared on company change.
   }, [activeCompany])
 
   // ── Persist terminal turns (skip the write a fresh restore triggers) ──────
@@ -654,6 +793,41 @@ export function BriefChat() {
       /* best effort */
     }
   }, [turns])
+
+  // ── Restore dismissed finding cards for the active brief ───────────────────
+  // Keyed by company + week-of so a grey-out persists across re-render/reload.
+  const dismissKey = dismissKeyFor(activeCompany, content.briefV2?.weekOf)
+  useEffect(() => {
+    if (!dismissKey) return
+    let restored = new Set<string>()
+    try {
+      const raw = localStorage.getItem(dismissKey)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) restored = new Set(parsed.filter((k) => typeof k === "string"))
+      }
+    } catch {
+      /* ignore corrupt storage */
+    }
+    skipDismissPersistRef.current = true
+    dismissKeyRef.current = dismissKey
+    setDismissed(restored)
+  }, [dismissKey])
+
+  // ── Persist dismissed set (skip the write a fresh restore triggers) ────────
+  useEffect(() => {
+    const key = dismissKeyRef.current
+    if (!key) return
+    if (skipDismissPersistRef.current) {
+      skipDismissPersistRef.current = false
+      return
+    }
+    try {
+      localStorage.setItem(key, JSON.stringify([...dismissed]))
+    } catch {
+      /* best effort */
+    }
+  }, [dismissed])
 
   const scrollToEnd = useCallback(() => {
     requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }))
@@ -686,9 +860,17 @@ export function BriefChat() {
   // ── Composer agent flows (mirror the old AIBar command logic) ─────────────
   const prdFlow = useCallback(async () => {
     const aId = uid()
-    setTurns((t) => [...t, { id: aId, role: "agent", persona: "pm", status: "generating PRD…", state: "thinking" }])
+    // Open the right rail immediately and show a generating spinner THERE — the
+    // PRD (in-progress + final) lives in the panel, never as a bottom message.
+    // The inline turn is a lightweight pointer to the panel, not the PRD itself.
+    setContent({ prd: null, prdMeta: null, prdGenerating: true })
+    openContentPanel("prd")
+    setTurns((t) => [...t, { id: aId, role: "agent", persona: "pm", status: "generating PRD… (opening in the panel)", state: "thinking" }])
     scrollToEnd()
-    const fail = (error: string) => setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error } : x)))
+    const fail = (error: string) => {
+      setContent({ prdGenerating: false })
+      setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error } : x)))
+    }
     try {
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
@@ -702,7 +884,7 @@ export function BriefChat() {
         fail(result.message)
         return
       }
-      setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex: 0 } })
+      setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex: 0 }, prdGenerating: false })
       openContentPanel("prd")
       setTurns((t) =>
         t.map((x) =>
@@ -765,6 +947,64 @@ export function BriefChat() {
   const evidenceFlow = useCallback(() => {
     openContentPanel("evidence")
   }, [openContentPanel])
+
+  const multiAgentFlow = useCallback(async () => {
+    const aId = uid()
+    setTurns((t) => [
+      ...t,
+      {
+        id: aId,
+        role: "agent",
+        persona: "pm",
+        status: "running multi-agent analysis…",
+        state: "thinking",
+      },
+    ])
+    scrollToEnd()
+    const fail = (error: string) =>
+      setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error } : x)))
+    try {
+      const brief = await briefApi.current(activeCompany)
+      const insights = brief.insights || []
+      if (!insights.length) {
+        fail("No brief insights available yet. Run the pipeline first.")
+        return
+      }
+      const insight = insights[0]
+      const result = await runMultiAgentGeneration(brief.id, 0, "aggressive")
+      if (!result.ok) {
+        fail(result.message)
+        return
+      }
+      const docCount = result.docs.docs.length
+      const readyCount = result.docs.docs.filter((d) => d.status === "ready").length
+      setTurns((t) =>
+        t.map((x) =>
+          x.id === aId
+            ? {
+                ...x,
+                state: "done",
+                status: "multi-agent analysis complete",
+                message:
+                  `**Multi-Agent Aggressive Analysis** complete for **${insight.title}**.\n\n` +
+                  `Generated **${readyCount}/${docCount + 3}** documents:\n` +
+                  `- PRD (human-readable + implementation spec)\n` +
+                  `- Evidence report (KG-grounded)\n` +
+                  `- User stories with acceptance criteria\n` +
+                  result.docs.docs
+                    .map((d) => `- ${d.title} — ${d.status === "ready" ? "ready" : d.status}`)
+                    .join("\n") +
+                  `\n\nAll documents are cross-referenced in the **Traceability Matrix**. ` +
+                  `Missing requirements, risks, and assumptions have been identified.`,
+                actions: ["prd", "tickets", "prototype"],
+              }
+            : x,
+        ),
+      )
+    } catch (e) {
+      fail(e instanceof Error ? e.message : "Multi-agent generation failed")
+    }
+  }, [activeCompany, scrollToEnd])
 
   const plainAsk = useCallback(
     async (q: string) => {
@@ -829,9 +1069,10 @@ export function BriefChat() {
         if (a === "evidence") return evidenceFlow()
         if (a === "tickets") return ticketsFlow()
         if (a === "prototype") return prototypeFlow()
+        if (a === "multi-agent") return multiAgentFlow()
       })
     },
-    [content.prd, evidenceFlow, openContentPanel, prdFlow, prototypeFlow, runGate, ticketsFlow],
+    [content.prd, evidenceFlow, multiAgentFlow, openContentPanel, prdFlow, prototypeFlow, runGate, ticketsFlow],
   )
 
   // ── Suggested-actions: hand the implementation brief to a coding agent ─────
@@ -919,15 +1160,21 @@ export function BriefChat() {
       busyRef.current = true
       setBusy(true)
       setCardBusyKey(key ?? null)
+      // Open the right rail up front with a generating spinner so the PRD always
+      // surfaces on the right while it's being drafted — not just when it's ready.
+      setContent({ prd: null, prdMeta: null, prdGenerating: true })
+      openContentPanel("prd")
       try {
         const result = await runPrdGeneration(meta)
         if (!result.ok) {
+          setContent({ prdGenerating: false })
           showToast("PRD generation failed", result.message.slice(0, 200))
           return
         }
-        setContent({ prd: result.prd, prdMeta: meta })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
         openContentPanel("prd")
       } catch (e) {
+        setContent({ prdGenerating: false })
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       } finally {
         busyRef.current = false
@@ -940,10 +1187,50 @@ export function BriefChat() {
     [content.briefDetails, content.prd, content.prdMeta, openContentPanel, setContent, showToast],
   )
 
+  const cardGenerateAll = useCallback(
+    async (finding: Finding) => {
+      const key = finding.detailKey
+      const detail = key ? content.briefDetails?.[key] : null
+      const meta = detail?.meta
+      if (!meta) {
+        showToast("Can't run multi-agent", "Open evidence from a finding with a linked brief first.")
+        return
+      }
+      if (busyRef.current) return
+      busyRef.current = true
+      setBusy(true)
+      setCardBusyKey(key ?? null)
+      try {
+        const result = await runMultiAgentGeneration(meta.briefId, meta.insightIndex, "aggressive")
+        if (!result.ok) {
+          showToast("Multi-agent generation failed", result.message.slice(0, 200))
+          return
+        }
+        const docCount = result.docs.docs.length
+        showToast(
+          "Multi-agent complete",
+          `Generated PRD + Evidence + ${docCount} analysis documents. All cross-referenced.`,
+        )
+      } catch (e) {
+        showToast("Multi-agent failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+      } finally {
+        busyRef.current = false
+        if (mountedRef.current) {
+          setBusy(false)
+          setCardBusyKey(null)
+        }
+      }
+    },
+    [content.briefDetails, showToast],
+  )
+
+  // Dismiss greys the card out in place (it stays in the list); restore un-greys
+  // it. Toggling the dismissed set drives both — and the persist effect writes it.
   const cardDismiss = useCallback((finding: Finding) => {
     const key = finding.detailKey
     if (!key) return
     setDismissed((s) => {
+      if (s.has(key)) return s
       const next = new Set(s)
       next.add(key)
       return next
@@ -984,6 +1271,17 @@ export function BriefChat() {
     [content.briefDetails, entriesByInsight, router, prototypeFlow, runGate, cardGeneratePrd],
   )
 
+  const cardRestore = useCallback((finding: Finding) => {
+    const key = finding.detailKey
+    if (!key) return
+    setDismissed((s) => {
+      if (!s.has(key)) return s
+      const next = new Set(s)
+      next.delete(key)
+      return next
+    })
+  }, [])
+
   // ── Composer handlers ─────────────────────────────────────────────────────
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1014,7 +1312,8 @@ export function BriefChat() {
     if (!v2) return []
     return [v2.hero, ...v2.supporting].filter(Boolean) as Finding[]
   }, [v2])
-  const visibleFindings = findings.filter((f) => !(f.detailKey && dismissed.has(f.detailKey)))
+  // Dismissed cards stay in the list (greyed out via the dismissed prop), so the
+  // finding is never removed — only collapsed until restored.
 
   const userInitials = content.userInitials ?? (content.userName ? content.userName.slice(0, 2).toUpperCase() : "You")
   const userName = content.userName ?? "You"
@@ -1022,6 +1321,10 @@ export function BriefChat() {
   const week = weekLabel(v2?.weekOf ?? null)
   const heading = briefTitle(v2?.weekOf ?? null)
   const refreshing = (pipeline.runStatus as { status?: string } | null)?.status === "running"
+  // The brief is being generated when hydration reports "generating" AND we
+  // don't yet have a brief to show. Once findings arrive (ready), the WIP
+  // indicator is replaced by the real brief. The failed state never trips this.
+  const generatingBrief = content.briefHydration === "generating" && findings.length === 0
 
   return (
     <section className="briefx" aria-label="Weekly brief">
@@ -1072,13 +1375,19 @@ export function BriefChat() {
                   <IconSparkle size={10} />
                   PM COWORKER
                 </span>
-                <span className="bc-agent-status">Monday brief · {greetTime}</span>
+                <span className="bc-agent-status">
+                  Monday brief · {generatingBrief ? "generating…" : greetTime}
+                </span>
               </div>
               <div className="bc-agent-body">
+                {generatingBrief ? (
+                  <BriefGeneratingState />
+                ) : (
+                <>
                 <p className="bc-greeting">{greeting}</p>
-                {visibleFindings.length > 0 ? (
+                {findings.length > 0 ? (
                   <div className="fc-stack">
-                    {visibleFindings.map((f) => {
+                    {findings.map((f) => {
                       const key = f.detailKey
                       const meta = key ? content.briefDetails?.[key]?.meta : undefined
                       const insightState = meta != null
@@ -1090,10 +1399,13 @@ export function BriefChat() {
                           finding={f}
                           busy={busy}
                           generating={cardBusyKey === f.detailKey}
+                          dismissed={!!f.detailKey && dismissed.has(f.detailKey)}
                           onAsk={() => cardAsk(f)}
                           onViewEvidence={() => cardViewEvidence(f)}
                           onGeneratePrd={() => cardGeneratePrd(f)}
+                          onGenerateAll={() => cardGenerateAll(f)}
                           onDismiss={() => cardDismiss(f)}
+                          onRestore={() => cardRestore(f)}
                           onPreview={() => cardPreview(f)}
                           insightState={insightState}
                         />
@@ -1107,6 +1419,8 @@ export function BriefChat() {
                     <span>{v2.sourcesLine}</span>
                   </div>
                 ) : null}
+                </>
+                )}
               </div>
             </div>
 
@@ -1233,6 +1547,7 @@ const ACTION_LABEL: Record<AgentAction, string> = {
   evidence: "View evidence",
   tickets: "Create tickets",
   prototype: "Generate prototype",
+  "multi-agent": "Generate PRD first",
 }
 
 function AgentTurn({

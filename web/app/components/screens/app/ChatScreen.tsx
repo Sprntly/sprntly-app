@@ -13,6 +13,8 @@ import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleto
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
 import { ApiError, askApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
+import { isComposerBusy, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration } from "../../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
@@ -188,13 +190,22 @@ export function ChatScreen() {
     }))
   }, [activeTabId])
   const [draft, setDraft] = useState("")
-  const [busy, setBusy] = useState(false)
+  // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
+  // composer's busy/disabled state is derived from the ACTIVE tab only (see the
+  // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
+  // composer even while another tab is still loading.
+  const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
+  // Composer busy/disabled + "thinking" indicator reflect ONLY the active tab's
+  // in-flight status. Another tab being mid-ask must not disable this composer.
+  const busy = isComposerBusy(busyTabs, activeTabId)
   const [showSlash, setShowSlash] = useState(false)
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
   const [recording, setRecording] = useState(false)
   const [attachments, setAttachments] = useState<{ name: string; content: string }[]>([])
-  const askingRef = useRef(false)
+  // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
+  // ask while its own is still in flight, while letting OTHER tabs send concurrently.
+  const askingTabsRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const recognitionRef = useRef<any>(null)
@@ -307,19 +318,23 @@ export function ChatScreen() {
       return
     }
     setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
-    setContent({ prd: null, prdMeta: null })
+    // Drive the panel's generating spinner via content too (not just per-tab),
+    // so the right rail shows in-progress PRD state immediately on open.
+    setContent({ prd: null, prdMeta: null, prdGenerating: true })
     openContentPanel("prd")
     try {
       const result = await runPrdGeneration(meta)
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd } : t))
-        setContent({ prd: result.prd, prdMeta: meta })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+        setContent({ prdGenerating: false })
         showToast("PRD generation failed", result.message)
       }
     } catch (e) {
       setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+      setContent({ prdGenerating: false })
       showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
     }
   }, [activeTabId, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
@@ -427,8 +442,34 @@ export function ChatScreen() {
     }
   }, [pendingOndemandDraft, setPendingOndemandDraft, activeTabId, openTab])
 
-  // Track the current Supabase conversation ID for multi-turn persistence
-  const dbConvIdRef = useRef<number | null>(null)
+  // ── Per-tab Supabase persistence ─────────────────────────────────────────
+  // Each tab maps to its OWN conversation, tracked via ChatTab.dbConvId. The
+  // persistence helper reads/writes that per-tab id (never a shared ref), so
+  // parallel chats record into separate conversations. A single in-flight create
+  // per tab keeps the user + assistant turns in ONE conversation under the
+  // fire-and-forget timing (see chatPersistence.ts).
+  const setTabConvId = useCallback((tabId: string, convId: number) => {
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, dbConvId: convId } : t))
+  }, [])
+  // Stable single instance — its per-tab in-flight-create map must persist across
+  // renders, so we build it once (lazy ref init) rather than per render.
+  const persistenceRef = useRef<ReturnType<typeof createChatPersistence> | null>(null)
+  if (persistenceRef.current === null) {
+    persistenceRef.current = createChatPersistence({
+      getApi: () => import("../../../lib/api").then((m) => m.conversationsApi),
+      getTabConvId: (tabId) => tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null,
+      setTabConvId: (tabId, convId) => setTabConvId(tabId, convId),
+      onConversationCreated: (turnId, convId) => {
+        // Tag the in-memory conversation with the DB id so the rail can load turns.
+        const latest = conversationsRef.current
+        const tagged = latest.map((c) =>
+          c.id === turnId ? { ...c, _dbId: convId } as any : c,
+        )
+        setContent({ conversations: tagged })
+      },
+    })
+  }
+  const persistence = persistenceRef.current
 
   // Resume a conversation from ChatsScreen or BacklogScreen (loads turns)
   const checkResume = useCallback(() => {
@@ -438,7 +479,8 @@ export function ChatScreen() {
       localStorage.removeItem("sprntly_resume_conv")
       const data = JSON.parse(raw) as { dbId: number; title: string; turns: { role: string; content: string }[] }
       if (!data.turns || data.turns.length === 0) return
-      dbConvIdRef.current = data.dbId
+      // The resumed tab's dbConvId is set via openTab(..., data.dbId) below —
+      // per-tab now, no shared ref.
       const restored: ThreadTurn[] = []
       for (let i = 0; i < data.turns.length; i++) {
         const t = data.turns[i]
@@ -467,7 +509,7 @@ export function ChatScreen() {
   }, [currentScreen, checkResume])
 
   const pushPendingConversation = useCallback(
-    (turnId: string, query: string) => {
+    (turnId: string, query: string, targetTabId: string) => {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toISOString()
@@ -479,36 +521,15 @@ export function ChatScreen() {
         ],
         sidebarConvCount: nextCount,
       })
-      // Persist to Supabase — create conversation + first user turn
-      import("../../../lib/api").then(({ conversationsApi }) => {
-        // If this is a follow-up in the same thread, just add a turn
-        if (dbConvIdRef.current) {
-          conversationsApi.addTurn(dbConvIdRef.current, "user", query).catch(() => { })
-          return
-        }
-        // New conversation
-        conversationsApi.create({
-          title,
-          preview: query.slice(0, 200),
-          query,
-          agent_type: "ask",
-        }).then((conv) => {
-          dbConvIdRef.current = conv.id
-          // Tag the in-memory conversation with the DB id so rail can load turns
-          const latest = conversationsRef.current
-          const tagged = latest.map((c) =>
-            c.id === turnId ? { ...c, _dbId: conv.id } as any : c,
-          )
-          setContent({ conversations: tagged })
-          conversationsApi.addTurn(conv.id, "user", query).catch(() => { })
-        }).catch(() => { })
-      })
+      // Persist to Supabase against THIS tab's conversation (create-once per tab).
+      // Fire-and-forget — failures are swallowed inside the helper.
+      void persistence.pushUserTurn(targetTabId, { turnId, title, query })
     },
-    [setContent],
+    [setContent, persistence],
   )
 
   const finalizeConversationTurn = useCallback(
-    (turnId: string, updates: { reply?: AskResponse; error?: string }) => {
+    (turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string) => {
       const prev = conversationsRef.current
       setContent({
         conversations: prev.map((c) => {
@@ -523,17 +544,14 @@ export function ChatScreen() {
           return c
         }),
       })
-      // Save assistant reply as a turn in Supabase
-      if (updates.reply && dbConvIdRef.current) {
-        const replyText = typeof updates.reply === "string"
-          ? updates.reply
-          : (updates.reply as any)?.answer || JSON.stringify(updates.reply).slice(0, 2000)
-        import("../../../lib/api").then(({ conversationsApi }) => {
-          conversationsApi.addTurn(dbConvIdRef.current!, "assistant", replyText).catch(() => { })
-        })
+      // Save assistant reply as a turn in this tab's Supabase conversation.
+      // The helper awaits any in-flight create so the assistant turn lands in the
+      // SAME conversation as its user turn.
+      if (updates.reply) {
+        void persistence.pushAssistantTurn(targetTabId, replyToText(updates.reply))
       }
     },
-    [setContent],
+    [setContent, persistence],
   )
 
   const submitAsk = useCallback(
@@ -546,11 +564,13 @@ export function ChatScreen() {
         setAttachments([]) // clear after sending
       }
       if (query.length < 1) return
-      if (askingRef.current) return
-      askingRef.current = true
+      // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
+      // before doing any work. (Authoritative per-tab guard happens once
+      // targetTabId is resolved below — needed for the no-active-tab case where
+      // openTab creates the target.)
+      if (activeTabId != null && askingTabsRef.current.has(activeTabId)) return
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-      setBusy(true)
       // Capture the target tab ID up-front so async callbacks always write to
       // the right tab, even if the user switches tabs while the request is in-flight.
       let targetTabId: string
@@ -563,52 +583,62 @@ export function ChatScreen() {
           t.id !== targetTabId ? t : { ...t, thread: [...t.thread, { id, query }] }
         ))
       }
-      pushPendingConversation(id, query)
+      pushPendingConversation(id, query, targetTabId)
       setActiveConv(0)
-      try {
-        const res = await askApi.ask(query, activeCompany)
-        setTabs((prev) => prev.map((t) =>
-          t.id !== targetTabId ? t : {
-            ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res } : turn)
-          }
-        ))
-        finalizeConversationTurn(id, { reply: res })
-      } catch (e) {
-        const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
-          ? (e.body as { detail: unknown }).detail
-          : null
-        const detailStr =
-          typeof detail === "string"
-            ? detail
-            : Array.isArray(detail)
+      // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
+      // It returns false (running nothing) if this tab already has an ask in
+      // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
+      // and routes the reply/error to the captured targetTabId. The guard, busy
+      // toggling, and cleanup (even if the tab is closed mid-flight) all live in
+      // the helper so the concurrency contract is unit-tested in one place.
+      await runTabAsk({
+        targetTabId,
+        asking: askingTabsRef.current,
+        setBusy: setBusyTabs,
+        ask: () => askApi.ask(query, activeCompany),
+        onResult: (tabId, res) => {
+          setTabs((prev) => prev.map((t) =>
+            t.id !== tabId ? t : {
+              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res } : turn)
+            }
+          ))
+          finalizeConversationTurn(id, { reply: res }, tabId)
+        },
+        onError: (tabId, e) => {
+          const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
+            ? (e.body as { detail: unknown }).detail
+            : null
+          const detailStr =
+            typeof detail === "string"
               ? detail
-                .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
-                .join(" · ")
-              : null
-        const msg =
-          e instanceof ApiError
-            ? detailStr || e.message
-            : e instanceof Error
-              ? e.message
-              : "Something went wrong"
-        setTabs((prev) => prev.map((t) =>
-          t.id !== targetTabId ? t : {
-            ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg } : turn)
-          }
-        ))
-        finalizeConversationTurn(id, { error: msg })
-        showToast("Ask failed", msg.slice(0, 120))
-      } finally {
-        askingRef.current = false
-        setBusy(false)
-      }
+              : Array.isArray(detail)
+                ? detail
+                  .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
+                  .join(" · ")
+                : null
+          const msg =
+            e instanceof ApiError
+              ? detailStr || e.message
+              : e instanceof Error
+                ? e.message
+                : "Something went wrong"
+          setTabs((prev) => prev.map((t) =>
+            t.id !== tabId ? t : {
+              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg } : turn)
+            }
+          ))
+          finalizeConversationTurn(id, { error: msg }, tabId)
+          showToast("Ask failed", msg.slice(0, 120))
+        },
+      })
     },
     [activeCompany, activeTabId, attachments, finalizeConversationTurn, openTab, pushPendingConversation, showToast],
   )
 
   const handleComposerSubmit = () => {
     const q = draft.trim()
-    if (q.length < 1 || askingRef.current) return
+    // Cheap active-tab guard; submitAsk re-checks per the resolved target tab.
+    if (q.length < 1 || (activeTabId != null && askingTabsRef.current.has(activeTabId))) return
     setDraft("")
     void submitAsk(q)
     const ta = composerRef.current
@@ -680,7 +710,7 @@ export function ChatScreen() {
     setActiveTabId(null)
     setDraft("")
     setActiveConv(null)
-    dbConvIdRef.current = null
+    // No shared conv-id to reset — each tab tracks its own dbConvId.
   }
 
   const hasThread = thread.length > 0

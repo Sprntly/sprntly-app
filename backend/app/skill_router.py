@@ -98,16 +98,22 @@ def detect_intent(question: str) -> SkillMatch | None:
 
 
 def list_available_skills() -> list[dict]:
-    """Return the list of skills the chat can route to, for frontend display."""
+    """Return the routable skills for the chat composer UI, grouped-ready.
+
+    Computed from the vendored catalog (`backend/skills/`) — not a hand-list —
+    so installing a skill folder surfaces it automatically. Non-routable skills
+    (business-context, fact-check) are excluded; the UI shape stays
+    {id, label, trigger, description, category}.
+    """
+    from app.skills.catalog import routable_manifest
+
     return [
-        {"id": "prd-author", "label": "Generate PRD", "trigger": "/prd", "description": "Draft a product requirements document from an insight or idea"},
-        {"id": "prioritize", "label": "Prioritize", "trigger": "/prioritize", "description": "Rank ideas using RICE, ICE, MoSCoW, or WSJF frameworks"},
-        {"id": "user-stories", "label": "User stories", "trigger": "/stories", "description": "Break a PRD into implementable user stories with acceptance criteria"},
-        {"id": "backlog-triage", "label": "Triage backlog", "trigger": "/triage", "description": "Clean up backlog: cluster, dedupe, flag tech debt vs product work"},
-        {"id": "decision-memo", "label": "Decision memo", "trigger": "/decide", "description": "Structure a build/buy, pivot/persevere, or A/B decision"},
-        {"id": "feedback-synthesis", "label": "Feedback synthesis", "trigger": "/feedback", "description": "Synthesize scattered feedback into prioritized themes"},
-        {"id": "third-party-feedback", "label": "Customer feedback", "trigger": "/reviews", "description": "Analyze customer tickets, reviews, and NPS data"},
-        {"id": "competitive-intelligence-review", "label": "Competitive analysis", "trigger": "/compete", "description": "McKinsey-grade competitive intelligence review"},
-        {"id": "incident-runbook", "label": "Incident runbook", "trigger": "/incident", "description": "Generate severity-tiered incident response runbook"},
-        {"id": "fact-check", "label": "Fact-check", "trigger": "/factcheck", "description": "Verify claims are grounded in real sources"},
+        {
+            "id": s["id"],
+            "label": s["label"],
+            "trigger": s["trigger"],
+            "description": s["description"],
+            "category": s["category"],
+        }
+        for s in routable_manifest()
     ]

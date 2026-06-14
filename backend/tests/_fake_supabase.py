@@ -65,7 +65,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "briefs":               {"payload"},
     "ask_log":              {"citations"},
     "cached_asks":          {"response"},
-    "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context"},
+    "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings"},
     "connections":          {"config"},
     "github_installations": {"permissions", "events"},
     # ---- KG foundation (jsonb + array + vector columns; the fake JSON-encodes) ----
@@ -75,6 +75,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "kg_relationship":   {"properties", "provenance"},
     "agent_decision_log": {"factors", "output", "kg_refs"},
     "enterprise_config": {"overrides"},
+    "ticket_edits":      {"acceptance_criteria"},
 }
 
 # Postgres bool columns surface as bool in supabase-py; SQLite stores 0/1.

@@ -123,17 +123,15 @@ def test_ingest_file_unknown_dataset_raises(isolated_settings):
         ds.ingest_file("ghost", "notes.txt", b"hi")
 
 
-def test_ingest_file_unsupported_rolls_back_raw(isolated_settings):
+def test_ingest_file_unknown_type_is_stored_as_stub(isolated_settings):
     ds = _datasets_module(isolated_settings)
-    from app.ingest import UnsupportedFileType
     ds.create_dataset("acme", "Acme")
-    raw = ds.raw_path("acme")
-    before = list(raw.iterdir()) if raw.exists() else []
-    with pytest.raises(UnsupportedFileType):
-        ds.ingest_file("acme", "evil.exe", b"\x00\x01\x02")
-    after = list(raw.iterdir())
-    # No orphan file left behind.
-    assert before == after
+    # Unknown binary type is no longer rejected: raw is kept and a placeholder
+    # markdown stub is written so the file still lands as a source.
+    result = ds.ingest_file("acme", "voice.m4a", b"\x00\x01\x02binary")
+    assert Path(result.stored_raw_path).read_bytes() == b"\x00\x01\x02binary"
+    assert "not yet parsed" in Path(result.md_path).read_text()
+    assert result.original_filename == "voice.m4a"
 
 
 def test_list_datasets_includes_brief_status(isolated_settings):

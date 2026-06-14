@@ -182,25 +182,96 @@ def remove_comment(
 
 # ── Priority mapping ────────────────────────────────────────────────────
 # Internal ticket priorities (P0–P3) → ClickUp's 1–4 scale.
-# ClickUp: 1=urgent, 2=high, 3=normal, 4=low.
+# ClickUp: 1=urgent, 2=high, 3=normal, 4=low. The generator also emits
+# human-readable labels (urgent/high/normal/low), so accept both.
 
 _PRIORITY_MAP: dict[str, int] = {
     "P0": 1,  # Critical → Urgent
     "P1": 2,  # High → High
     "P2": 3,  # Medium → Normal
     "P3": 4,  # Low → Low
+    "urgent": 1,
+    "high": 2,
+    "normal": 3,
+    "low": 4,
 }
 
 
-class TicketIn(BaseModel):
+def _clickup_priority(value: str | None) -> int | None:
+    """Map an internal priority (P0–P3 or urgent/high/normal/low) to ClickUp's
+    1–4 scale; None when unset/unknown so the field is omitted."""
+    if not value:
+        return None
+    return _PRIORITY_MAP.get(value) or _PRIORITY_MAP.get(value.lower())
+
+
+class TaskIn(BaseModel):
+    """One selected task to push. `task_id` is the stable ticket_key the UI
+    selected (e.g. "MER-481"); it keys this task's stored overrides
+    (ticket_edits / ticket_comments) and is echoed back so the UI can confirm
+    each push. Base title/description/criteria are the generated values; any
+    saved override wins over them at push time."""
+
+    task_id: str = Field(..., min_length=1)
     title: str = Field(..., min_length=1)
     description: str = ""
-    priority: str = "P2"
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    priority: str | None = None
 
 
 class PushClickUpIn(BaseModel):
     list_id: str = Field(..., min_length=1)
-    tickets: list[TicketIn] = Field(..., min_length=1)
+    tasks: list[TaskIn] = Field(..., min_length=1)
+
+
+def _load_overrides(c: Any, cid: str, ticket_key: str) -> dict[str, Any]:
+    """Fetch a ticket's saved edits + comments (the user-reviewed source of
+    truth) so the pushed task reflects what the user last saved, not just the
+    generator's first draft. Best-effort: a missing/empty override row just
+    means we fall back to the base task fields."""
+    edit_resp = (
+        c.table("ticket_edits").select("*")
+        .eq("company_id", cid).eq("ticket_key", ticket_key)
+        .limit(1).execute()
+    )
+    edit = edit_resp.data[0] if edit_resp.data else {}
+    comment_resp = (
+        c.table("ticket_comments").select("*")
+        .eq("company_id", cid).eq("ticket_key", ticket_key)
+        .order("created_at").execute()
+    )
+    return {
+        "description": edit.get("description") if edit else None,
+        "acceptance_criteria": edit.get("acceptance_criteria") if edit else None,
+        "comments": [
+            {"author": row.get("author") or "user", "body": row.get("body") or ""}
+            for row in (comment_resp.data or [])
+        ],
+    }
+
+
+def _render_markdown(
+    *, description: str, acceptance_criteria: list[str],
+    comments: list[dict[str, Any]],
+) -> str:
+    """Render the task body as ClickUp markdown: the description, then an
+    Acceptance criteria bullet list, then any saved comments as a Notes
+    section. Empty sections are skipped."""
+    parts: list[str] = []
+    if description.strip():
+        parts.append(description.strip())
+    if acceptance_criteria:
+        parts.append("")
+        parts.append("## Acceptance criteria")
+        parts.extend(f"- {ac}" for ac in acceptance_criteria if str(ac).strip())
+    if comments:
+        parts.append("")
+        parts.append("## Notes")
+        parts.extend(
+            f"- **{cm['author']}:** {cm['body']}"
+            for cm in comments if str(cm.get("body", "")).strip()
+        )
+    return "\n".join(parts).strip()
 
 
 @router.post("/lists")
@@ -221,35 +292,74 @@ def push_clickup(
     body: PushClickUpIn,
     company: CompanyContext = Depends(require_company),
 ):
-    """Create the given tickets as tasks in a ClickUp list (explicit write).
+    """Create the selected tasks as ClickUp tasks in a list (explicit write).
 
-    404 if ClickUp isn't connected. Per-ticket failures are isolated and
-    reported in `errors` rather than failing the whole batch.
+    Body: `{list_id, tasks: [{task_id, title, description, acceptance_criteria,
+    priority}]}`. For each task we merge the company's saved overrides
+    (ticket_edits → description + acceptance criteria; ticket_comments → Notes)
+    over the supplied base fields — the user-reviewed values win — then render a
+    markdown body and create the ClickUp task.
+
+    Returns `{ok, created: [{task_id, clickup_task_id, url, title}],
+    errors: [{task_id, title, error}]}`. Per-task failures are isolated so a
+    partial push still reports every task that did land, with its ClickUp id +
+    URL, so the UI can confirm each one. 404 if ClickUp isn't connected; 401 if
+    the stored token is no longer valid (reconnect ClickUp).
     """
     try:
         access_token = _clickup_access_token(company.company_id)
     except ClickUpNotConnectedError as e:
         raise HTTPException(404, str(e)) from e
 
+    c = require_client()
+    cid = company.company_id
+
     created: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
-    for ticket in body.tickets:
+    for task in body.tasks:
         try:
-            task = clickup_oauth.create_task(
+            overrides = _load_overrides(c, cid, task.task_id)
+            # User-reviewed overrides win over the generator's base values.
+            description = (
+                overrides["description"]
+                if overrides["description"] is not None
+                else task.description
+            )
+            acceptance = (
+                overrides["acceptance_criteria"]
+                if overrides["acceptance_criteria"] is not None
+                else task.acceptance_criteria
+            )
+            markdown = _render_markdown(
+                description=description or "",
+                acceptance_criteria=acceptance or [],
+                comments=overrides["comments"],
+            )
+            result = clickup_oauth.create_task(
                 access_token,
                 body.list_id,
-                name=ticket.title,
-                description=ticket.description or None,
-                priority=_PRIORITY_MAP.get(ticket.priority),
+                name=task.title,
+                markdown_description=markdown or None,
+                priority=_clickup_priority(task.priority),
             )
             created.append({
-                "ticket": ticket.title,
-                "task_id": task.get("id"),
-                "url": task.get("url"),
+                "task_id": task.task_id,
+                "clickup_task_id": result.get("id"),
+                "url": result.get("url"),
+                "title": task.title,
             })
-        except Exception as e:  # noqa: BLE001 — isolate per-ticket failures
-            logger.warning("ClickUp push failed for ticket %r: %s", ticket.title, e)
-            errors.append({"ticket": ticket.title, "error": str(e)})
+        except clickup_oauth.ClickUpAuthExpiredError as e:
+            # Token-level failure isn't per-task — fail the whole push so the UI
+            # prompts a reconnect instead of marking every task as errored.
+            raise HTTPException(401, str(e)) from e
+        except Exception as e:  # noqa: BLE001 — isolate per-task failures
+            logger.warning(
+                "ClickUp push failed for task %r (%s): %s",
+                task.title, task.task_id, e,
+            )
+            errors.append({
+                "task_id": task.task_id, "title": task.title, "error": str(e),
+            })
 
-    return {"created": created, "errors": errors}
+    return {"ok": not errors, "created": created, "errors": errors}

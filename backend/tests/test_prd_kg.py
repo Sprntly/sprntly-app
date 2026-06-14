@@ -14,8 +14,7 @@ Two layers under test:
 
 2. `app.prd_runner` — the wiring: KG-trail grounding reaches the prd-author
    llm_call input + is cited, decision-log carries kg_refs, empty-trail falls
-   back to the corpus, brief_engine dispatch, and the 2-part output + storage
-   contract is unchanged.
+   back to the corpus, and the 2-part output + storage contract is unchanged.
 
 Mocked at the gateway/facade seam (no Anthropic, no pgvector).
 """
@@ -153,12 +152,6 @@ def facade(isolated_settings):
     from app.graph import GraphFacade
 
     return GraphFacade()
-
-
-@pytest.fixture(autouse=True)
-def _synthesis_engine(isolated_settings, monkeypatch):
-    """Default the PRD runner to the KG-grounding engine for these tests."""
-    monkeypatch.setattr(prd_runner.settings, "brief_engine", "synthesis", raising=False)
 
 
 # ─────────────────── layer 1: insight_evidence_trail ───────────────────
@@ -322,8 +315,8 @@ def _setup_kg_prd(isolated_settings, facade, *, support_n=2):
 
 
 def test_prd_grounds_on_kg_trail_not_corpus(isolated_settings, facade, monkeypatch):
-    """Under brief_engine=synthesis, the prd-author input carries the KG trail's
-    signals (cited) and NOT the corpus dump."""
+    """The prd-author input carries the KG trail's signals (cited) and NOT the
+    corpus dump (KG-first grounding)."""
     db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
 
     captured: dict = {}
@@ -429,25 +422,6 @@ def test_prd_no_company_falls_back_to_corpus(isolated_settings, monkeypatch):
                         lambda **kw: (captured.update(kw), _llm_result(_TWO_PART))[1])
     prd_runner._run_sync(prd_id, brief_id, 0)
     assert "CORPUS_FALLBACK_MARK" in captured["input"]
-
-
-def test_prd_legacy_engine_uses_corpus(isolated_settings, facade, monkeypatch):
-    """brief_engine=legacy → corpus grounding even when a KG trail exists."""
-    db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
-    monkeypatch.setattr(prd_runner.settings, "brief_engine", "legacy", raising=False)
-
-    captured: dict = {}
-    monkeypatch.setattr(prd_runner, "llm_call",
-                        lambda **kw: (captured.update(kw), _llm_result(_TWO_PART))[1])
-    prd_runner._run_sync(prd_id, brief_id, 0)
-
-    assert "CORPUS_FALLBACK_MARK" in captured["input"]
-    assert "KNOWLEDGE GRAPH EVIDENCE" not in captured["input"]
-    sup = isolated_settings["supabase"]
-    gen = [r for r in sup.table("agent_decision_log").select("*").execute().data
-           if r["decision_type"] == "generate_prd"]
-    assert gen[0]["factors"]["grounding"] == "corpus"
-    assert gen[0]["factors"]["brief_engine"] == "legacy"
 
 
 def test_prd_2part_split_and_storage_unchanged_on_kg(isolated_settings, facade, monkeypatch):

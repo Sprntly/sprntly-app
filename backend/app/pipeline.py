@@ -7,6 +7,11 @@ Stages:
     4. Knowledge Graph refresh (entity extraction)
     5. Brief generation (with signal fusion)
 
+Stages 4 & 5 drive the KG-synthesis path that the UI actually reads: stage 4
+runs ``seed_incremental`` (incrementally ingesting newly uploaded source docs
+into the synthesis KG) and stage 5 runs ``generate_brief_for`` (re-seeds
+idempotently, then runs synthesis and saves the brief the UI serves).
+
 Each stage records timing and status in the pipeline_runs table.
 """
 from __future__ import annotations
@@ -242,15 +247,26 @@ async def _stage_ds_agent(dataset: str) -> dict[str, Any]:
 
 
 async def _stage_knowledge_graph(dataset: str) -> dict[str, Any]:
-    """Stage 4: Extract entities and refresh the knowledge graph."""
+    """Stage 4: Ingest source docs into the knowledge graph.
+
+    Incrementally seeds the synthesis KG that the UI reads — picking up any
+    newly-uploaded corpus docs (idempotent; unchanged docs are skipped by
+    content hash) and, on a first-ever empty KG, best-effort connector pulls.
+    """
     t0 = time.time()
 
     try:
-        from app.knowledge_graph import refresh_graph
-        stats = await asyncio.to_thread(refresh_graph, dataset)
+        from app.graph.facade import GraphFacade
+        from app.synthesis_brief import resolve_company, seed_incremental
+
+        company_id, slug = resolve_company(dataset)
+        seed = await asyncio.to_thread(
+            seed_incremental, GraphFacade(), company_id, slug
+        )
         return {
             "status": "completed",
-            **stats,
+            "engine": "synthesis",
+            "seed": seed,
             "duration_s": round(time.time() - t0, 1),
         }
     except Exception as exc:
@@ -262,14 +278,35 @@ async def _stage_knowledge_graph(dataset: str) -> dict[str, Any]:
 
 
 async def _stage_brief_generation(dataset: str) -> dict[str, Any]:
-    """Stage 5: Generate the ranked brief (uses signal fusion internally)."""
+    """Stage 5: Generate the ranked brief (uses signal fusion internally).
+
+    Runs ``generate_brief_for`` — which re-seeds the KG idempotently (cheap)
+    and runs synthesis, save_brief()ing the brief the UI's /current endpoint
+    reads. A company with no data to brief yet is NOT a pipeline failure:
+    ``EmptyKnowledgeGraphError`` maps to a benign ``skipped`` status (mirroring
+    routes/brief.py).
+    """
     t0 = time.time()
 
     try:
-        from app.brief_runner import auto_generate_brief
-        await auto_generate_brief(dataset)
+        from app.synthesis.agent import EmptyKnowledgeGraphError
+        from app.synthesis_brief import generate_brief_for
+
+        try:
+            await asyncio.to_thread(generate_brief_for, dataset)
+        except EmptyKnowledgeGraphError:
+            # Benign: nothing ingested yet. Not a pipeline failure — the
+            # user just needs to connect a source or upload files first.
+            return {
+                "status": "skipped",
+                "reason": "KG has no data to brief yet — connect a "
+                          "source or upload files",
+                "engine": "synthesis",
+                "duration_s": round(time.time() - t0, 1),
+            }
         return {
             "status": "completed",
+            "engine": "synthesis",
             "duration_s": round(time.time() - t0, 1),
         }
     except Exception as exc:

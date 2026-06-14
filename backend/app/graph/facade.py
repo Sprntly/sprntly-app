@@ -183,6 +183,19 @@ class GraphFacade:
         return props
 
     # ---- reads ----------------------------------------------------------
+    def list_sources(
+        self,
+        enterprise_id: str,
+        source_type: Optional[str] = None,
+    ) -> list[Source]:
+        """Tenant-scoped list of `kg_source` rows for the enterprise (optionally
+        filtered to one `source_type`). Used as the per-doc ingested ledger for
+        incremental seeding. Never returns another tenant's sources."""
+        q = self._tbl("kg_source").select("*").eq("enterprise_id", enterprise_id)
+        if source_type:
+            q = q.eq("source_type", source_type)
+        return [self._row_to_source(r) for r in (q.execute().data or [])]
+
     def get_entity(self, enterprise_id: str, entity_id: str) -> Optional[Entity]:
         r = (
             self._tbl("kg_entity").select("*")
@@ -273,6 +286,33 @@ class GraphFacade:
             kept.append(self._row_to_signal(r))
         return kept
 
+    def has_signals_since(self, enterprise_id: str, iso_ts: str) -> bool:
+        """True if any `kg_signal` for this enterprise has `created_at > iso_ts`.
+
+        The refresh-gate for the synthesis brief: if no signal has entered the
+        KG since the current brief was generated, regeneration is a no-op and
+        can be skipped. Tenant-scoped — only this enterprise's signals are
+        considered, never another tenant's.
+
+        Filtered in Python (mirrors `active_signals`) so it works against both
+        real Supabase and the in-memory test fake (which has no `gt`/`OR`).
+        Per-enterprise volumes are bounded (§20 NFR), so the scan is fine.
+        """
+        cutoff = _parse_iso(iso_ts)
+        if cutoff is None:
+            # No comparison point → treat as "changed" so we don't wrongly skip.
+            return True
+        rows = (
+            self._tbl("kg_signal").select("created_at")
+            .eq("enterprise_id", enterprise_id)
+            .execute().data or []
+        )
+        for r in rows:
+            created = _parse_iso(r.get("created_at"))
+            if created and created > cutoff:
+                return True
+        return False
+
     def load_session_context(self, enterprise_id: str) -> dict[str, Any]:
         """Spec §20: enterprise + top 10 active hypotheses + last 5 decisions
         + last 3 measured outcomes. Hard latency budget: ≤500ms."""
@@ -324,6 +364,16 @@ class GraphFacade:
         return out
 
     # ---- row mappers ----------------------------------------------------
+    def _row_to_source(self, r: dict) -> Source:
+        return Source(
+            id=r["id"],
+            enterprise_id=r["enterprise_id"],
+            source_type=r["source_type"],
+            label=r.get("label"),
+            config=r.get("config") or {},
+            status=r.get("status") or "active",
+        )
+
     def _row_to_entity(self, r: dict) -> Entity:
         return Entity(
             id=r["id"],

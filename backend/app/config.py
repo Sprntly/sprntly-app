@@ -125,6 +125,16 @@ class Settings(BaseSettings):
     )
     slack_bot_scopes: str = "chat:write,channels:read"
 
+    # Transactional email (Resend) — used for brief notifications + future
+    # system mail. Sends via the Resend HTTPS API (api.resend.com), keyed by
+    # RESEND_API_KEY, FROM the verified sending domain (mail.sprntly.ai).
+    # Empty key ⇒ email delivery is a clean no-op (logged), never an error —
+    # so non-prod envs without the key simply skip sending.
+    resend_api_key: str = ""
+    # Envelope From for outbound brief email. Must be on a Resend-verified
+    # domain; defaults to the verified mail.sprntly.ai sender.
+    brief_email_from: str = "Sprntly <briefs@mail.sprntly.ai>"
+
     # Which engine produces the weekly brief.
     #   "synthesis" (default) — KG-driven: seed-if-empty → run_synthesis over the
     #                           knowledge graph (kg_signal/kg_entity) → save_brief.
@@ -137,7 +147,38 @@ class Settings(BaseSettings):
     # Pipeline scheduler
     scheduler_enabled: bool = False
     pipeline_interval_hours: int = 6
+    # Weekly-brief scheduler (v0 checklist 2.4): the brief fires Monday 09:00 in
+    # each company's configured timezone (companies.notification_settings.timezone,
+    # default UTC). The scheduler ticks every WEEKLY_BRIEF_TICK_MINUTES and, for
+    # each company, asks app.brief_schedule.should_run_weekly_brief whether the
+    # local Monday-09:00 firing window is open. Must be comfortably smaller than
+    # brief_schedule.DUE_WINDOW (1h) so a window is never skipped between ticks;
+    # 15 min gives ~4 chances to catch each window even if a tick runs late.
+    weekly_brief_tick_minutes: int = 15
     scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
+
+    # ── Onboarding drip / nudge emails (v0 checklist 2.1) ────────────────
+    # Recurring onboarding emails to newly-joined company members on a cadence
+    # (default day-1 / day-3 / day-7). Sent via Resend; tracked per member ×
+    # step in drip_email_sends so steps never double-send. See app/drip_email.py.
+    #
+    # Opt-in: the drip scheduler job is registered only when DRIP_EMAILS_ENABLED
+    # is true AND SCHEDULER_ENABLED is on (the APScheduler itself must be
+    # running). RESEND_API_KEY drives the transport; when unset, sends are
+    # recorded as "skipped" so flipping the key on later does not retro-blast
+    # historical steps.
+    drip_emails_enabled: bool = False
+    resend_api_key: str = ""
+    # From: header for drip emails. Empty → "Sprntly <onboarding@sprntly.ai>".
+    drip_from_email: str = ""
+    # Comma-separated day offsets, e.g. "1,3,7". Empty → DEFAULT_CADENCE.
+    # Per-company overrides in companies.notification_settings["drip"] win over
+    # this (see app/drip_email.py:resolve_cadence).
+    drip_cadence_days: str = ""
+    # How often the drip job runs. Hourly+ is fine: a step fires the first
+    # cycle after a member crosses its day_offset, and de-dup makes extra
+    # cycles cheap no-ops.
+    drip_interval_hours: int = 6
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)
@@ -164,6 +205,18 @@ class Settings(BaseSettings):
     # Feature flag: set to true in .env to enable Design Agent routes.
     # Routes return 404 when false so the feature is invisible when off.
     design_agent_enabled: bool = False
+
+    # Multi-Agent mode: run PRD + Evidence + Technical Design + QA Test Cases +
+    # Risk Analysis + Traceability Matrix concurrently from a single trigger.
+    # "aggressive" mode pulls ClickUp task context (comments, attachments,
+    # linked tasks) into the generation context for deeper analysis.
+    multi_agent_enabled: bool = True
+    # Analysis depth: "standard" (PRD + Evidence + User Stories) or
+    # "aggressive" (adds Technical Design, QA Test Cases, Risk/Gap Analysis,
+    # Traceability Matrix, and ingests ClickUp task context).
+    analysis_mode: str = "aggressive"
+    # Max concurrent agent calls during multi-agent orchestration.
+    multi_agent_concurrency: int = 6
 
     @property
     def github_app_private_key_pem(self) -> str:

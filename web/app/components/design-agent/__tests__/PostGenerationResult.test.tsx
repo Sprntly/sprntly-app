@@ -802,6 +802,11 @@ function pinComment(over: Partial<PinComment> = {}): PinComment {
     saved: false,
     busy: false,
     error: null,
+    anchor: null,
+    xPctInEl: null,
+    yPctInEl: null,
+    elementFriendly: null,
+    elementTechnical: null,
     ...over,
   }
 }

@@ -5290,6 +5290,50 @@
     color: var(--ink);
   }
 
+  /* Brief generating / WIP state — spinner + reassuring copy shown while the
+     backend is building this week's brief. Distinct from the empty greeting
+     and the failed state; replaced by the real brief once hydration is ready. */
+  .bc-generating {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 18px 20px;
+    border: 1px solid var(--border-subtle, var(--surface-3));
+    border-radius: 12px;
+    background: var(--surface-2);
+  }
+
+  .bc-generating-spinner {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2.5px solid var(--accent-soft);
+    border-top-color: var(--accent);
+    animation: onbSpin 0.9s linear infinite;
+  }
+
+  .bc-generating-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .bc-generating-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .bc-generating-sub {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-soft, var(--muted));
+  }
+
   .bc-thread {
     width: 100%;
     max-width: 1024px;
@@ -5462,6 +5506,47 @@
     border-radius: 16px;
     padding: 18px 20px 16px;
     box-shadow: var(--shadow-sm);
+  }
+
+  /* Dismissed (greyed) finding card — collapsed, muted, dashed border, with a
+     "click to restore" affordance. Heavy detail/viz are not rendered. */
+  .fc--dismissed {
+    gap: 6px;
+    padding: 12px 16px;
+    background: var(--surface-1, var(--surface-2));
+    border-style: dashed;
+    box-shadow: none;
+    opacity: 0.55;
+    cursor: pointer;
+    transition: opacity 0.12s ease;
+  }
+
+  .fc--dismissed:hover,
+  .fc--dismissed:focus-visible {
+    opacity: 0.78;
+  }
+
+  .fc-dismissed-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .fc-dismissed-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .fc-dismissed-hint {
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink-3);
   }
 
   .fc-top {
@@ -6032,6 +6117,14 @@
   .fc-btn-prd:disabled {
     opacity: 0.55;
     cursor: not-allowed;
+  }
+
+  .fc-btn-prd--aggressive {
+    background: linear-gradient(135deg, #10b981, #059669);
+    border-color: #059669;
+  }
+  .fc-btn-prd--aggressive:hover:not(:disabled) {
+    background: linear-gradient(135deg, #059669, #047857);
   }
 
   .fc-btn-secondary {

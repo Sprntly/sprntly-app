@@ -10,3 +10,14 @@ if (!globalThis.crypto) {
     configurable: true,
   })
 }
+
+// jsdom doesn't implement Element.prototype.scrollIntoView. Components that
+// auto-scroll a thread (e.g. BriefChat's end-of-thread ref) call it on mount;
+// without this stub the call throws, and the unhandled rejections cascade into
+// an OOM during the run. Test-only no-op; real browsers provide it natively.
+if (
+  typeof Element !== "undefined" &&
+  !Element.prototype.scrollIntoView
+) {
+  Element.prototype.scrollIntoView = function scrollIntoView() {}
+}

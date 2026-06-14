@@ -57,6 +57,22 @@ export const COWORKERS: CoworkerMeta[] = [
 
 export const COWORKER_SLOTS: CoworkerSlot[] = COWORKERS.map((c) => c.slot)
 
+/**
+ * User-facing subset of the catalog. Only the Product (pm) coworker is shown
+ * in the teammate UI (onboarding naming step). The other slots (pd / ds /
+ * admin) stay in the full COWORKERS catalog because the backend contract
+ * (GET/PUT /v1/company/coworkers, backend/app/coworkers.py) always round-trips
+ * all four slots — they're sent with default names via withCoworkerDefaults so
+ * the PUT payload stays valid, just never surfaced to the user.
+ */
+export const VISIBLE_COWORKERS: CoworkerMeta[] = COWORKERS.filter(
+  (c) => c.slot === "pm",
+)
+
+export const VISIBLE_COWORKER_SLOTS: CoworkerSlot[] = VISIBLE_COWORKERS.map(
+  (c) => c.slot,
+)
+
 export function emptyCoworkerNames(): CoworkerNames {
   return { pm: "", pd: "", ds: "", admin: "" }
 }
@@ -71,9 +87,13 @@ export function normalizeCoworkerNames(names: CoworkerNames): CoworkerNames {
   }
 }
 
-/** All four coworkers must be named before the workspace can launch. */
+/** Every VISIBLE coworker (Product only) must be named before launch. The
+ *  hidden slots (pd / ds / admin) are filled with defaults on save, so they
+ *  never gate launch. */
 export function canLaunchWorkspace(names: CoworkerNames): boolean {
-  return COWORKER_SLOTS.every((slot) => names[slot].trim().length > 0)
+  return VISIBLE_COWORKER_SLOTS.every(
+    (slot) => names[slot].trim().length > 0,
+  )
 }
 
 /** Sensible default names so coworker naming is OPTIONAL: any slot the user

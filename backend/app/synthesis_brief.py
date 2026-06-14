@@ -1,11 +1,13 @@
 """KG-synthesis brief engine — the read path the UI already speaks.
 
-This is the production engine behind the weekly brief when
-``settings.brief_engine == "synthesis"`` (the default). It bridges the UI's
-dataset-slug world to the knowledge-graph world:
+This is the engine behind the weekly brief. It bridges the UI's dataset-slug
+world to the knowledge-graph world:
 
     slug → company_id  (companies.slug is the tenant key + the dataset slug)
-    seed-if-empty      (no KG signals yet → extract the corpus + best-effort
+    seed-incremental   (always extract corpus docs not yet ingested — tracked
+                        by a per-doc content hash in `kg_source` — so a doc
+                        uploaded *after* the first brief still flows into the
+                        graph; on a first-ever (empty) KG also do best-effort
                         connector pulls so convergence has something to rank)
     run_synthesis(...) (convergence → ranked insights → save_brief into the
                         SAME `briefs` table the UI's /current,/status,/{id}
@@ -16,17 +18,24 @@ behind the flag; this module never calls it.
 
 Seeding is resilient + bounded: corpus docs and connector pulls are capped, and
 every extraction is error-isolated so one bad doc/connector can't abort the
-seed. Seeding only runs when the KG has no active signals for the company — a
-populated graph skips straight to synthesis.
+seed. The corpus seed is INCREMENTAL — only docs whose content hash isn't
+already recorded as a `corpus_doc` source get (re-)extracted, so newly-uploaded
+docs always reach the brief while unchanged ones are skipped cheaply. Connector
+pulls run only on a first-ever (empty) KG; they have their own ongoing sync path
+(pipeline stage 1 + auto-sync-on-connect), so we don't re-pull them every regen.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import uuid
 
 from app.corpus import load_corpus
+from app.db.briefs import get_current_brief
 from app.db.companies import company_id_for_slug, slug_for_company_id
-from app.graph.extractor import extract_document
+from app.graph.extractor import _NS, extract_document
 from app.graph.facade import GraphFacade
+from app.graph.types import Source
 from app.synthesis.agent import EmptyKnowledgeGraphError, run_synthesis
 
 logger = logging.getLogger(__name__)
@@ -69,20 +78,43 @@ def _kg_is_empty(facade: GraphFacade, company_id: str) -> bool:
 
 
 def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
-    """Extract up to MAX_SEED_DOCS of the company's corpus into the KG.
+    """Incrementally extract the company's corpus into the KG.
+
+    Only docs whose content hash isn't already recorded as a `corpus_doc`
+    `kg_source` row get extracted, so a doc uploaded *after* the first brief
+    still flows in, while unchanged docs are skipped cheaply (and don't count
+    toward the MAX_SEED_DOCS new-doc cap). Extraction itself is idempotent
+    (content-keyed signal ids), so a re-extract of edited text self-dedups.
 
     Error-isolated per doc (mirrors /v1/synthesis/seed): one bad doc logs +
-    is skipped, the rest proceed. Missing corpus is not fatal — a company
-    might be connector-only.
+    is skipped, the rest proceed; the source row is recorded ONLY after a
+    successful extract, so a failed doc retries on the next run. Missing corpus
+    is not fatal — a company might be connector-only.
     """
-    totals = {"signals": 0, "themes": 0, "skipped": 0, "docs": 0}
+    totals = {"signals": 0, "themes": 0, "skipped": 0, "docs": 0, "unchanged": 0}
     try:
         corpus = load_corpus(slug)
     except (FileNotFoundError, RuntimeError) as e:
         logger.info("seed: no corpus for %s (%s) — skipping corpus extraction",
                     slug, e)
         return totals
-    for doc in corpus.docs[:MAX_SEED_DOCS]:
+
+    # Load the already-ingested content hashes once (the per-doc ledger).
+    existing = {
+        s.config.get("content_sha")
+        for s in facade.list_sources(company_id, source_type="corpus_doc")
+        if s.config
+    }
+
+    extracted = 0
+    for doc in corpus.docs:
+        sha = hashlib.sha256(f"{company_id}|{doc.text}".encode()).hexdigest()
+        if sha in existing:
+            totals["unchanged"] += 1
+            continue
+        # Cap NEW extractions per run; keep cheaply skipping unchanged docs.
+        if extracted >= MAX_SEED_DOCS:
+            continue
         try:
             r = extract_document(
                 facade, company_id, doc_name=doc.name, text=doc.text
@@ -90,6 +122,16 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]
             totals["docs"] += 1
+            extracted += 1
+            # Record the doc as ingested ONLY after a successful extract.
+            facade.create_source(company_id, Source(
+                id=str(uuid.uuid5(_NS, f"corpus-doc|{company_id}|{sha}")),
+                enterprise_id=company_id,
+                source_type="corpus_doc",
+                label=doc.name[:200],
+                config={"content_sha": sha, "doc": doc.name},
+            ))
+            existing.add(sha)
         except Exception:  # noqa: BLE001 — error-isolation per doc
             logger.exception("seed: corpus extraction failed for doc %s", doc.name)
     return totals
@@ -133,27 +175,32 @@ def _seed_from_connectors(facade: GraphFacade, company_id: str) -> dict:
     return totals
 
 
-def seed_if_empty(facade: GraphFacade, company_id: str, slug: str) -> dict | None:
-    """Populate the KG from the corpus + connectors, but only when it has no
-    active signals yet. Returns the seed summary, or None if the KG was already
-    populated (no seeding done)."""
-    if not _kg_is_empty(facade, company_id):
-        return None
-    logger.info("KG empty for company=%s (slug=%s) — seeding before synthesis",
-                company_id, slug)
+def seed_incremental(facade: GraphFacade, company_id: str, slug: str) -> dict:
+    """Populate the KG before synthesis, incrementally.
+
+    The corpus seed ALWAYS runs (extracting only docs not already ingested),
+    so a doc uploaded after the first brief reaches the graph. Connectors are
+    pulled ONLY on a first-ever (empty) KG — they have their own ongoing sync
+    path, so we don't re-pull them on every brief regen.
+
+    Returns {"corpus": <totals>, "connectors": <totals>|None, "was_empty": bool}.
+    """
+    was_empty = _kg_is_empty(facade, company_id)
+    if was_empty:
+        logger.info("KG empty for company=%s (slug=%s) — first-time seed "
+                    "(corpus + connectors) before synthesis", company_id, slug)
     corpus = _seed_from_corpus(facade, company_id, slug)
-    connectors = _seed_from_connectors(facade, company_id)
-    return {"corpus": corpus, "connectors": connectors}
+    connectors = _seed_from_connectors(facade, company_id) if was_empty else None
+    return {"corpus": corpus, "connectors": connectors, "was_empty": was_empty}
 
 
 def generate_all_synthesis_briefs() -> None:
     """Generate a synthesis brief for every company, warming drill-downs.
 
-    The startup counterpart to the legacy ``brief_runner.auto_generate_all``,
-    selected when ``settings.brief_engine == "synthesis"``. Mirrors the
-    scheduler's per-company synthesis cycle: error-isolated per company so one
-    bad slug/empty-KG/LLM hiccup is logged and skipped without aborting the
-    rest, and the whole pass never blocks or breaks startup.
+    The startup brief-generation pass. Mirrors the scheduler's per-company
+    synthesis cycle: error-isolated per company so one bad slug/empty-KG/LLM
+    hiccup is logged and skipped without aborting the rest, and the whole pass
+    never blocks or breaks startup.
     """
     from app.brief_runner import warm_synthesis_drilldowns
     from app.db.companies import list_companies
@@ -185,12 +232,43 @@ def generate_all_synthesis_briefs() -> None:
 def generate_brief_for(company_id_or_slug: str) -> dict:
     """Generate + persist the KG-driven weekly brief for one company.
 
-    Resolves slug↔company_id, seeds the KG if empty, then runs synthesis
-    (which save_brief()s into the `briefs` table the UI reads). Returns the
-    brief payload. Raises ValueError if the identifier is unknown or if the KG
-    is still empty after seeding (run_synthesis raises on no themes).
+    Resolves slug↔company_id, incrementally seeds the KG (always picking up
+    newly-uploaded corpus docs), then runs synthesis (which save_brief()s into
+    the `briefs` table the UI reads). Returns the brief payload. Raises
+    ValueError if the identifier is unknown or if the KG is still empty after
+    seeding (run_synthesis raises on no themes).
+
+    Refresh-gating: if a current brief already exists AND no new signal has
+    entered the KG since it was generated, synthesis is skipped and the
+    existing brief is returned unchanged (an unchanged company keeps its brief
+    instead of regenerating an identical one). Seeding still runs first — it is
+    what CREATES the new signals we then detect — so a newly-uploaded doc adds
+    fresh signals, `has_signals_since` becomes True, and we synthesize. The
+    check is timestamp-based, so it also catches signals written by other paths
+    (DS agent, connector sync) since the last brief. The first-ever brief
+    (no prior) always synthesizes, preserving EmptyKnowledgeGraphError on an
+    empty KG.
     """
     company_id, slug = resolve_company(company_id_or_slug)
     facade = GraphFacade()
-    seed_if_empty(facade, company_id, slug)
+
+    # Capture the current brief (if any) + its timestamp BEFORE seeding, so the
+    # comparison point is the moment the existing brief was generated.
+    prior = get_current_brief(slug)
+    prior_ts = prior.get("generated_at") if prior else None
+
+    seed_incremental(facade, company_id, slug)
+
+    # Skip the expensive synthesis when nothing new has entered the KG since the
+    # current brief was generated.
+    if prior is not None and prior_ts and not facade.has_signals_since(
+        company_id, prior_ts
+    ):
+        logger.info(
+            "KG unchanged since brief %s (generated_at=%s) for company=%s "
+            "(slug=%s) — skipping synthesis, returning existing brief",
+            prior.get("id"), prior_ts, company_id, slug,
+        )
+        return prior
+
     return run_synthesis(facade, company_id, dataset_slug=slug)

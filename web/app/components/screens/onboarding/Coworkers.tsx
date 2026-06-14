@@ -10,10 +10,10 @@ import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFor
 import { ChartBar, Palette, Settings, Sparkles } from "../../auth/icons"
 import {
   canLaunchWorkspace,
-  COWORKERS,
   coworkerHandle,
   coworkersApi,
   emptyCoworkerNames,
+  VISIBLE_COWORKERS,
   withCoworkerDefaults,
   type CoworkerNames,
   type CoworkerSlot,
@@ -23,13 +23,13 @@ import {
  * Onboarding "coworkers" step — "Introducing your AI coworkers." Restyled to
  * the v4 `.cowork-*` design (page 07) on the shared OnboardingChrome.
  *
- * Four specialists join the workspace: Product / Design / Data Science /
- * Admin (the COWORKERS catalog is the source of truth). The user names each
- * one — the name is how the coworker signs its work in chats, briefs, and
+ * Only the Product coworker is surfaced (VISIBLE_COWORKERS); the user names
+ * it — the name is how the coworker signs its work in chats, briefs, and
  * comments — and a live `.cowork-handle` pill previews the handle as they
- * type ("Maya" → maya_pm). Names persist to the backend
- * (PUT /v1/company/coworkers). "Launch workspace" advances to the
- * first-brief step, where the first Brief is generated.
+ * type ("Maya" → maya_pm). The hidden slots (pd / ds / admin) still ship to
+ * the backend with default names via withCoworkerDefaults so the
+ * PUT /v1/company/coworkers contract stays valid. "Launch workspace" advances
+ * to the first-brief step, where the first Brief is generated.
  */
 
 /** Slot → avatar glyph, standing in for the mock's Tabler webfont classes
@@ -67,7 +67,7 @@ export function Coworkers() {
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(
     () =>
-      COWORKERS.map((c) => ({
+      VISIBLE_COWORKERS.map((c) => ({
         key: c.slot,
         valid: names[c.slot].trim().length > 0,
         message: `Name your ${c.label.toLowerCase()} to launch.`,
@@ -110,21 +110,21 @@ export function Coworkers() {
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
-  const namedCount = COWORKERS.filter((c) => names[c.slot].trim()).length
+  const namedCount = VISIBLE_COWORKERS.filter((c) => names[c.slot].trim()).length
 
   return (
     <OnboardingChrome
       step={4}
       title={
         <>
-          Introducing your <em>AI coworkers.</em> Give them a name.
+          Introducing your <em>AI coworker.</em> Give it a name.
         </>
       }
-      subtitle="Three specialists plus an Admin join your workspace. You can give them a task, ask them questions, or @mention them — and their name is how they'll sign their work in chats, briefs, and comments."
+      subtitle="Your Product coworker joins the workspace. You can give it a task, ask it questions, or @mention it — and its name is how it'll sign its work in chats, briefs, and comments."
       footerMeta={
         <>
-          {namedCount} of {COWORKERS.length} named ·{" "}
-          {canLaunch ? "ready to launch" : "name each coworker to launch"}
+          {namedCount} of {VISIBLE_COWORKERS.length} named ·{" "}
+          {canLaunch ? "ready to launch" : "name your coworker to launch"}
         </>
       }
       onBack={() => router.push("/onboarding/connectors")}
@@ -137,7 +137,7 @@ export function Coworkers() {
         {error && <div className="onb-form-error">{error}</div>}
 
         <div className="cowork-list">
-          {COWORKERS.map((c) => {
+          {VISIBLE_COWORKERS.map((c) => {
             const Icon = SLOT_ICONS[c.slot]
             return (
               <div key={c.slot} className="cowork" data-field={c.slot}>

@@ -213,6 +213,40 @@ export const briefApi = {
       .then((b) => ({ ...briefFromWire(b), brief_id: b.brief_id })),
 }
 
+// ---- backlog ----------------------------------------------------------------
+//
+// The backlog is the REMAINDER of the same weekly-analysis ranking that feeds
+// the brief: the top 3 ranked insights go into the brief, ranks 4..N are
+// sequenced into the backlog. The backend gates the list on a brief existing,
+// so a company that has never had a brief returns an empty backlog.
+//
+// The route is tenant-scoped via the session (no company param) — the backend
+// resolves the company from the authenticated user.
+
+export type BacklogTag = "something_new" | "something_better" | "something_broken"
+export type BacklogStatus = "backlog" | "in_progress" | "done" | "dismissed"
+
+export type BacklogItem = {
+  id: string
+  theme_id: string
+  title: string
+  tag: BacklogTag | null
+  rank: number
+  score: number
+  status: BacklogStatus
+  reasoning: string | null
+}
+
+export type BacklogList = { items: BacklogItem[]; count: number }
+
+export const backlogApi = {
+  /** Ranked backlog items (rank-ascending). Empty when no brief exists. */
+  list: () => api.get<BacklogList>("/v1/backlog"),
+  /** Move one item to a new status (in_progress | done | dismissed). */
+  setStatus: (itemId: string, status: Exclude<BacklogStatus, "backlog">) =>
+    api.patch<BacklogItem>(`/v1/backlog/${encodeURIComponent(itemId)}`, { status }),
+}
+
 export type AskCitation = { source: string; evidence: string }
 export type AskResponse = {
   answer: string
@@ -652,8 +686,9 @@ export const connectorsApi = {
 
   // ---- Generic start-OAuth ------------------------------------------------
   /**
-   * Returns the provider's OAuth authorize URL as JSON. The caller is
-   * expected to navigate the browser to it (`window.location.href = url`).
+   * Returns the provider's OAuth authorize URL as JSON. The caller opens it
+   * in a new browser tab (see `openOauthTab` in lib/connectorsOauth) so the
+   * user isn't navigated out of onboarding / settings to authorize.
    *
    * Why this exists: the legacy GET /authorize routes 307-redirect to
    * Google/Figma/GitHub, but they require auth — and a browser URL-bar
@@ -1198,8 +1233,20 @@ export type ClickUpList = {
 }
 
 export type TicketPushResult = {
-  created: { ticket: string; task_id: string; url: string }[]
-  errors: { ticket: string; error: string }[]
+  ok: boolean
+  created: { task_id: string; clickup_task_id: string; url: string; title: string }[]
+  errors: { task_id: string; title: string; error: string }[]
+}
+
+/** One task to push into ClickUp. `task_id` is the stable ticket key the user
+ *  selected; the backend merges its saved edits/comments over these base
+ *  fields before creating the ClickUp task. */
+export type TicketPushTask = {
+  task_id: string
+  title: string
+  description?: string
+  acceptance_criteria?: string[]
+  priority?: string
 }
 
 export type TicketDataResponse = {
@@ -1240,14 +1287,13 @@ export const ticketPushApi = {
   /** Fetch ClickUp lists the company can push tickets into. 404 when not connected. */
   listClickUpLists: () =>
     api.post<{ lists: ClickUpList[] }>("/v1/tickets/lists", {}),
-  /** Push one or more tickets into a ClickUp list. */
-  pushToClickUp: (
-    listId: string,
-    tickets: { title: string; description: string; priority: string }[],
-  ) =>
+  /** Push the selected tasks into a ClickUp list. The backend merges each
+   *  task's saved edits/comments over the supplied base fields, then creates
+   *  the ClickUp tasks and returns their ids + URLs so the UI can confirm. */
+  pushToClickUp: (listId: string, tasks: TicketPushTask[]) =>
     api.post<TicketPushResult>("/v1/tickets/push-clickup", {
       list_id: listId,
-      tickets,
+      tasks,
     }),
 }
 
@@ -1357,4 +1403,117 @@ export async function withAuthRetry<T>(
     }
     return await fn()
   }
+}
+
+
+// ── Multi-Agent API ─────────────────────────────────────────────────────
+
+export type MultiAgentMode = "standard" | "aggressive"
+
+export interface MultiAgentGenerateResponse {
+  run_id: string
+  status: string
+  mode: MultiAgentMode
+  brief_id: number
+  insight_index: number
+}
+
+export interface MultiAgentDocStatus {
+  id: number
+  status: string
+  title: string
+}
+
+export interface MultiAgentRunStatus {
+  run_id: string
+  status: "generating" | "ready" | "partial" | "unknown"
+  docs: Record<string, MultiAgentDocStatus>
+}
+
+export interface MultiAgentDoc {
+  id: number
+  doc_type: string
+  title: string
+  status: string
+  payload_md: string
+  error?: string
+}
+
+export interface MultiAgentDocsResponse {
+  run_id: string
+  docs: MultiAgentDoc[]
+}
+
+export const multiAgentApi = {
+  /** Kick off multi-agent generation. Returns immediately with run_id. */
+  generate: (
+    briefId: number,
+    insightIndex: number,
+    mode: MultiAgentMode = "aggressive",
+    force = false,
+  ) =>
+    api.post<MultiAgentGenerateResponse>("/v1/multi-agent/generate", {
+      brief_id: briefId,
+      insight_index: insightIndex,
+      mode,
+      force,
+    }),
+
+  /** Poll run status until all docs are ready/partial. */
+  getStatus: (runId: string) =>
+    api.get<MultiAgentRunStatus>(`/v1/multi-agent/${runId}`),
+
+  /** Fetch all generated docs for a run (full markdown). */
+  getDocs: (runId: string) =>
+    api.get<MultiAgentDocsResponse>(`/v1/multi-agent/${runId}/docs`),
+
+  /** Fetch a single doc by id. */
+  getDoc: (docId: number) =>
+    api.get<MultiAgentDoc>(`/v1/multi-agent/doc/${docId}`),
+}
+
+// ---- Artifacts (All-Chats "Artifacts" tab) ---------------------------------
+// Append-only block. A unified, recency-sorted list of every generated PRD,
+// prototype, and evidence for the active company — backs the Artifacts tab.
+// Reuses the shared `api` helper (credentials/JSON/${API_URL} centralised).
+
+/** The brief/parent-PRD context shown on an artifact row's meta line, plus the
+ *  ids the existing viewer needs to OPEN it. Discriminated by `type`. */
+export type ArtifactItem =
+  | {
+      type: "prd"
+      id: number
+      title: string
+      status: string
+      created_at: string
+      source: { brief_id: number; week_label: string | null; insight_index: number | null }
+      open: { brief_id: number; insight_index: number | null; prd_id: number }
+    }
+  | {
+      type: "evidence"
+      id: number
+      title: string
+      status: string
+      created_at: string
+      source: { brief_id: number; week_label: string | null; insight_index: number | null }
+      open: { brief_id: number; insight_index: number | null; evidence_id: number }
+    }
+  | {
+      type: "prototype"
+      id: number
+      title: string
+      status: string
+      created_at: string
+      source: { prd_id: number | null; prd_title: string }
+      open: { prototype_id: number; prd_id: number | null }
+    }
+
+export const artifactsApi = {
+  /** Unified artifact list for a company slug, newest first. */
+  list: (company: string) =>
+    api
+      .get<{ artifacts: ArtifactItem[] }>(
+        `/v1/artifacts?dataset=${encodeURIComponent(company)}`,
+      )
+      .then((r) => r.artifacts),
 }

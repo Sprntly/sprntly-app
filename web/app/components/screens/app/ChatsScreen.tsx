@@ -1,10 +1,23 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useRouter } from "next/navigation"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
-import { conversationsApi, type ConversationRecord } from "../../../lib/api"
+import { useCompany } from "../../../context/CompanyContext"
+import {
+  conversationsApi,
+  artifactsApi,
+  briefApi,
+  prdApi,
+  evidenceApi,
+  type ConversationRecord,
+  type ArtifactItem,
+} from "../../../lib/api"
 import type { ConversationRow } from "../../../types/content"
+import { markdownToPrdState } from "../../../lib/prd-adapter"
+import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
+import { prototypePath } from "../../../lib/routes"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
@@ -106,14 +119,518 @@ function formatTime(timeStr: string): string {
 
 const GROUP_ORDER = ["Pinned", "Today", "Yesterday", "This week", "Earlier"] as const
 
+// ── Weekly-brief pin ──
+//
+// The current weekly brief is surfaced as a synthetic, always-pinned entry at
+// the very top of the chats list (above per-conversation pins). It is NOT a
+// conversation row — it links to the brief surface (`goTo("brief")`). It stays
+// at the top for the entire week: `/v1/brief/current` always returns this
+// week's brief, and when a new brief lands the entry simply reflects the new
+// one (same top spot). We additionally require the brief to belong to the
+// current calendar week so a stale brief is never shown as "this week's".
+
+/** The minimal current-brief shape needed to render the pinned entry. */
+export type BriefEntry = {
+  /** Brief id (for keys / debugging); not otherwise used by the row. */
+  id: number
+  /** Human week label, e.g. "Week of May 20". */
+  weekLabel: string
+  /** Brief headline shown as the row's description. */
+  headline: string
+  /** ISO timestamp the brief was generated. */
+  generatedAt: string
+}
+
+/** True when `generatedAt` falls within the current (Sun-start) calendar week.
+ *  Used to decide whether the current brief is genuinely "this week's brief"
+ *  and should hold the pinned top slot for the entire week. */
+export function isCurrentWeekBrief(generatedAt: string, now: Date = new Date()): boolean {
+  const date = new Date(generatedAt)
+  if (Number.isNaN(date.getTime())) return false
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const weekStart = new Date(todayStart.getTime() - todayStart.getDay() * 86400000)
+  const weekEnd = new Date(weekStart.getTime() + 7 * 86400000)
+  return date >= weekStart && date < weekEnd
+}
+
+// ── Artifacts tab ──
+
+type TabId = "chats" | "artifacts"
+type ArtifactFilter = "all" | "prd" | "prototype" | "evidence"
+
+const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "prd", label: "PRDs" },
+  { id: "prototype", label: "Prototypes" },
+  { id: "evidence", label: "Evidence" },
+]
+
+const ARTIFACT_BADGE: Record<ArtifactItem["type"], { label: string; bg: string; color: string }> = {
+  prd:       { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
+  prototype: { label: "PROTOTYPE", bg: "#DBEAFE", color: "#1E40AF" },
+  evidence:  { label: "EVIDENCE",  bg: "#FEF0E6", color: "#B45309" },
+}
+
+/** Compact relative time, e.g. "just now", "3h ago", "2d ago", "May 3". */
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ""
+  const diffMs = Date.now() - then
+  const mins = Math.floor(diffMs / 60000)
+  if (mins < 1) return "just now"
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days < 7) return `${days}d ago`
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+}
+
+/** The meta/source line for a row, per the locked design. */
+function artifactSourceLine(a: ArtifactItem): string {
+  const rel = a.created_at ? relativeTime(a.created_at) : ""
+  if (a.type === "prototype") {
+    const parts = [`from PRD ${a.source.prd_title}`]
+    if (a.status) parts.push(a.status)
+    if (rel) parts.push(rel)
+    return parts.join(" · ")
+  }
+  // prd | evidence
+  const week = a.source.week_label || "brief"
+  const parts = [`from Brief ${week}`]
+  if (a.status) parts.push(a.status)
+  if (rel) parts.push(rel)
+  return parts.join(" · ")
+}
+
+function ArtifactTypeIcon({ type }: { type: ArtifactItem["type"] }) {
+  const cfg = ARTIFACT_BADGE[type]
+  const wrap: React.CSSProperties = {
+    width: 38, height: 38, borderRadius: "50%", display: "flex",
+    alignItems: "center", justifyContent: "center", background: cfg.bg, flexShrink: 0,
+  }
+  if (type === "prototype") {
+    return (
+      <div style={wrap}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" />
+        </svg>
+      </div>
+    )
+  }
+  if (type === "evidence") {
+    return (
+      <div style={wrap}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+      </div>
+    )
+  }
+  // prd
+  return (
+    <div style={wrap}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" />
+        <line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="13" y2="17" />
+      </svg>
+    </div>
+  )
+}
+
+/** Presentational artifacts list. Pure (no hooks/fetching) so it can be unit
+ *  tested with renderToStaticMarkup + a jsdom click test, mirroring the
+ *  `SlackChannelPickerView` / `LabCodeChatView` pattern in this repo. */
+export function ArtifactsView({
+  items,
+  filter,
+  loading,
+  onFilterChange,
+  onOpen,
+}: {
+  items: ArtifactItem[]
+  filter: ArtifactFilter
+  loading: boolean
+  onFilterChange: (f: ArtifactFilter) => void
+  onOpen: (a: ArtifactItem) => void
+}) {
+  const filtered = filter === "all" ? items : items.filter((a) => a.type === filter)
+
+  return (
+    <div>
+      {/* Filter chips */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {ARTIFACT_FILTERS.map((f) => {
+          const active = f.id === filter
+          return (
+            <button
+              key={f.id}
+              type="button"
+              data-filter={f.id}
+              onClick={() => onFilterChange(f.id)}
+              style={{
+                fontSize: 12.5, fontWeight: 600, padding: "5px 13px", borderRadius: 16,
+                cursor: "pointer", whiteSpace: "nowrap",
+                border: `1px solid ${active ? "var(--accent, #179463)" : "var(--line, #E8E6E0)"}`,
+                background: active ? "var(--accent, #179463)" : "var(--surface, #fff)",
+                color: active ? "#fff" : "var(--ink-2, #5A5853)",
+              }}
+            >
+              {f.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Loading skeleton — matches the chats skeleton style */}
+      {loading && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 0" }}>
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 10px", borderRadius: 10 }}>
+              <div style={{ width: 38, height: 38, borderRadius: "50%", background: "var(--surface-2, #F0EDE7)", animation: "chats-pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.1}s` }} />
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ height: 13, borderRadius: 6, background: "var(--surface-2, #F0EDE7)", width: `${50 + i * 8}%`, animation: "chats-pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.1}s` }} />
+                <div style={{ height: 10, borderRadius: 4, background: "var(--surface-2, #F0EDE7)", width: `${70 + i * 5}%`, animation: "chats-pulse 1.4s ease-in-out infinite", animationDelay: `${i * 0.15}s` }} />
+              </div>
+            </div>
+          ))}
+          <style>{`@keyframes chats-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }`}</style>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {!loading && filtered.length === 0 && (
+        <EmptyPane
+          title="No artifacts yet"
+          hint="Generate a PRD, prototype, or evidence from a brief finding."
+          placeholders={2}
+        />
+      )}
+
+      {/* List */}
+      {!loading && filtered.map((a) => (
+        <div
+          key={`${a.type}-${a.id}`}
+          data-artifact-type={a.type}
+          onClick={() => onOpen(a)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === "Enter") onOpen(a) }}
+          style={{
+            display: "flex", alignItems: "flex-start", gap: 14,
+            padding: "14px 10px", borderRadius: 10, cursor: "pointer",
+            transition: "background 0.12s",
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" }}
+        >
+          <ArtifactTypeIcon type={a.type} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
+              marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}>
+              {a.title}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{
+                fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
+                background: ARTIFACT_BADGE[a.type].bg, color: ARTIFACT_BADGE[a.type].color,
+              }}>
+                {ARTIFACT_BADGE[a.type].label}
+              </span>
+              <span style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
+                {artifactSourceLine(a)}
+              </span>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ── Chats list (presentational) ──
+
+/** The synthetic, always-pinned brief row. Pure so it renders in both
+ *  renderToStaticMarkup and jsdom tests. Identified by `data-brief-pin`. */
+function BriefPinRow({ entry, onOpen }: { entry: BriefEntry; onOpen: () => void }) {
+  const cfg = AGENT_CONFIG.pm
+  return (
+    <div
+      data-brief-pin="true"
+      onClick={onOpen}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter") onOpen() }}
+      style={{
+        display: "flex", alignItems: "flex-start", gap: 14,
+        padding: "14px 10px", borderRadius: 10, cursor: "pointer",
+        transition: "background 0.12s",
+      }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" }}
+    >
+      <AgentIcon agent="pm" />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
+          marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          This week's brief
+        </div>
+        <div style={{
+          fontSize: 12.5, color: "var(--ink-2, #5A5853)", lineHeight: 1.45,
+          marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis",
+          display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+        }}>
+          {entry.headline}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{
+            fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+            letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
+            background: cfg.bg, color: cfg.color,
+          }}>
+            {cfg.label}
+          </span>
+          <span style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
+            {entry.weekLabel}
+          </span>
+        </div>
+      </div>
+      {/* Pinned indicator (filled, always-on — this row can't be unpinned). */}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0, paddingTop: 2 }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent, #179463)" stroke="none" aria-hidden>
+          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
+        </svg>
+      </div>
+    </div>
+  )
+}
+
+/** Presentational chats list — pure (no hooks/fetching), extracted from
+ *  ChatsScreen so it can be unit-tested with renderToStaticMarkup + jsdom
+ *  clicks, mirroring `ArtifactsView`. Owns grouping (Pinned first, then by
+ *  date) and renders the always-pinned `briefEntry` at the very top of Pinned. */
+export function ChatsListView({
+  rows,
+  briefEntry,
+  onRowClick,
+  onPin,
+  onDelete,
+  onOpenBrief,
+}: {
+  rows: ConversationRow[]
+  /** The current weekly brief, pinned to the top; null when there's none. */
+  briefEntry: BriefEntry | null
+  onRowClick: (row: ConversationRow) => void
+  onPin: (row: ConversationRow) => void
+  onDelete: (row: ConversationRow) => void
+  onOpenBrief: () => void
+}) {
+  const grouped = useMemo(() => {
+    const map = new Map<string, ConversationRow[]>()
+    for (const g of GROUP_ORDER) map.set(g, [])
+    for (const row of rows) {
+      if ((row as any)._pinned) {
+        map.get("Pinned")!.push(row)
+      } else {
+        map.get(dateGroup(row.time))!.push(row)
+      }
+    }
+    return map
+  }, [rows])
+
+  return (
+    <>
+      {GROUP_ORDER.map((group) => {
+        const dataRows = grouped.get(group) ?? []
+        // The brief pin lives at the head of the Pinned group. The group is
+        // rendered whenever it has rows OR a brief pin to show.
+        const showBriefPin = group === "Pinned" && !!briefEntry
+        if (dataRows.length === 0 && !showBriefPin) return null
+        return (
+          <div key={group}>
+            {/* Group header with line */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 12,
+              padding: "18px 0 8px", margin: "0 0 2px",
+            }}>
+              <span style={{
+                fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+                letterSpacing: "0.06em", color: "var(--ink-3, #8C8A84)",
+                whiteSpace: "nowrap",
+              }}>
+                {group}
+              </span>
+              <div style={{ flex: 1, height: 1, background: "var(--line, #E8E6E0)" }} />
+            </div>
+
+            {/* Always-pinned weekly brief, at the very top of Pinned. */}
+            {showBriefPin && briefEntry && (
+              <BriefPinRow entry={briefEntry} onOpen={onOpenBrief} />
+            )}
+
+            {dataRows.map((row) => {
+              const agent = detectAgent(row.title)
+              const cfg = AGENT_CONFIG[agent]
+              const isPinned = group === "Pinned"
+              const extraMeta = getExtraMeta(row, agent)
+
+              return (
+                <div
+                  key={row.id}
+                  onClick={() => onRowClick(row)}
+                  style={{
+                    display: "flex", alignItems: "flex-start", gap: 14,
+                    padding: "14px 10px", borderRadius: 10, cursor: "pointer",
+                    transition: "background 0.12s",
+                  }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" }}
+                >
+                  <AgentIcon agent={agent} />
+
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {/* Title */}
+                    <div style={{
+                      fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
+                      marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>
+                      {row.title}
+                    </div>
+
+                    {/* Description */}
+                    <div style={{
+                      fontSize: 12.5, color: "var(--ink-2, #5A5853)", lineHeight: 1.45,
+                      marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis",
+                      display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+                    }}>
+                      {row.savedTurn?.query || row.title}
+                    </div>
+
+                    {/* Agent pill + extra meta */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                        letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
+                        background: cfg.bg, color: cfg.color,
+                      }}>
+                        {cfg.label}
+                      </span>
+                      {extraMeta.map((m, i) => (
+                        <span key={i} style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
+                          {i > 0 && <span style={{ margin: "0 2px" }}>·</span>}
+                          {m}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Time + actions */}
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0, paddingTop: 2 }}>
+                    <span style={{ fontSize: 11, color: "var(--ink-4, #B0AEA6)", whiteSpace: "nowrap" }}>
+                      {formatTime(row.time)}
+                    </span>
+                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      {/* Pin toggle */}
+                      <button
+                        type="button"
+                        title={isPinned ? "Unpin" : "Pin"}
+                        onClick={(e) => { e.stopPropagation(); onPin(row) }}
+                        style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 1 }}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? "var(--accent, #179463)" : "none"} stroke={isPinned ? "none" : "var(--ink-4, #B0AEA6)"} strokeWidth="2">
+                          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
+                        </svg>
+                      </button>
+                      {/* Delete */}
+                      {(row as any)._dbId && (
+                        <button
+                          type="button"
+                          title="Delete"
+                          onClick={(e) => { e.stopPropagation(); onDelete(row) }}
+                          style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 1, color: "var(--ink-4, #B0AEA6)", fontSize: 14 }}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
 // ── Screen ──
 
 export function ChatsScreen() {
-  const { goTo, setPendingOndemandDraft } = useNavigation()
-  const { content } = useContent()
+  const { goTo, setPendingOndemandDraft, openContentPanel } = useNavigation()
+  const { content, setContent } = useContent()
+  const { activeCompany } = useCompany()
+  const router = useRouter()
   const [search, setSearch] = useState("")
   const [dbChats, setDbChats] = useState<ConversationRecord[]>([])
   const [loaded, setLoaded] = useState(false)
+
+  // ── Current weekly brief (drives the always-pinned top entry) ──
+  const [briefEntry, setBriefEntry] = useState<BriefEntry | null>(null)
+
+  // ── Tab + artifacts state ──
+  const [tab, setTab] = useState<TabId>("chats")
+  const [artifacts, setArtifacts] = useState<ArtifactItem[]>([])
+  const [artifactsLoading, setArtifactsLoading] = useState(false)
+  const [artifactFilter, setArtifactFilter] = useState<ArtifactFilter>("all")
+
+  // Refetch artifacts whenever the Artifacts tab is opened or the company
+  // changes (the required refetch-on-open baseline — no real-time wiring).
+  useEffect(() => {
+    if (tab !== "artifacts" || !activeCompany) return
+    let cancelled = false
+    setArtifactsLoading(true)
+    artifactsApi.list(activeCompany)
+      .then((rows) => { if (!cancelled) setArtifacts(rows) })
+      .catch(() => { if (!cancelled) setArtifacts([]) })
+      .finally(() => { if (!cancelled) setArtifactsLoading(false) })
+    return () => { cancelled = true }
+  }, [tab, activeCompany])
+
+  // Row click → OPEN the existing viewer, reusing the brief's exact mechanisms:
+  //  - prd      → load by id, setContent({prd, prdMeta}) + openContentPanel("prd")
+  //  - evidence → load by id, setContent({evidence}) + openContentPanel("evidence")
+  //  - prototype→ router.push(/prototype?prd=<prd_id>) (the in-tab canvas surface)
+  const openArtifact = useCallback(async (a: ArtifactItem) => {
+    try {
+      if (a.type === "prd") {
+        const rec = await prdApi.get(a.open.prd_id)
+        setContent({
+          prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined },
+          prdMeta: { briefId: a.open.brief_id, insightIndex: a.open.insight_index ?? 0 },
+        })
+        openContentPanel("prd")
+        return
+      }
+      if (a.type === "evidence") {
+        const rec = await evidenceApi.get(a.open.evidence_id)
+        // Set evidence content directly (no detail.meta), so the EvidenceTab
+        // renders the loaded doc without re-generating.
+        setContent({ evidence: markdownToEvidenceState(rec.payload_md), evidenceGenerating: false })
+        openContentPanel("evidence")
+        return
+      }
+      // prototype — open the in-tab canvas for its parent PRD.
+      router.push(prototypePath(a.open.prd_id))
+    } catch {
+      /* Best-effort open; a failed load leaves the list in place. */
+    }
+  }, [setContent, openContentPanel, router])
 
   // Load from Supabase on mount
   useEffect(() => {
@@ -123,6 +640,34 @@ export function ChatsScreen() {
     }).catch(() => { if (!cancelled) setLoaded(true) })
     return () => { cancelled = true }
   }, [])
+
+  // Fetch the current weekly brief so we can pin it to the top of the list.
+  // `/v1/brief/current` always returns this week's brief, so the pinned entry
+  // automatically stays put for the whole week and swaps to the new brief when
+  // one is generated. We only surface it when the brief belongs to the current
+  // calendar week — a 404 (no brief yet) or a stale brief leaves it unpinned,
+  // so we never render a broken/empty pinned row. The brief page owns its own
+  // generating/empty states, so we don't duplicate them here.
+  useEffect(() => {
+    if (!activeCompany) return
+    let cancelled = false
+    briefApi.current(activeCompany)
+      .then((brief) => {
+        if (cancelled) return
+        if (!isCurrentWeekBrief(brief.generated_at)) { setBriefEntry(null); return }
+        setBriefEntry({
+          id: brief.id,
+          weekLabel: brief.week_label || "This week",
+          headline: brief.summary_headline || "Your weekly brief is ready.",
+          generatedAt: brief.generated_at,
+        })
+      })
+      .catch(() => {
+        // 404 = no brief yet this week; any other error → just omit the entry.
+        if (!cancelled) setBriefEntry(null)
+      })
+    return () => { cancelled = true }
+  }, [activeCompany])
 
   // Map DB records to ConversationRow shape
   const dbRows: ConversationRow[] = useMemo(() =>
@@ -180,19 +725,8 @@ export function ChatsScreen() {
     )
   }, [allChats, search])
 
-  // Group: pinned items first, rest by date
-  const grouped = useMemo(() => {
-    const map = new Map<string, ConversationRow[]>()
-    for (const g of GROUP_ORDER) map.set(g, [])
-    for (const row of filtered) {
-      if ((row as any)._pinned) {
-        map.get("Pinned")!.push(row)
-      } else {
-        map.get(dateGroup(row.time))!.push(row)
-      }
-    }
-    return map
-  }, [filtered])
+  // Opening the pinned weekly-brief entry → the brief surface (`/brief`).
+  const openBrief = useCallback(() => { goTo("brief") }, [goTo])
 
   const handleRowClick = async (row: ConversationRow) => {
     const dbId = (row as any)._dbId as number | undefined
@@ -238,16 +772,36 @@ export function ChatsScreen() {
       <div style={{ maxWidth: 780, margin: "0 auto", padding: "0 4px" }}>
         {/* Top bar */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontSize: 16, fontWeight: 600, color: "var(--ink, #1A1A17)" }}>All chats</span>
-            <span style={{
-              fontSize: 12, fontWeight: 500, color: "var(--ink-3, #8C8A84)",
-              background: "var(--surface-2, #F0EDE7)", padding: "2px 8px", borderRadius: 20,
-            }}>
-              {allChats.length}
-            </span>
+          {/* Chats | Artifacts tab switcher */}
+          <div style={{
+            display: "flex", gap: 2, padding: 2, borderRadius: 8,
+            background: "var(--surface-2, #F0EDE7)",
+          }}>
+            {([["chats", "Chats"], ["artifacts", "Artifacts"]] as const).map(([id, label]) => {
+              const active = tab === id
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  data-tab={id}
+                  onClick={() => setTab(id)}
+                  style={{
+                    fontSize: 12.5, fontWeight: 600, padding: "5px 14px", borderRadius: 6,
+                    border: "none", cursor: "pointer",
+                    background: active ? "var(--surface, #fff)" : "transparent",
+                    color: active ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
+                    boxShadow: active ? "0 1px 2px rgba(0,0,0,0.06)" : "none",
+                  }}
+                >
+                  {label}
+                </button>
+              )
+            })}
           </div>
 
+          {/* Search (Chats tab only) */}
+          {tab === "chats" && (
+          <>
           {/* Search */}
           <div style={{ flex: 1, position: "relative" }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8C8A84" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
@@ -273,6 +827,11 @@ export function ChatsScreen() {
               ⌘K
             </span>
           </div>
+          </>
+          )}
+
+          {/* Spacer keeps New chat right-aligned when the search is hidden */}
+          {tab === "artifacts" && <div style={{ flex: 1 }} />}
 
           {/* New chat */}
           <button
@@ -289,6 +848,20 @@ export function ChatsScreen() {
           </button>
         </div>
 
+        {/* Artifacts tab */}
+        {tab === "artifacts" && (
+          <ArtifactsView
+            items={artifacts}
+            filter={artifactFilter}
+            loading={artifactsLoading}
+            onFilterChange={setArtifactFilter}
+            onOpen={openArtifact}
+          />
+        )}
+
+        {/* Chats tab (default) */}
+        {tab === "chats" && (
+        <>
         {/* Loading state */}
         {!loaded && (
           <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "20px 0" }}>
@@ -326,119 +899,19 @@ export function ChatsScreen() {
           </div>
         )}
 
-        {/* Grouped list */}
-        {!loaded ? null : GROUP_ORDER.map((group) => {
-          const rows = grouped.get(group)
-          if (!rows || rows.length === 0) return null
-          return (
-            <div key={group}>
-              {/* Group header with line */}
-              <div style={{
-                display: "flex", alignItems: "center", gap: 12,
-                padding: "18px 0 8px", margin: "0 0 2px",
-              }}>
-                <span style={{
-                  fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-                  letterSpacing: "0.06em", color: "var(--ink-3, #8C8A84)",
-                  whiteSpace: "nowrap",
-                }}>
-                  {group}
-                </span>
-                <div style={{ flex: 1, height: 1, background: "var(--line, #E8E6E0)" }} />
-              </div>
-
-              {rows.map((row) => {
-                const agent = detectAgent(row.title)
-                const cfg = AGENT_CONFIG[agent]
-                const isPinned = group === "Pinned"
-                const extraMeta = getExtraMeta(row, agent)
-
-                return (
-                  <div
-                    key={row.id}
-                    onClick={() => handleRowClick(row)}
-                    style={{
-                      display: "flex", alignItems: "flex-start", gap: 14,
-                      padding: "14px 10px", borderRadius: 10, cursor: "pointer",
-                      transition: "background 0.12s",
-                    }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" }}
-                  >
-                    <AgentIcon agent={agent} />
-
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      {/* Title */}
-                      <div style={{
-                        fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
-                        marginBottom: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                      }}>
-                        {row.title}
-                      </div>
-
-                      {/* Description */}
-                      <div style={{
-                        fontSize: 12.5, color: "var(--ink-2, #5A5853)", lineHeight: 1.45,
-                        marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis",
-                        display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
-                      }}>
-                        {row.savedTurn?.query || row.title}
-                      </div>
-
-                      {/* Agent pill + extra meta */}
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <span style={{
-                          fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-                          letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
-                          background: cfg.bg, color: cfg.color,
-                        }}>
-                          {cfg.label}
-                        </span>
-                        {extraMeta.map((m, i) => (
-                          <span key={i} style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
-                            {i > 0 && <span style={{ margin: "0 2px" }}>·</span>}
-                            {m}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Time + actions */}
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0, paddingTop: 2 }}>
-                      <span style={{ fontSize: 11, color: "var(--ink-4, #B0AEA6)", whiteSpace: "nowrap" }}>
-                        {formatTime(row.time)}
-                      </span>
-                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                        {/* Pin toggle */}
-                        <button
-                          type="button"
-                          title={isPinned ? "Unpin" : "Pin"}
-                          onClick={(e) => { e.stopPropagation(); handlePin(row) }}
-                          style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 1 }}
-                        >
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? "var(--accent, #179463)" : "none"} stroke={isPinned ? "none" : "var(--ink-4, #B0AEA6)"} strokeWidth="2">
-                            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
-                          </svg>
-                        </button>
-                        {/* Delete */}
-                        {(row as any)._dbId && (
-                          <button
-                            type="button"
-                            title="Delete"
-                            onClick={(e) => { e.stopPropagation(); handleDelete(row) }}
-                            style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 1, color: "var(--ink-4, #B0AEA6)", fontSize: 14 }}
-                          >
-                            ×
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )
-        })}
+        {/* Grouped list — Pinned (incl. the weekly brief) first, then by date */}
+        {loaded && (
+          <ChatsListView
+            rows={filtered}
+            briefEntry={briefEntry}
+            onRowClick={handleRowClick}
+            onPin={handlePin}
+            onDelete={handleDelete}
+            onOpenBrief={openBrief}
+          />
+        )}
+        </>
+        )}
       </div>
     </AppLayout>
   )

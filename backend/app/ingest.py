@@ -4,7 +4,14 @@ Mirrors the offline `scripts/convert_dataset.py` flow but exposes it as a
 library so the upload endpoint can convert in-process. Each public converter
 returns markdown as a string; the caller decides where to write it.
 
-Supported types (v1): .docx, .xlsx, .pdf, .txt, .md
+Rich converters exist for .docx, .xlsx, .csv, .pdf, .txt, .md. Any other type
+is *accepted, never rejected*: `convert` falls back to a best-effort handler
+that passes the file through as text when it decodes cleanly (yaml, json, toml,
+logs, …) or stores a placeholder stub for binary content (audio, images, …).
+The raw bytes are always saved by the caller, so processing can be improved
+later without changing the upload contract. A .zip is not a converter here —
+it's expanded by `app.datasets.ingest_zip`, which feeds each member back
+through these converters.
 """
 from __future__ import annotations
 
@@ -134,17 +141,47 @@ SUPPORTED_SUFFIXES = tuple(_SUFFIX_TO_CONVERTER.keys())
 
 
 class UnsupportedFileType(ValueError):
-    pass
+    """Retained for callers that still catch it; `convert` no longer raises it."""
+
+
+def _looks_textual(data: bytes) -> bool:
+    """Heuristic: does this look like decodable text rather than binary?"""
+    if not data:
+        return True
+    if b"\x00" in data[:8192]:  # NUL byte → almost certainly binary
+        return False
+    try:
+        data.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def fallback_to_md(filename: str, data: bytes) -> str:
+    """Best-effort conversion for types without a dedicated converter.
+
+    Never raises: textual content (yaml/json/toml/logs/…) passes through as-is;
+    binary content (audio/images/…) becomes a placeholder stub so the file still
+    lands as a source. The raw bytes are preserved by the caller either way.
+    """
+    if _looks_textual(data):
+        return data.decode("utf-8", errors="replace")
+    suffix = Path(filename).suffix.lower() or "(none)"
+    kb = max(1, round(len(data) / 1024))
+    return (
+        f"# {Path(filename).name}\n\n"
+        f"_Stored as a source but not yet parsed (type {suffix}, {kb} KB). "
+        "Binary or unrecognized format — its content is not included in "
+        "analysis yet._\n"
+    )
 
 
 def convert(filename: str, data: bytes) -> str:
-    """Dispatch by extension. Raises UnsupportedFileType for unknown formats."""
+    """Dispatch by extension; unknown types fall back instead of failing."""
     suffix = Path(filename).suffix.lower()
     fn = _SUFFIX_TO_CONVERTER.get(suffix)
     if fn is None:
-        raise UnsupportedFileType(
-            f"Unsupported file type {suffix!r}. Supported: {', '.join(SUPPORTED_SUFFIXES)}"
-        )
+        return fallback_to_md(filename, data)
     return fn(data)
 
 

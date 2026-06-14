@@ -135,7 +135,7 @@ function AddTicketModal({ onClose, onAdd }: { onClose: () => void; onAdd: (t: In
         const listsRes = await ticketPushApi.listClickUpLists()
         if (listsRes.lists.length > 0) {
           await ticketPushApi.pushToClickUp(listsRes.lists[0].id, [{
-            title: ticket.title, description: ticket.description, priority: ticket.priority,
+            task_id: ticket.id, title: ticket.title, description: ticket.description, priority: ticket.priority,
           }])
         }
       } catch { /* silent — saved internally */ }
@@ -323,6 +323,7 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
     setPushMessage(null)
     try {
       const res = await ticketPushApi.pushToClickUp(listId, [{
+        task_id: ticket.id,
         title: ticket.title,
         description: ticket.description,
         priority: ticket.priority,

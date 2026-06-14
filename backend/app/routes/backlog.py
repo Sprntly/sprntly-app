@@ -8,7 +8,16 @@ Two routes (both tenant-scoped via require_company):
                                  (in_progress | done | dismissed).
 
 Items are produced by the synthesis run (sequence_backlog) — every theme that
-didn't make the weekly brief, carrying its rank, score, and triage rationale.
+didn't make the weekly brief's TOP 3, carrying its rank, score, and triage
+rationale. The backlog is therefore the REMAINDER (rank ≥ 4) of the same
+analysis that produced the brief.
+
+Empty-when-no-brief invariant: the backlog is the by-product of a weekly brief
+generation, so a company that has never had a brief generated MUST show an
+empty backlog. The GET route enforces this explicitly — it returns no items
+unless a brief exists for the company — so stale/orphaned rows (e.g. a brief
+deleted after the fact) can never surface a backlog without an analysis behind
+it.
 """
 from __future__ import annotations
 
@@ -23,6 +32,8 @@ from app.db.backlog import (
     list_backlog_items,
     update_backlog_status,
 )
+from app.db.briefs import get_current_brief
+from app.db.companies import slug_for_company_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +44,29 @@ class StatusUpdate(BaseModel):
     status: str
 
 
+def _company_has_brief(company_id: str) -> bool:
+    """True iff a current weekly brief exists for this company.
+
+    Briefs are keyed by the dataset slug (`briefs.dataset == companies.slug`),
+    mirroring how the brief routes scope by slug. No slug / no brief row → the
+    company has never had an analysis, so its backlog must be empty.
+    """
+    slug = slug_for_company_id(company_id)
+    if slug is None:
+        return False
+    return get_current_brief(slug) is not None
+
+
 @router.get("")
 def get_backlog(company: CompanyContext = Depends(require_company)):
-    """The enterprise's ranked backlog (rank-ascending)."""
+    """The enterprise's ranked backlog (ranks ≥ 4 of the latest analysis).
+
+    Empty when no weekly brief has ever been generated for the company: the
+    backlog is the remainder of the brief's ranking, so with no brief there is
+    no analysis to draw a backlog from.
+    """
+    if not _company_has_brief(company.company_id):
+        return {"items": [], "count": 0}
     items = list_backlog_items(company.company_id)
     return {"items": items, "count": len(items)}
 

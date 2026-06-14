@@ -27,6 +27,7 @@ from app.graph.types import Entity, Relationship
 from app.prompts import BRIEF_SCHEMA_VERSION
 from app.synthesis.convergence import ThemeConvergence, compute_convergence
 from app.synthesis.delivery import deliver_brief_to_slack
+from app.synthesis.email_delivery import deliver_brief_to_email
 from app.synthesis.backlog import sequence_backlog
 from app.synthesis.scoring import classify_theme_fit, score_candidates
 
@@ -34,7 +35,9 @@ logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "synthesis-brief-v1"
 MAX_CANDIDATES = 8   # themes sent to the LLM judge
-MAX_INSIGHTS = 5     # spec: 3–5 ranked recommendations
+MAX_INSIGHTS = 3     # the weekly brief surfaces the TOP 3 ranked insights;
+                     # ranks 4..N are sequenced into the backlog (a single
+                     # analysis run → top 3 = brief, the rest = backlog).
 
 
 class EmptyKnowledgeGraphError(ValueError):
@@ -106,8 +109,10 @@ _BRIEF_SCHEMA = {
 _SYSTEM = """You are Sprntly's Synthesis Agent, ranking product themes for a weekly \
 brief. You receive candidate themes with computed convergence evidence from the \
 company's knowledge graph (multi-source signals with weights, revenue at stake, \
-competitive pressure). Select and rank the top findings (3-5) a product manager \
-should act on this week.
+competitive pressure). Select and rank the TOP 3 findings a product manager \
+should act on this week — the highest-priority insights for the weekly brief. \
+(Lower-priority candidates are sequenced into the backlog separately, so focus \
+the brief on the three that matter most.)
 
 Rules:
 - Ground every claim in the provided evidence — never invent numbers.
@@ -305,4 +310,15 @@ def run_synthesis(
     ):
         logger.warning("brief slack delivery: %s", delivery)
     brief["_slack_delivery"] = delivery
+
+    # Email is a SECOND, independent delivery channel (v0 checklist 2.4). Same
+    # side-effect contract as Slack: never raises, never blocks the brief. Gated
+    # per-company by notification_settings.email_enabled (default OFF), so it is
+    # a clean no-op until a company opts in.
+    email_delivery = deliver_brief_to_email(enterprise_id, brief)
+    if not email_delivery.get("delivered") and email_delivery.get("reason") not in (
+        "email_disabled", "no_recipients", "resend_not_configured"
+    ):
+        logger.warning("brief email delivery: %s", email_delivery)
+    brief["_email_delivery"] = email_delivery
     return brief

@@ -4,7 +4,9 @@ A "dataset" maps 1:1 to a company (or product, or whatever the user is
 modeling). Files live under DATA_DIR/<slug>/, where:
 
   DATA_DIR/<slug>/
-    raw/        ← uploaded originals (.docx, .xlsx, .pdf, .txt)
+    raw/        ← uploaded originals (any type; rich converters exist for
+                  .docx/.xlsx/.csv/.pdf/.txt/.md, others are stored as-is; a
+                  .zip is expanded and its members ingested individually)
     *.md        ← converted corpus, fed to the LLM
     _reference/ ← optional answer keys (ignored by the corpus loader)
 
@@ -14,7 +16,9 @@ inserts a row + mkdir, upload writes the file + converts it.
 """
 from __future__ import annotations
 
+import io
 import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -152,6 +156,85 @@ def ingest_file(slug: str, filename: str, data: bytes) -> IngestedFile:
         md_path=str(md_target),
         md_chars=len(md_text),
     )
+
+
+# ZIP archives ------------------------------------------------------------
+# A .zip is expanded and each supported member is ingested individually
+# (one .md per inner file). Guards against zip-bomb / path-traversal abuse:
+# basename-only paths, per-member + total uncompressed caps, member-count cap,
+# and nested zips are skipped (never recursed).
+_ZIP_MAX_MEMBERS = 500
+_ZIP_MAX_TOTAL_UNCOMPRESSED = 200 * 1024 * 1024  # 200 MB across the whole archive
+
+
+def _is_zip_junk(name: str) -> bool:
+    """macOS resource-fork / metadata entries to ignore."""
+    base = Path(name).name
+    return (
+        name.startswith("__MACOSX/")
+        or base.startswith("._")
+        or base == ".DS_Store"
+        or not base
+    )
+
+
+def ingest_zip(
+    slug: str, filename: str, data: bytes, *, per_member_max_bytes: int
+) -> tuple[list[IngestedFile], list[dict]]:
+    """Expand a .zip and ingest each supported member as its own source.
+
+    Returns (ingested, errors) — partial success is fine: unsupported members,
+    oversized members, and junk are skipped with a per-member error rather than
+    failing the whole archive. Raises DatasetNotFound / DatasetError for
+    archive-level problems (bad zip, no usable contents).
+    """
+    if not db.dataset_exists(slug):
+        raise DatasetNotFound(f"Dataset {slug!r} does not exist")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise DatasetError(f"{Path(filename).name!r} is not a valid zip archive") from exc
+
+    ingested: list[IngestedFile] = []
+    errors: list[dict] = []
+    total_uncompressed = 0
+    with zf:
+        for info in zf.infolist():
+            if info.is_dir() or _is_zip_junk(info.filename):
+                continue
+            base = Path(info.filename).name  # basename only → no path traversal
+            suffix = Path(base).suffix.lower()
+            if suffix == ".zip":
+                # Nested zips are never recursed (zip-bomb guard).
+                errors.append({"filename": base, "error": "Nested zip skipped"})
+                continue
+            # Any other type is accepted — ingest_file converts what it can and
+            # stores the rest as-is. We no longer reject unknown suffixes here.
+            if info.file_size > per_member_max_bytes:
+                errors.append({
+                    "filename": base,
+                    "error": f"Member exceeds {per_member_max_bytes // (1024*1024)}MB limit",
+                })
+                continue
+            total_uncompressed += info.file_size
+            if total_uncompressed > _ZIP_MAX_TOTAL_UNCOMPRESSED:
+                errors.append({"filename": base, "error": "Archive too large (uncompressed cap exceeded)"})
+                break
+            if len(ingested) >= _ZIP_MAX_MEMBERS:
+                errors.append({"filename": base, "error": "Too many files in archive"})
+                break
+            try:
+                member_bytes = zf.read(info)
+                ingested.append(ingest_file(slug, base, member_bytes))
+            except UnsupportedFileType as exc:
+                errors.append({"filename": base, "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 — one bad member shouldn't kill the archive
+                logger.exception("Zip member ingest failed for %s/%s", slug, base)
+                errors.append({"filename": base, "error": f"Conversion failed: {exc}"})
+
+    if not ingested and not errors:
+        raise DatasetError(f"{Path(filename).name!r} contained no supported files")
+    return ingested, errors
 
 
 def list_datasets() -> list[dict]:

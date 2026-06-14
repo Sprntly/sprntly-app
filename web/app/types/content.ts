@@ -513,6 +513,11 @@ export interface AppContentState {
    *  formats on BriefScreen doesn't require a second fetch. `null` until
    *  the first brief load completes. */
   briefV2: import("../lib/brief-v2-adapter").BriefV2State | null
+  /** Coarse lifecycle of the current brief load, mirrored from
+   *  `useBriefHydration` (called once in AppShell) so the brief surface can
+   *  render a "generating…" WIP indicator without re-invoking the
+   *  side-effectful hydration hook. `null` until the first hydration tick. */
+  briefHydration: "idle" | "loading" | "ready" | "generating" | "failed" | "empty" | null
   pastWeeks: PastWeekRow[]
   shipped: ShippedState
   conversations: ConversationRow[]
@@ -525,6 +530,13 @@ export interface AppContentState {
    *  PrdScreen can refetch / regenerate against the same source.
    *  Populated by DetailScreen.handleGeneratePrd alongside `prd`. */
   prdMeta: { briefId: number; insightIndex: number } | null
+  /** True while a PRD is being generated from any chat / card / composer flow,
+   *  so ContentPanel's PrdPanelContent can show a generating spinner in the
+   *  right rail even before `content.prd` is populated. Mirrors
+   *  `evidenceGenerating`. Every "Generate/Create PRD" path opens the rail
+   *  immediately and flips this on, so the PRD always surfaces on the right —
+   *  never only as a bottom chat message. */
+  prdGenerating: boolean
   /** Generated Evidence Page doc — shares the `PrdContent` base shape (markdown
    *  sections with tables and `chart` blocks) so it can reuse the markdown
    *  adapter. Evidence carries its own `evidence_id` on the wire and never a

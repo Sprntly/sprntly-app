@@ -30,6 +30,10 @@ class SkillSpec:
     `content_hash` is the first 12 hex chars of the sha256 over every file in
     the skill directory (path + bytes), so any edit to the method, a module, a
     template, or a script changes the hash.
+
+    `description` is the one-line summary from the SKILL.md frontmatter — what
+    the router classifies against. `has_scripts` is True when the skill bundles
+    deterministic `scripts/*.py` (run for math, never estimated).
     """
 
     id: str
@@ -37,6 +41,28 @@ class SkillSpec:
     modules: dict[str, str] = field(default_factory=dict)    # name -> text
     templates: dict[str, str] = field(default_factory=dict)  # name -> text
     content_hash: str = ""
+    description: str = ""
+    has_scripts: bool = False
+
+
+def _parse_frontmatter(text: str) -> dict[str, str]:
+    """Extract simple `key: value` pairs from a leading `---`…`---` block.
+
+    Deliberately minimal (no YAML dep): handles the flat, single-line
+    `name:`/`description:` frontmatter the PM skills use. Returns {} when there
+    is no frontmatter block.
+    """
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}
+    out: dict[str, str] = {}
+    for line in text[3:end].splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            out[k.strip()] = v.strip()
+    return out
 
 
 class UnknownSkillError(KeyError):
@@ -82,12 +108,20 @@ def get_skill(skill_id: str) -> SkillSpec:
             f"unknown skill {skill_id!r}: no SKILL.md under {skill_dir}. "
             f"Vendored skills: {available}"
         )
+    method = method_path.read_text(encoding="utf-8")
+    fm = _parse_frontmatter(method)
+    scripts_dir = skill_dir / "scripts"
+    has_scripts = scripts_dir.is_dir() and any(
+        f.suffix == ".py" for f in scripts_dir.iterdir() if f.is_file()
+    )
     return SkillSpec(
         id=skill_id,
-        method=method_path.read_text(encoding="utf-8"),
+        method=method,
         modules=_read_subdir(skill_dir, "modules"),
         templates=_read_subdir(skill_dir, "templates"),
         content_hash=_content_hash(skill_dir),
+        description=fm.get("description", ""),
+        has_scripts=has_scripts,
     )
 
 
