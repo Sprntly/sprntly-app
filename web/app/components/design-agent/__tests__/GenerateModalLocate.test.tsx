@@ -272,22 +272,33 @@ describe("test_generate_in_codebase_mode_calls_locate_and_shows_analysing", () =
     expect(spy).toHaveBeenCalledWith({ prd_id: PRD_ID, github_repo: SEL_REPO })
   })
 
-  it("renders 'Analysing your codebase' when locateState=analysing", () => {
-    const html = renderModal({ _testLocateState: "analysing" })
-    expect(html).toContain('data-testid="locate-analysing"')
-    expect(html).toContain("Analysing your codebase")
+  it("renders the animated loading state (not a static label) when in the locating phase", () => {
+    const html = renderModal({ _testFlowPhase: "locating" })
+    expect(html).toContain('data-testid="generate-loading-state"')
+    // The indicator is an indeterminate heartbeat, NOT a static label that
+    // reads frozen at 8-60s.
+    expect(html).toContain('data-testid="generate-loading-heartbeat"')
   })
 })
 
-// ─── test_auto_proceed_shows_chip_and_starts_generation ──────────────────────
+// ─── test_auto_proceed_shows_matched_and_starts_generation ───────────────────
 
-describe("test_auto_proceed_shows_chip_and_starts_generation", () => {
-  it("chip renders with chosen route when locateState=chip", () => {
-    const html = renderModal({ _testLocateState: "chip", _testChosenRouteForChip: "/team" })
-    expect(html).toContain('data-testid="locate-chip"')
-    expect(html).toContain("Generating on top of")
+describe("test_auto_proceed_shows_matched_and_starts_generation", () => {
+  it("shows the transient 'matched: <screen>' line when a screen resolves", () => {
+    const html = renderModal({ _testFlowPhase: "generating", _testMatchedRoute: "/team" })
+    expect(html).toContain('data-testid="generate-loading-matched"')
+    expect(html).toContain("Matched")
     expect(html).toContain("/team")
-    expect(html).toContain("Not this screen?")
+  })
+
+  it("shows the proceed note as subtext beneath the matched line", () => {
+    const html = renderModal({
+      _testFlowPhase: "generating",
+      _testMatchedRoute: "/team",
+      _testProceedNote: "closest match, lower confidence",
+    })
+    expect(html).toContain('data-testid="generate-loading-note"')
+    expect(html).toContain("closest match")
   })
 
   it("fires runGenerateFlow after an auto_proceed locate response", async () => {
@@ -314,12 +325,12 @@ describe("test_proceed_with_note_starts_generation", () => {
   })
 })
 
-// ─── test_ranked_confirm_blocks_until_pick ───────────────────────────────────
+// ─── test_ambiguous_match_shows_picker ───────────────────────────────────────
 
-describe("test_ranked_confirm_blocks_until_pick", () => {
-  it("LocateConfirmView renders with candidates when locateState=ranked_confirm", () => {
+describe("test_ambiguous_match_shows_picker", () => {
+  it("picker renders with candidates in the picker phase", () => {
     const html = renderModal({
-      _testLocateState: "ranked_confirm",
+      _testFlowPhase: "picker",
       _testLocateResult: RANKED_CONFIRM,
     })
     expect(html).toContain('data-testid="locate-confirm-surface"')
@@ -327,12 +338,12 @@ describe("test_ranked_confirm_blocks_until_pick", () => {
     expect(html).toContain("/dashboard")
   })
 
-  it("Generate button is disabled while locateState=ranked_confirm", () => {
+  it("the config-phase action footer (Generate button) is gone in the picker phase", () => {
     const html = renderModal({
-      _testLocateState: "ranked_confirm",
+      _testFlowPhase: "picker",
       _testLocateResult: RANKED_CONFIRM,
     })
-    expect(html).toMatch(/data-testid="generate-btn"[^>]*disabled=""/)
+    expect(html).not.toContain('data-testid="generate-btn"')
   })
 })
 
@@ -344,7 +355,7 @@ describe("test_pick_carries_chosen_route_into_genstart", () => {
     const buttons = captureButtons({
       ...baseCodebaseProps(),
       onGenStart,
-      _testLocateState: "ranked_confirm",
+      _testFlowPhase: "picker",
       _testLocateResult: RANKED_CONFIRM,
     })
     const choiceBtn = buttons.find((b) => b["data-testid"] === "locate-confirm-choice")
@@ -356,13 +367,24 @@ describe("test_pick_carries_chosen_route_into_genstart", () => {
   })
 })
 
-// ─── test_unmapped_shows_fallback_no_autostart ───────────────────────────────
+// ─── test_unmapped_shows_resolve_no_autostart ────────────────────────────────
 
-describe("test_unmapped_shows_fallback_no_autostart", () => {
-  it("renders the unmapped fallback message when locateState=unmapped", () => {
-    const html = renderModal({ _testLocateState: "unmapped" })
+describe("test_unmapped_shows_resolve_no_autostart", () => {
+  it("renders the unmapped-resolve UI in the unmapped-resolve phase", () => {
+    const html = renderModal({ _testFlowPhase: "unmapped-resolve" })
+    expect(html).toContain('data-testid="unmapped-resolve"')
     expect(html).toContain('data-testid="locate-unmapped"')
     expect(html).toContain("couldn")
+    // Switch-source affordance back to config is present.
+    expect(html).toContain('data-testid="unmapped-switch-source"')
+  })
+
+  it("offers the ranked fallbacks as a picker when unmapped carries candidates", () => {
+    const html = renderModal({
+      _testFlowPhase: "unmapped-resolve",
+      _testLocateResult: { ...RANKED_CONFIRM, unmapped: true },
+    })
+    expect(html).toContain('data-testid="locate-confirm-choice"')
   })
 
   it("does not call runGenerateFlow when locate returns unmapped", async () => {
@@ -458,7 +480,8 @@ describe("test_approve_modal_mount_unchanged_optional_context", () => {
     )
     const html = renderModal({ onGenStart })
     expect(html).toContain('data-testid="generate-btn"')
-    expect(html).not.toContain('data-testid="locate-chip"')
+    // The resting config phase shows the form, not the loading/matched state.
+    expect(html).not.toContain('data-testid="generate-loading-matched"')
   })
 })
 
@@ -488,7 +511,7 @@ describe("test_no_prohibited_tokens_in_appended_lines", () => {
       join(process.cwd(), "app", "components", "design-agent", "GenerateModal.tsx"),
       "utf8",
     )
-    const section = src.slice(src.indexOf("LocateFlowState"))
+    const section = src.slice(src.indexOf("FlowPhase"))
     expect(/[CPH]\d-\d/.test(section), "ticket-series ID in GenerateModal locate section").toBe(false)
     expect(/\bAD\d/.test(section), "AD-series token in GenerateModal locate section").toBe(false)
     expect(/\bF\d{1,2}\b/.test(section), "function-req token in GenerateModal locate section").toBe(false)
