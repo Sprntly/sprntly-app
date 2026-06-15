@@ -246,12 +246,14 @@ def test_prototype_title_derived_from_parent_prd(artifacts_env, monkeypatch):
 def test_recency_sort_newest_first(artifacts_env, monkeypatch):
     ctx = _client(monkeypatch)
     brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
-    # Three artifacts with explicit, distinct timestamps.
-    _seed_prd(brief_id=brief_id, title="Oldest",
+    # Three artifacts with explicit, distinct timestamps. The two PRDs use
+    # distinct insight_index so they're separate logical PRDs (not collapsed by
+    # the latest-generation dedup) — this test is about recency sort, not dedup.
+    _seed_prd(brief_id=brief_id, title="Oldest", insight_index=0,
               generated_at="2026-05-01T00:00:00+00:00")
     _seed_evidence(brief_id=brief_id, title="Middle",
                    generated_at="2026-05-15T00:00:00+00:00")
-    prd_newest = _seed_prd(brief_id=brief_id, title="Newest",
+    prd_newest = _seed_prd(brief_id=brief_id, title="Newest", insight_index=1,
                            generated_at="2026-06-01T00:00:00+00:00")
     _seed_prototype(prd_id=prd_newest, workspace_id=ctx.company_id,
                     created_at="2026-06-10T00:00:00+00:00")
