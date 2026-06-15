@@ -22,6 +22,8 @@ import {
   prototypeTabState,
   fsParamToFullscreen,
   actionForActiveProto,
+  resolvePrdTitle,
+  needsTitleFetch,
 } from "../PrototypeRoute"
 import type { PrototypeRecord } from "../../../lib/api"
 
@@ -213,9 +215,69 @@ describe("prototype route — figma source resolver (figmaKeyForPrototype)", () 
   })
 })
 
-// The supplemental PRD fetch + panel-field picker were removed: the in-tab canvas
-// no longer renders a PRD panel (the left column is a live-only conversation
-// thread; only the PRD title survives, sourced directly from ContentContext).
+// The supplemental PRD *panel* fetch + panel-field picker were removed: the in-tab
+// canvas no longer renders a PRD panel (the left column is a live-only conversation
+// thread). Only the PRD TITLE survives — sourced from ContentContext when it holds
+// the matching PRD, else from a minimal title-only supplemental fetch so the
+// breadcrumb/titlebar show the real title on direct-nav / refresh (when
+// ContentContext is empty). The two pure helpers below pin that contract.
+
+describe("prototype route — title resolution (resolvePrdTitle)", () => {
+  // Navigation-from-within-app: ContentContext holds the matching PRD → use it.
+  it("prefers the ContentContext title when present (in-app nav path)", () => {
+    expect(resolvePrdTitle(185, "Checkout Redesign", null, null)).toBe("Checkout Redesign")
+    // content title wins even if a (stale) fetched title is also present
+    expect(resolvePrdTitle(185, "Checkout Redesign", 185, "Old Title")).toBe("Checkout Redesign")
+  })
+
+  // Direct-nav / refresh: ContentContext empty (contentTitle null) → the minimal
+  // supplemental fetch populated `fetchedTitle` for THIS prd_id → use it. This is
+  // the regression: previously this returned null → titlebar showed "Untitled".
+  it("falls back to the fetched title on direct-nav when content is empty", () => {
+    expect(resolvePrdTitle(185, null, 185, "Checkout Redesign")).toBe("Checkout Redesign")
+  })
+
+  // Before the fetch resolves (or it failed) there is no title anywhere → null
+  // (the titlebar renders its own "Untitled prototype" fallback).
+  it("returns null when neither content nor a matching fetch supplies a title", () => {
+    expect(resolvePrdTitle(185, null, null, null)).toBeNull()
+    expect(resolvePrdTitle(null, null, null, null)).toBeNull()
+  })
+
+  // The fetched title is only trusted for the prd_id it was fetched for — a title
+  // left over from a prior prototype's prd_id must NOT leak onto a different id.
+  it("does not leak a fetched title from a DIFFERENT prd_id", () => {
+    expect(resolvePrdTitle(185, null, 7, "Other PRD")).toBeNull()
+  })
+})
+
+describe("prototype route — title fetch guard (needsTitleFetch)", () => {
+  // Direct-nav: prd_id present, content empty, nothing fetched yet → fetch.
+  it("fetches on direct-nav when content lacks the title and nothing fetched yet", () => {
+    expect(needsTitleFetch(185, null, null)).toBe(true)
+  })
+
+  // In-app nav: ContentContext already supplies the title → no fetch.
+  it("does NOT fetch when ContentContext already supplies the title", () => {
+    expect(needsTitleFetch(185, "Checkout Redesign", null)).toBe(false)
+  })
+
+  // Idempotency: once this prd_id's title has been fetched, don't refetch on
+  // subsequent renders (the guard prevents a refetch loop).
+  it("does NOT refetch once this prd_id's title is already fetched", () => {
+    expect(needsTitleFetch(185, null, 185)).toBe(false)
+  })
+
+  // A fetch for a DIFFERENT prd_id does not satisfy the current id → fetch.
+  it("fetches when only a different prd_id's title was previously fetched", () => {
+    expect(needsTitleFetch(185, null, 7)).toBe(true)
+  })
+
+  // No prd_id at all → nothing to fetch.
+  it("does NOT fetch when there is no prd_id", () => {
+    expect(needsTitleFetch(null, null, null)).toBe(false)
+  })
+})
 
 describe("prototype route — fs param derivation (fsParamToFullscreen)", () => {
   // Absent fs param → fullscreen (default-open state for the in-tab canvas).

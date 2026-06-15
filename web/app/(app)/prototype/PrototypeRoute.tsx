@@ -47,6 +47,7 @@ import { IterateComposer } from "../../components/design-agent/IterateComposer"
 import { useIterateRun } from "../../components/design-agent/useIterateRun"
 import {
   designAgentApi,
+  prdApi,
   type CommentRecord,
   type PrototypeRecord,
 } from "../../lib/api"
@@ -84,6 +85,39 @@ export function figmaKeyForPrototype(
   if (urlPrdId == null || !contentPrd) return null
   if (contentPrd.prd_id !== urlPrdId) return null
   return contentPrd.figma_file_key ?? null
+}
+
+/** Pure: resolve the PRD TITLE for the breadcrumb / in-tab title bar / left
+ *  header. Prefers ContentContext when it holds the matching PRD; on direct-nav /
+ *  refresh ContentContext is empty (no PRD loaded for `?prd=<id>`), so we fall
+ *  back to the minimal title-only supplemental fetch — but ONLY when that fetch
+ *  resolved for the SAME prd_id (guards a stale fetched title from a prior id).
+ *  Title only — no PRD body / sections / panel is involved. Exported so the
+ *  direct-nav title contract is unit-testable without a DOM. */
+export function resolvePrdTitle(
+  protoPrdId: number | null,
+  contentTitle: string | null,
+  fetchedPrdId: number | null,
+  fetchedTitle: string | null,
+): string | null {
+  if (contentTitle != null) return contentTitle
+  if (protoPrdId != null && fetchedPrdId === protoPrdId) return fetchedTitle
+  return null
+}
+
+/** Pure: decide whether the title-only supplemental fetch should fire. True when
+ *  there is a prd_id to fetch, ContentContext does NOT already supply the title,
+ *  and this prd_id's title has not already been fetched in this mount. Exported
+ *  for unit testing the refetch guard without a DOM. */
+export function needsTitleFetch(
+  protoPrdId: number | null,
+  contentTitle: string | null,
+  fetchedPrdId: number | null,
+): boolean {
+  if (protoPrdId == null) return false
+  if (contentTitle != null) return false
+  if (fetchedPrdId === protoPrdId) return false
+  return true
 }
 
 /** Pure: classify the in-tab render state for a given prd context. Extracted so
@@ -183,9 +217,41 @@ function InTabCanvas({
   const prd = content.prd
   const protoPrdId = (proto as PrototypeRecord & { prd_id?: number }).prd_id ?? null
   // PRD title for the breadcrumb / in-tab title bar / left-column header. Only the
-  // TITLE survives the PRD-panel removal; it comes from ContentContext when it holds
-  // the matching PRD, else null (no supplemental fetch — the panel is gone).
-  const prdTitle = prd?.prd_id === protoPrdId ? (prd?.title ?? null) : null
+  // TITLE survives the PRD-panel removal: prefer ContentContext when it holds the
+  // matching PRD, else fall back to a minimal title-only supplemental fetch below.
+  const contentTitle = prd?.prd_id === protoPrdId ? (prd?.title ?? null) : null
+
+  // Supplemental TITLE-ONLY fetch. On direct-nav / refresh, ContentContext is
+  // empty (no PRD loaded for `?prd=<id>`), so `contentTitle` is null and the
+  // breadcrumb/titlebar would render "Untitled prototype". We re-source ONLY the
+  // PRD title (NOT the body, sections, or any panel) by fetching the prototype's
+  // own prd_id once. Guarded so it never refetches when a title is already
+  // available (from ContentContext or a prior fetch for this same prd_id).
+  const [fetchedTitle, setFetchedTitle] = useState<string | null>(null)
+  const [fetchedPrdId, setFetchedPrdId] = useState<number | null>(null)
+  const prdTitle = resolvePrdTitle(protoPrdId, contentTitle, fetchedPrdId, fetchedTitle)
+  useEffect(() => {
+    // Skip when there's nothing to fetch, when ContentContext already supplies the
+    // title, or when this prd_id's title was already fetched in this mount.
+    if (!needsTitleFetch(protoPrdId, contentTitle, fetchedPrdId)) return
+    // Narrow for TS: needsTitleFetch already returns false for a null id, but the
+    // compiler can't see through the helper boundary, so re-assert before .get().
+    if (protoPrdId == null) return
+    let cancelled = false
+    prdApi
+      .get(protoPrdId)
+      .then((fetchedPrd) => {
+        if (cancelled) return
+        setFetchedTitle(fetchedPrd.title ?? null)
+        setFetchedPrdId(protoPrdId)
+      })
+      .catch(() => {
+        /* best-effort — titlebar falls back to "Untitled prototype" on error */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [protoPrdId, contentTitle, fetchedPrdId])
   // The signed-in user's display name for user-turn labels in the live thread.
   const userName = content.userName ?? null
 

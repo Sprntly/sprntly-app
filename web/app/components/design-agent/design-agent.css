@@ -2751,6 +2751,46 @@
   min-height: 120px;
 }
 
+/* ── Live conversation thread fills the left panel (#1 follow-up) ────────────
+ * #1 removed the PRD block from `.da-left-scroll` and made that scroll region
+ * host ONLY the live agent-conversation thread (the `.da-left-activity` panel).
+ * The legacy `.da-left-activity` styling above was authored for the OLD layout
+ * where the activity panel was a SECONDARY block sitting beneath the PRD scroll
+ * — hence `max-height:38%`, its own `overflow-y:auto`, a `border-top`, and a
+ * `surface-2` background. With the PRD gone, those caps leave the messages in a
+ * short top-anchored block, an empty gap, then the pinned composer.
+ *
+ * When `.da-left-activity` is the SOLE child of `.da-left-scroll` (the thread
+ * layout), neutralise the cap/detached styling so the thread fills the height
+ * between the header and the pinned composer: it grows to fill `.da-left-scroll`
+ * (which is already `flex:1; min-height:0; overflow-y:auto`), messages anchor at
+ * the top, and overflow scrolls inside `.da-left-scroll`. The composer
+ * (`.da-left-compose`, `flex-shrink:0`) keeps its pinned-bottom behaviour.
+ *
+ * Append-only; the legacy rules above are untouched (still apply wherever an
+ * activity panel is NOT the direct child of a scroll region). Token-only.
+ * ─────────────────────────────────────────────────────────────────────────── */
+.design-agent-surface .da-left-scroll > .da-left-activity {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 0;
+  overflow-y: visible;
+  border-top: none;
+  background: transparent;
+  /* `.da-left-scroll` already provides the 16px frame padding. */
+  padding: 0;
+}
+/* In the thread layout the scroll region must stay the single scroller and keep
+ * filling all space between header and composer even while a run streams — the
+ * legacy `.is-running` caps (55% scroll / 120px activity, for the old PRD+activity
+ * split) would otherwise shrink the thread mid-run. */
+.design-agent-surface .da-left.is-running .da-left-scroll {
+  max-height: none;
+}
+.design-agent-surface .da-left.is-running .da-left-scroll > .da-left-activity {
+  min-height: 0;
+}
+
 /* ── CommentsPanel visual polish (P7 design-kit) ────────────────────────────
  * Changes 1–6 from David's mockup alignment: count badge, avatar tints, step
  * chip, resolve indicator, footer send button + helper, card styling.
