@@ -1,37 +1,78 @@
 "use client"
 
 /**
- * Left-panel agent-flow activity transcript. Renders the modular `ActivityEvent[]`
+ * Left-panel agent-conversation thread. Renders the modular `ActivityEvent[]`
  * from `useIterateRun` in the `.proto-msg` chat style:
  *   - user request  → a right-aligned user message bubble,
  *   - working steps → an "agent working" card with an animated status + a
  *                     streamed-steps checklist (active spinner / done check),
  *   - question      → the agent's clarifying question (the answer surface itself
  *                     renders separately, inline just below — wired by the host),
- *   - done          → a completion line,
+ *   - done          → a completion turn carrying the agent's change summary,
  *   - error         → an error line.
  *
- * Pure presentational (no hooks/I/O) → SSR-renderable. The activity is DRIVEN by
- * the poll in useIterateRun: the intermediate working steps are cosmetic (no real
- * backend step stream yet), but the terminal "done" line is emitted only on the
- * poll's real completion — this component holds no timer of its own and renders
- * "done" purely from the event it is handed. A real backend SSE/step stream would
- * feed the same event list via appendActivity.
+ * EVERY turn shows an author + a relative timestamp via the shared
+ * `.da-activity-agent-label` styling: agent turns label "Design Agent · {ago}",
+ * user turns "{userName ?? 'You'} · {ago}". The author is derived from `kind`
+ * ("user" → the user, everything else → the Design Agent). The relative time is
+ * computed at render from each turn's client-captured `createdAt` (ms) and
+ * refreshed by a light 30s ticker so "2m ago" stays current.
+ *
+ * LIVE-ONLY: the thread holds no persistence. `createdAt` is captured in-app at
+ * append time and never reloaded; a refresh starts the thread empty. The thread
+ * is presentation only — it is NOT fed back into the model as conversational
+ * context (each iterate stays a discrete, bounded change request).
+ *
+ * The author/timestamp label is rendered INSIDE the existing `aria-live="polite"`
+ * log region; the 30s ticker only re-derives the relative-time strings (no new
+ * turns), so it does not spam the live region with content changes.
  */
 
+import { useEffect, useState } from "react"
+import { shortRelativeTime } from "./CommentsPanel"
 import type { ActivityEvent } from "./useIterateRun"
 
 function stripAgentContext(text: string): string {
   return text.split('\n').filter(l => !l.startsWith('[ref:')).join('\n').trim()
 }
 
+/** Compose the author + relative-time label for a turn. `now` is injected so the
+ *  pure formatting stays deterministic in tests. Pure → SSR/unit-testable. */
+export function turnLabel(
+  kind: ActivityEvent["kind"],
+  createdAt: number | undefined,
+  userName: string | null | undefined,
+  now: number,
+): string {
+  const author = kind === "user" ? (userName?.trim() || "You") : "Design Agent"
+  // Guard a missing/invalid timestamp (older callers, malformed events): omit the
+  // relative-time suffix rather than throwing on `new Date(undefined)`.
+  const rel =
+    typeof createdAt === "number" && Number.isFinite(createdAt)
+      ? shortRelativeTime(new Date(createdAt).toISOString(), now)
+      : ""
+  return rel ? `${author} · ${rel}` : author
+}
+
 export function IterateActivityStream({
   activity,
   running,
+  userName = null,
 }: {
   activity: ActivityEvent[]
   running: boolean
+  /** The signed-in user's display name for user-turn labels. Falls back to
+   *  "You" when null. Sourced upstream from `content.userName`. */
+  userName?: string | null
 }) {
+  // Light ticker: re-render every 30s so the relative timestamps ("2m ago")
+  // stay current without persisting anything. `now` is local component state.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000)
+    return () => clearInterval(id)
+  }, [])
+
   if (activity.length === 0) return null
   return (
     <div
@@ -42,6 +83,7 @@ export function IterateActivityStream({
       aria-label="Design Agent activity"
     >
       {activity.map((e) => {
+        const label = turnLabel(e.kind, e.createdAt, userName, now)
         switch (e.kind) {
           case "user":
             return (
@@ -50,6 +92,7 @@ export function IterateActivityStream({
                 className="proto-msg proto-msg--user"
                 data-testid="da-activity-user"
               >
+                <p className="da-activity-agent-label">{label}</p>
                 <p className="proto-msg-body">{stripAgentContext(e.text)}</p>
               </div>
             )
@@ -78,7 +121,7 @@ export function IterateActivityStream({
                 className="proto-msg proto-msg--agent da-activity-question"
                 data-testid="da-activity-question"
               >
-                <p className="da-activity-agent-label">Design Agent asks</p>
+                <p className="da-activity-agent-label">{label}</p>
                 <p className="proto-msg-body">{e.question}</p>
               </div>
             )
@@ -86,11 +129,14 @@ export function IterateActivityStream({
             return (
               <div
                 key={e.id}
-                className="da-activity-done"
+                className="proto-msg proto-msg--agent"
                 data-testid="da-activity-done"
               >
-                <span className="da-activity-done-icon" aria-hidden="true">✓</span>
-                <span>{e.text}</span>
+                <p className="da-activity-agent-label">{label}</p>
+                <p className="proto-msg-body da-activity-done-body">
+                  <span className="da-activity-done-icon" aria-hidden="true">✓</span>
+                  <span>{e.text}</span>
+                </p>
               </div>
             )
           case "error":

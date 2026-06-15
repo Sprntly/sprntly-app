@@ -2579,6 +2579,15 @@
   font-weight: 600;
   color: var(--accent-ink);
 }
+/* the done turn now renders as an agent bubble (label + summary body); the
+   icon + text sit inline within the body row. */
+.design-agent-surface .da-activity-done-body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--accent-ink);
+}
 .design-agent-surface .da-activity-done-icon {
   flex-shrink: 0;
   width: 16px;

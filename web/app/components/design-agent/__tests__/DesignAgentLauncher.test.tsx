@@ -19,7 +19,6 @@ import { GenerationErrorBanner } from "../GenerationErrorBanner"
 import { PrototypePreviewCard } from "../PrototypePreviewCard"
 import type { PrototypeRecord } from "../../../lib/api"
 import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
-import type { PrdSection } from "../../../types/content"
 
 // PrdSections-style shim: Sprntly components have no `import React`; vitest's
 // esbuild transform defaults to the classic runtime, so expose React globally
@@ -797,9 +796,9 @@ describe("DesignAgentLauncher — exported signatures unchanged (test_launcher_s
   })
 })
 
-// ─── Condensed PRD panel threading on the launcher open paths ─────────────────
+// ─── PRD panel removed from the canvas (live-only conversation thread) ────────
 
-describe("condensed PRD panel is forwarded on both launcher open paths", () => {
+describe("the PRD panel no longer renders in the launcher's result canvas", () => {
   const sampleResult: PrototypeRecord = {
     id: 7,
     status: "ready",
@@ -809,17 +808,6 @@ describe("condensed PRD panel is forwarded on both launcher open paths", () => {
     share_mode: "private",
     share_token: null,
   }
-
-  // One tl;dr block: provides Problem/Fix/Impact cards without triggering the
-  // "View full PRD" expander (which would recursively render PrdSections).
-  const sampleSections = [
-    {
-      type: "prd-tldr",
-      problem: "Users drop off at the checkout step",
-      fix: "Streamline to a single-page flow",
-      impact: "Estimated 15 percent conversion lift",
-    },
-  ] as unknown as PrdSection[]
 
   function panelHtml(
     over: Partial<Parameters<typeof DesignAgentLauncherView>[0]> = {},
@@ -836,35 +824,20 @@ describe("condensed PRD panel is forwarded on both launcher open paths", () => {
     )
   }
 
-  it("renders the condensed panel on the in-session result path when sections are provided (test_launcher_in_session_mount_renders_condensed_panel)", () => {
-    const html = panelHtml({ result: sampleResult, prdSections: sampleSections })
-    expect(html).toContain('data-testid="da-prd-condensed"')
-    expect(html).toContain('data-testid="da-prd-pcx-problem"')
-    expect(html).toContain('data-testid="da-prd-pcx-fix"')
-    expect(html).toContain('data-testid="da-prd-pcx-impact"')
-    expect(html).not.toContain("PRD content unavailable.")
-  })
-
-  it("threads prdMetaLine into the panel subtitle on the in-session result path (test_meta_line_threads_into_panel_subtitle)", () => {
-    const metaLine = "Redesign initiative, Sprint 5"
-    const inSessionHtml = panelHtml({
-      result: sampleResult,
-      prdSections: sampleSections,
-      prdMetaLine: metaLine,
-    })
-    expect(inSessionHtml).toContain(metaLine)
-  })
-
-  it("falls back to the empty-state on the in-session path when sections are absent (test_launcher_no_sections_renders_empty_state)", () => {
-    const html = panelHtml({ result: sampleResult })
-    expect(html).toContain("PRD content unavailable.")
-    expect(html).not.toContain('data-testid="da-prd-condensed"')
-  })
-
-  it("renders without error and shows the empty-state when the new props are omitted (test_optional_props_keep_callers_type_safe)", () => {
-    // All new props are optional — omitting them renders the empty-state, no throw.
-    const html = panelHtml({ result: sampleResult })
+  it("renders the result canvas without any condensed-PRD surface (test_no_prd_panel_in_result_canvas)", () => {
+    const html = panelHtml({ result: sampleResult, prdTitle: "Checkout redesign" })
+    // The result canvas mounts…
     expect(html).toContain('data-testid="post-generation-result"')
-    expect(html).toContain("PRD content unavailable.")
+    // …but the PRD panel + its old empty-state are gone entirely.
+    expect(html).not.toContain('data-testid="da-prd-condensed"')
+    expect(html).not.toContain('data-testid="da-prd-pcx-problem"')
+    expect(html).not.toContain("PRD content unavailable.")
+    // The left column is the live conversation thread instead.
+    expect(html).toContain('data-testid="da-left-thread"')
+  })
+
+  it("keeps the PRD title for the in-tab title bar / left header (test_prd_title_survives)", () => {
+    const html = panelHtml({ result: sampleResult, prdTitle: "Checkout redesign" })
+    expect(html).toContain("Checkout redesign")
   })
 })

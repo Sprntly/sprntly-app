@@ -9,7 +9,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { readFileSync } from "node:fs"
 
-import { IterateActivityStream } from "../IterateActivityStream"
+import { IterateActivityStream, turnLabel } from "../IterateActivityStream"
 import type { ActivityEvent } from "../useIterateRun"
 
 // Sprntly components carry no `import React`; expose it globally.
@@ -19,8 +19,11 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ACTIVITY_STREAM_PATH = join(HERE, "..", "IterateActivityStream.tsx")
 
 let _id = 0
-function makeEvent<T extends Omit<ActivityEvent, "id">>(e: T): T & { id: number } {
-  return { ...e, id: ++_id } as T & { id: number }
+function makeEvent<T extends Omit<ActivityEvent, "id" | "createdAt">>(
+  e: T,
+  createdAt: number = Date.now(),
+): T & { id: number; createdAt: number } {
+  return { ...e, id: ++_id, createdAt } as T & { id: number; createdAt: number }
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +100,10 @@ describe("IterateActivityStream — event kinds", () => {
       }),
     )
     expect(html).toContain('data-testid="da-activity-question"')
-    expect(html).toContain("Design Agent asks")
+    // The question turn now carries the unified author label ("Design Agent · {ago}")
+    // rather than the old static "Design Agent asks" heading.
+    expect(html).toContain("Design Agent")
+    expect(html).toContain('class="da-activity-agent-label"')
     expect(html).toContain("Which color scheme?")
   })
 
@@ -152,6 +158,78 @@ describe("IterateActivityStream — running trailing indicator", () => {
       }),
     )
     expect(html).not.toContain('data-testid="da-activity-running"')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Author + relative-timestamp labels (the named-turn conversation thread)
+// ---------------------------------------------------------------------------
+
+describe("IterateActivityStream — named turns (author + relative timestamp)", () => {
+  const NOW = 1_700_000_000_000
+  // 5 minutes earlier → shortRelativeTime → "5m".
+  const FIVE_MIN_AGO = NOW - 5 * 60 * 1000
+
+  it("turnLabel: a user turn is labelled '{userName} · {ago}'", () => {
+    expect(turnLabel("user", FIVE_MIN_AGO, "Ada Lovelace", NOW)).toBe(
+      "Ada Lovelace · 5m",
+    )
+  })
+
+  it("turnLabel: a user turn falls back to 'You' when userName is null", () => {
+    expect(turnLabel("user", FIVE_MIN_AGO, null, NOW)).toBe("You · 5m")
+  })
+
+  it("turnLabel: an agent turn is labelled 'Design Agent · {ago}'", () => {
+    expect(turnLabel("done", FIVE_MIN_AGO, "Ada", NOW)).toBe("Design Agent · 5m")
+  })
+
+  it("turnLabel: omits the time suffix when createdAt is missing", () => {
+    expect(turnLabel("user", undefined, "Ada", NOW)).toBe("Ada")
+  })
+
+  it("test_user_turn_renders_author_label: a user turn renders the user-name label", () => {
+    const event = makeEvent({ kind: "user" as const, text: "make it blue" }, FIVE_MIN_AGO)
+    const html = renderToStaticMarkup(
+      React.createElement(IterateActivityStream, {
+        activity: [event],
+        running: false,
+        userName: "Ada Lovelace",
+      }),
+    )
+    expect(html).toContain('class="da-activity-agent-label"')
+    expect(html).toContain("Ada Lovelace")
+  })
+
+  it("test_agent_turn_renders_design_agent_label: an agent (done) turn renders the 'Design Agent' label", () => {
+    const event = makeEvent({ kind: "done" as const, text: "Made the hero blue." }, FIVE_MIN_AGO)
+    const html = renderToStaticMarkup(
+      React.createElement(IterateActivityStream, {
+        activity: [event],
+        running: false,
+        userName: "Ada",
+      }),
+    )
+    expect(html).toContain('class="da-activity-agent-label"')
+    expect(html).toContain("Design Agent")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Done turn shows the agent's summary
+// ---------------------------------------------------------------------------
+
+describe("IterateActivityStream — done turn summary", () => {
+  it("test_done_turn_renders_summary_text: the done turn renders whatever summary text it carries", () => {
+    const event = makeEvent({
+      kind: "done" as const,
+      text: "Swapped the hero background to brand blue and tightened the spacing.",
+    })
+    const html = renderToStaticMarkup(
+      React.createElement(IterateActivityStream, { activity: [event], running: false }),
+    )
+    expect(html).toContain('data-testid="da-activity-done"')
+    expect(html).toContain("Swapped the hero background to brand blue")
   })
 })
 

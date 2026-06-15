@@ -45,8 +45,12 @@ export type ActivityEventInput =
   | { kind: "question"; question: string }
   | { kind: "error"; text: string }
 
-/** An activity event with its assigned id (the rendered shape). */
-export type ActivityEvent = ActivityEventInput & { id: number }
+/** An activity event with its assigned id + a client-captured wall-clock
+ *  timestamp (ms, set at append time via Date.now()). `createdAt` is LIVE-ONLY
+ *  app-runtime state — never persisted, never reloaded — so a refresh starts the
+ *  thread empty. The render derives the author from `kind` ("user" → the signed-in
+ *  user; everything else → "Design Agent") and the relative time from `createdAt`. */
+export type ActivityEvent = ActivityEventInput & { id: number; createdAt: number }
 
 /** The cosmetic step script revealed while the async run polls. COSMETIC ONLY —
  *  see the file header TODO. Each is appended as the poll advances so the user
@@ -100,6 +104,12 @@ export function useIterateRun({
   // Live EventSource for the current iterate run. Closed on terminal event,
   // on onerror, in the finally block, and on component unmount.
   const esRef = useRef<EventSource | null>(null)
+  // The agent's 1–2 sentence change summary, captured off the `done` SSE frame's
+  // `text` when present. The terminal done turn is appended on the POLL resolve
+  // (the honest "the run is really done" signal), so we stash the summary here and
+  // use it as the done turn's text — falling back to "Change applied" when the
+  // done frame carried no summary (poll-only path / SSE unavailable). Live-only.
+  const doneSummaryRef = useRef<string | null>(null)
 
   useEffect(() => {
     return () => {
@@ -108,10 +118,13 @@ export function useIterateRun({
     }
   }, [])
 
-  /** The ONLY mutator of the activity list — the forward-compatible SSE seam. */
+  /** The ONLY mutator of the activity list — the forward-compatible SSE seam.
+   *  Stamps each turn with a client-captured `createdAt` (Date.now()) so the
+   *  render can show a relative timestamp. Live-only: this clock value is never
+   *  persisted — a refresh starts the thread empty. */
   const appendActivity = useCallback((event: ActivityEventInput) => {
     eventIdRef.current += 1
-    const withId = { ...event, id: eventIdRef.current } as ActivityEvent
+    const withId = { ...event, id: eventIdRef.current, createdAt: Date.now() } as ActivityEvent
     setActivity((prev) => [...prev, withId])
     return eventIdRef.current
   }, [])
@@ -146,6 +159,7 @@ export function useIterateRun({
       setError(null)
       setPendingQuestion(null)
       lastQuestionRef.current = null
+      doneSummaryRef.current = null
 
       // 1) The user's request as a chat message.
       appendActivity({ kind: "user", text: prompt })
@@ -170,10 +184,21 @@ export function useIterateRun({
               if (event.kind === "step" && event.state === "active") {
                 markLastStepDone()
               }
-              appendActivity(event)
-              if (event.kind === "done" || event.kind === "error") {
+              if (event.kind === "done") {
+                // The done frame carries the agent's 1–2 sentence summary. We do
+                // NOT append it as a turn here — the terminal done turn is appended
+                // on the POLL resolve (the honest "really done" signal). Capture the
+                // summary so the poll-resolve done turn uses it. Closing the stream
+                // on done is preserved.
+                doneSummaryRef.current = event.text?.trim() || null
                 es.close()
                 esRef.current = null
+              } else {
+                appendActivity(event)
+                if (event.kind === "error") {
+                  es.close()
+                  esRef.current = null
+                }
               }
             } catch {
               // Malformed frame — ignore, poll resolves terminal state.
@@ -238,7 +263,13 @@ export function useIterateRun({
         //     run is really done.
         markLastStepDone()
         if (proto.status === "ready") {
-          appendActivity({ kind: "done", text: "Change applied" })
+          // Use the agent's captured summary (from the done SSE frame) when
+          // present; fall back to "Change applied" on the poll-only path / when no
+          // summary was streamed.
+          appendActivity({
+            kind: "done",
+            text: doneSummaryRef.current ?? "Change applied",
+          })
           onComplete(proto)
         } else if (proto.status === "failed") {
           throw new Error(proto.error || "Iteration failed")

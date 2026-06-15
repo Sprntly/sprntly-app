@@ -31,11 +31,8 @@ import { ShareMenu, type ShareMode } from "./ShareMenu"
 import { PrototypeViewer, type Platform } from "./PrototypeViewer"
 // ManualEditOverlay import dropped —
 // its trigger is no longer mounted on the canvas (the component file is kept).
-// PrdSections no longer dumped in the
-// left sidebar — replaced by a CONDENSED context panel built from the PRD's
-// title + meta + the prd-tldr (Problem/Fix/Impact) block. PrdSections import is
-// kept only for the optional "View full PRD" expander.
-import { PrdSections } from "../shared/PrdSections"
+// The left column is now a LIVE-ONLY agent-conversation thread (named turns +
+// composer); the PRD panel was removed entirely (live-only, no PRD context dump).
 // the clarifying-question answer
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
@@ -110,7 +107,6 @@ import {
   type CommentRecord,
   type PrototypeRecord,
 } from "../../lib/api"
-import type { PrdSection } from "../../types/content"
 
 // a pin-anchored comment created via
 // the mark-and-comment flow. `xPct`/`yPct` are the pin's position over the canvas
@@ -169,19 +165,14 @@ export type PostGenerationResultProps = {
    *  share-gated comments column on without a re-mount). Optional/defaulted so the
    *  public-viewer composition and existing direct calls keep type-checking. */
   onShared?: (token: string | null) => void
-  /** the PRD's parsed semantic sections, threaded
-   *  from ApproveModal (which reads them off `useContent().content.prd`). Rendered
-   *  read-only at the TOP of the new LEFT sidebar (above the iterate composer). */
-  prdSections?: PrdSection[]
-  /** the PRD title for the left-sidebar header. */
+  /** the PRD title — KEPT (used by the breadcrumb, the in-tab title bar, and the
+   *  left-column header). The PRD content panel itself was removed; only the title
+   *  label survives. */
   prdTitle?: string | null
-  /** the PRD's one-line meta/description
-   *  (PrdContent.metaLine) — rendered as the subtitle in the condensed context panel. */
-  prdMetaLine?: string | null
-  /** the PRD's DB id, threaded to PrdSections so
-   *  the read-only render does NOT mount a second DesignAgentLauncher (prd-design
-   *  block) — passing undefined makes that block fall back to its inert empty
-   *  state inside the sidebar. (We pass undefined deliberately.) */
+  /** the signed-in user's display name, used to label user turns in the live
+   *  conversation thread ("{userName} · 2m ago"). Falls back to "You" when null.
+   *  Sourced upstream from `content.userName`. */
+  userName?: string | null
   /** the control-bar "Done" affordance — closes
    *  the full-screen canvas back to the PRD (ApproveModal.closeCanvas). */
   onDone?: () => void
@@ -275,12 +266,11 @@ export type PostGenerationResultViewProps = {
   fullscreenOpen?: boolean
   onOpenFullscreen?: () => void
   onCloseFullscreen?: () => void
-  /** PRD content for the LEFT sidebar (read-only)
-   *  + the control-bar Done affordance. See PostGenerationResultProps. */
-  prdSections?: PrdSection[]
+  /** PRD title for the breadcrumb / in-tab title bar / left-column header
+   *  + the control-bar Done affordance. The PRD content panel was removed. */
   prdTitle?: string | null
-  /** PRD one-line meta for the condensed panel. */
-  prdMetaLine?: string | null
+  /** signed-in user's display name for user-turn labels in the live thread. */
+  userName?: string | null
   onDone?: () => void
   /** collapsible-panel + control-bar state, owned
    *  by the container and threaded into the SSR-renderable pure view (matching the
@@ -434,136 +424,6 @@ export function viewerRemountKey(
   reloadNonce: number,
 ): string {
   return `viewer-${bundleUrl ?? "none"}-${reloadNonce}`
-}
-
-/**
- * the condensed PRD context model.
- * David's left panel is LIGHTWEIGHT context, not the full document. We pull the
- * TL;DR triptych (Problem / Fix / Impact) from the `prd-tldr` block if present;
- * the long body sections (Context / Requirements / AC / etc.) are dropped from
- * the default view and tucked behind a "View full PRD" expander. Pure → unit-
- * testable without a DOM.
- */
-export type CondensedPrd = {
-  problem: string | null
-  fix: string | null
-  impact: string | null
-  hasFullBody: boolean
-}
-
-export function condensePrd(sections: PrdSection[] | undefined): CondensedPrd {
-  const empty: CondensedPrd = { problem: null, fix: null, impact: null, hasFullBody: false }
-  if (!sections || sections.length === 0) return empty
-  const tldr = sections.find((s) => s.type === "prd-tldr") as
-    | { type: "prd-tldr"; problem: string; fix: string; impact: string }
-    | undefined
-  // "Full body" = anything beyond the tldr / a leading title-ish heading worth
-  // putting behind the expander.
-  const bodyCount = sections.filter((s) => s.type !== "prd-tldr").length
-  if (tldr) {
-    return {
-      problem: tldr.problem || null,
-      fix: tldr.fix || null,
-      impact: tldr.impact || null,
-      hasFullBody: bodyCount > 0,
-    }
-  }
-  return { ...empty, hasFullBody: sections.length > 0 }
-}
-
-/** Pure: drop the leading PRD boilerplate (the "# Part A …" title, the
- *  Author/DRI/Status meta line, the divider) so a CONDENSED preview leads with
- *  the first real content. Heuristic: PRD content sections are numbered
- *  ("1. …", "2. …"), so the first heading whose text starts with a digit marks
- *  where the substance begins; everything before it is preamble. If no numbered
- *  heading is found the sections are returned unchanged (safe no-op). Only the
- *  preview uses this — the full doc behind "View full PRD" renders unmodified. */
-export function stripPrdPreamble(sections: PrdSection[]): PrdSection[] {
-  const firstContentIdx = sections.findIndex(
-    (s) => s.type === "h2" && /^\d/.test(s.text.trim()),
-  )
-  return firstContentIdx > 0 ? sections.slice(firstContentIdx) : sections
-}
-
-/**
- * the condensed left-sidebar context
- * panel — PRD title + one-line meta + Problem/Fix/Impact cards (David's
- * `.proto-ctx-panel` `.pcx` style: small uppercase header + short body). The
- * long PRD body is dropped to a "View full PRD" expander (kept cheap — a native
- * <details>) so the panel stays a LIGHT context view, not the full doc.
- */
-function CondensedPrdPanel({
-  title,
-  metaLine,
-  sections,
-}: {
-  title: string | null
-  metaLine: string | null
-  sections: PrdSection[] | undefined
-}) {
-  const c = condensePrd(sections)
-  const cards: { label: string; body: string }[] = []
-  if (c.problem) cards.push({ label: "Problem", body: c.problem })
-  if (c.fix) cards.push({ label: "Fix", body: c.fix })
-  if (c.impact) cards.push({ label: "Impact", body: c.impact })
-
-  return (
-    <div className="proto-ctx-panel" data-testid="da-prd-condensed">
-      {metaLine && <p className="proto-ctx-meta">{metaLine}</p>}
-      {cards.length > 0 ? (
-        <div className="proto-ctx-cards">
-          {cards.map((card) => (
-            <div className="pcx" key={card.label} data-testid={`da-prd-pcx-${card.label.toLowerCase()}`}>
-              <div className="pcx-label">{card.label}</div>
-              {/* Clamp a long Problem/Fix/Impact field to a few lines so a
-                  verbose card can't blow out the panel height. Non-destructive:
-                  the full text stays in the document (and is reachable via
-                  "View full PRD"); hover shows it in full via the title. */}
-              <div
-                className="pcx-body"
-                title={card.body}
-                style={{
-                  display: "-webkit-box",
-                  WebkitLineClamp: 3,
-                  WebkitBoxOrient: "vertical",
-                  overflow: "hidden",
-                }}
-              >
-                {card.body}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : sections && sections.length > 0 ? (
-        // Prose PRD (no structured TL;DR): show a BOUNDED preview of the parsed
-        // content rather than a blank placeholder — a capped, fading window so it
-        // never dominates the panel; the full doc sits behind "View full PRD".
-        <div
-          className="proto-ctx-cards"
-          data-testid="da-prd-prose-preview"
-          style={{
-            maxHeight: 220,
-            overflow: "hidden",
-            WebkitMaskImage: "linear-gradient(to bottom, black 65%, transparent)",
-            maskImage: "linear-gradient(to bottom, black 65%, transparent)",
-          }}
-        >
-          <PrdSections sections={stripPrdPreamble(sections)} />
-        </div>
-      ) : (
-        <p className="da-left-prd-empty">No summary available for this PRD.</p>
-      )}
-      {/* Long body behind a cheap native expander so the panel stays light. */}
-      {c.hasFullBody && sections && (
-        <details className="proto-ctx-full" data-testid="da-prd-full">
-          <summary className="proto-ctx-full-summary">View full PRD</summary>
-          <div className="proto-ctx-full-body">
-            <PrdSections sections={sections} />
-          </div>
-        </details>
-      )}
-    </div>
-  )
 }
 
 /**
@@ -1090,11 +950,13 @@ function ActivityPanel({
   iterateRunning,
   iteratePendingQuestion,
   onAnswerQuestion,
+  userName,
 }: {
   iterateActivity: import("./useIterateRun").ActivityEvent[]
   iterateRunning: boolean
   iteratePendingQuestion: import("../../lib/api").PendingQuestion | null
   onAnswerQuestion?: (answer: string) => void | Promise<void>
+  userName?: string | null
 }) {
   const activityEndRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -1105,6 +967,7 @@ function ActivityPanel({
       <IterateActivityStream
         activity={iterateActivity}
         running={iterateRunning}
+        userName={userName}
       />
       {iteratePendingQuestion && onAnswerQuestion && (
         <InlineClarifyAnswer
@@ -1137,9 +1000,8 @@ export function PostGenerationResultView({
   fullscreenOpen = false,
   onOpenFullscreen,
   onCloseFullscreen,
-  prdSections,
   prdTitle,
-  prdMetaLine,
+  userName,
   onDone,
   leftOpen = true,
   onToggleLeft,
@@ -1312,42 +1174,30 @@ export function PostGenerationResultView({
               className="da-left-handle"
               data-testid="da-left-collapse"
               title="Collapse"
-              aria-label="Collapse PRD panel"
+              aria-label="Collapse conversation panel"
               onClick={() => onToggleLeft?.()}
             >
               <IconChevronLeft size={15} />
             </button>
           </div>
-          <div className="da-left-scroll" data-testid="da-left-prd">
-            {/* CONDENSED context — PRD
-                meta + the TL;DR (Problem/Fix/Impact) cards (David's `.pcx`), with
-                the long body tucked behind a "View full PRD" expander. NOT the
-                full document dump. */}
-            {prdSections && prdSections.length > 0 ? (
-              <CondensedPrdPanel
-                title={prdTitle ?? null}
-                metaLine={prdMetaLine ?? null}
-                sections={prdSections}
+          {/* LIVE-ONLY agent-conversation thread — named turns (author + relative
+              timestamp) for the user's requests, the "agent working" steps, the
+              completion summary, clarifying questions, and errors. No PRD panel,
+              no persistence: a refresh starts the thread empty. The thread is the
+              scrollable region; the composer below stays pinned at the bottom.
+              When a run pauses on a clarifying question the INLINE answer surface
+              renders right here in the stream and continues the iterate. */}
+          <div className="da-left-scroll" data-testid="da-left-thread">
+            {(iterateActivity.length > 0 || iteratePendingQuestion) && (
+              <ActivityPanel
+                iterateActivity={iterateActivity}
+                iterateRunning={iterateRunning}
+                iteratePendingQuestion={iteratePendingQuestion}
+                onAnswerQuestion={onAnswerQuestion}
+                userName={userName}
               />
-            ) : (
-              <p className="da-left-prd-empty">PRD content unavailable.</p>
             )}
           </div>
-          {/* the LIVE agent-flow
-              activity stream — the user's request, the "agent working" steps, and
-              the completion / clarifying question / error — rendered IN the left
-              flow (David's `.proto-msg` chat style). Driven by the shared runner's
-              poll (cosmetic steps; SSE-ready seam in useIterateRun). When a run
-              pauses on a clarifying question, the INLINE answer surface renders
-              right here in the stream (not detached) and continues the iterate. */}
-          {(iterateActivity.length > 0 || iteratePendingQuestion) && (
-            <ActivityPanel
-              iterateActivity={iterateActivity}
-              iterateRunning={iterateRunning}
-              iteratePendingQuestion={iteratePendingQuestion}
-              onAnswerQuestion={onAnswerQuestion}
-            />
-          )}
           {/* the prop-driven
               clarifying surface (from a prototype row that already carried a
               `pending_question` BEFORE this session's run). Suppressed while the
@@ -1370,8 +1220,8 @@ export function PostGenerationResultView({
             type="button"
             className="da-left-reopen"
             data-testid="da-left-expand"
-            title="Open PRD panel"
-            aria-label="Open PRD panel"
+            title="Open conversation panel"
+            aria-label="Open conversation panel"
             onClick={() => onToggleLeft?.()}
           >
             <IconDocument size={16} />
@@ -1509,9 +1359,8 @@ export function PostGenerationResult({
   comments,
   iterate,
   onShared,
-  prdSections,
   prdTitle,
-  prdMetaLine,
+  userName,
   onDone,
   onPinApply,
   onPinIterate,
@@ -1640,9 +1489,8 @@ export function PostGenerationResult({
       fullscreenOpen={fullscreenOpen}
       onOpenFullscreen={() => { setFullscreenOpen(true); onFullscreenChange?.(true) }}
       onCloseFullscreen={() => { setFullscreenOpen(false); onFullscreenChange?.(false) }}
-      prdSections={prdSections}
       prdTitle={prdTitle}
-      prdMetaLine={prdMetaLine}
+      userName={userName}
       onDone={onDone}
       leftOpen={leftOpen}
       onToggleLeft={() => setLeftOpen((v) => !v)}

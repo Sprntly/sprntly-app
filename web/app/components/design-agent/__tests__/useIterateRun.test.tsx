@@ -626,6 +626,69 @@ describe("useIterateRun — SSE EventSource wiring", () => {
     expect(es.close).toHaveBeenCalled()
   })
 
+  it("test_done_summary_from_sse_used_on_poll_resolve: the done frame's summary text becomes the done turn's text", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValue(proto("ready"))
+
+    const onComplete = vi.fn()
+    const api = makeApiWithSse(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("make the hero blue")
+      await Promise.resolve()
+      await Promise.resolve()
+      // The agent streams a done frame carrying its 1–2 sentence summary.
+      MockEventSource.latest().emit({
+        kind: "done",
+        text: "Made the hero background brand blue and tightened the spacing.",
+      })
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const doneTurns = result.current.activity.filter((e) => e.kind === "done")
+    expect(doneTurns).toHaveLength(1)
+    expect(doneTurns[0].kind === "done" && doneTurns[0].text).toBe(
+      "Made the hero background brand blue and tightened the spacing.",
+    )
+    // The SSE done frame did NOT itself append a turn — exactly one done turn.
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_done_summary_falls_back_when_absent: with no done summary, the done turn is 'Change applied'", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValue(proto("ready"))
+
+    const onComplete = vi.fn()
+    const api = makeApiWithSse(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("tighten the spacing")
+      await Promise.resolve()
+      await Promise.resolve()
+      // A done frame with no summary text → fall back.
+      MockEventSource.latest().emit({ kind: "done", text: "" })
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const doneTurns = result.current.activity.filter((e) => e.kind === "done")
+    expect(doneTurns).toHaveLength(1)
+    expect(doneTurns[0].kind === "done" && doneTurns[0].text).toBe("Change applied")
+  })
+
   it("test_activity_event_union_unchanged: ActivityEventInput has exactly the five expected member kinds (seam contract)", () => {
     const user: ActivityEventInput = { kind: "user", text: "hi" }
     const stepA: ActivityEventInput = { kind: "step", text: "working", state: "active" }
