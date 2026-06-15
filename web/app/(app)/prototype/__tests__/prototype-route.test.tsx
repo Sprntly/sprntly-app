@@ -81,8 +81,10 @@ describe("prototype route — nav registration", () => {
     expect(screenIdFromPathname(PROTOTYPE_PATH)).toBe("prototype")
   })
 
-  it("does not disturb the existing nav (prd / chat unchanged)", () => {
-    expect(screenIdFromPathname("/prd")).toBe("prd")
+  it("the removed /prd route falls through to chat; chat unchanged", () => {
+    // /prd was deleted in the prd-removal refactor — it no longer maps to a
+    // screen and falls through to the chat default.
+    expect(screenIdFromPathname("/prd")).toBe("chat")
     expect(screenIdFromPathname("/")).toBe("chat")
   })
 })
