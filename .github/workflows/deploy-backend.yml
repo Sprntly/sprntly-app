@@ -4,12 +4,20 @@ name: Deploy backend to api.sprntly.ai
 # tracks Sprntly/sprntly-app, where the canonical backend lives), pip-installs,
 # and restarts sprintly.service. Demo backend changes do NOT go through here —
 # only sprntly-app deploys the backend.
+#
+# Schema safety (added after a prod incident): a `migrate` job applies any
+# pending Supabase migrations BEFORE the backend restarts, so code can never go
+# live against a schema that's missing its tables. Prod migrations used to be
+# applied by hand, which silently drifted and broke a feature (multi_agent_docs
+# / ticket / drip tables were missing). The migration history was baselined
+# (all existing migrations marked applied) so `db push` only applies NEW ones.
 
 on:
   push:
     branches: [main]
     paths:
       - 'backend/**'
+      - 'supabase/migrations/**'
       - '.github/workflows/deploy-backend.yml'
   workflow_dispatch:
 
@@ -18,7 +26,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Apply pending DB migrations first. Gates the deploy: if a migration fails,
+  # the backend is NOT restarted onto code that needs it.
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Apply pending Supabase migrations (db push)
+        env:
+          # Session-mode pooler connection string from the Supabase dashboard
+          # (Settings → Database → Connection pooling → Mode: Session). The
+          # GitHub runner is IPv4-only, so the IPv6 direct host can't be used —
+          # the pooler is the IPv4 path. Stored as a repo/org secret.
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::warning title=Migrations skipped::SUPABASE_DB_URL secret is not set — pending migrations were NOT applied. Add the Session-mode pooler connection string from the Supabase dashboard to enable auto-apply. Until then, prod schema can drift."
+            exit 0
+          fi
+          # --yes: non-interactive. db push compares against the baselined
+          # migration history and applies only migrations not yet recorded.
+          supabase db push --db-url "$SUPABASE_DB_URL" --yes
+
   deploy:
+    needs: migrate
     runs-on: ubuntu-latest
     steps:
       - name: SSH and deploy
