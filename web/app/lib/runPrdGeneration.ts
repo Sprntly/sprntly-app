@@ -64,3 +64,27 @@ export async function loadPrdById(prdId: number): Promise<PrdLoadResult> {
     },
   }
 }
+
+/**
+ * Fetch the most-recent PRD for a company and map it to PrdState — no
+ * generation. Used right after a multi-agent run (which creates the PRD record)
+ * to land it in the right-rail card without re-generating: the run we just
+ * finished is the latest PRD.
+ */
+export async function loadLatestPrd(dataset: string): Promise<PrdLoadResult> {
+  const prd = await prdApi.latest(dataset)
+  if (!prd || prd.status === "failed") {
+    return { ok: false, message: prd?.error || "No PRD available yet" }
+  }
+  if (prd.status !== "ready") {
+    return { ok: false, message: "PRD isn't ready yet" }
+  }
+  return {
+    ok: true,
+    prd: {
+      ...markdownToPrdState(prd.payload_md),
+      prd_id: prd.id,
+      figma_file_key: undefined,
+    },
+  }
+}

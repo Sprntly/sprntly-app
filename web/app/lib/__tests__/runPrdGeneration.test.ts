@@ -3,7 +3,7 @@
 // card as Evidence) instead of navigating to a separate page.
 import { describe, it, expect, vi, afterEach } from "vitest"
 import { prdApi } from "../api"
-import { loadPrdById } from "../runPrdGeneration"
+import { loadPrdById, loadLatestPrd } from "../runPrdGeneration"
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -41,5 +41,33 @@ describe("loadPrdById", () => {
     const result = await loadPrdById(8)
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.message).toMatch(/isn't ready/i)
+  })
+})
+
+describe("loadLatestPrd", () => {
+  it("maps the company's latest ready PRD to a PrdState (no generation)", async () => {
+    const spy = vi
+      .spyOn(prdApi, "latest")
+      .mockResolvedValue({ id: 99, status: "ready", payload_md: "# Title\n\nBody." } as never)
+
+    const result = await loadLatestPrd("acme")
+
+    expect(spy).toHaveBeenCalledWith("acme")
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.prd.prd_id).toBe(99)
+  })
+
+  it("returns an error when the latest PRD isn't ready", async () => {
+    vi.spyOn(prdApi, "latest").mockResolvedValue({ id: 5, status: "generating", payload_md: "" } as never)
+
+    const result = await loadLatestPrd("acme")
+    expect(result.ok).toBe(false)
+  })
+
+  it("returns an error when there is no PRD yet", async () => {
+    vi.spyOn(prdApi, "latest").mockResolvedValue(null as never)
+
+    const result = await loadLatestPrd("acme")
+    expect(result).toEqual({ ok: false, message: "No PRD available yet" })
   })
 })
