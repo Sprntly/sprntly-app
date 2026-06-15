@@ -141,18 +141,6 @@ export type BriefEntry = {
   generatedAt: string
 }
 
-/** True when `generatedAt` falls within the current (Sun-start) calendar week.
- *  Used to decide whether the current brief is genuinely "this week's brief"
- *  and should hold the pinned top slot for the entire week. */
-export function isCurrentWeekBrief(generatedAt: string, now: Date = new Date()): boolean {
-  const date = new Date(generatedAt)
-  if (Number.isNaN(date.getTime())) return false
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const weekStart = new Date(todayStart.getTime() - todayStart.getDay() * 86400000)
-  const weekEnd = new Date(weekStart.getTime() + 7 * 86400000)
-  return date >= weekStart && date < weekEnd
-}
-
 // ── Artifacts tab ──
 
 type TabId = "chats" | "artifacts"
@@ -641,12 +629,11 @@ export function ChatsScreen() {
     return () => { cancelled = true }
   }, [])
 
-  // Fetch the current weekly brief so we can pin it to the top of the list.
-  // `/v1/brief/current` always returns this week's brief, so the pinned entry
-  // automatically stays put for the whole week and swaps to the new brief when
-  // one is generated. We only surface it when the brief belongs to the current
-  // calendar week — a 404 (no brief yet) or a stale brief leaves it unpinned,
-  // so we never render a broken/empty pinned row. The brief page owns its own
+  // Fetch the latest weekly brief and pin it to the top of the list. We always
+  // surface the most recent brief regardless of how old it is — it holds the
+  // pinned top slot until a newer one is generated. `/v1/brief/current` returns
+  // the latest `is_current` brief; a 404 (no brief yet) leaves it unpinned, so
+  // we never render a broken/empty pinned row. The brief page owns its own
   // generating/empty states, so we don't duplicate them here.
   useEffect(() => {
     if (!activeCompany) return
@@ -654,10 +641,9 @@ export function ChatsScreen() {
     briefApi.current(activeCompany)
       .then((brief) => {
         if (cancelled) return
-        if (!isCurrentWeekBrief(brief.generated_at)) { setBriefEntry(null); return }
         setBriefEntry({
           id: brief.id,
-          weekLabel: brief.week_label || "This week",
+          weekLabel: brief.week_label || "Weekly brief",
           headline: brief.summary_headline || "Your weekly brief is ready.",
           generatedAt: brief.generated_at,
         })

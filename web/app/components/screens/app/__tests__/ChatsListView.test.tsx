@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { ChatsListView, isCurrentWeekBrief, type BriefEntry } from "../ChatsScreen"
+import { ChatsListView, type BriefEntry } from "../ChatsScreen"
 import type { ConversationRow } from "../../../../types/content"
 
 // A conversation row, with the private `_pinned` / `_dbId` markers the screen
@@ -185,26 +185,5 @@ describe("ChatsListView — interaction (jsdom)", () => {
     const briefPin = container.querySelector('[data-brief-pin="true"]') as HTMLDivElement
     fireEvent.click(briefPin)
     expect(onRowClick).not.toHaveBeenCalled()
-  })
-})
-
-describe("isCurrentWeekBrief — week boundary", () => {
-  const ref = new Date("2026-05-20T12:00:00Z") // a Wednesday
-
-  it("returns true for a brief generated earlier in the same week", () => {
-    // Sunday of that week.
-    expect(isCurrentWeekBrief("2026-05-17T09:00:00Z", ref)).toBe(true)
-  })
-
-  it("returns true for a brief generated 'now'", () => {
-    expect(isCurrentWeekBrief(ref.toISOString(), ref)).toBe(true)
-  })
-
-  it("returns false for a brief from the previous week (stale → not pinned)", () => {
-    expect(isCurrentWeekBrief("2026-05-10T09:00:00Z", ref)).toBe(false)
-  })
-
-  it("returns false for an unparseable timestamp", () => {
-    expect(isCurrentWeekBrief("not-a-date", ref)).toBe(false)
   })
 })
