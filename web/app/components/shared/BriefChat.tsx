@@ -8,7 +8,7 @@ import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { useWorkspace } from "../../context/WorkspaceContext"
 import { ApiError, askApi, briefApi, type AskResponse } from "../../lib/api"
-import { runPrdGeneration, loadPrdById } from "../../lib/runPrdGeneration"
+import { runPrdGeneration, loadPrdById, loadLatestPrd } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
@@ -1223,9 +1223,15 @@ export function BriefChat() {
       busyRef.current = true
       setBusy(true)
       setCardBusyKey(key ?? null)
+      // Open the PRD rail card up front with a spinner so the work surfaces on
+      // the right immediately (the same content panel as Evidence) instead of
+      // only landing as a toast when the whole run finishes.
+      setContent({ prd: null, prdMeta: meta, prdGenerating: true })
+      openContentPanel("prd")
       try {
         const result = await runMultiAgentGeneration(meta.briefId, meta.insightIndex, "aggressive")
         if (!result.ok) {
+          setContent({ prdGenerating: false })
           showToast("Multi-agent generation failed", result.message.slice(0, 200))
           return
         }
@@ -1233,11 +1239,22 @@ export function BriefChat() {
         // Refresh the brief→PRD map so the card's button flips "Generate PRD" →
         // "View PRD" in place (the PRD now exists for this insight).
         refetchPrototypeMap()
+        // Land the generated PRD in the rail card. The run just created the PRD
+        // record for this insight, so it's the company's latest — fetch it (a
+        // pure read, no re-generation) and surface it in the open panel.
+        const prdResult = await loadLatestPrd(activeCompany)
+        if (prdResult.ok) {
+          setContent({ prd: prdResult.prd, prdMeta: meta, prdGenerating: false })
+          openContentPanel("prd")
+        } else {
+          setContent({ prdGenerating: false })
+        }
         showToast(
           "Multi-agent complete",
           `Generated PRD + Evidence + ${docCount} analysis documents. All cross-referenced.`,
         )
       } catch (e) {
+        setContent({ prdGenerating: false })
         showToast("Multi-agent failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       } finally {
         busyRef.current = false
@@ -1247,7 +1264,7 @@ export function BriefChat() {
         }
       }
     },
-    [content.briefDetails, showToast, refetchPrototypeMap],
+    [content.briefDetails, activeCompany, openContentPanel, setContent, showToast, refetchPrototypeMap],
   )
 
   // Dismiss greys the card out in place (it stays in the list); restore un-greys
