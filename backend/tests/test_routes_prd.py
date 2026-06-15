@@ -63,6 +63,41 @@ def test_get_prd_returns_row(tenant_client, isolated_settings):
     assert body["payload_md"] == "# PRD body"
 
 
+def test_get_generations_returns_only_sibling_rows(tenant_client, isolated_settings):
+    # Each regeneration is a new prds row sharing (brief_id, insight_index).
+    # /generations returns the whole family for that key — and nothing else.
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset="acme")
+    p1 = db_mod.start_prd(brief_id=brief_id, insight_index=0, title="g1",
+                          template_version=1, variant="v2")
+    db_mod.complete_prd(p1, title="g1", md="a")
+    p2 = db_mod.start_prd(brief_id=brief_id, insight_index=0, title="g2",
+                          template_version=1, variant="v2")
+    db_mod.complete_prd(p2, title="g2", md="b")
+    other = db_mod.start_prd(brief_id=brief_id, insight_index=1, title="other",
+                             template_version=1, variant="v2")
+    db_mod.complete_prd(other, title="other", md="c")
+
+    resp = t.client.get(f"/v1/prd/{p2}/generations")
+    assert resp.status_code == 200
+    ids = {g["id"] for g in resp.json()["generations"]}
+    assert ids == {p1, p2}            # both insight-0 siblings
+    assert other not in ids           # the insight-1 PRD is a different family
+
+
+def test_get_generations_cross_tenant_returns_404(tenant_client, isolated_settings):
+    a = tenant_client.make(slug="company-a")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset="company-a")
+    prd_id = db_mod.start_prd(brief_id=brief_id, insight_index=0, title="t",
+                              template_version=1, variant="v2")
+    db_mod.complete_prd(prd_id, title="t", md="x")
+    b = tenant_client.make(slug="company-b")
+    assert b.client.get(f"/v1/prd/{prd_id}/generations").status_code == 404
+    assert a.client.get(f"/v1/prd/{prd_id}/generations").status_code == 200
+
+
 def test_get_permissive_on_v1_rows(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
