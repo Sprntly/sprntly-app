@@ -7,30 +7,44 @@
 // Relative imports (not `@/…`) to match the codebase + the vitest resolver.
 import { useState } from "react"
 import type { FormEvent, ReactNode } from "react"
-import { API_URL } from "../lib/api"
 import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
 
 export type PasscodeResult =
   | { ok: true; bundleUrl: string; isComplete: boolean }
   | { ok: false; error: string }
 
+/** The app-origin /_da-bundle passcode-verify URL for a share token.
+ *
+ * Option A (the same shape the authed view-grant mint uses): the passcode
+ * POST mints the HttpOnly `da_share_grant` cookie that the SAME-ORIGIN bundle
+ * iframe's asset GETs carry. The cookie is host-only (domain=None), so it must
+ * be minted FIRST-PARTY to the serving (app) origin — NOT the API origin. A
+ * RELATIVE /_da-bundle path is same-origin by construction: the gate runs in the
+ * browser at the app origin and the proxy serves the bundle from that same
+ * origin (nginx `location ^~ /_da-bundle/` → FastAPI). Minting on the API origin
+ * (api.sprntly.ai) instead would set the grant host-only to the api host, so it
+ * would never attach to the app-origin iframe's asset GETs → passcode shares
+ * would blank-render in prod (localhost masks this: cookies are port-agnostic). */
+export function passcodeVerifyUrl(token: string): string {
+  return `/_da-bundle/v1/design-agent/by-token/${encodeURIComponent(token)}/passcode`
+}
+
 /** POST the passcode; map status codes to a user-facing result. The backend
  * returns 429 (rate-limited) BEFORE 401 (wrong passcode), so we surface the
- * throttle message distinctly from the wrong-passcode message. */
+ * throttle message distinctly from the wrong-passcode message. `credentials:
+ * "include"` so the Set-Cookie (da_share_grant) is stored for the asset GETs. */
 export async function submitPasscode(args: {
   token: string
   passcode: string
   fetchImpl?: typeof fetch
 }): Promise<PasscodeResult> {
   const doFetch = args.fetchImpl ?? fetch
-  const res = await doFetch(
-    `${API_URL}/v1/design-agent/by-token/${encodeURIComponent(args.token)}/passcode`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ passcode: args.passcode }),
-    },
-  )
+  const res = await doFetch(passcodeVerifyUrl(args.token), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passcode: args.passcode }),
+    credentials: "include",
+  })
   if (res.status === 429) {
     return { ok: false, error: "Too many attempts; try again in a minute." }
   }

@@ -62,6 +62,14 @@ type Props = {
    *  signed-in PostGenerationResult call site (which passes no headControls) is
    *  byte-for-byte unchanged. */
   headControls?: ReactNode
+  /** Bundle-proxy view-grant: called when the authed bundle iframe fails to load
+   *  (e.g. an asset GET 401s because the `da_view_grant` cookie expired or was
+   *  revoked). The authed container wires this to a BOUNDED single re-mint
+   *  (useViewGrant). Absent on the public `/p/<token>` surface — that path is
+   *  token-in-URL and never mints a grant. The browser fires the iframe `error`
+   *  event on a failed top-document (index.html) load; per-subresource 401s on a
+   *  same-origin bundle are tester-verified in the browser lane. */
+  onAssetError?: () => void
   /** C2b: optional overlay rendered INSIDE `.proto-stage` (which is
    *  position:relative), layered OVER the iframe. The public viewer passes the
    *  mark overlay + pin layer here so marking renders on top of the prototype.
@@ -82,6 +90,7 @@ export function PrototypeViewer({
   hideToggle = false,
   headControls,
   stageOverlay,
+  onAssetError,
 }: Props) {
   // UX-EXPLORE (throwaway — REVERT): controlled when a `platform` prop is given;
   // otherwise own the state locally as before. Either way `platform` below is the
@@ -164,6 +173,10 @@ export function PrototypeViewer({
             // code and must never open new windows or navigate the parent host away.
             sandbox="allow-scripts allow-same-origin allow-forms"
             className="da-prototype-iframe"
+            // View-grant: a failed top-document load (e.g. index.html 401 after the
+            // grant lapsed) fires `error`; the authed container re-mints ONCE
+            // (bounded). No-op when no handler is wired (public surface).
+            onError={onAssetError ? () => onAssetError() : undefined}
           />
           {/* C2b: optional marking overlay, layered over the iframe inside the
               position:relative stage. Undefined → nothing (signed-in path). */}

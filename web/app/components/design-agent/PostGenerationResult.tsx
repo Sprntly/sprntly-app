@@ -51,6 +51,12 @@ import { MarkOverlay, PinLayer, PrototypeMarkLayer } from "./PrototypeMarkLayer"
 // the public viewer drives the SAME implementation. The create-fn is injected
 // per surface (signed-in: withAuthRetry(createComment); public: createCommentByToken).
 import { usePinMarking } from "./usePinMarking"
+// Bundle-proxy view-grant flow: the authed iframe now loads from the same-origin
+// proxy, so the app must mint the `da_view_grant` cookie (bearer-authed POST)
+// BEFORE setting the iframe `src`. The hook gates `bundle_url` until the grant
+// exists and re-mints ONCE (bounded) on a later asset 401. The public
+// `/p/<token>` viewer does NOT use this surface, so it is untouched.
+import { useViewGrant } from "./useViewGrant"
 import type { PendingQuestion } from "../../lib/api"
 import {
   IconMessage,
@@ -235,7 +241,19 @@ export type PostGenerationResultViewProps = {
   isComplete: boolean
   shareMode: ShareMode
   shareToken: string | null
+  /** The GATED proxy bundle url: null until the view-grant cookie has been
+   *  minted (the container's useViewGrant gates it). When null the viewer cell
+   *  doesn't render — the iframe `src` is never set without a credential. */
   bundleUrl: string | null
+  /** A terminal view-grant error (initial mint failed or the bounded re-mint was
+   *  exhausted). When set the canvas surfaces a non-blocking error affordance. */
+  bundleGrantError?: string | null
+  /** Called when an authed iframe asset load 401s (grant missing/expired) so the
+   *  container can re-mint ONCE (bounded). Absent on the public surface. */
+  onBundleAssetError?: () => void
+  /** Bumped on a successful re-mint so the iframe is forced to reload the
+   *  now-re-authorized bundle. Folded into the viewer remount key. */
+  bundleGrantReloadKey?: number
   onStateChange?: (state: { isComplete: boolean; staleHandoff: boolean }) => void
   /** P6-13 (UX-3): comments node for the right cell of the `design-pane` grid.
    *  When absent, the viewer renders full-width (no comments cell, no grid). */
@@ -1013,10 +1031,12 @@ function FullscreenOverlay({
   bundleUrl,
   isComplete,
   onCloseFullscreen,
+  onAssetError,
 }: {
   bundleUrl: string
   isComplete: boolean
   onCloseFullscreen?: () => void
+  onAssetError?: () => void
 }) {
   const fullscreenRef = useRef<HTMLDivElement>(null)
 
@@ -1053,7 +1073,7 @@ function FullscreenOverlay({
         ×
       </button>
       <div className="proto-fullscreen-body">
-        <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} />
+        <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} onAssetError={onAssetError} />
       </div>
     </div>
   )
@@ -1107,6 +1127,9 @@ export function PostGenerationResultView({
   shareMode,
   shareToken,
   bundleUrl,
+  bundleGrantError = null,
+  onBundleAssetError,
+  bundleGrantReloadKey = 0,
   onStateChange,
   comments,
   iterate,
@@ -1200,12 +1223,15 @@ export function PostGenerationResultView({
       // `key` follows BOTH the bundle path and the nonce, so React mounts a fresh
       // iframe when the build advances to a new path AND when a same-path rebuild
       // bumps the nonce — the canvas never reuses a frame stuck on a prior build.
-      key={viewerRemountKey(bundleUrl, bundleReloadNonce)}
+      // The remount key folds in the grant reload key so a bounded re-mint
+      // forces a fresh iframe load of the now-re-authorized bundle.
+      key={`${viewerRemountKey(bundleUrl, bundleReloadNonce)}-g${bundleGrantReloadKey}`}
       bundleUrl={reloadBundleUrl ?? bundleUrl}
       isComplete={isComplete}
       platform={platform}
       onPlatformChange={onPlatformChange}
       hideToggle
+      onAssetError={onBundleAssetError}
     />
   ) : null
 
@@ -1361,6 +1387,14 @@ export function PostGenerationResultView({
           data-testid="da-canvas-center"
         >
           {viewer}
+          {/* View-grant failure (initial mint failed, or the bounded re-mint was
+              exhausted — the grant was likely revoked mid-session). Non-blocking
+              banner over the stage; a refresh re-runs the mint. */}
+          {bundleGrantError && !viewer && (
+            <div className="da-grant-error" role="alert" data-testid="da-grant-error">
+              {bundleGrantError}
+            </div>
+          )}
           {/* IFRAME NUANCE (critical): the prototype is an <iframe>, so clicks
               inside it can't be captured directly. The <MarkOverlay> sits ABOVE
               the iframe; it is click-inert normally (pointer-events:none via CSS)
@@ -1456,6 +1490,7 @@ export function PostGenerationResultView({
           bundleUrl={bundleUrl}
           isComplete={isComplete}
           onCloseFullscreen={onCloseFullscreen}
+          onAssetError={onBundleAssetError}
         />
       )}
     </div>
@@ -1497,6 +1532,13 @@ export function PostGenerationResult({
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
   )
+
+  // Bundle-proxy view-grant: mint `da_view_grant` (bearer-authed POST) before the
+  // authed iframe loads the same-origin proxy bundle. `grantedBundleUrl` is null
+  // until the grant exists, so the iframe `src` is never set without a credential
+  // the asset GETs can carry. `notifyAssetError` re-mints ONCE on an asset 401
+  // (bounded — see useViewGrant). The bundle url is opaque here; we never parse it.
+  const grant = useViewGrant(prototype.id, prototype.bundle_url)
 
   // P6-16 (UX-6): client-only open state for the full-screen overlay. Owned here
   // (the stateful container) and threaded into the SSR-renderable pure view,
@@ -1581,7 +1623,13 @@ export function PostGenerationResult({
       isComplete={isComplete}
       shareMode={prototype.share_mode ?? "private"}
       shareToken={prototype.share_token ?? null}
-      bundleUrl={prototype.bundle_url}
+      // GATED bundle url — null until the view-grant cookie is minted, so the
+      // authed iframe never loads the proxy bundle without a credential its asset
+      // GETs can carry. (The opaque proxy url is loaded verbatim; never parsed.)
+      bundleUrl={grant.grantedBundleUrl}
+      bundleGrantError={grant.error}
+      onBundleAssetError={grant.notifyAssetError}
+      bundleGrantReloadKey={grant.reloadKey}
       onStateChange={(state) => {
         setIsComplete(state.isComplete)
         onStateChange?.(state)

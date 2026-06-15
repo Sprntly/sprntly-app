@@ -27,7 +27,7 @@ import { dirname, resolve } from "node:path"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import { PasscodeGateView } from "../PasscodeGate"
-import { submitPasscode } from "../PasscodeGate"
+import { submitPasscode, passcodeVerifyUrl } from "../PasscodeGate"
 import { nextViewerState } from "../PublicTokenViewer"
 import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
@@ -486,5 +486,39 @@ describe("P6-18 behaviour unchanged (AC5 — CSS-only fix, no logic drift)", () 
     const r401 = await submitPasscode({ token: "t", passcode: "wrong", fetchImpl: fetch401 })
     expect(r401.ok).toBe(false)
     if (!r401.ok) expect(r401.error).toContain("Incorrect passcode")
+  })
+})
+
+// REGRESSION LOCK (Option-A parity with the view-grant mint): the passcode POST
+// mints the host-only `da_share_grant` cookie, so it MUST target the APP-ORIGIN
+// /_da-bundle path (same-origin, relative) — NOT the API origin (API_URL). A
+// mint on the API origin would set the cookie host-only to api.<domain> and it
+// would never attach to the app-origin iframe asset GETs → prod blank-render.
+// localhost masks this (port-agnostic cookies), so pin the target origin here.
+describe("passcode mint targets the app-origin /_da-bundle path (prod cookie correctness)", () => {
+  it("passcodeVerifyUrl is the relative app-origin /_da-bundle path, not an API_URL absolute", () => {
+    const url = passcodeVerifyUrl("tok-123")
+    expect(url).toBe("/_da-bundle/v1/design-agent/by-token/tok-123/passcode")
+    // Relative (no scheme/host) ⇒ same-origin by construction; never the API origin.
+    expect(url.startsWith("/_da-bundle/")).toBe(true)
+    expect(url).not.toMatch(/^https?:\/\//)
+    // Token is URL-encoded.
+    expect(passcodeVerifyUrl("a/b?c")).toBe(
+      "/_da-bundle/v1/design-agent/by-token/a%2Fb%3Fc/passcode",
+    )
+  })
+
+  it("submitPasscode POSTs to the /_da-bundle path with credentials: 'include'", async () => {
+    const spy = vi.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => ({ bundle_url: "u", is_complete: true }),
+    })
+    await submitPasscode({ token: "tok-9", passcode: "p", fetchImpl: spy })
+    expect(spy).toHaveBeenCalledTimes(1)
+    const [calledUrl, init] = spy.mock.calls[0]
+    expect(calledUrl).toBe("/_da-bundle/v1/design-agent/by-token/tok-9/passcode")
+    expect(init.method).toBe("POST")
+    expect(init.credentials).toBe("include")
   })
 })

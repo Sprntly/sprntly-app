@@ -197,10 +197,23 @@ class Settings(BaseSettings):
     github_app_slug: str = "sprntly-ai"
 
     # Design Agent share-token secret (F6 / AD Rule #14). A DISTINCT secret from
-    # jwt_secret — never reuse JWT_SECRET for Design Agent surfaces. Bound here
-    # for FUTURE HMAC-based share_token rotation (P2-06 stores the column + ships
-    # the helpers; it does not yet consume this secret). No JWT_SECRET fallback.
+    # jwt_secret — never reuse JWT_SECRET for Design Agent surfaces. Now ALSO the
+    # HMAC key for the bundle-proxy grant cookies (da_view_grant / da_share_grant).
+    # No JWT_SECRET fallback. MUST be set in prod; the bundle proxy fails closed
+    # (mint + validate both refuse) when this is empty — never serve with an
+    # unsigned/forgeable grant.
     design_agent_token_secret: str = ""
+
+    # Bundle-proxy public origin (Decision 2 — same-origin serving). The prototype
+    # bundle is served from the APP origin (e.g. https://app.sprntly.ai) via an
+    # nginx reverse-proxy to the FastAPI /v1/design-agent/.../bundle routes, under
+    # the /_da-bundle/ prefix. This is a CONFIG-derived constant — the proxy base
+    # baked into bundle_url is NEVER built from the inbound Host header (host-trust
+    # guard, plan fix-item #4). Empty default falls back to frontend_url so local
+    # dev / tests get a same-origin base without extra config.
+    design_agent_bundle_origin: str = ""
+    # The URL-path prefix the app-origin nginx maps to the FastAPI bundle routes.
+    design_agent_bundle_path_prefix: str = "/_da-bundle"
 
     # Feature flag: set to true in .env to enable Design Agent routes.
     # Routes return 404 when false so the feature is invisible when off.
@@ -257,6 +270,23 @@ class Settings(BaseSettings):
     @property
     def cookie_secure(self) -> bool:
         return self.env == "production"
+
+    @property
+    def design_agent_bundle_base(self) -> str:
+        """Public base for the bundle proxy, host-trust safe (NEVER from Host).
+
+        Shape: ``<origin><prefix>/v1/design-agent`` e.g.
+        ``https://app.sprntly.ai/_da-bundle/v1/design-agent``. Callers append
+        ``/{prototype_id}/bundle/index.html`` (authed) or
+        ``/by-token/{token}/bundle/index.html`` (public/passcode). Falls back to
+        ``frontend_url`` when ``design_agent_bundle_origin`` is unset so local dev
+        and tests get a same-origin base without extra config.
+        """
+        origin = (self.design_agent_bundle_origin or self.frontend_url or "").rstrip("/")
+        prefix = "/" + (self.design_agent_bundle_path_prefix or "").strip("/")
+        if prefix == "/":
+            prefix = ""
+        return f"{origin}{prefix}/v1/design-agent"
 
     @property
     def data_path(self) -> Path:
