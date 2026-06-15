@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS prototypes (
     bundle_url             TEXT,
     current_checkpoint_id  INTEGER,
     error                  TEXT,
+    preview_image_url      TEXT,
+    is_complete            INTEGER NOT NULL DEFAULT 0,
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at           TEXT
 );
@@ -104,16 +106,21 @@ def _seed_evidence(*, brief_id: int, title: str, insight_index: int = 0,
 
 
 def _seed_prototype(*, prd_id: int, workspace_id: str, status: str = "ready",
-                    created_at: str | None = None) -> int:
+                    created_at: str | None = None,
+                    preview_image_url: str | None = None,
+                    is_complete: bool = False) -> int:
     from app.db.client import require_client
     row = {
         "prd_id": prd_id,
         "workspace_id": workspace_id,
         "status": status,
         "template_version": 1,
+        "is_complete": is_complete,
     }
     if created_at is not None:
         row["created_at"] = created_at
+    if preview_image_url is not None:
+        row["preview_image_url"] = preview_image_url
     resp = require_client().table("prototypes").insert(row).execute()
     return resp.data[0]["id"]
 
@@ -238,3 +245,62 @@ def test_recency_sort_newest_first(artifacts_env, monkeypatch):
     assert titles == ["Newest", "Newest", "Middle", "Oldest"]
     # First item is the prototype (newest created_at).
     assert r.json()["artifacts"][0]["type"] == "prototype"
+
+
+def test_prototype_status_filter_includes_generating_and_ready(artifacts_env, monkeypatch):
+    # generating + ready are surfaced; failed + invalidated are excluded.
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    prd_gen = _seed_prd(brief_id=brief_id, title="Building PRD")
+    prd_ready = _seed_prd(brief_id=brief_id, title="Built PRD")
+    prd_failed = _seed_prd(brief_id=brief_id, title="Failed PRD")
+    prd_inval = _seed_prd(brief_id=brief_id, title="Invalidated PRD")
+
+    _seed_prototype(prd_id=prd_gen, workspace_id=ctx.company_id, status="generating")
+    _seed_prototype(prd_id=prd_ready, workspace_id=ctx.company_id, status="ready")
+    _seed_prototype(prd_id=prd_failed, workspace_id=ctx.company_id, status="failed")
+    _seed_prototype(prd_id=prd_inval, workspace_id=ctx.company_id, status="invalidated")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    assert r.status_code == 200
+    proto_statuses = sorted(
+        a["status"] for a in r.json()["artifacts"] if a["type"] == "prototype"
+    )
+    assert proto_statuses == ["generating", "ready"]
+
+
+def test_prototype_emits_preview_and_completion_fields(artifacts_env, monkeypatch):
+    # preview_image_url, is_complete, status present on emitted prototype items,
+    # including the null-preview / not-yet-complete case.
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    prd_done = _seed_prd(brief_id=brief_id, title="Completed PRD")
+    prd_building = _seed_prd(brief_id=brief_id, title="Building PRD")
+
+    _seed_prototype(
+        prd_id=prd_done, workspace_id=ctx.company_id, status="ready",
+        preview_image_url="prototypes/1/acme/_preview/preview.png",
+        is_complete=True,
+        created_at="2026-06-10T00:00:00+00:00",
+    )
+    _seed_prototype(
+        prd_id=prd_building, workspace_id=ctx.company_id, status="generating",
+        created_at="2026-06-09T00:00:00+00:00",
+    )
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    assert r.status_code == 200
+    protos = {
+        a["title"]: a for a in r.json()["artifacts"] if a["type"] == "prototype"
+    }
+
+    done = protos["Completed PRD"]
+    assert done["status"] == "ready"
+    assert done["is_complete"] is True
+    assert done["preview_image_url"] == "prototypes/1/acme/_preview/preview.png"
+
+    building = protos["Building PRD"]
+    assert building["status"] == "generating"
+    assert building["is_complete"] is False
+    # NULL preview surfaces as JSON null (the shimmer case).
+    assert building["preview_image_url"] is None

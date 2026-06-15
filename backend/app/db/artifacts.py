@@ -122,10 +122,14 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
 
     # ── Prototypes (workspace_id = company UUID). Title is derived from the
     #    parent PRD (prototypes have no title column). ─────────────────────────
+    #    Surface only in-progress + built prototypes: status IN
+    #    ('generating','ready'). 'failed' / 'invalidated' are intentionally
+    #    excluded — they are not user-facing artifacts in this listing.
     proto_rows = (
         c.table("prototypes")
-        .select("id, prd_id, status, created_at")
+        .select("id, prd_id, status, created_at, preview_image_url, is_complete")
         .eq("workspace_id", company_id)
+        .in_("status", ["generating", "ready"])
         .execute()
         .data
         or []
@@ -153,6 +157,11 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
                 "title": prd_title,
                 "status": r.get("status") or "",
                 "created_at": r.get("created_at"),
+                # Frontend derives Building/Completed/Draft + clickability +
+                # thumbnail-vs-shimmer from these. preview_image_url is NULL
+                # until completion (or when screenshotting isn't provisioned).
+                "preview_image_url": r.get("preview_image_url"),
+                "is_complete": bool(r.get("is_complete")),
                 "source": {
                     "prd_id": pid,
                     "prd_title": prd_title,
