@@ -38,4 +38,18 @@ describe("public /p/<token> viewer does NOT mint a view-grant", () => {
     // bearer view-grant mint.
     expect(src).toMatch(/bundleUrl=\{props\.view\.bundleUrl\}/)
   })
+
+  // Option-A parity with the view-grant mint: the passcode POST mints the
+  // host-only da_share_grant cookie, so it must target the APP-ORIGIN /_da-bundle
+  // path — NOT the API origin (API_URL). Minting on the API origin sets the
+  // cookie host-only to api.<domain>, which never attaches to the app-origin
+  // iframe asset GETs → prod blank-render (localhost masks it: port-agnostic
+  // cookies). Lock it at the source so a revert to API_URL trips here.
+  it("PasscodeGate mints the passcode grant on the app-origin /_da-bundle path, not API_URL", () => {
+    const src = read("PasscodeGate.tsx")
+    // It posts to the same-origin /_da-bundle passcode endpoint...
+    expect(src).toMatch(/\/_da-bundle\/v1\/design-agent\/by-token\//)
+    // ...and does NOT import or build the URL from API_URL (the api origin).
+    expect(src).not.toMatch(/API_URL/)
+  })
 })
