@@ -395,6 +395,26 @@ def test_view_grant_unauth_401(client, env):
     assert client.post(f"/v1/design-agent/{pid}/view-grant").status_code == 401
 
 
+def test_view_grant_cookie_is_host_only_and_path_scoped(client, env):
+    # Option A (v3 §1.6): the da_view_grant cookie MUST be HOST-ONLY (NO Domain
+    # attr ⇒ no cookie_domain dependency, no broadening) and Path-scoped to THIS
+    # prototype's bundle route, HttpOnly + SameSite=Lax. Locks the host-only
+    # property in CI so a regression to a domain cookie fails the suite.
+    _seed_company(_OWNER_COMPANY, _OWNER_USER)
+    pid, _ = _seed_prototype(env, share_mode="private")
+    resp = client.post(
+        f"/v1/design-agent/{pid}/view-grant",
+        headers={"Authorization": f"Bearer {_mint_bearer(_OWNER_USER)}"},
+    )
+    assert resp.status_code == 204
+    sc = resp.headers.get("set-cookie", "")
+    assert "da_view_grant=" in sc
+    assert "domain=" not in sc.lower()                       # HOST-ONLY — no Domain attr
+    assert f"/v1/design-agent/{pid}/bundle" in sc            # path-scoped to this proto
+    assert "httponly" in sc.lower()
+    assert "samesite=lax" in sc.lower()
+
+
 def test_view_grant_over_limit_429(client, env):
     # Repeated non-owner mint attempts register failures → 6th is 429.
     _seed_company(_OTHER_COMPANY, _OTHER_USER)
