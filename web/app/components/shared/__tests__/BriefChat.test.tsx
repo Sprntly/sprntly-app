@@ -86,6 +86,19 @@ vi.mock("../../../context/WorkspaceContext", () => ({
   }),
 }))
 
+// Mock the brief→PRD map hook so we can (a) start from an empty map (button reads
+// "Generate PRD") and (b) spy on refetch — the call that lets the card flip to
+// "View PRD" in place after a generation completes.
+const { refetchMapSpy } = vi.hoisted(() => ({ refetchMapSpy: vi.fn() }))
+vi.mock("../../design-agent/useBriefPrototypeMap", () => ({
+  useBriefPrototypeMap: () => ({
+    entriesByInsight: new Map(),
+    loading: false,
+    error: false,
+    refetch: refetchMapSpy,
+  }),
+}))
+
 import { ContentProvider, useContent } from "../../../context/ContentContext"
 import { NavigationProvider } from "../../../context/NavigationContext"
 import type {
@@ -95,6 +108,7 @@ import type {
   BriefV2State,
 } from "../../../lib/brief-v2-adapter"
 import { BriefChat, prdCtaState } from "../BriefChat"
+import { runMultiAgentGeneration } from "../../../lib/runMultiAgentGeneration"
 
 describe("prdCtaState — smart View/Generate PRD button", () => {
   it("offers 'View PRD' when a PRD already exists for the insight", () => {
@@ -183,7 +197,16 @@ const BRIEF: BriefV2State = {
 function InjectBrief({ brief }: { brief: BriefV2State }) {
   const { setContent } = useContent()
   React.useEffect(() => {
-    setContent({ briefV2: brief, userName: "Apurva Jain" })
+    setContent({
+      briefV2: brief,
+      userName: "Apurva Jain",
+      // Minimal per-finding detail meta so card actions (generate/view) have a
+      // brief+insight to act on; without it cardGenerateAll early-returns.
+      briefDetails: {
+        "something_wrong-0": { meta: { briefId: 1, insightIndex: 0 } },
+        "something_wrong-1": { meta: { briefId: 1, insightIndex: 1 } },
+      } as never,
+    })
   }, [setContent, brief])
   return null
 }
@@ -230,6 +253,26 @@ describe("BriefChat finding card — single full-system PRD button", () => {
     expect(within(card).queryByRole("button", { name: /generate prd first/i })).toBeNull()
     // The single button runs the full multi-agent system (tooltip names the suite).
     expect(prdButtons[0].getAttribute("title")).toMatch(/full system/i)
+  })
+
+  it("clicking Generate PRD runs the system then refetches the map so the button can flip to View PRD", async () => {
+    vi.mocked(runMultiAgentGeneration).mockResolvedValueOnce({
+      ok: true,
+      runId: "r1",
+      status: { status: "ready" } as never,
+      docs: { docs: [] } as never,
+    })
+    await act(async () => {
+      renderBrief()
+    })
+    const card = cardFor(HERO.title)
+    const btn = within(card).getByRole("button", { name: /generate prd/i })
+    await act(async () => {
+      fireEvent.click(btn)
+    })
+    expect(runMultiAgentGeneration).toHaveBeenCalledTimes(1)
+    // The map refetch is what lets the button flip Generate PRD → View PRD.
+    expect(refetchMapSpy).toHaveBeenCalled()
   })
 })
 

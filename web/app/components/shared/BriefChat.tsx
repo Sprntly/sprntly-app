@@ -733,8 +733,11 @@ export function BriefChat() {
     return null
   }, [content.briefDetails])
 
-  // One fetch per brief — drives the per-card right-rail state
-  const { entriesByInsight } = useBriefPrototypeMap(briefId)
+  // One fetch per brief — drives the per-card right-rail state + the
+  // Generate/View PRD button. refetch() is called after a card generation so the
+  // button flips from "Generate PRD" → "View PRD" in place (no reload).
+  const { entriesByInsight, refetch: refetchPrototypeMap } =
+    useBriefPrototypeMap(briefId)
 
   // GenerateModal / LoadingScreen state — mounted once at BriefChat level
   const genLoadingRef = useRef(false)
@@ -1227,6 +1230,9 @@ export function BriefChat() {
           return
         }
         const docCount = result.docs.docs.length
+        // Refresh the brief→PRD map so the card's button flips "Generate PRD" →
+        // "View PRD" in place (the PRD now exists for this insight).
+        refetchPrototypeMap()
         showToast(
           "Multi-agent complete",
           `Generated PRD + Evidence + ${docCount} analysis documents. All cross-referenced.`,
@@ -1241,7 +1247,7 @@ export function BriefChat() {
         }
       }
     },
-    [content.briefDetails, showToast],
+    [content.briefDetails, showToast, refetchPrototypeMap],
   )
 
   // Dismiss greys the card out in place (it stays in the list); restore un-greys
