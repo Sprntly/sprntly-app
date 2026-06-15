@@ -8,7 +8,7 @@ import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { useWorkspace } from "../../context/WorkspaceContext"
 import { ApiError, askApi, briefApi, type AskResponse } from "../../lib/api"
-import { runPrdGeneration } from "../../lib/runPrdGeneration"
+import { runPrdGeneration, loadPrdById } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
@@ -27,7 +27,7 @@ import { prototypeStateForInsight } from "../design-agent/briefPrototypeMap.help
 import { GenerateModal } from "../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
-import { prototypePath, prdPath } from "../../lib/routes"
+import { prototypePath } from "../../lib/routes"
 import { useRouter } from "next/navigation"
 
 type Finding = BriefV2HeroFinding | BriefV2CompactFinding
@@ -1296,17 +1296,58 @@ export function BriefChat() {
   // the generate flow if the prd id can't be resolved (the button only offers
   // "View PRD" when hasPrd && prdId, so this is belt-and-suspenders).
   const cardViewPrd = useCallback(
-    (finding: Finding) => {
+    async (finding: Finding) => {
       const key = finding.detailKey
       const meta = key ? content.briefDetails?.[key]?.meta : null
       const state =
         meta != null
           ? prototypeStateForInsight(entriesByInsight, meta.insightIndex)
           : null
-      if (state?.prdId != null) router.push(prdPath(state.prdId))
-      else void runGate(() => cardGeneratePrd(finding))
+      // No PRD yet → generate one (cardGeneratePrd opens it in the rail too).
+      if (state?.prdId == null) {
+        void runGate(() => cardGeneratePrd(finding))
+        return
+      }
+      // Existing PRD → open it in the right-rail content panel (the SAME card as
+      // Evidence), not a separate page. If it's already loaded for this insight,
+      // just re-open the panel.
+      if (
+        content.prd &&
+        content.prdMeta &&
+        meta &&
+        content.prdMeta.briefId === meta.briefId &&
+        content.prdMeta.insightIndex === meta.insightIndex
+      ) {
+        openContentPanel("prd")
+        return
+      }
+      setContent({ prd: null, prdMeta: meta ?? null, prdGenerating: true })
+      openContentPanel("prd")
+      try {
+        const result = await loadPrdById(state.prdId)
+        if (!result.ok) {
+          setContent({ prdGenerating: false })
+          showToast("Couldn't open PRD", result.message.slice(0, 200))
+          return
+        }
+        setContent({ prd: result.prd, prdMeta: meta ?? null, prdGenerating: false })
+        openContentPanel("prd")
+      } catch (e) {
+        setContent({ prdGenerating: false })
+        showToast("Couldn't open PRD", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+      }
     },
-    [content.briefDetails, entriesByInsight, router, runGate, cardGeneratePrd],
+    [
+      content.briefDetails,
+      content.prd,
+      content.prdMeta,
+      entriesByInsight,
+      openContentPanel,
+      runGate,
+      cardGeneratePrd,
+      setContent,
+      showToast,
+    ],
   )
 
   const cardRestore = useCallback((finding: Finding) => {

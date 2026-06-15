@@ -39,3 +39,28 @@ export async function runPrdGeneration(meta: DetailState["meta"]): Promise<PrdGe
     },
   }
 }
+
+export type PrdLoadResult = { ok: true; prd: PrdState } | { ok: false; message: string }
+
+/**
+ * Fetch an already-generated PRD by id and map it to PrdState — no generation.
+ * Lets the brief card's "View PRD" surface an existing PRD in the right rail
+ * (the same content-panel card as Evidence) instead of navigating to a page.
+ */
+export async function loadPrdById(prdId: number): Promise<PrdLoadResult> {
+  const prd = await prdApi.get(prdId)
+  if (prd.status === "failed") {
+    return { ok: false, message: prd.error || "PRD failed on the backend" }
+  }
+  if (prd.status !== "ready") {
+    return { ok: false, message: "PRD isn't ready yet" }
+  }
+  return {
+    ok: true,
+    prd: {
+      ...markdownToPrdState(prd.payload_md),
+      prd_id: prd.id,
+      figma_file_key: undefined,
+    },
+  }
+}
