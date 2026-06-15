@@ -95,7 +95,7 @@ def test_fireflies_connect_kicks_off_sync(isolated_settings, monkeypatch):
 
     require_company = conn_route.require_company
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
-        company_id="co-X", role="member", user_id="u1")
+        company_id="co-X", role="admin", user_id="u1")
     try:
         client = TestClient(main_mod.app)
         r = client.post("/v1/connectors/fireflies/apikey", json={"api_key": "ff-key"})

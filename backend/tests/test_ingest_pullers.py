@@ -189,7 +189,7 @@ def test_sync_route_uses_company_scoped_connection(isolated_settings, monkeypatc
     monkeypatch.setattr(ingest_route.db, "get_connection",
                         lambda cid, prov: calls.setdefault("get", (cid, prov)) and None)
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
-        company_id="co-X", role="member", user_id="u1")
+        company_id="co-X", role="admin", user_id="u1")
     try:
         client = TestClient(main_mod.app)
         r = client.post("/v1/ingest/clickup/sync")
