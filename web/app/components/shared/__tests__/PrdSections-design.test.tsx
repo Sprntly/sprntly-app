@@ -28,11 +28,9 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const CSS_PATH = join(HERE, "..", "..", "design-agent", "design-agent.css")
 const CSS = readFileSync(CSS_PATH, "utf8")
 const PRD_SECTIONS_SRC = readFileSync(join(HERE, "..", "PrdSections.tsx"), "utf8")
-// shared/__tests__ → shared → components → screens/app/PrdScreen.tsx
-const PRD_SCREEN_SRC = readFileSync(
-  join(HERE, "..", "..", "screens", "app", "PrdScreen.tsx"),
-  "utf8",
-)
+// shared/__tests__ → shared → PrdPanelContent.tsx — the right-rail PRD host
+// (the standalone PrdScreen page was removed; the rail is the sole PRD surface).
+const PRD_SCREEN_SRC = readFileSync(join(HERE, "..", "PrdPanelContent.tsx"), "utf8")
 
 const OLD_EMPTY_COPY = "No prototype yet — use the Design Agent to generate one"
 
@@ -231,10 +229,8 @@ describe("PrdSections — prd-design generate-trigger relocation + hot-file exce
     expect(PRD_SECTIONS_SRC).toContain(
       "contentEditable region is deliberately untouched",
     )
-    expect(PRD_SCREEN_SRC).toContain("Hot-file exception")
-    expect(PRD_SCREEN_SRC).toContain(
-      "editable PRD-body region is deliberately left untouched",
-    )
+    // (The standalone PrdScreen page carried a matching note; it was removed in
+    // the prd-removal refactor, so only PrdSections is asserted here.)
   })
 })
 
