@@ -31,6 +31,7 @@ import {
   recordReplayShow,
   wasSeenThisLoad,
 } from "./notificationStore"
+import { ensureNotifyPermission, fireReadyNotification } from "./browserNotify"
 import { IconClose, IconSparkle } from "../shared/app-icons"
 
 /** P1-12 ready-completion toast copy. Reused for the live toast, the persisted
@@ -211,6 +212,11 @@ export async function runGenerateFlow({
   onKickoff,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
+  // Ask for OS-notification permission inside the Generate user-gesture (where
+  // browsers allow the prompt) so a ready notification can reach the user if
+  // they navigate away / background the tab during the minutes-long build.
+  // Unawaited + best-effort: never blocks or fails the kickoff.
+  void ensureNotifyPermission()
   try {
     const kickoff = await generate(params)
     // P5-09: persist a `pending` entry so a reload mid-generation that then
@@ -238,6 +244,14 @@ export async function runGenerateFlow({
         if (notifyOnReady) {
           showToast(READY_TOAST_TITLE, READY_TOAST_SUB)
         }
+        // OS-level notification (no-op unless permission was granted) so the
+        // user is reached even when the tab is backgrounded / they navigated
+        // away. Clicking it routes to this PRD's prototype.
+        fireReadyNotification({
+          title: READY_TOAST_TITLE,
+          body: READY_TOAST_SUB,
+          prdId: params.prd_id,
+        })
       } else {
         showToast("Generation failed", result.message)
       }

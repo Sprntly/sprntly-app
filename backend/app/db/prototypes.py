@@ -306,6 +306,34 @@ def find_ready_prototype_by_prd(
     return resp.data[0] if resp.data else None
 
 
+def find_active_prototype_by_prd(
+    *,
+    prd_id: int,
+    workspace_id: str,
+) -> dict[str, Any] | None:
+    """Return the most-recent READY-or-GENERATING prototype for a PRD, or None.
+
+    Resume sibling of find_ready_prototype_by_prd: it also matches an in-flight
+    'generating' row so a page (re)load mid-generation can re-attach to it and
+    poll to ready, instead of dropping to the generate panel and stranding the
+    finished bundle (the readiness lag between the SSE 'done' at codegen-complete
+    and complete_prototype() at the end of the build/stage tail). Read-only, no
+    dedup side-effect, filtered to the caller's workspace, newest by id.
+    """
+    c = require_client()
+    resp = (
+        c.table(_TABLE)
+        .select("*")
+        .eq("prd_id", prd_id)
+        .eq("workspace_id", workspace_id)
+        .in_("status", ["ready", "generating"])
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
 def create_checkpoint(
     *,
     prototype_id: int,

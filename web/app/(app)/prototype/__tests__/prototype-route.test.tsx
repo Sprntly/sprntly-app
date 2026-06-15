@@ -23,6 +23,7 @@ import {
   needsSupplementalPrd,
   pickPrdFields,
   fsParamToFullscreen,
+  actionForActiveProto,
 } from "../PrototypeRoute"
 import type { PrototypeRecord } from "../../../lib/api"
 
@@ -160,6 +161,37 @@ describe("prototype route — in-tab render state (prototypeTabState)", () => {
 
   it("PRD set, resolve settled with no prototype → 'generate' (the generate panel)", () => {
     expect(prototypeTabState(42, false, null)).toBe("generate")
+  })
+})
+
+describe("prototype route — active-prototype resume decision (actionForActiveProto)", () => {
+  it("reveals a ready prototype that has a bundle_url", () => {
+    const proto = {
+      id: 9,
+      status: "ready",
+      bundle_url: "https://cdn/b.js",
+    } as PrototypeRecord
+    expect(actionForActiveProto(proto)).toEqual({ kind: "reveal", proto })
+  })
+
+  it("resumes an in-flight generating prototype (the reachability fix)", () => {
+    const proto = { id: 12, status: "generating", bundle_url: null } as PrototypeRecord
+    expect(actionForActiveProto(proto)).toEqual({ kind: "resume", prototypeId: 12 })
+  })
+
+  it("does NOT reveal a ready row that has no bundle_url yet (still staging)", () => {
+    const proto = { id: 13, status: "ready", bundle_url: null } as PrototypeRecord
+    expect(actionForActiveProto(proto)).toEqual({ kind: "none" })
+  })
+
+  it("does nothing for null / failed / invalidated", () => {
+    expect(actionForActiveProto(null)).toEqual({ kind: "none" })
+    expect(
+      actionForActiveProto({ id: 1, status: "failed" } as PrototypeRecord),
+    ).toEqual({ kind: "none" })
+    expect(
+      actionForActiveProto({ id: 2, status: "invalidated" } as PrototypeRecord),
+    ).toEqual({ kind: "none" })
   })
 })
 

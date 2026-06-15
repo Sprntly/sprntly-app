@@ -965,6 +965,20 @@ export const designAgentApi = {
       return null
     }
   },
+  /** Resume lookup: the most-recent READY-or-GENERATING prototype for a PRD, or
+   *  null. Unlike getByPrd (ready only), this also returns an in-flight row so
+   *  the prototype route can re-attach to a generation in progress on a (re)load
+   *  and poll it to ready — instead of stranding the finished bundle during the
+   *  readiness lag. Swallows 404→null like getByPrd. */
+  getActiveByPrd: async (prdId: number): Promise<PrototypeRecord | null> => {
+    try {
+      return await api.get<PrototypeRecord>(
+        `/v1/design-agent/by-prd/${encodeURIComponent(String(prdId))}/active`,
+      )
+    } catch {
+      return null
+    }
+  },
   /** F14 — mark a prototype complete. Empty body. */
   complete: (prototypeId: number) =>
     api.post<{
