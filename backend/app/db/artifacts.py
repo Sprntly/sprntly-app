@@ -71,7 +71,17 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
             .data
             or []
         )
+        # A PRD is regenerated in place: each attempt is a new prds row sharing
+        # the same (brief_id, insight_index). The artifacts list shows only the
+        # LATEST generation per logical PRD; older generations are reachable from
+        # the PRD's Version History (see routes/prd.py /{prd_id}/generations).
+        latest_by_key: dict[tuple, dict] = {}
         for r in prd_rows:
+            key = (r["brief_id"], r.get("insight_index"))
+            cur = latest_by_key.get(key)
+            if cur is None or (r.get("generated_at") or "") > (cur.get("generated_at") or ""):
+                latest_by_key[key] = r
+        for r in latest_by_key.values():
             bid = r["brief_id"]
             items.append({
                 "type": "prd",
