@@ -784,6 +784,77 @@ def test_by_prd_registered_exactly_once(env):
     assert len(op_ids) == len(set(op_ids))
 
 
+# ─── GET /by-prd/{prd_id}/active — ready-OR-generating resume lookup ─────────
+
+
+def test_active_by_prd_returns_generating_prototype(env, client):
+    # The resume lookup matches an IN-FLIGHT generating row (unlike /by-prd which
+    # is ready-only) so a (re)load mid-generation can re-attach and poll to ready.
+    pid = env.proto.start_prototype(
+        prd_id=170, workspace_id=_TEST_COMPANY_ID, template_version=1
+    )
+    resp = client.get("/v1/design-agent/by-prd/170/active")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == pid
+    assert body["status"] == "generating"
+
+
+def test_active_by_prd_returns_ready_prototype(env, client):
+    # A ready row also resolves (the route reveals the canvas directly for these).
+    pid = _seed_ready_prototype(env, prd_id=171, workspace_id=_TEST_COMPANY_ID)
+    resp = client.get("/v1/design-agent/by-prd/171/active")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == pid
+    assert body["status"] == "ready"
+
+
+def test_active_by_prd_returns_404_when_none(env, client):
+    # No active prototype for the PRD → 404 (frontend swallows 404→null → panel).
+    assert client.get("/v1/design-agent/by-prd/172/active").status_code == 404
+
+
+def test_active_by_prd_no_generate_side_effect(env, client):
+    # Pure read: a lookup for a PRD with no prototype must NOT insert a row.
+    from tests import _fake_supabase
+
+    assert client.get("/v1/design-agent/by-prd/173/active").status_code == 404
+    rows = _fake_supabase.get_fake_db().execute(
+        "SELECT id FROM prototypes WHERE prd_id = ? AND workspace_id = ?",
+        (173, _TEST_COMPANY_ID),
+    ).fetchall()
+    assert rows == []
+
+
+def test_active_by_prd_cross_workspace_returns_404(env, client):
+    # A generating row under a FOREIGN workspace is invisible to the caller → 404,
+    # not 403, not 200: cross-tenant existence is never disclosed.
+    env.proto.start_prototype(prd_id=174, workspace_id="demo", template_version=1)
+    assert client.get("/v1/design-agent/by-prd/174/active").status_code == 404
+
+
+def test_active_by_prd_returns_404_when_flag_off(env, client, monkeypatch):
+    # Gated by the same feature flag as the rest of the surface.
+    env.proto.start_prototype(
+        prd_id=175, workspace_id=_TEST_COMPANY_ID, template_version=1
+    )
+    assert client.get("/v1/design-agent/by-prd/175/active").status_code == 200
+    monkeypatch.delenv("DESIGN_AGENT_ENABLED", raising=False)
+    assert client.get("/v1/design-agent/by-prd/175/active").status_code == 404
+
+
+def test_active_by_prd_three_segment_resolves(env, client):
+    # The three-segment /by-prd/{prd_id}/active resolves to get_active_by_prd and
+    # is never shadowed by the two-segment /by-prd/{prd_id} (ready-only) route: a
+    # generating row is 404 on /by-prd but 200 on /by-prd/.../active.
+    env.proto.start_prototype(
+        prd_id=176, workspace_id=_TEST_COMPANY_ID, template_version=1
+    )
+    assert client.get("/v1/design-agent/by-prd/176").status_code == 404
+    assert client.get("/v1/design-agent/by-prd/176/active").status_code == 200
+
+
 # ─── Connected-repo identifier threaded into generation ─────────────────────
 #
 # The Generate modal lets a user pick one of their connected GitHub repos. That

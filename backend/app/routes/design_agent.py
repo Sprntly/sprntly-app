@@ -71,6 +71,7 @@ from app.db.prototypes import (
     fail_prototype,
     find_existing_prototype,
     find_prototype_by_share_token,
+    find_active_prototype_by_prd,
     find_ready_prototype_by_prd,
     flag_stale_handoff,
     get_prototype,
@@ -479,6 +480,32 @@ def get_by_prd(
     )
     if not row:
         raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
+    return row
+
+
+@router.get("/by-prd/{prd_id}/active")
+def get_active_by_prd(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> dict[str, Any]:
+    """Return the most-recent READY-or-GENERATING prototype for a PRD.
+
+    Resume lookup: unlike `/by-prd/{prd_id}` (ready only), this also returns an
+    in-flight 'generating' row so the prototype route can RE-ATTACH on a (re)load
+    that happens mid-generation — show the loader and poll to ready — instead of
+    dropping to the generate panel and stranding the finished bundle during the
+    readiness lag (SSE 'done' at codegen-complete vs complete_prototype() at the
+    end of the build/stage tail). Pure read, no generate side-effect. Returns 404
+    when no active prototype exists (frontend swallows 404→null). Workspace-
+    filtered: a prototype in another workspace returns 404, not 403. Three-segment
+    path, so it can never be shadowed by the single-segment `GET /{prototype_id}`.
+    """
+    _require_feature_enabled()
+    row = find_active_prototype_by_prd(
+        prd_id=prd_id, workspace_id=company.company_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No active prototype for this PRD")
     return row
 
 

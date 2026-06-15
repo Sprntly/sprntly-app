@@ -53,7 +53,10 @@ import {
 } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import type { PrdSection } from "../../types/content"
-import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
+import {
+  runDesignAgentGeneration,
+  type DesignAgentGenResult,
+} from "../../lib/runDesignAgentGeneration"
 
 /** Pure: build the modal onClose handler that is safe to capture as a closure.
  *  Navigation only fires when no generation is in flight. The loading state is
@@ -145,6 +148,30 @@ export function prototypeTabState(
  */
 export function fsParamToFullscreen(fsParam: string | null): boolean {
   return fsParam !== "0"
+}
+
+/** Pure: decide what the route should do with the active-prototype lookup result
+ *  on (re)load. `reveal` a ready+bundled row (the canvas), `resume` an in-flight
+ *  generating row (overlay + poll-to-ready), or do `none` (drop to the generate
+ *  panel). Extracted so the resume decision is unit-testable without mounting the
+ *  client component (the repo's vitest env is `node`, no jsdom). This is the
+ *  reachability fix: a generating row is resumed instead of stranded during the
+ *  readiness lag between the SSE 'done' and complete_prototype(). */
+export type ActiveProtoAction =
+  | { kind: "reveal"; proto: PrototypeRecord }
+  | { kind: "resume"; prototypeId: number }
+  | { kind: "none" }
+
+export function actionForActiveProto(
+  found: PrototypeRecord | null,
+): ActiveProtoAction {
+  if (found && found.status === "ready" && found.bundle_url) {
+    return { kind: "reveal", proto: found }
+  }
+  if (found && found.status === "generating") {
+    return { kind: "resume", prototypeId: found.id }
+  }
+  return { kind: "none" }
 }
 
 /**
@@ -381,10 +408,16 @@ export function PrototypeRoute() {
   const [genGithubRepo, setGenGithubRepo] = useState<string | null>(null)
   const [genProtoId, setGenProtoId] = useState<number | null>(null)
 
-  // Resolve the PRD's ready prototype read-only on prd change. getByPrd swallows
-  // a 404 → null, so this never kicks a generation; a null result drops the tab
-  // to the generate-landing path. Skipped once a prototype is already held (e.g.
-  // freshly revealed after a generation) so the reveal isn't clobbered.
+  // Resolve the PRD's prototype read-only on prd change, and RE-ATTACH to an
+  // in-flight generation. getActiveByPrd returns the newest ready-OR-generating
+  // row (swallows 404→null), so a (re)load mid-generation no longer strands the
+  // finished bundle: the SSE 'done' fires at codegen-complete but the row is not
+  // marked ready until the end of the build/stage/preview tail (~minutes later),
+  // and the kickoff poll is page-bound — it dies on reload. Here we resume:
+  //   • ready  → reveal the canvas (existing behaviour),
+  //   • generating → show the loader overlay (genProtoId re-subscribes the SSE)
+  //     and poll to terminal, then handleGenDone reveals it,
+  //   • none/failed → drop to the generate panel.
   useEffect(() => {
     if (prdId == null) {
       setProto(null)
@@ -394,12 +427,29 @@ export function PrototypeRoute() {
     let cancelled = false
     setResolving(true)
     designAgentApi
-      .getByPrd(prdId)
+      .getActiveByPrd(prdId)
       .then((found) => {
         if (cancelled) return
-        setProto(
-          found && found.status === "ready" && found.bundle_url ? found : null,
-        )
+        const action = actionForActiveProto(found)
+        if (action.kind === "reveal") {
+          setProto(action.proto)
+          return
+        }
+        setProto(null)
+        if (action.kind === "resume") {
+          // Re-attach to the running generation: overlay + resume poll.
+          setGenFigmaKey(null)
+          setGenGithubRepo(null)
+          setGenProtoId(action.prototypeId)
+          genLoadingRef.current = true
+          setGenLoading(true)
+          void runDesignAgentGeneration({
+            prototypeId: action.prototypeId,
+          }).then((result) => {
+            if (cancelled) return
+            handleGenDone(result)
+          })
+        }
       })
       .catch(() => {
         if (!cancelled) setProto(null)
@@ -410,6 +460,8 @@ export function PrototypeRoute() {
     return () => {
       cancelled = true
     }
+    // handleGenDone is a stable closure over setters/refs (no reactive deps).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prdId])
 
   // Show the overlay the instant generation kicks off; capture the source context
