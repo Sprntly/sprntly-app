@@ -395,11 +395,15 @@ def test_view_grant_unauth_401(client, env):
     assert client.post(f"/v1/design-agent/{pid}/view-grant").status_code == 401
 
 
-def test_view_grant_cookie_is_host_only_and_path_scoped(client, env):
-    # Option A (v3 §1.6): the da_view_grant cookie MUST be HOST-ONLY (NO Domain
-    # attr ⇒ no cookie_domain dependency, no broadening) and Path-scoped to THIS
-    # prototype's bundle route, HttpOnly + SameSite=Lax. Locks the host-only
-    # property in CI so a regression to a domain cookie fails the suite.
+def test_view_grant_cookie_is_host_only_and_path_scoped(client, env, monkeypatch):
+    # Option A (v3 §1.3/§1.6): the da_view_grant cookie MUST be HOST-ONLY (NO Domain
+    # attr) and Path-scoped to THIS prototype's bundle route, HttpOnly + SameSite=Lax.
+    # CRITICAL: set cookie_domain=".sprntly.ai" (the PROD value) and assert the grant
+    # cookie STILL has no Domain — i.e. the grant cookie is DECOUPLED from
+    # settings.cookie_domain. This is the test that proves prod host-only behavior;
+    # asserting under the empty local cookie_domain would be a no-op that masks a
+    # domain-cookie regression.
+    monkeypatch.setattr(env.bundle.settings, "cookie_domain", ".sprntly.ai", raising=False)
     _seed_company(_OWNER_COMPANY, _OWNER_USER)
     pid, _ = _seed_prototype(env, share_mode="private")
     resp = client.post(
@@ -409,7 +413,7 @@ def test_view_grant_cookie_is_host_only_and_path_scoped(client, env):
     assert resp.status_code == 204
     sc = resp.headers.get("set-cookie", "")
     assert "da_view_grant=" in sc
-    assert "domain=" not in sc.lower()                       # HOST-ONLY — no Domain attr
+    assert "domain=" not in sc.lower()                       # HOST-ONLY even with cookie_domain set
     assert f"/v1/design-agent/{pid}/bundle" in sc            # path-scoped to this proto
     assert "httponly" in sc.lower()
     assert "samesite=lax" in sc.lower()

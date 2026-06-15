@@ -145,19 +145,25 @@ def _verify_grant(raw: str | None) -> dict | None:
 
 
 def _grant_cookie_kwargs(path: str) -> dict:
-    """Cookie attrs for a grant. Chosen SameSite=Lax (plan §16-3): under
-    Decision 2 the iframe is same-origin to the app parent (`app.sprntly.ai`), so
-    its subresource asset GETs are SAME-SITE → Lax is attached. This is
-    TESTER-VERIFY-REQUIRED in the same-origin repro; if the iframe ever moves off
-    the app origin, fall back to `SameSite=None; Secure; Partitioned`. HttpOnly so
-    the iframe never reads it; Secure in prod (settings.cookie_secure)."""
+    """Cookie attrs for a grant. SameSite=Lax (plan §16-3): under Decision 2 the
+    iframe is same-origin to the app parent (`app.sprntly.ai`), so its subresource
+    asset GETs are SAME-SITE → Lax is attached. HttpOnly so the iframe never reads
+    it; Secure in prod (settings.cookie_secure).
+
+    domain=None UNCONDITIONALLY (v3 §1.3 first-party design): grant cookies are
+    minted AND consumed only on the app/serving origin via /_da-bundle/, so they
+    MUST be HOST-ONLY to that origin. They are deliberately DECOUPLED from
+    settings.cookie_domain — using `.sprntly.ai` here would broaden the grant to
+    every subdomain (api., demo., …), which is exactly what Option A removes. The
+    SESSION cookie (auth.py) legitimately keeps .sprntly.ai to span api+app; the
+    GRANT cookie must not."""
     return {
         "max_age": _GRANT_TTL_SECONDS,
         "httponly": True,
         "secure": settings.cookie_secure,
         "samesite": "lax",
         "path": path,
-        "domain": settings.cookie_domain or None,
+        "domain": None,
     }
 
 
