@@ -513,7 +513,8 @@ export function PrototypeRoute() {
   }
 
   // No PRD context (bare /prototype): there is nothing to generate from. Send the
-  // user to the PRD screen to pick/approve a PRD first.
+  // user to the weekly brief, where a PRD opens in the right-rail card and offers
+  // "Generate Prototype".
   if (prdId == null) {
     return (
       <AppLayout>
@@ -522,8 +523,8 @@ export function PrototypeRoute() {
           <p className="da-prototype-empty-sub">
             Open a PRD and choose "Generate Prototype" to start a prototype here.
           </p>
-          <button type="button" className="btn btn-accent" onClick={() => goTo("prd")}>
-            Go to PRD
+          <button type="button" className="btn btn-accent" onClick={() => goTo("brief")}>
+            Go to brief
           </button>
         </div>
       </AppLayout>
@@ -576,7 +577,7 @@ export function PrototypeRoute() {
           open
           onClose={buildGatedOnClose(
             () => genLoadingRef.current,
-            () => router.push("/prd"),
+            () => goTo("brief"),
           )}
           prdId={prdId}
           figmaFileKey={figmaFileKey}

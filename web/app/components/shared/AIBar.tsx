@@ -644,7 +644,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                       </div>
                       <p className="ai-bar-agent-message">{agentAction.message}</p>
                       <div className="ai-bar-agent-actions">
-                        <button type="button" className="ai-bar-agent-btn ai-bar-agent-btn--primary" onClick={() => goTo("prd")}>
+                        <button type="button" className="ai-bar-agent-btn ai-bar-agent-btn--primary" onClick={() => openContentPanel("prd")}>
                           Open PRD
                         </button>
                         <button type="button" className="ai-bar-agent-btn" onClick={() => goTo("tickets")}>

@@ -11,7 +11,7 @@ import { EmptyPane } from "../../shared/EmptyPane"
 import { EvidenceSections } from "../../shared/EvidenceSections"
 
 export function DetailScreen() {
-  const { goTo, setAIBarValue, expandAiPanel, showToast } = useNavigation()
+  const { goTo, setAIBarValue, expandAiPanel, showToast, openContentPanel } = useNavigation()
   const { content, setContent } = useContent()
   const d = content.detail
   const evidence = content.evidence
@@ -78,10 +78,11 @@ export function DetailScreen() {
         showToast("PRD generation failed", result.message.slice(0, 200))
         return
       }
-      // Persist the source pointer so PrdScreen can refetch / regenerate
-      // against the same brief insight.
+      // Persist the source pointer so the PRD rail can refetch / regenerate
+      // against the same brief insight, then open it in the content panel
+      // (same rail card as Evidence — no separate PRD page).
       setContent({ prd: result.prd, prdMeta: d.meta })
-      goTo("prd")
+      openContentPanel("prd")
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       showToast("PRD generation failed", msg.slice(0, 200))

@@ -12,7 +12,6 @@ export type ScreenId =
   | "chats"
   | "brief"
   | "detail"
-  | "prd"
   | "ondemand"
   | "past"
   | "shipped"
@@ -41,7 +40,6 @@ export const APP_SCREENS: ScreenId[] = [
   "chats",
   "brief",
   "detail",
-  "prd",
   "ondemand",
   "past",
   "shipped",
@@ -69,7 +67,6 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   chats: "All chats",
   brief: "Monday brief",
   detail: "Evidence",
-  prd: "PRD",
   ondemand: "Home",
   past: "Past briefs",
   shipped: "Shipped",
@@ -115,14 +112,6 @@ export const AI_CONTEXTS: Record<
       "Run a sensitivity analysis on the revenue model",
       "Pull more similar tickets",
       "Who has context on SMS verification?",
-    ],
-  },
-  prd: {
-    path: "/prd",
-    suggest: [
-      "Make the test plan more rigorous",
-      "Add rollback criteria",
-      "Who should own this?",
     ],
   },
   ondemand: {

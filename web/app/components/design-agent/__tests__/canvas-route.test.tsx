@@ -62,7 +62,8 @@ describe("non-prototype routes unchanged (no nav regression)", () => {
     ["/", "chat"],
     ["/brief", "brief"],
     ["/evidence", "detail"],
-    ["/prd", "prd"],
+    // "/prd" route removed — it now falls through to chat (see prd-removal refactor).
+    ["/prd", "chat"],
     ["/past", "past"],
     ["/shipped", "shipped"],
     ["/settings", "settings"],
@@ -82,7 +83,6 @@ describe("non-prototype routes unchanged (no nav regression)", () => {
 
   it("SCREEN_PATH kept every prior entry", () => {
     expect(SCREEN_PATH.chat).toBe("/")
-    expect(SCREEN_PATH.prd).toBe("/prd")
     expect(SCREEN_PATH.prototype).toBe(PROTOTYPE_PATH)
   })
 })
