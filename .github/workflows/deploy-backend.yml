@@ -44,6 +44,15 @@ jobs:
             fi
             cd backend
             ./.venv/bin/pip install -q -r requirements.txt
+            # Keep the shared nginx.conf in sync — the /_da-bundle bundle-proxy
+            # (and /agent) locations live in the same file as the main backend,
+            # so re-apply it on every backend deploy (mirrors deploy-agent.yml).
+            # Validate (nginx -t) BEFORE restarting the backend so a bad config
+            # fails the deploy here, without leaving backend-restarted-but-nginx-
+            # unreloaded. script_stop:true aborts the job on any failure below.
+            sudo cp ~/Sprntly/backend/deploy/nginx.conf /etc/nginx/conf.d/sprintly.conf
+            sudo nginx -t
+            sudo systemctl reload nginx
             sudo /bin/systemctl restart sprintly
             # Wait up to 15s for FastAPI to bind. Avoids races when two deploys
             # restart the service close together.
