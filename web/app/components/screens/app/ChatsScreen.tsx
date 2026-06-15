@@ -308,45 +308,86 @@ export function ArtifactsView({
       )}
 
       {/* List */}
-      {!loading && filtered.map((a) => (
-        <div
-          key={`${a.type}-${a.id}`}
-          data-artifact-type={a.type}
-          onClick={() => onOpen(a)}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => { if (e.key === "Enter") onOpen(a) }}
-          style={{
-            display: "flex", alignItems: "flex-start", gap: 14,
-            padding: "14px 10px", borderRadius: 10, cursor: "pointer",
-            transition: "background 0.12s",
-          }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" }}
-        >
-          <ArtifactTypeIcon type={a.type} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{
-              fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
-              marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            }}>
-              {a.title}
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <span style={{
-                fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-                letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
-                background: ARTIFACT_BADGE[a.type].bg, color: ARTIFACT_BADGE[a.type].color,
+      {!loading && filtered.map((a) => {
+        const rowWrapper = {
+          "data-artifact-type": a.type,
+          onClick: () => onOpen(a),
+          role: "button" as const,
+          tabIndex: 0,
+          onKeyDown: (e: React.KeyboardEvent) => { if (e.key === "Enter") onOpen(a) },
+          onMouseEnter: (e: React.MouseEvent) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" },
+          onMouseLeave: (e: React.MouseEvent) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" },
+        }
+
+        // Prototype rows WITH a real preview render as an image card (thumbnail
+        // on top, title + sub-line below). Every other case — PRD, evidence, and
+        // prototypes without a preview — keeps the icon+text row unchanged.
+        if (a.type === "prototype" && a.preview_image_url) {
+          return (
+            <div
+              key={`${a.type}-${a.id}`}
+              {...rowWrapper}
+              style={{
+                display: "flex", flexDirection: "column", gap: 10,
+                padding: "14px 10px", borderRadius: 10, cursor: "pointer",
+                transition: "background 0.12s",
+              }}
+            >
+              <div style={{
+                width: "100%", height: 150, overflow: "hidden", borderRadius: 8,
+                border: "1px solid var(--line, #E8E6E0)", background: "var(--surface-2, #F4F1EA)",
               }}>
-                {ARTIFACT_BADGE[a.type].label}
-              </span>
-              <span style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
-                {artifactSourceLine(a)}
-              </span>
+                <img className="fc-preview-img" src={a.preview_image_url} alt={a.title} />
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{
+                  fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
+                  marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>
+                  {a.title}
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
+                  {`Prototype · ${relativeTime(a.created_at)}`}
+                </div>
+              </div>
+            </div>
+          )
+        }
+
+        return (
+          <div
+            key={`${a.type}-${a.id}`}
+            {...rowWrapper}
+            style={{
+              display: "flex", alignItems: "flex-start", gap: 14,
+              padding: "14px 10px", borderRadius: 10, cursor: "pointer",
+              transition: "background 0.12s",
+            }}
+          >
+            <ArtifactTypeIcon type={a.type} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
+                marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>
+                {a.title}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{
+                  fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                  letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
+                  background: ARTIFACT_BADGE[a.type].bg, color: ARTIFACT_BADGE[a.type].color,
+                }}>
+                  {ARTIFACT_BADGE[a.type].label}
+                </span>
+                <span style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
+                  {artifactSourceLine(a)}
+                </span>
+              </div>
             </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

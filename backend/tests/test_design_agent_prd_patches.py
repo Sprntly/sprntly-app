@@ -180,6 +180,7 @@ CREATE TABLE prototypes (
     website_url            TEXT,
     github_installation_id INTEGER,
     bundle_url             TEXT,
+    preview_image_url      TEXT,
     current_checkpoint_id  INTEGER,
     pending_question       TEXT,
     error                  TEXT,

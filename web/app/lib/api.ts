@@ -1504,6 +1504,7 @@ export type ArtifactItem =
       title: string
       status: string
       created_at: string
+      preview_image_url: string | null
       source: { prd_id: number | null; prd_title: string }
       open: { prototype_id: number; prd_id: number | null }
     }

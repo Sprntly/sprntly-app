@@ -673,6 +673,46 @@ def fresh_bundle_url(
         return stored_bundle_url
 
 
+def fresh_preview_image_url(
+    *,
+    prototype_id: int,
+    checkpoint_id: int,
+    stored_preview_image_url: str | None = None,
+) -> str | None:
+    """Mint a FRESH signed preview-image URL for a public/passcode share, sign-on-read.
+
+    Binary sibling of `fresh_bundle_url`: the stored `preview_image_url` is a
+    short-lived (24h) Supabase signed URL minted at stage time, so a permanent
+    share goes stale and the <img> 403s after the TTL elapses. This re-derives the
+    preview object path (`prototypes/<pid>/<cid>/_preview/preview.png`) and signs
+    it afresh on every read, so a permanent share always serves a live image URL.
+
+    Sync (the public/listing routes are sync `def`, run in FastAPI's threadpool).
+
+    Falls back to `stored_preview_image_url` when no Supabase bucket is configured
+    (the filesystem/dev path serves a stable public/file:// URL that never expires)
+    or when re-signing fails for any reason (better a possibly-stale URL than a 500).
+    """
+    bucket = _bucket_name()
+    if not bucket:
+        # Filesystem/dev fallback: the stored URL is a stable public/file:// URL.
+        return stored_preview_image_url
+    object_path = f"{_bundle_prefix(prototype_id, checkpoint_id)}/{_PREVIEW_OBJECT}"
+    try:
+        from app.db.client import require_client
+
+        storage = require_client().storage.from_(bucket)
+        signed = storage.create_signed_url(path=object_path, expires_in=_SIGNED_URL_TTL_SECONDS)
+        url = _extract_signed_url(signed)
+        return url or stored_preview_image_url
+    except Exception:
+        logger.warning(
+            "fresh_preview_image_url_resign_failed prototype_id=%s checkpoint_id=%s",
+            prototype_id, checkpoint_id, exc_info=True,
+        )
+        return stored_preview_image_url
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 

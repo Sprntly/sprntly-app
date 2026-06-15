@@ -179,6 +179,7 @@ CREATE TABLE prototypes (
     workspace_id           TEXT NOT NULL,
     status                 TEXT NOT NULL DEFAULT 'generating',
     template_version       INTEGER,
+    preview_image_url      TEXT,
     current_checkpoint_id  INTEGER,
     is_complete            INTEGER NOT NULL DEFAULT 0
 );

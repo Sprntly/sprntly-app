@@ -24,7 +24,29 @@ in-code-join posture db/prds.latest_prd_for_dataset already uses.
 """
 from __future__ import annotations
 
+from urllib.parse import urlsplit, urlunsplit
+
 from app.db.client import require_client, retry_on_disconnect
+from app.design_agent.storage import fresh_preview_image_url
+
+
+def _relativize_local(url: str | None) -> str | None:
+    """Strip a dev/localhost scheme+host so the URL renders relative.
+
+    A dev-baked preview URL (`http://localhost:8000/...` or `http://127.0.0.1/...`)
+    is host- and port-specific, which breaks once the page is served from a
+    different frontend port. Dropping scheme+host leaves a root-relative path that
+    resolves under whatever host serves the page (and, in dev, through the
+    `web/public/prototype-bundles` symlink). A prod signed URL (any non-localhost
+    absolute URL) passes through UNCHANGED so its host + signing token survive.
+    """
+    if not url:
+        return url
+    parts = urlsplit(url)
+    if parts.scheme in ("http", "https") and parts.hostname in ("localhost", "127.0.0.1"):
+        # strip scheme+host → path(+query) so it resolves under whatever host serves the page
+        return urlunsplit(("", "", parts.path, parts.query, ""))
+    return url
 
 # Hard cap on the unified list. Recency-sorted, so the cap keeps the newest
 # 200 artifacts; older ones are dropped (acceptable for a listing view — the
@@ -124,12 +146,15 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
     #    parent PRD (prototypes have no title column). ─────────────────────────
     proto_rows = (
         c.table("prototypes")
-        .select("id, prd_id, status, created_at")
+        .select("id, prd_id, status, created_at, preview_image_url, current_checkpoint_id")
         .eq("workspace_id", company_id)
         .execute()
         .data
         or []
     )
+    # Only surface prototypes that finished generating — failed/invalidated rows
+    # have no usable bundle or preview and shouldn't appear in the artifacts list.
+    proto_rows = [r for r in proto_rows if r.get("status") == "ready"]
     if proto_rows:
         prd_ids = sorted({r["prd_id"] for r in proto_rows if r.get("prd_id") is not None})
         prd_title_by_id: dict[int, str] = {}
@@ -146,6 +171,21 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
         for r in proto_rows:
             pid = r.get("prd_id")
             prd_title = prd_title_by_id.get(pid) or "Untitled PRD"
+            # Served preview URL: re-sign against the current checkpoint when we
+            # have one (the stored URL is a 24h signed URL that goes stale), else
+            # fall back to the stored value. Then relativize a dev/localhost-baked
+            # URL so it renders regardless of frontend port; a prod signed URL is
+            # left untouched.
+            ckpt_id = r.get("current_checkpoint_id")
+            if ckpt_id is not None:
+                served = fresh_preview_image_url(
+                    prototype_id=r["id"],
+                    checkpoint_id=ckpt_id,
+                    stored_preview_image_url=r.get("preview_image_url"),
+                )
+            else:
+                served = r.get("preview_image_url")
+            served = _relativize_local(served)
             items.append({
                 "type": "prototype",
                 "id": r["id"],
@@ -153,6 +193,7 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
                 "title": prd_title,
                 "status": r.get("status") or "",
                 "created_at": r.get("created_at"),
+                "preview_image_url": served,
                 "source": {
                     "prd_id": pid,
                     "prd_title": prd_title,

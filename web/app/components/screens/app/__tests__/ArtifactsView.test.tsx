@@ -30,8 +30,19 @@ const PROTO: ArtifactItem = {
   title: "Handoff Threshold PRD", // derived from parent PRD
   status: "ready",
   created_at: new Date().toISOString(),
+  preview_image_url: "https://cdn/proto-thumb.png",
   source: { prd_id: 1, prd_title: "Handoff Threshold PRD" },
   open: { prototype_id: 2, prd_id: 1 },
+}
+const PROTO_NO_PREVIEW: ArtifactItem = {
+  type: "prototype",
+  id: 4,
+  title: "No-thumbnail Prototype",
+  status: "ready",
+  created_at: new Date().toISOString(),
+  preview_image_url: null,
+  source: { prd_id: 1, prd_title: "Handoff Threshold PRD" },
+  open: { prototype_id: 4, prd_id: 1 },
 }
 const EVIDENCE: ArtifactItem = {
   type: "evidence",
@@ -70,21 +81,18 @@ describe("ArtifactsView — chrome", () => {
     expect(html).toContain("Evidence")
   })
 
-  it("renders a row per artifact with a type badge", () => {
+  it("renders a row per artifact with a type badge (prd + evidence)", () => {
     const html = markup()
     expect(html).toContain("Handoff Threshold PRD")
     expect(html).toContain("Day-30 Retention Evidence")
     expect(html).toContain(">PRD<")
-    expect(html).toContain(">PROTOTYPE<")
     expect(html).toContain(">EVIDENCE<")
   })
 
-  it("renders the source/meta line per type", () => {
+  it("renders the source/meta line for prd/evidence rows", () => {
     const html = markup()
     // prd/evidence → "from Brief <week_label>"
     expect(html).toContain("from Brief Week of May 20")
-    // prototype → "from PRD <title>"
-    expect(html).toContain("from PRD Handoff Threshold PRD")
   })
 
   it("shows the empty state when there are no artifacts", () => {
@@ -110,8 +118,10 @@ describe("ArtifactsView — filtering (client-side by type)", () => {
 
   it("renders only prototypes when filter=prototype", () => {
     const html = markup({ filter: "prototype" })
-    expect(html).toContain(">PROTOTYPE<")
+    // prototype-with-preview renders an image card (no PROTOTYPE badge)
+    expect(html).toContain('class="fc-preview-img"')
     expect(html).not.toContain(">EVIDENCE<")
+    expect(html).not.toContain(">PRD<")
   })
 
   it("renders only evidence when filter=evidence", () => {
@@ -156,5 +166,49 @@ describe("ArtifactsView — interaction (jsdom)", () => {
     )
     expect(container.querySelector('[data-artifact-type="prototype"]')).toBeNull()
     expect(container.querySelector('[data-artifact-type="prd"]')).not.toBeNull()
+  })
+})
+
+describe("ArtifactsView — prototype image cards", () => {
+  it("renders a prototype WITH preview_image_url as an image card", () => {
+    const html = markup({ items: [PROTO] })
+    // reuses the shared fc-preview-img class + the real src
+    expect(html).toContain('class="fc-preview-img"')
+    expect(html).toContain('src="https://cdn/proto-thumb.png"')
+    // alt for a11y
+    expect(html).toContain('alt="Handoff Threshold PRD"')
+    // title still rendered below the thumbnail
+    expect(html).toContain("Handoff Threshold PRD")
+    // no icon+text badge for the image card
+    expect(html).not.toContain(">PROTOTYPE<")
+  })
+
+  it("renders the 'Prototype · …' sub-line on the image card", () => {
+    const html = markup({ items: [PROTO] })
+    expect(html).toContain("Prototype · ")
+    // relativeTime of a just-now timestamp
+    expect(html).toContain("just now")
+  })
+
+  it("renders a PRD row as icon+text (no image card)", () => {
+    const html = markup({ items: [PRD] })
+    expect(html).toContain(">PRD<")
+    expect(html).not.toContain("fc-preview-img")
+  })
+
+  it("renders an evidence row as icon+text (no image card)", () => {
+    const html = markup({ items: [EVIDENCE] })
+    expect(html).toContain(">EVIDENCE<")
+    expect(html).not.toContain("fc-preview-img")
+  })
+
+  it("falls back to the icon+text row for a prototype with null preview_image_url", () => {
+    const html = markup({ items: [PROTO_NO_PREVIEW] })
+    // no image card / no <img>
+    expect(html).not.toContain("fc-preview-img")
+    expect(html).not.toContain("<img")
+    // falls back to the badge + source line row
+    expect(html).toContain(">PROTOTYPE<")
+    expect(html).toContain("from PRD Handoff Threshold PRD")
   })
 })

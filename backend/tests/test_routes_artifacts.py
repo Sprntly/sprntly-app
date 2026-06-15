@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS prototypes (
     website_url            TEXT,
     github_installation_id INTEGER,
     bundle_url             TEXT,
+    preview_image_url      TEXT,
     current_checkpoint_id  INTEGER,
     error                  TEXT,
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
@@ -104,7 +105,9 @@ def _seed_evidence(*, brief_id: int, title: str, insight_index: int = 0,
 
 
 def _seed_prototype(*, prd_id: int, workspace_id: str, status: str = "ready",
-                    created_at: str | None = None) -> int:
+                    created_at: str | None = None,
+                    preview_image_url: str | None = None,
+                    current_checkpoint_id: int | None = None) -> int:
     from app.db.client import require_client
     row = {
         "prd_id": prd_id,
@@ -114,6 +117,10 @@ def _seed_prototype(*, prd_id: int, workspace_id: str, status: str = "ready",
     }
     if created_at is not None:
         row["created_at"] = created_at
+    if preview_image_url is not None:
+        row["preview_image_url"] = preview_image_url
+    if current_checkpoint_id is not None:
+        row["current_checkpoint_id"] = current_checkpoint_id
     resp = require_client().table("prototypes").insert(row).execute()
     return resp.data[0]["id"]
 
@@ -238,3 +245,120 @@ def test_recency_sort_newest_first(artifacts_env, monkeypatch):
     assert titles == ["Newest", "Newest", "Middle", "Oldest"]
     # First item is the prototype (newest created_at).
     assert r.json()["artifacts"][0]["type"] == "prototype"
+
+
+# ─── Preview-thumbnail surfacing (artifacts-thumbnails) ──────────────────────
+
+
+def _protos(resp_json) -> list[dict]:
+    return [a for a in resp_json["artifacts"] if a["type"] == "prototype"]
+
+
+def test_only_ready_prototypes_surface(artifacts_env, monkeypatch):
+    """Failed / invalidated prototypes are excluded; only `ready` ones surface."""
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    prd_id = _seed_prd(brief_id=brief_id, title="P")
+    _seed_prototype(prd_id=prd_id, workspace_id=ctx.company_id, status="ready",
+                    created_at="2026-06-01T00:00:00+00:00")
+    _seed_prototype(prd_id=prd_id, workspace_id=ctx.company_id, status="failed",
+                    created_at="2026-06-02T00:00:00+00:00")
+    _seed_prototype(prd_id=prd_id, workspace_id=ctx.company_id, status="invalidated",
+                    created_at="2026-06-03T00:00:00+00:00")
+    _seed_prototype(prd_id=prd_id, workspace_id=ctx.company_id, status="generating",
+                    created_at="2026-06-04T00:00:00+00:00")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    protos = _protos(r.json())
+    assert len(protos) == 1
+    assert protos[0]["status"] == "ready"
+
+
+def test_ready_prototype_surfaces_preview_image_url(artifacts_env, monkeypatch):
+    """A ready prototype exposes a `preview_image_url` key in its item dict."""
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    prd_id = _seed_prd(brief_id=brief_id, title="P")
+    _seed_prototype(
+        prd_id=prd_id, workspace_id=ctx.company_id, status="ready",
+        current_checkpoint_id=7,
+        preview_image_url="https://x.supabase.co/storage/v1/object/sign/p?token=abc",
+    )
+    # Mock the re-sign helper to echo the stored URL (no bucket needed); proves the
+    # served value flows from the helper into the item dict.
+    import app.db.artifacts as artifacts_mod
+    monkeypatch.setattr(
+        artifacts_mod, "fresh_preview_image_url",
+        lambda *, prototype_id, checkpoint_id, stored_preview_image_url: stored_preview_image_url,
+    )
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    proto = _protos(r.json())[0]
+    assert "preview_image_url" in proto
+    assert proto["preview_image_url"] == \
+        "https://x.supabase.co/storage/v1/object/sign/p?token=abc"
+
+
+def test_localhost_preview_url_relativized(artifacts_env, monkeypatch):
+    """A dev/localhost-baked stored URL comes out root-relative (no scheme/host)."""
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    prd_id = _seed_prd(brief_id=brief_id, title="P")
+    _seed_prototype(
+        prd_id=prd_id, workspace_id=ctx.company_id, status="ready",
+        current_checkpoint_id=3,
+        preview_image_url="http://localhost:8000/prototype-bundles/9/3/_preview/preview.png",
+    )
+    import app.db.artifacts as artifacts_mod
+    monkeypatch.setattr(
+        artifacts_mod, "fresh_preview_image_url",
+        lambda *, prototype_id, checkpoint_id, stored_preview_image_url: stored_preview_image_url,
+    )
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    proto = _protos(r.json())[0]
+    assert proto["preview_image_url"] == "/prototype-bundles/9/3/_preview/preview.png"
+
+
+def test_prod_signed_preview_url_unchanged(artifacts_env, monkeypatch):
+    """A non-localhost absolute (prod signed) URL passes through UNCHANGED."""
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    prd_id = _seed_prd(brief_id=brief_id, title="P")
+    signed = "https://x.supabase.co/storage/v1/object/sign/prototypes/9/3/_preview/preview.png?token=abc"
+    _seed_prototype(
+        prd_id=prd_id, workspace_id=ctx.company_id, status="ready",
+        current_checkpoint_id=3, preview_image_url=signed,
+    )
+    import app.db.artifacts as artifacts_mod
+    monkeypatch.setattr(
+        artifacts_mod, "fresh_preview_image_url",
+        lambda *, prototype_id, checkpoint_id, stored_preview_image_url: stored_preview_image_url,
+    )
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    proto = _protos(r.json())[0]
+    assert proto["preview_image_url"] == signed
+
+
+def test_prototype_without_checkpoint_uses_stored_preview(artifacts_env, monkeypatch):
+    """No current_checkpoint_id → served falls back to the stored value directly
+    (the re-sign helper is not invoked), still relativized for localhost."""
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    prd_id = _seed_prd(brief_id=brief_id, title="P")
+    _seed_prototype(
+        prd_id=prd_id, workspace_id=ctx.company_id, status="ready",
+        preview_image_url="http://127.0.0.1:8000/prototype-bundles/5/1/_preview/preview.png",
+    )
+    # Helper must NOT be called when there is no checkpoint.
+    import app.db.artifacts as artifacts_mod
+
+    def _boom(**_k):
+        raise AssertionError("fresh_preview_image_url called with no checkpoint")
+
+    monkeypatch.setattr(artifacts_mod, "fresh_preview_image_url", _boom)
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    proto = _protos(r.json())[0]
+    assert proto["preview_image_url"] == "/prototype-bundles/5/1/_preview/preview.png"
