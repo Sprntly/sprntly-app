@@ -24,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 vi.mock("../../../lib/api", () => {
   return {
     designAgentApi: {
-      viewGrant: vi.fn<(id: number) => Promise<void>>().mockResolvedValue(undefined),
+      viewGrant: vi.fn<(viewGrantUrl: string) => Promise<void>>().mockResolvedValue(undefined),
       createComment: vi.fn().mockResolvedValue({}),
     },
     withAuthRetry: <T,>(fn: () => Promise<T>) => fn(),
@@ -77,9 +77,10 @@ describe("PostGenerationResult — authed view-grant gates the iframe (DOM)", ()
       React.createElement(PostGenerationResult, { prototype: proto({ bundle_url: BUNDLE }) }),
     )
 
-    // Grant POST fired for the prototype...
+    // Grant POST fired for the prototype, via the app-origin /_da-bundle/
+    // view-grant path derived from the bundle URL (Option A)...
     expect(viewGrant).toHaveBeenCalledTimes(1)
-    expect(viewGrant).toHaveBeenCalledWith(42)
+    expect(viewGrant).toHaveBeenCalledWith("https://app.test/_da-bundle/v1/design-agent/42/view-grant")
     // ...and BEFORE it resolves there is no iframe (src never set without a grant).
     expect(container.querySelector("iframe.da-prototype-iframe")).toBeNull()
 

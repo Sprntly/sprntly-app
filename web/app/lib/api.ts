@@ -995,8 +995,21 @@ export const designAgentApi = {
    *  doesn't own the prototype, 401 if unauthenticated, 429 if rate-limited.
    *  ONLY the authed surface calls this; the public `/p/<token>` path is
    *  token-in-URL and never mints a grant. */
-  viewGrant: (prototypeId: number) =>
-    api.post<void>(`/v1/design-agent/${prototypeId}/view-grant`, {}),
+  viewGrant: async (viewGrantUrl: string): Promise<void> => {
+    // Option A (approved v3 §1.6): mint via the APP-ORIGIN /_da-bundle/ path
+    // (viewGrantUrl, derived from the proxy bundle URL) — NOT api.post(API_URL).
+    // This sets da_view_grant HOST-ONLY first-party to the app origin (no Domain
+    // attr ⇒ no cookie_domain dependency) so the same-origin iframe's asset GETs
+    // carry it. Bearer-authed (require_company server-side); credentials:'include'
+    // so the Set-Cookie is stored. 204/no body; throws on 401/404/429.
+    const headers: Record<string, string> = {}
+    if (accessTokenProvider) {
+      const token = await accessTokenProvider()
+      if (token) headers.Authorization = `Bearer ${token}`
+    }
+    const res = await fetch(viewGrantUrl, { method: "POST", headers, credentials: "include" })
+    if (!res.ok) throw new ApiError(res.status, null, "view-grant failed")
+  },
   /** F15 — resume iteration on a completed prototype. Empty body. */
   resume: (prototypeId: number) =>
     api.post<{

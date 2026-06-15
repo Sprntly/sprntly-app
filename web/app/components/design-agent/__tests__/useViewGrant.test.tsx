@@ -26,7 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 vi.mock("../../../lib/api", () => {
   return {
     designAgentApi: {
-      viewGrant: vi.fn<(id: number) => Promise<void>>().mockResolvedValue(undefined),
+      viewGrant: vi.fn<(viewGrantUrl: string) => Promise<void>>().mockResolvedValue(undefined),
     },
   }
 })
@@ -64,9 +64,10 @@ describe("useViewGrant — grant POST precedes the iframe src", () => {
 
     const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
 
-    // The mint fired for the right prototype...
+    // The mint fired for the right prototype, via the APP-ORIGIN /_da-bundle/
+    // view-grant path derived from the bundle URL (Option A — first-party cookie)...
     expect(viewGrant).toHaveBeenCalledTimes(1)
-    expect(viewGrant).toHaveBeenCalledWith(PID)
+    expect(viewGrant).toHaveBeenCalledWith("https://app.test/_da-bundle/v1/design-agent/99/view-grant")
     // ...and the bundle url is STILL withheld (iframe src not set yet).
     expect(result.current.grantedBundleUrl).toBeNull()
     expect(result.current.pending).toBe(true)

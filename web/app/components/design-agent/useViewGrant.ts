@@ -94,7 +94,10 @@ export function useViewGrant(
       mintingRef.current = true
       setPending(true)
       try {
-        await designAgentApi.viewGrant(prototypeId)
+        // Option A: mint via the app-origin /_da-bundle/ view-grant path derived
+        // from the bundle URL (…/bundle/<asset>[?v=] → …/view-grant), so the grant
+        // cookie is first-party to the serving (app) origin — not the API origin.
+        await designAgentApi.viewGrant(url.replace(/\/bundle\/.*$/, "/view-grant"))
         setError(null)
         // Expose the bundle url only AFTER the grant cookie is set, so the iframe
         // asset GETs carry it on the very first request.
