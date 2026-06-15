@@ -279,6 +279,26 @@ def test_public_not_ready_404(client, env):
     assert client.get(f"/v1/design-agent/by-token/{token}/bundle/index.html").status_code == 404
 
 
+def test_public_unknown_token_404(client, env):
+    # An unknown/bogus share_token resolves to no row → 404 (not 500, not 401):
+    # invisibility, same as a wrong token. (Replaces the deleted re-sign tests'
+    # missing-row edge.)
+    bogus = str(uuid.uuid4())
+    assert client.get(f"/v1/design-agent/by-token/{bogus}/bundle/index.html").status_code == 404
+    assert client.get(f"/v1/design-agent/by-token/{bogus}/bundle/assets/app.js").status_code == 404
+
+
+def test_public_no_checkpoint_404(client, env):
+    # A ready, public row whose current_checkpoint_id is NULL has no bundle object
+    # path to serve → 404, NOT a 500 (replaces the deleted no-checkpoint fallback
+    # test). Both the public and authed serve paths gate on _checkpoint_for_row.
+    _, token = _seed_prototype(
+        env, share_mode="public", checkpoint_id=None, stage_files=False,
+    )
+    assert client.get(f"/v1/design-agent/by-token/{token}/bundle/index.html").status_code == 404
+    assert client.get(f"/v1/design-agent/by-token/{token}/bundle/assets/app.js").status_code == 404
+
+
 def test_public_revocation_flip_to_private(client, env):
     # PUBLIC index 200 → set private → next asset 404 (per-object DB re-read).
     pid, token = _seed_prototype(env, share_mode="public")
