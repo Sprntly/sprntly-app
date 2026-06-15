@@ -785,18 +785,58 @@ def test_publish_step_called_once_per_loop_iteration(monkeypatch):
 
 
 def test_sse_stream_closed_with_done_on_complete_run(monkeypatch):
-    """_sse_close is called with kind='done' when the run completes normally."""
+    """_sse_close is called with kind='done' on a normal complete run, and the
+    agent's final text block is threaded through as the `summary`."""
     closed: list[tuple] = []
 
-    def _capture_close(pid, *, kind):
-        closed.append((pid, kind))
+    def _capture_close(pid, *, kind, summary=""):
+        closed.append((pid, kind, summary))
 
     monkeypatch.setattr(runner, "_sse_close", _capture_close)
 
     _install_client(monkeypatch, [_msg("end_turn", [_text("done")])])
     _run(agent_loop(_system(), _user(), _ctx(prototype_id=7)))
 
-    assert closed == [(7, "done")]
+    assert closed == [(7, "done", "done")]
+
+
+def test_sse_done_summary_is_last_text_block_stripped(monkeypatch):
+    """The done summary is the LAST type=='text' block of the OUTER run's final
+    content, stripped — the 1-2 sentence change summary the agent ends with."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind, summary=""):
+        closed.append((pid, kind, summary))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    # An interstitial text block, then the final summary block — only the LAST
+    # one is the summary; leading/trailing whitespace is stripped.
+    final_turn = _msg(
+        "end_turn",
+        [_text("Working on it..."), _text("  Renamed the CTA to 'Get started'.  ")],
+    )
+    _install_client(monkeypatch, [final_turn])
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=11)))
+
+    assert closed == [(11, "done", "Renamed the CTA to 'Get started'.")]
+
+
+def test_sse_done_summary_empty_when_no_text_block(monkeypatch):
+    """A complete run whose final turn carries no text block yields an empty
+    summary (graceful) — _sse_close then omits the `text` key on the sentinel."""
+    closed: list[tuple] = []
+
+    def _capture_close(pid, *, kind, summary=""):
+        closed.append((pid, kind, summary))
+
+    monkeypatch.setattr(runner, "_sse_close", _capture_close)
+
+    # stop != tool_use with no text blocks → complete with empty final_content text.
+    _install_client(monkeypatch, [_msg("end_turn", [])])
+    _run(agent_loop(_system(), _user(), _ctx(prototype_id=12)))
+
+    assert closed == [(12, "done", "")]
 
 
 def test_sse_stream_closed_with_error_on_non_complete_exit(monkeypatch):

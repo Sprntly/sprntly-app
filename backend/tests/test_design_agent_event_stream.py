@@ -93,6 +93,60 @@ async def test_subscribe_terminates_on_error_sentinel():
     assert results == [{"kind": "error"}]
 
 
+# ─── done sentinel carries the agent's change summary ─────────────────────────
+
+
+async def test_done_sentinel_carries_summary_text():
+    """A non-empty summary on a done close() lands as the `text` key on the
+    terminal sentinel (the agent's natural-language change description)."""
+    results: list[dict] = []
+
+    async def _consume():
+        async for ev in event_stream.subscribe(20):
+            results.append(ev)
+
+    task = asyncio.create_task(_consume())
+    await asyncio.sleep(0)
+    event_stream.close(20, kind="done", summary="Renamed the CTA button.")
+    await task
+
+    assert results == [{"kind": "done", "text": "Renamed the CTA button."}]
+
+
+async def test_done_sentinel_omits_text_when_summary_empty():
+    """An empty summary leaves the done sentinel shape unchanged (no `text` key)
+    — the frontend keeps its 'Change applied' fallback."""
+    results: list[dict] = []
+
+    async def _consume():
+        async for ev in event_stream.subscribe(21):
+            results.append(ev)
+
+    task = asyncio.create_task(_consume())
+    await asyncio.sleep(0)
+    event_stream.close(21, kind="done", summary="")
+    await task
+
+    assert results == [{"kind": "done"}]
+
+
+async def test_error_sentinel_never_carries_text():
+    """The error sentinel is unchanged even if a summary is somehow passed —
+    `text` is a done-only key."""
+    results: list[dict] = []
+
+    async def _consume():
+        async for ev in event_stream.subscribe(22):
+            results.append(ev)
+
+    task = asyncio.create_task(_consume())
+    await asyncio.sleep(0)
+    event_stream.close(22, kind="error", summary="should be ignored")
+    await task
+
+    assert results == [{"kind": "error"}]
+
+
 # ─── multi-subscriber fan-out ─────────────────────────────────────────────────
 
 
