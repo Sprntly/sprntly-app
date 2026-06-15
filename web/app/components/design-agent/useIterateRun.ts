@@ -64,6 +64,13 @@ const COSMETIC_STEPS = [
 
 const TICK_MS = 2000
 const MAX_MS = 6 * 60 * 1000
+// After the run signals completion (SSE `done` / status flip), the backend
+// stages the rebuilt bundle a few seconds later — it advances the checkpoint and
+// rewrites `bundle_url`. We poll a short extra window for that new bundle so the
+// center iframe reloads the ACTUAL change, not the pre-iterate bundle. Bounded so
+// a backend that reuses the same `bundle_url` (overwrite-in-place) still resolves
+// — the nonce bump on the host forces the iframe to re-fetch regardless.
+const BUNDLE_WAIT_MS = 30 * 1000
 
 export type IterateRunState = {
   /** True while an iterate is POSTing or polling. */
@@ -105,16 +112,33 @@ export function useIterateRun({
   // on onerror, in the finally block, and on component unmount.
   const esRef = useRef<EventSource | null>(null)
   // The agent's 1–2 sentence change summary, captured off the `done` SSE frame's
-  // `text` when present. The terminal done turn is appended on the POLL resolve
-  // (the honest "the run is really done" signal), so we stash the summary here and
-  // use it as the done turn's text — falling back to "Change applied" when the
-  // done frame carried no summary (poll-only path / SSE unavailable). Live-only.
+  // `text` when present. The terminal done turn carries this as its text — falling
+  // back to "Change applied" only when the done frame carried no summary (poll-
+  // only path / SSE unavailable). Live-only.
   const doneSummaryRef = useRef<string | null>(null)
+  // The SSE `done` frame is the AUTHORITATIVE run-complete signal — it fires at
+  // run-complete and carries the summary. Because an iterate keeps the prototype
+  // `status === "ready"` for the whole run, the poll's `status === "generating"`
+  // gate never trips, so the poll alone would resolve the done turn at iterate-
+  // START (before the summary exists). We wait on this deferred instead: the
+  // `onmessage` handler resolves it when the `done` frame lands, so the terminal
+  // turn can't be committed before the run actually completes AND the summary is
+  // available. The poll loop remains a strict FALLBACK (SSE unavailable / never
+  // opens), and the pending_question / error frames also settle it. Live-only.
+  const sseDoneRef = useRef<{
+    promise: Promise<void>
+    resolve: () => void
+    settled: boolean
+  } | null>(null)
 
   useEffect(() => {
     return () => {
       esRef.current?.close()
       esRef.current = null
+      // Unblock any in-flight run-body waiting on the SSE `done` deferred so it
+      // doesn't hang past unmount.
+      sseDoneRef.current?.resolve()
+      sseDoneRef.current = null
     }
   }, [])
 
@@ -161,8 +185,43 @@ export function useIterateRun({
       lastQuestionRef.current = null
       doneSummaryRef.current = null
 
+      // Arm the SSE `done` deferred BEFORE opening the stream, so a fast `done`
+      // frame can never beat its creation. `settled` lets the run-body know
+      // whether SSE actually delivered a terminal frame (→ trust the summary +
+      // run-complete signal) or never did (→ fall back to the poll outcome).
+      let resolveSseDone: () => void = () => {}
+      const sseDonePromise = new Promise<void>((resolve) => {
+        resolveSseDone = resolve
+      })
+      const sseDone = {
+        promise: sseDonePromise,
+        resolve: () => {
+          if (!sseDone.settled) {
+            sseDone.settled = true
+            resolveSseDone()
+          }
+        },
+        settled: false,
+      }
+      sseDoneRef.current = sseDone
+
       // 1) The user's request as a chat message.
       appendActivity({ kind: "user", text: prompt })
+
+      // Shared clarifying-question resolution (the agent paused to ask). Surfaces
+      // the question in-stream, hands the paused row to the canvas, and ends the
+      // run WITHOUT a done turn — identical behaviour from whichever poll site
+      // first sees `pending_question`. Returns so the caller's `return` ends the
+      // run; the `finally` still closes SSE + clears the in-flight guard.
+      const resolvePendingQuestion = (paused: PrototypeRecord) => {
+        markLastStepDone()
+        const pq = paused.pending_question!
+        lastQuestionRef.current = pq.question
+        setPendingQuestion(pq)
+        appendActivity({ kind: "question", question: pq.question })
+        // The center canvas still reflects the paused prototype.
+        onComplete(paused)
+      }
 
       // 2) Open a real backend SSE stream for per-step events. The backend
       //    already sends the first step; no pre-append here to avoid duplicates. Real backend
@@ -185,17 +244,23 @@ export function useIterateRun({
                 markLastStepDone()
               }
               if (event.kind === "done") {
-                // The done frame carries the agent's 1–2 sentence summary. We do
-                // NOT append it as a turn here — the terminal done turn is appended
-                // on the POLL resolve (the honest "really done" signal). Capture the
-                // summary so the poll-resolve done turn uses it. Closing the stream
-                // on done is preserved.
+                // The done frame is the authoritative run-complete signal and
+                // carries the agent's 1–2 sentence summary. We do NOT append the
+                // terminal turn here — the run-body owns terminal ordering (so the
+                // done turn lands AFTER the rebuilt bundle is staged). Capture the
+                // summary and resolve the deferred so the run-body proceeds to the
+                // bundle-wait + done turn. Closing the stream on done is preserved.
                 doneSummaryRef.current = event.text?.trim() || null
+                sseDoneRef.current?.resolve()
                 es.close()
                 esRef.current = null
               } else {
                 appendActivity(event)
                 if (event.kind === "error") {
+                  // A streamed error settles the run-body's wait too, so it stops
+                  // waiting on a `done` that will never arrive; the poll then
+                  // surfaces the failed status as the run's error.
+                  sseDoneRef.current?.resolve()
                   es.close()
                   esRef.current = null
                 }
@@ -221,61 +286,101 @@ export function useIterateRun({
           mode: "execute",
         })
 
-        // 4) Poll the prototype row to completion. The iterate runs in the
-        //    background; `status` returns to 'ready' when the new checkpoint is
-        //    built (or `pending_question` is set if the agent paused to ask).
         const startedAt = Date.now()
         // A bearer token can expire mid-poll; a transient 401 here used to abort
         // the whole run even though the background iterate completes. Retry once
         // through the refresh so the run survives the blip and still lands.
+        // This first read also captures the PRE-iterate bundle_url: the run is
+        // complete (and the iframe should reload) only once a NEW bundle is
+        // staged, so we compare against this baseline below.
         let proto = await withAuthRetry(() => api.get(prototypeId))
-        // The run is in-progress while status is 'generating'. Some backends keep
-        // status 'ready' and only flip bundle_url/pending_question — so we also
-        // break out the moment a pending_question appears.
+        const baselineBundleUrl = proto.bundle_url
+
+        // An agent that paused IMMEDIATELY (before the loop) — surface it here.
+        if (proto.pending_question != null) {
+          return resolvePendingQuestion(proto)
+        }
+
+        // 4) Wait for the run to COMPLETE. The authoritative signal is the SSE
+        //    `done` frame (it fires at run-complete and carries the summary). An
+        //    iterate keeps `status === "ready"` the whole run, so the old
+        //    `status === "generating"` gate never tripped and the poll resolved
+        //    the done turn at iterate-START — losing the summary every time. We
+        //    now drive completion off the SSE `done` deferred, with the poll as a
+        //    strict FALLBACK (SSE unavailable / never opened). The poll loop also
+        //    detects a pending_question, a failure, or a bundle_url change as
+        //    real completion signals so the fallback resolves without SSE.
         while (
-          proto.status === "generating" &&
+          !sseDone.settled &&
           proto.pending_question == null &&
+          proto.status !== "failed" &&
+          proto.bundle_url === baselineBundleUrl &&
           Date.now() - startedAt < MAX_MS
         ) {
-          // Step events now come from SSE — no cosmetic advancement here.
-          await new Promise((r) => setTimeout(r, TICK_MS))
+          // Race the poll tick against the SSE `done` signal: the moment `done`
+          // lands we stop polling and proceed, so we never wait a full TICK_MS
+          // past completion.
+          await Promise.race([
+            sseDone.promise,
+            new Promise((r) => setTimeout(r, TICK_MS)),
+          ])
+          if (sseDone.settled) break
+          proto = await withAuthRetry(() => api.get(prototypeId))
+        }
+
+        // Re-read once after a settled SSE `done` so we pick up a status/question
+        // the frame implies but the last poll predates.
+        if (sseDone.settled && proto.pending_question == null) {
           proto = await withAuthRetry(() => api.get(prototypeId))
         }
 
         // 5a) Agent paused with a clarifying question → surface it in-stream.
         if (proto.pending_question != null) {
-          markLastStepDone()
-          lastQuestionRef.current = proto.pending_question.question
-          setPendingQuestion(proto.pending_question)
-          appendActivity({
-            kind: "question",
-            question: proto.pending_question.question,
-          })
-          // The center canvas still reflects the paused prototype.
-          onComplete(proto)
-          return
+          return resolvePendingQuestion(proto)
         }
 
-        // 5b) Resolve on the REAL poll outcome. The terminal "Change applied"
-        //     line is appended ONLY when the poll actually resolved to ready —
-        //     never on a timeout or a failure (those surface as an error). That
-        //     is what keeps the stream honest: a "done" line means the backend
-        //     run is really done.
-        markLastStepDone()
-        if (proto.status === "ready") {
-          // Use the agent's captured summary (from the done SSE frame) when
-          // present; fall back to "Change applied" on the poll-only path / when no
-          // summary was streamed.
-          appendActivity({
-            kind: "done",
-            text: doneSummaryRef.current ?? "Change applied",
-          })
-          onComplete(proto)
-        } else if (proto.status === "failed") {
+        // 5b) Hard-failure / timeout surface as an error (never a done line).
+        if (proto.status === "failed") {
           throw new Error(proto.error || "Iteration failed")
-        } else {
+        }
+        if (!sseDone.settled && Date.now() - startedAt >= MAX_MS) {
           throw new Error("Iteration timed out")
         }
+
+        // 6) The run is complete. WAIT for the rebuilt bundle before reloading the
+        //    canvas: the backend stages the new checkpoint (rewrites bundle_url) a
+        //    few seconds AFTER run-complete, so resolving immediately would reload
+        //    the PRE-iterate bundle (stale canvas / 404 on a not-yet-built bundle).
+        //    Poll a bounded extra window for a bundle_url change; if the backend
+        //    overwrites the bundle in place (same url), the host's reload-nonce
+        //    bump still forces the iframe to re-fetch, so the bounded wait is safe.
+        const bundleWaitStart = Date.now()
+        while (
+          proto.bundle_url === baselineBundleUrl &&
+          proto.pending_question == null &&
+          Date.now() - bundleWaitStart < BUNDLE_WAIT_MS
+        ) {
+          await new Promise((r) => setTimeout(r, TICK_MS))
+          proto = await withAuthRetry(() => api.get(prototypeId))
+          if (proto.pending_question != null) {
+            return resolvePendingQuestion(proto)
+          }
+          if (proto.status === "failed") {
+            throw new Error(proto.error || "Iteration failed")
+          }
+        }
+
+        // 7) Resolve. The terminal done turn carries the agent's captured summary
+        //    (from the SSE `done` frame) when present, falling back to "Change
+        //    applied" only on the poll-only / SSE-unavailable path. onComplete
+        //    fires with the FRESHEST row (new bundle_url), so the iframe reloads
+        //    the actual change.
+        markLastStepDone()
+        appendActivity({
+          kind: "done",
+          text: doneSummaryRef.current ?? "Change applied",
+        })
+        onComplete(proto)
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Could not run the change"
         setError(msg)
@@ -283,6 +388,11 @@ export function useIterateRun({
       } finally {
         esRef.current?.close()
         esRef.current = null
+        // Resolve any still-pending SSE-done waiter (defensive — the run is over)
+        // and drop the ref so a late frame from a closed stream can't touch the
+        // next run's deferred.
+        sseDone.resolve()
+        if (sseDoneRef.current === sseDone) sseDoneRef.current = null
         setRunning(false)
         inFlightRef.current = false
       }

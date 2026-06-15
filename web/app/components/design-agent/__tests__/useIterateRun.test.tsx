@@ -706,3 +706,219 @@ describe("useIterateRun — SSE EventSource wiring", () => {
     expect(uniqueKinds).toContain("error")
   })
 })
+
+// ---------------------------------------------------------------------------
+// The real-world iterate timing: status stays "ready" the WHOLE run, the SSE
+// `done` frame (with the summary) arrives LATE, and the rebuilt bundle is staged
+// a few polls AFTER run-complete. These tests model that exact sequence — the
+// failing-before-fix case is the first one.
+// ---------------------------------------------------------------------------
+
+const OLD_BUNDLE = "https://bundle.test/v1"
+const NEW_BUNDLE = "https://bundle.test/v2"
+
+/** A ready prototype row with a caller-chosen bundle_url (the shared `proto`
+ *  helper hardcodes a single url; an iterate flips the url on rebuild, so these
+ *  tests need both the pre- and post-iterate values). */
+function ready(bundleUrl: string | null): PrototypeRecord {
+  return {
+    id: PROTOTYPE_ID,
+    status: "ready",
+    bundle_url: bundleUrl,
+    error: null,
+    pending_question: null,
+  }
+}
+
+describe("useIterateRun — iterate keeps status 'ready'; done summary + fresh bundle", () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    MockEventSource.clear()
+    setAccessTokenProvider(() => Promise.resolve("test-sse-bearer"))
+    vi.stubGlobal("EventSource", MockEventSource)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    vi.resetAllMocks()
+  })
+
+  it("test_status_ready_throughout_late_done_carries_summary: the done turn shows the streamed summary even though the poll sees 'ready' from the very first GET and the done frame arrives ~9s later (FAILS PRE-FIX → 'Change applied')", async () => {
+    // The prototype is 'ready' on EVERY poll (an iterate never flips status to
+    // 'generating') — so the old `while (status === 'generating')` gate never ran
+    // and the done turn was resolved at iterate-START, before the summary frame.
+    // The new bundle is staged on the 3rd GET; the SSE `done` (with the summary)
+    // lands a couple polls in. The done turn MUST carry the summary.
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(ready(OLD_BUNDLE)) // baseline read (pre-iterate)
+      .mockResolvedValueOnce(ready(OLD_BUNDLE)) // still old bundle
+      .mockResolvedValue(ready(NEW_BUNDLE)) // rebuilt bundle staged
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    const SUMMARY =
+      "Changed --background to a light blue and nudged the hero padding."
+
+    await act(async () => {
+      const run = result.current.runIterate("make the background light blue")
+      await Promise.resolve()
+      await Promise.resolve()
+      // The agent's summary arrives LATE, on the SSE done frame — well after the
+      // first poll already saw 'ready'.
+      await vi.advanceTimersByTimeAsync(3000)
+      MockEventSource.latest().emit({ kind: "done", text: SUMMARY })
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const doneTurns = result.current.activity.filter((e) => e.kind === "done")
+    expect(doneTurns).toHaveLength(1)
+    // PRE-FIX this asserts "Change applied" (summary lost to the race). POST-FIX
+    // the streamed summary is shown.
+    expect(doneTurns[0].kind === "done" && doneTurns[0].text).toBe(SUMMARY)
+
+    // The canvas reloads the REBUILT bundle, not the pre-iterate one.
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(onComplete.mock.calls[onComplete.mock.calls.length - 1][0].bundle_url).toBe(
+      NEW_BUNDLE,
+    )
+    expect(result.current.error).toBeNull()
+    expect(result.current.running).toBe(false)
+  })
+
+  it("test_status_ready_throughout_no_summary_falls_back: a late done frame with no summary text resolves to 'Change applied'", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(ready(OLD_BUNDLE))
+      .mockResolvedValue(ready(NEW_BUNDLE))
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("tighten the spacing")
+      await Promise.resolve()
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(2000)
+      MockEventSource.latest().emit({ kind: "done", text: "" })
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const doneTurns = result.current.activity.filter((e) => e.kind === "done")
+    expect(doneTurns).toHaveLength(1)
+    expect(doneTurns[0].kind === "done" && doneTurns[0].text).toBe("Change applied")
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_status_ready_throughout_sse_unavailable_poll_fallback: with no SSE, the run still resolves to 'Change applied' off the bundle-change poll", async () => {
+    // No EventSource available → the poll fallback alone must resolve the run.
+    // Completion is detected by the bundle_url changing (status is 'ready' the
+    // whole time), and the done turn falls back to "Change applied".
+    setAccessTokenProvider(() => Promise.resolve(null)) // SSE branch not entered
+
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(ready(OLD_BUNDLE)) // baseline
+      .mockResolvedValueOnce(ready(OLD_BUNDLE)) // still building
+      .mockResolvedValue(ready(NEW_BUNDLE)) // rebuilt
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("nudge the layout")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const doneTurns = result.current.activity.filter((e) => e.kind === "done")
+    expect(doneTurns).toHaveLength(1)
+    expect(doneTurns[0].kind === "done" && doneTurns[0].text).toBe("Change applied")
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(onComplete.mock.calls[onComplete.mock.calls.length - 1][0].bundle_url).toBe(
+      NEW_BUNDLE,
+    )
+    expect(result.current.error).toBeNull()
+  })
+
+  it("test_status_ready_throughout_clarifying_question_unchanged: a pending_question that appears on a later poll still surfaces the question, never a done line", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(ready(OLD_BUNDLE)) // baseline, no question yet
+      .mockResolvedValueOnce(ready(OLD_BUNDLE))
+      .mockResolvedValue({
+        ...ready(OLD_BUNDLE),
+        pending_question: { question: "Which shade of blue?" },
+      })
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("change the palette")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const { activity } = result.current
+    expect(
+      activity.some(
+        (e) => e.kind === "question" && e.question === "Which shade of blue?",
+      ),
+    ).toBe(true)
+    expect(hasChangeApplied(activity)).toBe(false)
+    expect(result.current.pendingQuestion?.question).toBe("Which shade of blue?")
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_status_failed_surfaces_error_not_done: a failed status surfaces an error and never a done line", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(ready(OLD_BUNDLE)) // baseline
+      .mockResolvedValue({
+        id: PROTOTYPE_ID,
+        status: "failed",
+        bundle_url: OLD_BUNDLE,
+        error: "build blew up",
+        pending_question: null,
+      })
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("break it")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    expect(hasChangeApplied(result.current.activity)).toBe(false)
+    expect(result.current.error).toBe("build blew up")
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(result.current.running).toBe(false)
+  })
+})
