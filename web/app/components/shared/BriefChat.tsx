@@ -27,7 +27,7 @@ import { prototypeStateForInsight } from "../design-agent/briefPrototypeMap.help
 import { GenerateModal } from "../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
-import { prototypePath } from "../../lib/routes"
+import { prototypePath, prdPath } from "../../lib/routes"
 import { useRouter } from "next/navigation"
 
 type Finding = BriefV2HeroFinding | BriefV2CompactFinding
@@ -402,6 +402,20 @@ function chartFromStatTiles(finding: Finding): BriefV2InlineChart | null {
   return { kind: "bar", title: finding.metricHighlight || finding.title || "", data }
 }
 
+/** Pure: the primary finding-card CTA. When a PRD already exists for this
+ *  insight the button becomes "View PRD" (opens the existing PRD); otherwise
+ *  "Generate PRD" (runs the full system), reflecting in-flight as "Generating…".
+ *  Extracted so the view-vs-generate decision is unit-testable. */
+export function prdCtaState(
+  insightState: { hasPrd: boolean; prdId: number | null } | null | undefined,
+  generating: boolean,
+): { label: string; isView: boolean } {
+  if (insightState?.hasPrd && insightState.prdId != null) {
+    return { label: "View PRD", isView: true }
+  }
+  return { label: generating ? "Generating…" : "Generate PRD", isView: false }
+}
+
 // ── Finding card — matches reference layout ───────────────────────────────────
 function BriefFindingCard({
   finding,
@@ -411,6 +425,7 @@ function BriefFindingCard({
   onAsk,
   onViewEvidence,
   onGenerateAll,
+  onViewPrd,
   onDismiss,
   onRestore,
   onPreview,
@@ -423,6 +438,7 @@ function BriefFindingCard({
   onAsk: () => void
   onViewEvidence: () => void
   onGenerateAll: () => void
+  onViewPrd: () => void
   onDismiss: () => void
   onRestore: () => void
   onPreview: () => void
@@ -545,16 +561,27 @@ function BriefFindingCard({
 
           {/* Action buttons */}
           <div className="fc-actions">
-            <button
-              type="button"
-              className={`fc-btn-prd fc-btn-prd--${accent}`}
-              onClick={onGenerateAll}
-              disabled={busy}
-              title="Generates the full system: PRD + Evidence + Technical Design + QA Test Cases + Risk Analysis + Traceability Matrix"
-            >
-              <IconFileText size={14} />
-              {generating ? "Generating…" : "Generate PRD"}
-            </button>
+            {(() => {
+              const cta = prdCtaState(insightState, generating)
+              return (
+                <button
+                  type="button"
+                  className={`fc-btn-prd fc-btn-prd--${accent}`}
+                  onClick={cta.isView ? onViewPrd : onGenerateAll}
+                  // View is a cheap read — allowed while another job is busy;
+                  // Generate is gated on `busy` as before.
+                  disabled={busy && !cta.isView}
+                  title={
+                    cta.isView
+                      ? "Open the existing PRD"
+                      : "Generates the full system: PRD + Evidence + Technical Design + QA Test Cases + Risk Analysis + Traceability Matrix"
+                  }
+                >
+                  <IconFileText size={14} />
+                  {cta.label}
+                </button>
+              )
+            })()}
             <button type="button" className="fc-btn-secondary" onClick={onPreview}>
               <IconTerminalPrompt size={13} />
               View prototype
@@ -1264,6 +1291,24 @@ export function BriefChat() {
     [content.briefDetails, entriesByInsight, router, prototypeFlow, runGate, cardGeneratePrd],
   )
 
+  // "View PRD" — open the insight's EXISTING PRD at /prd?prd=<id> (mirrors the
+  // "View prototype" router.push(prototypePath(prdId)) nav). Safety fallback to
+  // the generate flow if the prd id can't be resolved (the button only offers
+  // "View PRD" when hasPrd && prdId, so this is belt-and-suspenders).
+  const cardViewPrd = useCallback(
+    (finding: Finding) => {
+      const key = finding.detailKey
+      const meta = key ? content.briefDetails?.[key]?.meta : null
+      const state =
+        meta != null
+          ? prototypeStateForInsight(entriesByInsight, meta.insightIndex)
+          : null
+      if (state?.prdId != null) router.push(prdPath(state.prdId))
+      else void runGate(() => cardGeneratePrd(finding))
+    },
+    [content.briefDetails, entriesByInsight, router, runGate, cardGeneratePrd],
+  )
+
   const cardRestore = useCallback((finding: Finding) => {
     const key = finding.detailKey
     if (!key) return
@@ -1396,6 +1441,7 @@ export function BriefChat() {
                           onAsk={() => cardAsk(f)}
                           onViewEvidence={() => cardViewEvidence(f)}
                           onGenerateAll={() => cardGenerateAll(f)}
+                          onViewPrd={() => cardViewPrd(f)}
                           onDismiss={() => cardDismiss(f)}
                           onRestore={() => cardRestore(f)}
                           onPreview={() => cardPreview(f)}

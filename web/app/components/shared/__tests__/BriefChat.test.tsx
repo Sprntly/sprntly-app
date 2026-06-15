@@ -94,7 +94,30 @@ import type {
   BriefV2InlineChart,
   BriefV2State,
 } from "../../../lib/brief-v2-adapter"
-import { BriefChat } from "../BriefChat"
+import { BriefChat, prdCtaState } from "../BriefChat"
+
+describe("prdCtaState — smart View/Generate PRD button", () => {
+  it("offers 'View PRD' when a PRD already exists for the insight", () => {
+    expect(prdCtaState({ hasPrd: true, prdId: 12 }, false)).toEqual({
+      label: "View PRD",
+      isView: true,
+    })
+    // still 'View PRD' even mid another job (view is a cheap read)
+    expect(prdCtaState({ hasPrd: true, prdId: 12 }, true).isView).toBe(true)
+  })
+  it("offers 'Generate PRD' when none exists (and 'Generating…' in flight)", () => {
+    expect(prdCtaState({ hasPrd: false, prdId: null }, false)).toEqual({
+      label: "Generate PRD",
+      isView: false,
+    })
+    expect(prdCtaState({ hasPrd: false, prdId: null }, true).label).toBe("Generating…")
+  })
+  it("does NOT offer view when hasPrd but the prd id is unknown, or no state", () => {
+    expect(prdCtaState({ hasPrd: true, prdId: null }, false).isView).toBe(false)
+    expect(prdCtaState(null, false)).toEqual({ label: "Generate PRD", isView: false })
+    expect(prdCtaState(undefined, false).isView).toBe(false)
+  })
+})
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 // A real inline chart with KNOWN labels + values — the assertions below look

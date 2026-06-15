@@ -19,6 +19,15 @@ export function prototypePath(prdId?: number | string | null): string {
   return `${PROTOTYPE_PATH}?prd=${encodeURIComponent(String(prdId))}`
 }
 
+/** Build the /prd route with the PRD id as a `?prd=` query param. Mirror of
+ *  prototypePath: the single destination for opening an EXISTING PRD (the PRD
+ *  screen resolves it from `?prd=`). With no id it returns the bare `/prd`.
+ *  Pure → unit-testable. */
+export function prdPath(prdId?: number | string | null): string {
+  if (prdId == null || prdId === "") return "/prd"
+  return `/prd?prd=${encodeURIComponent(String(prdId))}`
+}
+
 /** Read the PRD id carried in the prototype page's `?prd=` query param, or null
  *  when absent / malformed. Accepts the raw value from `useSearchParams().get`
  *  (string | null). PRD ids are positive integers; anything else → null so the
