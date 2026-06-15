@@ -2,8 +2,10 @@
 // Client viewer for the public /p/<token> route (P2-05). Co-located with the
 // page exactly like web/app/(app)/onboarding/[step]/OnboardingStep.tsx — the
 // server shell (page.tsx) handles static export; this owns the runtime
-// behaviour. Reads the real token from the URL (useParams), resolves it against
-// the public backend resolver, and branches: public → iframe; passcode → gate;
+// behaviour. Reads the real token from the LIVE URL (window.location.pathname,
+// client-side) — NOT useParams(), which under output:"export" returns the
+// prerendered "_" sentinel (see shareTokenFromPathname). Resolves it against the
+// public backend resolver, and branches: public → iframe; passcode → gate;
 // missing/private/not-ready/404 → notFound().
 //
 // The resolver + branch logic are split into pure functions (resolveToken,
@@ -11,7 +13,7 @@
 // has no DOM/router — the same split convention as DesignAgentDrawer's
 // runGenerateFlow. Relative imports (not `@/…`) match the codebase + vitest.
 import { useEffect, useState, type FormEvent } from "react"
-import { notFound, useParams } from "next/navigation"
+import { notFound } from "next/navigation"
 import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
 import { ManualEditOverlay } from "../components/design-agent/ManualEditOverlay"
 import { CommentsPanel } from "../components/design-agent/CommentsPanel"
@@ -24,6 +26,7 @@ import { MarkOverlay, PinLayer, PrototypeMarkLayer } from "../components/design-
 import { designAgentApi } from "../lib/api"
 import { PasscodeGate } from "./PasscodeGate"
 import { resolveToken, type ResolvedView } from "./resolveToken"
+import { shareTokenFromLocation } from "./shareTokenFromPathname"
 import { IconMessage, IconPin } from "../components/shared/app-icons"
 
 export type { ResolvedView }
@@ -71,8 +74,14 @@ function persistViewerName(name: string): void {
 }
 
 export function PublicTokenViewer() {
-  const params = useParams<{ token: string | string[] }>()
-  const token = Array.isArray(params.token) ? params.token[0] : params.token
+  // The real share token comes from the live URL, not useParams() — under
+  // output:"export" the route is prerendered under the "_" sentinel, so
+  // useParams() returns "_". `undefined` = not yet read on the client (stay in
+  // loading); `null` = read but no real token (sentinel/malformed → notFound()).
+  const [token, setToken] = useState<string | null | undefined>(undefined)
+  useEffect(() => {
+    setToken(shareTokenFromLocation())
+  }, [])
   const [state, setState] = useState<ViewerState>({ kind: "loading" })
   // C2a public-viewer chrome state. `commentsOpen` toggles the writable-anon
   // CommentsPanel.
@@ -112,6 +121,7 @@ export function PublicTokenViewer() {
   })
 
   useEffect(() => {
+    if (token === undefined) return // not yet read from the URL → stay loading
     if (!token) {
       setState({ kind: "notfound" })
       return
