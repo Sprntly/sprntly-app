@@ -14,8 +14,9 @@
 // is named [slug] to satisfy Next's same-name rule with the canonical
 // /p/[slug]/[token] route, but HERE the value IS the share token.
 import { useEffect, useRef } from "react"
-import { notFound, useParams, useRouter } from "next/navigation"
+import { notFound, useRouter } from "next/navigation"
 import { resolveToken, type ResolvedView } from "../resolveToken"
+import { shareTokenFromLocation } from "../shareTokenFromPathname"
 
 // Pure: given the resolved view (or null) and the token, compute the canonical
 // path to replace to — or null when the token did not resolve (caller calls
@@ -29,16 +30,17 @@ export function legacyRedirectTarget(
 }
 
 export function LegacyTokenRedirect() {
-  // The legacy /p/<token> URL matches the shared [slug] segment, so the share
-  // token arrives as params.slug here (see the NOTE in the file header).
-  const params = useParams<{ slug: string | string[] }>()
-  const token = Array.isArray(params.slug) ? params.slug[0] : params.slug
   const router = useRouter()
   // Guard against a notFound() throw across a re-render once we've already 404'd.
   const done = useRef(false)
 
   useEffect(() => {
     if (done.current) return
+    // The real token comes from the live URL, not useParams() — under
+    // output:"export" the route is prerendered under the "_" sentinel, so
+    // useParams().slug returns "_". The legacy /p/<token> route is 1-segment, so
+    // the token is the last/only `/p` segment — exactly what this returns.
+    const token = shareTokenFromLocation()
     if (!token) {
       done.current = true
       notFound()
@@ -66,7 +68,7 @@ export function LegacyTokenRedirect() {
     return () => {
       active = false
     }
-  }, [token, router])
+  }, [router])
 
   // Redirect-only surface: nothing visible to render while resolving.
   return null

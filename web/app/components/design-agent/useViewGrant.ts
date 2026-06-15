@@ -66,6 +66,39 @@ export function shouldRemint(attempts: number): {
 }
 
 /**
+ * Probe the granted bundle's top document (index.html) with a credentialed GET.
+ *
+ * WHY: a 401-bodied index.html is a SUCCESSFUL load to the browser — it renders
+ * the JSON error body (`{"detail":"grant required"}`) and fires the iframe `load`
+ * event, NOT `error`. So the iframe `onError` handler can't detect a lapsed or
+ * withheld `da_view_grant` (the real prod incident). This explicit preflight can:
+ * it inspects the HTTP status the iframe load itself would hide. Same-origin +
+ * `credentials: "include"` so the host-only path-scoped grant cookie attaches,
+ * exactly as the iframe asset GETs do.
+ *
+ * Returns "unauthorized" ONLY on a 401 (the case the bounded re-mint must handle);
+ * "ok" otherwise — including a network/transient failure, which would also fail
+ * the real iframe load and fire `onError`, so it stays on that path and never
+ * burns the bounded re-mint budget on a transient.
+ */
+export async function preflightBundle(
+  bundleUrl: string,
+  fetchImpl?: typeof fetch,
+): Promise<"ok" | "unauthorized"> {
+  const doFetch = fetchImpl ?? fetch
+  try {
+    const res = await doFetch(bundleUrl, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+    })
+    return res.status === 401 ? "unauthorized" : "ok"
+  } catch {
+    return "ok"
+  }
+}
+
+/**
  * Mint a `da_view_grant` for the authed bundle iframe, gating `bundleUrl` until
  * the grant exists, with a bounded single re-mint on a later asset 401.
  *
@@ -144,6 +177,25 @@ export function useViewGrant(
       setError("Couldn't load the prototype. Please refresh and try again.")
     }
   }, [bundleUrl, mint])
+
+  // Preflight the granted bundle after each (re)mint. A 401-bodied index.html
+  // LOADS in the iframe (fires `load`, not `error` — see preflightBundle), so the
+  // iframe onError can't detect a lapsed/withheld grant; this credentialed GET
+  // does, and routes a 401 through the SAME bounded re-mint path (notifyAssetError
+  // / remintAttemptsRef, cap = 1 — NO parallel counter). Keyed on the granted url
+  // + reloadKey so it re-runs after a re-mint bumps the key; once the cap is hit
+  // notifyAssetError nulls grantedBundleUrl and this guard returns — so the
+  // preflight→re-mint cycle is bounded too (no preflight↔mint loop).
+  useEffect(() => {
+    if (!grantedBundleUrl) return
+    let active = true
+    void preflightBundle(grantedBundleUrl).then((status) => {
+      if (active && status === "unauthorized") notifyAssetError()
+    })
+    return () => {
+      active = false
+    }
+  }, [grantedBundleUrl, reloadKey, notifyAssetError])
 
   return { grantedBundleUrl, error, pending, reloadKey, notifyAssetError }
 }
