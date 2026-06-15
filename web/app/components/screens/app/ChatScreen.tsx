@@ -93,9 +93,13 @@ export function ChatScreen() {
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
+  // Company-scoped localStorage keys so different tenants never share chat state.
+  const tabsKey = `sprntly_chat_tabs_${activeCompany}`
+  const activeTabKey = `sprntly_chat_active_tab_${activeCompany}`
+
   const [tabs, setTabs] = useState<ChatTab[]>(() => {
     try {
-      const saved = localStorage.getItem("sprntly_chat_tabs")
+      const saved = localStorage.getItem(tabsKey)
       if (!saved) return []
       // Restore with defaults for fields not persisted (prd/evidence are large — re-generate on reload)
       return (JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
@@ -119,19 +123,45 @@ export function ChatScreen() {
   const animatedTurnIds = useRef<Set<string>>(new Set())
   const [activeTabId, setActiveTabId] = useState<string | null>(() => {
     try {
-      return localStorage.getItem("sprntly_chat_active_tab") || null
+      return localStorage.getItem(activeTabKey) || null
     } catch { return null }
   })
+
+  // When the active company changes (user switches workspace or logs in as
+  // a different user), reload tabs from the new company-scoped storage so we
+  // never show another tenant's chat threads.
+  const prevCompanyRef = useRef(activeCompany)
+  useEffect(() => {
+    if (prevCompanyRef.current === activeCompany) return
+    prevCompanyRef.current = activeCompany
+    try {
+      const saved = localStorage.getItem(tabsKey)
+      if (saved) {
+        setTabs((JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
+          id: t.id ?? "", title: t.title ?? "", thread: t.thread ?? [],
+          dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
+          prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+        })))
+      } else {
+        setTabs([])
+      }
+      setActiveTabId(localStorage.getItem(activeTabKey) || null)
+    } catch {
+      setTabs([])
+      setActiveTabId(null)
+    }
+  }, [activeCompany, tabsKey, activeTabKey])
+
   // Persist tabs to localStorage — strip large/transient fields (prd, evidence, *Generating)
   useEffect(() => {
     try {
       const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, ...rest }) => rest)
-      localStorage.setItem("sprntly_chat_tabs", JSON.stringify(slim))
+      localStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
-  }, [tabs])
+  }, [tabs, tabsKey])
   useEffect(() => {
-    try { localStorage.setItem("sprntly_chat_active_tab", activeTabId ?? "") } catch { /* ignore */ }
-  }, [activeTabId])
+    try { localStorage.setItem(activeTabKey, activeTabId ?? "") } catch { /* ignore */ }
+  }, [activeTabId, activeTabKey])
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const thread = activeTab?.thread ?? []

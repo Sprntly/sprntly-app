@@ -179,6 +179,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await supabase.auth.signOut()
     } finally {
+      // Wipe all session-scoped localStorage so a different user logging in
+      // on the same browser never sees the previous user's data (chat tabs,
+      // active company, conversation resume, etc.).
+      try {
+        // Fixed keys
+        const SESSION_KEYS = [
+          "sprntly_active_company",
+          "sprntly_chat_tabs",
+          "sprntly_chat_active_tab",
+          "sprntly_resume_conv",
+        ]
+        for (const key of SESSION_KEYS) {
+          localStorage.removeItem(key)
+        }
+        // Company-scoped keys (sprntly_chat_tabs_<slug>, etc.)
+        const toRemove: string[] = []
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i)
+          if (key && (key.startsWith("sprntly_chat_tabs_") || key.startsWith("sprntly_chat_active_tab_"))) {
+            toRemove.push(key)
+          }
+        }
+        for (const key of toRemove) {
+          localStorage.removeItem(key)
+        }
+      } catch {
+        // localStorage may be disabled; not fatal.
+      }
       setState({ kind: "anonymous" })
     }
   }, [])
