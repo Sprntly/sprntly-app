@@ -110,7 +110,9 @@ from app.design_agent.storage import (
     TypeCheckError,
     TypeCheckRepairExhausted,
     ViteBuildError,
+    authed_bundle_url,
     fresh_bundle_url,
+    public_bundle_proxy_url,
     repair_unresolved_relative_imports,
     stage_bundle,
     stage_preview_image,
@@ -1532,10 +1534,17 @@ async def _stage_complete_run(
         )
 
     # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
+    # NO-BYPASS migration (plan §8-A/B): the persisted bundle_url is the STABLE
+    # app-origin PROXY base, NOT the 24h Supabase signed URL `stage_bundle`
+    # returned (that signed URL was used above only for the server-side screenshot
+    # capture and is never browser-facing). The authed surface serves this proxy
+    # base via the da_view_grant cookie; the public surface re-derives a by-token
+    # proxy URL on read (_public_bundle_url). Signing now happens inside the proxy
+    # handler, sign-on-read, so a browser never receives a direct/signed object URL.
     complete_prototype(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
-        bundle_url=bundle_url,
+        bundle_url=authed_bundle_url(prototype_id),
         current_checkpoint_id=checkpoint_id,
         preview_image_url=preview_image_url,
     )
@@ -1809,23 +1818,19 @@ def _share_token_hash(token: str) -> str:
 
 
 def _public_bundle_url(row: dict[str, Any]) -> str | None:
-    """Bundle URL for a public/passcode view, freshly signed on read.
+    """Bundle URL for a public/passcode view — the app-origin PROXY base.
 
-    The stored `bundle_url` is a 24h-TTL Supabase signed URL minted at stage
-    time, but a public/passcode share is permanent — the stored URL goes stale
-    and the iframe 403s after the TTL. Re-sign per request from the bundle object
-    path (derived from the current checkpoint) so the share never expires. Falls
-    back to the stored URL when there is no checkpoint to derive a path from, or
-    on the filesystem/dev backend (handled inside `fresh_bundle_url`)."""
-    stored = row.get("bundle_url")
-    checkpoint_id = row.get("current_checkpoint_id")
-    if checkpoint_id is None:
-        return stored
-    return fresh_bundle_url(
-        prototype_id=row["id"],
-        checkpoint_id=checkpoint_id,
-        stored_bundle_url=stored,
-    )
+    NO-BYPASS migration (plan §8-D): a public/passcode share resolves to the
+    same-origin bundle proxy keyed by the share token in the path
+    (`…/by-token/<token>/bundle/index.html`), NOT a direct/signed Supabase URL.
+    The proxy authorizes (re-resolves share_mode per asset GET) and signs-on-read
+    server-side, so the browser never receives a signed object URL and the share
+    never expires (no 24h TTL on the public URL). Returns None when the row has
+    no share_token (a token is minted at start_prototype, so this is defensive)."""
+    token = row.get("share_token")
+    if not token:
+        return None
+    return public_bundle_proxy_url(token)
 
 
 class PublicPrototypeView(BaseModel):
@@ -1894,7 +1899,7 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
 
 @router.post("/by-token/{token}/passcode", response_model=PublicPrototypeView)
 def verify_passcode(
-    token: str, body: PasscodeAttempt, request: Request
+    token: str, body: PasscodeAttempt, request: Request, response: Response
 ) -> PublicPrototypeView:
     """Verify a passcode against a passcode-mode share; on success return the
     bundle_url. Rate-limited 5/min/token (P2-06 primitive). The rate-limit check
@@ -1922,6 +1927,15 @@ def verify_passcode(
     # Success: clear the failure history so a later legitimate visitor is not
     # throttled by this token's earlier wrong attempts.
     passcode_rate_limit_clear(token=token)
+    # Bundle-proxy (plan §5): set the scoped da_share_grant cookie so the iframe's
+    # subsequent asset GETs to the proxy authenticate. The cookie is HMAC-bound to
+    # this token + checkpoint; fails closed (503) on an unset token secret. Set
+    # only when there is a checkpoint to bind (a ready share always has one).
+    _cp = row.get("current_checkpoint_id")
+    if _cp is not None:
+        from app.routes.design_agent_bundle import set_share_grant_cookie
+
+        set_share_grant_cookie(response, token=token, checkpoint_id=_cp)
     logger.info("prototype_public_view_resolved token_hash=%s share_mode=passcode", th)
     return PublicPrototypeView(
         share_mode="passcode",
@@ -3051,12 +3065,14 @@ async def _stage_iterate_run(
     # Step 4 — P3-12. Advance current_checkpoint_id + bundle_url WITHOUT a
     # completed_at re-stamp (NOT complete_prototype — AC6a). F7: this does not
     # rotate share_token / share_mode, so the public /p/<token> URL is unchanged
-    # and now resolves to the new checkpoint's bundle_url.
+    # and now resolves to the new checkpoint's bundle. NO-BYPASS (plan §8): store
+    # the STABLE app-origin proxy base (not the staged signed URL `bundle_url`,
+    # which is server-side only); the proxy signs-on-read per checkpoint.
     advance_current_checkpoint(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
         checkpoint_id=checkpoint_id,
-        bundle_url=bundle_url,
+        bundle_url=authed_bundle_url(prototype_id),
     )
 
 

@@ -567,19 +567,12 @@ describe("PostGenerationResult container — defaults from the prototype record 
     expect(html).toContain('data-testid="post-generation-result"')
   })
 
-  it("defaultFullscreen=true seeds fullscreenOpen state to true — overlay renders on mount when a bundle is present", () => {
-    // The in-tab canvas passes defaultFullscreen so the prototype opens maximized.
-    // With a bundleUrl present the FullscreenOverlay is gated on
-    // `fullscreenOpen && bundleUrl`; both are true here so the overlay mounts.
-    const html = renderToStaticMarkup(
-      React.createElement(PostGenerationResult, {
-        prototype: proto({ bundle_url: "https://cdn/p/42/index.html" }),
-        defaultFullscreen: true,
-      }),
-    )
-    expect(html).toContain('data-testid="proto-fullscreen"')
-    expect(html).toContain('data-testid="proto-fullscreen-close"')
-  })
+  // NOTE: the container now GATES `bundle_url` behind the view-grant mint
+  // (useViewGrant) — the iframe/overlay only render AFTER the async grant POST
+  // resolves, which `renderToStaticMarkup` (synchronous, no effects) cannot drive.
+  // The viewer-present-when-bundle cases (defaultFullscreen overlay; MarkOverlay
+  // mount) therefore moved to the DOM-env companion
+  // `PostGenerationResult.grant.dom.test.tsx`, which mocks viewGrant + waits.
 
   it("defaultFullscreen absent (other consumers) — overlay does not render on mount", () => {
     // Other consumers (PrdScreen, DesignAgentLauncher) omit defaultFullscreen;
@@ -594,11 +587,11 @@ describe("PostGenerationResult container — defaults from the prototype record 
     expect(html).not.toContain('data-testid="proto-fullscreen-close"')
   })
 
-  it("onFullscreenChange prop is accepted without error and does not affect initial SSR output", () => {
+  it("onFullscreenChange prop is accepted without error and does not fire on the initial render", () => {
     // The callback is an optional notification-only prop — it fires on toggle, not
-    // on mount. Passing it must not crash the static render or alter the markup
-    // (the internal state is the source of truth; the callback is a side-channel).
-    // defaultFullscreen=true so fullscreenOpen is true → overlay renders.
+    // on mount. Passing it must not crash the static render. (The overlay-present
+    // assertion moved to the DOM companion: the overlay is gated on the now-
+    // async-granted bundle url, which renderToStaticMarkup can't drive.)
     const spy = vi.fn()
     const html = renderToStaticMarkup(
       React.createElement(PostGenerationResult, {
@@ -607,8 +600,8 @@ describe("PostGenerationResult container — defaults from the prototype record 
         onFullscreenChange: spy,
       }),
     )
-    // Overlay present (defaultFullscreen seeds the initial state).
-    expect(html).toContain('data-testid="proto-fullscreen"')
+    // The container chrome renders cleanly with the prop present.
+    expect(html).toContain('data-testid="post-generation-result"')
     // The callback was NOT invoked during the static render — it only fires on
     // toggle (open/close handlers), not on initial mount.
     expect(spy).not.toHaveBeenCalled()
@@ -898,16 +891,17 @@ describe("Mark-and-comment pin flow — view layer", () => {
 // per-element offsets and handlePinSubmit ships them, since the click→state→
 // payload data flow itself can't be driven without a DOM.
 describe("PostGenerationResult container — pin-anchor threading through the leaf split", () => {
-  it("the REAL container renders <MarkOverlay> on the stage (overlay click → anchor capture is mounted, not dropped)", () => {
+  it("the REAL container renders the center stage (overlay/pin layer mount once the granted bundle loads)", () => {
     const html = renderToStaticMarkup(
       React.createElement(PostGenerationResult, {
         prototype: proto({ bundle_url: BUNDLE }),
       }),
     )
-    // The extracted overlay mounts inside the real container's center stage. A
-    // dropped-prop / unmounted-leaf bug would lose this element.
+    // The center stage always renders. The <MarkOverlay> inside it is gated on
+    // the viewer, which is gated on the now-async-granted bundle url — so the
+    // overlay-mounts-inside-the-stage assertion moved to the DOM companion
+    // (PostGenerationResult.grant.dom.test.tsx), which drives the grant + waits.
     expect(html).toContain('data-testid="da-canvas-center"')
-    expect(html).toContain('data-testid="da-mark-overlay"')
   })
 
   it("handleStageClick captures the resolved anchor + the per-element click offsets (source invariant)", () => {

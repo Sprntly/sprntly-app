@@ -3008,3 +3008,14 @@
   border-radius: 6px;
   display: block;
 }
+
+/* Bundle-proxy view-grant failure (authed surface). Shown when the
+   `da_view_grant` mint fails or the bounded re-mint is exhausted (the grant was
+   likely revoked mid-session). Scoped to .design-agent-surface; reuses the
+   --danger token (no new palette). A refresh re-runs the mint. */
+.design-agent-surface .da-grant-error {
+  padding: 24px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--danger);
+}

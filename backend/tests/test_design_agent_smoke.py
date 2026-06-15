@@ -687,7 +687,13 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
     assert row["current_checkpoint_id"], "current_checkpoint_id not populated"
 
     # ── Step 3: the served bundle exists and carries data-anchor-id.
-    index_path = Path(unquote(urlparse(row["bundle_url"]).path))
+    # bundle_url is now an app-origin proxy URL (no-bypass migration), not a
+    # filesystem path — derive the on-disk staging path from storage_dir +
+    # prototypes/<id>/<current_checkpoint_id>/index.html instead.
+    index_path = (
+        Path(tmp_path) / "prototypes" / str(row["id"])
+        / str(row["current_checkpoint_id"]) / "index.html"
+    )
     assert index_path.exists(), f"bundle entry not on disk at {index_path}"
     bundle_dir = index_path.parent
     files = [p for p in sorted(bundle_dir.rglob("*")) if p.is_file()]
@@ -796,7 +802,12 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
     assert not persisted["figma_file_key"], "Scenario B must carry no Figma key"
 
     # AC2: served bundle exists and carries data-anchor-id (AD4 closure).
-    index_path = Path(unquote(urlparse(row["bundle_url"]).path))
+    # bundle_url is now an app-origin proxy URL (no-bypass migration), not a
+    # filesystem path — derive the on-disk staging path from storage_dir.
+    index_path = (
+        Path(tmp_path) / "prototypes" / str(row["id"])
+        / str(row["current_checkpoint_id"]) / "index.html"
+    )
     assert index_path.exists(), f"bundle entry not on disk at {index_path}"
     bundle_dir = index_path.parent
     files = [p for p in sorted(bundle_dir.rglob("*")) if p.is_file()]
@@ -870,7 +881,12 @@ async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
     )
 
     # AC3: served bundle exists and carries data-anchor-id.
-    index_path = Path(unquote(urlparse(row["bundle_url"]).path))
+    # bundle_url is now an app-origin proxy URL (no-bypass migration), not a
+    # filesystem path — derive the on-disk staging path from storage_dir.
+    index_path = (
+        Path(tmp_path) / "prototypes" / str(row["id"])
+        / str(row["current_checkpoint_id"]) / "index.html"
+    )
     assert index_path.exists(), f"bundle entry not on disk at {index_path}"
     bundle_dir = index_path.parent
     files = [p for p in sorted(bundle_dir.rglob("*")) if p.is_file()]

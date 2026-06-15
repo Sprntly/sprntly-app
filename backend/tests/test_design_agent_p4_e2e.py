@@ -485,13 +485,20 @@ async def test_manual_edit_keeps_share_url_stable_resolver_serves_new_bundle(env
         # F7: the manual edit advanced the bundle but did NOT rotate the share config.
         assert advanced["share_token"] == token
         assert advanced["share_mode"] == "public"
-        assert bundle_url_b and bundle_url_b != bundle_url_a
+        # No-bypass migration: the authed row's bundle_url is a STABLE proxy URL
+        # keyed by the prototype id (the proxy serves the latest checkpoint
+        # server-side), so it does NOT change across the manual edit — only the
+        # bytes it resolves to do.
+        assert f"/_da-bundle/v1/design-agent/{pid}/bundle/index.html" in bundle_url_b
+        assert bundle_url_b == bundle_url_a  # stable URL, content changed server-side
 
-        # AC2: the public resolver now serves the NEW bundle_url under the SAME token
-        # (the reload-shows-the-change assertion, backend-side).
+        # AC2: the public resolver serves a by-token-keyed proxy URL under the SAME
+        # token — stable across the edit; the reload shows the change server-side.
         res = await ac.get(f"/v1/design-agent/by-token/{token}")
         assert res.status_code == 200, res.text
-        assert res.json()["bundle_url"] == bundle_url_b
+        public_url = res.json()["bundle_url"]
+        assert "/_da-bundle/v1/design-agent/by-token/" in public_url
+        assert str(token) in public_url
 
 
 # ─── Manual edit: AC5 (stale anchor fails clearly, not silently) ──────────────
@@ -632,6 +639,8 @@ async def test_p4_e2e_no_network_passes_in_ci(env, monkeypatch):
     # AC6: generation made exactly the scripted 2 calls — no real Anthropic traffic,
     # and nothing else reached the (mocked) client; the run never touched the network.
     assert mock_client.messages.create.call_count == 2
-    # AC6: the bundle was staged to the filesystem (file:// URI), not Supabase/CDN —
-    # proves the run completed without a storage bucket or any network egress.
-    assert ready["bundle_url"].startswith("file://")
+    # AC6: no network egress is already proven by call_count == 2 + the unset
+    # SUPABASE_STORAGE_BUCKET assertion above (filesystem staging). No-bypass
+    # migration: the stored bundle_url is now the app-origin authed proxy URL
+    # (decoupled from the staging backend), keyed by the prototype id.
+    assert f"/_da-bundle/v1/design-agent/{pid}/bundle/index.html" in ready["bundle_url"]

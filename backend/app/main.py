@@ -44,6 +44,7 @@ from app.routes import (
     conversations,
     datasets as datasets_routes,
     design_agent,
+    design_agent_bundle,
     ingest,
     metrics,
     multi_agent,
@@ -230,6 +231,11 @@ app.include_router(prd.router)
 app.include_router(stories.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
+# Bundle proxy (Option B) registered BEFORE design_agent.router (plan fix-item #2)
+# so its more-specific /{prototype_id}/bundle/{asset_path:path} +
+# /by-token/{token}/bundle/{asset_path:path} routes resolve before the
+# single-segment GET /{prototype_id} catch-all in design_agent.router.
+app.include_router(design_agent_bundle.router)
 app.include_router(design_agent.router)
 app.include_router(multi_agent.router)
 app.include_router(pipeline.router)

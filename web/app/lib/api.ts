@@ -986,6 +986,17 @@ export const designAgentApi = {
       is_complete: boolean
       complete_checkpoint_id: number | null
     }>(`/v1/design-agent/${prototypeId}/complete`, {}),
+  /** Bundle-proxy view-grant (Option B). Mints the short-lived, HttpOnly,
+   *  path-scoped `da_view_grant` cookie that the SAME-ORIGIN bundle iframe's
+   *  asset GETs carry automatically (the iframe cannot send a bearer). This
+   *  bearer-authed POST (`require_company` server-side) MUST precede setting the
+   *  authed iframe `src` to the opaque proxy bundle URL. The backend returns 204
+   *  with the cookie as the payload — there is no body. 404 if the workspace
+   *  doesn't own the prototype, 401 if unauthenticated, 429 if rate-limited.
+   *  ONLY the authed surface calls this; the public `/p/<token>` path is
+   *  token-in-URL and never mints a grant. */
+  viewGrant: (prototypeId: number) =>
+    api.post<void>(`/v1/design-agent/${prototypeId}/view-grant`, {}),
   /** F15 — resume iteration on a completed prototype. Empty body. */
   resume: (prototypeId: number) =>
     api.post<{

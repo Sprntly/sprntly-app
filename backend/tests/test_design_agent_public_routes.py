@@ -82,11 +82,19 @@ def env(isolated_settings, monkeypatch):
 
     _fake_supabase.get_fake_db().executescript(_PROTOTYPE_DDL)
     monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    # The bundle-proxy passcode path mints a grant cookie (HMAC-signed with this
+    # secret) on verify success — fail-closed without it (prod always sets it).
+    monkeypatch.setenv("DESIGN_AGENT_TOKEN_SECRET", "test-grant-secret")
 
+    import app.config as config_mod
+    importlib.reload(config_mod)           # pick up DESIGN_AGENT_TOKEN_SECRET
     import app.db.prototypes as proto_mod
     importlib.reload(proto_mod)            # rebind require_client + fresh rate-limit state
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)           # rebind its `from app.db.prototypes import ...`
+    import app.routes.design_agent_bundle as bundle_mod
+    importlib.reload(bundle_mod)
+    monkeypatch.setattr(bundle_mod.settings, "design_agent_token_secret", "test-grant-secret", raising=False)
     import app.main as main_mod
     importlib.reload(main_mod)             # rebuild the app with the reloaded router
 
@@ -151,7 +159,11 @@ def test_get_by_token_returns_200_unauthenticated_for_public_mode(unauth):
     body = resp.json()
     assert body["share_mode"] == "public"
     assert body["requires_passcode"] is False
-    assert body["bundle_url"] == _DEFAULT_BUNDLE
+    # NO-BYPASS migration: bundle_url is now the app-origin proxy URL keyed by the
+    # share token (not a direct/signed object URL). The token rides in the path.
+    assert "/_da-bundle/v1/design-agent/by-token/" in body["bundle_url"]
+    assert token in body["bundle_url"]
+    assert "supabase" not in body["bundle_url"]
     assert body["is_complete"] is True
 
 
@@ -224,7 +236,9 @@ def test_verify_passcode_returns_bundle_url_on_correct_passcode(unauth, env):
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["bundle_url"] == _DEFAULT_BUNDLE
+    # NO-BYPASS: passcode-verify success returns the proxy URL (by-token path).
+    assert "/_da-bundle/v1/design-agent/by-token/" in body["bundle_url"]
+    assert token in body["bundle_url"]
     assert body["is_complete"] is True
     assert set(body.keys()) == {
         "share_mode", "requires_passcode", "bundle_url", "is_complete", "company_slug",
@@ -288,15 +302,14 @@ def test_existing_routes_still_resolve(env):
     assert "/v1/design-agent/by-token/{token}/passcode" in paths
 
 
-# ─── bundle_url re-signed on read (permanent share, 24h stored URL) ──────────
+# ─── bundle_url is the app-origin PROXY URL (no-bypass migration) ─────────────
 #
-# The stored bundle_url is a 24h-TTL signed URL minted at stage time, but a
-# public/passcode share is permanent — serving the stored URL 403s the iframe
-# once the TTL lapses. The public view paths must mint a FRESH signed URL per
-# request from the bundle object path. We stub the routes module's bound
-# `fresh_bundle_url` to assert the route (a) calls it with the prototype_id +
-# current_checkpoint_id (so it can re-derive the object path) and (b) serves the
-# freshly-signed value, NOT the stale stored bundle_url.
+# A public/passcode share is permanent. Previously the view routes re-signed the
+# stored 24h Supabase URL per request (`fresh_bundle_url`). The no-bypass
+# migration replaces that: the view routes return the same-origin bundle PROXY
+# URL keyed by the share token in the path. The proxy authorizes + signs-on-read
+# server-side, so the browser never receives a signed object URL and the share
+# never expires.
 
 
 def _seed_with_checkpoint(
@@ -316,49 +329,37 @@ def _seed_with_checkpoint(
     return token
 
 
-def test_get_by_token_public_resigns_bundle_url(unauth, env, monkeypatch):
-    fresh = "https://cdn.example/p/abc/index.html?token=FRESH"
-    calls: list[dict] = []
-
-    def _stub(*, prototype_id, checkpoint_id, stored_bundle_url):
-        calls.append(
-            {"prototype_id": prototype_id, "checkpoint_id": checkpoint_id,
-             "stored_bundle_url": stored_bundle_url}
-        )
-        return fresh
-
-    monkeypatch.setattr(env.routes, "fresh_bundle_url", _stub)
+def test_get_by_token_public_returns_proxy_url(unauth, env):
     token = _seed_with_checkpoint(share_mode="public", checkpoint_id=99)
     body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
-    # Served the freshly-signed URL, not the stored stale one.
-    assert body["bundle_url"] == fresh
+    # The proxy URL is keyed by the share token in the path — NOT the stale
+    # signed object URL stored on the row.
+    assert "/_da-bundle/v1/design-agent/by-token/" in body["bundle_url"]
+    assert token in body["bundle_url"]
     assert "STALE" not in body["bundle_url"]
-    # Called with the inputs needed to re-derive prototypes/<pid>/<cid>/index.html.
-    assert len(calls) == 1
-    assert calls[0]["checkpoint_id"] == 99
-    assert "STALE" in calls[0]["stored_bundle_url"]
+    assert "supabase" not in body["bundle_url"]
 
 
-def test_verify_passcode_resigns_bundle_url(unauth, env, monkeypatch):
-    fresh = "https://cdn.example/p/abc/index.html?token=FRESH"
-    monkeypatch.setattr(
-        env.routes, "fresh_bundle_url",
-        lambda *, prototype_id, checkpoint_id, stored_bundle_url: fresh,
-    )
+def test_verify_passcode_returns_proxy_url(unauth, env):
     h = env.proto.hash_share_passcode("hunter2")
     token = _seed_with_checkpoint(share_mode="passcode", checkpoint_id=42, passcode_hash=h)
     resp = unauth.post(
         f"/v1/design-agent/by-token/{token}/passcode", json={"passcode": "hunter2"}
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["bundle_url"] == fresh
+    assert "/_da-bundle/v1/design-agent/by-token/" in resp.json()["bundle_url"]
+    assert token in resp.json()["bundle_url"]
 
 
-def test_public_bundle_url_helper_falls_back_without_checkpoint(env):
-    # When the row has no current_checkpoint_id there is no object path to derive,
-    # so the helper returns the stored URL unchanged (never None-crashes).
-    row = {"id": 7, "bundle_url": "https://cdn.example/stored", "current_checkpoint_id": None}
-    assert env.routes._public_bundle_url(row) == "https://cdn.example/stored"
+def test_public_bundle_url_helper_uses_share_token(env):
+    # The helper returns the by-token proxy URL keyed on the row's share_token;
+    # the checkpoint no longer appears in the public URL (the proxy derives it
+    # server-side per request). None only when the row has no share_token.
+    row = {"id": 7, "bundle_url": "https://cdn.example/stored",
+           "current_checkpoint_id": None, "share_token": "tok-xyz"}
+    out = env.routes._public_bundle_url(row)
+    assert "/_da-bundle/v1/design-agent/by-token/tok-xyz/bundle/index.html" in out
+    assert env.routes._public_bundle_url({"id": 7, "share_token": None}) is None
 
 
 def test_fresh_bundle_url_no_bucket_returns_stored():
