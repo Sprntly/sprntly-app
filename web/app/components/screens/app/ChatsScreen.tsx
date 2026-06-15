@@ -186,12 +186,25 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" })
 }
 
+/** Human-facing lifecycle label for a prototype artifact, derived from
+ *  status + is_complete (never the raw status string):
+ *    generating          → "Building"
+ *    ready & complete     → "Completed"
+ *    ready & not complete → "Draft"
+ */
+function prototypeStatusLabel(
+  a: Extract<ArtifactItem, { type: "prototype" }>,
+): string {
+  if (a.status === "generating") return "Building"
+  return a.is_complete ? "Completed" : "Draft"
+}
+
 /** The meta/source line for a row, per the locked design. */
 function artifactSourceLine(a: ArtifactItem): string {
   const rel = a.created_at ? relativeTime(a.created_at) : ""
   if (a.type === "prototype") {
     const parts = [`from PRD ${a.source.prd_title}`]
-    if (a.status) parts.push(a.status)
+    parts.push(prototypeStatusLabel(a))
     if (rel) parts.push(rel)
     return parts.join(" · ")
   }
@@ -234,6 +247,70 @@ function ArtifactTypeIcon({ type }: { type: ArtifactItem["type"] }) {
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" />
         <line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="13" y2="17" />
       </svg>
+    </div>
+  )
+}
+
+/** Inline SVG used as the prototype thumbnail fallback when no preview image is
+ *  available (ready row with null preview, e.g. screenshotting unprovisioned).
+ *  Matches the `‹›` glyph the round ArtifactTypeIcon shows. */
+function PrototypeGlyph() {
+  const cfg = ARTIFACT_BADGE.prototype
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" />
+    </svg>
+  )
+}
+
+/** Left-aligned thumbnail for a prototype artifact card. Three states:
+ *   - generating → shimmer placeholder (chats-pulse), no image
+ *   - ready + preview_image_url → the real screenshot
+ *   - ready + null preview      → the `‹›` glyph fallback
+ *  Sized to match the card row height; uses the same surface tokens as the
+ *  round ArtifactTypeIcon so it stays native to the artifacts surface. */
+function ArtifactPrototypeThumb({
+  proto,
+}: {
+  proto: Extract<ArtifactItem, { type: "prototype" }>
+}) {
+  const box: React.CSSProperties = {
+    width: 64, height: 48, borderRadius: 8, flexShrink: 0, overflow: "hidden",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    background: ARTIFACT_BADGE.prototype.bg,
+    border: "1px solid var(--line, #E8E6E0)",
+  }
+  if (proto.status === "generating") {
+    return (
+      <div data-proto-thumb="building" style={box}>
+        <div
+          data-proto-shimmer
+          style={{
+            width: "100%", height: "100%",
+            background: "var(--surface-2, #F0EDE7)",
+            animation: "chats-pulse 1.4s ease-in-out infinite",
+          }}
+        />
+        <style>{`@keyframes chats-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }`}</style>
+      </div>
+    )
+  }
+  if (proto.preview_image_url) {
+    return (
+      <div data-proto-thumb="image" style={box}>
+        <img
+          src={proto.preview_image_url}
+          alt=""
+          aria-hidden
+          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        />
+      </div>
+    )
+  }
+  // ready + null preview → SVG fallback
+  return (
+    <div data-proto-thumb="fallback" style={box}>
+      <PrototypeGlyph />
     </div>
   )
 }
@@ -308,23 +385,33 @@ export function ArtifactsView({
       )}
 
       {/* List */}
-      {!loading && filtered.map((a) => (
+      {!loading && filtered.map((a) => {
+        // A generating prototype is a placeholder, not yet openable: no nav, no
+        // hover affordance, default cursor. Every other row stays clickable.
+        const isBuilding = a.type === "prototype" && a.status === "generating"
+        const clickable = !isBuilding
+        return (
         <div
           key={`${a.type}-${a.id}`}
           data-artifact-type={a.type}
-          onClick={() => onOpen(a)}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => { if (e.key === "Enter") onOpen(a) }}
+          data-clickable={clickable ? "true" : "false"}
+          onClick={clickable ? () => onOpen(a) : undefined}
+          role={clickable ? "button" : undefined}
+          aria-disabled={clickable ? undefined : true}
+          tabIndex={clickable ? 0 : undefined}
+          onKeyDown={clickable ? (e) => { if (e.key === "Enter") onOpen(a) } : undefined}
           style={{
-            display: "flex", alignItems: "flex-start", gap: 14,
-            padding: "14px 10px", borderRadius: 10, cursor: "pointer",
+            display: "flex", alignItems: "center", gap: 14,
+            padding: "14px 10px", borderRadius: 10,
+            cursor: clickable ? "pointer" : "default",
             transition: "background 0.12s",
           }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" }}
+          onMouseEnter={clickable ? (e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" } : undefined}
+          onMouseLeave={clickable ? (e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" } : undefined}
         >
-          <ArtifactTypeIcon type={a.type} />
+          {a.type === "prototype"
+            ? <ArtifactPrototypeThumb proto={a} />
+            : <ArtifactTypeIcon type={a.type} />}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{
               fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)",
@@ -346,7 +433,8 @@ export function ArtifactsView({
             </div>
           </div>
         </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
