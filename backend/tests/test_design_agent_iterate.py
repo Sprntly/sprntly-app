@@ -687,7 +687,9 @@ async def test_stage_iterate_run_advances_current_checkpoint(env, monkeypatch, c
     # The advance actually moved the row to the new checkpoint + staged bundle.
     row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
     assert row["current_checkpoint_id"] == 555
-    assert row["bundle_url"] == "https://bundle/iterated"
+    # No-bypass migration: the iterate path stores the authed proxy URL for the
+    # prototype id, not whatever stage_bundle returned.
+    assert f"/_da-bundle/v1/design-agent/{pid}/bundle/index.html" in row["bundle_url"]
 
 
 @pytest.mark.asyncio

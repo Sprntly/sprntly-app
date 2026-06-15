@@ -275,7 +275,8 @@ async def test_iterate_creates_new_checkpoint_and_advances_current(env, monkeypa
     row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
     assert row["current_checkpoint_id"] != ckpt_a       # advanced off A
     assert row["current_checkpoint_id"] > ckpt_a        # to the newest (B)
-    assert row["bundle_url"] == "https://bundle/iterated"
+    # No-bypass migration: the iterate path stores the authed proxy URL for pid.
+    assert f"/_da-bundle/v1/design-agent/{pid}/bundle/index.html" in row["bundle_url"]
 
 
 @pytest.mark.asyncio
@@ -306,10 +307,17 @@ async def test_by_token_returns_new_bundle_after_iterate(env, monkeypatch):
     shared = env.proto.set_share_config(prototype_id=pid, workspace_id="app", share_mode="public")
     token = shared["share_token"]
 
+    # No-bypass migration: the public view returns a STABLE by-token proxy URL
+    # (the proxy serves the latest checkpoint server-side), so the URL itself does
+    # NOT change across an iterate — only the bytes it resolves to do. The intent
+    # ("same token, the share resolves to the new bundle") is preserved by asserting
+    # the stable by-token proxy URL on both reads + the token did not rotate.
+    expected_proxy = f"/_da-bundle/v1/design-agent/by-token/{token}/bundle/index.html"
+
     client = TestClient(env.main.app)
     before = client.get(f"/v1/design-agent/by-token/{token}")
     assert before.status_code == 200, before.text
-    assert before.json()["bundle_url"] == "https://bundle/v1"
+    assert expected_proxy in before.json()["bundle_url"]
 
     await env.routes._stage_iterate_run(
         prototype_id=pid, workspace_id="app",
@@ -318,4 +326,7 @@ async def test_by_token_returns_new_bundle_after_iterate(env, monkeypatch):
 
     after = client.get(f"/v1/design-agent/by-token/{token}")
     assert after.status_code == 200, after.text
-    assert after.json()["bundle_url"] == "https://bundle/v2"  # SAME token, new bundle
+    assert expected_proxy in after.json()["bundle_url"]  # SAME stable URL, new content
+    # Token did not rotate across the iterate.
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["share_token"] == token

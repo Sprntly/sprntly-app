@@ -150,6 +150,42 @@ class ThemeBridgeError(RuntimeError):
 # ─── Vite build (where the anchor-id plugin runs — AD4) ─────────────────────
 
 
+def _is_safe_bundle_relpath(rel_path: str) -> bool:
+    """True iff `rel_path` is a safe, contained relative bundle path.
+
+    Shared traversal predicate extracted from `_is_agent_writable` (which models
+    the same normalize-and-refuse logic for the build-overlay path). The bundle
+    proxy (`routes/design_agent_bundle.py`) reuses this as the FIRST containment
+    gate before deriving any storage object key. Returns False for:
+      - absolute paths / leading-slash,
+      - any path that normalizes to `..` or escapes upward (`../…`),
+      - backslash or NUL,
+      - CR/LF or any control character (header-injection guard — the path is
+        echoed into response headers downstream),
+      - a surviving `%2e`/`%2f`/`%5c` after the route's single unquote
+        (double-encoding is rejected at the route; here we reject any residual
+        encoded traversal token as belt-and-braces).
+    The route does the single `unquote` and passes the decoded value here.
+    """
+    if not rel_path:
+        return False
+    # Header-injection / control-char guard (CR, LF, NUL, any C0/C1 control).
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in rel_path):
+        return False
+    if "\\" in rel_path:
+        return False
+    # Residual encoded traversal tokens (defence in depth vs double-encoding).
+    lowered = rel_path.lower()
+    if "%2e" in lowered or "%2f" in lowered or "%5c" in lowered or "%00" in lowered:
+        return False
+    normalized = os.path.normpath(rel_path.strip())
+    if os.path.isabs(normalized) or rel_path.startswith("/"):
+        return False
+    if normalized == ".." or normalized.startswith(".." + os.sep):
+        return False
+    return True
+
+
 def _is_agent_writable(rel_path: str) -> bool:
     """False for scaffold-owned build/config files so the agent's overlay can
     never clobber the build harness. The agent owns src/** and index.html.
@@ -689,6 +725,31 @@ def _bundle_prefix(prototype_id: int, checkpoint_id: int) -> str:
     return f"prototypes/{prototype_id}/{checkpoint_id}"
 
 
+# ─── Bundle-proxy URL builders (no-bypass migration, plan §8) ────────────────
+#
+# The stored `bundle_url` becomes a STABLE proxy base pointing at the app-origin
+# bundle proxy, NOT a signed Supabase URL. The proxy authorizes + signs-on-read
+# server-side, so a browser never receives a direct object/signed URL. The base
+# is CONFIG-derived (settings.design_agent_bundle_base) — NEVER from the inbound
+# Host header (host-trust guard, plan fix-item #4).
+
+
+def authed_bundle_url(prototype_id: int) -> str:
+    """Proxy URL for the AUTHED twin's index.html entry. Stored on the prototype
+    row's `bundle_url`; the authed surface serves it via the `da_view_grant`
+    cookie. Stable across re-stages (no signature, no TTL)."""
+    base = settings.design_agent_bundle_base.rstrip("/")
+    return f"{base}/{prototype_id}/bundle/index.html"
+
+
+def public_bundle_proxy_url(token: str) -> str:
+    """Proxy URL for the PUBLIC/PASSCODE share's index.html entry, keyed by the
+    share token in the path (F6 — the token is the access primitive and rides on
+    every asset GET). Returned by the public view routes."""
+    base = settings.design_agent_bundle_base.rstrip("/")
+    return f"{base}/by-token/{token}/bundle/index.html"
+
+
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -699,6 +760,18 @@ _CONTENT_TYPES = {
     ".txt": "text/plain; charset=utf-8",
     ".tsx": "text/plain; charset=utf-8",
     ".ts": "text/plain; charset=utf-8",
+    # Bundle-proxy serve-time MIME (guardrail #6): fonts, images, source maps.
+    # Without these, a font/image asset served via the proxy falls through to
+    # application/octet-stream and the browser refuses to apply it.
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".ico": "image/x-icon",
+    ".webp": "image/webp",
+    ".map": "application/json; charset=utf-8",
 }
 
 
@@ -707,6 +780,229 @@ def _content_type(rel_path: str) -> str:
         if rel_path.endswith(ext):
             return ct
     return "application/octet-stream"
+
+
+# ─── Bundle-proxy serve (containment-before-sign, stream + Range, plan §2/§7) ──
+#
+# The single object-serving primitive the bundle proxy route calls AFTER it has
+# authorized the request. Two backends, mirroring the staging dual path:
+#   - Supabase (primary): containment assert → server-side create_signed_url →
+#     httpx.AsyncClient.stream() forwarding bytes + Range/Content-Range/
+#     Accept-Ranges. The browser never sees the signature (SSRF-safe: the signed
+#     path is an already-contained object_key).
+#   - Filesystem (dev/test fallback): Starlette FileResponse at the resolved,
+#     contained path (native Range + streaming + If-Modified-Since).
+# Containment is asserted in BOTH backends BEFORE any signed-URL mint or file
+# open (plan §2.7 — never sign / open an attacker-influenced path).
+
+
+class BundleObjectNotFound(Exception):
+    """The requested bundle object does not exist (→ 404 at the route)."""
+
+
+def _safe_object_key(prototype_id: int, checkpoint_id: int, rel_path: str) -> str:
+    """Build + containment-assert the storage object key for `rel_path`.
+
+    Raises BundleObjectNotFound if `rel_path` is unsafe (traversal) OR if the
+    normalized object key escapes the bundle prefix. The route ALSO validates
+    `rel_path` up front, but this is the load-bearing last line before any
+    create_signed_url / file open (defence in depth, plan §2.6-§2.7)."""
+    if not _is_safe_bundle_relpath(rel_path):
+        raise BundleObjectNotFound(rel_path)
+    prefix = _bundle_prefix(prototype_id, checkpoint_id)
+    object_key = os.path.normpath(f"{prefix}/{rel_path}")
+    if not (object_key == prefix or object_key.startswith(prefix + os.sep) or object_key.startswith(prefix + "/")):
+        raise BundleObjectNotFound(rel_path)
+    # normpath uses os.sep; storage keys use "/". Re-join with "/" for the bucket.
+    return object_key.replace(os.sep, "/")
+
+
+# Hop-by-hop / signature-bearing headers we never echo back from the signed GET.
+_STREAM_FORWARD_HEADERS = ("content-length", "content-range", "accept-ranges", "etag", "last-modified")
+
+
+async def serve_bundle_object(
+    *,
+    prototype_id: int,
+    checkpoint_id: int,
+    rel_path: str,
+    range_header: str | None,
+    cache_control: str,
+    extra_headers: dict[str, str] | None = None,
+):
+    """Return a Starlette Response streaming the bundle object at `rel_path`.
+
+    Async (the route awaits it). `cache_control` is set by the caller per
+    share-mode (plan §4 asymmetry). Raises BundleObjectNotFound on
+    traversal/containment failure or a missing object. The `.b64` base64-sentinel
+    asset (binary written by `_read_dist`) is decoded before streaming and the
+    MIME is taken from the real (suffix-stripped) name. Containment runs BEFORE
+    any signed-URL mint or file open."""
+    from starlette.responses import FileResponse, Response
+
+    object_key = _safe_object_key(prototype_id, checkpoint_id, rel_path)
+
+    # Decode a `.b64` sentinel asset's real name for MIME (plan §6); the stored
+    # object key may carry the `.b64` suffix for non-UTF-8 assets.
+    is_b64 = object_key.endswith(".b64")
+    mime_name = object_key[:-4] if is_b64 else object_key
+    content_type = _content_type(mime_name)
+
+    base_headers = {"Cache-Control": cache_control}
+    if extra_headers:
+        base_headers.update(extra_headers)
+
+    bucket = _bucket_name()
+    if bucket:
+        return await _serve_supabase(
+            bucket=bucket,
+            object_key=object_key,
+            is_b64=is_b64,
+            content_type=content_type,
+            range_header=range_header,
+            base_headers=base_headers,
+        )
+    return _serve_filesystem(
+        object_key=object_key,
+        is_b64=is_b64,
+        content_type=content_type,
+        range_header=range_header,
+        base_headers=base_headers,
+        FileResponse=FileResponse,
+        Response=Response,
+    )
+
+
+async def _serve_supabase(
+    *, bucket, object_key, is_b64, content_type, range_header, base_headers,
+):
+    """Sign the (already-contained) object key, then httpx-stream it with Range
+    forwarding. Never exposes the signature to the browser. Prefetches the
+    upstream status + Range headers, then streams the body."""
+    import httpx
+    from starlette.responses import Response, StreamingResponse
+
+    from app.db.client import require_client
+
+    storage = require_client().storage.from_(bucket)
+    if is_b64:
+        # A base64-sentinel asset can't be Range-streamed transparently (the
+        # stored bytes are base64 text). Download, decode, serve whole — these
+        # are rare binary assets (fonts/images that failed UTF-8 decode at read).
+        try:
+            data = storage.download(object_key)
+        except Exception as exc:
+            raise BundleObjectNotFound(object_key) from exc
+        raw = base64.b64decode(data if isinstance(data, (bytes, bytearray)) else str(data))
+        headers = dict(base_headers)
+        headers["Accept-Ranges"] = "bytes"
+        return Response(content=raw, media_type=content_type, headers=headers)
+
+    # containment already asserted upstream (SSRF-safe) — sign only a contained key.
+    signed = storage.create_signed_url(path=object_key, expires_in=_SIGNED_URL_TTL_SECONDS)
+    signed_url = _extract_signed_url(signed)
+    if not signed_url:
+        raise BundleObjectNotFound(object_key)
+
+    fwd_req_headers = {"Range": range_header} if range_header else {}
+
+    client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=600.0))
+    cm = client.stream("GET", signed_url, headers=fwd_req_headers)
+    try:
+        resp = await cm.__aenter__()
+    except Exception as exc:
+        await client.aclose()
+        raise BundleObjectNotFound(object_key) from exc
+
+    if resp.status_code in (403, 404):
+        await cm.__aexit__(None, None, None)
+        await client.aclose()
+        raise BundleObjectNotFound(object_key)
+
+    headers = dict(base_headers)
+    headers["Accept-Ranges"] = "bytes"
+    for h in _STREAM_FORWARD_HEADERS:
+        if h in resp.headers and h not in ("content-length",):
+            headers[h] = resp.headers[h]
+
+    async def _body():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await cm.__aexit__(None, None, None)
+            await client.aclose()
+
+    return StreamingResponse(
+        _body(),
+        status_code=resp.status_code,  # 200 or 206 (Range) — forwarded
+        media_type=content_type,
+        headers=headers,
+    )
+
+
+def _serve_filesystem(
+    *, object_key, is_b64, content_type, range_header, base_headers, FileResponse, Response,
+):
+    """Serve the object from the filesystem fallback with containment re-asserted
+    via resolve() + is_relative_to (plan §2). Range is handled explicitly (the
+    pinned Starlette FileResponse does not implement Range)."""
+    storage_root = Path(settings.storage_dir).resolve()
+    target = (storage_root / object_key).resolve()
+    # Filesystem-specific containment: resolve()d path MUST stay under storage_dir.
+    if not (target == storage_root or _is_relative_to(target, storage_root)):
+        raise BundleObjectNotFound(object_key)
+    if not target.is_file():
+        raise BundleObjectNotFound(object_key)
+
+    raw = base64.b64decode(target.read_bytes()) if is_b64 else target.read_bytes()
+    total = len(raw)
+    headers = dict(base_headers)
+    headers["Accept-Ranges"] = "bytes"
+
+    rng = _parse_range(range_header, total) if range_header else None
+    if rng is not None:
+        start, end = rng
+        body = raw[start:end + 1]
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        return Response(content=body, status_code=206, media_type=content_type, headers=headers)
+    return Response(content=raw, media_type=content_type, headers=headers)
+
+
+def _parse_range(range_header: str, total: int) -> tuple[int, int] | None:
+    """Parse a single `bytes=start-end` range. Returns (start, end) inclusive, or
+    None when unparseable / unsatisfiable (caller serves 200 full body)."""
+    if not range_header.startswith("bytes="):
+        return None
+    spec = range_header[len("bytes="):].split(",", 1)[0].strip()
+    if "-" not in spec:
+        return None
+    lo, _, hi = spec.partition("-")
+    try:
+        if lo == "":
+            # suffix range: last N bytes
+            n = int(hi)
+            if n <= 0:
+                return None
+            start = max(0, total - n)
+            return (start, total - 1)
+        start = int(lo)
+        end = int(hi) if hi else total - 1
+    except ValueError:
+        return None
+    if start > end or start >= total:
+        return None
+    return (start, min(end, total - 1))
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    """Path.is_relative_to backport (py3.8) — used for the filesystem containment
+    assert so a symlink/`..` escape under storage_dir is refused."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 # ─── Source readback (P2-04 — read raw virtual_fs staged under _source/) ──────

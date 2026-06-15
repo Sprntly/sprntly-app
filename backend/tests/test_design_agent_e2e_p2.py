@@ -386,7 +386,13 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
             }
             assert body["share_mode"] == "public"
             assert body["requires_passcode"] is False
-            assert body["bundle_url"] == ready_row["bundle_url"]
+            # No-bypass migration: both bundle_urls are app-origin proxy URLs.
+            # The PUBLIC view returns a by-token-keyed proxy URL; the authed row
+            # carries a by-{id}-keyed proxy URL — they intentionally differ.
+            assert "/_da-bundle/v1/design-agent/by-token/" in body["bundle_url"]
+            assert str(token) in body["bundle_url"]
+            assert "/_da-bundle/v1/design-agent/" in ready_row["bundle_url"]
+            assert "/bundle/" in ready_row["bundle_url"]
             assert body["is_complete"] is True
 
             # AC #4: brute-force opacity — a random UUID is 404, NOT 401/403.

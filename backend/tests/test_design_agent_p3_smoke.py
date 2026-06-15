@@ -480,7 +480,15 @@ async def test_p3_full_loop_comment_apply_iterate_orphan_patch_checkpoint(env, m
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as pub:
             res = await pub.get(f"/v1/design-agent/by-token/{token}")
             assert res.status_code == 200, res.text
-            assert res.json()["bundle_url"] == final.json()["bundle_url"]
+            # No-bypass migration: both bundle_urls are app-origin proxy URLs. The
+            # PUBLIC view is keyed by the share token; the authed row is keyed by
+            # the prototype id — they intentionally differ.
+            public_url = res.json()["bundle_url"]
+            assert "/_da-bundle/v1/design-agent/by-token/" in public_url
+            assert str(token) in public_url
+            authed_url = final.json()["bundle_url"]
+            assert "/_da-bundle/v1/design-agent/" in authed_url
+            assert "/bundle/" in authed_url
 
 
 # ─── AC8: locked-prototype guard ────────────────────────────────────────────

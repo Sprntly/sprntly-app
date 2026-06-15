@@ -319,7 +319,7 @@ async def test_stage_complete_run_marks_ready_when_source_stage_fails(env, monke
     )
     row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
     assert row["status"] == "ready"
-    assert row["bundle_url"] == "https://x.example/prototypes/1/1/index.html"
+    assert f"/_da-bundle/v1/design-agent/{pid}/bundle/index.html" in row["bundle_url"]
     # The dist/ checkpoint still exists and is threaded back.
     cps = _checkpoints_for(pid)
     assert len(cps) == 1
