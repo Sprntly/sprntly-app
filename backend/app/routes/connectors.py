@@ -101,6 +101,27 @@ def _public_connection(row: dict) -> dict:
     }
 
 
+# ── RBAC helpers ──────────────────────────────────────────────────────
+# Personal connectors (Slack) are open to any member. Org-wide connectors
+# (GitHub, Figma, Google Drive, ClickUp, HubSpot, Fireflies) are admin-only
+# for mutations (connect, disconnect, sync, config) but readable by all.
+_PERSONAL_PROVIDERS = {slack_oauth.SLACK_PROVIDER}
+
+
+def _require_admin_for_org_connector(
+    company: CompanyContext, provider: str
+) -> None:
+    """Raise 403 if a non-admin tries to mutate an org-wide connector."""
+    if provider in _PERSONAL_PROVIDERS:
+        return  # any member can manage their own personal connector
+    if company.role not in ("owner", "admin"):
+        raise HTTPException(
+            403,
+            "Only admins can manage org-wide connectors. "
+            "Ask your workspace admin to connect this integration.",
+        )
+
+
 def _visible_connection_rows(company: CompanyContext) -> list[dict]:
     """Connection rows the CURRENT user may see: every company-scoped
     provider (shared) plus only THIS user's own Slack row. Other members'
@@ -219,6 +240,7 @@ def start_oauth(
     body: StartOauthIn | None = None,
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, provider)
     payload = body or StartOauthIn()
     if not _is_safe_return_to(payload.return_to):
         raise HTTPException(422, "return_to must be a safe relative path")
@@ -481,6 +503,7 @@ def google_drive_config(
     body: GoogleDriveConfigIn,
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise HTTPException(404, "Google Drive is not connected")
@@ -502,6 +525,7 @@ def google_drive_sync(
     body: GoogleDriveSyncIn | None = None,
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     payload = body or GoogleDriveSyncIn()
     try:
         result = sync_google_drive(
@@ -538,6 +562,7 @@ def google_drive_sync(
 def google_drive_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
     row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise HTTPException(404, "Google Drive is not connected")
@@ -621,6 +646,7 @@ def figma_connect_pat(
     body: FigmaPatIn,
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, figma_oauth.FIGMA_PROVIDER)
     pat = body.pat.strip()
     user = figma_pat.fetch_me(pat)
     if not user:
@@ -658,6 +684,7 @@ def figma_connect_pat(
 def figma_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, figma_oauth.FIGMA_PROVIDER)
     row = db.get_connection(company.company_id, figma_oauth.FIGMA_PROVIDER)
     if not row:
         raise HTTPException(404, "Figma is not connected")
@@ -761,6 +788,7 @@ def figma_sync_to_corpus(
     body: FigmaSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, figma_oauth.FIGMA_PROVIDER)
     """Sync Figma file structure and design tokens into the corpus.
 
     Fetches file tree + published styles and writes a markdown summary
@@ -1003,6 +1031,7 @@ def _has_github_install_for(account_login: str, company_id: str) -> bool:
 def github_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, github_app.GITHUB_PROVIDER)
     row = db.get_connection(company.company_id, github_app.GITHUB_PROVIDER)
     if not row:
         raise HTTPException(404, "GitHub is not connected")
@@ -1243,6 +1272,7 @@ def github_sync_to_corpus(
     body: GitHubSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, github_app.GITHUB_PROVIDER)
     """Sync tracked GitHub PRs into the corpus as a markdown file.
 
     Reads open PRs from the github_pull_requests table and writes
@@ -1391,6 +1421,7 @@ def clickup_callback(code: str, state: str):
 def clickup_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, clickup_oauth.CLICKUP_PROVIDER)
     row = db.get_connection(company.company_id, clickup_oauth.CLICKUP_PROVIDER)
     if not row:
         raise HTTPException(404, "ClickUp is not connected")
@@ -1442,6 +1473,7 @@ def hubspot_callback(code: str, state: str):
 def hubspot_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     row = db.get_connection(company.company_id, hubspot_oauth.HUBSPOT_PROVIDER)
     if not row:
         raise HTTPException(404, "HubSpot is not connected")
@@ -1458,6 +1490,7 @@ def hubspot_sync(
     body: HubSpotSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     """Sync HubSpot CRM data (contacts, companies, deals) into the corpus.
 
     Fetches data from HubSpot API, converts to markdown, and writes
@@ -1478,6 +1511,7 @@ def hubspot_sync_to_corpus(
     body: HubSpotSyncCorpusIn,
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, hubspot_oauth.HUBSPOT_PROVIDER)
     """Alias for /hubspot/sync — matches Figma/GitHub sync-to-corpus pattern."""
     from app.connectors.hubspot_sync import HubSpotSyncError, sync_hubspot
 
@@ -1736,6 +1770,7 @@ def fireflies_connect_apikey(
     body: FirefliesApiKeyIn,
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, fireflies_apikey.FIREFLIES_PROVIDER)
     api_key = body.api_key.strip()
     user = fireflies_apikey.fetch_authenticated_user(api_key)
     if not user:
@@ -1776,6 +1811,7 @@ def fireflies_connect_apikey(
 def fireflies_disconnect(
     company: CompanyContext = Depends(require_company),
 ):
+    _require_admin_for_org_connector(company, fireflies_apikey.FIREFLIES_PROVIDER)
     row = db.get_connection(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
     if not row:
         raise HTTPException(404, "Fireflies is not connected")

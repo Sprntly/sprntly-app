@@ -20,7 +20,7 @@
  */
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useAuth } from "../../../../lib/auth"
 import { api } from "../../../../lib/api"
 
@@ -161,18 +161,17 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
               required
               disabled={inviteSubmitting}
             />
-            <select
+            <ThemedSelect<InviteRole>
               className="set-team-invite-select"
               value={inviteRole}
-              onChange={(e) =>
-                onChangeInviteRole(e.target.value as InviteRole)
-              }
+              options={[
+                { value: "member", label: "Member" },
+                { value: "admin", label: "Admin" },
+                { value: "viewer", label: "Viewer" },
+              ]}
               disabled={inviteSubmitting}
-            >
-              <option value="member">Member</option>
-              <option value="admin">Admin</option>
-              <option value="viewer">Viewer</option>
-            </select>
+              onChange={onChangeInviteRole}
+            />
             <button
               type="submit"
               className="set-team-invite-submit"
@@ -221,20 +220,19 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
                   )}
                 </div>
                 {canManage ? (
-                  <select
+                  <ThemedSelect<TeamRole>
                     className="set-team-row-select"
                     value={m.role}
                     disabled={isSoleOwner}
-                    onChange={(e) =>
-                      onChangeMemberRole(m.user_id, e.target.value as TeamRole)
-                    }
-                    aria-label={`Role for ${display}`}
-                  >
-                    <option value="owner">Owner</option>
-                    <option value="admin">Admin</option>
-                    <option value="member">Member</option>
-                    <option value="viewer">Viewer</option>
-                  </select>
+                    options={[
+                      { value: "owner", label: "Owner" },
+                      { value: "admin", label: "Admin" },
+                      { value: "member", label: "Member" },
+                      { value: "viewer", label: "Viewer" },
+                    ]}
+                    ariaLabel={`Role for ${display}`}
+                    onChange={(role) => onChangeMemberRole(m.user_id, role)}
+                  />
                 ) : (
                   <span className="st neutral">{m.role}</span>
                 )}
@@ -381,6 +379,73 @@ function Avatar({
     <span className="set-team-row-av" style={style}>
       {initials}
     </span>
+  )
+}
+
+/** Custom themed dropdown — replaces native <select> so the open list
+ *  picks up the app theme instead of the OS-native cyan highlight. */
+function ThemedSelect<T extends string>({
+  value,
+  options,
+  disabled,
+  className,
+  ariaLabel,
+  onChange,
+}: {
+  value: T
+  options: { value: T; label: string }[]
+  disabled?: boolean
+  className?: string
+  ariaLabel?: string
+  onChange: (v: T) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener("mousedown", handler)
+    return () => document.removeEventListener("mousedown", handler)
+  }, [open])
+
+  const selected = options.find((o) => o.value === value)
+
+  return (
+    <div
+      ref={ref}
+      className={`themed-select${disabled ? " disabled" : ""}${className ? ` ${className}` : ""}`}
+      aria-label={ariaLabel}
+    >
+      <button
+        type="button"
+        className="themed-select-trigger"
+        onClick={() => !disabled && setOpen((o) => !o)}
+        disabled={disabled}
+      >
+        <span>{selected?.label ?? value}</span>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <div className="themed-select-menu">
+          {options.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              className={`themed-select-option${opt.value === value ? " active" : ""}`}
+              onClick={() => { onChange(opt.value); setOpen(false) }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 

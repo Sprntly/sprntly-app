@@ -42,6 +42,8 @@ def _decrypt_provider_token(company_id: str, provider: str) -> str:
 
 @router.post("/{provider}/sync")
 def sync(provider: str, company: CompanyContext = Depends(require_company)):
+    if company.role not in ("owner", "admin"):
+        raise HTTPException(403, "Only admins can trigger connector syncs")
     if provider not in PULLERS:
         raise HTTPException(404, f"No ingestion puller for provider {provider!r}")
 

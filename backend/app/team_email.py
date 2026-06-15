@@ -53,14 +53,23 @@ def send_invite_email(email: str) -> bool:
         )
         return False
 
+    redirect = _invite_redirect_url()
     try:
         client.auth.admin.invite_user_by_email(
             email,
-            {"redirect_to": _invite_redirect_url()},
+            {"redirect_to": redirect},
         )
         return True
     except Exception as exc:  # noqa: BLE001 — best-effort
+        # Surface the exact Supabase error so operators can fix config.
+        # Common causes:
+        #   - Free-tier rate limit (3 emails/hour)
+        #   - redirect_to not in Supabase "Redirect URLs" (Auth > URL Config)
+        #   - SMTP not configured in Supabase project
         logger.warning(
-            "Supabase invite_user_by_email failed for %s: %s", email, exc
+            "Supabase invite_user_by_email failed for %s: %s "
+            "(redirect_to=%s). Check Supabase Auth settings: "
+            "email rate limits, redirect URLs allow-list, SMTP config.",
+            email, exc, redirect,
         )
         return False

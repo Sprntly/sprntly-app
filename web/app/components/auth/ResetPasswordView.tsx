@@ -2,6 +2,7 @@
 // and handlers in. Lets the structure be asserted via renderToStaticMarkup.
 import Link from "next/link"
 import { AuthShell } from "./AuthShell"
+import { PasswordStrengthBar } from "./PasswordStrengthBar"
 import { Eye, EyeOff } from "./icons"
 
 export type ResetPasswordMode = "form" | "done" | "no-session"
@@ -37,9 +38,9 @@ export function ResetPasswordView(props: ResetPasswordViewProps) {
     return (
       <AuthShell tag="Password reset">
         <div className="auth-h">All <em>set.</em></div>
-        <div className="auth-sub">Your new password is updated. You're signed in.</div>
+        <div className="auth-sub">Your new password is updated. You&apos;re signed in.</div>
         <div style={{ marginTop: 16 }}>
-          <Link href="/" className="btn btn-primary btn-block">
+          <Link href="/" className="btn btn-brand btn-block">
             Continue to Sprntly
           </Link>
         </div>
@@ -55,7 +56,7 @@ export function ResetPasswordView(props: ResetPasswordViewProps) {
           This reset link is invalid or has expired. Request a new one and sign in again.
         </div>
         <div style={{ marginTop: 16 }}>
-          <Link href="/sign-in" className="btn btn-primary btn-block">
+          <Link href="/sign-in" className="btn btn-brand btn-block">
             Back to sign in
           </Link>
         </div>
@@ -73,9 +74,10 @@ export function ResetPasswordView(props: ResetPasswordViewProps) {
           <div className="field-l">
             <label htmlFor="new-password">New password</label> <span className="req">*</span>
           </div>
-          <div className="field-with-icon">
+          <div className="inp-pwd-wrap">
             <input
               id="new-password"
+              className="inp"
               type={showPassword ? "text" : "password"}
               value={newPassword}
               onChange={(e) => onNewPasswordChange(e.target.value)}
@@ -86,13 +88,14 @@ export function ResetPasswordView(props: ResetPasswordViewProps) {
             />
             <button
               type="button"
-              className="field-icon-btn"
+              className="pwd-toggle"
               aria-label={showPassword ? "Hide password" : "Show password"}
               onClick={onToggleShowPassword}
             >
               {showPassword ? <EyeOff /> : <Eye />}
             </button>
           </div>
+          <PasswordStrengthBar password={newPassword} />
         </div>
 
         <div className="field">
@@ -101,6 +104,7 @@ export function ResetPasswordView(props: ResetPasswordViewProps) {
           </div>
           <input
             id="confirm-password"
+            className="inp"
             type={showPassword ? "text" : "password"}
             value={confirmPassword}
             onChange={(e) => onConfirmPasswordChange(e.target.value)}
@@ -119,12 +123,16 @@ export function ResetPasswordView(props: ResetPasswordViewProps) {
 
         <button
           type="submit"
-          className="btn btn-primary btn-block"
+          className="btn btn-brand btn-block"
           disabled={submitting}
         >
           {submitting ? "Updating…" : "Update password"}
         </button>
       </form>
+
+      <div className="auth-foot">
+        <Link href="/sign-in" className="auth-link">Back to sign in</Link>
+      </div>
     </AuthShell>
   )
 }

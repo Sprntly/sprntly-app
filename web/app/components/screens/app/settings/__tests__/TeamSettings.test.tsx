@@ -144,16 +144,16 @@ describe("TeamSettingsView — combined roster", () => {
     expect(html).toContain("⋯")
   })
 
-  it("member viewer: no actions menu, no role <select>", () => {
+  it("member viewer: no actions menu, no role dropdown", () => {
     const html = render({ currentUserRole: "member", currentUserId: MEMBER_ID })
     expect(html).not.toContain('class="set-team-row-actions"')
-    expect(html).not.toContain("<select")
+    expect(html).not.toContain("themed-select")
   })
 
   it("viewer-role caller: same read-only treatment as member", () => {
     const html = render({ currentUserRole: "viewer", currentUserId: MEMBER_ID })
     expect(html).not.toContain('class="set-team-row-actions"')
-    expect(html).not.toContain("<select")
+    expect(html).not.toContain("themed-select")
   })
 
   it("sole-owner row has its role select disabled (kept guard, decision 3-A)", () => {
@@ -162,12 +162,11 @@ describe("TeamSettingsView — combined roster", () => {
       currentUserRole: "owner",
       currentUserId: OWNER_ID,
     })
-    expect(html).toMatch(/<select[^>]*\bdisabled\b/)
+    expect(html).toContain("themed-select disabled")
   })
 
   it("includes Viewer in the member role select dropdown", () => {
     const html = render({ currentUserRole: "admin", currentUserId: ADMIN_ID })
-    expect(html).toContain('value="viewer"')
     expect(html).toContain(">Viewer<")
   })
 })
