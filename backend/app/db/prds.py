@@ -154,6 +154,28 @@ def get_prd_rendered(prd_id: int) -> dict | None:
 
 
 @retry_on_disconnect
+def list_prd_generations(prd_id: int) -> list[dict]:
+    """All generation attempts sharing this PRD's (brief_id, insight_index),
+    newest first. Each regeneration creates a new prds row; this returns the
+    whole family so the Version History can offer prior generations. Returns []
+    when the PRD doesn't exist. None-safe on insight_index (filtered in Python so
+    a NULL insight_index groups correctly, mirroring db/artifacts.py)."""
+    c = require_client()
+    row = get_prd(prd_id)
+    if row is None:
+        return []
+    resp = (
+        c.table("prds")
+        .select("id, title, status, generated_at, insight_index")
+        .eq("brief_id", row["brief_id"])
+        .order("generated_at", desc=True)
+        .execute()
+    )
+    ins = row.get("insight_index")
+    return [r for r in (resp.data or []) if r.get("insight_index") == ins]
+
+
+@retry_on_disconnect
 def latest_prd_for_dataset(dataset: str) -> dict | None:
     """Most recent ready PRD whose brief belongs to `dataset`."""
     c = require_client()
