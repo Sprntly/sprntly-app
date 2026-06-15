@@ -1,7 +1,19 @@
 import { describe, expect, it } from "vitest"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
-import { pathForScreen, screenIdFromPathname } from "../routes"
+import { pathForScreen, screenIdFromPathname, prdPath } from "../routes"
+
+describe("routes — prdPath (open an existing PRD)", () => {
+  it("threads the PRD id as a ?prd query param", () => {
+    expect(prdPath(42)).toBe("/prd?prd=42")
+    expect(prdPath("7")).toBe("/prd?prd=7")
+  })
+  it("returns the bare /prd when no id is given", () => {
+    expect(prdPath()).toBe("/prd")
+    expect(prdPath(null)).toBe("/prd")
+    expect(prdPath("")).toBe("/prd")
+  })
+})
 
 describe("routes — standalone connectors removed (commit A)", () => {
   it("does not map any ScreenId to the /connectors path", () => {
