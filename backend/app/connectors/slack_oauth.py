@@ -30,6 +30,8 @@ Slack v2 specifics worth knowing:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import time
@@ -55,6 +57,7 @@ SLACK_CONVERSATIONS_LIST_URL = "https://slack.com/api/conversations.list"
 SLACK_CONVERSATIONS_URL = "https://slack.com/api/conversations.list"
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
+SLACK_AUTH_REVOKE_URL = "https://slack.com/api/auth.revoke"
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
 # Channel-listing cap. Slack supports up to 1000 per page; 200 is a
@@ -188,6 +191,86 @@ def fetch_auth_test(access_token: str) -> dict[str, Any]:
         return {}
     data = resp.json()
     return data if data.get("ok") else {}
+
+
+def revoke_token(access_token: str) -> bool:
+    """Revoke a Slack token via auth.revoke so disconnect tears the install down
+    on Slack's side, not just locally (Slack Marketplace expects clean
+    uninstall). Best-effort: returns True on `ok: true`, False otherwise; never
+    raises so a revoke failure can't block the local disconnect."""
+    try:
+        resp = requests.post(
+            SLACK_AUTH_REVOKE_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        return bool(resp.ok and resp.json().get("ok"))
+    except Exception:  # noqa: BLE001 — best-effort; local delete proceeds regardless
+        logger.warning("Slack auth.revoke failed", exc_info=True)
+        return False
+
+
+# ── Events API: request-signature verification + App Home ────────────────────
+
+SLACK_VIEWS_PUBLISH_URL = "https://slack.com/api/views.publish"
+
+
+def verify_signature(timestamp: str, raw_body: bytes, signature: str) -> bool:
+    """Verify a Slack Events API request signature (per Slack's signing-secret
+    scheme). Returns False on a missing secret/header, a timestamp older than
+    5 minutes (replay guard), or any HMAC mismatch — constant-time compared."""
+    secret = settings.slack_signing_secret
+    if not secret or not timestamp or not signature:
+        return False
+    try:
+        if abs(time.time() - int(timestamp)) > 60 * 5:
+            return False
+    except (TypeError, ValueError):
+        return False
+    base = b"v0:" + timestamp.encode() + b":" + raw_body
+    digest = hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(f"v0={digest}", signature)
+
+
+def app_home_view() -> dict[str, Any]:
+    """Block Kit view for the Slack App Home — onboarding + usage guidance, per
+    Slack Marketplace UX guidance (give users a welcome + what the app does)."""
+    return {
+        "type": "home",
+        "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": "Sprntly", "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text":
+                "*Your AI product manager.* Sprntly turns your tools and conversations "
+                "into weekly briefs, PRDs, and prototypes."}},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text":
+                "*What this connection does*\n"
+                "• Posts your weekly brief and updates into the channel you choose\n"
+                "• Reads messages from channels you add Sprntly to, to surface "
+                "product signals — never channels you haven't invited it to"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text":
+                "*Get started*\nOpen Sprntly and go to *Settings → Connectors → Slack* "
+                "to pick the channel for your brief."}},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text":
+                "Manage or disconnect anytime in Sprntly → Settings → Connectors."}]},
+        ],
+    }
+
+
+def publish_app_home(bot_token: str, slack_user_id: str) -> bool:
+    """Publish the App Home view for a user via views.publish. Best-effort —
+    returns False (never raises) so an event handler can't fail the webhook."""
+    try:
+        resp = requests.post(
+            SLACK_VIEWS_PUBLISH_URL,
+            headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+            json={"user_id": slack_user_id, "view": app_home_view()},
+            timeout=10,
+        )
+        return bool(resp.ok and resp.json().get("ok"))
+    except Exception:  # noqa: BLE001 — best-effort
+        logger.warning("Slack views.publish (App Home) failed", exc_info=True)
+        return False
 
 
 def fetch_team_info(bot_access_token: str) -> dict[str, Any]:
