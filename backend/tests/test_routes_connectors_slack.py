@@ -135,7 +135,7 @@ def test_exchange_code_for_token_surfaces_slack_ok_false_as_400(slack_env):
     assert exc.value.status_code == 400
 
 
-def test_token_payload_to_store_keeps_only_what_we_need(slack_env):
+def test_token_payload_to_store_keeps_bot_and_user_tokens(slack_env):
     from app.connectors import slack_oauth
     import json as _json
 
@@ -146,8 +146,12 @@ def test_token_payload_to_store_keeps_only_what_we_need(slack_env):
             "bot_user_id": "U99",
             "team": {"id": "T123", "name": "Acme"},
             "scope": "chat:write,channels:read",
-            # extra fields we should NOT carry around:
-            "authed_user": {"id": "U-installer", "access_token": "xoxp-secret"},
+            # Two-way: the installer's user token IS persisted (read-as-user).
+            "authed_user": {
+                "id": "U-installer",
+                "access_token": "xoxp-secret",
+                "scope": "channels:history,search:read",
+            },
             "app_id": "A99",
         }
     )
@@ -158,8 +162,31 @@ def test_token_payload_to_store_keeps_only_what_we_need(slack_env):
     assert stored["team_name"] == "Acme"
     assert stored["scope"] == "chat:write,channels:read"
     assert "obtained_at" in stored
-    # Installer user-token must not be persisted.
+    # The installing user is the DM target + owner of the user token.
+    assert stored["authed_user_id"] == "U-installer"
+    assert stored["user_access_token"] == "xoxp-secret"
+    assert stored["user_scope"] == "channels:history,search:read"
+    # The nested dict itself is flattened, not stored verbatim.
     assert "authed_user" not in stored
+
+
+def test_token_payload_to_store_bot_only_has_no_user_token(slack_env):
+    """A bot-only install (no user_scope granted) carries no user token."""
+    from app.connectors import slack_oauth
+    import json as _json
+
+    blob = slack_oauth.token_payload_to_store(
+        {
+            "ok": True,
+            "access_token": "xoxb-1234",
+            "team": {"id": "T123", "name": "Acme"},
+            "scope": "chat:write",
+            "authed_user": {"id": "U-installer"},  # no access_token
+        }
+    )
+    stored = _json.loads(blob)
+    assert stored["user_access_token"] is None
+    assert stored["authed_user_id"] == "U-installer"
 
 
 def test_fetch_team_info_uses_bearer_auth(slack_env):
@@ -613,3 +640,250 @@ def test_slack_events_rejects_bad_signature(slack_env, monkeypatch):
     }
     r = ctx.client.post("/v1/connectors/slack/events", content=body, headers=headers)
     assert r.status_code == 401
+
+
+# ─────────── two-way: user-token grant + read-as-user helpers ───────────
+
+
+def test_authorize_url_includes_user_scope_by_default(slack_env):
+    """Two-way install: the consent screen requests user scopes so Slack
+    returns a user token alongside the bot token."""
+    from app.connectors import slack_oauth
+
+    url = slack_oauth.authorize_url(state="s")
+    # user scopes ride on user_scope=, encoded (search:read -> search%3Aread)
+    assert "user_scope=" in url
+    assert "search" in url
+
+
+def test_authorize_url_omits_user_scope_when_empty(slack_env):
+    """Passing user_scopes='' suppresses the user-token grant (bot-only)."""
+    from app.connectors import slack_oauth
+
+    url = slack_oauth.authorize_url(state="s", user_scopes="")
+    assert "user_scope=" not in url
+
+
+def test_open_dm_returns_channel_id(slack_env):
+    from app.connectors import slack_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {"ok": True, "channel": {"id": "D123"}}
+    with patch(
+        "app.connectors.slack_oauth.requests.post", return_value=mock_resp
+    ) as mock_post:
+        channel = slack_oauth.open_dm("xoxb-1234", "U-target")
+
+    assert channel == "D123"
+    call_args = mock_post.call_args
+    assert call_args.args[0] == "https://slack.com/api/conversations.open"
+    assert call_args.kwargs["headers"]["Authorization"] == "Bearer xoxb-1234"
+    assert call_args.kwargs["json"] == {"users": "U-target"}
+
+
+def test_open_dm_raises_400_on_ok_false(slack_env):
+    from app.connectors import slack_oauth
+    from fastapi import HTTPException
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {"ok": False, "error": "user_not_found"}
+    with patch("app.connectors.slack_oauth.requests.post", return_value=mock_resp):
+        with pytest.raises(HTTPException) as exc:
+            slack_oauth.open_dm("xoxb-1234", "U-missing")
+    assert exc.value.status_code == 400
+    assert "user_not_found" in exc.value.detail
+
+
+def test_post_dm_to_user_opens_then_posts(slack_env):
+    """post_dm_to_user resolves the DM channel, then posts to it."""
+    from app.connectors import slack_oauth
+
+    open_resp = MagicMock()
+    open_resp.ok = True
+    open_resp.json.return_value = {"ok": True, "channel": {"id": "D9"}}
+    post_resp = MagicMock()
+    post_resp.ok = True
+    post_resp.json.return_value = {"ok": True, "ts": "1.2", "channel": "D9"}
+
+    with patch(
+        "app.connectors.slack_oauth.requests.post",
+        side_effect=[open_resp, post_resp],
+    ) as mock_post:
+        out = slack_oauth.post_dm_to_user(
+            "xoxb-1234", slack_user_id="U-target", text="hi there"
+        )
+
+    assert out["ts"] == "1.2"
+    # Two calls: conversations.open then chat.postMessage to the DM channel.
+    assert mock_post.call_args_list[0].args[0].endswith("conversations.open")
+    second = mock_post.call_args_list[1]
+    assert second.args[0].endswith("chat.postMessage")
+    assert second.kwargs["json"] == {"channel": "D9", "text": "hi there"}
+
+
+def test_fetch_conversation_history_trims_shape(slack_env):
+    from app.connectors import slack_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {
+        "ok": True,
+        "messages": [{"ts": "1.0", "text": "a"}, {"ts": "2.0", "text": "b"}],
+        "has_more": True,
+        "response_metadata": {"next_cursor": "CURSOR2"},
+    }
+    with patch(
+        "app.connectors.slack_oauth.requests.get", return_value=mock_resp
+    ) as mock_get:
+        out = slack_oauth.fetch_conversation_history(
+            "xoxp-user", channel="C1", limit=2
+        )
+
+    assert out["messages"][1]["text"] == "b"
+    assert out["has_more"] is True
+    assert out["next_cursor"] == "CURSOR2"
+    call_args = mock_get.call_args
+    assert call_args.args[0] == "https://slack.com/api/conversations.history"
+    assert call_args.kwargs["headers"]["Authorization"] == "Bearer xoxp-user"
+    assert call_args.kwargs["params"]["channel"] == "C1"
+
+
+def test_fetch_conversation_history_raises_400_on_ok_false(slack_env):
+    from app.connectors import slack_oauth
+    from fastapi import HTTPException
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {"ok": False, "error": "not_in_channel"}
+    with patch("app.connectors.slack_oauth.requests.get", return_value=mock_resp):
+        with pytest.raises(HTTPException) as exc:
+            slack_oauth.fetch_conversation_history("xoxp-user", channel="C1")
+    assert exc.value.status_code == 400
+    assert "not_in_channel" in exc.value.detail
+
+
+def test_search_messages_uses_user_token(slack_env):
+    from app.connectors import slack_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {
+        "ok": True,
+        "messages": {
+            "total": 1,
+            "matches": [{"ts": "1.0", "text": "found it"}],
+        },
+    }
+    with patch(
+        "app.connectors.slack_oauth.requests.get", return_value=mock_resp
+    ) as mock_get:
+        out = slack_oauth.search_messages("xoxp-user", query="roadmap")
+
+    assert out["total"] == 1
+    assert out["matches"][0]["text"] == "found it"
+    call_args = mock_get.call_args
+    assert call_args.args[0] == "https://slack.com/api/search.messages"
+    assert call_args.kwargs["headers"]["Authorization"] == "Bearer xoxp-user"
+    assert call_args.kwargs["params"]["query"] == "roadmap"
+
+
+# ─────────────────── /slack/dm, /history, /search routes ───────────────────
+
+
+def test_dm_route_sends_dm_to_installing_user(slack_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real", "authed_user_id": "U-me"},
+        label="Meridian",
+    )
+    with patch(
+        "app.routes.connectors.slack_oauth.post_dm_to_user",
+        return_value={"ok": True, "ts": "1.5", "channel": "D9"},
+    ) as mock_dm:
+        r = ctx.client.post("/v1/connectors/slack/dm", json={"text": "ping"})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["ts"] == "1.5"
+    mock_dm.assert_called_once_with(
+        "xoxb-real", slack_user_id="U-me", text="ping"
+    )
+
+
+def test_dm_route_rejects_empty_text(slack_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real", "authed_user_id": "U-me"},
+    )
+    r = ctx.client.post("/v1/connectors/slack/dm", json={"text": "  "})
+    assert r.status_code == 422
+
+
+def test_history_route_uses_user_token(slack_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real", "user_access_token": "xoxp-me"},
+        label="Meridian",
+    )
+    with patch(
+        "app.routes.connectors.slack_oauth.fetch_conversation_history",
+        return_value={"messages": [{"ts": "1.0"}], "has_more": False, "next_cursor": ""},
+    ) as mock_hist:
+        r = ctx.client.get("/v1/connectors/slack/history?channel=C1&limit=5")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["messages"] == [{"ts": "1.0"}]
+    assert mock_hist.call_args.args[0] == "xoxp-me"
+    assert mock_hist.call_args.kwargs["channel"] == "C1"
+    assert mock_hist.call_args.kwargs["limit"] == 5
+
+
+def test_history_route_400_when_no_user_token(slack_env, monkeypatch):
+    """A bot-only install can't read as the user — 400, reconnect needed."""
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},  # no user_access_token
+    )
+    r = ctx.client.get("/v1/connectors/slack/history?channel=C1")
+    assert r.status_code == 400
+    assert "read-as-user" in r.json()["detail"]
+
+
+def test_search_route_uses_user_token(slack_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real", "user_access_token": "xoxp-me"},
+    )
+    with patch(
+        "app.routes.connectors.slack_oauth.search_messages",
+        return_value={"matches": [{"text": "hit"}], "total": 1},
+    ) as mock_search:
+        r = ctx.client.get("/v1/connectors/slack/search?q=launch&count=5")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] == 1
+    assert mock_search.call_args.args[0] == "xoxp-me"
+    assert mock_search.call_args.kwargs["query"] == "launch"
+    assert mock_search.call_args.kwargs["count"] == 5
+
+
+def test_search_route_404_when_not_connected(slack_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get("/v1/connectors/slack/search?q=x")
+    assert r.status_code == 404

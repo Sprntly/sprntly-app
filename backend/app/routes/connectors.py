@@ -17,6 +17,9 @@
 
   GET    /v1/connectors/slack/callback           -> OAuth callback
   DELETE /v1/connectors/slack                   -> disconnect
+  POST   /v1/connectors/slack/dm                 -> DM the user (Sprntly -> user)
+  GET    /v1/connectors/slack/history            -> read channel/DM messages
+  GET    /v1/connectors/slack/search             -> search the user's own content
   POST   /v1/connectors/slack/sync-to-corpus    -> sync messages into corpus
 
   GET    /v1/connectors/github/authorize        -> redirect to GitHub
@@ -1651,9 +1654,11 @@ async def slack_events(request: Request):
     return {"ok": True}
 
 
-def _slack_bot_token(company_id: str, user_id: str) -> tuple[str, dict]:
-    """Decrypt and return (bot_token, connection_row) for THIS user's own
-    Slack connection. 404 if not connected, 500 if the token is unreadable."""
+def _slack_token_json(company_id: str, user_id: str) -> tuple[dict, dict]:
+    """Decrypt and return (token_json, connection_row) for THIS user's own
+    Slack connection. 404 if not connected, 500 if unreadable. token_json
+    holds both the bot token (access_token) and, when the install granted
+    user scopes, the user token (user_access_token)."""
     row = db.get_slack_connection(company_id, user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
@@ -1661,10 +1666,33 @@ def _slack_bot_token(company_id: str, user_id: str) -> tuple[str, dict]:
         token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
     except (TokenEncryptionError, json.JSONDecodeError) as e:
         raise HTTPException(500, "Slack token unreadable") from e
+    return token_json, row
+
+
+def _slack_bot_token(company_id: str, user_id: str) -> tuple[str, dict]:
+    """Decrypt and return (bot_token, connection_row) for THIS user's own
+    Slack connection. 404 if not connected, 500 if the token is unreadable."""
+    token_json, row = _slack_token_json(company_id, user_id)
     bot_token = token_json.get("access_token")
     if not bot_token:
         raise HTTPException(500, "Slack token has no bot access_token")
     return bot_token, row
+
+
+def _slack_user_token(company_id: str, user_id: str) -> tuple[str, dict]:
+    """Decrypt and return (user_token, connection_row) for THIS user's own
+    Slack connection. 404 if not connected, 500 if unreadable, 400 if the
+    install was bot-only (no user token granted — reconnect to grant the
+    read-as-user scopes)."""
+    token_json, row = _slack_token_json(company_id, user_id)
+    user_token = token_json.get("user_access_token")
+    if not user_token:
+        raise HTTPException(
+            400,
+            "Slack is connected without read-as-user access — reconnect Slack "
+            "to grant it.",
+        )
+    return user_token, row
 
 
 class SlackBotTokenIn(BaseModel):
@@ -1742,6 +1770,79 @@ def slack_list_channels(
     in the Configure drawer. Resolves THIS user's own Slack."""
     token, _row = _slack_bot_token(company.company_id, company.user_id)
     return {"channels": slack_oauth.list_channels(token)}
+
+
+class SlackDmIn(BaseModel):
+    text: str
+
+    def model_post_init(self, _context) -> None:
+        if not self.text or not self.text.strip():
+            raise ValueError("text cannot be empty")
+
+
+@router.post("/slack/dm")
+def slack_dm_user(
+    body: SlackDmIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Send a direct message to THIS user via Slack (Sprntly → user's DM).
+
+    Uses the bot token to open a DM with the connection's own installing
+    user (authed_user_id captured at OAuth time) and post to it. Needs the
+    `im:write` + `chat:write` bot scopes."""
+    token_json, _row = _slack_token_json(company.company_id, company.user_id)
+    bot_token = token_json.get("access_token")
+    if not bot_token:
+        raise HTTPException(500, "Slack token has no bot access_token")
+    target = token_json.get("authed_user_id")
+    if not target:
+        raise HTTPException(
+            400,
+            "Slack connection has no user to DM — reconnect Slack.",
+        )
+    result = slack_oauth.post_dm_to_user(
+        bot_token, slack_user_id=target, text=body.text.strip()
+    )
+    return {"ok": True, "ts": result.get("ts"), "channel": result.get("channel")}
+
+
+@router.get("/slack/history")
+def slack_history(
+    channel: str,
+    limit: int = 100,
+    oldest: str | None = None,
+    latest: str | None = None,
+    cursor: str | None = None,
+    company: CompanyContext = Depends(require_company),
+):
+    """Read messages from a Slack channel/DM (user's Slack → Sprntly).
+
+    Reads as the user (xoxp) so it can reach the user's own DMs and private
+    channels; requires Slack connected with read-as-user access."""
+    user_token, _row = _slack_user_token(company.company_id, company.user_id)
+    return slack_oauth.fetch_conversation_history(
+        user_token,
+        channel=channel,
+        limit=limit,
+        oldest=oldest,
+        latest=latest,
+        cursor=cursor,
+    )
+
+
+@router.get("/slack/search")
+def slack_search(
+    q: str,
+    count: int = 20,
+    page: int = 1,
+    company: CompanyContext = Depends(require_company),
+):
+    """Search the user's own Slack content (user's Slack → Sprntly).
+
+    Uses the user token (xoxp) + `search:read`; spans everything the
+    authorizing user can see."""
+    user_token, _row = _slack_user_token(company.company_id, company.user_id)
+    return slack_oauth.search_messages(user_token, query=q, count=count, page=page)
 
 
 class SlackConfigIn(BaseModel):
