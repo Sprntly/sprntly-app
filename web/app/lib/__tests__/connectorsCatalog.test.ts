@@ -38,6 +38,13 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     }
   })
 
+  it("every category accepts Word files (.doc + .docx)", () => {
+    for (const cat of CONNECTOR_CATALOG) {
+      expect(cat.uploadExtensions).toContain(".doc")
+      expect(cat.uploadExtensions).toContain(".docx")
+    }
+  })
+
   it("every item has a single-letter logoText and a hex logoColor", () => {
     for (const cat of CONNECTOR_CATALOG) {
       for (const item of cat.items) {

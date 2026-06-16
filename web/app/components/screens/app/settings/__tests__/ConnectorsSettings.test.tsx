@@ -156,15 +156,15 @@ describe("ConnectorsSettingsView — per-category upload strip", () => {
     const html = render()
     // Match the catalog's uploadAccept strings (HTML-encoded · in markup may
     // come through as raw · since renderToStaticMarkup outputs UTF-8).
-    expect(html).toContain("PDF · CSV · XLSX") // Analytics
-    expect(html).toContain("PDF · MD")          // Code + Monitoring
+    expect(html).toContain("PDF · DOCX · CSV · XLSX") // Analytics
+    expect(html).toContain("PDF · DOCX · MD")          // Code + Monitoring
   })
 
   it("attaches an accept= attribute mirroring uploadExtensions", () => {
     const html = render()
-    // Analytics: ".pdf,.csv,.xlsx"
-    expect(html).toContain('accept=".pdf,.csv,.xlsx"')
-    // Code: ".pdf,.md"
-    expect(html).toContain('accept=".pdf,.md"')
+    // Analytics: ".pdf,.doc,.docx,.csv,.xlsx"
+    expect(html).toContain('accept=".pdf,.doc,.docx,.csv,.xlsx"')
+    // Code: ".pdf,.doc,.docx,.md"
+    expect(html).toContain('accept=".pdf,.doc,.docx,.md"')
   })
 })

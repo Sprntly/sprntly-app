@@ -16,8 +16,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     key: "analytics",
     title: "Analytics",
     subLabel: "required",
-    uploadAccept: "PDF · CSV · XLSX",
-    uploadExtensions: [".pdf", ".csv", ".xlsx"],
+    uploadAccept: "PDF · DOCX · CSV · XLSX",
+    uploadExtensions: [".pdf", ".doc", ".docx", ".csv", ".xlsx"],
     items: [
       { id: "mixpanel",         name: "Mixpanel",         logo: "M", logoText: "M", logoColor: "#7856FF", oauth: false },
       { id: "amplitude",        name: "Amplitude",        logo: "A", logoText: "A", logoColor: "#1A6CFF", oauth: false },
@@ -60,8 +60,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "revenue",
     title: "Revenue",
-    uploadAccept: "PDF · PPT · XLSX",
-    uploadExtensions: [".pdf", ".ppt", ".pptx", ".xlsx"],
+    uploadAccept: "PDF · DOCX · PPT · XLSX",
+    uploadExtensions: [".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xlsx"],
     items: [
       { id: "stripe",     name: "Stripe",     logo: "S", logoText: "S", logoColor: "#635BFF", oauth: false },
       { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false },
@@ -71,8 +71,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "code",
     title: "Code",
-    uploadAccept: "PDF · MD",
-    uploadExtensions: [".pdf", ".md"],
+    uploadAccept: "PDF · DOCX · MD",
+    uploadExtensions: [".pdf", ".doc", ".docx", ".md"],
     items: [
       { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", oauth: true },
       { id: "gitlab",    name: "GitLab",    logo: "G", logoText: "G", logoColor: "#FC6D26", oauth: false },
@@ -83,8 +83,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     key: "monitoring",
     title: "Monitoring & Reliability",
     subLabel: "powers On-Call Agent",
-    uploadAccept: "PDF · MD",
-    uploadExtensions: [".pdf", ".md"],
+    uploadAccept: "PDF · DOCX · MD",
+    uploadExtensions: [".pdf", ".doc", ".docx", ".md"],
     items: [
       { id: "sentry",    name: "Sentry",    logo: "S", logoText: "S", logoColor: "#362D59", oauth: false },
       { id: "datadog",   name: "Datadog",   logo: "D", logoText: "D", logoColor: "#632CA6", oauth: false },
@@ -95,8 +95,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "design",
     title: "Design",
-    uploadAccept: "PDF · PNG · JPG",
-    uploadExtensions: [".pdf", ".png", ".jpg", ".jpeg"],
+    uploadAccept: "PDF · DOCX · PNG · JPG",
+    uploadExtensions: [".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg"],
     items: [
       // Figma OAuth is the user-facing path. The PAT backend module
       // (figma_pat.py + /v1/connectors/figma/pat route) is kept alive to
