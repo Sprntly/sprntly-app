@@ -1335,6 +1335,37 @@ export const ticketPushApi = {
     }),
 }
 
+// ── User stories: real PRD→tickets generation + ClickUp push ────────────────
+// Backend: app/routes/stories.py. Generation is LLM-backed (the vendored
+// user-stories skill) and writes nothing; push is the explicit ClickUp write.
+// This is the REAL path behind "Create ticket" (vs the mock ticket fixtures).
+export type GeneratedStory = {
+  title: string
+  body: string
+  acceptance_criteria: string[]
+  priority: string | null
+  route: string | null
+}
+
+export type StoryPushResult = {
+  created: { story: string; task_id: string; url: string }[]
+  errors: { story: string; error: string }[]
+}
+
+export const storiesApi = {
+  /** Break a PRD into user-story tickets via the LLM. No write. 404 if the PRD
+   *  no longer exists. */
+  generate: (prdId: number) =>
+    api.post<{ stories: GeneratedStory[] }>("/v1/stories/generate", { prd_id: prdId }),
+  /** ClickUp lists the company can push into (target picker). 404 if ClickUp
+   *  isn't connected. */
+  listClickUpLists: () =>
+    api.post<{ lists: ClickUpList[] }>("/v1/stories/lists", {}),
+  /** Create the reviewed stories as tasks in a ClickUp list (explicit write). */
+  pushToClickUp: (listId: string, stories: GeneratedStory[]) =>
+    api.post<StoryPushResult>("/v1/stories/push", { list_id: listId, stories }),
+}
+
 // ── Team members ──────────────────────────────────────────────────────────
 
 export type TeamMemberRecord = {
