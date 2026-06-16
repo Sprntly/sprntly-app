@@ -27,7 +27,7 @@ import { designAgentApi } from "../lib/api"
 import { PasscodeGate } from "./PasscodeGate"
 import { resolveToken, type ResolvedView } from "./resolveToken"
 import { shareTokenFromLocation } from "./shareTokenFromPathname"
-import { IconMessage, IconPin } from "../components/shared/app-icons"
+import { IconClose, IconMessage, IconPin } from "../components/shared/app-icons"
 
 export type { ResolvedView }
 
@@ -157,139 +157,167 @@ export function PublicTokenViewer() {
   if (state.kind === "passcode") return <PasscodeGate token={token as string} />
   return (
     <div className="design-agent-surface">
-      <PrototypeViewer
-        bundleUrl={state.bundleUrl}
-        isComplete={state.isComplete}
-        // C2a: Mark + Comment controls in the browser-frame head. Styled like the
-        // platform toggle (.platform-toggle group look). aria-pressed reflects the
-        // toggle state. Comment opens the writable-anon CommentsPanel below.
-        // C2b: Mark now drives the real pin/mark overlay via the shared hook
-        // (pin.toggleMark / pin.markMode), mounted in the stageOverlay below.
-        headControls={
-          <div
-            className="platform-toggle proto-head-controls-group"
-            role="group"
-            aria-label="Prototype tools"
-          >
+      <div className="da-ready" data-testid="da-ready">
+        <div
+          className={`da-stage${pin.markMode ? " marking" : ""}`}
+          data-testid="da-canvas-center"
+        >
+          <PrototypeViewer
+            bundleUrl={state.bundleUrl}
+            isComplete={state.isComplete}
+            // C2a: Mark + Comment controls in the browser-frame head. Styled like the
+            // platform toggle (.platform-toggle group look). aria-pressed reflects the
+            // toggle state. Comment opens the collapsible da-right sidebar.
+            // C2b: Mark drives the real pin/mark overlay via the shared hook
+            // (pin.toggleMark / pin.markMode), mounted in the stageOverlay below.
+            headControls={
+              <div
+                className="platform-toggle proto-head-controls-group"
+                role="group"
+                aria-label="Prototype tools"
+              >
+                <button
+                  type="button"
+                  className={pin.markMode ? "active" : ""}
+                  aria-pressed={pin.markMode}
+                  data-testid="public-mark-toggle"
+                  onClick={() => pin.toggleMark()}
+                  title="Mark"
+                >
+                  <IconPin size={14} />
+                </button>
+                <button
+                  type="button"
+                  className={commentsOpen ? "active" : ""}
+                  aria-pressed={commentsOpen}
+                  data-testid="public-comments-toggle"
+                  onClick={() => setCommentsOpen((v) => !v)}
+                  title="Comments"
+                >
+                  <IconMessage size={14} />
+                </button>
+              </div>
+            }
+            // C2b: the marking overlay renders INSIDE `.proto-stage`, layered over the
+            // iframe. MarkOverlay is click-inert except in mark mode (where it
+            // hit-tests the iframe + drops a pin); PinLayer renders the numbered pins.
+            stageOverlay={
+              <>
+                <MarkOverlay markMode={pin.markMode} onStageClick={pin.handleStageClick} />
+                <PinLayer pins={pin.pins} computedPinPositions={pin.computedPinPositions} />
+              </>
+            }
+            chrome={
+              /* F13 manual edit (P4-01) is INTERNAL-ONLY: it renders its toggle only
+                 when a prototypeId is supplied. The public resolver is minimum-
+                 disclosure and exposes no prototypeId / signed-in primitive on this
+                 surface, so the overlay mounts with prototypeId undefined → renders
+                 nothing (AC10, non-breaking). */
+              <ManualEditOverlay isComplete={state.isComplete} />
+            }
+          />
+        </div>
+        {/* C2a + C2b: collapsible right-side comments panel — same da-right layout
+            as the signed-in editor. Width transitions 0→340px when open. The
+            CommentsPanel mounts with no prototypeId (minimum-disclosure) so create
+            routes via createCommentByToken(token) and list via listCommentsByToken(token);
+            canResolve is false for anonymous viewers. The name-capture form lives
+            inside the panel body so it appears in the sidebar on first comment. */}
+        <aside
+          className={`da-right${commentsOpen ? " open" : ""}`}
+          data-testid="da-canvas-comments"
+          aria-hidden={commentsOpen ? "false" : "true"}
+        >
+          <div className="da-right-top">
+            <IconMessage size={15} />
+            <span className="da-right-title">Comments</span>
             <button
               type="button"
-              className={pin.markMode ? "active" : ""}
-              aria-pressed={pin.markMode}
-              data-testid="public-mark-toggle"
-              onClick={() => pin.toggleMark()}
-              title="Mark"
-            >
-              <IconPin size={14} />
-            </button>
-            <button
-              type="button"
-              className={commentsOpen ? "active" : ""}
-              aria-pressed={commentsOpen}
-              data-testid="public-comments-toggle"
+              className="da-right-close"
+              title="Hide comments"
+              aria-label="Hide comments"
+              data-testid="public-comments-close"
               onClick={() => setCommentsOpen((v) => !v)}
-              title="Comments"
             >
-              <IconMessage size={14} />
+              <IconClose size={14} />
             </button>
           </div>
-        }
-        // C2b: the marking overlay renders INSIDE `.proto-stage`, layered over the
-        // iframe. MarkOverlay is click-inert except in mark mode (where it
-        // hit-tests the iframe + drops a pin); PinLayer renders the numbered pins.
-        stageOverlay={
-          <>
-            <MarkOverlay markMode={pin.markMode} onStageClick={pin.handleStageClick} />
-            <PinLayer pins={pin.pins} computedPinPositions={pin.computedPinPositions} />
-          </>
-        }
-      chrome={
-        <>
-          {/* F13 manual edit (P4-01) is INTERNAL-ONLY: it renders its toggle only
-              when a prototypeId is supplied. The public resolver is minimum-
-              disclosure and exposes no prototypeId / signed-in primitive on this
-              surface, so the overlay mounts with prototypeId undefined → renders
-              nothing (AC10, non-breaking). The signed-in surface mounts it with a
-              real prototypeId + isComplete to enable edit mode. */}
-          <ManualEditOverlay isComplete={state.isComplete} />
-          {/* C2a writable-anon comments. No prototypeId on this surface (minimum-
-              disclosure), so create routes via createCommentByToken(token);
-              canComment enables create while resolve/apply/ignore/delete stay
-              hidden (all gated on prototypeId). The head Comment toggle collapses
-              the panel by flipping commentsOpen. */}
-          {commentsOpen && needsName && (
-            /* Phase 3: first-comment name capture. Shown when the writable comments
-               surface is open but no name is stored yet. On submit we persist the
-               name to localStorage and proceed; a returning viewer is not re-prompted.
-               A short PII notice sets expectations about where the name + comment go. */
-            <form
-              className="design-agent-surface da-viewer-name-form"
-              data-testid="viewer-name-form"
-              onSubmit={handleNameSubmit}
-            >
-              <label className="da-viewer-name-label" htmlFor="da-viewer-first-name">
-                Add your name to comment
-              </label>
-              <div className="da-viewer-name-fields">
-                <input
-                  id="da-viewer-first-name"
-                  className="da-viewer-name-input"
-                  data-testid="viewer-first-name-input"
-                  type="text"
-                  placeholder="First name"
-                  value={firstName}
-                  onChange={(e) => setFirstName(e.target.value)}
-                  maxLength={40}
-                  autoComplete="given-name"
-                />
-                <input
-                  id="da-viewer-last-name"
-                  className="da-viewer-name-input"
-                  data-testid="viewer-last-name-input"
-                  type="text"
-                  placeholder="Last name"
-                  value={lastName}
-                  onChange={(e) => setLastName(e.target.value)}
-                  maxLength={40}
-                  autoComplete="family-name"
-                />
-              </div>
-              <button
-                type="submit"
-                className="btn btn-accent da-viewer-name-submit"
-                data-testid="viewer-name-submit"
-                disabled={!firstName.trim() && !lastName.trim()}
+          <div className="da-right-body">
+            {/* C2b: dropped-pin comment rows (draft composer + saved rows).
+                editorMode=false + canResolve=false → Apply / Ignore / resolve
+                stay hidden on the public surface. */}
+            <PrototypeMarkLayer
+              pins={pin.pins}
+              editorMode={false}
+              canResolve={false}
+              onPinDraftChange={pin.handlePinDraftChange}
+              onSubmitComment={pin.handlePinSubmit}
+              onPinRemove={pin.handlePinRemove}
+            />
+            {commentsOpen && needsName && (
+              /* Phase 3: first-comment name capture. Shown when the writable comments
+                 surface is open but no name is stored yet. On submit we persist the
+                 name to localStorage and proceed; a returning viewer is not re-prompted.
+                 A short PII notice sets expectations about where the name + comment go. */
+              <form
+                className="design-agent-surface da-viewer-name-form"
+                data-testid="viewer-name-form"
+                onSubmit={handleNameSubmit}
               >
-                Continue
-              </button>
-              <p className="da-viewer-name-notice" data-testid="viewer-name-notice">
-                Your name and comment are shared with the prototype&rsquo;s owner.
-              </p>
-            </form>
-          )}
-          {commentsOpen && !needsName && (
-            <>
-              {/* C2b: the dropped-pin comment rows (draft composer + saved rows).
-                  editorMode=false + canResolve=false → Apply / Ignore / resolve
-                  are hidden on the public surface; only the draft → submit (via
-                  createCommentByToken) + saved display remain. */}
-              <PrototypeMarkLayer
-                pins={pin.pins}
-                editorMode={false}
-                canResolve={false}
-                onPinDraftChange={pin.handlePinDraftChange}
-                onSubmitComment={pin.handlePinSubmit}
-                onPinRemove={pin.handlePinRemove}
-              />
+                <label className="da-viewer-name-label" htmlFor="da-viewer-first-name">
+                  Add your name to comment
+                </label>
+                <div className="da-viewer-name-fields">
+                  <input
+                    id="da-viewer-first-name"
+                    className="da-viewer-name-input"
+                    data-testid="viewer-first-name-input"
+                    type="text"
+                    placeholder="First name"
+                    value={firstName}
+                    onChange={(e) => setFirstName(e.target.value)}
+                    maxLength={40}
+                    autoComplete="given-name"
+                  />
+                  <input
+                    id="da-viewer-last-name"
+                    className="da-viewer-name-input"
+                    data-testid="viewer-last-name-input"
+                    type="text"
+                    placeholder="Last name"
+                    value={lastName}
+                    onChange={(e) => setLastName(e.target.value)}
+                    maxLength={40}
+                    autoComplete="family-name"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="btn btn-accent da-viewer-name-submit"
+                  data-testid="viewer-name-submit"
+                  disabled={!firstName.trim() && !lastName.trim()}
+                >
+                  Continue
+                </button>
+                <p className="da-viewer-name-notice" data-testid="viewer-name-notice">
+                  Your name and comment are shared with the prototype&rsquo;s owner.
+                </p>
+              </form>
+            )}
+            {!needsName && (
+              /* C2a writable-anon comments. No prototypeId on this surface (minimum-
+                 disclosure), so create routes via createCommentByToken(token);
+                 canComment enables create while resolve/apply/ignore/delete stay
+                 hidden (all gated on prototypeId). */
               <CommentsPanel
                 token={token as string}
                 canComment
                 viewerName={viewerName}
               />
-            </>
-          )}
-        </>
-      }
-      />
+            )}
+          </div>
+        </aside>
+      </div>
     </div>
   )
 }
