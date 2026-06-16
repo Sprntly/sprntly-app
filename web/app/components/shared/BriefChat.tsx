@@ -656,7 +656,7 @@ function SuggestIcon({ name }: { name: SuggestSpec["icon"] }) {
 }
 
 export function BriefChat() {
-  const { aiBarValue, setAIBarValue, openContentPanel, showToast, goTo } = useNavigation()
+  const { aiBarValue, setAIBarValue, openContentPanel, showToast, goTo, contentPanelTab } = useNavigation()
   const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
@@ -1455,7 +1455,9 @@ export function BriefChat() {
         </div>
 
         <div className="bc-dock">
-          {findings.length > 0 ? (
+          {/* "Create ticket" only makes sense against an open PRD — gate the chip
+              stack on the PRD rail being open so it isn't a hanging button. */}
+          {findings.length > 0 && contentPanelTab === "prd" ? (
             <div className="bc-suggest">
               <div className="bc-suggest-list">
                 {suggestions.map((s) => (
