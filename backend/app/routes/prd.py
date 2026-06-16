@@ -30,6 +30,7 @@ from app.db import (
 from app.db.prds import (
     get_prd,
     latest_prd_for_dataset,
+    list_prd_generations,
     list_prd_versions,
     restore_prd_version,
     save_prd_version,
@@ -201,6 +202,18 @@ def get_versions(
     """List all versions of a PRD, newest first."""
     require_owned_prd(prd_id, company.company_id)
     return list_prd_versions(prd_id)
+
+
+@router.get("/{prd_id}/generations")
+def get_generations(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Prior generations of this PRD (other prds rows sharing the same
+    brief+insight), newest first — the regeneration history surfaced in the
+    PRD's Version History dropdown."""
+    require_owned_prd(prd_id, company.company_id)
+    return {"generations": list_prd_generations(prd_id)}
 
 
 @router.post("/{prd_id}/versions/{version_id}/restore")

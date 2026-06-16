@@ -16,6 +16,7 @@ import { DesignAgentLauncher } from "../design-agent/DesignAgentLauncher"
 import { EmptyPane } from "./EmptyPane"
 import { ApiError, designAgentApi, prdApi, type PrototypeRecord } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
+import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
 import { runDesignAgentGeneration } from "../../lib/runDesignAgentGeneration"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
 import {
@@ -39,7 +40,6 @@ function saveDraft(prdId: number, html: string) {
 }
 
 type SaveStatus = "saved" | "saving" | "unsaved"
-type PrdVersion = { id: number; prd_id: number; version_number: number; title: string; payload_md: string; saved_by: string; saved_at: string }
 
 function PrdSummaryStrip({ prd }: { prd: PrdState }) {
   const tldr = prd.sections.find((s) => s.type === "prd-tldr")
@@ -288,9 +288,20 @@ export function PrdPanelContent() {
   const bodyRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved")
-  const [versions, setVersions] = useState<PrdVersion[]>([])
+  const [history, setHistory] = useState<HistoryEntry[]>([])
   const [showVersions, setShowVersions] = useState(false)
   const [versionsLoading, setVersionsLoading] = useState(false)
+
+  // Open a prior generation (a different prds row) into the panel.
+  const openGeneration = useCallback(async (genId: number) => {
+    try {
+      const rec = await prdApi.get(genId)
+      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined } })
+      setShowVersions(false)
+    } catch {
+      showToast("Couldn't open version", "Failed to load that generation.")
+    }
+  }, [setContent, showToast])
 
   useEffect(() => {
     if (!prd || !bodyRef.current) return
@@ -441,7 +452,10 @@ export function PrdPanelContent() {
               setShowVersions(!showVersions)
               if (!showVersions) {
                 setVersionsLoading(true)
-                try { const v = await prdApi.listVersions(prd.prd_id); setVersions(v) } catch { setVersions([]) }
+                try {
+                  const [v, g] = await Promise.all([prdApi.listVersions(prd.prd_id), prdApi.listGenerations(prd.prd_id)])
+                  setHistory(mergeHistory(v, g, prd.prd_id))
+                } catch { setHistory([]) }
                 setVersionsLoading(false)
               }
             }} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -479,28 +493,47 @@ export function PrdPanelContent() {
         <div style={{ marginTop: 12, borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface)", overflow: "hidden" }}>
           <div style={{ padding: "10px 16px", background: "var(--surface-2)", borderBottom: "1px solid var(--line)", fontSize: 12, fontWeight: 600, color: "var(--ink-2)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <span>Version History</span>
-            <span style={{ fontSize: 11, fontWeight: 400, color: "var(--ink-4)" }}>{versions.length} version{versions.length !== 1 ? "s" : ""}</span>
+            <span style={{ fontSize: 11, fontWeight: 400, color: "var(--ink-4)" }}>{history.length} version{history.length !== 1 ? "s" : ""}</span>
           </div>
           {versionsLoading ? (
             <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>Loading versions...</div>
-          ) : versions.length === 0 ? (
+          ) : history.length === 0 ? (
             <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>No versions saved yet.</div>
           ) : (
             <div style={{ maxHeight: 260, overflowY: "auto" }}>
-              {versions.map((v) => (
-                <div key={v.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid var(--line)", fontSize: 12.5 }}>
-                  <div>
-                    <div style={{ fontWeight: 500, color: "var(--ink)" }}>v{v.version_number} — {v.title.slice(0, 50)}</div>
-                    <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 2 }}>{v.saved_by} · {new Date(v.saved_at).toLocaleString()}</div>
+              {history.map((e) => {
+                const rowStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid var(--line)", fontSize: 12.5 } as const
+                const actionStyle = { fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", color: "var(--accent)", fontWeight: 600 } as const
+                if (e.kind === "snapshot") {
+                  const v = e.snapshot
+                  return (
+                    <div key={`s${v.id}`} style={rowStyle}>
+                      <div>
+                        <div style={{ fontWeight: 500, color: "var(--ink)" }}>v{v.version_number} — {v.title.slice(0, 50)}</div>
+                        <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 2 }}>Edit · {v.saved_by} · {new Date(v.saved_at).toLocaleString()}</div>
+                      </div>
+                      <button type="button" onClick={async () => {
+                        try { await prdApi.restoreVersion(prd.prd_id, v.id); showToast("Version restored", `Restored to v${v.version_number}.`); window.location.reload() }
+                        catch { showToast("Restore failed", "Could not restore this version.") }
+                      }} style={actionStyle}>
+                        Restore
+                      </button>
+                    </div>
+                  )
+                }
+                const g = e.generation
+                return (
+                  <div key={`g${g.id}`} style={rowStyle}>
+                    <div>
+                      <div style={{ fontWeight: 500, color: "var(--ink)" }}>{g.title.slice(0, 50)}</div>
+                      <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 2 }}>Generated · {new Date(g.generated_at).toLocaleString()}</div>
+                    </div>
+                    {e.isCurrent
+                      ? <span style={{ fontSize: 11, color: "var(--ink-4)", fontWeight: 600 }}>Current</span>
+                      : <button type="button" onClick={() => openGeneration(g.id)} style={actionStyle}>Open</button>}
                   </div>
-                  <button type="button" onClick={async () => {
-                    try { await prdApi.restoreVersion(prd.prd_id, v.id); showToast("Version restored", `Restored to v${v.version_number}.`); window.location.reload() }
-                    catch { showToast("Restore failed", "Could not restore this version.") }
-                  }} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", color: "var(--accent)", fontWeight: 600 }}>
-                    Restore
-                  </button>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>

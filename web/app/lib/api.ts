@@ -803,6 +803,13 @@ export const prdApi = {
   /** Restore a PRD to a specific version. */
   restoreVersion: (prdId: number, versionId: number) =>
     api.post<PrdRecord>(`/v1/prd/${prdId}/versions/${versionId}/restore`, {}),
+  /** Prior generations of this PRD (regenerations sharing brief+insight), newest first. */
+  listGenerations: (id: number) =>
+    api
+      .get<{ generations: { id: number; title: string; status: string; generated_at: string; insight_index: number | null }[] }>(
+        `/v1/prd/${id}/generations`,
+      )
+      .then((r) => r.generations),
 }
 
 // ---- Design Agent (P1-09) ---------------------------------------------------

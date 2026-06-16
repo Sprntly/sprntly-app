@@ -170,6 +170,30 @@ def test_tenant_scoping_only_own_artifacts(artifacts_env, monkeypatch):
     assert rr.status_code == 404
 
 
+def test_prd_list_dedups_to_latest_generation(artifacts_env, monkeypatch):
+    # Each PRD regeneration is a new prds row sharing (brief_id, insight_index).
+    # The artifacts list must show only the LATEST generation per logical PRD.
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    _seed_prd(brief_id=brief_id, title="KG Timeout PRD", insight_index=0,
+              generated_at="2026-06-15T01:00:00+00:00")
+    _seed_prd(brief_id=brief_id, title="KG Timeout PRD", insight_index=0,
+              generated_at="2026-06-15T02:00:00+00:00")
+    latest = _seed_prd(brief_id=brief_id, title="KG Timeout PRD", insight_index=0,
+                       generated_at="2026-06-15T03:00:00+00:00")
+    # A different insight is a different logical PRD → its own entry.
+    _seed_prd(brief_id=brief_id, title="Pricing PRD", insight_index=1,
+              generated_at="2026-06-14T00:00:00+00:00")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    assert r.status_code == 200
+    prds = [a for a in r.json()["artifacts"] if a["type"] == "prd"]
+    assert len(prds) == 2  # latest KG Timeout + Pricing — not all 4 rows
+    kg = [a for a in prds if a["title"] == "KG Timeout PRD"]
+    assert len(kg) == 1
+    assert kg[0]["id"] == latest  # the newest generation wins
+
+
 def test_unified_shape_all_three_types(artifacts_env, monkeypatch):
     ctx = _client(monkeypatch)
     brief_id = _seed_brief(dataset="acme", week_label="Week of May 20")
@@ -222,12 +246,14 @@ def test_prototype_title_derived_from_parent_prd(artifacts_env, monkeypatch):
 def test_recency_sort_newest_first(artifacts_env, monkeypatch):
     ctx = _client(monkeypatch)
     brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
-    # Three artifacts with explicit, distinct timestamps.
-    _seed_prd(brief_id=brief_id, title="Oldest",
+    # Three artifacts with explicit, distinct timestamps. The two PRDs use
+    # distinct insight_index so they're separate logical PRDs (not collapsed by
+    # the latest-generation dedup) — this test is about recency sort, not dedup.
+    _seed_prd(brief_id=brief_id, title="Oldest", insight_index=0,
               generated_at="2026-05-01T00:00:00+00:00")
     _seed_evidence(brief_id=brief_id, title="Middle",
                    generated_at="2026-05-15T00:00:00+00:00")
-    prd_newest = _seed_prd(brief_id=brief_id, title="Newest",
+    prd_newest = _seed_prd(brief_id=brief_id, title="Newest", insight_index=1,
                            generated_at="2026-06-01T00:00:00+00:00")
     _seed_prototype(prd_id=prd_newest, workspace_id=ctx.company_id,
                     created_at="2026-06-10T00:00:00+00:00")
