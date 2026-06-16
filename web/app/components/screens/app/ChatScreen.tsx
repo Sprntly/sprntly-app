@@ -1056,14 +1056,6 @@ export function ChatScreen() {
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1a2 2 0 0 0 0 4v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 0 0-4z" /><path d="M13 7v10" /></svg>
                         {activeTab?.prd ? "Create ticket" : "Generate PRD first"}
                       </button>
-                      <button type="button" className="bc-suggest-btn" onClick={handleChatPrototype}>
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></svg>
-                        {chatInsightState?.hasPrd && chatInsightState.prototypeReady ? "View prototype" : "Generate prototype"}
-                      </button>
-                      <button type="button" className="bc-suggest-btn" onClick={() => showToast("Coding agent", "Hand-off to your coding agent once a PRD is ready.")}>
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
-                        Send to coding agent
-                      </button>
                     </div>
                   </div>
                 ) : null}
