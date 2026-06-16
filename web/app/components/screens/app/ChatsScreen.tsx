@@ -274,6 +274,9 @@ function ArtifactPrototypeThumb({
 }: {
   proto: Extract<ArtifactItem, { type: "prototype" }>
 }) {
+  // A present-but-broken preview (e.g. a 404'd screenshot URL) must degrade to
+  // the same glyph as the null-preview case — never a browser broken-image icon.
+  const [imgFailed, setImgFailed] = useState(false)
   const box: React.CSSProperties = {
     width: 64, height: 48, borderRadius: 8, flexShrink: 0, overflow: "hidden",
     display: "flex", alignItems: "center", justifyContent: "center",
@@ -295,19 +298,20 @@ function ArtifactPrototypeThumb({
       </div>
     )
   }
-  if (proto.preview_image_url) {
+  if (proto.preview_image_url && !imgFailed) {
     return (
       <div data-proto-thumb="image" style={box}>
         <img
           src={proto.preview_image_url}
           alt=""
           aria-hidden
+          onError={() => setImgFailed(true)}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
       </div>
     )
   }
-  // ready + null preview → SVG fallback
+  // ready + null preview, OR a preview that failed to load → SVG fallback
   return (
     <div data-proto-thumb="fallback" style={box}>
       <PrototypeGlyph />

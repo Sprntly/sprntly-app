@@ -225,6 +225,21 @@ describe("ArtifactsView — prototype card states", () => {
     expect(container.querySelector('[data-proto-thumb="fallback"] svg')).not.toBeNull()
     expect(container.querySelector('[data-proto-thumb="image"]')).toBeNull()
   })
+
+  it("(e) ready + preview that fails to load → onError → SVG glyph fallback", () => {
+    const { container } = render(
+      React.createElement(ArtifactsView, {
+        items: [READY_COMPLETE], filter: "all", loading: false, onFilterChange: noop, onOpen: noop,
+      }),
+    )
+    const img = container.querySelector('[data-proto-thumb="image"] img') as HTMLImageElement
+    expect(img).not.toBeNull()
+    // Simulate the preview URL 404ing (the #354 broken-link case, not just null).
+    fireEvent.error(img)
+    expect(container.querySelector('[data-proto-thumb="image"]')).toBeNull()
+    expect(container.querySelector('[data-proto-thumb="fallback"]')).not.toBeNull()
+    expect(container.querySelector('[data-proto-thumb="fallback"] svg')).not.toBeNull()
+  })
 })
 
 describe("ArtifactsView — interaction (jsdom)", () => {
