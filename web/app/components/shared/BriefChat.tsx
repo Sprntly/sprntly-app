@@ -193,14 +193,6 @@ function IconChevronRight({ size = 12 }: { size?: number }) {
     </svg>
   )
 }
-function IconCode({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <polyline points="16 18 22 12 16 6" />
-      <polyline points="8 6 2 12 8 18" />
-    </svg>
-  )
-}
 function IconTerminalPrompt({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -603,59 +595,39 @@ function BriefFindingCard({
 }
 
 // ── Suggested-actions state machine ──────────────────────────────────────────
-// The chip stack above the composer offers the most useful next steps, and the
-// set advances as the user acts: explore → prd → prototype / tickets / coding.
-// Generating a PRD already lives on each finding card, so the composer's
-// suggestions skip it and start at the downstream flow: create ticket → coding.
-type SuggestStage = "prd" | "tickets" | "prototype" | "coding"
-type SuggestKind = "create-ticket" | "view-prototype" | "view-prd" | "coding"
+// The chip stack above the composer offers the most useful next step. Generating
+// a PRD already lives on each finding card, so the composer's suggestion starts
+// at the downstream flow: create tickets from the PRD, then view the PRD.
+type SuggestStage = "prd" | "tickets"
+type SuggestKind = "create-ticket" | "view-prd"
 
 interface SuggestSpec {
   kind: SuggestKind
   label: string
-  icon: "code" | "terminal" | "file" | "ticket"
+  icon: "file" | "ticket"
   primary?: boolean
 }
 
-// Each stage offers three next-step chips; clicking one advances the stage so
-// the set updates (mirrors the reference: ready → tickets → coding flow).
 const SUGGEST_STAGES: Record<SuggestStage, SuggestSpec[]> = {
-  // Default / reference screen 1.
+  // Default — break the PRD into tickets.
   prd: [
     { kind: "create-ticket", label: "Create ticket", icon: "ticket", primary: true },
-    { kind: "view-prototype", label: "View prototype", icon: "terminal" },
-    { kind: "coding", label: "Send to coding agent", icon: "code" },
   ],
-  // Reference screen 2 — after Create ticket.
+  // After Create ticket.
   tickets: [
-    { kind: "coding", label: "Send to coding agent", icon: "code", primary: true },
-    { kind: "view-prototype", label: "View prototype", icon: "terminal" },
-    { kind: "view-prd", label: "View PRD", icon: "file" },
-  ],
-  prototype: [
-    { kind: "coding", label: "Send to coding agent", icon: "code", primary: true },
-    { kind: "create-ticket", label: "Create ticket", icon: "ticket" },
-    { kind: "view-prd", label: "View PRD", icon: "file" },
-  ],
-  coding: [
-    { kind: "view-prototype", label: "View prototype", icon: "terminal", primary: true },
-    { kind: "create-ticket", label: "Create ticket", icon: "ticket" },
-    { kind: "view-prd", label: "View PRD", icon: "file" },
+    { kind: "view-prd", label: "View PRD", icon: "file", primary: true },
   ],
 }
 
 // Stage to advance to after a kind is clicked (null → keep the current stage).
 const SUGGEST_NEXT: Record<SuggestKind, SuggestStage | null> = {
   "create-ticket": "tickets",
-  "view-prototype": "prototype",
   "view-prd": null,
-  coding: "coding",
 }
 
-// The AgentAction a kind dispatches (coding is handled separately).
-const SUGGEST_ACTION: Record<Exclude<SuggestKind, "coding">, AgentAction> = {
+// The AgentAction a kind dispatches.
+const SUGGEST_ACTION: Record<SuggestKind, AgentAction> = {
   "create-ticket": "tickets",
-  "view-prototype": "prototype",
   "view-prd": "prd",
 }
 
@@ -679,8 +651,6 @@ function BriefGeneratingState() {
 }
 
 function SuggestIcon({ name }: { name: SuggestSpec["icon"] }) {
-  if (name === "code") return <IconCode size={14} />
-  if (name === "terminal") return <IconTerminalPrompt size={14} />
   if (name === "file") return <IconFileText size={14} />
   return <IconTicket size={14} />
 }
@@ -1080,15 +1050,7 @@ export function BriefChat() {
   )
 
   // ── Suggested-actions: hand the implementation brief to a coding agent ─────
-  const sendToCoding = useCallback(() => {
-    if (!content.prd) {
-      showToast("Generate a PRD first", "I hand the implementation brief to your coding agent once a PRD exists.")
-      return
-    }
-    showToast("Sent to coding agent", "Handed the PRD's implementation brief to your coding agent.")
-  }, [content.prd, showToast])
-
-  // Active suggestion chips, each advancing the stage as the reference flow does.
+  // Active suggestion chips, each advancing the stage as the user acts.
   const suggestions = useMemo(
     () =>
       SUGGEST_STAGES[suggestStage].map((spec) => ({
@@ -1096,11 +1058,10 @@ export function BriefChat() {
         onClick: () => {
           const next = SUGGEST_NEXT[spec.kind]
           if (next) setSuggestStage(next)
-          if (spec.kind === "coding") sendToCoding()
-          else onAction(SUGGEST_ACTION[spec.kind])
+          onAction(SUGGEST_ACTION[spec.kind])
         },
       })),
-    [suggestStage, onAction, sendToCoding],
+    [suggestStage, onAction],
   )
 
   // ── Per-card actions (replicate BriefScreen's evidence/PRD wiring) ────────
