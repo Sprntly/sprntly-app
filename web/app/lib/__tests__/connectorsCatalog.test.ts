@@ -128,10 +128,9 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
 
 describe("CONNECTOR_IDS_WITH_OAUTH", () => {
   it("contains the connectors whose UI surfaces a live OAuth flow (Drive/GitHub + ClickUp + HubSpot + Slack + Figma)", () => {
-    // Figma flipped to OAuth in June 2026 for the Figma app-review
-    // resubmission — Figma's reviewers rejected the PAT-based public
-    // connect path. The figma_pat backend module is still alive to
-    // grandfather any stored PAT, but no UI exposes it.
+    // Figma is OAuth-only for the app-review resubmission — Figma's reviewers
+    // rejected the PAT-based connect path, so it was removed entirely (no
+    // figma_pat module, no /figma/pat route).
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
       ["clickup", "figma", "github", "google_drive", "hubspot", "slack"].sort(),
     )
