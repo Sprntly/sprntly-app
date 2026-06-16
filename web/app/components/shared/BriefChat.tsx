@@ -833,50 +833,35 @@ export function BriefChat() {
 
   // ── Composer agent flows (mirror the old AIBar command logic) ─────────────
   const prdFlow = useCallback(async () => {
-    const aId = uid()
-    // Open the right rail immediately and show a generating spinner THERE — the
-    // PRD (in-progress + final) lives in the panel, never as a bottom message.
-    // The inline turn is a lightweight pointer to the panel, not the PRD itself.
+    // PRD generation is a COMMAND, not a conversation: the PRD (in-progress and
+    // final) lives in the right-rail panel, never as a bottom chat message. So
+    // this opens the rail with a generating spinner and surfaces failures as a
+    // toast — NO chat turn — exactly mirroring the finding-card "Generate PRD"
+    // path (cardGeneratePrd). (Previously this appended a "PRD draft ready" agent
+    // turn, which was redundant with the rail.)
     setContent({ prd: null, prdMeta: null, prdGenerating: true })
     openContentPanel("prd")
-    setTurns((t) => [...t, { id: aId, role: "agent", persona: "pm", status: "generating PRD… (opening in the panel)", state: "thinking" }])
-    scrollToEnd()
-    const fail = (error: string) => {
-      setContent({ prdGenerating: false })
-      setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error } : x)))
-    }
     try {
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
       if (!insights.length) {
-        fail("No brief insights available yet. Run the pipeline to refresh this week's brief first.")
+        setContent({ prdGenerating: false })
+        showToast("No brief yet", "Run the pipeline to refresh this week's brief first.")
         return
       }
-      const insight = insights[0]
       const result = await runPrdGeneration({ briefId: brief.id, insightIndex: 0 })
       if (!result.ok) {
-        fail(result.message)
+        setContent({ prdGenerating: false })
+        showToast("PRD generation failed", result.message.slice(0, 200))
         return
       }
       setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex: 0 }, prdGenerating: false })
       openContentPanel("prd")
-      setTurns((t) =>
-        t.map((x) =>
-          x.id === aId
-            ? {
-                ...x,
-                state: "done",
-                status: "PRD draft ready",
-                message: `Drafted the PRD from **${insight.title}**. Opened it on the right — six sections, fully editable, auto-saving.`,
-                actions: ["prd", "tickets", "prototype"],
-              }
-            : x,
-        ),
-      )
     } catch (e) {
-      fail(e instanceof Error ? e.message : "PRD generation failed")
+      setContent({ prdGenerating: false })
+      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     }
-  }, [activeCompany, openContentPanel, scrollToEnd, setContent])
+  }, [activeCompany, openContentPanel, setContent, showToast])
 
   const ticketsFlow = useCallback(() => {
     openContentPanel("tickets")
@@ -1023,7 +1008,9 @@ export function BriefChat() {
         return
       }
       if (busyRef.current) return
-      appendUser(q)
+      // A PRD command opens its work in the right rail (no chat turn), so don't
+      // echo it as a chat message either — it's a command, not a conversation.
+      if (!isPrdCommand(q)) appendUser(q)
       setDraft("")
       if (composerRef.current) composerRef.current.style.height = "auto"
       void runGate(() => {
