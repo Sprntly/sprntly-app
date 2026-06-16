@@ -1,7 +1,6 @@
 export { ChatScreen } from "./ChatScreen"
 export { BriefScreen } from "./BriefScreen"
 export { DetailScreen } from "./DetailScreen"
-export { PrdScreen } from "./PrdScreen"
 export { PastScreen } from "./PastScreen"
 export { ShippedScreen } from "./ShippedScreen"
 export { SettingsScreen } from "./SettingsScreen"

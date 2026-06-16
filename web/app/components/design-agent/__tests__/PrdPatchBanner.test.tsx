@@ -115,9 +115,11 @@ describe("PrdPatchBanner — orchestration helpers", () => {
 // (grep/diff per the ticket Unit Tests). The contentEditable landmark must still
 // appear EXACTLY once and keep its sibling props — building F11 on it is forbidden
 // (codebase-agent-patterns §3 — the next poll wipes it).
-describe("PrdScreen mount (AC7 — contentEditable untouched)", () => {
+describe("PrdPanelContent mount (AC7 — contentEditable untouched)", () => {
+  // The standalone PrdScreen page was removed in the prd-removal refactor; the
+  // right-rail PrdPanelContent is the sole PRD host and carries the same mount.
   const src = readFileSync(
-    new URL("../../screens/app/PrdScreen.tsx", import.meta.url),
+    new URL("../../shared/PrdPanelContent.tsx", import.meta.url),
     "utf8",
   )
 
@@ -136,7 +138,7 @@ describe("PrdScreen mount (AC7 — contentEditable untouched)", () => {
 
   it("mounts PrdPatchBanner above the prd content (import + single mount line)", () => {
     expect(src).toContain(
-      'import { PrdPatchBanner } from "../../design-agent/PrdPatchBanner"',
+      'import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"',
     )
     expect(src).toContain("<PrdPatchBanner prdId={prd.prd_id} />")
     // DOM order: the banner mount precedes the prd-frame block.
