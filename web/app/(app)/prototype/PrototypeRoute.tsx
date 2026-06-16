@@ -51,8 +51,6 @@ import {
   type CommentRecord,
   type PrototypeRecord,
 } from "../../lib/api"
-import { markdownToPrdState } from "../../lib/prd-adapter"
-import type { PrdSection } from "../../types/content"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
@@ -89,42 +87,37 @@ export function figmaKeyForPrototype(
   return contentPrd.figma_file_key ?? null
 }
 
-/** Pure: decide whether the supplemental PRD fetch is needed. Returns true when
- *  the canvas has a prd_id to fetch AND ContentContext does not already hold
- *  usable sections for that prd AND the prd has not already been loaded in this
- *  mount.
- *  Exported for unit testing without a DOM (Node env, no jsdom needed).
- */
-export function needsSupplementalPrd(
+/** Pure: resolve the PRD TITLE for the breadcrumb / in-tab title bar / left
+ *  header. Prefers ContentContext when it holds the matching PRD; on direct-nav /
+ *  refresh ContentContext is empty (no PRD loaded for `?prd=<id>`), so we fall
+ *  back to the minimal title-only supplemental fetch — but ONLY when that fetch
+ *  resolved for the SAME prd_id (guards a stale fetched title from a prior id).
+ *  Title only — no PRD body / sections / panel is involved. Exported so the
+ *  direct-nav title contract is unit-testable without a DOM. */
+export function resolvePrdTitle(
   protoPrdId: number | null,
-  contentPrdId: number | null | undefined,
-  contentSectionsLength: number,
-  loadedPrdId: number | null,
-): boolean {
-  if (protoPrdId == null) return false
-  const contentMatches =
-    contentPrdId === protoPrdId && contentSectionsLength > 0
-  if (contentMatches) return false
-  if (loadedPrdId === protoPrdId) return false
-  return true
+  contentTitle: string | null,
+  fetchedPrdId: number | null,
+  fetchedTitle: string | null,
+): string | null {
+  if (contentTitle != null) return contentTitle
+  if (protoPrdId != null && fetchedPrdId === protoPrdId) return fetchedTitle
+  return null
 }
 
-/** Pure: pick the PRD sections/title to pass to the left panel. Prefers
- *  ContentContext when it holds a matching, non-empty sections array; falls back
- *  to the supplemental-fetched values otherwise.
- *  Exported for unit testing without a DOM (Node env, no jsdom needed).
- */
-export function pickPrdFields<S, T>(
-  contentMatches: boolean,
-  contentSections: S,
-  urlSections: S,
-  contentTitle: T,
-  urlTitle: T,
-): { sections: S; title: T } {
-  return {
-    sections: contentMatches ? contentSections : urlSections,
-    title: contentMatches ? contentTitle : urlTitle,
-  }
+/** Pure: decide whether the title-only supplemental fetch should fire. True when
+ *  there is a prd_id to fetch, ContentContext does NOT already supply the title,
+ *  and this prd_id's title has not already been fetched in this mount. Exported
+ *  for unit testing the refetch guard without a DOM. */
+export function needsTitleFetch(
+  protoPrdId: number | null,
+  contentTitle: string | null,
+  fetchedPrdId: number | null,
+): boolean {
+  if (protoPrdId == null) return false
+  if (contentTitle != null) return false
+  if (fetchedPrdId === protoPrdId) return false
+  return true
 }
 
 /** Pure: classify the in-tab render state for a given prd context. Extracted so
@@ -180,8 +173,8 @@ export function actionForActiveProto(
  *   - a local useIterateRun drives the composer Submit, a comment's Apply, and a
  *     pin's Apply down one fixed iterate path; onComplete swaps the fresh row +
  *     bumps the reload nonce so the center iframe reloads the rebuilt bundle.
- *   - PRD sections/title are pulled by the prototype's own prd_id (fed by
- *     markdownToPrdState) when ContentContext doesn't already hold the right PRD.
+ *   - the left column is a LIVE-ONLY agent-conversation thread (named turns +
+ *     composer); only the PRD TITLE survives (breadcrumb / title bar / header).
  *   - the iterate slot is <IterateComposer>; the comments slot is <CommentsPanel>
  *     gated on share_token.
  *   - onShared / onIterated re-fetch the row so the share-gated comments column
@@ -198,6 +191,7 @@ function InTabCanvas({
   onBack,
   searchParams,
   router,
+  seedV1,
 }: {
   proto: PrototypeRecord
   /** Replace the parent's held prototype with a fresher row (after iterate /
@@ -214,15 +208,52 @@ function InTabCanvas({
   /** The Next.js router — threaded from PrototypeRoute so InTabCanvas can call
    *  router.replace without a second useRouter call inside the child. */
   router: ReturnType<typeof useRouter>
+  /** True only when this canvas mounted because a generation just completed IN
+   *  THIS SESSION (not when an existing prototype was loaded). Drives the opening
+   *  agent "Generated v1…" seed turn. Live-only — never persisted/refetched. */
+  seedV1: boolean
 }) {
   const { content } = useContent()
   const prd = content.prd
+  const protoPrdId = (proto as PrototypeRecord & { prd_id?: number }).prd_id ?? null
+  // PRD title for the breadcrumb / in-tab title bar / left-column header. Only the
+  // TITLE survives the PRD-panel removal: prefer ContentContext when it holds the
+  // matching PRD, else fall back to a minimal title-only supplemental fetch below.
+  const contentTitle = prd?.prd_id === protoPrdId ? (prd?.title ?? null) : null
 
-  // PRD context pulled by the prototype's own prd_id when ContentContext doesn't
-  // already hold the matching PRD (mirrors ApproveModal's supplemental PRD pull).
-  const [urlPrdSections, setUrlPrdSections] = useState<PrdSection[] | undefined>(undefined)
-  const [urlPrdTitle, setUrlPrdTitle] = useState<string | null>(null)
-  const [loadedPrdId, setLoadedPrdId] = useState<number | null>(null)
+  // Supplemental TITLE-ONLY fetch. On direct-nav / refresh, ContentContext is
+  // empty (no PRD loaded for `?prd=<id>`), so `contentTitle` is null and the
+  // breadcrumb/titlebar would render "Untitled prototype". We re-source ONLY the
+  // PRD title (NOT the body, sections, or any panel) by fetching the prototype's
+  // own prd_id once. Guarded so it never refetches when a title is already
+  // available (from ContentContext or a prior fetch for this same prd_id).
+  const [fetchedTitle, setFetchedTitle] = useState<string | null>(null)
+  const [fetchedPrdId, setFetchedPrdId] = useState<number | null>(null)
+  const prdTitle = resolvePrdTitle(protoPrdId, contentTitle, fetchedPrdId, fetchedTitle)
+  useEffect(() => {
+    // Skip when there's nothing to fetch, when ContentContext already supplies the
+    // title, or when this prd_id's title was already fetched in this mount.
+    if (!needsTitleFetch(protoPrdId, contentTitle, fetchedPrdId)) return
+    // Narrow for TS: needsTitleFetch already returns false for a null id, but the
+    // compiler can't see through the helper boundary, so re-assert before .get().
+    if (protoPrdId == null) return
+    let cancelled = false
+    prdApi
+      .get(protoPrdId)
+      .then((fetchedPrd) => {
+        if (cancelled) return
+        setFetchedTitle(fetchedPrd.title ?? null)
+        setFetchedPrdId(protoPrdId)
+      })
+      .catch(() => {
+        /* best-effort — titlebar falls back to "Untitled prototype" on error */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [protoPrdId, contentTitle, fetchedPrdId])
+  // The signed-in user's display name for user-turn labels in the live thread.
+  const userName = content.userName ?? null
 
   // A reload nonce bumped on every completed iterate. The center iframe reads the
   // bundle url; when the backend OVERWRITES the bundle at the SAME url, threading
@@ -230,8 +261,6 @@ function InTabCanvas({
   const [bundleReloadNonce, setBundleReloadNonce] = useState(0)
   // The comment lifted from CommentsPanel's Apply into IterateComposer's pre-fill.
   const [applyTarget, setApplyTarget] = useState<CommentRecord | null>(null)
-
-  const protoPrdId = (proto as PrototypeRecord & { prd_id?: number }).prd_id ?? null
 
   // Shared iterate runner — drives the composer Submit, a comment's Apply, and a
   // pin's Apply through one fixed path: POST → poll-to-completion → left-panel
@@ -273,50 +302,24 @@ function InTabCanvas({
     }
   }, [proto.id, onProtoChange])
 
-  // ContentContext has usable sections for this prd when all three hold: prd_id
-  // matches, sections is a non-empty array. Empty-array is the zero-value for a
-  // stale/partial prd (ContentContext initialises sections to []); an empty array
-  // is not usable, so we treat it the same as absent and fall back to the fetch.
-  const contentMatches =
-    prd?.prd_id === protoPrdId &&
-    Array.isArray(prd?.sections) &&
-    prd.sections.length > 0
-
-  // Supplemental PRD pull. Fetches when ContentContext does NOT hold usable
-  // sections for this prototype's prd. Loads at most once per prd_id (the
-  // loadedPrdId guard makes subsequent re-renders a no-op once the fetch
-  // completes). Loop-safety: when contentMatches becomes true the effect returns
-  // early before the loadedPrdId guard, so no re-fetch fires and no state
-  // changes, avoiding any cycle.
+  // Within-session v1 seed: when this canvas mounted because a generation just
+  // completed IN THIS SESSION (seedV1), append an opening AGENT turn so the live
+  // thread opens with the agent introducing v1. Fires once on mount (the `key` off
+  // the prototype id forces a fresh mount per prototype, so the ref-guard is a
+  // belt-and-braces against a same-mount re-run). LIVE-ONLY: not persisted, not
+  // refetched — a refresh starts the thread empty.
+  const seededRef = useRef(false)
+  const { appendActivity } = iterateRun
   useEffect(() => {
-    if (!needsSupplementalPrd(protoPrdId, prd?.prd_id, prd?.sections?.length ?? 0, loadedPrdId)) return
-    // protoPrdId is non-null here (needsSupplementalPrd returned true)
-    const prdIdToFetch = protoPrdId as number
-    let cancelled = false
-    prdApi
-      .get(prdIdToFetch)
-      .then((fetchedPrd) => {
-        if (cancelled) return
-        const parsed = markdownToPrdState(fetchedPrd.payload_md)
-        setUrlPrdSections(parsed.sections)
-        setUrlPrdTitle(fetchedPrd.title ?? null)
-        setLoadedPrdId(prdIdToFetch)
-      })
-      .catch(() => {
-        /* best-effort — left panel simply omits sections on error */
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [protoPrdId, loadedPrdId, prd?.prd_id, prd?.sections?.length])
-
-  const panelFields = pickPrdFields(
-    contentMatches,
-    prd?.sections,
-    urlPrdSections,
-    prd?.title ?? null,
-    urlPrdTitle,
-  )
+    if (!seedV1 || seededRef.current) return
+    seededRef.current = true
+    const title = prdTitle ?? "the PRD"
+    appendActivity({
+      kind: "done",
+      text: `Generated v1 from PRD '${title}'. Describe a change below to iterate.`,
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <PostGenerationResult
@@ -337,9 +340,8 @@ function InTabCanvas({
       onStateChange={(state) =>
         onProtoChange({ ...proto, is_complete: state.isComplete })
       }
-      prdSections={panelFields.sections}
-      prdTitle={panelFields.title}
-      prdMetaLine={prd?.metaLine ?? null}
+      prdTitle={prdTitle}
+      userName={userName}
       onPinIterate={runCanvasIterate}
       onDone={onDone}
       iterateActivity={iterateRun.activity}
@@ -396,6 +398,10 @@ export function PrototypeRoute() {
   // prototype so the in-tab canvas reveals it WITHOUT navigating to an overlay.
   const [proto, setProto] = useState<PrototypeRecord | null>(null)
   const [resolving, setResolving] = useState(false)
+  // The prototype id whose canvas should open with the within-session "Generated
+  // v1…" seed turn — set only when a generation completes in this session, never
+  // on the read-only load path. Drives InTabCanvas's one-shot seed. Live-only.
+  const [seedProtoId, setSeedProtoId] = useState<number | null>(null)
 
   // Ref-backed loading flag: read live inside the onClose closure so the
   // callback never captures a stale false from the render before kickoff.
@@ -488,6 +494,7 @@ export function PrototypeRoute() {
     setGenLoading(false)
     if (result?.ok && result.prototype) {
       setProto(result.prototype)
+      setSeedProtoId(result.prototype.id)
     } else if (result?.ok && prdId != null) {
       // Reveal-by-refetch fallback: the kickoff succeeded but no full row came
       // back on the result — re-resolve the PRD's ready prototype in-tab.
@@ -496,6 +503,7 @@ export function PrototypeRoute() {
         .then((found) => {
           if (found && found.status === "ready" && found.bundle_url) {
             setProto(found)
+            setSeedProtoId(found.id)
           }
         })
         .catch(() => {
@@ -536,6 +544,7 @@ export function PrototypeRoute() {
             onBack={() => router.back()}
             searchParams={search}
             router={router}
+            seedV1={proto.id === seedProtoId}
           />
         </div>
       </AppLayout>

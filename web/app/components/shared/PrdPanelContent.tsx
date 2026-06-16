@@ -415,7 +415,7 @@ export function PrdPanelContent() {
             >
               <div className="prd-meta">{prd.metaLine}</div>
               <h1 className="prd-title">{prd.title}</h1>
-              <PrdSections sections={prd.sections} prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} prdTitle={prd.title} prdMetaLine={prd.metaLine} />
+              <PrdSections sections={prd.sections} prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} prdTitle={prd.title} />
             </div>
           </>
         ) : (

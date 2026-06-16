@@ -67,16 +67,23 @@ async def subscribe(prototype_id: int) -> AsyncIterator[dict[str, Any]]:
                 del _subscribers[prototype_id]
 
 
-def close(prototype_id: int, *, kind: str = "done") -> None:
+def close(prototype_id: int, *, kind: str = "done", summary: str = "") -> None:
     """Push a terminal sentinel event to all subscribers and clear the registry.
 
     Every active subscribe() generator yields the sentinel then completes.
     Mapping from _finish status: complete runs -> kind="done"; all other exits
     (max_iters, aborted, refused, error) -> kind="error". Safe to call when no
     subscribers exist (no-op).
+
+    `summary` is the agent's natural-language change summary (the iterate run's
+    final text block). It is attached as the `text` key on the sentinel ONLY for
+    a non-empty done event; the error sentinel is unchanged. The frontend keeps
+    its "Change applied" fallback for the absent/empty case.
     """
     queues = _subscribers.pop(prototype_id, set())
     sentinel: dict[str, Any] = {"kind": kind}
+    if kind == "done" and summary:
+        sentinel["text"] = summary
     for q in queues:
         if q.full():
             try:

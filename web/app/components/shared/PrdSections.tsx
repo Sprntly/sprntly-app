@@ -35,7 +35,6 @@ export function PrdSections({
   prdId,
   figmaFileKey,
   prdTitle,
-  prdMetaLine,
 }: {
   sections: PrdState["sections"]
   /** PRD DB id, threaded to the prd-design block so the F2 launcher can call
@@ -45,13 +44,10 @@ export function PrdSections({
   /** Figma file key for the prd-design launcher; null/undefined → no source. */
   figmaFileKey?: string | null
   /** PRD title, threaded to the prd-design launcher so the preview card and the
-   *  canvas breadcrumb can label the PRD. Optional so non-PRD callers (and the
-   *  empty/demo states) keep type-checking. */
+   *  canvas breadcrumb / left-column header can label the PRD. Optional so non-PRD
+   *  callers (and the empty/demo states) keep type-checking. The PRD content panel
+   *  was removed from the canvas (live-only thread); only the title survives. */
   prdTitle?: string | null
-  /** PRD one-line meta, threaded to the prd-design launcher so the condensed
-   *  PRD panel can display the subtitle. Optional so non-PRD callers keep
-   *  type-checking. */
-  prdMetaLine?: string | null
 }) {
   return (
     <>
@@ -62,8 +58,6 @@ export function PrdSections({
           prdId={prdId}
           figmaFileKey={figmaFileKey}
           prdTitle={prdTitle}
-          prdSections={sections}
-          prdMetaLine={prdMetaLine}
         />
       ))}
     </>
@@ -75,15 +69,11 @@ function RenderBlock({
   prdId,
   figmaFileKey,
   prdTitle,
-  prdSections,
-  prdMetaLine,
 }: {
   block: PrdSection
   prdId?: number
   figmaFileKey?: string | null
   prdTitle?: string | null
-  prdSections?: PrdSection[]
-  prdMetaLine?: string | null
 }) {
   switch (block.type) {
     case "h2":
@@ -167,7 +157,7 @@ function RenderBlock({
     case "prd-dod":
       return <DodChecklist items={block.items} />
     case "prd-design":
-      return <DesignSection prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} prdSections={prdSections} prdMetaLine={prdMetaLine} />
+      return <DesignSection prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} />
     default:
       // Evidence variants and any unknown future blocks render as no-op
       // in the PRD renderer; the dedicated EvidenceSections covers them.
@@ -190,14 +180,10 @@ function DesignSection({
   prdId,
   figmaFileKey,
   prdTitle,
-  prdSections,
-  prdMetaLine,
 }: {
   prdId?: number
   figmaFileKey?: string | null
   prdTitle?: string | null
-  prdSections?: PrdSection[]
-  prdMetaLine?: string | null
 }) {
   return (
     <section className="prd-design">
@@ -208,7 +194,7 @@ function DesignSection({
           heading was removed in the redesign; the section wrapper + launcher are
           kept. */}
       {prdId !== undefined ? (
-        <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} prdSections={prdSections} prdMetaLine={prdMetaLine} />
+        <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} />
       ) : (
         <div className="design-agent-surface">
           <p className="prd-design-empty">

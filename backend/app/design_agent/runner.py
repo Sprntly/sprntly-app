@@ -1215,6 +1215,28 @@ def _persist_pending_question_if_paused(
     )
 
 
+def _final_text_summary(final_content: list) -> str:
+    """Return the last `type=="text"` block's stripped text from a run's final
+    assistant content, or "" if none.
+
+    The iterate system prompt instructs the agent to end its turn with a 1-2
+    sentence natural-language summary of the change; that text is the LAST text
+    block of `final_content`. We surface it on the SSE `done` sentinel so the
+    client can show the agent's own description of what changed.
+
+    `final_content` blocks are normalized dicts ({"type","text"} for text) by the
+    time _finish runs (see _to_api_block). Salvage / max_iters / aborted exits may
+    pass a partial or empty list — those return "" gracefully (no text block, or
+    the agent never wrote a summary). Only the LAST text block is taken: any
+    earlier interstitial text the agent emitted while working is not the summary.
+    """
+    last = ""
+    for block in final_content or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            last = block.get("text", "") or ""
+    return last.strip()
+
+
 def _finish(
     usage: RunUsage,
     status: str,
@@ -1229,7 +1251,17 @@ def _finish(
     # aborted / error) in one place. awaiting_clarification is a pause, not a
     # terminal — the stream stays open while the user composes an answer.
     if prototype_id is not None and status != "awaiting_clarification":
-        _sse_close(prototype_id, kind="done" if status == "complete" else "error")
+        if status == "complete":
+            # done sentinel carries the agent's own 1-2 sentence change summary
+            # (last text block of THIS run's final_content) when present. Only the
+            # complete/done path surfaces text; error sentinels stay shape-stable.
+            _sse_close(
+                prototype_id,
+                kind="done",
+                summary=_final_text_summary(final_content),
+            )
+        else:
+            _sse_close(prototype_id, kind="error")
     duration_ms = int((time.perf_counter() - start) * 1000)
     return RunResult(
         status=status,

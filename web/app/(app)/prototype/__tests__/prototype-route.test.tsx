@@ -20,10 +20,10 @@ import {
   figmaKeyForPrototype,
   buildGatedOnClose,
   prototypeTabState,
-  needsSupplementalPrd,
-  pickPrdFields,
   fsParamToFullscreen,
   actionForActiveProto,
+  resolvePrdTitle,
+  needsTitleFetch,
 } from "../PrototypeRoute"
 import type { PrototypeRecord } from "../../../lib/api"
 
@@ -215,63 +215,67 @@ describe("prototype route — figma source resolver (figmaKeyForPrototype)", () 
   })
 })
 
-describe("prototype route — supplemental PRD fetch gate (needsSupplementalPrd)", () => {
-  // Case (a): cold load — ContentContext.prd is null, so prd_id is undefined and
-  // sectionsLength is 0 → contentMatches is false → fetch should fire.
-  it("returns true on cold load (no content prd at all)", () => {
-    expect(needsSupplementalPrd(42, undefined, 0, null)).toBe(true)
-    expect(needsSupplementalPrd(42, null, 0, null)).toBe(true)
+// The supplemental PRD *panel* fetch + panel-field picker were removed: the in-tab
+// canvas no longer renders a PRD panel (the left column is a live-only conversation
+// thread). Only the PRD TITLE survives — sourced from ContentContext when it holds
+// the matching PRD, else from a minimal title-only supplemental fetch so the
+// breadcrumb/titlebar show the real title on direct-nav / refresh (when
+// ContentContext is empty). The two pure helpers below pin that contract.
+
+describe("prototype route — title resolution (resolvePrdTitle)", () => {
+  // Navigation-from-within-app: ContentContext holds the matching PRD → use it.
+  it("prefers the ContentContext title when present (in-app nav path)", () => {
+    expect(resolvePrdTitle(185, "Checkout Redesign", null, null)).toBe("Checkout Redesign")
+    // content title wins even if a (stale) fetched title is also present
+    expect(resolvePrdTitle(185, "Checkout Redesign", 185, "Old Title")).toBe("Checkout Redesign")
   })
 
-  // Case (b): client-nav with stale/partial prd — prd_id matches but sections is
-  // empty (ContentContext zero-value). The old guard skipped the fetch here;
-  // the new gate must NOT skip it.
-  it("returns true when prd_id matches but sections is empty (stale prd, post-generation nav)", () => {
-    expect(needsSupplementalPrd(42, 42, 0, null)).toBe(true)
+  // Direct-nav / refresh: ContentContext empty (contentTitle null) → the minimal
+  // supplemental fetch populated `fetchedTitle` for THIS prd_id → use it. This is
+  // the regression: previously this returned null → titlebar showed "Untitled".
+  it("falls back to the fetched title on direct-nav when content is empty", () => {
+    expect(resolvePrdTitle(185, null, 185, "Checkout Redesign")).toBe("Checkout Redesign")
   })
 
-  // Case (c): ContentContext genuinely has sections for this prd → skip the fetch.
-  it("returns false when ContentContext holds a non-empty sections array for this prd", () => {
-    expect(needsSupplementalPrd(42, 42, 3, null)).toBe(false)
+  // Before the fetch resolves (or it failed) there is no title anywhere → null
+  // (the titlebar renders its own "Untitled prototype" fallback).
+  it("returns null when neither content nor a matching fetch supplies a title", () => {
+    expect(resolvePrdTitle(185, null, null, null)).toBeNull()
+    expect(resolvePrdTitle(null, null, null, null)).toBeNull()
   })
 
-  // Case (d): already fetched this prd in this mount → no redundant re-fetch.
-  it("returns false when the prd was already fetched (loadedPrdId matches)", () => {
-    expect(needsSupplementalPrd(42, undefined, 0, 42)).toBe(false)
-    expect(needsSupplementalPrd(42, null, 0, 42)).toBe(false)
-  })
-
-  // No protoPrdId → nothing to fetch.
-  it("returns false when protoPrdId is null", () => {
-    expect(needsSupplementalPrd(null, undefined, 0, null)).toBe(false)
-  })
-
-  // Different prd_id in ContentContext + not yet loaded → fetch needed.
-  it("returns true when ContentContext has a DIFFERENT prd loaded", () => {
-    expect(needsSupplementalPrd(42, 7, 5, null)).toBe(true)
+  // The fetched title is only trusted for the prd_id it was fetched for — a title
+  // left over from a prior prototype's prd_id must NOT leak onto a different id.
+  it("does not leak a fetched title from a DIFFERENT prd_id", () => {
+    expect(resolvePrdTitle(185, null, 7, "Other PRD")).toBeNull()
   })
 })
 
-describe("prototype route — panel field picker (pickPrdFields)", () => {
-  const contentSections = [{ id: "s1" }] as unknown as import("../../../types/content").PrdSection[]
-  const urlSections = [{ id: "s2" }] as unknown as import("../../../types/content").PrdSection[]
-
-  it("picks ContentContext values when contentMatches is true", () => {
-    const result = pickPrdFields(true, contentSections, urlSections, "content title", "url title")
-    expect(result.sections).toBe(contentSections)
-    expect(result.title).toBe("content title")
+describe("prototype route — title fetch guard (needsTitleFetch)", () => {
+  // Direct-nav: prd_id present, content empty, nothing fetched yet → fetch.
+  it("fetches on direct-nav when content lacks the title and nothing fetched yet", () => {
+    expect(needsTitleFetch(185, null, null)).toBe(true)
   })
 
-  it("picks supplemental-fetched values when contentMatches is false", () => {
-    const result = pickPrdFields(false, contentSections, urlSections, "content title", "url title")
-    expect(result.sections).toBe(urlSections)
-    expect(result.title).toBe("url title")
+  // In-app nav: ContentContext already supplies the title → no fetch.
+  it("does NOT fetch when ContentContext already supplies the title", () => {
+    expect(needsTitleFetch(185, "Checkout Redesign", null)).toBe(false)
   })
 
-  it("falls back to undefined urlSections when contentMatches is false and no fetch yet", () => {
-    const result = pickPrdFields(false, [] as unknown as import("../../../types/content").PrdSection[], undefined, null, null)
-    expect(result.sections).toBeUndefined()
-    expect(result.title).toBeNull()
+  // Idempotency: once this prd_id's title has been fetched, don't refetch on
+  // subsequent renders (the guard prevents a refetch loop).
+  it("does NOT refetch once this prd_id's title is already fetched", () => {
+    expect(needsTitleFetch(185, null, 185)).toBe(false)
+  })
+
+  // A fetch for a DIFFERENT prd_id does not satisfy the current id → fetch.
+  it("fetches when only a different prd_id's title was previously fetched", () => {
+    expect(needsTitleFetch(185, null, 7)).toBe(true)
+  })
+
+  // No prd_id at all → nothing to fetch.
+  it("does NOT fetch when there is no prd_id", () => {
+    expect(needsTitleFetch(null, null, null)).toBe(false)
   })
 })
 

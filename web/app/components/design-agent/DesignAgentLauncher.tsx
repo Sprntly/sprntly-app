@@ -30,7 +30,6 @@ import { IterateComposer } from "./IterateComposer"
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
 import { PrototypePreviewCard } from "./PrototypePreviewCard"
 import { designAgentApi, type CommentRecord, type PrototypeRecord } from "../../lib/api"
-import type { PrdSection } from "../../types/content"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
@@ -40,17 +39,10 @@ export type DesignAgentLauncherProps = {
   prdId: number
   figmaFileKey?: string | null
   /** PRD title, threaded from PrdScreen → PrdSections so the preview card + the
-   *  canvas breadcrumb can label the PRD. Optional so existing callers keep
-   *  type-checking. */
+   *  canvas breadcrumb / left-column header can label the PRD. Optional so
+   *  existing callers keep type-checking. The PRD content panel was removed from
+   *  the canvas (live-only conversation thread); only the title survives. */
   prdTitle?: string | null
-  /** Full PRD section list, threaded from PrdScreen → PrdSections so the
-   *  condensed PRD panel in the canvas left sidebar can render the
-   *  Problem/Fix/Impact triptych. When absent the sidebar shows the empty-state.
-   *  Optional so non-PRD callers keep type-checking. */
-  prdSections?: PrdSection[]
-  /** PRD one-line meta, threaded alongside prdSections so the condensed panel
-   *  can display the subtitle. Optional so non-PRD callers keep type-checking. */
-  prdMetaLine?: string | null
   /** When set from outside (e.g. notify-mode generation kicked off by
    *  ApproveModal), shows PrototypeGeneratingCard without requiring the
    *  launcher's own drawer flow to have kicked off. */
@@ -298,8 +290,6 @@ export function DesignAgentLauncherView({
   onShared,
   existing = null,
   prdTitle = null,
-  prdSections,
-  prdMetaLine = null,
   onOpenExisting,
   onDeleteExisting,
   renderDrawer = defaultRenderDrawer,
@@ -364,15 +354,13 @@ export function DesignAgentLauncherView({
           `iterate` slot (the left region of the 3-region canvas layout), and
           CommentsPanel in its `comments` slot (the right region). The
           PrototypeViewer + thin toolbar occupy the center region. PRD sections
-          and meta are now threaded on this path so the condensed PRD context
-          panel renders in the left sidebar. */}
+          The left column is a live-only conversation thread; the PRD title is
+          threaded for the breadcrumb / left-column header. */}
       {result && (
         <PostGenerationResult
           key={result.id}
           prototype={result}
           prdTitle={prdTitle}
-          prdSections={prdSections}
-          prdMetaLine={prdMetaLine}
           comments={
             result.share_token ? (
               <CommentsPanel
