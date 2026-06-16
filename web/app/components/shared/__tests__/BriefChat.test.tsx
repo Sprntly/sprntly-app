@@ -402,3 +402,14 @@ describe("BriefChat finding card — real chart from the insight (Task B)", () =
     expect(barTitles.some((t) => t?.includes("41"))).toBe(true)
   })
 })
+
+describe("BriefChat composer chips — gated on the PRD rail being open", () => {
+  it("hides the 'Create ticket' chip until the PRD rail is open (no hanging button)", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    // The brief has findings (the chip stack would otherwise render), but the
+    // PRD content panel is closed by default, so "Create ticket" must be absent.
+    expect(screen.queryByRole("button", { name: /create ticket/i })).toBeNull()
+  })
+})

@@ -85,6 +85,7 @@ export function ChatScreen() {
     setPendingOndemandDraft,
     showToast,
     openContentPanel,
+    contentPanelTab,
   } = useNavigation()
   const router = useRouter()
   const auth = useAuth()
@@ -1036,8 +1037,9 @@ export function ChatScreen() {
 
             {hasThread ? (
               <div className="bc-dock">
-                {/* Floating suggest chips — shown when the last turn has a reply */}
-                {thread.length > 0 && thread[thread.length - 1].reply && !busy ? (
+                {/* Floating "Create ticket" chip — only when the PRD rail is open
+                    (it generates tickets from that PRD), else it's a hanging button. */}
+                {thread.length > 0 && thread[thread.length - 1].reply && !busy && contentPanelTab === "prd" ? (
                   <div className="bc-suggest">
                     <div className="bc-suggest-list">
                       <button
