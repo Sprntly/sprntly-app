@@ -177,6 +177,12 @@ describe("PRD always opens the right rail — composer command path", () => {
       expect(done?.prdGenerating).toBe(false)
     })
     expect(runPrdGeneration).toHaveBeenCalled()
+
+    // No chat turn: PRD generation is a command — the PRD lives in the rail, so
+    // the old "PRD draft ready" agent turn (and its action buttons) must NOT be
+    // appended to the chat.
+    expect(screen.queryByText(/PRD draft ready/i)).toBeNull()
+    expect(screen.queryByText(/Drafted the PRD from/i)).toBeNull()
   })
 })
 
