@@ -22,7 +22,7 @@ import {
 
 type Step = "name" | "upload" | "generate" | "ready"
 
-const SUPPORTED_EXT = [".docx", ".xlsx", ".pdf", ".txt", ".md"]
+const SUPPORTED_EXT = [".doc", ".docx", ".xlsx", ".pdf", ".txt", ".md"]
 
 export default function OnboardPage() {
   const auth = useAuth()
@@ -254,7 +254,7 @@ export default function OnboardPage() {
           <div>
             <h1 className="title">Upload data sources</h1>
             <p className="blurb">
-              Accepted: <code>.docx</code>, <code>.xlsx</code>, <code>.pdf</code>, <code>.txt</code>, <code>.md</code>. 20 MB per file.
+              Accepted: <code>.doc</code>, <code>.docx</code>, <code>.xlsx</code>, <code>.pdf</code>, <code>.txt</code>, <code>.md</code>. 20 MB per file.
               Sprntly will convert each to markdown for the LLM.
             </p>
             <label className="dropzone">

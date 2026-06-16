@@ -21,7 +21,7 @@ import {
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 
-const SUPPORTED_EXT = [".docx", ".xlsx", ".csv", ".pdf", ".txt", ".md", ".zip"]
+const SUPPORTED_EXT = [".doc", ".docx", ".xlsx", ".csv", ".pdf", ".txt", ".md", ".zip"]
 
 export function SourcesScreen() {
   const { activeCompany } = useCompany()
@@ -282,7 +282,7 @@ export function SourcesScreen() {
         <span>
           {uploading
             ? "Uploading…"
-            : "Click to choose files or drag-and-drop (.docx, .xlsx, .csv, .pdf, .txt, .md, or a .zip containing any files)"}
+            : "Click to choose files or drag-and-drop (.doc, .docx, .xlsx, .csv, .pdf, .txt, .md, or a .zip containing any files)"}
         </span>
       </label>
 
