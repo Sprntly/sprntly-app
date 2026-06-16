@@ -287,7 +287,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     // Full card shows the mini chart, the body copy, and the action buttons.
     expect(card.querySelector(".fc-mc")).not.toBeNull()
     expect(within(card).queryByText(/Body copy for First-handoff/)).not.toBeNull()
-    expect(within(card).queryByText("View evidence")).not.toBeNull()
+    expect(within(card).queryByText("View prototype")).not.toBeNull()
 
     // Click the per-card Dismiss control.
     fireEvent.click(within(card).getByLabelText("Dismiss finding"))
@@ -298,7 +298,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     expect(within(dismissed).getByText(HERO.title)).not.toBeNull()
     expect(dismissed.querySelector(".fc-mc")).toBeNull()
     expect(within(dismissed).queryByText(/Body copy for First-handoff/)).toBeNull()
-    expect(within(dismissed).queryByText("View evidence")).toBeNull()
+    expect(within(dismissed).queryByText("View prototype")).toBeNull()
     // The restore affordance is shown.
     expect(within(dismissed).getByText(/click to restore/i)).not.toBeNull()
   })
@@ -318,7 +318,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     const restored = cardFor(HERO.title)
     expect(restored.className).not.toContain("fc--dismissed")
     expect(restored.querySelector(".fc-mc")).not.toBeNull()
-    expect(within(restored).queryByText("View evidence")).not.toBeNull()
+    expect(within(restored).queryByText("View prototype")).not.toBeNull()
   })
 
   it("test_dismiss_is_per_card: dismissing one finding leaves the other untouched", async () => {
@@ -332,7 +332,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     // The supporting card is unaffected — still a full card.
     const other = cardFor(SUPPORTING.title)
     expect(other.className).not.toContain("fc--dismissed")
-    expect(within(other).queryByText("View evidence")).not.toBeNull()
+    expect(within(other).queryByText("View prototype")).not.toBeNull()
   })
 
   it("test_dismiss_persists_to_localstorage_across_remount: a dismissal survives a fresh mount", async () => {

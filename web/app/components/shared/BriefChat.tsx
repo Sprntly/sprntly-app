@@ -217,15 +217,6 @@ function IconTicket({ size = 14 }: { size?: number }) {
     </svg>
   )
 }
-function IconSearch({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <circle cx="11" cy="11" r="7" />
-      <line x1="21" y1="21" x2="16.65" y2="16.65" />
-    </svg>
-  )
-}
-
 // ── Mini inline chart + prototype preview (reference card chrome) ─────────────
 // First signed number found in a string ("70% handoff threshold" → 70). Used
 // to place the dashed reference line on the same domain as the bars.
@@ -423,7 +414,6 @@ function BriefFindingCard({
   generating,
   dismissed,
   onAsk,
-  onViewEvidence,
   onGenerateAll,
   onViewPrd,
   onDismiss,
@@ -436,7 +426,6 @@ function BriefFindingCard({
   generating: boolean
   dismissed: boolean
   onAsk: () => void
-  onViewEvidence: () => void
   onGenerateAll: () => void
   onViewPrd: () => void
   onDismiss: () => void
@@ -585,10 +574,6 @@ function BriefFindingCard({
             <button type="button" className="fc-btn-secondary" onClick={onPreview}>
               <IconTerminalPrompt size={13} />
               View prototype
-            </button>
-            <button type="button" className="fc-btn-secondary" onClick={onViewEvidence}>
-              <IconSearch size={13} />
-              View evidence
             </button>
           </div>
         </div>
@@ -1128,29 +1113,6 @@ export function BriefChat() {
     [focusComposer],
   )
 
-  const cardViewEvidence = useCallback(
-    (finding: Finding) => {
-      const key = finding.detailKey
-      const detail = key ? content.briefDetails?.[key] : null
-      // Only update detail (and clear evidence) when switching to a DIFFERENT
-      // insight. When the user re-clicks the same insight's "View evidence",
-      // keep the already-loaded evidence so the panel shows it immediately
-      // instead of re-generating.
-      if (detail) {
-        const currentMeta = content.detail?.meta
-        const isSameInsight =
-          currentMeta &&
-          currentMeta.briefId === detail.meta?.briefId &&
-          currentMeta.insightIndex === detail.meta?.insightIndex
-        if (!isSameInsight) {
-          setContent({ detail, evidence: null })
-        }
-      }
-      openContentPanel("evidence")
-    },
-    [content.briefDetails, content.detail?.meta, openContentPanel, setContent],
-  )
-
   // Lightweight single-PRD generation. The card's visible "Generate PRD" button
   // runs the full multi-agent system (cardGenerateAll); this helper is the PRD
   // scaffold used by the prototype-preview flow's "no PRD yet → make one first"
@@ -1503,7 +1465,6 @@ export function BriefChat() {
                           generating={cardBusyKey === f.detailKey}
                           dismissed={!!f.detailKey && dismissed.has(f.detailKey)}
                           onAsk={() => cardAsk(f)}
-                          onViewEvidence={() => cardViewEvidence(f)}
                           onGenerateAll={() => cardGenerateAll(f)}
                           onViewPrd={() => cardViewPrd(f)}
                           onDismiss={() => cardDismiss(f)}
