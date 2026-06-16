@@ -1547,10 +1547,15 @@ export type ArtifactItem =
       type: "prototype"
       id: number
       title: string
-      status: string
+      // Lifecycle. Aggregation filters to generating|ready; failed/invalidated
+      // never arrive. (Widened to `string` is avoided — the surface keys UI off
+      // these two values; an unknown value falls through to the ready branch.)
+      status: "generating" | "ready"
       created_at: string
       source: { prd_id: number | null; prd_title: string }
       open: { prototype_id: number; prd_id: number | null }
+      is_complete: boolean
+      preview_image_url: string | null
     }
 
 export const artifactsApi = {

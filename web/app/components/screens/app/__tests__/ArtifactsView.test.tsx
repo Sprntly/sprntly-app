@@ -32,6 +32,8 @@ const PROTO: ArtifactItem = {
   created_at: new Date().toISOString(),
   source: { prd_id: 1, prd_title: "Handoff Threshold PRD" },
   open: { prototype_id: 2, prd_id: 1 },
+  is_complete: true,
+  preview_image_url: "https://cdn.example.com/proto-2.png",
 }
 const EVIDENCE: ArtifactItem = {
   type: "evidence",
@@ -118,6 +120,125 @@ describe("ArtifactsView — filtering (client-side by type)", () => {
     const html = markup({ filter: "evidence" })
     expect(html).toContain("Day-30 Retention Evidence")
     expect(html).not.toContain(">PRD<")
+  })
+})
+
+describe("ArtifactsView — prototype card states", () => {
+  const BUILDING: ArtifactItem = {
+    type: "prototype",
+    id: 4,
+    title: "Generating PRD",
+    status: "generating",
+    created_at: new Date().toISOString(),
+    source: { prd_id: 5, prd_title: "Generating PRD" },
+    open: { prototype_id: 4, prd_id: 5 },
+    is_complete: false,
+    preview_image_url: null,
+  }
+  const READY_COMPLETE: ArtifactItem = {
+    type: "prototype",
+    id: 6,
+    title: "Done PRD",
+    status: "ready",
+    created_at: new Date().toISOString(),
+    source: { prd_id: 7, prd_title: "Done PRD" },
+    open: { prototype_id: 6, prd_id: 7 },
+    is_complete: true,
+    preview_image_url: "https://cdn.example.com/proto-6.png",
+  }
+  const READY_DRAFT: ArtifactItem = {
+    type: "prototype",
+    id: 8,
+    title: "Draft PRD",
+    status: "ready",
+    created_at: new Date().toISOString(),
+    source: { prd_id: 9, prd_title: "Draft PRD" },
+    open: { prototype_id: 8, prd_id: 9 },
+    is_complete: false,
+    preview_image_url: "https://cdn.example.com/proto-8.png",
+  }
+  const READY_NO_PREVIEW: ArtifactItem = {
+    ...READY_COMPLETE,
+    id: 10,
+    open: { prototype_id: 10, prd_id: 7 },
+    preview_image_url: null,
+  }
+
+  it("(a) generating → 'Building' label + shimmer present + NOT clickable", () => {
+    const onOpen = vi.fn()
+    const { container } = render(
+      React.createElement(ArtifactsView, {
+        items: [BUILDING], filter: "all", loading: false, onFilterChange: noop, onOpen,
+      }),
+    )
+    const row = container.querySelector('[data-artifact-type="prototype"]') as HTMLDivElement
+    expect(row.textContent).toContain("Building")
+    expect(row.textContent).not.toContain("Completed")
+    // shimmer placeholder rendered over the image slot
+    expect(container.querySelector('[data-proto-thumb="building"]')).not.toBeNull()
+    expect(container.querySelector('[data-proto-shimmer]')).not.toBeNull()
+    // not clickable: marked non-clickable and clicking fires nothing
+    expect(row.getAttribute("data-clickable")).toBe("false")
+    expect(row.getAttribute("role")).toBeNull()
+    fireEvent.click(row)
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it("(b) ready + is_complete → 'Completed', clickable, real preview image", () => {
+    const onOpen = vi.fn()
+    const { container } = render(
+      React.createElement(ArtifactsView, {
+        items: [READY_COMPLETE], filter: "all", loading: false, onFilterChange: noop, onOpen,
+      }),
+    )
+    const row = container.querySelector('[data-artifact-type="prototype"]') as HTMLDivElement
+    expect(row.textContent).toContain("Completed")
+    expect(row.getAttribute("data-clickable")).toBe("true")
+    const img = container.querySelector('[data-proto-thumb="image"] img') as HTMLImageElement
+    expect(img).not.toBeNull()
+    expect(img.getAttribute("src")).toBe("https://cdn.example.com/proto-6.png")
+    fireEvent.click(row)
+    expect(onOpen).toHaveBeenCalledWith(READY_COMPLETE)
+  })
+
+  it("(c) ready + !is_complete → 'Draft', clickable", () => {
+    const onOpen = vi.fn()
+    const { container } = render(
+      React.createElement(ArtifactsView, {
+        items: [READY_DRAFT], filter: "all", loading: false, onFilterChange: noop, onOpen,
+      }),
+    )
+    const row = container.querySelector('[data-artifact-type="prototype"]') as HTMLDivElement
+    expect(row.textContent).toContain("Draft")
+    expect(row.getAttribute("data-clickable")).toBe("true")
+    fireEvent.click(row)
+    expect(onOpen).toHaveBeenCalledWith(READY_DRAFT)
+  })
+
+  it("(d) ready + null preview → SVG glyph fallback (no img)", () => {
+    const { container } = render(
+      React.createElement(ArtifactsView, {
+        items: [READY_NO_PREVIEW], filter: "all", loading: false, onFilterChange: noop, onOpen: noop,
+      }),
+    )
+    expect(container.querySelector('[data-proto-thumb="fallback"]')).not.toBeNull()
+    expect(container.querySelector('[data-proto-thumb="fallback"] svg')).not.toBeNull()
+    expect(container.querySelector('[data-proto-thumb="image"]')).toBeNull()
+  })
+
+  it("(e) ready + preview that fails to load → onError → SVG glyph fallback", () => {
+    const { container } = render(
+      React.createElement(ArtifactsView, {
+        items: [READY_COMPLETE], filter: "all", loading: false, onFilterChange: noop, onOpen: noop,
+      }),
+    )
+    const img = container.querySelector('[data-proto-thumb="image"] img') as HTMLImageElement
+    expect(img).not.toBeNull()
+    // Simulate the preview URL 404ing (the #354 broken-link case, not just null).
+    fireEvent.error(img)
+    expect(container.querySelector('[data-proto-thumb="image"]')).toBeNull()
+    expect(container.querySelector('[data-proto-thumb="fallback"]')).not.toBeNull()
+    expect(container.querySelector('[data-proto-thumb="fallback"] svg')).not.toBeNull()
   })
 })
 
