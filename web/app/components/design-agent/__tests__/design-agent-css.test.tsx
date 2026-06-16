@@ -185,10 +185,11 @@ describe("wrapper class on the three DA roots (AC2)", () => {
     expect(PUBLIC_VIEWER).toContain(
       'className="design-agent-surface da-public-error"',
     )
-    // main <PrototypeViewer> return wrapped in a design-agent-surface div
-    expect(PUBLIC_VIEWER).toMatch(
-      /<div className="design-agent-surface">\s*<PrototypeViewer/,
-    )
+    // main ready-state return: design-agent-surface wraps da-ready which wraps
+    // da-stage which wraps PrototypeViewer (collapsible sidebar layout).
+    expect(PUBLIC_VIEWER).toContain('className="design-agent-surface"')
+    expect(PUBLIC_VIEWER).toContain("da-ready")
+    expect(PUBLIC_VIEWER).toContain("<PrototypeViewer")
   })
 })
 
