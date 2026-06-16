@@ -101,16 +101,15 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
 
   it("shows 'Off' pill + 'Connect' action for an apikey-supported connector with no connection", () => {
     const html = render()
-    // Figma is currently apikey-only (PAT — the OAuth app is in Figma's review queue).
     // Both `oauth: true` and `authType: "apikey"` rows surface a Connect action.
     expect(html).toContain("Figma")
     expect(html).toContain("Connect")
   })
 
-  it("Figma row is routed to OAuth (re-flipped for Figma app-review resubmission, June 2026)", () => {
-    // Figma's review explicitly rejected the PAT-based public connect
-    // mechanism. Catalog flag flipped back to oauth:true; the PAT backend
-    // route stays alive for grandfathered tokens but no UI exposes it.
+  it("Figma row is routed to OAuth (PAT path fully removed for Figma app-review)", () => {
+    // Figma's review rejected the PAT-based connect mechanism. The PAT path is
+    // now removed entirely (no figma_pat module, no /figma/pat route); Figma is
+    // OAuth-only — oauth:true and no authType.
     const figma = CONNECTOR_CATALOG.flatMap((c) => c.items).find(
       (i) => i.id === "figma",
     )

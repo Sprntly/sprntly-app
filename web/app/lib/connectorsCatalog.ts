@@ -98,11 +98,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: "PDF · DOCX · PNG · JPG",
     uploadExtensions: [".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg"],
     items: [
-      // Figma OAuth is the user-facing path. The PAT backend module
-      // (figma_pat.py + /v1/connectors/figma/pat route) is kept alive to
-      // grandfather any token written before the flip, but no UI exposes
-      // it — Figma's review explicitly required OAuth as the public connect
-      // mechanism (resubmission, June 2026).
+      // Figma is OAuth-only. The legacy PAT connect path was removed entirely
+      // (no figma_pat module, no /figma/pat route) — Figma's app review requires
+      // OAuth as the sole public connect mechanism.
       { id: "figma",  name: "Figma",  logo: "F", logoText: "F", logoColor: "#F24E1E", oauth: true },
       { id: "framer", name: "Framer", logo: "F", logoText: "F", logoColor: "#000000", oauth: false },
     ],

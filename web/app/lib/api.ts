@@ -662,13 +662,6 @@ export const connectorsApi = {
   disconnectFireflies: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
 
-  // ---- Figma Personal Access Token (PAT, stopgap while OAuth in review) ----
-  connectFigmaWithPat: (pat: string) =>
-    api.post<{ ok: true; provider: string; account_label: string }>(
-      `/v1/connectors/figma/pat`,
-      { pat },
-    ),
-
   // ---- Generic test-connection --------------------------------------------
   /**
    * Re-validate a stored connection by re-running the provider's
