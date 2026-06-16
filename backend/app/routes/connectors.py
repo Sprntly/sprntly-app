@@ -1534,8 +1534,64 @@ def slack_disconnect(
     row = db.get_slack_connection(company.company_id, company.user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
+    # Revoke the token on Slack's side first (best-effort), so the install is
+    # torn down for the workspace, not just deleted locally — Slack Marketplace
+    # expects a clean uninstall. A revoke failure must not block the local delete.
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        bot_token = token_json.get("access_token")
+        if bot_token:
+            slack_oauth.revoke_token(bot_token)
+    except Exception:  # noqa: BLE001 — never let revoke block the disconnect
+        logger.warning("Slack token revoke on disconnect failed", exc_info=True)
     db.delete_slack_connection(company.company_id, company.user_id)
     return {"deleted": True, "provider": slack_oauth.SLACK_PROVIDER}
+
+
+@router.post("/slack/events")
+async def slack_events(request: Request):
+    """Slack Events API webhook. Unauthenticated by design — Slack calls it
+    directly and the signing-secret request signature is the auth. Handles the
+    url_verification handshake, app_uninstalled (tear down the workspace's
+    connections — clean uninstall for Marketplace), and app_home_opened
+    (publish the App Home view). Always returns 200 fast so Slack won't retry."""
+    raw = await request.body()
+    ts = request.headers.get("X-Slack-Request-Timestamp", "")
+    sig = request.headers.get("X-Slack-Signature", "")
+    if not slack_oauth.verify_signature(ts, raw, sig):
+        raise HTTPException(401, "invalid Slack signature")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, "invalid JSON body") from e
+
+    if payload.get("type") == "url_verification":
+        return {"challenge": payload.get("challenge", "")}
+
+    if payload.get("type") == "event_callback":
+        event = payload.get("event") or {}
+        etype = event.get("type")
+        team_id = payload.get("team_id") or ""
+        if etype == "app_uninstalled":
+            for row in db.list_slack_connections_by_team(team_id):
+                try:
+                    db.delete_slack_connection(row["company_id"], row["user_id"])
+                except Exception:  # noqa: BLE001 — one failure shouldn't stop teardown
+                    logger.warning("app_uninstalled: delete failed for a conn", exc_info=True)
+            logger.info("slack app_uninstalled: team=%s torn down", team_id)
+        elif etype == "app_home_opened":
+            slack_user = event.get("user") or ""
+            conns = db.list_slack_connections_by_team(team_id)
+            if conns and slack_user:
+                try:
+                    token_json = json.loads(decrypt_token_json(conns[0]["token_json_encrypted"]))
+                    bot_token = token_json.get("access_token")
+                    if bot_token:
+                        slack_oauth.publish_app_home(bot_token, slack_user)
+                except Exception:  # noqa: BLE001 — best-effort App Home
+                    logger.warning("app_home_opened: publish failed", exc_info=True)
+
+    return {"ok": True}
 
 
 def _slack_bot_token(company_id: str, user_id: str) -> tuple[str, dict]:

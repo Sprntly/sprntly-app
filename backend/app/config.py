@@ -124,6 +124,10 @@ class Settings(BaseSettings):
         "groups:read,groups:history,users:read"
     )
     slack_bot_scopes: str = "chat:write,channels:read"
+    # Signing secret (Slack app → Basic Information → App Credentials). Required
+    # to verify the request signature on the Events API endpoint (app_uninstalled
+    # + app_home_opened). Empty → the events endpoint rejects all requests.
+    slack_signing_secret: str = ""
 
     # Transactional email (Resend) — used for brief notifications + future
     # system mail. Sends via the Resend HTTPS API (api.resend.com), keyed by

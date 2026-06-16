@@ -271,6 +271,23 @@ def list_slack_connections(company_id: str) -> list[dict]:
     return [_to_legacy_shape(r) for r in (resp.data or [])]
 
 
+def list_slack_connections_by_team(team_id: str) -> list[dict]:
+    """All Slack connections (ACROSS companies) for a Slack workspace/team id.
+    The app_uninstalled event is workspace-scoped, not company-scoped, so this
+    isn't keyed by company. Matched on the stored config.team.id (filtered in
+    Python — the set of Slack connections is small)."""
+    if not team_id:
+        return []
+    c = require_client()
+    resp = c.table("connections").select("*").eq("provider", SLACK_PROVIDER).execute()
+    out: list[dict] = []
+    for r in (resp.data or []):
+        cfg = r.get("config") or {}
+        if isinstance(cfg, dict) and (cfg.get("team") or {}).get("id") == team_id:
+            out.append(_to_legacy_shape(r))
+    return out
+
+
 def upsert_slack_connection(
     *,
     company_id: str,

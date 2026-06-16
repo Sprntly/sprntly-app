@@ -45,6 +45,7 @@ def slack_env(isolated_settings, monkeypatch):
         "http://testserver/v1/connectors/slack/callback",
     )
     monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000")
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "test-signing-secret")
     _reload_app_modules()
     yield
 
@@ -545,3 +546,70 @@ def test_test_endpoint_dispatches_to_team_info(slack_env, monkeypatch):
     assert r.status_code == 200
     assert "Meridian" in r.json()["account_label"]
     mock_fetch.assert_called_once_with("xoxb-real")
+
+
+# ───────────── Events API: signature verification, revoke, App Home ─────────────
+
+
+def _sign(secret: str, ts: str, body: bytes) -> str:
+    import hashlib
+    import hmac
+    base = b"v0:" + ts.encode() + b":" + body
+    return "v0=" + hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
+
+
+def test_verify_signature_round_trip(slack_env):
+    import time as _t
+    from app.connectors import slack_oauth
+    ts = str(int(_t.time()))
+    body = b'{"type":"url_verification","challenge":"abc"}'
+    sig = _sign("test-signing-secret", ts, body)
+    assert slack_oauth.verify_signature(ts, body, sig) is True
+    # Tampered body → reject.
+    assert slack_oauth.verify_signature(ts, body + b"x", sig) is False
+    # Stale timestamp (>5 min) → reject (replay guard).
+    old = str(int(_t.time()) - 6 * 60)
+    assert slack_oauth.verify_signature(old, body, _sign("test-signing-secret", old, body)) is False
+
+
+def test_revoke_token_calls_auth_revoke(slack_env):
+    from app.connectors import slack_oauth
+    with patch("app.connectors.slack_oauth.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(ok=True, json=lambda: {"ok": True})
+        assert slack_oauth.revoke_token("xoxb-x") is True
+        assert mock_post.call_args[0][0] == slack_oauth.SLACK_AUTH_REVOKE_URL
+
+
+def test_app_home_view_is_home_with_blocks(slack_env):
+    from app.connectors import slack_oauth
+    view = slack_oauth.app_home_view()
+    assert view["type"] == "home"
+    assert len(view["blocks"]) > 0
+
+
+def test_slack_events_url_verification_with_valid_signature(slack_env, monkeypatch):
+    import time as _t
+    ctx = company_client(monkeypatch)
+    body = b'{"type":"url_verification","challenge":"ch-123"}'
+    ts = str(int(_t.time()))
+    headers = {
+        "X-Slack-Request-Timestamp": ts,
+        "X-Slack-Signature": _sign("test-signing-secret", ts, body),
+        "Content-Type": "application/json",
+    }
+    r = ctx.client.post("/v1/connectors/slack/events", content=body, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["challenge"] == "ch-123"
+
+
+def test_slack_events_rejects_bad_signature(slack_env, monkeypatch):
+    import time as _t
+    ctx = company_client(monkeypatch)
+    body = b'{"type":"url_verification","challenge":"x"}'
+    headers = {
+        "X-Slack-Request-Timestamp": str(int(_t.time())),
+        "X-Slack-Signature": "v0=deadbeef",
+        "Content-Type": "application/json",
+    }
+    r = ctx.client.post("/v1/connectors/slack/events", content=body, headers=headers)
+    assert r.status_code == 401
