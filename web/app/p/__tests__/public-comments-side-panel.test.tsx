@@ -1,4 +1,4 @@
-// Wave-2 #4: Anonymous commenting via collapsible right-side panel
+// Anonymous commenting via the collapsible right-side panel on the public view
 // Tests the by-token path (list + create), resolve suppression, name capture,
 // and the trap (comments created via by-token must be LISTED via by-token, not
 // the authed path — if they were, the create would succeed but the panel would

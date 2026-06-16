@@ -208,11 +208,10 @@ export function PublicTokenViewer() {
               </>
             }
             chrome={
-              /* F13 manual edit (P4-01) is INTERNAL-ONLY: it renders its toggle only
-                 when a prototypeId is supplied. The public resolver is minimum-
-                 disclosure and exposes no prototypeId / signed-in primitive on this
-                 surface, so the overlay mounts with prototypeId undefined → renders
-                 nothing (AC10, non-breaking). */
+              /* The manual-edit overlay renders its toggle only when a prototypeId
+                 is supplied. The public token view is minimum-disclosure and exposes
+                 no prototypeId on this surface, so the overlay mounts with prototypeId
+                 undefined and renders nothing here (non-breaking). */
               <ManualEditOverlay isComplete={state.isComplete} />
             }
           />
