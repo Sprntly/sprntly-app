@@ -76,6 +76,53 @@ def _fake_repair_run(*, writes=None, cost_usd=0.02):
     return _run, state
 
 
+# A CSS source whose `@apply` names a utility class. Two flavours: a real shadcn
+# token that genuinely is not in the project's tailwind config, and a class the
+# model simply invented. Both surface from `vite build` as a ViteBuildError whose
+# headline leads with the offending class name (the headline-preserving change).
+_APPLY_INDEX_CSS = (
+    "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n"
+    ".card { @apply border-border bg-card; }\n"
+)
+_APPLY_REAL_TOKEN_MSG = (
+    "The `border-border` class does not exist. If `border-border` is a custom class, "
+    "make sure it is defined within a `@layer` directive."
+)
+_APPLY_INVENTED_TOKEN_MSG = (
+    "The `border-hairline` class does not exist. If `border-hairline` is a custom "
+    "class, make sure it is defined within a `@layer` directive."
+)
+_ROLLUP_UNRESOLVED_MSG = (
+    'Could not resolve "./components/Header" from "src/App.tsx"'
+)
+
+
+def _stateful_vite_build_error(*, headline, fixed_key, dist=None):
+    """vite_build replacement: raise ViteBuildError(headline) UNTIL `fixed_key`
+    appears in the vfs (the agent's fix), then return a dist. Records calls."""
+    state = {"calls": 0}
+
+    async def _build(virtual_fs):
+        state["calls"] += 1
+        if fixed_key not in virtual_fs:
+            raise ViteBuildError(headline)
+        return dict(dist or {"index.html": "<html>built</html>"})
+
+    return _build, state
+
+
+def _always_vite_build_error(headline):
+    """vite_build replacement that ALWAYS raises ViteBuildError(headline) — used to
+    exercise the exhaustion → honest-fail path for the generic build-error class."""
+    state = {"calls": 0}
+
+    async def _build(virtual_fs):
+        state["calls"] += 1
+        raise ViteBuildError(headline)
+
+    return _build, state
+
+
 # ─── Route hook — fake Supabase DB (duplicated per-file convention) ───────────
 
 _PROTOTYPE_DDL = """
@@ -294,14 +341,15 @@ async def test_clean_build_runs_zero_repairs(env, monkeypatch):
     assert repair_state["calls"] == 0
 
 
-async def test_non_typecheck_failure_still_fails_without_repair(env, monkeypatch):
-    """AC6 regression: a non-typecheck build failure (e.g. a syntax error vite's own
-    repair can't fix) still fails the row immediately — the typecheck-repair loop is
-    never entered."""
+async def test_generic_build_failure_enters_repair_then_honest_fails(env, monkeypatch):
+    """A generic build failure (e.g. a syntax error vite's own repair can't fix) now
+    enters the agent-driven repair loop — it is no longer straight-to-fail. When the
+    agent cannot fix it across the bounded re-tries, the row honest-fails with the
+    real ViteBuildError class (strip-to-green is NOT applied for this class)."""
     async def _syntax_error(virtual_fs):
         raise ViteBuildError("vite build exit=1: Unexpected token")
 
-    repair, repair_state = _fake_repair_run()
+    repair, repair_state = _fake_repair_run(writes=None)   # agent never fixes it
     monkeypatch.setattr(storage, "vite_build", _syntax_error)
     monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
     _wire_staging(env, monkeypatch)
@@ -313,8 +361,9 @@ async def test_non_typecheck_failure_still_fails_without_repair(env, monkeypatch
     )
     row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
     assert row["status"] == "failed"
-    assert repair_state["calls"] == 0
+    assert repair_state["calls"] == env.routes._BUILD_REPAIR_MAX_ITERS  # repair WAS attempted
     assert "ViteBuildError" in (row["error"] or "")
+    assert "TypeCheckRepairExhausted" not in (row["error"] or "")
 
 
 async def test_typecheck_error_without_system_blocks_fails_precisely(env, monkeypatch):
@@ -365,6 +414,100 @@ async def test_repair_progress_is_generic_label_only(env, monkeypatch):
     for text in texts:
         assert "TS2304" not in text
         assert "Cannot find name" not in text
+
+
+# ─── Generic vite-build repair (CSS @apply, rollup unresolved import) ─────────
+
+
+@pytest.mark.parametrize(
+    "headline, offending",
+    [
+        (_APPLY_REAL_TOKEN_MSG, "border-border"),     # real shadcn token, not in config
+        (_APPLY_INVENTED_TOKEN_MSG, "border-hairline"),  # a class the model invented
+    ],
+)
+async def test_apply_build_error_repairs_then_completes(env, monkeypatch, headline, offending):
+    """A first build raising a ViteBuildError with an `@apply <unknown>` headline
+    routes into the SAME agent-driven repair loop type errors use — not straight to
+    fail. The agent re-entry rewrites the CSS; the next rebuild is green → 'ready'.
+    The offending class name is fed into the re-entry (proves the headline is fed
+    back), for both a real-but-undefined token and an invented one."""
+    build, _ = _stateful_vite_build_error(headline=headline, fixed_key="src/_fixed.css")
+    repair, repair_state = _fake_repair_run(writes={"src/_fixed.css": ".card{}"})
+    monkeypatch.setattr(storage, "vite_build", build)
+    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    _wire_staging(env, monkeypatch)
+
+    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    await env.routes._stage_complete_run(
+        prototype_id=pid, workspace_id="app",
+        virtual_fs={"src/App.tsx": _ORPHAN_APP_TSX, "src/index.css": _APPLY_INDEX_CSS},
+        system_blocks=_SYS,
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "ready"                      # repaired, not failed
+    assert repair_state["calls"] >= 1                    # the agent was re-entered
+    assert repair_state["diagnostics"]                   # diagnostics threaded in
+    assert offending in repair_state["diagnostics"][0]   # the offending class reached the agent
+
+
+async def test_rollup_unresolved_import_takes_repair_path(env, monkeypatch):
+    """A first build raising a ViteBuildError with a rollup `Could not resolve "..."`
+    headline takes the agent-repair re-entry path, not straight-to-fail. The agent
+    writes the missing module; the next rebuild is green → 'ready'."""
+    build, _ = _stateful_vite_build_error(
+        headline=_ROLLUP_UNRESOLVED_MSG, fixed_key="src/components/Header.tsx",
+    )
+    repair, repair_state = _fake_repair_run(
+        writes={"src/components/Header.tsx": "export default function Header(){return <div/>;}"},
+    )
+    monkeypatch.setattr(storage, "vite_build", build)
+    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    _wire_staging(env, monkeypatch)
+
+    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    await env.routes._stage_complete_run(
+        prototype_id=pid, workspace_id="app",
+        virtual_fs={"src/App.tsx": _ORPHAN_APP_TSX}, system_blocks=_SYS,
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "ready"
+    assert repair_state["calls"] >= 1
+    assert "Could not resolve" in repair_state["diagnostics"][0]
+
+
+async def test_persistent_vite_build_error_honest_fails_no_strip(env, monkeypatch, caplog):
+    """EXHAUSTION with a persistent generic ViteBuildError (every rebuild keeps
+    raising the `@apply <unknown>` error) → HONEST FAIL: the row fails, the residual
+    is a ViteBuildError (NOT TypeCheckRepairExhausted, so strip-to-green was NOT
+    applied for this class), and the loop logs the honest-fail action."""
+    build, build_state = _always_vite_build_error(_APPLY_INVENTED_TOKEN_MSG)
+    repair, repair_state = _fake_repair_run(writes=None)   # agent never fixes it
+    monkeypatch.setattr(storage, "vite_build", build)
+    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    _wire_staging(env, monkeypatch)
+
+    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    with caplog.at_level(logging.INFO):
+        await env.routes._stage_complete_run(
+            prototype_id=pid, workspace_id="app",
+            virtual_fs={"src/App.tsx": _ORPHAN_APP_TSX, "src/index.css": _APPLY_INDEX_CSS},
+            system_blocks=_SYS,
+        )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    # Honest-fail surfaces the real ViteBuildError class, NOT the typecheck-strip class.
+    assert "ViteBuildError" in (row["error"] or "")
+    assert "TypeCheckRepairExhausted" not in (row["error"] or "")
+    assert repair_state["calls"] == env.routes._BUILD_REPAIR_MAX_ITERS
+    assert build_state["calls"] >= 1                      # the build actually ran
+    # The exhaustion branch logs honest_fail for the ViteBuildError class, and the
+    # strip-to-green action is NEVER logged for it (that path is typecheck-only).
+    msgs = [r.getMessage() for r in caplog.records]
+    honest = [m for m in msgs if m.startswith("build_repair_exhausted")]
+    assert honest and "action=honest_fail" in honest[0]
+    assert "ViteBuildError" in honest[0]
+    assert not any("action=strip_to_green" in m for m in msgs)
 
 
 # ─── Runner-level egress seam: fake Anthropic client (copied for self-containment) ──
@@ -478,6 +621,23 @@ def test_render_repair_user_embeds_diagnostics():
     rendered = _render_typecheck_repair_user(diagnostics)
     assert diagnostics in rendered
     assert diagnostics not in FINISHING_LABEL
+
+
+def test_render_repair_user_has_apply_hint_without_hardcoded_class():
+    """The repair prompt is build-error general (not type-only) and carries a concise
+    `@apply` hint — without hardcoding any specific utility class name."""
+    from app.design_agent.runner import _render_typecheck_repair_user
+
+    # Diagnostics deliberately free of any utility token, so the only place a token
+    # could appear is the prompt's static text — which must hardcode none.
+    rendered = _render_typecheck_repair_user("build failed")
+    # Reads as a build error, with the @apply guidance present.
+    assert "build error" in rendered.lower() or "build" in rendered.lower()
+    assert "@apply" in rendered
+    assert "never invent utility names" in rendered
+    # No specific shadcn/invented token is baked into the prompt text itself.
+    for token in ("border-border", "border-hairline", "bg-card"):
+        assert token not in rendered
 
 
 def test_nudge_both_branches_lead_with_cleanup():

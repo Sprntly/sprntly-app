@@ -1502,16 +1502,22 @@ async def generate_prototype(
 
 def _render_typecheck_repair_user(diagnostics: str) -> str:
     """Build the user turn for a repair re-entry. Plain English; the diagnostics
-    are the build's own message (real file and symbol names), never internal IDs."""
+    are the build's own message (real file, symbol, and class names), never
+    internal IDs. Covers both runtime-breaking type errors and generic build
+    errors (e.g. a CSS `@apply` of a utility class that does not exist)."""
     return (
-        "The prototype was built, but it will not run yet. The compiler found "
-        "references to things that do not exist:\n\n"
+        "The prototype was built, but the build did not succeed. The compiler "
+        "reported this build error / diagnostic:\n\n"
         f"{diagnostics}\n\n"
-        "Fix this so the app runs. For each problem, either write the missing file "
-        "or, if the reference is left over and no longer needed, remove the import "
-        "that points at it. Prefer writing the missing screen so the flow stays "
-        "complete. Make the smallest set of changes that resolves every problem, "
-        "then end your turn with a one-sentence summary. Do not start unrelated work."
+        "Fix this so the app builds and runs. For a reference to something that "
+        "does not exist, either write the missing file or, if the reference is left "
+        "over and no longer needed, remove the import that points at it — prefer "
+        "writing the missing screen so the flow stays complete. If the error says an "
+        "`@apply` utility class does not exist, that utility is not defined in the "
+        "project's tailwind config — remove the `@apply` of that class or replace it "
+        "with the equivalent raw CSS; never invent utility names. Make the smallest "
+        "set of changes that resolves every problem, then end your turn with a "
+        "one-sentence summary. Do not start unrelated work."
     )
 
 
