@@ -1695,71 +1695,9 @@ def _slack_user_token(company_id: str, user_id: str) -> tuple[str, dict]:
     return user_token, row
 
 
-class SlackBotTokenIn(BaseModel):
-    api_key: str
-
-    def model_post_init(self, _context) -> None:
-        if not self.api_key or not self.api_key.strip():
-            raise ValueError("api_key cannot be empty")
-
-
-@router.post("/slack/apikey")
-def slack_connect_bot_token(
-    body: SlackBotTokenIn,
-    company: CompanyContext = Depends(require_company),
-):
-    """Connect Slack using a Bot User OAuth Token (xoxb-...).
-
-    Alternative to the full OAuth flow — useful when the Slack app is not
-    distributed. The user copies the token from api.slack.com/apps →
-    Install App → Bot User OAuth Token.
-
-    Per-user + company-scoped: the token is stored under the current
-    session user's own Slack connection (also fixes the prior
-    company-less upsert call).
-    """
-    token = body.api_key.strip()
-    auth_info = slack_oauth.fetch_auth_test(token)
-    if not auth_info:
-        raise HTTPException(
-            400,
-            "Slack rejected this token — verify the Bot User OAuth Token "
-            "at api.slack.com/apps → Install App.",
-        )
-
-    label = (
-        auth_info.get("user")
-        or auth_info.get("team")
-        or "Slack workspace"
-    )
-
-    payload = json.dumps({
-        "access_token": token,
-        "token_type": "bot",
-        "team_id": auth_info.get("team_id"),
-        "team_name": auth_info.get("team"),
-        "bot_user_id": auth_info.get("user_id"),
-        "obtained_at": int(__import__("time").time()),
-    })
-
-    try:
-        token_encrypted = encrypt_token_json(payload)
-    except TokenEncryptionError as e:
-        raise HTTPException(500, str(e)) from e
-
-    db.upsert_slack_connection(
-        company_id=company.company_id,
-        user_id=company.user_id,
-        token_encrypted=token_encrypted,
-        scopes=settings.slack_scopes.replace(",", " "),
-        account_label=label,
-        config_json=json.dumps({"auth_info": auth_info}) if auth_info else "{}",
-    )
-    return {
-        "ok": True,
-        "provider": slack_oauth.SLACK_PROVIDER,
-        "account_label": label,
-    }
+# Slack is OAuth-only. The legacy bot-token (xoxb-) paste connect path was
+# removed — Slack Marketplace requires OAuth install ("Add to Slack"), not a
+# pasted token, so no /slack/apikey endpoint exists for a reviewer to flag.
 
 
 @router.get("/slack/channels")

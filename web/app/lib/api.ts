@@ -658,11 +658,6 @@ export const connectorsApi = {
     }>("/v1/connectors/hubspot/sync-to-corpus", { dataset }),
 
   // ---- Slack ---------------------------------------------------------------
-  connectSlackWithBotToken: (apiKey: string) =>
-    api.post<{ ok: true; provider: string; account_label: string }>(
-      `/v1/connectors/slack/apikey`,
-      { api_key: apiKey },
-    ),
   disconnectSlack: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/slack`),
   listSlackChannels: () =>
