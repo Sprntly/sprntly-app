@@ -1,4 +1,5 @@
-"""Slack OAuth v2 helpers — bot install for posting notifications.
+"""Slack OAuth v2 helpers — two-way: bot install (send + bot reads) plus a
+user-token grant (read the authorizing user's own messages).
 
 Flow:
     1. Frontend hits POST /v1/connectors/slack/start-oauth
@@ -15,12 +16,14 @@ Message delivery:
 
 Slack v2 specifics worth knowing:
     - The exchange response separates bot creds from user creds:
-        access_token       — the bot token (xoxb-...)  ← what we store + post with
+        access_token       — the bot token (xoxb-...)  ← send + bot reads
         team               — {id, name}                ← shown as account_label
         bot_user_id        — the bot's own user id (handy for filtering messages)
-        authed_user.id     — the installing user's id
-      We only need the bot pieces for the notification-target use case;
-      we don't request user scopes.
+        authed_user.id     — the installing user's id  ← DM-the-user target
+        authed_user.access_token — the user token (xoxp-...), present only when
+                             user_scope was requested  ← read-as-user
+      We store both: the bot token for send + channel reads, and the user
+      token for reading the installing user's own DMs/channels/search.
     - Bot install requires the installing user to be a workspace admin
       (or for the workspace to allow non-admin installs). If your
       installer isn't an admin, Slack returns an error page; the
@@ -58,6 +61,9 @@ SLACK_CONVERSATIONS_URL = "https://slack.com/api/conversations.list"
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
 SLACK_AUTH_REVOKE_URL = "https://slack.com/api/auth.revoke"
+SLACK_CONVERSATIONS_OPEN_URL = "https://slack.com/api/conversations.open"
+SLACK_CONVERSATIONS_HISTORY_URL = "https://slack.com/api/conversations.history"
+SLACK_SEARCH_MESSAGES_URL = "https://slack.com/api/search.messages"
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
 # Channel-listing cap. Slack supports up to 1000 per page; 200 is a
@@ -73,20 +79,36 @@ def slack_configured() -> bool:
     )
 
 
-def authorize_url(state: str, scopes: str | None = None) -> str:
-    """Build the URL the user gets redirected to for the Slack consent screen."""
+def authorize_url(
+    state: str,
+    scopes: str | None = None,
+    user_scopes: str | None = None,
+) -> str:
+    """Build the URL the user gets redirected to for the Slack consent screen.
+
+    Slack v2: bot scopes ride on `scope=`, user scopes on `user_scope=`.
+    Requesting both in one install gives us a bot token (send + bot reads)
+    AND a user token (read the authorizing user's own messages). Pass
+    `user_scopes=""` to suppress the user-token grant (send-only install).
+    """
     if not slack_configured():
         raise HTTPException(500, "Slack OAuth is not configured on the server")
     from urllib.parse import urlencode
 
-    # Slack v2: bot scopes ride on `scope=`, optional user scopes on
-    # `user_scope=`. We only want bot scopes for the notification target.
     params = {
         "client_id": settings.slack_client_id,
         "scope": scopes or settings.slack_bot_scopes,
         "redirect_uri": settings.slack_oauth_redirect_uri,
         "state": state,
     }
+    # None ⇒ fall back to the configured default; "" ⇒ explicitly omit so no
+    # user token is issued. Only send `user_scope=` when non-empty (an empty
+    # param still flips Slack into requesting a user token).
+    user_scope = (
+        settings.slack_user_scopes if user_scopes is None else user_scopes
+    )
+    if user_scope:
+        params["user_scope"] = user_scope
     return f"{SLACK_AUTH_URL}?{urlencode(params)}"
 
 
@@ -300,12 +322,14 @@ def token_payload_to_store(token_json: dict[str, Any]) -> str:
     """Pack the parts of Slack's oauth.v2.access response that we actually
     need into a compact JSON blob for Fernet encryption.
 
-    Storing the whole response would also work, but it includes the
-    installing user's token (when user scopes are requested) plus other
-    pieces we'd rather not carry around. Bot token is what we post with;
-    bot_user_id is useful for filtering; team {id, name} backs the
-    account_label and the channel-picker UI."""
+    Bot token is what we send + read channels with; bot_user_id is useful
+    for filtering; team {id, name} backs the account_label and the
+    channel-picker UI; authed_user_id is the DM-the-user target. When user
+    scopes were granted, authed_user.access_token is the xoxp token we read
+    the installing user's own messages/search with — stored as
+    user_access_token (None when the install was bot-only)."""
     team = token_json.get("team") or {}
+    authed_user = token_json.get("authed_user") or {}
     payload = {
         "access_token": token_json.get("access_token"),
         "token_type": token_json.get("token_type", "bot"),
@@ -314,7 +338,11 @@ def token_payload_to_store(token_json: dict[str, Any]) -> str:
         "app_id": token_json.get("app_id"),
         "team_id": team.get("id"),
         "team_name": team.get("name"),
-        "authed_user_id": (token_json.get("authed_user") or {}).get("id"),
+        "authed_user_id": authed_user.get("id"),
+        # User token (xoxp-...) + its scopes — present only when user_scope
+        # was requested and granted. Absent ⇒ read-as-user is unavailable.
+        "user_access_token": authed_user.get("access_token"),
+        "user_scope": authed_user.get("scope") or "",
         "obtained_at": int(time.time()),
     }
     return json.dumps(payload)
@@ -369,6 +397,162 @@ def post_message(
             f"Slack rejected the message: {parsed.get('error') or 'unknown error'}",
         )
     return parsed
+
+
+def open_dm(bot_access_token: str, slack_user_id: str) -> str:
+    """Open (or fetch the existing) DM channel between the bot and a user and
+    return its channel id (e.g. "D0123456789").
+
+    This is the first half of "send the user a message": Slack won't let you
+    chat.postMessage to a user id directly — you post to the DM channel id
+    that conversations.open returns. Requires the `im:write` bot scope.
+
+    Raises HTTPException(400) on Slack-side rejection (ok:false), matching
+    post_message so callers surface a real error."""
+    resp = requests.post(
+        SLACK_CONVERSATIONS_OPEN_URL,
+        headers={
+            "Authorization": f"Bearer {bot_access_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json={"users": slack_user_id},
+        timeout=15,
+    )
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = resp.json() or {}
+    except ValueError:
+        parsed = {}
+    channel_id = ((parsed.get("channel") or {}).get("id")) if parsed else None
+    if not resp.ok or not parsed.get("ok") or not channel_id:
+        logger.warning(
+            "Slack conversations.open failed: http=%s ok=%s err=%s",
+            resp.status_code,
+            parsed.get("ok"),
+            parsed.get("error"),
+        )
+        raise HTTPException(
+            400,
+            f"Slack could not open a DM: {parsed.get('error') or 'unknown error'}",
+        )
+    return channel_id
+
+
+def post_dm_to_user(
+    bot_access_token: str,
+    *,
+    slack_user_id: str,
+    text: str,
+    blocks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Send a direct message to a specific Slack user as the Sprntly bot.
+
+    Convenience wrapper: opens the DM channel (conversations.open) then posts
+    to it (chat.postMessage). This realizes the "Sprntly DMs the user"
+    direction. Needs `im:write` + `chat:write` bot scopes."""
+    channel_id = open_dm(bot_access_token, slack_user_id)
+    return post_message(
+        bot_access_token, channel=channel_id, text=text, blocks=blocks
+    )
+
+
+def fetch_conversation_history(
+    access_token: str,
+    *,
+    channel: str,
+    limit: int = 100,
+    oldest: str | None = None,
+    latest: str | None = None,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Read messages from a channel/DM via conversations.history.
+
+    Works with either token: the bot token (xoxb) for channels/DMs the bot
+    is in, or the user token (xoxp) to read the authorizing user's own
+    conversations. `oldest`/`latest` are Slack ts bounds; `cursor` paginates.
+
+    Returns the trimmed shape {messages: [...], has_more, next_cursor}.
+    Raises HTTPException(400) on Slack-side rejection."""
+    params: dict[str, str] = {"channel": channel, "limit": str(limit)}
+    if oldest:
+        params["oldest"] = oldest
+    if latest:
+        params["latest"] = latest
+    if cursor:
+        params["cursor"] = cursor
+    resp = requests.get(
+        SLACK_CONVERSATIONS_HISTORY_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        params=params,
+        timeout=15,
+    )
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = resp.json() or {}
+    except ValueError:
+        parsed = {}
+    if not resp.ok or not parsed.get("ok"):
+        logger.warning(
+            "Slack conversations.history failed: http=%s ok=%s err=%s",
+            resp.status_code,
+            parsed.get("ok"),
+            parsed.get("error"),
+        )
+        raise HTTPException(
+            400,
+            f"Slack rejected the history read: "
+            f"{parsed.get('error') or 'unknown error'}",
+        )
+    return {
+        "messages": parsed.get("messages") or [],
+        "has_more": bool(parsed.get("has_more")),
+        "next_cursor": (parsed.get("response_metadata") or {}).get("next_cursor")
+        or "",
+    }
+
+
+def search_messages(
+    user_access_token: str,
+    *,
+    query: str,
+    count: int = 20,
+    page: int = 1,
+) -> dict[str, Any]:
+    """Search the authorizing user's own content via search.messages.
+
+    REQUIRES a user token (xoxp) with `search:read` — search.messages is not
+    available to bot tokens. Reads as the user, so results span everything
+    that user can see (their DMs, private channels, etc.).
+
+    Returns the trimmed shape {matches: [...], total}. Raises
+    HTTPException(400) on Slack-side rejection."""
+    resp = requests.get(
+        SLACK_SEARCH_MESSAGES_URL,
+        headers={"Authorization": f"Bearer {user_access_token}"},
+        params={"query": query, "count": str(count), "page": str(page)},
+        timeout=15,
+    )
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = resp.json() or {}
+    except ValueError:
+        parsed = {}
+    if not resp.ok or not parsed.get("ok"):
+        logger.warning(
+            "Slack search.messages failed: http=%s ok=%s err=%s",
+            resp.status_code,
+            parsed.get("ok"),
+            parsed.get("error"),
+        )
+        raise HTTPException(
+            400,
+            f"Slack rejected the search: {parsed.get('error') or 'unknown error'}",
+        )
+    messages = parsed.get("messages") or {}
+    return {
+        "matches": messages.get("matches") or [],
+        "total": messages.get("total") or 0,
+    }
 
 
 def list_channels(bot_access_token: str) -> list[dict[str, Any]]:

@@ -157,7 +157,21 @@ class Settings(BaseSettings):
         "chat:write,channels:read,channels:history,"
         "groups:read,groups:history,users:read"
     )
-    slack_bot_scopes: str = "chat:write,channels:read"
+    # Bot scopes (xoxb): send (chat:write) + DM a user (im:write) + read the
+    # channels/DMs the bot has been added to (history scopes). Must mirror the
+    # Bot Token Scopes configured on the Slack app for the consent screen to
+    # grant them.
+    slack_bot_scopes: str = (
+        "chat:write,im:write,channels:read,channels:history,"
+        "groups:history,im:history,mpim:history,users:read"
+    )
+    # User scopes (xoxp): read the authorizing user's OWN messages + search,
+    # acting as them. Rides on `user_scope=` in the authorize URL; Slack then
+    # returns authed_user.access_token. Empty ⇒ no user_scope on the consent
+    # screen ⇒ no user token issued (send-only / bot-reads-only install).
+    slack_user_scopes: str = (
+        "channels:history,groups:history,im:history,mpim:history,search:read"
+    )
     # Signing secret (Slack app → Basic Information → App Credentials). Required
     # to verify the request signature on the Events API endpoint (app_uninstalled
     # + app_home_opened). Empty → the events endpoint rejects all requests.
