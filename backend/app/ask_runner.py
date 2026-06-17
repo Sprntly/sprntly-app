@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Prompt version stamped onto the Ask decision-log row so the §4d audit spine
 # pins the exact Ask composition (corpus + KG bridge, #18) behind each answer.
-ASK_PROMPT_VERSION = "ask-kg-v1"
+ASK_PROMPT_VERSION = "ask-kg-v2"
 
 # Strong refs to in-flight warm tasks. asyncio holds only a weak reference to a
 # bare create_task result, so without this a fanned-out warm task can be
@@ -68,7 +68,7 @@ _ASK_RESPONSE_SCHEMA: dict = {
 def _generate_one_sync(dataset: str, question: str) -> dict:
     """Run the same Anthropic call that /v1/ask would run for a given Q."""
     corpus = load_corpus(dataset)
-    cacheable = f"Corpus:\n\n{corpus.joined()}"
+    cacheable = f"Source material:\n\n{corpus.joined()}"
     user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
     return call_json(
         system=ASK_SYSTEM,
@@ -115,7 +115,7 @@ def compose_ask_answer(
       - Always load the dataset corpus (cacheable prefix; unchanged grounding).
       - If a tenant (`enterprise_id`) is resolvable AND its KG has relevant
         signals/entities, retrieve a ranked, budget-capped context bundle and
-        inject it as a "KNOWLEDGE GRAPH CONTEXT" section, with the KG-aware
+        inject it as a "LIVE CONTEXT FROM CONNECTED SOURCES" section, with the KG-aware
         system addendum. Otherwise fall back to corpus-only — identical to the
         pre-#18 path, including the cache warmer's prompt.
       - Decision-log the ask (agent="ask", decision_type="answer") with
@@ -124,7 +124,7 @@ def compose_ask_answer(
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
     corpus = load_corpus(dataset)
-    cacheable = f"Corpus:\n\n{corpus.joined()}" if corpus.docs else None
+    cacheable = f"Source material:\n\n{corpus.joined()}" if corpus.docs else None
 
     bundle = _retrieve_kg_bundle(enterprise_id, question)
 
