@@ -287,7 +287,6 @@ export function Connectors() {
           const isDone = doneCats.has(i)
           const isOpen = openCat === i
           const unlocked = isCategoryUnlocked(doneCats, i)
-          const isLast = i === categories.length - 1
           return (
             <div
               key={cat.key}
@@ -372,7 +371,7 @@ export function Connectors() {
                       className="btn btn-brand"
                       onClick={() => completeCategory(i)}
                     >
-                      {isLast ? "Done" : "Done · next"}
+                      Done
                     </button>
                   </div>
                 </div>
