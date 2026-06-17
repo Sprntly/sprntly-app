@@ -247,9 +247,12 @@ def test_synthesis_binds_prioritize(isolated_settings, monkeypatch):
     from app.synthesis import agent as synth
     from app.synthesis.convergence import ThemeConvergence
 
+    # Multi-source so it clears the brief evidence gate and reaches the LLM call
+    # (this test asserts skill binding on the prompt, not the gate).
     cand = ThemeConvergence(theme_id="t1", theme_label="Slow checkout")
-    cand.signal_count = 1
-    cand.source_types = {"customer_voice"}
+    cand.signal_count = 2
+    cand.source_types = {"customer_voice", "revenue"}
+    cand.connected_signal_count = 2
     cand.effective_weight = 0.9
     monkeypatch.setattr(synth, "compute_convergence", lambda f, e: [cand])
     monkeypatch.setattr(synth, "load_kpi_tree", lambda e: None)

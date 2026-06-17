@@ -317,8 +317,11 @@ def test_synthesis_survives_backlog_failure(facade, isolated_settings):
 
     db = isolated_settings["supabase"]
     _seed_company(db, "ent-A")
+    # Multi-source so it clears the brief evidence gate (this test is about
+    # backlog-failure resilience, not the thin-evidence path).
     brief_theme = _seed_theme_with_signals(facade, "ent-A", "BRIEF", [
         ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 0),
+        ("customer_voice", "feature_request", {}, 0),
     ])
     ranked = {**_RANKED, "insights": [{**_RANKED["insights"][0], "theme_id": brief_theme.id}]}
 

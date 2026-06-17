@@ -174,6 +174,7 @@ def test_synthesis_includes_strategic_context(isolated_settings, monkeypatch):
     facade = GraphFacade()
     theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
         ("revenue", "deal_blocker", {}, 1),
+        ("customer_voice", "feature_request", {}, 1),  # multi-source: clears gate
     ])
     monkeypatch.setattr(synth, "load_kpi_tree", lambda eid: _tree())
     monkeypatch.setattr(synth, "classify_theme_fit",
@@ -206,6 +207,7 @@ def test_synthesis_works_without_tree(isolated_settings, monkeypatch):
     facade = GraphFacade()
     theme = _seed_theme_with_signals(facade, "ent-B", "SSO", [
         ("revenue", "deal_blocker", {}, 1),
+        ("customer_voice", "feature_request", {}, 1),  # multi-source: clears gate
     ])
     monkeypatch.setattr(synth, "load_kpi_tree", lambda eid: None)
     monkeypatch.setattr(synth, "llm_call", lambda **kw: LLMResult(
