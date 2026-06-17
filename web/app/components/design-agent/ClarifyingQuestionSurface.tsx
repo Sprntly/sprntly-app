@@ -331,9 +331,11 @@ export type LocateConfirmViewProps = {
  *  ManualEditOverlay → "Manual Edit Overlay"). Falls back to the raw route
  *  when the result is empty (handles blank or non-standard component names). */
 function deriveScreenLabel(entryComponent: string, route: string): string {
-  const stripped = entryComponent.replace(/(Screen|Page)$/, "")
+  const ec = entryComponent ?? ""
+  const rt = route ?? ""
+  const stripped = ec.replace(/(Screen|Page)$/, "")
   const label = stripped.replace(/([A-Z])/g, " $1").trim()
-  return label || route
+  return label || rt
 }
 
 /** Pure presentational view for the pre-gen screen-selection gate. No hooks,
