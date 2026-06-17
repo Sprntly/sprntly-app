@@ -44,6 +44,8 @@ import { useWorkspace } from "../../context/WorkspaceContext"
 import { prdIdFromPrototypeSearch, prototypePath } from "../../lib/routes"
 import { AppLayout } from "../../components/screens/app/AppLayout"
 import { GenerateModal } from "../../components/design-agent/GenerateModal"
+import { GenerationErrorBanner, reasonCopy } from "../../components/design-agent/GenerationErrorBanner"
+import { GenerateSurfaceErrorBoundary } from "../../components/design-agent/GenerateSurfaceErrorBoundary"
 import { GenerationLoadingScreen, type LocatePhaseState } from "../../components/design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../../components/design-agent/PostGenerationResult"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
@@ -464,6 +466,12 @@ export function PrototypeRoute() {
   // Full-screen loading-overlay visibility + the prototype_id known once the
   // generate POST returns (lets the loading screen subscribe to the SSE stream).
   const [genLoading, setGenLoading] = useState(false)
+  // Terminal-failure recovery: set to the failure message when a generation
+  // resolves `{ ok: false, message }` (failed / invalidated / timeout / throw —
+  // see runDesignAgentGeneration.ts), so the chokepoint no longer silently
+  // collapses to the bare empty/PRD state. Drives a dedicated error+Retry render
+  // branch below. Null on the success path (success stays byte-identical).
+  const [genError, setGenError] = useState<string | null>(null)
   const [genFigmaKey, setGenFigmaKey] = useState<string | null>(null)
   const [genGithubRepo, setGenGithubRepo] = useState<string | null>(null)
   const [genProtoId, setGenProtoId] = useState<number | null>(null)
@@ -598,11 +606,14 @@ export function PrototypeRoute() {
     genLoadingRef.current = false
     setGenLoading(false)
     if (result?.ok && result.prototype) {
+      // SUCCESS — clear any prior failure and reveal the new prototype in-tab.
+      setGenError(null)
       setProto(result.prototype)
       setSeedProtoId(result.prototype.id)
     } else if (result?.ok && prdId != null) {
       // Reveal-by-refetch fallback: the kickoff succeeded but no full row came
       // back on the result — re-resolve the PRD's ready prototype in-tab.
+      setGenError(null)
       designAgentApi
         .getByPrd(prdId)
         .then((found) => {
@@ -614,7 +625,24 @@ export function PrototypeRoute() {
         .catch(() => {
           /* degrade — the tab stays on the generate panel for a retry */
         })
+    } else {
+      // FAILURE / no result (failed / invalidated / timeout / throw, OR the
+      // GenerateModal's `.catch(() => onGenDone())` no-arg path). Surface a loud,
+      // persistent error + Retry instead of silently falling through to the bare
+      // empty/PRD state. runDesignAgentGeneration always carries a `message` on
+      // the `{ ok: false }` shape; the no-arg path falls back to a generic line.
+      setGenError(result && !result.ok ? result.message : "Generation failed")
     }
+  }
+
+  // Retry from the generation-error state. Mirrors GenerateModal's locate Retry:
+  // clear the failure and re-open the generate panel so the user re-initiates the
+  // run explicitly (re-using the existing kickoff path — the empty-state →
+  // GenerateModal flow). Does NOT auto-re-POST (matches DesignAgentLauncher's
+  // onRetry contract). genError is also cleared on a successful subsequent run.
+  const handleGenErrorRetry = () => {
+    setGenError(null)
+    setGenerateRequested(true)
   }
 
   // No PRD context (bare /prototype): there is nothing to generate from. Send the
@@ -652,6 +680,40 @@ export function PrototypeRoute() {
             router={router}
             seedV1={proto.id === seedProtoId}
           />
+        </div>
+      </AppLayout>
+    )
+  }
+
+  // Generation FAILED (terminal { ok: false } / no-result) → a loud, persistent
+  // error + Retry. Sits ABOVE the resolving / empty / generate branches so a
+  // failed run NEVER silently collapses to the bare empty/PRD state. Reuses the
+  // EXISTING GenerationErrorBanner (the same component + reasonCopy mapping the
+  // DesignAgentLauncher uses): the raw backend message is mapped to curated copy
+  // (raw error never hits the DOM), and Retry re-opens the generate
+  // panel via the existing kickoff path. A "Back to brief" affordance gives a
+  // deliberate exit (mirrors locate's Switch-source: a user choice, not a silent
+  // collapse). genError is set only on the failure branch of handleGenDone, so the
+  // success path never reaches here.
+  if (genError) {
+    return (
+      <AppLayout>
+        <div
+          className="design-agent-surface da-prototype-empty"
+          data-testid="prototype-route-gen-error"
+        >
+          <GenerationErrorBanner
+            reason={reasonCopy(genError)}
+            onRetry={handleGenErrorRetry}
+          />
+          <button
+            type="button"
+            className="btn"
+            data-testid="prototype-route-gen-error-back"
+            onClick={() => goTo("brief")}
+          >
+            Back to brief
+          </button>
         </div>
       </AppLayout>
     )
@@ -737,27 +799,36 @@ export function PrototypeRoute() {
   return (
     <AppLayout>
       <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
-        <GenerateModal
-          open={generateRequested && !genLoading}
-          onClose={buildGatedOnClose(
-            () => genLoadingRef.current,
-            () => goTo("brief"),
-          )}
-          prdId={prdId}
-          figmaFileKey={figmaFileKey}
-          onGenStart={handleGenStart}
-          onKickoff={(id) => setGenProtoId(id)}
-          onGenDone={handleGenDone}
-          savedPreference={savedPreference}
-          onLocatePhase={setLocatePhase}
-        />
-        <GenerationLoadingScreen
-          open={genLoading}
-          figmaFileKey={genFigmaKey}
-          githubRepo={genGithubRepo}
-          prototypeId={genProtoId}
-          locatePhase={locatePhase ?? undefined}
-        />
+        {/* Scoped error boundary (belt-and-suspenders to genError): any UNGUARDED
+            render throw inside the locate/generate surface degrades to a clean
+            in-surface fallback + Retry, instead of escaping to the framework's
+            whole-page "Application error" (the repo has no app-wide error.tsx).
+            Its Retry re-mounts the guarded subtree; onReset also clears genError +
+            re-arms the panel so a recovered throw lands on a fresh generate panel,
+            not a stale one. Scoped to THIS surface only — the app shell survives. */}
+        <GenerateSurfaceErrorBoundary onReset={handleGenErrorRetry}>
+          <GenerateModal
+            open={generateRequested && !genLoading}
+            onClose={buildGatedOnClose(
+              () => genLoadingRef.current,
+              () => goTo("brief"),
+            )}
+            prdId={prdId}
+            figmaFileKey={figmaFileKey}
+            onGenStart={handleGenStart}
+            onKickoff={(id) => setGenProtoId(id)}
+            onGenDone={handleGenDone}
+            savedPreference={savedPreference}
+            onLocatePhase={setLocatePhase}
+          />
+          <GenerationLoadingScreen
+            open={genLoading}
+            figmaFileKey={genFigmaKey}
+            githubRepo={genGithubRepo}
+            prototypeId={genProtoId}
+            locatePhase={locatePhase ?? undefined}
+          />
+        </GenerateSurfaceErrorBoundary>
       </div>
     </AppLayout>
   )
