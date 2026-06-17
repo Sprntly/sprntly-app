@@ -30,6 +30,10 @@ class ThemeConvergence:
     competitor_pressure: int = 0
     base_score: float = 0.0  # VoC Volume & Severity base (prioritize skill)
     evidence: list[dict] = field(default_factory=list)  # top signals for the LLM pass
+    # Newest contributing signal's valid_at — the "is there fresher evidence?"
+    # input to brief de-dup (synthesis/dedup.py). None when the theme has no
+    # signals (it won't be emitted in that case).
+    latest_signal_at: datetime | None = None
 
     @property
     def breadth(self) -> int:
@@ -76,6 +80,8 @@ def compute_convergence(
             seen.add(sig.id)
             w = sig.confidence * sig.weight * _recency_factor(sig, now)
             tc.signal_count += 1
+            if tc.latest_signal_at is None or sig.valid_at > tc.latest_signal_at:
+                tc.latest_signal_at = sig.valid_at
             tc.source_types.add(sig.source_type)
             tc.effective_weight += w
             rev = sig.properties.get("revenue_at_risk_usd") or sig.properties.get("revenue_usd") or 0

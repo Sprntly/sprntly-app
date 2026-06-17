@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.db.briefs import save_brief
+from app.db.finding_state import get_finding_states, upsert_finding_state
 from app.business_context import load_business_context
 from app.kpi_tree import load_kpi_tree
 from app.graph.config_layers import config_get
@@ -29,6 +30,7 @@ from app.synthesis.convergence import ThemeConvergence, compute_convergence
 from app.synthesis.delivery import deliver_brief_to_slack
 from app.synthesis.email_delivery import deliver_brief_to_email
 from app.synthesis.backlog import sequence_backlog
+from app.synthesis.dedup import suppress_unchanged
 from app.synthesis.scoring import classify_theme_fit, score_candidates
 
 logger = logging.getLogger(__name__)
@@ -162,7 +164,27 @@ def run_synthesis(
             "Knowledge graph has no themes with signals for this enterprise — "
             "run extraction/seeding first"
         )
-    cands = convergence[:MAX_CANDIDATES]
+    # Brief de-dup: a theme already surfaced in a prior brief is dropped from
+    # brief candidacy unless its issue materially changed since (new evidence /
+    # ≥20% metric move — see synthesis/dedup.py). Suppressed themes are not lost:
+    # they still flow to the backlog via sequence_backlog (which excludes only
+    # the brief top-N, not these). If nothing previously-surfaced changed and no
+    # new themes exist, brief_pool may be smaller than convergence — that's the
+    # intended "nothing new to report" outcome.
+    states = get_finding_states(enterprise_id, [c.theme_id for c in convergence])
+    brief_pool = suppress_unchanged(convergence, states)
+    if not brief_pool:
+        # Everything still converging was already surfaced and nothing changed.
+        # Don't ship a blank brief — fall back to the full ranking so the page
+        # keeps showing the most pressing items. Rare in practice: the upstream
+        # refresh-gate only regenerates when new signals exist, which normally
+        # changes at least one theme.
+        logger.info(
+            "brief de-dup suppressed all candidates for %s; "
+            "falling back to full ranking", enterprise_id,
+        )
+        brief_pool = convergence
+    cands = brief_pool[:MAX_CANDIDATES]
 
     tree = load_kpi_tree(enterprise_id)
 
@@ -289,7 +311,34 @@ def run_synthesis(
         "_generated_by": "synthesis_agent",
         "_schema_version": BRIEF_SCHEMA_VERSION,
     }
-    save_brief(dataset_slug, week_label, brief, schema_version=BRIEF_SCHEMA_VERSION)
+    brief_id = save_brief(dataset_slug, week_label, brief, schema_version=BRIEF_SCHEMA_VERSION)
+
+    # Record the convergence FINGERPRINT of each surfaced theme so the next run
+    # can tell whether it changed before resurfacing it (brief de-dup). Keyed by
+    # theme_id; uses the live ThemeConvergence we ranked from (by_id), captured
+    # AFTER the brief is saved so we can stamp the owning brief_id. Best-effort:
+    # a fingerprint failure must never break an already-saved brief.
+    for ins in insights:
+        tc = by_id.get(ins.get("theme_id", ""))
+        if tc is None:
+            continue
+        try:
+            upsert_finding_state(
+                enterprise_id,
+                theme_id=tc.theme_id,
+                signal_count=tc.signal_count,
+                effective_weight=tc.effective_weight,
+                revenue_at_stake=tc.revenue_at_stake_usd,
+                breadth=tc.breadth,
+                latest_signal_at=(
+                    tc.latest_signal_at.isoformat() if tc.latest_signal_at else None
+                ),
+                last_brief_id=brief_id,
+            )
+        except Exception:  # noqa: BLE001 — never let de-dup bookkeeping break the brief
+            logger.warning(
+                "finding-state upsert failed for theme %s", tc.theme_id, exc_info=True
+            )
 
     # SEQUENCE the rest — one synthesis run yields BOTH the brief AND the
     # ranked backlog behind it. Additive + resilient: a backlog failure must
