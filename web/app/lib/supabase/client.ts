@@ -95,10 +95,39 @@ export async function postLoginPath(): Promise<string> {
         return `/onboarding/${slugForStep(fresh.onboarding_step)}`
       }
     }
+    // Pre-onboarding profile gate: a brand-new user whose profile has no first
+    // name (primarily Google sign-ups — Supabase lands them with empty
+    // first/last) goes to the unnumbered `your-name` gate to set it before the
+    // numbered flow. Email/password users (who type their name at sign-up) and
+    // anyone who already has a name skip straight to the first numbered step.
+    // A missing profile row is treated as an empty name → show the gate.
+    if (!(await hasFirstName(user.id))) {
+      return "/onboarding/your-name"
+    }
     return `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
   }
   if (workspace.onboarding_completed_at) return "/"
   return `/onboarding/${slugForStep(workspace.onboarding_step)}`
+}
+
+/**
+ * True when the user's profile already has a non-empty first name. Minimal
+ * query (`select first_name`); a missing row or any error is treated as "no
+ * name" so the gate shows rather than silently skipping it.
+ */
+async function hasFirstName(userId: string): Promise<boolean> {
+  try {
+    const supabase = getSupabase()
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("first_name")
+      .eq("id", userId)
+      .maybeSingle()
+    if (error || !data) return false
+    return String((data as { first_name?: unknown }).first_name ?? "").trim().length > 0
+  } catch {
+    return false
+  }
 }
 
 async function tryAutoAcceptInvite(): Promise<boolean> {

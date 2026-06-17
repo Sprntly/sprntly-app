@@ -1,3 +1,4 @@
+export { YourName } from "./YourName"
 export { BusinessInfo } from "./BusinessInfo"
 export { Analyzing } from "./Analyzing"
 export { Metrics } from "./Metrics"
