@@ -17,6 +17,7 @@ import base64
 import logging
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
@@ -29,6 +30,7 @@ from app.design_agent.codebase_map.repo_reader import (
     _MAX_TREE_ENTRIES,
     _MAX_FILE_BYTES,
     _MAX_EXTRA_FILE_BYTES,
+    _FETCH_CONCURRENCY,
     _detect_frontend_root,
     read_repo,
 )
@@ -470,7 +472,7 @@ def _resp_any(url, **kw):
 
 
 def test_extra_path_over_tree_cap_under_extra_cap_is_fetched():
-    """AC1: with always_fetch=n, a ~300 KB extra at idx < n is decoded (1 MiB
+    """With always_fetch=n, a ~300 KB extra at idx < n is decoded (1 MiB
     ceiling) while a same-size path at idx >= n is dropped (128 KB tree cap)."""
     reader = RepoReader(123)
     payload = _contents_payload("f", "x" * 10, size=300_000)
@@ -489,7 +491,7 @@ def test_extra_path_over_tree_cap_under_extra_cap_is_fetched():
 
 
 def test_tree_sampled_file_over_128k_still_dropped():
-    """AC2: always_fetch=0 → every path keeps the 128 KB tree cap; a 200 KB
+    """always_fetch=0 → every path keeps the 128 KB tree cap; a 200 KB
     file is dropped, not truncated, not fetched."""
     reader = RepoReader(123)
     payload = _contents_payload("big", "x" * 10, size=200_000)
@@ -505,7 +507,7 @@ def test_tree_sampled_file_over_128k_still_dropped():
 
 
 def test_extras_fetched_first_beyond_max_files():
-    """AC3: read_repo with more extras than _MAX_FILES still attempts every
+    """read_repo with more extras than _MAX_FILES still attempts every
     extra (extras occupy the front of fetch_list, always_fetch raises budget)."""
     extras = [f"dep/file{i}.ts" for i in range(_MAX_FILES + 5)]  # 45 > 40
     tree = ["src/App.tsx", "src/index.tsx"]
@@ -527,7 +529,7 @@ def test_extras_fetched_first_beyond_max_files():
 
 
 def test_no_extras_behaviour_unchanged():
-    """AC4: read_repo(extra_paths=None) fetches only tree paths at the 128 KB
+    """read_repo(extra_paths=None) fetches only tree paths at the 128 KB
     cap — a 200 KB tree file is dropped, behaviour byte-for-byte as today."""
     big = _contents_payload("src/big.ts", "x" * 10, size=200_000)
     small = _contents_payload("src/small.ts", "ok")
@@ -554,7 +556,7 @@ def test_no_extras_behaviour_unchanged():
 
 
 def test_detect_frontend_root_monorepo_root_and_none():
-    """AC13: web/ via a package.json declaring next/react; '' for a repo-root
+    """web/ via a package.json declaring next/react; '' for a repo-root
     app whose manifest is at the root; '' when no manifest + no App-Router dir."""
     import json as _json
 
@@ -578,7 +580,7 @@ def test_detect_frontend_root_monorepo_root_and_none():
 
 
 def test_detect_frontend_root_app_router_fallback():
-    """AC13: with no package.json bodies, the App-Router page dir signal still
+    """With no package.json bodies, the App-Router page dir signal still
     finds the frontend prefix (web/app/**/page.tsx → 'web/')."""
     tree = ["backend/app/main.py", "web/app/(app)/sources/page.tsx"]
     assert _detect_frontend_root(tree, {}) == "web/"
@@ -617,7 +619,7 @@ def test_detect_frontend_root_prefers_app_router_over_bare_react_sibling():
 
 
 def test_tree_cap_measures_frontend_after_filter():
-    """AC14: a backend-first tree (600 backend paths BEFORE 50 web/app pages)
+    """A backend-first tree (600 backend paths BEFORE 50 web/app pages)
     keeps the web pages when frontend_root='web/' (cap applied AFTER the prefix
     filter); with no detected root the flat 600-cap clips them (today's bug)."""
     backend = [f"backend/app/file{i}.py" for i in range(600)]
@@ -657,7 +659,7 @@ def test_tree_cap_measures_frontend_after_filter():
 
 
 def test_read_repo_threads_frontend_root_into_tree_filter():
-    """AC14: the prefix filter is applied BEFORE the _MAX_TREE_ENTRIES cap — a
+    """The prefix filter is applied BEFORE the _MAX_TREE_ENTRIES cap — a
     passed frontend_root yields a tree budget measured on frontend files only."""
     backend = [f"backend/file{i}.py" for i in range(100)]
     web = [f"web/app/route{i}/page.tsx" for i in range(700)]  # > _MAX_TREE_ENTRIES
@@ -680,7 +682,7 @@ def test_read_repo_threads_frontend_root_into_tree_filter():
 
 
 def test_build_map_nonempty_on_backend_first_monorepo():
-    """AC17 (deterministic proxy): a live-style build over a backend-first
+    """Deterministic proxy: a live-style build over a backend-first
     multi-root tree (backend sorts BEFORE web/) yields a NON-EMPTY node set.
 
     The frontend subtree is auto-detected (web/package.json declares next/react)
@@ -725,3 +727,191 @@ def test_build_map_nonempty_on_backend_first_monorepo():
     assert result is not None
     assert len(result.nodes) > 0  # the empty-map blocker is fixed
     assert any("web/app" in (n.file or "") for n in result.nodes)
+
+
+# ── parallelized fetch_files (bounded ThreadPoolExecutor) ─────────────────
+# These tests target RepoReader.fetch_files directly and key the stubbed contents
+# layer BY PATH (not by call order), so they are robust to out-of-order completion
+# under the thread pool — that order-independence is itself part of the contract
+# being asserted.
+
+
+def _oversize_payload(path: str) -> dict:
+    """A base64 payload whose declared size exceeds even the 1 MiB extra cap."""
+    return {
+        "path": path,
+        "encoding": "base64",
+        "content": _b64("x" * 10),
+        "size": _MAX_EXTRA_FILE_BYTES + 1,
+    }
+
+
+def test_fetch_files_parallel_matches_serial_mixed_cases():
+    """Parallel fetch returns the identical (bodies, had_error) a serial loop
+    would, for a mix of {normal file, 404/None skip, oversize skip, raising path}.
+
+    Keyed by path so completion order cannot change the result: only the normal
+    file lands in bodies, the 404 and oversize are silent skips, and the raising
+    path sets had_error True."""
+    reader = RepoReader(123)
+
+    def _raw(headers, repo, path, branch):
+        if path == "normal.ts":
+            return _contents_payload("normal.ts", "normal body")
+        if path == "missing.ts":
+            return None  # 404 → silent skip (not an error)
+        if path == "huge.ts":
+            return _oversize_payload("huge.ts")  # oversize → silent None decode
+        if path == "boom.ts":
+            raise OSError("GitHub contents API returned 502 for boom.ts")
+        raise AssertionError(f"unexpected path {path}")
+
+    with patch(
+        "app.design_agent.codebase_map.repo_reader._get_contents_raw",
+        side_effect=_raw,
+    ), patch.object(RepoReader, "_headers", return_value=_STUB_HEADERS):
+        bodies, had_error = reader.fetch_files(
+            _STUB_REPO, _STUB_BRANCH,
+            ["normal.ts", "missing.ts", "huge.ts", "boom.ts"],
+            always_fetch=0,
+        )
+
+    assert bodies == {"normal.ts": "normal body"}  # only the decodable file
+    assert had_error is True                        # the raising path flips it
+
+
+def test_fetch_files_max_bytes_tied_to_original_index():
+    """max_bytes follows each path's ORIGINAL index in paths[:budget], not the
+    completion order: idx < always_fetch → _MAX_EXTRA_FILE_BYTES, idx >= → the
+    tighter _MAX_FILE_BYTES. Patch _decode_file_payload to record (path, cap)."""
+    reader = RepoReader(123)
+    seen: dict[str, int] = {}
+    lock = threading.Lock()
+
+    def _record(payload, max_bytes=_MAX_FILE_BYTES):
+        path = payload["path"]
+        with lock:
+            seen[path] = max_bytes
+        return "body"
+
+    def _raw(headers, repo, path, branch):
+        # Make later-submitted paths "win the race" to prove the cap is bound to
+        # the original index, not whichever future resolves first.
+        return _contents_payload(path, "x")
+
+    # 2 extras (idx 0,1 → extra cap) + 2 tree-sampled (idx 2,3 → file cap).
+    paths = ["extra0.css", "extra1.css", "tree0.ts", "tree1.ts"]
+    with patch(
+        "app.design_agent.codebase_map.repo_reader._get_contents_raw",
+        side_effect=_raw,
+    ), patch(
+        "app.design_agent.codebase_map.repo_reader._decode_file_payload",
+        side_effect=_record,
+    ), patch.object(RepoReader, "_headers", return_value=_STUB_HEADERS):
+        bodies, had_error = reader.fetch_files(
+            _STUB_REPO, _STUB_BRANCH, paths, always_fetch=2,
+        )
+
+    assert seen["extra0.css"] == _MAX_EXTRA_FILE_BYTES  # idx 0 < always_fetch
+    assert seen["extra1.css"] == _MAX_EXTRA_FILE_BYTES  # idx 1 < always_fetch
+    assert seen["tree0.ts"] == _MAX_FILE_BYTES          # idx 2 >= always_fetch
+    assert seen["tree1.ts"] == _MAX_FILE_BYTES          # idx 3 >= always_fetch
+    assert had_error is False
+    assert set(bodies) == set(paths)
+
+
+def test_fetch_files_had_error_false_on_pure_404_and_oversize():
+    """A mix of only 404s and oversize skips leaves had_error False — those are
+    silent skips, never errors."""
+    reader = RepoReader(123)
+
+    def _raw(headers, repo, path, branch):
+        if path.startswith("missing"):
+            return None  # 404
+        return _oversize_payload(path)  # oversize → None decode, silent
+
+    with patch(
+        "app.design_agent.codebase_map.repo_reader._get_contents_raw",
+        side_effect=_raw,
+    ), patch.object(RepoReader, "_headers", return_value=_STUB_HEADERS):
+        bodies, had_error = reader.fetch_files(
+            _STUB_REPO, _STUB_BRANCH,
+            ["missing1.ts", "huge1.ts", "missing2.ts", "huge2.ts"],
+            always_fetch=0,
+        )
+
+    assert bodies == {}
+    assert had_error is False
+
+
+def test_fetch_files_had_error_true_when_any_path_raises():
+    """A single raising path among otherwise-clean fetches flips had_error to
+    True while the clean files still land."""
+    reader = RepoReader(123)
+
+    def _raw(headers, repo, path, branch):
+        if path == "boom.ts":
+            raise OSError("transport blew up")
+        return _contents_payload(path, "ok")
+
+    with patch(
+        "app.design_agent.codebase_map.repo_reader._get_contents_raw",
+        side_effect=_raw,
+    ), patch.object(RepoReader, "_headers", return_value=_STUB_HEADERS):
+        bodies, had_error = reader.fetch_files(
+            _STUB_REPO, _STUB_BRANCH,
+            ["ok1.ts", "boom.ts", "ok2.ts"],
+            always_fetch=0,
+        )
+
+    assert bodies == {"ok1.ts": "ok", "ok2.ts": "ok"}
+    assert had_error is True
+
+
+def test_fetch_files_concurrency_is_bounded():
+    """No more than _FETCH_CONCURRENCY fetches are ever in flight at once.
+
+    Each fetch increments a live-counter on entry, records the running peak, then
+    decrements on exit — deterministic, no sleep-as-sync. With more paths than
+    the bound, the peak must never exceed _FETCH_CONCURRENCY."""
+    reader = RepoReader(123)
+    lock = threading.Lock()
+    live = 0
+    peak = 0
+
+    def _raw(headers, repo, path, branch):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        try:
+            # Brief, bounded spin so overlapping tasks actually coincide without
+            # relying on wall-clock sleeps for synchronization.
+            for _ in range(2000):
+                pass
+            return _contents_payload(path, "x")
+        finally:
+            with lock:
+                live -= 1
+
+    paths = [f"f{i}.ts" for i in range(_FETCH_CONCURRENCY * 3)]
+    with patch(
+        "app.design_agent.codebase_map.repo_reader._get_contents_raw",
+        side_effect=_raw,
+    ), patch.object(RepoReader, "_headers", return_value=_STUB_HEADERS):
+        bodies, had_error = reader.fetch_files(
+            _STUB_REPO, _STUB_BRANCH, paths, always_fetch=0,
+        )
+
+    assert had_error is False
+    assert set(bodies) == set(paths)
+    assert peak <= _FETCH_CONCURRENCY
+
+
+def test_fetch_files_empty_paths_returns_empty():
+    """An empty path list short-circuits to ({}, False) without spinning a pool."""
+    reader = RepoReader(123)
+    with patch.object(RepoReader, "_headers", return_value=_STUB_HEADERS):
+        bodies, had_error = reader.fetch_files(_STUB_REPO, _STUB_BRANCH, [], always_fetch=0)
+    assert bodies == {}
+    assert had_error is False

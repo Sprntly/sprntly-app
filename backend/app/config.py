@@ -10,11 +10,11 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
     openai_api_key: str = ""  # embeddings (text-embedding-3-small)
-    # Design Agent uses a dedicated key (AD16) for cost attribution + per-key
+    # Design Agent uses a dedicated key for cost attribution + per-key
     # rotation at handoff; falls back to anthropic_api_key with a startup
     # warning (see app/design_agent/client.py).
     design_agent_anthropic_api_key: str = ""
-    # AD15 backstop (P6-06): hard USD ceiling ABOVE the $0.50 soft cap. When a
+    # Spend backstop: hard USD ceiling ABOVE the $0.50 soft cap. When a
     # run's projected next-iteration spend reaches this, agent_loop ABORTS (clean
     # terminal status, partial bundle salvaged) rather than degrade-and-continue.
     # Default 5.00 only catches PATHOLOGICAL runs: the worst observed-legit run
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # legit run, 10× the soft cap). Env-overridable via DESIGN_AGENT_HARD_CAP_USD;
     # never lower than the soft cap, and never below the $1.52 legit-run floor.
     design_agent_hard_cap_usd: float = 5.00
-    # Vite build budget for a prototype gen (P6-21). Default 120s — the typical
+    # Vite build budget for a prototype gen. Default 120s — the typical
     # scaffold builds in ~5-15s, but a cold node start, a large single-file emit,
     # or a busy host (esp. the colder prod EC2 build host) can exceed the prior
     # hardcoded 60s and floor an otherwise-valid build. Env-overridable per
@@ -36,6 +36,40 @@ class Settings(BaseSettings):
     # parts + one other call. Env-overridable via LLM_MAX_CONCURRENCY; values
     # <= 0 fall back to the default (never 0, which would deadlock).
     llm_max_concurrency: int = 3
+    # Tier 1 — process-wide cap on how many Design Agent generations may run
+    # their HEAVY section (LLM recreate loop + vite build + screenshot) at once.
+    # Default 1: on the 2-vCPU prod box, one generation already pins both cores
+    # through the vite build, so admitting a second concurrent heavy run is what
+    # produced the 504-under-load contention. At 1, a concurrent /locate keeps CPU
+    # headroom. Read at CALL-TIME in routes/design_agent.py (the semaphore is
+    # lazy-initialised on first use), so a test can monkeypatch this and a future
+    # bump (e.g. on a larger box) takes effect without an import-time freeze.
+    # Env-overridable via DESIGN_AGENT_GENERATION_CONCURRENCY.
+    design_agent_generation_concurrency: int = 1
+    # Tier 0 — how long the lifespan teardown waits for in-flight generation
+    # to drain on SIGTERM before giving up (deploy/restart graceful-drain). MUST
+    # exceed the vite-build subprocess timeout (design_agent_vite_build_timeout_seconds,
+    # default 120s) or a build in flight at shutdown is abandoned and the deploy
+    # 502s recur — so the default 130s sits above the 120s build budget. On
+    # deadline-elapse the teardown does NOT cancel (the vite thread is
+    # uncancellable); the startup orphan sweep recovers any left-behind 'generating'
+    # row on next boot. Env-overridable via DESIGN_AGENT_DRAIN_DEADLINE_SECONDS so
+    # it can be tuned per environment. NOTE: the systemd unit must set
+    # TimeoutStopSec > this value (>=150s) or systemd SIGKILLs mid-drain.
+    design_agent_drain_deadline_seconds: int = 130
+    # Tier 2 — OPT-IN worker queue. When True AND a worker heartbeat is
+    # fresh, POST /generate enqueues the generation onto `design_agent_jobs` for
+    # a separate `python -m app.worker` process to run, removing the heavy work
+    # (LLM loop + vite build + Chromium) from the API request process (the
+    # t3.micro 504 contention). Default FALSE: a box that has not deployed the
+    # 2nd systemd worker unit must degrade to today's in-process create_task path
+    # — and so must a box where the flag is on but no worker is alive (no fresh
+    # heartbeat) or the table is missing. Like DESIGN_AGENT_ENABLED, the gate is
+    # read at REQUEST/CALL time (os.environ in routes/design_agent.py + the
+    # worker), never frozen at import, so a flip takes effect without a code
+    # deploy and a reloaded Settings singleton in tests stays honest.
+    # Env-overridable via DESIGN_AGENT_WORKER_ENABLED.
+    design_agent_worker_enabled: bool = False
     # How many of a fresh brief's top insights get their PRD pre-warmed after
     # brief generation (hero first, then confidence). Warm calls run in the
     # LLM gate's background lane so they never delay a user's click. 0 disables.
@@ -62,7 +96,7 @@ class Settings(BaseSettings):
 
     # Internal service-to-service API (DS Agent → Backend)
     internal_api_key: str = ""
-    # Design Agent bundle staging (P1-08). Supabase Storage is the PRIMARY
+    # Design Agent bundle staging. Supabase Storage is the PRIMARY
     # destination (bucket named by the SUPABASE_STORAGE_BUCKET env var, read
     # directly in design_agent/storage.py). These two settings drive the
     # dev/test FALLBACK used when that env var is unset:
@@ -200,7 +234,7 @@ class Settings(BaseSettings):
     # the agent access to). Defaults to the production slug.
     github_app_slug: str = "sprntly-ai"
 
-    # Design Agent share-token secret (F6 / AD Rule #14). A DISTINCT secret from
+    # Design Agent share-token secret. A DISTINCT secret from
     # jwt_secret — never reuse JWT_SECRET for Design Agent surfaces. Now ALSO the
     # HMAC key for the bundle-proxy grant cookies (da_view_grant / da_share_grant).
     # No JWT_SECRET fallback. MUST be set in prod; the bundle proxy fails closed

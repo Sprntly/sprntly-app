@@ -4,6 +4,15 @@ Covers the wiring layer: workspace isolation → installation resolver →
 build_map → locate_screen → decide_gate → response serialization.
 No new map/locate/gate logic is tested here — that belongs in the unit
 suites for their respective modules.
+
+/locate is now an accept + poll contract: POST returns a job id immediately and
+the pipeline runs in a background task; the client polls GET /locate/jobs/{id}
+for the result. These tests drive that flow end-to-end via ``_post_and_poll``,
+which POSTs then runs the background task to completion and returns the polled
+result — so the response-shape assertions below exercise the SAME LocateResponse
+payload the synchronous endpoint used to return inline. (The dedicated async
+contract behaviours — immediate return, job store, cross-workspace 404, drain
+registration — live in test_design_agent_locate_async.py.)
 """
 from __future__ import annotations
 
@@ -19,6 +28,47 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import _TEST_COMPANY_ID
+
+
+def _post_and_poll(client: TestClient, routes_mod, json_body: dict):
+    """POST /locate (auth + validation + job mint), run the background pipeline to
+    completion on a fresh loop, then GET the job. Returns the poll Response.
+
+    The POST kicks ``_run_locate_bg`` as a fire-and-forget task; rather than race
+    the sync TestClient's portal loop we drive the same coroutine deterministically
+    here (the heavy calls are patched via asyncio.to_thread, so it completes
+    synchronously) so the response-shape assertions see the SAME LocateResponse the
+    synchronous endpoint used to return inline. The dedicated immediate-return and
+    drain-registration behaviours are proven in test_design_agent_locate_async.py."""
+    async def _noop_bg(**_kw):
+        return None
+
+    # Mint the job but suppress the fire-and-forget task's real work, so the only
+    # execution of the pipeline is the deterministic asyncio.run below (no portal
+    # loop race, no double telemetry emission).
+    with patch.object(routes_mod, "_run_locate_bg", new=_noop_bg):
+        accepted = client.post("/v1/design-agent/locate", json=json_body)
+    assert accepted.status_code == 202, accepted.text
+    payload = accepted.json()
+    assert payload["status"] == "running"
+    job_id = payload["job_id"]
+
+    rec = routes_mod._locate_jobs[job_id]
+    # The mint stored the workspace + running status; run the pipeline coroutine
+    # to populate the terminal record (running→done/error), then poll it.
+    asyncio.run(
+        routes_mod._run_locate_bg(
+            job_id=job_id,
+            workspace_id=rec["workspace_id"],
+            github_repo=json_body["github_repo"],
+            ref=json_body.get("ref"),
+            prd_text="",
+            installation_id=routes_mod._resolve_github_installation_id_for_repo(
+                rec["workspace_id"], json_body["github_repo"]
+            ),
+        )
+    )
+    return client.get(f"/v1/design-agent/locate/jobs/{job_id}")
 
 # ── env fixture ──────────────────────────────────────────────────────────────
 
@@ -140,7 +190,7 @@ def test_locate_404_when_flag_off(client, env, monkeypatch):
 
 
 def test_locate_cross_workspace_prd_404(client, env):
-    """PRD belonging to another workspace returns 404, not the locate result."""
+    """PRD belonging to another workspace returns 404, not a job id."""
     _seed_cross_workspace_prd(prd_id=99)
     resp = client.post(
         "/v1/design-agent/locate",
@@ -164,17 +214,19 @@ def test_locate_auto_proceed_response(client, env, monkeypatch):
         return fake_locate
 
     with patch("asyncio.to_thread", new=_fake_to_thread):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
 
     assert resp.status_code == 200, resp.text
-    body = resp.json()
+    poll = resp.json()
+    assert poll["status"] == "done"
+    body = poll["result"]
     assert body["decision"] == "auto_proceed"
     assert len(body["chosen"]) == 1
     assert body["chosen"][0]["route"] == "/home"
-    # Planner amendment: component_count populated from ScreenNode.composed_components.
+    # component_count populated from ScreenNode.composed_components.
     assert body["chosen"][0]["component_count"] == 3
     assert len(body["ranked"]) == 1
     assert body["posture"] == "CLEAN"
@@ -195,13 +247,13 @@ def test_locate_ranked_confirm_response(client, env, monkeypatch):
         return fake_locate
 
     with patch("asyncio.to_thread", new=_fake_to_thread):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
 
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["result"]
     assert body["decision"] == "ranked_confirm"
     assert body["chosen"] == []
     assert len(body["ranked"]) == 1
@@ -228,13 +280,13 @@ def test_no_installation_returns_unmapped_no_llm_call(client, env, monkeypatch):
         return None  # build_map path; locate_screen should never be reached
 
     with patch("asyncio.to_thread", new=_spy_to_thread):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
 
     assert resp.status_code == 200
-    body = resp.json()
+    body = resp.json()["result"]
     assert body["unmapped"] is True
     assert body["decision"] == "ranked_confirm"
     assert body["chosen"] == []
@@ -252,14 +304,15 @@ def test_empty_map_returns_unmapped(client, env, monkeypatch):
         return None
 
     with patch("asyncio.to_thread", new=_fake_to_thread):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
 
     assert resp.status_code == 200
-    assert resp.json()["unmapped"] is True
-    assert resp.json()["decision"] == "ranked_confirm"
+    body = resp.json()["result"]
+    assert body["unmapped"] is True
+    assert body["decision"] == "ranked_confirm"
 
 
 def test_map_failure_fails_open_no_502(client, env, monkeypatch, caplog):
@@ -274,21 +327,26 @@ def test_map_failure_fails_open_no_502(client, env, monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO, logger="app.routes.design_agent"):
         with patch("asyncio.to_thread", new=_raise_on_build):
-            resp = client.post(
-                "/v1/design-agent/locate",
-                json={"prd_id": 1, "github_repo": "org/repo"},
+            resp = _post_and_poll(
+                client, env.routes,
+                {"prd_id": 1, "github_repo": "org/repo"},
             )
 
-    assert resp.status_code == 200, "map failure must fail-open, not 502"
-    body = resp.json()
+    assert resp.status_code == 200
+    poll = resp.json()
+    # Map failure fails OPEN to a done unmapped result, NOT an error status.
+    assert poll["status"] == "done"
+    body = poll["result"]
     assert body["unmapped"] is True
     assert body["decision"] == "ranked_confirm"
     log_text = " ".join(r.getMessage() for r in caplog.records)
     assert "locate.map_failed" in log_text
 
 
-def test_locate_llm_failure_returns_502(client, env, monkeypatch):
-    """locate_screen raises → 502; the endpoint never fabricates a screen."""
+def test_locate_llm_failure_polls_error(client, env, monkeypatch):
+    """locate_screen raises → poll returns status "error" with a message; the
+    endpoint never fabricates a screen. (Was a synchronous 502 before the async
+    contract; now the failure is surfaced through the poll, not the request.)"""
     _seed_prd()
     _mock_installation(monkeypatch)
     fake_map, _ = _make_map_result()
@@ -300,12 +358,16 @@ def test_locate_llm_failure_returns_502(client, env, monkeypatch):
         raise RuntimeError("Anthropic API error")
 
     with patch("asyncio.to_thread", new=_fake_to_thread):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
 
-    assert resp.status_code == 502
+    assert resp.status_code == 200
+    poll = resp.json()
+    assert poll["status"] == "error"
+    assert poll["result"] is None
+    assert "Anthropic API error" in (poll["error"] or "")
 
 
 # ── concurrency / observability ───────────────────────────────────────────────
@@ -326,12 +388,13 @@ def test_blocking_calls_offloaded_to_thread(client, env, monkeypatch):
         return fake_locate
 
     with patch("asyncio.to_thread", new=_spy_to_thread):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
 
     assert resp.status_code == 200
+    assert resp.json()["status"] == "done"
     assert "build_map" in calls, f"build_map not dispatched via to_thread; calls={calls}"
     assert "locate_screen" in calls, f"locate_screen not dispatched via to_thread; calls={calls}"
 
@@ -349,11 +412,12 @@ def test_request_log_no_prd_leak(client, env, monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO, logger="app.routes.design_agent"):
         with patch("asyncio.to_thread", new=_fake_to_thread):
-            resp = client.post(
-                "/v1/design-agent/locate",
-                json={"prd_id": 1, "github_repo": "org/repo"},
+            resp = _post_and_poll(
+                client, env.routes,
+                {"prd_id": 1, "github_repo": "org/repo"},
             )
 
+    assert resp.status_code == 200
     all_log = " ".join(r.getMessage() for r in caplog.records)
     assert "locate.request" in all_log, "request-start log line missing"
     assert "prd_id=1" in all_log
@@ -378,6 +442,7 @@ def test_no_existing_route_broken_imports_clean(env):
     assert "/v1/design-agent/prd-patches" in paths
     assert "/v1/design-agent/figma-files" in paths
     assert "/v1/design-agent/locate" in paths
+    assert "/v1/design-agent/locate/jobs/{job_id}" in paths
 
 
 # ── app-shell signal threading + candidate id carry ───────────────────────────
@@ -459,9 +524,9 @@ def test_locate_passes_app_shell_signal_when_shell_node_present(client, env, mon
     fake_locate = _spanning_locate_result()
 
     with patch("asyncio.to_thread", new=_to_thread_for(fake_map, fake_locate)):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
 
     assert resp.status_code == 200, resp.text
@@ -491,9 +556,9 @@ def test_locate_passes_no_app_shell_when_absent(client, env, monkeypatch):
     fake_locate = _spanning_locate_result()
 
     with patch("asyncio.to_thread", new=_to_thread_for(fake_map, fake_locate)):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
 
     assert resp.status_code == 200, resp.text
@@ -515,12 +580,12 @@ def test_spans_routing_fires_through_route(client, env, monkeypatch):
         "asyncio.to_thread",
         new=_to_thread_for(_shell_map_result(with_shell=True), fake_locate),
     ):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
     assert resp.status_code == 200, resp.text
-    body = resp.json()
+    body = resp.json()["result"]
     assert body["decision"] == "proceed_with_note"
     assert len(body["chosen"]) == 1
     assert body["chosen"][0]["id"] == "app-shell"
@@ -532,12 +597,12 @@ def test_spans_routing_fires_through_route(client, env, monkeypatch):
         "asyncio.to_thread",
         new=_to_thread_for(_shell_map_result(with_shell=False), fake_locate),
     ):
-        resp2 = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp2 = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
     assert resp2.status_code == 200, resp2.text
-    assert resp2.json()["decision"] == "ranked_confirm"
+    assert resp2.json()["result"]["decision"] == "ranked_confirm"
 
 
 def test_locate_response_carries_candidate_id(client, env, monkeypatch):
@@ -575,13 +640,13 @@ def test_locate_response_carries_candidate_id(client, env, monkeypatch):
     fake_locate = LocateResult(candidates=cands)
 
     with patch("asyncio.to_thread", new=_to_thread_for(fake_map, fake_locate)):
-        resp = client.post(
-            "/v1/design-agent/locate",
-            json={"prd_id": 1, "github_repo": "org/repo"},
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
         )
 
     assert resp.status_code == 200, resp.text
-    body = resp.json()
+    body = resp.json()["result"]
     ranked_ids = [c["id"] for c in body["ranked"]]
     assert ranked_ids == ["/inbox", "inbox#archived", "app-shell"]
     by_id = {c["id"]: c for c in body["ranked"]}

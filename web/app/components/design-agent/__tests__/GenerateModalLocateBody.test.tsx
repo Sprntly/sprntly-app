@@ -141,7 +141,23 @@ function baseCodebaseProps(): ModalProps {
     _testRepos: REPOS,
     _testInitSource: "github",
     _testInitRepoSel: SEL_REPO,
+    // Zero inter-poll delay so the live POST→poll loop settles within one
+    // flushAsync tick (the async locate contract).
+    _testPollIntervalMs: 0,
+    _testPollTimeoutMs: 5000,
   }
+}
+
+/** Mock the async locate contract: POST → job handle, first poll → done(result). */
+function mockLocateResolves(result: LocateResponse) {
+  vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+    job_id: "job-1",
+    status: "running",
+  })
+  vi.spyOn(designAgentApi, "locateJob").mockResolvedValue({
+    status: "done",
+    result,
+  })
 }
 
 function baseFigmaProps(): ModalProps {
@@ -206,9 +222,9 @@ function lastGenerateParams(): Record<string, unknown> {
 
 // ─── Codebase mode sends both keys ───────────────────────────────────────────
 
-describe("test_codebase_mode_sends_route_and_commit_sha", () => {
+describe("codebase mode sends route and commit sha", () => {
   it("includes chosen_screen_route + map_commit_sha on the auto_proceed path", async () => {
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(makeLocate())
+    mockLocateResolves(makeLocate())
     const buttons = captureButtons(baseCodebaseProps())
     const btn = buttons.find((b) => b["data-testid"] === "generate-btn")
     expect(btn).toBeDefined()
@@ -228,7 +244,7 @@ describe("test_codebase_mode_sends_route_and_commit_sha", () => {
 
 // ─── Figma mode never carries either key ─────────────────────────────────────
 
-describe("test_figma_mode_omits_route_and_sha_keys", () => {
+describe("figma mode omits route and sha keys", () => {
   it("does not include chosen_screen_route or map_commit_sha in figma mode", async () => {
     const buttons = captureButtons(baseFigmaProps())
     const btn = buttons.find((b) => b["data-testid"] === "generate-btn")
@@ -246,7 +262,7 @@ describe("test_figma_mode_omits_route_and_sha_keys", () => {
 
 // ─── Website mode never carries either key ───────────────────────────────────
 
-describe("test_website_mode_omits_route_and_sha_keys", () => {
+describe("website mode omits route and sha keys", () => {
   it("does not include chosen_screen_route or map_commit_sha in website mode", async () => {
     const buttons = captureButtons(baseWebsiteProps())
     const btn = buttons.find((b) => b["data-testid"] === "generate-btn")
@@ -263,14 +279,12 @@ describe("test_website_mode_omits_route_and_sha_keys", () => {
 
 // ─── Empty SHA → chosen_screen_route alone (sha key omitted) ─────────────────
 
-describe("test_empty_sha_not_sent", () => {
+describe("empty sha not sent", () => {
   it("omits map_commit_sha when the locate response has empty commit_sha", async () => {
     // A mapped locate with non-empty chosen but empty SHA — the modal still
     // has a route to send but no snapshot to pin against. The body carries
     // the route alone; the backend gracefully resolves to None.
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(
-      makeLocate({ commit_sha: "" }),
-    )
+    mockLocateResolves(makeLocate({ commit_sha: "" }))
     const buttons = captureButtons(baseCodebaseProps())
     const btn = buttons.find((b) => b["data-testid"] === "generate-btn")
     ;(btn!["onClick"] as () => void)()
@@ -284,11 +298,11 @@ describe("test_empty_sha_not_sent", () => {
 
 // ─── Non-codebase auto path — direct runGenerateForRoute call ───────────────
 
-describe("test_codebase_mode_without_route_omits_chosen_screen_route", () => {
+describe("codebase mode without a route omits chosen_screen_route", () => {
   it("does not send chosen_screen_route when no route was ever chosen", async () => {
     // unmapped locate → modal does NOT call runGenerateFlow at all (the
     // unmapped fallback UI takes over). Assert no call landed.
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(
+    mockLocateResolves(
       makeLocate({ unmapped: true, chosen: [], decision: "ranked_confirm" }),
     )
     const buttons = captureButtons(baseCodebaseProps())

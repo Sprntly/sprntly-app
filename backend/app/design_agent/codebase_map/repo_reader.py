@@ -11,12 +11,15 @@ Design notes
 - Per-file fetch bodies borrow the logic of GithubExtractor._github_get_contents
   and _fetch_text_file mirrored inline, since those are bound instance methods
   that cannot be imported without touching the original class.
-- Sequential file fetching is deliberate: the live GitHub App rate-limit
-  behaviour on customer repos is untested at scale, so a simple loop matches
-  the existing adapter pattern and avoids compounding concurrent API pressure.
-  A bounded thread-pool would reduce wall-clock time at the cost of more
-  simultaneous rate-limit slots — that trade-off belongs in a later ticket once
-  actual rate-limit headroom is measured on real customer repos.
+- File bodies are fetched with a small, bounded ThreadPoolExecutor. The
+  per-file contents GETs are independent network round-trips, so a serial loop
+  spent the cold-path latency almost entirely waiting on I/O. A bounded pool of
+  _FETCH_CONCURRENCY workers overlaps that wait while keeping the number of
+  simultaneous GitHub-App rate-limit slots small. fetch_files runs inside a
+  worker thread (read_repo → build_map is dispatched via asyncio.to_thread), so
+  a thread pool here adds no event-loop pressure. The (bodies, had_error)
+  contract is preserved byte-for-byte: per-index byte ceilings, silent
+  404/oversize skips, and had_error only on real non-404 transport errors.
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ import base64
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
@@ -48,6 +52,14 @@ _MAX_FILE_BYTES = 128_000  # per-file byte cap for tree-sampled files; larger fi
 # bridge is often 200-400KB and would be silently dropped under the tree cap,
 # killing the theme bridge. Still bounded — never an unlimited fetch.
 _MAX_EXTRA_FILE_BYTES = 1_048_576  # 1 MiB ceiling for explicit extras
+# Bounded fan-out for the per-file contents fetch. Each file is an
+# independent GitHub-App contents GET, so the serial loop was I/O-bound; a small
+# pool overlaps the waits to cut cold map-build latency. 8 is deliberately
+# conservative: well under the budget ceiling (max(_MAX_FILES=40, always_fetch)),
+# so even a full build keeps at most 8 concurrent rate-limit slots in flight
+# against GitHub's 5,000 req/hr installation budget — meaningful speed-up with no
+# realistic risk of secondary-rate-limit bursts on a single customer repo.
+_FETCH_CONCURRENCY = 8
 
 
 # ── data model ──────────────────────────────────────────────────────────────────
@@ -326,18 +338,41 @@ class RepoReader:
         had_error = False
 
         budget = max(_MAX_FILES, always_fetch)
-        for idx, path in enumerate(paths[:budget]):
-            # The first `always_fetch` paths are the caller's explicit extras
-            # (read_repo prepends them), so they earn the larger byte ceiling.
-            # Tree-sampled paths keep the tighter _MAX_FILE_BYTES cap.
+        targets = list(enumerate(paths[:budget]))
+        if not targets:
+            return bodies, had_error
+
+        def _fetch_one(idx: int, path: str) -> tuple[str, str | None, bool]:
+            """Fetch + decode one path; returns (path, text_or_None, errored).
+
+            max_bytes is bound to the path's ORIGINAL index in paths[:budget]
+            (captured here, not by completion order): the first `always_fetch`
+            paths are the caller's explicit extras and earn the larger ceiling;
+            tree-sampled paths keep the tighter _MAX_FILE_BYTES cap. errored is
+            True only on a non-404 HTTP error or transport exception — a 404 or
+            an oversize / non-base64 skip (_decode_file_payload → None) stays a
+            silent skip, exactly as the serial loop behaved.
+            """
             max_bytes = _MAX_EXTRA_FILE_BYTES if idx < always_fetch else _MAX_FILE_BYTES
             try:
                 payload = _get_contents_raw(headers, repo, path, branch)
-                text = _decode_file_payload(payload, max_bytes=max_bytes)
-                if text is not None:
-                    bodies[path] = text
+                return path, _decode_file_payload(payload, max_bytes=max_bytes), False
             except Exception:
+                return path, None, True
+
+        # Bounded fan-out: one task per path, at most _FETCH_CONCURRENCY in
+        # flight. Results are assembled single-threaded from the returned tuples
+        # below, so no worker mutates the shared bodies dict (no race). Worker
+        # count is capped at the number of targets to avoid spinning idle threads.
+        workers = min(_FETCH_CONCURRENCY, len(targets))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(lambda t: _fetch_one(*t), targets))
+
+        for path, text, errored in results:
+            if errored:
                 had_error = True
+            if text is not None:
+                bodies[path] = text
 
         return bodies, had_error
 

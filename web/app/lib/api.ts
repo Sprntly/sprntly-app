@@ -805,12 +805,12 @@ export const prdApi = {
       .then((r) => r.generations),
 }
 
-// ---- Design Agent (P1-09) ---------------------------------------------------
+// ---- Design Agent ---------------------------------------------------
 // Append-only block; does not modify any export above. Mirrors prdApi — reuses
 // the shared `api` helper so credentials/JSON/${API_URL} handling stays
 // centralised (no raw fetch, no reinvented client).
 
-/** F12 (P3-08) — the agent's clarifying question, persisted on the prototype
+/** The agent's clarifying question, persisted on the prototype
  *  row as a sidecar. Shape `{question, choices?, context?}`. When non-null the
  *  prototype is in `awaiting_clarification` (`status` stays `ready` — the
  *  question is a sidecar, NOT a status enum value). `choices` present → answer
@@ -827,7 +827,7 @@ export type PrototypeRecord = {
   status: "generating" | "ready" | "failed" | "invalidated"
   bundle_url: string | null
   error: string | null
-  // ── P2-12 (append-only): F14/F15 + F6 columns added by the P2-06 sharing
+  // ── (append-only): mark-complete/resume + share columns added by the sharing
   //    migration. GET /v1/design-agent/{id} does `select("*")`, so the row
   //    carries these. Typed OPTIONAL so existing `PrototypeRecord` literals
   //    (e.g. the runDesignAgentGeneration test's `proto()` base) keep
@@ -835,11 +835,11 @@ export type PrototypeRecord = {
   is_complete?: boolean
   share_mode?: "private" | "public" | "passcode"
   share_token?: string | null
-  // ── P3-16 (append-only): F12 `awaiting_clarification` sidecar — the
-  //    `pending_question` column added by P3-08. GET /{id} `select("*")` carries
+  // ── (append-only): `awaiting_clarification` sidecar — the
+  //    `pending_question` column. GET /{id} `select("*")` carries
   //    it; typed OPTIONAL/nullable to match the posture above (no api method
   //    added — the existing GET poll surfaces it; the answer routes through the
-  //    existing P3-14 `iterate`). Null/absent ⇒ no question pending.
+  //    existing `iterate`). Null/absent ⇒ no question pending.
   pending_question?: PendingQuestion | null
   // ── (append-only): optional preview-thumbnail URL captured on generation-
   //    complete. GET /{id} / by-prd both `select("*")`, so the column flows
@@ -856,11 +856,11 @@ export type PrototypeStartResponse = {
   status: string
 }
 
-/** F8 (P3-02/P3-03) — an anchored comment. Wire shape mirrors the backend
+/** An anchored comment. Wire shape mirrors the backend
  *  `CommentOut` (id/anchor_id/body/author/status/created_at/resolved_at).
- *  `status` is the AD12 lifecycle: `open` (active), `resolved` (internally
+ *  `status` is the lifecycle: `open` (active), `resolved` (internally
  *  closed), `orphaned` (the anchor no longer exists in the current bundle —
- *  set by P3-04, rendered with no pin by the panel). */
+ *  set by the backend, rendered with no pin by the panel). */
 export type CommentRecord = {
   id: number
   anchor_id: string
@@ -874,7 +874,7 @@ export type CommentRecord = {
   resolved_anchor_id?: string | null
 }
 
-/** F11 (P3-09/P3-10) — a proposed PRD patch. Wire shape mirrors the backend
+/** A proposed PRD patch. Wire shape mirrors the backend
  *  `PrdPatchOut` (id/prd_id/prototype_id/rationale/patch_md/status/created_at).
  *  `status` is `pending` (awaiting accept/reject), `applied` (folded into the
  *  rendered PRD on read via apply_patches_to_prd_md), or `rejected`. The banner
@@ -918,8 +918,8 @@ export const designAgentApi = {
      *  URL's node-id query param. Passed through to the backend so the agent
      *  loop fetches only that specific frame instead of the file's top-5. */
     figma_node_id?: string | null
-    website_url?: string | null  // P5-02: Scenario B fallback source
-    manual_design?: { primary_color: string; font_family: string } | null  // P5-02: manual floor
+    website_url?: string | null  // Scenario B fallback source
+    manual_design?: { primary_color: string; font_family: string } | null  // manual floor
     github_repo?: string | null  // connected-repo full_name ("org/repo"); prompt context only
     design_source?: "figma" | "github" | "website" | null  // explicit source selector; null = back-compat implicit precedence
     /** The screen route the PM confirmed in the locate UX. Sent only on the
@@ -979,7 +979,7 @@ export const designAgentApi = {
       return null
     }
   },
-  /** F14 — mark a prototype complete. Empty body. */
+  /** Mark a prototype complete. Empty body. */
   complete: (prototypeId: number) =>
     api.post<{
       prototype_id: number
@@ -1010,14 +1010,14 @@ export const designAgentApi = {
     const res = await fetch(viewGrantUrl, { method: "POST", headers, credentials: "include" })
     if (!res.ok) throw new ApiError(res.status, null, "view-grant failed")
   },
-  /** F15 — resume iteration on a completed prototype. Empty body. */
+  /** Resume iteration on a completed prototype. Empty body. */
   resume: (prototypeId: number) =>
     api.post<{
       prototype_id: number
       is_complete: boolean
       handoffs_flagged_stale: number
     }>(`/v1/design-agent/${prototypeId}/resume`, {}),
-  /** F6 — set the share mode (and, for passcode mode, the passcode). */
+  /** Set the share mode (and, for passcode mode, the passcode). */
   share: (
     prototypeId: number,
     body: { mode: "private" | "public" | "passcode"; passcode?: string },
@@ -1028,7 +1028,7 @@ export const designAgentApi = {
       share_token: string | null
     }>(`/v1/design-agent/${prototypeId}/share`, body),
   /**
-   * F16 — `GET /v1/design-agent/{id}/export` returns `text/markdown`, NOT JSON,
+   * `GET /v1/design-agent/{id}/export` returns `text/markdown`, NOT JSON,
    * so it bypasses the shared JSON-parsing `request<T>` helper and uses `fetch`
    * directly. Same auth path (Bearer via `accessTokenProvider`) + cookie.
    */
@@ -1041,15 +1041,15 @@ export const designAgentApi = {
       { method: "GET", headers, credentials: "include" },
     )
     if (!res.ok) {
-      // 409 = WIP (F17). 404 = wrong workspace / missing. 401 = no auth.
+      // 409 = WIP. 404 = wrong workspace / missing. 401 = no auth.
       throw new ApiError(res.status, await res.text())
     }
     return await res.text()
   },
-  // ── F8 anchored comments (P3-03) ──────────────────────────────────────────
+  // ── anchored comments ──────────────────────────────────────────
   /** Public-route comment write (external viewer on `/p/<token>`): the token
-   *  is the access primitive (F6), so no auth is required. Hits the P3-02
-   *  public route. Phase 3: an optional `viewer_name` is the viewer's self-
+   *  is the access primitive, so no auth is required. Hits the
+   *  public route. An optional `viewer_name` is the viewer's self-
    *  supplied display name; the backend maps it onto the comment author (falling
    *  back to "Anonymous"). Omitted on the signed-in surface. Additive field. */
   createCommentByToken: (token: string, body: {
@@ -1090,7 +1090,7 @@ export const designAgentApi = {
     ),
   deleteComment: (prototypeId: number, commentId: number) =>
     api.delete<void>(`/v1/design-agent/${prototypeId}/comments/${commentId}`),
-  // ── F11 PRD patches (P3-10) ───────────────────────────────────────────────
+  // ── PRD patches ───────────────────────────────────────────────
   /** List the PENDING PRD patches for a PRD (workspace-filtered server-side).
    *  The PrdPatchBanner calls this on mount to decide whether to surface. */
   listPendingPatches: (prdId: number) =>
@@ -1111,11 +1111,11 @@ export const designAgentApi = {
       `/v1/design-agent/prd-patches/${patchId}/reject`,
       {},
     ),
-  // ── AD14 pre-flight cost estimate (P3-11) ─────────────────────────────────
-  /** Pre-flight cost estimate for an iterate run (AD14). Deterministic, makes no
+  // ── pre-flight cost estimate ─────────────────────────────────
+  /** Pre-flight cost estimate for an iterate run. Deterministic, makes no
    *  Anthropic call server-side — drives the CostEstimateModal's
-   *  "~$0.X · Continue / Cancel" gate. The iterate composer itself (`iterate`) is
-   *  P3-14; this only estimates. */
+   *  "~$0.X · Continue / Cancel" gate. The iterate composer itself (`iterate`)
+   *  only estimates here. */
   estimateIterate: (
     prototypeId: number,
     body: { prompt: string; applied_comment_id?: number | null },
@@ -1124,13 +1124,13 @@ export const designAgentApi = {
       `/v1/design-agent/${prototypeId}/iterate/estimate`,
       body,
     ),
-  // ── F9/F10 iterate (P3-14) ────────────────────────────────────────────────
-  /** Kick off an iterate of an existing prototype (F9 re-prompt / F10 Apply).
-   *  Owned HERE, not P3-11 (which ships `estimateIterate` only). The IterateComposer
-   *  routes Submit through the AD14 `CostEstimateModal` gate and calls this ONLY
+  // ── iterate ────────────────────────────────────────────────
+  /** Kick off an iterate of an existing prototype (re-prompt / Apply).
+   *  The IterateComposer
+   *  routes Submit through the `CostEstimateModal` gate and calls this ONLY
    *  from the modal's Continue handler — never directly from a Submit. Defaults
-   *  `mode:'execute'` (`'plan'` is P3-07). Returns the background-run handle +
-   *  `queue_position` (P3-06's iterate queue). 409 when the prototype is locked
+   *  `mode:'execute'`. Returns the background-run handle +
+   *  `queue_position` (the iterate queue). 409 when the prototype is locked
    *  (`is_complete`) or not `ready`; 429 when the queue is full. */
   iterate: (
     prototypeId: number,
@@ -1144,11 +1144,11 @@ export const designAgentApi = {
       ...body,
       mode: body.mode ?? "execute",
     }),
-  // ── F13 manual edit (P4-01 caller / P4-02 route) ──────────────────────────
-  /** F13 (AD13/AD23) — commit a batch of light visual property edits collected
+  // ── manual edit ──────────────────────────
+  /** Commit a batch of light visual property edits collected
    *  by the ManualEditOverlay. Mirrors `iterate`'s response shape (background-run
    *  handle + queue_position). `body.edits` are de-duplicated
-   *  `{anchor_id, property, old_value, new_value}` triples; P4-02's backend route
+   *  `{anchor_id, property, old_value, new_value}` triples; the backend route
    *  translates them into source edits via one LLM run. 409 when the prototype is
    *  locked (`is_complete`) or not `ready`; the route returns a clear error when
    *  an anchor_id no longer exists in the current bundle (the overlay surfaces it
@@ -1176,12 +1176,24 @@ export const designAgentApi = {
    *  <1s. Returns { question }. */
   clarifyComment: (prototypeId: number, commentBody: string) =>
     api.post<{ question: string }>(`/v1/design-agent/${prototypeId}/clarify-comment`, { comment_body: commentBody }),
-  /** Run the map → locate-LLM → gate pipeline for a PRD + connected repo.
-   *  Returns the gate decision, chosen screen(s), and the full ranked top-3.
-   *  `unmapped` is true when no installation or codebase map is available —
-   *  the caller should fall back to the manual-picker flow in that case. */
+  /** Kick off the map → locate-LLM → gate pipeline for a PRD + connected repo.
+   *  ASYNC contract: the POST returns 202 with a `job_id` immediately;
+   *  the gate decision is produced in the background and read back by polling
+   *  `locateJob(job_id)`. Inline failures still surface on the POST itself —
+   *  notably 404 (feature off / PRD not owned / cross-workspace) — so callers
+   *  must catch the POST as well as the poll. Use `locateJob` to drive the loop. */
   locate: (body: { prd_id: number; github_repo: string; ref?: string | null }) =>
-    api.post<LocateResponse>("/v1/design-agent/locate", body),
+    api.post<LocateJobHandle>("/v1/design-agent/locate", body),
+  /** Poll a locate job by id. Returns the job status; when `status` is
+   *  "done" the existing `LocateResponse` rides in `result`, and when "error"
+   *  the failure reason rides in `error`. A 404 from this endpoint means the
+   *  job is unknown / TTL-swept / cross-workspace — a TERMINAL error, distinct
+   *  from a transient 5xx the caller should retry. Reuses LocateResponse as the
+   *  result shape (do not redefine). */
+  locateJob: (jobId: string) =>
+    api.get<LocateJobStatus>(
+      `/v1/design-agent/locate/jobs/${encodeURIComponent(jobId)}`,
+    ),
   briefPrototypeMap: (briefId: number): Promise<BriefPrototypeMap> =>
     api.get<BriefPrototypeMap>(
       `/v1/design-agent/brief-prototype-map?brief_id=${encodeURIComponent(String(briefId))}`,
@@ -1202,6 +1214,22 @@ export type LocateCandidate = {
   component_count: number
 }
 
+/** Handle returned by POST /v1/design-agent/locate (HTTP 202). The job
+ *  runs in the background; poll `locateJob(job_id)` until it is "done"/"error". */
+export type LocateJobHandle = {
+  job_id: string
+  status: "running"
+}
+
+/** Snapshot returned by GET /v1/design-agent/locate/jobs/{job_id}.
+ *  `result` is the unchanged LocateResponse, present only when status is
+ *  "done"; `error` carries the failure reason when status is "error". */
+export type LocateJobStatus = {
+  status: "running" | "done" | "error"
+  result?: LocateResponse
+  error?: string
+}
+
 /** Shape returned by POST /v1/design-agent/locate. */
 export type LocateResponse = {
   decision: "auto_proceed" | "proceed_with_note" | "ranked_confirm"
@@ -1218,7 +1246,7 @@ export type LocateResponse = {
   commit_sha: string
 }
 
-/** Shape returned by POST /v1/design-agent/{id}/iterate/estimate (AD14/AD15). */
+/** Shape returned by POST /v1/design-agent/{id}/iterate/estimate. */
 export type IterateCostEstimate = {
   cached_input_tokens: number
   new_input_tokens: number
@@ -1229,21 +1257,21 @@ export type IterateCostEstimate = {
   model: string
 }
 
-/** Shape returned by POST /v1/design-agent/{id}/iterate (P3-05 route + P3-06 queue). */
+/** Shape returned by POST /v1/design-agent/{id}/iterate (route + queue). */
 export type IterateResponse = {
   prototype_id: number
   status: string
   queue_position: number
 }
 
-/** F13 (P4-01) — the closed set of properties the ManualEditOverlay exposes.
- *  Border, animation, gap, margin, etc. are OUT of scope (deferred to v2 per
- *  BUILD-PHASES.md). The wire keeps this typed so the overlay and P4-02 share
+/** The closed set of properties the ManualEditOverlay exposes.
+ *  Border, animation, gap, margin, etc. are OUT of scope (deferred to v2).
+ *  The wire keeps this typed so the overlay and the backend share
  *  one shape end-to-end. */
 export type EditableProperty = "text" | "font-size" | "padding" | "color" | "background"
 
-/** F13 (P4-01/P4-02) — one fixed-property visual edit. The SAVED triple keys on
- *  `anchor_id` (AD4 — one id may match N structurally-identical elements; P4-02
+/** One fixed-property visual edit. The SAVED triple keys on
+ *  `anchor_id` (one id may match N structurally-identical elements; the backend
  *  applies the edit to ALL N). `old_value` is the pristine value at first
  *  selection; `new_value` is the final value at Save. */
 export type ManualEditTriple = {
@@ -1253,7 +1281,7 @@ export type ManualEditTriple = {
   new_value: string
 }
 
-/** Shape returned by POST /v1/design-agent/{id}/manual-edit (P4-02). Mirrors
+/** Shape returned by POST /v1/design-agent/{id}/manual-edit. Mirrors
  *  IterateResponse — a manual edit kicks off the same background-run + queue. */
 export type ManualEditResponse = {
   prototype_id: number

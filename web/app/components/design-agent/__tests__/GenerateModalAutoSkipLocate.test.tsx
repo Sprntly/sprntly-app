@@ -18,7 +18,7 @@
  * auto-skip must NOT call locate (no regression on those paths).
  */
 import * as React from "react"
-import { render, waitFor } from "@testing-library/react"
+import { render, waitFor, act } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 // Sprntly components use the classic JSX runtime; expose React globally so the
@@ -40,6 +40,7 @@ vi.mock("../DesignAgentDrawer", async (importOriginal) => {
 import { GenerateModal } from "../GenerateModal"
 import { runGenerateFlow } from "../DesignAgentDrawer"
 import {
+  ApiError,
   connectorsApi,
   designAgentApi,
   type ConnectionSummary,
@@ -97,6 +98,23 @@ const REPOS: GitHubRepo[] = [
     stargazers_count: 0,
   },
 ]
+
+/**
+ * Mock the async locate contract: POST → job handle, first poll →
+ * done(result). Replaces the old single `locate().mockResolvedValue(...)`.
+ * Returns the `locate` POST spy so call-count assertions still read naturally.
+ */
+function mockLocateResolves(result: LocateResponse) {
+  const spy = vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+    job_id: "job-1",
+    status: "running",
+  })
+  vi.spyOn(designAgentApi, "locateJob").mockResolvedValue({
+    status: "done",
+    result,
+  })
+  return spy
+}
 
 function makeLocate(overrides: Partial<LocateResponse> = {}): LocateResponse {
   return {
@@ -180,7 +198,7 @@ afterEach(() => {
 
 describe("saved-github auto-skip routes through locate (recreate fidelity)", () => {
   it("calls designAgentApi.locate with {prd_id, github_repo} on a healthy github preference", async () => {
-    const locateSpy = vi.spyOn(designAgentApi, "locate").mockResolvedValue(makeLocate())
+    const locateSpy = mockLocateResolves(makeLocate())
 
     render(
       React.createElement(GenerateModal, {
@@ -203,7 +221,7 @@ describe("saved-github auto-skip routes through locate (recreate fidelity)", () 
   })
 
   it("on auto_proceed the generate body carries chosen_screen_route + chosen_screen_id + map_commit_sha", async () => {
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(makeLocate())
+    mockLocateResolves(makeLocate())
 
     render(
       React.createElement(GenerateModal, {
@@ -233,7 +251,7 @@ describe("saved-github auto-skip routes through locate (recreate fidelity)", () 
   })
 
   it("fires onGenStart with the chosen route + repo before generation", async () => {
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(makeLocate())
+    mockLocateResolves(makeLocate())
     const onGenStart = vi.fn()
 
     render(
@@ -261,7 +279,7 @@ describe("saved-github auto-skip routes through locate (recreate fidelity)", () 
 
   it("at ranked_confirm does NOT auto-generate (re-opens the picker, no generate call)", async () => {
     const onClose = vi.fn()
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(
+    mockLocateResolves(
       makeLocate({ decision: "ranked_confirm", chosen: [], commit_sha: "" }),
     )
 
@@ -283,7 +301,7 @@ describe("saved-github auto-skip routes through locate (recreate fidelity)", () 
   })
 
   it("at unmapped does NOT auto-generate", async () => {
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(
+    mockLocateResolves(
       makeLocate({ unmapped: true, chosen: [], decision: "ranked_confirm", commit_sha: "" }),
     )
 
@@ -308,7 +326,7 @@ describe("saved-github auto-skip routes through locate (recreate fidelity)", () 
 
 describe("saved figma / website auto-skip never call locate (no regression)", () => {
   it("saved-figma auto-skip generates WITHOUT calling locate", async () => {
-    const locateSpy = vi.spyOn(designAgentApi, "locate").mockResolvedValue(makeLocate())
+    const locateSpy = mockLocateResolves(makeLocate())
 
     render(
       React.createElement(GenerateModal, {
@@ -334,7 +352,7 @@ describe("saved figma / website auto-skip never call locate (no regression)", ()
   })
 
   it("saved-website auto-skip generates WITHOUT calling locate", async () => {
-    const locateSpy = vi.spyOn(designAgentApi, "locate").mockResolvedValue(makeLocate())
+    const locateSpy = mockLocateResolves(makeLocate())
 
     render(
       React.createElement(GenerateModal, {
@@ -355,5 +373,433 @@ describe("saved figma / website auto-skip never call locate (no regression)", ()
     expect(params["design_source"]).toBe("website")
     expect(params).not.toHaveProperty("chosen_screen_route")
     expect(params).not.toHaveProperty("map_commit_sha")
+  })
+})
+
+// ─── github render-guard flash suppression ────────────────────────────────────
+//
+// The render-time guard (not the useEffect) must suppress the config form for
+// github too, to prevent a one-frame flash before enterLoadingFlow() fires.
+//
+// Three cases:
+//   1. Data still loading (connections=null OR repos=null) → null
+//   2. Data loaded + preference healthy → null (effect will fire)
+//   3. Data loaded + preference UNHEALTHY (repo not in list) → form renders
+//
+// These tests drive the RENDER path only (no waiting for effects to fire locate).
+
+describe("github render-guard flash suppression", () => {
+  it("returns null while connections are still loading (connections=null)", () => {
+    // _testConnections=null simulates the async connector fetch in flight.
+    // The render guard must suppress immediately rather than showing the form.
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: null,
+        _testRepos: REPOS,
+      }),
+    )
+    // The modal should render nothing (render guard returns null).
+    expect(container.querySelector("#modal-generate")).toBeNull()
+  })
+
+  it("returns null while repos are still loading (repos=null, connections loaded)", () => {
+    // _testRepos=null simulates the repo list fetch still in flight.
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+        _testRepos: null,
+      }),
+    )
+    expect(container.querySelector("#modal-generate")).toBeNull()
+  })
+
+  it("never shows the config form when healthy — goes straight to loading state", async () => {
+    // Data is loaded and the saved preference is healthy. The render guard
+    // suppresses the config form (returns null) while in the config phase, and
+    // the auto-skip effect immediately fires enterLoadingFlow(), switching the
+    // phase to "loading" — so the loading heartbeat renders instead of the form.
+    // The config form ([data-testid="generate-btn"]) must never appear.
+    mockLocateResolves(makeLocate())
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+        _testRepos: REPOS,
+      }),
+    )
+    // The config form's Generate button must never be visible.
+    expect(container.querySelector("[data-testid='generate-btn']")).toBeNull()
+    // The modal transitions to the loading phase — the heartbeat is visible.
+    await waitFor(() =>
+      expect(container.querySelector("[data-testid='generate-loading-heartbeat']")).not.toBeNull(),
+    )
+  })
+
+  it("falls through to the form when the saved repo is NOT in the loaded list (unhealthy)", () => {
+    // The saved preference names a repo that is not in the loaded repos list.
+    // The render guard must NOT suppress — the form is the recovery path.
+    const missingRepoPref: DesignSourcePreference = {
+      design_source: "github",
+      github_repo: "org/missing-repo",
+      figma_file_key: null,
+      website_url: null,
+    }
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: missingRepoPref,
+        _testConnections: GITHUB_CONN,
+        _testRepos: REPOS, // REPOS only contains org/repo, not org/missing-repo
+      }),
+    )
+    // The config form must render so the user can pick a different repo.
+    expect(container.querySelector("#modal-generate")).not.toBeNull()
+  })
+})
+
+// ─── auto-skip locate FAILURE never blanks ───────────────────────────
+//
+// The tester's repro: on the in-tab /prototype surface, a SAVED github
+// preference auto-skips and fires locate; when locate FAILS, the surface used to
+// render NOTHING — no loading, no error, no Retry (pure blank). The manual-click
+// terminal-failure paths are already covered in GenerateModalLocatePoll; this
+// block proves the AUTO-SKIP entry reaches the SAME explicit error phase (so the
+// Retry UI renders) and never collapses to a null render while open.
+//
+// These tests pass _testPoll* overrides (zero interval, small timeout) so the
+// POST→poll loop settles fast under waitFor — the production auto-skip tests
+// above use real intervals, but a terminal failure surfaces on the first
+// POST/poll with no leading sleep, so the overrides only matter for the timeout
+// case (which drives the clock explicitly).
+
+describe("auto-skip locate failure surfaces the error state, never blank", () => {
+  function renderAutoSkip(extra: Record<string, unknown> = {}) {
+    return render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+        _testRepos: REPOS,
+        _testPollIntervalMs: 0,
+        _testPollTimeoutMs: 5000,
+        _testPollMaxRetries: 4,
+        ...extra,
+      }),
+    )
+  }
+
+  it("a terminal POST 403 on the auto-skip path shows the error + Retry, not a blank", async () => {
+    // The exact tester repro: SAVED github source → auto-skip fires locate →
+    // the locate POST returns 403 (terminal). Before the fix the flow bailed
+    // without setting flowPhase="error", leaving the modal in the null-rendering
+    // config-auto-skip state → blank screen.
+    vi.spyOn(designAgentApi, "locate").mockRejectedValue(
+      new ApiError(403, { detail: "forbidden" }),
+    )
+
+    const { container } = renderAutoSkip()
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="locate-error-state"]'),
+      ).toBeTruthy(),
+    )
+    // The Retry affordance is present.
+    expect(container.querySelector('[data-testid="locate-retry"]')).toBeTruthy()
+    // NEVER blank: the modal shell is mounted (not a null render).
+    expect(container.querySelector("#modal-generate")).not.toBeNull()
+    // It did NOT collapse to the config form and never generated.
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+    expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+  })
+
+  it("a terminal 404 on the auto-skip job poll shows the error state, not a blank", async () => {
+    vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+      job_id: "job-as-1",
+      status: "running",
+    })
+    const jobSpy = vi
+      .spyOn(designAgentApi, "locateJob")
+      .mockRejectedValue(new ApiError(404, { detail: "unknown job" }))
+
+    const { container } = renderAutoSkip()
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="locate-error-state"]'),
+      ).toBeTruthy(),
+    )
+    // 404 is terminal — exactly one poll GET, no retry storm.
+    expect(jobSpy).toHaveBeenCalledTimes(1)
+    expect(container.querySelector("#modal-generate")).not.toBeNull()
+    expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+  })
+
+  it("a never-finishing auto-skip job hits the timeout cap → error, not a blank", async () => {
+    vi.useFakeTimers()
+    try {
+      vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+        job_id: "job-as-2",
+        status: "running",
+      })
+      vi.spyOn(designAgentApi, "locateJob").mockResolvedValue({ status: "running" })
+
+      const { container } = renderAutoSkip({
+        _testPollIntervalMs: 10,
+        _testPollTimeoutMs: 30,
+      })
+
+      // Advance past the timeout cap, flushing the poll loop's awaits.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200)
+      })
+
+      expect(
+        container.querySelector('[data-testid="locate-error-state"]'),
+      ).toBeTruthy()
+      expect(
+        container.querySelector('[data-testid="locate-error"]')?.textContent,
+      ).toContain("timed out")
+      // Never blank, never collapsed to config.
+      expect(container.querySelector("#modal-generate")).not.toBeNull()
+      expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("ASYNC-SETTLE: a terminal POST 403 still surfaces the error when connector+repo data settle via the effect (live-surface repro)", async () => {
+    // The live /prototype surface does NOT inject _testConnections/_testRepos —
+    // the auto-skip effect fetches them, so connections settle, THEN repos
+    // settle, re-running the effect across several renders before
+    // enterLoadingFlow() fires. This drives that real settling path (only the
+    // network calls are mocked) and proves the auto-skip locate FAILURE still
+    // ends in the error phase rather than a null-rendering config-auto-skip
+    // state. The beforeEach already stubs connectorsApi.list +
+    // listAccessibleGithubRepos to return GITHUB_CONN / REPOS.
+    vi.spyOn(designAgentApi, "locate").mockRejectedValue(
+      new ApiError(403, { detail: "forbidden" }),
+    )
+
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        // NO _testConnections / _testRepos — force the real fetch + settle path.
+      }),
+    )
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="locate-error-state"]'),
+      ).toBeTruthy(),
+    )
+    expect(container.querySelector('[data-testid="locate-retry"]')).toBeTruthy()
+    expect(container.querySelector("#modal-generate")).not.toBeNull()
+    expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+  })
+
+  it("RE-ENTRY STORM: effect re-runs after a failure do NOT auto-re-fire locate (only Retry does)", async () => {
+    // On the live surface the auto-skip effect re-runs whenever its deps churn
+    // (savedPreference / workspace identity changes on context re-renders). After
+    // a locate FAILURE the effect must NOT silently re-enter the loading flow and
+    // re-POST in a storm (which thrashes the surface and hammers the failing
+    // endpoint). Only the explicit Retry button may re-run locate.
+    const postSpy = vi.spyOn(designAgentApi, "locate").mockRejectedValue(
+      new ApiError(403, { detail: "forbidden" }),
+    )
+
+    const { container, rerender } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: { ...GITHUB_PREF },
+        _testConnections: GITHUB_CONN,
+        _testRepos: REPOS,
+        _testPollIntervalMs: 0,
+        _testPollTimeoutMs: 5000,
+      }),
+    )
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="locate-error-state"]'),
+      ).toBeTruthy(),
+    )
+    expect(postSpy).toHaveBeenCalledTimes(1)
+
+    // Force several effect re-runs by re-rendering with a fresh savedPreference
+    // object identity (same shape) — simulates the live context churn.
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        rerender(
+          React.createElement(GenerateModal, {
+            open: true,
+            onClose: vi.fn(),
+            prdId: PRD_ID,
+            figmaFileKey: null,
+            savedPreference: { ...GITHUB_PREF },
+            _testConnections: GITHUB_CONN,
+            _testRepos: REPOS,
+            _testPollIntervalMs: 0,
+            _testPollTimeoutMs: 5000,
+          }),
+        )
+      })
+    }
+
+    // Still in the error state, and locate was NOT re-fired by the effect churn.
+    expect(container.querySelector('[data-testid="locate-error-state"]')).toBeTruthy()
+    expect(postSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it("SWITCH SOURCE after an auto-skip failure renders the config form, never blank", async () => {
+    // The tester's follow-on repro: SAVED github source → auto-skip fires locate
+    // → locate FAILS → the clean error modal renders with Retry + Switch source.
+    // Clicking "Switch source" sets flowPhase back to "config".
+    // Before the fix the savedPreference render-null guard still saw a HEALTHY
+    // github preference and returned null → <main> rendered NOTHING → BLANK.
+    // With the fix the guard is gated on the pre-auto-skip window only, so an
+    // explicit return to config falls through to the source-picker FORM.
+    vi.spyOn(designAgentApi, "locate").mockRejectedValue(
+      new ApiError(403, { detail: "forbidden" }),
+    )
+
+    const { container } = renderAutoSkip()
+
+    // Auto-skip fired, locate failed → the error state is showing.
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="locate-error-state"]'),
+      ).toBeTruthy(),
+    )
+
+    const switchSource = container.querySelector<HTMLButtonElement>(
+      '[data-testid="locate-error-switch-source"]',
+    )
+    expect(switchSource).toBeTruthy()
+    act(() => switchSource!.click())
+
+    // FAILS WITHOUT THE FIX: the guard returns null here (githubHealthy is still
+    // true), so #modal-generate is null and the config form never renders — the
+    // blank-screen bug. With the fix the modal stays mounted AND the config /
+    // source-picker form renders so the user can choose a different source.
+    expect(container.querySelector("#modal-generate")).not.toBeNull()
+    expect(container.querySelector('[data-testid="generate-btn"]')).not.toBeNull()
+    // The error state is gone — we are back in config, not stuck.
+    expect(container.querySelector('[data-testid="locate-error-state"]')).toBeNull()
+    // And Switch source did NOT itself fire a generation.
+    expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+  })
+
+  it("SWITCH SOURCE from the unmapped-resolve phase also reaches the config form, never blank", async () => {
+    // The unmapped path's "Switch source" (data-testid="unmapped-switch-source")
+    // sets flowPhase back to "config" the same way the error path does. With a
+    // healthy github preference still set it would also hit the render-null guard
+    // and blank. Drive the auto-skip → unmapped → Switch source path and assert
+    // the config form renders.
+    mockLocateResolves(
+      makeLocate({ unmapped: true, chosen: [], decision: "ranked_confirm", commit_sha: "" }),
+    )
+
+    const { container } = renderAutoSkip()
+
+    // Auto-skip located but came back unmapped → the unmapped-resolve phase.
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="unmapped-resolve"]'),
+      ).toBeTruthy(),
+    )
+    // No auto-generation at unmapped.
+    expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
+
+    const switchSource = container.querySelector<HTMLButtonElement>(
+      '[data-testid="unmapped-switch-source"]',
+    )
+    expect(switchSource).toBeTruthy()
+    act(() => switchSource!.click())
+
+    // Never blank: the modal stays mounted and the config form renders.
+    expect(container.querySelector("#modal-generate")).not.toBeNull()
+    expect(container.querySelector('[data-testid="generate-btn"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="unmapped-resolve"]')).toBeNull()
+  })
+
+  it("PRE-AUTO-SKIP suppression preserved: a healthy github preference still shows NO config flash on first mount", () => {
+    // The switch-source gate must not re-introduce the original config flash. On first
+    // mount, before the auto-skip effect has run (autoSkipFiredRef still false),
+    // a healthy saved github preference must still suppress the config form — the
+    // render path is synchronous, so this assertion runs before any effect fires.
+    mockLocateResolves(makeLocate())
+    const { container } = render(
+      React.createElement(GenerateModal, {
+        open: true,
+        onClose: vi.fn(),
+        prdId: PRD_ID,
+        figmaFileKey: null,
+        savedPreference: GITHUB_PREF,
+        _testConnections: GITHUB_CONN,
+        _testRepos: REPOS,
+      }),
+    )
+    // The config form's Generate button must NOT flash on the first synchronous
+    // render (suppression still applies pre-auto-skip).
+    expect(container.querySelector("[data-testid='generate-btn']")).toBeNull()
+  })
+
+  it("Retry after an auto-skip failure re-runs locate and can then succeed", async () => {
+    const postSpy = vi
+      .spyOn(designAgentApi, "locate")
+      .mockRejectedValueOnce(new ApiError(403, { detail: "forbidden" }))
+      .mockResolvedValueOnce({ job_id: "job-as-retry", status: "running" })
+    vi.spyOn(designAgentApi, "locateJob").mockResolvedValue({
+      status: "done",
+      result: makeLocate(),
+    })
+
+    const { container } = renderAutoSkip()
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="locate-error-state"]'),
+      ).toBeTruthy(),
+    )
+    expect(postSpy).toHaveBeenCalledTimes(1)
+
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="locate-retry"]',
+    )
+    expect(retry).toBeTruthy()
+    act(() => retry!.click())
+
+    // Retry re-POSTs and the flow proceeds to generation.
+    await waitFor(() => expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1))
+    expect(postSpy).toHaveBeenCalledTimes(2)
+    expect(container.querySelector('[data-testid="locate-error-state"]')).toBeNull()
   })
 })

@@ -25,6 +25,7 @@ from app.db.prototypes import (
     invalidate_stale_prototypes,
 )
 from app.db.prototype_pending_iterations import invalidate_orphan_running_iterations
+from app.db.design_agent_jobs import requeue_orphan_claimed_jobs  # Tier 2
 from app.design_agent.prompts import DESIGN_AGENT_TEMPLATE_VERSION
 from app.prompts import (
     ASK_CACHE_VERSION,
@@ -141,7 +142,7 @@ async def lifespan(app: FastAPI):
             prd_orphans,
             ask_orphans,
         )
-    # Design Agent startup invalidation (P1-07 prototypes + P3-06 iterations).
+    # Design Agent startup invalidation (prototypes + iterations).
     #
     # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
     # out-of-band via Supabase migrations (db.init_db is a no-op) that may not yet
@@ -149,11 +150,11 @@ async def lifespan(app: FastAPI):
     # A missing design-agent table must NOT crash API startup; the Design Agent
     # surface stays dark behind NEXT_PUBLIC_DESIGN_AGENT_ENABLED regardless. Without
     # this guard an unapplied migration takes the entire API down (prod was 502 from
-    # the P1 rollup until this landed). Both unguarded calls — the P1-07 prototypes
-    # block AND the P3-06 iterations call — live inside this ONE try/except so a
+    # the rollup until this landed). Both unguarded calls — the prototypes
+    # block AND the iterations call — live inside this ONE try/except so a
     # regression that un-guards either one is caught by the lifespan-guard test.
     try:
-        # Design Agent (P1-07): demote orphaned 'generating' prototypes (the worker
+        # Design Agent: demote orphaned 'generating' prototypes (the worker
         # task died with the previous process) + stale 'ready' prototypes (template
         # bump). Sync helpers, across ALL workspaces — system-wide cleanup, not a
         # user-driven query (Rule #23) — mirroring the prd/evidence invalidation above.
@@ -166,7 +167,7 @@ async def lifespan(app: FastAPI):
                 proto_orphans,
                 proto_stale,
             )
-        # Design Agent (P3-06, AD11): demote orphaned 'running' iterations (the worker
+        # Design Agent: demote orphaned 'running' iterations (the worker
         # task died with the previous process) so a restart recovers the iterate queue.
         # Sync helper, across ALL workspaces — system-wide cleanup, not user-driven
         # (Rule #23) — mirroring the prototype orphan-clear above.
@@ -174,6 +175,16 @@ async def lifespan(app: FastAPI):
         if iter_orphans:
             logger.info(
                 "Invalidated %d orphan running iteration(s)", iter_orphans)
+        # Design Agent (Tier 2): re-queue jobs left 'claimed' by a worker
+        # process that died (its claim is now orphaned) so a fresh worker picks
+        # them up. Sync helper, across ALL workspaces — system-wide cleanup, not
+        # user-driven. requeue_orphan_claimed_jobs is itself fail-soft
+        # (missing table => 0), and it sits inside this guarded block so an
+        # environment without the Tier 2 migration applied never breaks startup.
+        job_orphans = requeue_orphan_claimed_jobs()
+        if job_orphans:
+            logger.info(
+                "Re-queued %d orphan claimed design-agent job(s)", job_orphans)
     except Exception:
         logger.warning(
             "Design Agent startup invalidation skipped — table(s) unavailable "
@@ -197,6 +208,30 @@ async def lifespan(app: FastAPI):
             logger.warning("Scheduler startup failed", exc_info=True)
 
     yield
+
+    # ── Tier 0: graceful drain of in-flight Design Agent generation ────
+    # On a deploy/restart SIGTERM, stop admitting new /generate work, then wait
+    # for any in-flight generation to finish (up to a tunable deadline) so the
+    # process is not SIGKILLed mid-build (the deploy-time 502 class). The
+    # deadline EXCEEDS the vite-build subprocess timeout
+    # (settings.design_agent_vite_build_timeout_seconds, default 120s) — default
+    # 130s — so a build in flight at shutdown is given room to complete. On
+    # deadline-elapse we do NOT cancel (the vite thread is uncancellable); the
+    # startup invalidate_orphan_generating_prototypes() sweep recovers any
+    # left-behind 'generating' row on the next boot. Wrapped so a drain error
+    # never blocks shutdown.
+    #
+    # SYSTEMD IMPLICATION (load-bearing): the unit running this process MUST set
+    # TimeoutStopSec greater than design_agent_drain_deadline_seconds (>=150s for
+    # the 130s default) — otherwise systemd sends SIGKILL before the drain
+    # finishes and this fix is inert.
+    design_agent.request_shutdown()
+    try:
+        await design_agent.drain_inflight(
+            settings.design_agent_drain_deadline_seconds
+        )
+    except Exception:
+        logger.warning("Design Agent drain failed during shutdown", exc_info=True)
 
     # Teardown: shut down scheduler if it was started.
     if settings.scheduler_enabled:

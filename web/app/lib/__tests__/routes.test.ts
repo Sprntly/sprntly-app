@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
-import { pathForScreen, screenIdFromPathname } from "../routes"
+import {
+  pathForScreen,
+  screenIdFromPathname,
+  prototypePath,
+  PROTOTYPE_PATH,
+} from "../routes"
 
 describe("routes — standalone connectors removed (commit A)", () => {
   it("does not map any ScreenId to the /connectors path", () => {
@@ -17,6 +22,25 @@ describe("routes — standalone connectors removed (commit A)", () => {
     // PATH_TO_SCREEN previously mapped "/connectors" → "connectors".
     // After commit A it should fall through to the default ("chat").
     expect(screenIdFromPathname("/connectors")).toBe("chat")
+  })
+})
+
+describe("routes — prototypePath generate-intent option", () => {
+  it("appends &generate=1 after the prd param when generate intent is set", () => {
+    expect(prototypePath(42, { generate: true })).toBe("/prototype?prd=42&generate=1")
+  })
+
+  it("appends ?generate=1 on the bare path when there is no prd", () => {
+    expect(prototypePath(undefined, { generate: true })).toBe("/prototype?generate=1")
+    expect(prototypePath(null, { generate: true })).toBe("/prototype?generate=1")
+  })
+
+  it("does NOT append generate when the option is absent or false (default callers)", () => {
+    expect(prototypePath(42)).toBe("/prototype?prd=42")
+    expect(prototypePath(42, {})).toBe("/prototype?prd=42")
+    expect(prototypePath(42, { generate: false })).toBe("/prototype?prd=42")
+    expect(prototypePath()).toBe(PROTOTYPE_PATH)
+    expect(prototypePath(null, { generate: false })).toBe(PROTOTYPE_PATH)
   })
 })
 

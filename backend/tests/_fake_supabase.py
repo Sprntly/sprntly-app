@@ -76,6 +76,8 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "agent_decision_log": {"factors", "output", "kg_refs"},
     "enterprise_config": {"overrides"},
     "ticket_edits":      {"acceptance_criteria"},
+    "design_agent_map_cache": {"payload"},
+    "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
 }
 
 # Postgres bool columns surface as bool in supabase-py; SQLite stores 0/1.
@@ -166,6 +168,12 @@ class _Query:
 
     def in_(self, col: str, vals: Iterable) -> "_Query":
         self._ins.append((col, list(vals)))
+        return self
+
+    def lt(self, col: str, val: Any) -> "_Query":
+        """`col < ?` — used by the map-cache expiry sweep."""
+        self._raw_where.append(f"{col} < ?")
+        self._raw_args.append(val)
         return self
 
     @property

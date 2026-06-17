@@ -1,13 +1,20 @@
 /**
- * Tests for designAgentApi.locate + the LocateCandidate / LocateResponse types.
+ * Tests for the ASYNC locate contract: designAgentApi.locate (POST →
+ * 202 { job_id }) + designAgentApi.locateJob (GET the poll endpoint), plus the
+ * LocateCandidate / LocateResponse types reused as the job result shape.
  *
- * Stubs global fetch to verify the method issues the correct POST and returns
- * the typed response without any actual network call.
+ * Stubs global fetch to verify each method issues the correct request and
+ * returns the typed response without any actual network call.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { vi } from "vitest"
 import { API_URL, designAgentApi } from "../api"
-import type { LocateCandidate, LocateResponse } from "../api"
+import type {
+  LocateCandidate,
+  LocateResponse,
+  LocateJobHandle,
+  LocateJobStatus,
+} from "../api"
 
 type MockResponse = {
   ok: boolean
@@ -52,7 +59,7 @@ function makeLocateResponse(overrides: Partial<LocateResponse> = {}): LocateResp
   }
 }
 
-describe("designAgentApi.locate", () => {
+describe("designAgentApi.locate (async POST → job handle)", () => {
   let fetchMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
@@ -65,7 +72,9 @@ describe("designAgentApi.locate", () => {
   })
 
   it("POSTs to /v1/design-agent/locate with the request body", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeLocateResponse()))
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(202, { job_id: "job-1", status: "running" }),
+    )
     await designAgentApi.locate({ prd_id: 42, github_repo: "org/repo" })
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -78,7 +87,9 @@ describe("designAgentApi.locate", () => {
   })
 
   it("forwards the optional ref field when supplied", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, makeLocateResponse()))
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(202, { job_id: "job-1", status: "running" }),
+    )
     await designAgentApi.locate({ prd_id: 1, github_repo: "org/repo", ref: "main" })
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
@@ -89,54 +100,90 @@ describe("designAgentApi.locate", () => {
     })
   })
 
-  it("returns a typed LocateResponse with all required fields", async () => {
-    const expected = makeLocateResponse()
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, expected))
+  it("returns the typed job handle ({ job_id, status: 'running' }) on 202", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(202, { job_id: "abc-123", status: "running" }),
+    )
 
-    const result: LocateResponse = await designAgentApi.locate({
+    const handle: LocateJobHandle = await designAgentApi.locate({
       prd_id: 42,
       github_repo: "org/repo",
     })
 
-    expect(result.decision).toBe("auto_proceed")
-    expect(result.chosen).toHaveLength(1)
-    expect(result.ranked).toHaveLength(1)
-    expect(result.top_confidence).toBe(90)
-    expect(result.threshold).toBe(80)
-    expect(result.repo).toBe("org/repo")
-    expect(result.posture).toBe("CLEAN")
-    expect(result.unmapped).toBe(false)
+    expect(handle.job_id).toBe("abc-123")
+    expect(handle.status).toBe("running")
   })
 
-  it("returns component_count on each candidate", async () => {
-    const candidate = makeLocateCandidate({ component_count: 5 })
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, makeLocateResponse({ chosen: [candidate], ranked: [candidate] })),
-    )
+  it("propagates an inline 404 on the POST (feature off / PRD not owned / cross-workspace)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(404, { detail: "not found" }))
 
-    const result = await designAgentApi.locate({ prd_id: 1, github_repo: "org/repo" })
-
-    expect(result.chosen[0].component_count).toBe(5)
-    expect(result.ranked[0].component_count).toBe(5)
+    await expect(
+      designAgentApi.locate({ prd_id: 1, github_repo: "org/repo" }),
+    ).rejects.toMatchObject({ status: 404 })
   })
 
-  it("carries the stable candidate id (so the picker can forward a non-route host)", async () => {
-    // The shell host has an empty route but a stable id; the id is what the
-    // picker forwards on generate so it resolves on the backend.
-    const shellHost = makeLocateCandidate({ id: "app-shell", route: "" })
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, makeLocateResponse({ chosen: [shellHost], ranked: [shellHost] })),
-    )
+  it("propagates a non-2xx 5xx as an error", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(502, { detail: "locate failed" }))
 
-    const result = await designAgentApi.locate({ prd_id: 1, github_repo: "org/repo" })
+    await expect(
+      designAgentApi.locate({ prd_id: 1, github_repo: "org/repo" }),
+    ).rejects.toMatchObject({ status: 502 })
+  })
+})
 
-    expect(result.chosen[0].id).toBe("app-shell")
-    expect(result.chosen[0].route).toBe("")
-    expect(result.ranked[0].id).toBe("app-shell")
+describe("designAgentApi.locateJob (poll the job)", () => {
+  let fetchMock: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
   })
 
-  it("returns unmapped=true and empty chosen/ranked when map is unavailable", async () => {
-    const unmapped = makeLocateResponse({
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it("GETs /v1/design-agent/locate/jobs/{job_id}", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { status: "running" }))
+    await designAgentApi.locateJob("abc-123")
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${API_URL}/v1/design-agent/locate/jobs/abc-123`)
+    expect(init.method).toBe("GET")
+    expect(init.credentials).toBe("include")
+  })
+
+  it("URL-encodes the job id", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { status: "running" }))
+    await designAgentApi.locateJob("a/b c")
+
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${API_URL}/v1/design-agent/locate/jobs/a%2Fb%20c`)
+  })
+
+  it("returns status 'running' while the job is in flight", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { status: "running" }))
+
+    const status: LocateJobStatus = await designAgentApi.locateJob("j1")
+    expect(status.status).toBe("running")
+    expect(status.result).toBeUndefined()
+  })
+
+  it("returns status 'done' carrying the full LocateResponse result", async () => {
+    const result = makeLocateResponse()
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { status: "done", result }))
+
+    const status = await designAgentApi.locateJob("j1")
+    expect(status.status).toBe("done")
+    expect(status.result?.decision).toBe("auto_proceed")
+    expect(status.result?.chosen).toHaveLength(1)
+    expect(status.result?.ranked[0].component_count).toBe(3)
+    expect(status.result?.repo).toBe("org/repo")
+  })
+
+  it("carries unmapped=true through the done result when the map is unavailable", async () => {
+    const result = makeLocateResponse({
       decision: "ranked_confirm",
       chosen: [],
       ranked: [],
@@ -144,21 +191,36 @@ describe("designAgentApi.locate", () => {
       posture: "PARTIAL",
       unmapped: true,
     })
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, unmapped))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { status: "done", result }))
 
-    const result = await designAgentApi.locate({ prd_id: 1, github_repo: "org/repo" })
-
-    expect(result.unmapped).toBe(true)
-    expect(result.chosen).toEqual([])
-    expect(result.ranked).toEqual([])
-    expect(result.decision).toBe("ranked_confirm")
+    const status = await designAgentApi.locateJob("j1")
+    expect(status.result?.unmapped).toBe(true)
+    expect(status.result?.chosen).toEqual([])
   })
 
-  it("propagates a non-2xx response as an error", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(502, { detail: "locate failed" }))
+  it("returns status 'error' with the failure reason", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { status: "error", error: "mapper crashed" }),
+    )
 
-    await expect(
-      designAgentApi.locate({ prd_id: 1, github_repo: "org/repo" }),
-    ).rejects.toMatchObject({ status: 502 })
+    const status = await designAgentApi.locateJob("j1")
+    expect(status.status).toBe("error")
+    expect(status.error).toBe("mapper crashed")
+  })
+
+  it("propagates a 404 (unknown / TTL-swept / cross-workspace job) as a terminal error", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(404, { detail: "unknown job" }))
+
+    await expect(designAgentApi.locateJob("gone")).rejects.toMatchObject({
+      status: 404,
+    })
+  })
+
+  it("propagates a transient 5xx as an error the caller can retry", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(503, { detail: "upstream down" }))
+
+    await expect(designAgentApi.locateJob("j1")).rejects.toMatchObject({
+      status: 503,
+    })
   })
 })

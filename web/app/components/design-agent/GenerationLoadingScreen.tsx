@@ -2,6 +2,27 @@
 
 import { useEffect, useRef, useState } from "react"
 import { designAgentApi, getAccessToken } from "../../lib/api"
+import type { LocateConfirmCandidate } from "./ClarifyingQuestionSurface"
+
+/**
+ * The pre-build phase the loading surface should render. Passed from
+ * GenerateModal via onLocatePhase; consumed by the parent to drive the loader.
+ * This version of the loader does not yet render the locate phases inline —
+ * the type is declared here so PrototypeRoute can wire the prop in advance of
+ * the full locate-in-loading-screen rollout.
+ */
+export type LocatePhaseState =
+  | { kind: "locating" }
+  | { kind: "crumb"; label: string; narrative: string | null }
+  | {
+      kind: "picker"
+      candidates: LocateConfirmCandidate[]
+      busy?: boolean
+      error?: string | null
+      onChoose: (route: string, id: string) => void
+      onHint?: (hint: string) => void
+    }
+  | { kind: "building" }
 
 // Cosmetic step labels for generate mode — shown only until the SSE stream
 // delivers the first real step (or when no prototypeId is available).
@@ -52,6 +73,8 @@ export function GenerationLoadingScreen({
   mode = "generate",
   prototypeId,
   onNotifyWhenReady,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  locatePhase: _locatePhase,
 }: {
   open: boolean
   /** Optional: fired once the exit fade completes (cosmetic hook). */
@@ -68,6 +91,10 @@ export function GenerationLoadingScreen({
   /** When provided and mode === "generate", renders a "Notify me when ready"
    *  button that dismisses the overlay and arms background-completion notification. */
   onNotifyWhenReady?: () => void
+  /** The pre-build locate phase (locating / crumb / picker) emitted by
+   *  GenerateModal. Reserved for the locate-in-loading-screen rollout; accepted
+   *  here so PrototypeRoute can pass it without a type error. */
+  locatePhase?: LocatePhaseState
 }) {
   // ── Cosmetic fallback (used when no SSE stream is active) ──────────────────
   const steps = mode === "refresh" ? REFRESH_STEPS : STEPS

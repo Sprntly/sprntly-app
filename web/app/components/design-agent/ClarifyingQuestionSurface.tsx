@@ -1,27 +1,27 @@
 "use client"
 
 /**
- * P3-16 — F12 clarifying-question answer surface for the SIGNED-IN app.
+ * Clarifying-question answer surface for the SIGNED-IN app.
  *
- * Closes the F12 UI gap: P3-08 ships the BACKEND of F12 (when the agent calls
- * the `clarifying_question` sentinel the runner pauses, persists
- * `pending_question` on the prototype row, and the prototype enters the
- * `awaiting_clarification` signal — `pending_question IS NOT NULL`, `status`
- * stays `ready`). No ticket surfaced that question to the signed-in user, so a
+ * Closes the clarifying-question UI gap: the backend already ships this flow
+ * (when the agent calls the `clarifying_question` sentinel the runner pauses,
+ * persists `pending_question` on the prototype row, and the prototype enters
+ * the `awaiting_clarification` signal — `pending_question IS NOT NULL`, `status`
+ * stays `ready`). Nothing surfaced that question to the signed-in user, so a
  * paused prototype sat invisibly stuck. This component reads
  * `prototype.pending_question`, renders the agent's question, captures the
  * user's answer, and routes it as a NEW iterate (the answer IS the iterate
  * prompt — there is no auto-resume; the runner is stateless between calls, per
- * P3-08's answer-as-new-iterate decision).
+ * the answer-as-new-iterate decision).
  *
  * Reuse, not addition (KEY constraints):
  *   - NO new backend route, NO new api method. The question arrives via the
- *     EXISTING `GET /v1/design-agent/{id}` poll (P3-08 column on the prototype
- *     row). The answer routes through P3-14's EXISTING `designAgentApi.iterate`
- *     (`{prompt, mode:'execute'}`). The backend clears `pending_question` on the
- *     new iterate kickoff (P3-08 `clear_pending_question`).
+ *     EXISTING `GET /v1/design-agent/{id}` poll (the backend column on the
+ *     prototype row). The answer routes through the EXISTING
+ *     `designAgentApi.iterate` (`{prompt, mode:'execute'}`). The backend clears
+ *     `pending_question` on the new iterate kickoff (`clear_pending_question`).
  *
- * DELIBERATE P3 CHOICE (AC-documented): NO cost-estimate (AD14) modal in front
+ * DELIBERATE CHOICE (documented): NO cost-estimate modal in front
  * of the answer. Unlike `IterateComposer`'s re-prompt/Apply flows, the user here
  * is RESPONDING to an agent-initiated pause, not initiating a fresh run — gating
  * an answer behind a cost modal is poor pause-resume UX. If we want
@@ -30,12 +30,12 @@
  *
  * Gating:
  *   - `pending_question` null/absent → render nothing (`return null`).
- *   - `is_complete` (F14 locked) → render nothing even if a question is set; a
+ *   - `is_complete` (locked) → render nothing even if a question is set; a
  *     locked prototype cannot iterate (Resume first). Mirrors IterateComposer.
  *   - mounts ONLY in `DesignAgentLauncher` (the authed surface), NEVER on the
  *     public `/p/<token>` route (external viewers cannot answer/iterate).
  *
- * The surface does NOT self-poll or render its own progress (AC4): on submit it
+ * The surface does NOT self-poll or render its own progress: on submit it
  * clears its LOCAL copy optimistically and hands off to the launcher's existing
  * status/poll surface; the backend clears the real `pending_question` on the
  * iterate kickoff. Testability split mirrors IterateComposer / CompletionBar:
@@ -55,7 +55,7 @@ import {
 
 // ---- pure helpers (dependency-injected, SSR-free) ---------------------------
 
-/** The iterate call signature (owned by P3-14; reused here — no new method). */
+/** The iterate call signature (owned elsewhere; reused here — no new method). */
 export type IterateFn = (
   prototypeId: number,
   body: {
@@ -67,21 +67,21 @@ export type IterateFn = (
 
 /** Compose the iterate prompt from the agent's original question + the user's
  *  answer, so the (stateless) agent knows what it asked when the new iterate
- *  runs. The exact phrasing is a P3 nicety, NOT load-bearing — documented per
- *  the ticket. The original question is prepended as context. */
+ *  runs. The exact phrasing is a nicety, NOT load-bearing — documented.
+ *  The original question is prepended as context. */
 export function composeAnswerPrompt(question: string, answer: string): string {
   return `You asked: "${question}". My answer: ${answer.trim()}. Continue.`
 }
 
 /** Should the surface render at all? Only when a question is pending AND the
- *  prototype is not locked (F14). Pure → unit-testable without a DOM. */
+ *  prototype is not locked. Pure → unit-testable without a DOM. */
 export function shouldRenderSurface(prototype: PrototypeRecord): boolean {
   return prototype.pending_question != null && !(prototype.is_complete ?? false)
 }
 
 /** Route the answer as a NEW iterate (the answer IS the iterate prompt). The
  *  ONLY path that calls `iterate`. Pins `mode:'execute'`. NO cost-estimate gate
- *  in front of it (deliberate P3 choice — see file header). Returns the
+ *  in front of it (deliberate choice — see file header). Returns the
  *  IterateResponse so the caller can hand off / surface queue position. */
 export async function runAnswer(
   iterate: IterateFn,
@@ -120,7 +120,7 @@ export type ClarifyingQuestionSurfaceViewProps = {
  *  the choice buttons (when present) OR a free-text answer input + Submit. The
  *  null/locked gating lives in the container (this view is only mounted when
  *  there IS a question to answer), but the answer affordance is ALWAYS present
- *  so the prototype is never UI-dead-ended (AC7). */
+ *  so the prototype is never UI-dead-ended. */
 export function ClarifyingQuestionSurfaceView({
   question,
   context = null,
@@ -221,7 +221,7 @@ export type ClarifyingQuestionSurfaceProps = {
   /** The prototype row (from the launcher's poll state). The surface reads
    *  `pending_question` + `is_complete` off it. */
   prototype: PrototypeRecord
-  /** Injected for tests; defaults to the real P3-14 iterate (no new method). */
+  /** Injected for tests; defaults to the real iterate (no new method). */
   iterate?: IterateFn
   /** Optional hook so the launcher can refresh/clear after a successful answer.
    *  The surface already clears its LOCAL copy optimistically — this is purely a
@@ -234,7 +234,7 @@ export type ClarifyingQuestionSurfaceProps = {
  * answer (choice button or free text), and routes it as a NEW iterate via the
  * reused `designAgentApi.iterate`. On success it optimistically clears its LOCAL
  * copy (renders null) and hands off to the launcher's existing status/poll
- * surface (AC4 — no self-poll, no own progress UI).
+ * surface (no self-poll, no own progress UI).
  */
 export function ClarifyingQuestionSurface({
   prototype,
@@ -244,7 +244,7 @@ export function ClarifyingQuestionSurface({
   const [answer, setAnswer] = useState("")
   // Optimistic local clear: once an answer is submitted, the surface renders
   // nothing and hands off to the launcher poll (the backend clears the real
-  // pending_question on the iterate kickoff — P3-08 clear_pending_question).
+  // pending_question on the iterate kickoff — clear_pending_question).
   const [answered, setAnswered] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -304,6 +304,10 @@ export type LocateConfirmCandidate = {
   route: string
   entry_component: string
   component_count: number
+  /** Plain-language, one-sentence description of what this screen is and what a
+   *  user does on it — the PM-facing narrative the picker renders as the primary
+   *  supporting line. May be empty (older/degraded locate results). */
+  rationale: string
   is_top: boolean
 }
 
@@ -373,8 +377,19 @@ export function LocateConfirmView({
           >
             <span data-testid="locate-confirm-choice-label">
               {deriveScreenLabel(c.entry_component, c.route)}
-            </span>{" "}
-            <span data-testid="locate-confirm-route-info">
+            </span>
+            {c.rationale && (
+              <span
+                className="clarifying-question-context"
+                data-testid="locate-confirm-narrative"
+              >
+                {c.rationale}
+              </span>
+            )}{" "}
+            <span
+              data-testid="locate-confirm-route-info"
+              style={{ opacity: 0.55, fontSize: "0.85em" }}
+            >
               {c.route} · {c.component_count} components
             </span>
             {c.is_top && (
