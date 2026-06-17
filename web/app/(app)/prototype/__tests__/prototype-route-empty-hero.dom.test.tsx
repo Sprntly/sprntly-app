@@ -166,10 +166,10 @@ describe("PrototypeRoute — no-prototype empty state (Value hero)", () => {
     expect(sub).toContain("grounded in your connected codebase")
     expect(sub).toContain("Share it and refine it with comments.")
 
-    // Meta line (verbatim fragments with dot separators).
-    expect(sub).toContain("~2–3 min")
-    expect(sub).toContain("scoped against your connected repo")
-    expect(sub).toContain("you'll pick the screen")
+    // Meta line (verbatim).
+    expect(sub).toContain("scoped against your codebase or design source")
+    expect(sub).not.toContain("~2–3 min")
+    expect(sub).not.toContain("you'll pick the screen")
 
     // Three value chips.
     expect(screen.getByText("Interactive & clickable")).toBeTruthy()

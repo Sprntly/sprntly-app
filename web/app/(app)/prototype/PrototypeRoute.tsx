@@ -784,7 +784,7 @@ export function PrototypeRoute() {
               Generate prototype
             </button>
           }
-          meta={["~2–3 min", "scoped against your connected repo", "you'll pick the screen"]}
+          meta={["scoped against your codebase or design source"]}
           chips={[
             { icon: <IconPin size={15} />, label: "Interactive & clickable" },
             { icon: <IconCopy size={15} />, label: "Matches your app's UI" },
