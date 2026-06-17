@@ -92,10 +92,15 @@ vi.mock("../../../context/WorkspaceContext", () => ({
 // Mock the brief→PRD map hook so we can (a) start from an empty map (button reads
 // "Generate PRD") and (b) spy on refetch — the call that lets the card flip to
 // "View PRD" in place after a generation completes.
-const { refetchMapSpy } = vi.hoisted(() => ({ refetchMapSpy: vi.fn() }))
+// `mapEntries` is a hoisted, mutable map so a test can seed a ready prototype
+// (with a preview_image_url) and assert the card renders NO preview thumbnail.
+const { refetchMapSpy, mapEntries } = vi.hoisted(() => ({
+  refetchMapSpy: vi.fn(),
+  mapEntries: new Map<number, unknown>(),
+}))
 vi.mock("../../design-agent/useBriefPrototypeMap", () => ({
   useBriefPrototypeMap: () => ({
-    entriesByInsight: new Map(),
+    entriesByInsight: mapEntries,
     loading: false,
     error: false,
     refetch: refetchMapSpy,
@@ -243,6 +248,7 @@ afterEach(() => {
   cleanup()
   localStorage.clear()
   vi.clearAllMocks()
+  mapEntries.clear()
 })
 
 describe("BriefChat finding card — single full-system PRD button", () => {
@@ -503,5 +509,35 @@ describe("BriefChat composer — 'generate a prototype' navigation", () => {
     expect(pushSpy).toHaveBeenCalledWith(prototypePath(515))
     expect(pushSpy).toHaveBeenCalledWith("/prototype?prd=515")
     expect(pushSpy).not.toHaveBeenCalledWith("/prototype")
+  })
+})
+
+// ── Broken preview thumbnail removed ──────────────────────────────────────────
+// The right-rail prototype-preview thumbnail was removed: the design-agent
+// screenshot capture photographed the bundle's raw HTML source (served as
+// text/plain), so the thumbnail showed markup, not the prototype. Even with a
+// READY prototype that carries a preview_image_url, the card must render NO
+// preview tile — only the "View prototype" button remains as the way in.
+describe("BriefChat finding card — no prototype preview thumbnail", () => {
+  it("renders no .fc-preview tile even when a ready prototype has a preview_image_url", async () => {
+    // Seed the brief→prototype map: insight 0 has a ready prototype WITH an image.
+    mapEntries.set(0, {
+      insight_index: 0,
+      prd_id: 42,
+      prd_title: "Measurement Stack",
+      prototype: { ready: true, preview_image_url: "https://cdn/thumb.png" },
+    } as never)
+
+    await act(async () => {
+      renderBrief()
+    })
+
+    const card = cardFor(HERO.title)
+    // The broken thumbnail (and its image) must not render…
+    expect(card.querySelector(".fc-preview")).toBeNull()
+    expect(card.querySelector(".fc-preview-img")).toBeNull()
+    expect(within(card).queryByText("Prototype preview · open design")).toBeNull()
+    // …but the prototypeable finding still offers the "View prototype" button.
+    expect(within(card).queryByText("View prototype")).not.toBeNull()
   })
 })
