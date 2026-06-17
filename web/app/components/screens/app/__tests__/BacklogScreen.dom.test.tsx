@@ -9,19 +9,22 @@
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import type { BacklogItem, BacklogList } from "../../../../lib/api"
+import type { BacklogItem, BacklogList, CompletedList } from "../../../../lib/api"
 
 const listMock = vi.fn<() => Promise<BacklogList>>()
+const completedMock = vi.fn<() => Promise<CompletedList>>()
 
-// Mock the API client — the screen reads the backlog through backlogApi.list().
+// Mock the API client — the screen reads the backlog through backlogApi.list()
+// and the Completed tab through backlogApi.completed().
 vi.mock("../../../../lib/api", () => ({
   backlogApi: {
     list: () => listMock(),
+    completed: () => completedMock(),
     setStatus: vi.fn(),
   },
 }))
@@ -60,6 +63,10 @@ function item(overrides: Partial<BacklogItem>): BacklogItem {
 
 beforeEach(() => {
   listMock.mockReset()
+  completedMock.mockReset()
+  // Default: Proposed-tab tests don't need completed data, but the mock must
+  // resolve in case the tab is exercised.
+  completedMock.mockResolvedValue({ items: [], count: 0 })
 })
 
 afterEach(() => {
@@ -108,5 +115,47 @@ describe("BacklogScreen — Proposed tab", () => {
     // The legacy hardcoded demo titles must NOT appear with an empty backlog.
     expect(screen.queryByText("First-Handoff Wizard to lift Day-30 activation")).toBeNull()
     expect(screen.queryByText("Co-authoring nudge to amplify the viral loop")).toBeNull()
+  })
+})
+
+describe("BacklogScreen — Completed tab", () => {
+  async function openCompletedTab() {
+    listMock.mockResolvedValue({ items: [], count: 0 })
+    render(<BacklogScreen />)
+    await waitFor(() => expect(screen.getByText("No backlog yet")).toBeTruthy())
+    await act(async () => {
+      fireEvent.click(screen.getByText("Completed initiatives"))
+    })
+  }
+
+  it("renders the completed findings returned by the API (prd_created/done)", async () => {
+    completedMock.mockResolvedValue({
+      items: [
+        { theme_id: "t-prd", title: "SSO support", action: "prd_created", last_surfaced_at: "2026-06-10T00:00:00Z" },
+        { theme_id: "t-done", title: "Bulk import", action: "done", last_surfaced_at: "2026-06-01T00:00:00Z" },
+      ],
+      count: 2,
+    })
+
+    await openCompletedTab()
+
+    await waitFor(() => expect(screen.getByText("SSO support")).toBeTruthy())
+    expect(screen.getByText("Bulk import")).toBeTruthy()
+    expect(screen.getByText("PRD created")).toBeTruthy()
+    expect(screen.getByText("Done")).toBeTruthy()
+    // The legacy hardcoded completed demo titles must NOT leak through.
+    expect(screen.queryByText("Epic FHIR read integration")).toBeNull()
+    // Top-bar count reflects the fetched list.
+    expect(screen.getAllByText(/2 shipped/).length).toBeGreaterThan(0)
+  })
+
+  it("shows an empty state when no findings are completed", async () => {
+    completedMock.mockResolvedValue({ items: [], count: 0 })
+
+    await openCompletedTab()
+
+    await waitFor(() => expect(screen.getByText("Nothing completed yet")).toBeTruthy())
+    expect(screen.queryByText("Epic FHIR read integration")).toBeNull()
+    expect(screen.getByText(/0 shipped/)).toBeTruthy()
   })
 })

@@ -2,11 +2,13 @@ import asyncio
 import logging
 
 from fastapi import Depends, APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
 from app.brief_runner import get_status, set_status, warm_synthesis_drilldowns
 from app.db import get_current_brief
 from app.db.companies import display_name_for_slug
+from app.db.finding_state import set_finding_action
 from app.deps.ownership import require_owned_brief, require_owned_dataset
 from app.synthesis.agent import EmptyKnowledgeGraphError
 from app.synthesis_brief import generate_brief_for
@@ -121,6 +123,53 @@ async def regenerate(
     require_owned_dataset(dataset, company.company_id)
     _track(asyncio.create_task(_synthesis_generate_bg(dataset)))
     return {"started": True, "dataset": dataset}
+
+
+class DismissIn(BaseModel):
+    """Identify the brief finding to dismiss, either directly by theme_id or by
+    (brief_id, insight_index) which we resolve to a theme_id via the brief
+    payload. Exactly one form is required."""
+
+    theme_id: str | None = None
+    brief_id: int | None = Field(default=None, ge=1)
+    insight_index: int | None = Field(default=None, ge=0)
+
+
+@router.post("/dismiss")
+def dismiss(
+    body: DismissIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Record that the user dismissed a brief finding (action='dismissed').
+
+    Phase 2 lifecycle: a dismissed finding is NOT 'completed' (completed =
+    prd_created | done) — it simply won't reappear as a fresh brief finding via
+    the de-dup memory it shares. The frontend keeps its localStorage dismiss UX;
+    this server record makes the action durable + theme-keyed.
+
+    Accepts either a raw `theme_id` or a (`brief_id`, `insight_index`) pair which
+    is resolved to the theme_id from the owned brief's payload."""
+    theme_id = body.theme_id
+    if not theme_id:
+        if body.brief_id is None or body.insight_index is None:
+            raise HTTPException(
+                400, "Provide either theme_id or (brief_id and insight_index)"
+            )
+        # Tenant gate + resolve insight → theme_id from the brief payload.
+        brief = require_owned_brief(body.brief_id, company.company_id)
+        insights = brief.get("insights") or []
+        if not (0 <= body.insight_index < len(insights)):
+            raise HTTPException(
+                400,
+                f"insight_index={body.insight_index} out of range "
+                f"(0..{len(insights) - 1})",
+            )
+        theme_id = insights[body.insight_index].get("theme_id")
+        if not theme_id:
+            raise HTTPException(400, "Insight carries no theme_id; cannot dismiss")
+
+    set_finding_action(company.company_id, theme_id, "dismissed")
+    return {"dismissed": True, "theme_id": theme_id}
 
 
 @router.get("/{brief_id}")

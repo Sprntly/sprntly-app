@@ -535,6 +535,9 @@ CREATE TABLE brief_finding_state (
     fp_revenue_at_stake REAL NOT NULL DEFAULT 0,
     fp_breadth          INTEGER NOT NULL DEFAULT 0,
     fp_latest_signal_at TEXT,
+    -- Phase 2 user-action (mirrors 20260616140000_brief_finding_state_action.sql).
+    action              TEXT NOT NULL DEFAULT 'surfaced'
+                        CHECK (action IN ('surfaced', 'prd_created', 'dismissed', 'done')),
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (enterprise_id, theme_id)
