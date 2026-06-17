@@ -214,6 +214,30 @@ class GraphFacade:
         )
         return self._row_to_signal(r.data[0]) if r.data else None
 
+    def get_signals(
+        self, enterprise_id: str, ids: list[str]
+    ) -> dict[str, Signal]:
+        """Batched, tenant-scoped fetch of many signals in ONE query.
+
+        Mirrors `get_signal`'s parsing/shape but takes a list of ids and uses a
+        single `.in_("id", ids)` round-trip instead of one query per id (kills
+        the N+1 the per-edge retrieval/evidence/convergence walks would
+        otherwise incur). Returns `{id: Signal}` for the ids that exist in this
+        enterprise; ids that don't resolve are simply absent from the dict.
+
+        De-dupes the input ids and short-circuits the empty list to `{}` (an
+        empty `IN ()` is invalid SQL anyway)."""
+        unique = list(dict.fromkeys(ids))  # de-dup, preserve order
+        if not unique:
+            return {}
+        r = (
+            self._tbl("kg_signal").select("*")
+            .eq("enterprise_id", enterprise_id)
+            .in_("id", unique)
+            .execute()
+        )
+        return {row["id"]: self._row_to_signal(row) for row in (r.data or [])}
+
     def query_entities(
         self,
         enterprise_id: str,

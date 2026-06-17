@@ -109,23 +109,38 @@ def gather_evidence_trail(
     seen: set[str] = set()
     trail: list[dict] = []
 
-    def _collect(target_id: str) -> None:
+    # Gather the ordered (source_id, edge_type) pairs for each target FIRST
+    # (SUPPORTS edges before the rest, mirroring the original walk order), then
+    # batch the signal fetch into ONE query (kills the per-edge N+1). The
+    # `edges_to` reads are unchanged; only the per-signal lookups are batched.
+    edge_items: list[tuple[str, str]] = []  # (signal source_id, edge.type)
+
+    def _gather_edges(target_id: str) -> None:
         for edge in facade.edges_to(enterprise_id, target_id, type="SUPPORTS") + [
             e for e in facade.edges_to(enterprise_id, target_id)
             if e.type != "SUPPORTS"
         ]:
-            if edge.source_kind != "signal" or edge.source_id in seen:
+            if edge.source_kind != "signal":
                 continue
-            sig = facade.get_signal(enterprise_id, edge.source_id)
-            if sig is None or sig.properties.get("superseded_by"):
-                continue
-            seen.add(sig.id)
-            trail.append(_signal_to_trail_item(sig, edge.type))
+            edge_items.append((edge.source_id, edge.type))
 
     if hypothesis is not None:
-        _collect(hypothesis.id)
+        _gather_edges(hypothesis.id)
     if theme_id:
-        _collect(theme_id)
+        _gather_edges(theme_id)
+
+    signals_by_id = facade.get_signals(
+        enterprise_id, [sid for sid, _ in edge_items]
+    )
+
+    for source_id, edge_type in edge_items:
+        if source_id in seen:
+            continue
+        sig = signals_by_id.get(source_id)
+        if sig is None or sig.properties.get("superseded_by"):
+            continue
+        seen.add(sig.id)
+        trail.append(_signal_to_trail_item(sig, edge_type))
 
     # Strongest evidence first — weight then confidence.
     trail.sort(key=lambda t: (-t["weight"], -t["confidence"]))
