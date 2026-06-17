@@ -116,11 +116,11 @@ function isTransientLocateError(err: unknown): boolean {
 /** Maps LocateCandidate[] to the shape LocateConfirmView expects. */
 export function mapLocateCandidates(ranked: LocateCandidate[]): LocateConfirmCandidate[] {
   return ranked.map((c, i) => ({
-    id: c.id,
-    route: c.route,
-    entry_component: c.entry_component,
-    component_count: c.component_count,
-    rationale: c.rationale,
+    id: c.id ?? "",
+    route: c.route ?? "",
+    entry_component: c.entry_component ?? "",
+    component_count: c.component_count ?? 0,
+    rationale: c.rationale ?? "",
     is_top: i === 0,
   }))
 }
@@ -874,6 +874,13 @@ export function GenerateModal({
         }
       }
       if (isStale()) return
+
+      // A handle without a usable job id is terminal — never poll
+      // `locateJob(undefined)` (the `jobs/undefined` 404 class). Fail clean.
+      if (!handle.job_id) {
+        fail("Couldn't start codebase analysis — try again or switch source")
+        return
+      }
 
       // 2) Poll the job until done/error/timeout. Transient poll failures are
       //    retried within the same budget; a 404/400 job is terminal.
