@@ -355,8 +355,12 @@ describe("ambiguous match shows picker", () => {
       _testLocateResult: RANKED_CONFIRM,
     })
     expect(html).toContain('data-testid="locate-confirm-surface"')
+    // Suggested + alternatives layout: the top candidate (/team) leads with its
+    // route-info line; the second candidate surfaces as an alt row (its derived
+    // name "Dashboard", not its route string).
     expect(html).toContain("/team")
-    expect(html).toContain("/dashboard")
+    expect(html).toContain('data-testid="locate-alt-row"')
+    expect(html).toContain("Dashboard")
   })
 
   it("the config-phase action footer (Generate button) is gone in the picker phase", () => {
@@ -371,7 +375,7 @@ describe("ambiguous match shows picker", () => {
 // ─── pick carries chosen route into genstart ────────────────────────────
 
 describe("pick carries chosen route into genstart", () => {
-  it("clicking a picker candidate calls onGenStart with chosenScreenRoute", () => {
+  it("confirming the suggested candidate calls onGenStart with chosenScreenRoute", () => {
     const onGenStart = vi.fn()
     const buttons = captureButtons({
       ...baseCodebaseProps(),
@@ -379,9 +383,11 @@ describe("pick carries chosen route into genstart", () => {
       _testFlowPhase: "picker",
       _testLocateResult: RANKED_CONFIRM,
     })
-    const choiceBtn = buttons.find((b) => b["data-testid"] === "locate-confirm-choice")
-    expect(choiceBtn).toBeDefined()
-    ;(choiceBtn!["onClick"] as () => void)()
+    // The picker leads with the top candidate (/team) in the Suggested slot;
+    // "Use this screen" confirms it (clicking an alt row only promotes).
+    const useBtn = buttons.find((b) => b["data-testid"] === "locate-confirm-use")
+    expect(useBtn).toBeDefined()
+    ;(useBtn!["onClick"] as () => void)()
     expect(onGenStart).toHaveBeenCalledWith(
       expect.objectContaining({ chosenScreenRoute: "/team" }),
     )
@@ -405,7 +411,7 @@ describe("unmapped shows resolve, no autostart", () => {
       _testFlowPhase: "unmapped-resolve",
       _testLocateResult: { ...RANKED_CONFIRM, unmapped: true },
     })
-    expect(html).toContain('data-testid="locate-confirm-choice"')
+    expect(html).toContain('data-testid="locate-confirm-use"')
   })
 
   it("does not call runGenerateFlow when locate returns unmapped", async () => {

@@ -272,12 +272,20 @@ describe("ambiguous match surfaces the inline picker", () => {
     // No generation yet — the user must pick.
     expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
 
-    // Pick the second candidate.
-    const choices = container.querySelectorAll<HTMLButtonElement>(
-      '[data-testid="locate-confirm-choice"]',
+    // The suggested + alternatives layout leads with /team; the second
+    // candidate (/dashboard) is an alt row. Promote it (click the alt row →
+    // it moves into the Suggested slot), then confirm with "Use this screen".
+    const altRows = container.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="locate-alt-row"]',
     )
-    expect(choices.length).toBeGreaterThanOrEqual(2)
-    act(() => choices[1]!.click())
+    expect(altRows.length).toBeGreaterThanOrEqual(1)
+    act(() => altRows[0]!.click())
+
+    const useBtn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="locate-confirm-use"]',
+    )
+    expect(useBtn).toBeTruthy()
+    act(() => useBtn!.click())
 
     await waitFor(() =>
       expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
@@ -332,11 +340,13 @@ describe("unmapped match surfaces the inline resolve", () => {
         container.querySelector('[data-testid="unmapped-resolve"]'),
       ).toBeTruthy(),
     )
-    const choice = container.querySelector<HTMLButtonElement>(
-      '[data-testid="locate-confirm-choice"]',
+    // The fallback picker leads with /team in the Suggested slot; confirming
+    // it is "Use this screen" (no promote needed for the default lead).
+    const useBtn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="locate-confirm-use"]',
     )
-    expect(choice).toBeTruthy()
-    act(() => choice!.click())
+    expect(useBtn).toBeTruthy()
+    act(() => useBtn!.click())
 
     await waitFor(() =>
       expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),

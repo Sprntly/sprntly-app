@@ -46,6 +46,14 @@ describe("LocateConfirmView tolerates malformed candidates (no render crash)", (
         rationale: "Manage teammates and roles.",
         is_top: true,
       },
+      {
+        id: "/dashboard",
+        route: "/dashboard",
+        entry_component: "DashboardPage",
+        component_count: 7,
+        rationale: "Home overview after sign-in.",
+        is_top: false,
+      },
     ]
 
     let html = ""
@@ -57,12 +65,13 @@ describe("LocateConfirmView tolerates malformed candidates (no render crash)", (
       })
     }).not.toThrow()
 
-    // The picker still renders the candidate + the "Search for another screen"
+    // The picker still renders the lead card + the "Search for another screen"
     // affordance — the user is not stranded on a blank error boundary.
-    expect(html).toContain('data-testid="locate-confirm-choice"')
+    expect(html).toContain('data-testid="locate-confirm-use"')
     expect(html).toContain('data-testid="locate-confirm-search-other"')
     expect(html).toContain("Search for another screen")
-    // Label falls back to the route when entry_component is null.
+    // The malformed candidate is the is_top lead; its label falls back to the
+    // route when entry_component is null.
     expect(html).toContain("/team")
   })
 
@@ -73,7 +82,7 @@ describe("LocateConfirmView tolerates malformed candidates (no render crash)", (
       route: "/dashboard",
       component_count: 7,
       rationale: "Home overview after sign-in.",
-      is_top: false,
+      is_top: true,
     } as unknown as LocateConfirmCandidate
 
     let html = ""
@@ -85,9 +94,38 @@ describe("LocateConfirmView tolerates malformed candidates (no render crash)", (
       })
     }).not.toThrow()
 
-    expect(html).toContain('data-testid="locate-confirm-choice"')
+    expect(html).toContain('data-testid="locate-confirm-use"')
     expect(html).toContain('data-testid="locate-confirm-search-other"')
     expect(html).toContain("/dashboard")
+  })
+
+  it("renders a SINGLE malformed candidate (null entry_component, null rationale) as the lead only, without throwing", () => {
+    const partial = {
+      id: "/team",
+      route: "/team",
+      entry_component: null,
+      component_count: 2,
+      rationale: null,
+      is_top: true,
+    } as unknown as LocateConfirmCandidate
+
+    let html = ""
+    expect(() => {
+      html = renderView({
+        candidates: [partial],
+        onChoose: vi.fn(),
+        onSearchOther: vi.fn(),
+      })
+    }).not.toThrow()
+
+    // Lead card present; no Other options / alt rows for a single candidate.
+    expect(html).toContain('data-testid="locate-confirm-use"')
+    expect(html).not.toContain('data-testid="locate-others-label"')
+    expect(html).not.toContain('data-testid="locate-alt-row"')
+    // null rationale → narrative line omitted (no crash).
+    expect(html).not.toContain('data-testid="locate-confirm-narrative"')
+    // Route fallback label shows.
+    expect(html).toContain("/team")
   })
 })
 
