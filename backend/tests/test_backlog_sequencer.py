@@ -110,6 +110,47 @@ def test_sequence_ranks_remaining_by_score(facade, isolated_settings):
     assert rows[0]["score"] >= rows[1]["score"]
 
 
+def test_sequence_persists_all_themes_but_triages_only_top_cap(
+        facade, isolated_settings, monkeypatch):
+    """EVERY non-brief theme is persisted to the backlog; only the top
+    TRIAGE_CAP get an LLM tag/rationale (cost bound). Tail items land without."""
+    from app.synthesis import backlog as bl
+
+    _seed_company(isolated_settings["supabase"], "ent-A")
+    monkeypatch.setattr(bl, "TRIAGE_CAP", 2)
+    # Four themes with descending breadth → deterministic rank four>three>two>one.
+    t4 = _seed_theme_with_signals(facade, "ent-A", "four", [
+        (s, "feature_request", {}, 0)
+        for s in ("revenue", "customer_voice", "project_mgmt", "communication")])
+    t3 = _seed_theme_with_signals(facade, "ent-A", "three", [
+        (s, "feature_request", {}, 0)
+        for s in ("revenue", "customer_voice", "project_mgmt")])
+    _seed_theme_with_signals(facade, "ent-A", "two", [
+        (s, "feature_request", {}, 0) for s in ("revenue", "customer_voice")])
+    _seed_theme_with_signals(facade, "ent-A", "one", [
+        ("revenue", "feature_request", {}, 0)])
+
+    captured = {}
+
+    def _cap(**kw):
+        captured["input"] = kw.get("input", "")
+        return _llm_result(_triage_for(t4.id, t3.id))
+
+    with patch.object(bl, "llm_call", side_effect=_cap):
+        rows = bl.sequence_backlog(facade, "ent-A", exclude_theme_ids=[])
+
+    # All four persisted — nothing dropped by a cap.
+    assert len(rows) == 4
+    # The triage LLM only saw the top-2 themes.
+    assert "four" in captured["input"] and "three" in captured["input"]
+    assert "two" not in captured["input"] and "one" not in captured["input"]
+    # Tail items are persisted but carry no LLM tag/reasoning.
+    by_title = {r["title"]: r for r in rows}
+    assert by_title["four"]["tag"] == "something_new"
+    assert by_title["two"]["tag"] is None
+    assert by_title["one"]["reasoning"] is None
+
+
 def test_sequence_persists_items_with_rank_and_reasoning(facade, isolated_settings):
     from app.synthesis import backlog as bl
 
