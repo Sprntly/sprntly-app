@@ -239,9 +239,21 @@ export type BacklogItem = {
 
 export type BacklogList = { items: BacklogItem[]; count: number }
 
+/** A completed brief finding — a theme whose action is prd_created or done. */
+export type CompletedItem = {
+  theme_id: string
+  title: string
+  action: "prd_created" | "done"
+  last_surfaced_at: string | null
+}
+
+export type CompletedList = { items: CompletedItem[]; count: number }
+
 export const backlogApi = {
   /** Ranked backlog items (rank-ascending). Empty when no brief exists. */
   list: () => api.get<BacklogList>("/v1/backlog"),
+  /** Completed findings (prd_created | done) for the Completed tab. */
+  completed: () => api.get<CompletedList>("/v1/backlog/completed"),
   /** Move one item to a new status (in_progress | done | dismissed). */
   setStatus: (itemId: string, status: Exclude<BacklogStatus, "backlog">) =>
     api.patch<BacklogItem>(`/v1/backlog/${encodeURIComponent(itemId)}`, { status }),

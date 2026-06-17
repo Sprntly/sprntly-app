@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { AppLayout } from "./AppLayout"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useCompany } from "../../../context/CompanyContext"
-import { backlogApi, type BacklogItem, type BacklogTag } from "../../../lib/api"
+import { backlogApi, type BacklogItem, type BacklogTag, type CompletedItem } from "../../../lib/api"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -24,16 +24,6 @@ interface BacklogIdea {
   type: IdeaType
   impact: string
   impactClass: "positive" | "negative" | "neutral"
-}
-
-interface CompletedInitiative {
-  id: string
-  title: string
-  sub: string
-  type: IdeaType
-  shipped: string
-  impactDelivered: string
-  impactDir: "up" | "down" | "neutral"
 }
 
 // ── Static data ───────────────────────────────────────────────────────────────
@@ -61,15 +51,6 @@ const INITIAL_IDEAS: BacklogIdea[] = [
   { id: "b10", rank: 10, title: "Mobile handoff summary for night shift",           sub: "38 complaints · night-shift nurses",       source: "brief",   type: "UI",             impact: "+5pt D30",      impactClass: "positive" },
   { id: "b11", rank: 11, title: "Role-based dashboards for charge nurses",          sub: "Charge nurses can't see unit-level data",  source: "backlog", type: "New initiative", impact: "+7% WAU",       impactClass: "positive" },
   { id: "b12", rank: 12, title: "Handoff reminder push notifications",              sub: "Reduces missed shift handoffs",            source: "brief",   type: "UI",             impact: "-22% misses",   impactClass: "positive" },
-]
-
-const COMPLETED: CompletedInitiative[] = [
-  { id: "c1", title: "Epic FHIR read integration",              sub: "Opened the Epic-account pipeline",          type: "Infra",          shipped: "Apr 14, 2026", impactDelivered: "+14 accounts",      impactDir: "up"   },
-  { id: "c2", title: "Care-plan co-authoring (v1)",             sub: "Drove the self-spreading engagement loop",  type: "New initiative", shipped: "Mar 28, 2026", impactDelivered: "+12% WoW",          impactDir: "up"   },
-  { id: "c3", title: "Onboarding redesign for new deployments", sub: "Cut time-to-first-handoff dramatically",   type: "UI",             shipped: "Feb 19, 2026", impactDelivered: "-1.5d ramp",        impactDir: "down" },
-  { id: "c4", title: "Slack weekly-brief delivery",             sub: "Lifted brief open + action rate",          type: "New initiative", shipped: "Jan 31, 2026", impactDelivered: "+38% opens",        impactDir: "up"   },
-  { id: "c5", title: "Auto-flag stale care plans",              sub: "Reduced missed plan updates",              type: "Bug",            shipped: "Jan 12, 2026", impactDelivered: "-18% misses",       impactDir: "down" },
-  { id: "c6", title: "SSO via Okta + SCIM provisioning",        sub: "Cleared security gate for enterprise",     type: "Infra",          shipped: "Dec 8, 2025",  impactDelivered: "3 deals unblocked", impactDir: "up"   },
 ]
 
 // ── API → idea mapping ────────────────────────────────────────────────────────
@@ -575,21 +556,77 @@ function ProposedContent({
 
 // ── Completed tab ─────────────────────────────────────────────────────────────
 
-function ImpactArrow({ dir }: { dir: "up" | "down" | "neutral" }) {
-  if (dir === "up") return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#179463" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" /><polyline points="17 6 23 6 23 12" />
-    </svg>
-  )
-  if (dir === "down") return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#c13838" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <polyline points="23 18 13.5 8.5 8.5 13.5 1 6" /><polyline points="17 18 23 18 23 12" />
-    </svg>
-  )
-  return null
+// How a completed finding's `action` renders as a "Status" badge. prd_created
+// and done are the only actions the backend returns for the Completed tab.
+const ACTION_STYLE: Record<CompletedItem["action"], { label: string; style: { color: string; bg: string; border: string } }> = {
+  prd_created: { label: "PRD created", style: { color: "#5b50b8", bg: "#f0eefb", border: "#c5c0ee" } },
+  done:        { label: "Done",        style: { color: "#179463", bg: "#eaf7f1", border: "#9bdcc1" } },
 }
 
-function CompletedContent() {
+function formatSurfacedDate(iso: string | null): string {
+  if (!iso) return "—"
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return "—"
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+}
+
+function CompletedContent({ onCountChange }: { onCountChange?: (count: number) => void }) {
+  const { activeCompany }     = useCompany()
+  const [items, setItems]     = useState<CompletedItem[]>([])
+  const [load, setLoad]       = useState<LoadState>("loading")
+
+  // Completed = brief findings whose action is prd_created or done. The route is
+  // session-scoped to the company; `activeCompany` is only a re-fetch trigger.
+  useEffect(() => {
+    let cancelled = false
+    setLoad("loading")
+    backlogApi
+      .completed()
+      .then((res) => {
+        if (cancelled) return
+        setItems(res.items)
+        setLoad("ready")
+      })
+      .catch(() => {
+        if (cancelled) return
+        setItems([])
+        setLoad("error")
+      })
+    return () => { cancelled = true }
+  }, [activeCompany])
+
+  useEffect(() => { onCountChange?.(items.length) }, [items.length, onCountChange])
+
+  if (load === "loading") {
+    return (
+      <div className="bl-empty" role="status" aria-live="polite" style={{ padding: "48px 24px", textAlign: "center", color: "var(--ink-3)" }}>
+        Loading completed initiatives…
+      </div>
+    )
+  }
+
+  if (load === "error") {
+    return (
+      <div className="bl-empty" role="alert" style={{ padding: "48px 24px", textAlign: "center", color: "var(--ink-3)" }}>
+        Couldn&apos;t load completed initiatives. Please try again.
+      </div>
+    )
+  }
+
+  if (items.length === 0) {
+    return (
+      <div className="bl-empty" role="status" style={{ padding: "56px 24px", textAlign: "center", maxWidth: 480, margin: "0 auto", color: "var(--ink-2)" }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--ink)", margin: "0 0 8px" }}>
+          Nothing completed yet
+        </h2>
+        <p style={{ fontSize: 13, lineHeight: 1.55, margin: 0 }}>
+          When you create a PRD for a brief finding or mark one done, it moves
+          here so you can see what your team acted on across briefs.
+        </p>
+      </div>
+    )
+  }
+
   return (
     <>
       <div className="bl-info-bar">
@@ -598,37 +635,31 @@ function CompletedContent() {
             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" />
           </svg>
           <span>
-            <strong>{COMPLETED.length} initiatives</strong>{" "}
-            shipped from Sprntly briefs — with the measured impact each one delivered. Most recent first.
+            <strong>{items.length} {items.length === 1 ? "initiative" : "initiatives"}</strong>{" "}
+            acted on from Sprntly briefs — a PRD was created or the work was marked done. Most recent first.
           </span>
         </div>
       </div>
       <div className="bl-table-wrap bl-table-wrap--completed">
         <div className="bl-thead bl-thead--completed">
           <div className="bl-th bl-th--initiative">Initiative</div>
-          <div className="bl-th bl-th--ctype">Type</div>
-          <div className="bl-th bl-th--shipped">Shipped</div>
-          <div className="bl-th bl-th--delivered">Impact Delivered</div>
+          <div className="bl-th bl-th--ctype">Status</div>
+          <div className="bl-th bl-th--shipped">Surfaced</div>
         </div>
         <div className="bl-tbody">
-          {COMPLETED.map((item) => {
-            const s = TYPE_STYLE[item.type]
+          {items.map((item) => {
+            const a = ACTION_STYLE[item.action]
             return (
-              <div key={item.id} className="bl-completed-row">
+              <div key={item.theme_id} className="bl-completed-row">
                 <div className="bl-cell bl-cell--initiative">
                   <div className="bl-project-title">{item.title}</div>
-                  <div className="bl-project-sub">{item.sub}</div>
                 </div>
                 <div className="bl-cell bl-cell--ctype">
-                  <span className="bl-type-badge" style={{ color: s.color, background: s.bg, borderColor: s.border, cursor: "default" }}>
-                    {item.type}
+                  <span className="bl-type-badge" style={{ color: a.style.color, background: a.style.bg, borderColor: a.style.border, cursor: "default" }}>
+                    {a.label}
                   </span>
                 </div>
-                <div className="bl-cell bl-cell--shipped">{item.shipped}</div>
-                <div className={`bl-cell bl-cell--delivered${item.impactDir === "up" ? " bl-impact--pos" : item.impactDir === "down" ? " bl-impact--neg" : ""}`}>
-                  <ImpactArrow dir={item.impactDir} />
-                  {item.impactDelivered}
-                </div>
+                <div className="bl-cell bl-cell--shipped">{formatSurfacedDate(item.last_surfaced_at)}</div>
               </div>
             )
           })}
@@ -655,6 +686,7 @@ export function BacklogScreen() {
   const { showToast, openContentPanel }     = useNavigation()
   const [tab, setTab]                       = useState<BacklogTab>("proposed")
   const [proposedCount, setProposedCount]   = useState<number | null>(null)
+  const [completedCount, setCompletedCount] = useState<number | null>(null)
   const [showAddIdea, setShowAddIdea]       = useState(false)
   const [isSyncing, setIsSyncing]           = useState(false)
   const [chatValue, setChatValue]           = useState("")
@@ -695,7 +727,7 @@ export function BacklogScreen() {
             <span className="bl-count-badge">
               {tab === "proposed"
                 ? `${proposedCount ?? 0} ideas`
-                : `${COMPLETED.length} shipped`}
+                : `${completedCount ?? 0} shipped`}
             </span>
             <div className="bl-tabs">
               <button
@@ -734,7 +766,7 @@ export function BacklogScreen() {
           <div className="bl-body" style={{ flex: 1, overflow: "auto" }}>
             {tab === "proposed"
               ? <ProposedContent addHandlerRef={addHandlerRef} onSelectIdea={handleSelectIdea} selectedIdeaId={selectedIdea?.id ?? null} onCountChange={setProposedCount} />
-              : <CompletedContent />}
+              : <CompletedContent onCountChange={setCompletedCount} />}
           </div>
 
           {/* ── Right panel: idea detail + PRD generation ── */}

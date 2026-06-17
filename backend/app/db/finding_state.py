@@ -76,3 +76,64 @@ def upsert_finding_state(
         },
         on_conflict="enterprise_id,theme_id",
     ).execute()
+
+
+# ── Phase 2: theme-keyed user-action tracking ────────────────────────────────
+#
+# The same per-(enterprise, theme) row also records what the user DID with a
+# finding once it was surfaced. `action` walks
+#   surfaced → prd_created | dismissed | done.
+# "Completed" (the Backlog screen's Completed tab) = action in
+# ('prd_created', 'done'); see list_findings_by_action / the completed route.
+
+COMPLETED_ACTIONS: tuple[str, ...] = ("prd_created", "done")
+
+
+def set_finding_action(
+    enterprise_id: str,
+    theme_id: str,
+    action: str,
+    *,
+    client=None,
+) -> None:
+    """Record the user's action on a surfaced theme (upsert on enterprise+theme).
+
+    Creates the row if it doesn't exist yet so a dismiss / PRD-create on a theme
+    that was never fingerprinted (edge case) still records — the fingerprint
+    columns fall back to their table defaults. Idempotent on
+    (enterprise_id, theme_id): a repeat call just refreshes `action`/`updated_at`.
+    """
+    cli = client or require_client()
+    now = utc_now()
+    cli.table("brief_finding_state").upsert(
+        {
+            "id": str(uuid.uuid4()),
+            "enterprise_id": enterprise_id,
+            "theme_id": theme_id,
+            "action": action,
+            "updated_at": now,
+        },
+        on_conflict="enterprise_id,theme_id",
+    ).execute()
+
+
+def list_findings_by_action(
+    enterprise_id: str,
+    actions: tuple[str, ...],
+    *,
+    client=None,
+) -> list[dict]:
+    """Rows for an enterprise whose `action` is in `actions`, newest-surfaced first.
+
+    Filtered in Python (mirrors get_finding_states) so it behaves identically
+    against real Supabase and the in-memory test fake; per-enterprise volumes are
+    tiny (one row per theme ever surfaced)."""
+    cli = client or require_client()
+    rows = (
+        cli.table("brief_finding_state").select("*")
+        .eq("enterprise_id", enterprise_id).execute().data or []
+    )
+    wanted = set(actions)
+    out = [r for r in rows if r.get("action") in wanted]
+    out.sort(key=lambda r: (r.get("last_surfaced_at") or ""), reverse=True)
+    return out

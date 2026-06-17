@@ -52,6 +52,24 @@ router = APIRouter(prefix="/v1/prd", tags=["prd"])
 _inflight_tasks: set[asyncio.Task] = set()
 
 
+def _record_prd_action(company_id: str, insight: dict) -> None:
+    """Best-effort: mark the insight's theme as 'prd_created' for the lifecycle.
+
+    Resolves the insight → theme_id from the brief payload (insights carry
+    `theme_id`, set by the synthesis ranker) and records the action so the theme
+    surfaces in the Backlog screen's Completed tab on the next brief. Swallows
+    everything: a finding-state hiccup must never fail PRD generation."""
+    try:
+        theme_id = insight.get("theme_id")
+        if not theme_id:
+            return
+        from app.db.finding_state import set_finding_action
+
+        set_finding_action(company_id, theme_id, "prd_created")
+    except Exception:  # noqa: BLE001 — lifecycle bookkeeping is non-critical
+        logger.exception("failed to record prd_created finding action")
+
+
 class GenerateIn(BaseModel):
     brief_id: int = Field(..., ge=1)
     insight_index: int = Field(..., ge=0)
@@ -101,6 +119,13 @@ async def generate(
         template_version=PRD_TEMPLATE_VERSION,
         variant=PRD_VARIANT,
     )
+    # Phase 2 lifecycle: record that the user created a PRD for this brief
+    # finding so it lands in the Completed section once the next brief arrives.
+    # Best-effort — must never break PRD creation. The insight's theme_id is
+    # carried in the saved brief payload; enterprise_id == company_id (same
+    # convention convergence/finding_state use).
+    _record_prd_action(company.company_id, insight)
+
     task = asyncio.create_task(
         generate_prd(prd_id, body.brief_id, body.insight_index)
     )
