@@ -168,6 +168,10 @@ function baseCodebaseProps(): ModalProps {
     _testRepos: REPOS,
     _testInitSource: "github",
     _testInitRepoSel: SEL_REPO,
+    // Poll overrides so the live POST→poll loop completes within a single
+    // flushAsync tick (zero inter-poll delay, generous overall timeout).
+    _testPollIntervalMs: 0,
+    _testPollTimeoutMs: 5000,
   }
 }
 
@@ -211,6 +215,22 @@ async function flushAsync(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0))
 }
 
+/**
+ * Mock the ASYNC locate contract: the POST returns a job handle and the
+ * first poll resolves with the given LocateResponse. This is the poll-shape
+ * replacement for the old single `locate().mockResolvedValue(<LocateResponse>)`.
+ */
+function mockLocateResolves(result: LocateResponse) {
+  vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+    job_id: "job-1",
+    status: "running",
+  })
+  vi.spyOn(designAgentApi, "locateJob").mockResolvedValue({
+    status: "done",
+    result,
+  })
+}
+
 // ─── mapLocateCandidates ─────────────────────────────────────────────────────
 
 describe("mapLocateCandidates helper", () => {
@@ -234,9 +254,9 @@ describe("mapLocateCandidates helper", () => {
   })
 })
 
-// ─── test_codebase_source_label_and_enable ───────────────────────────────────
+// ─── codebase source label and enable ───────────────────────────────────
 
-describe("test_codebase_source_label_and_enable", () => {
+describe("codebase source label and enable", () => {
   it("renders 'From our codebase' as the github source option label", () => {
     const html = renderModal()
     expect(html).toContain("From our codebase")
@@ -259,11 +279,12 @@ describe("test_codebase_source_label_and_enable", () => {
   })
 })
 
-// ─── test_generate_in_codebase_mode_calls_locate_and_shows_analysing ─────────
+// ─── generate in codebase mode calls locate and shows analysing ─────────
 
-describe("test_generate_in_codebase_mode_calls_locate_and_shows_analysing", () => {
+describe("generate in codebase mode calls locate and shows analysing", () => {
   it("calls designAgentApi.locate with prd_id + github_repo when Generate is clicked", async () => {
-    const spy = vi.spyOn(designAgentApi, "locate").mockResolvedValue(AUTO_PROCEED)
+    mockLocateResolves(AUTO_PROCEED)
+    const spy = vi.mocked(designAgentApi.locate)
     const buttons = captureButtons(baseCodebaseProps())
     const btn = buttons.find((b) => b["data-testid"] === "generate-btn")
     expect(btn).toBeDefined()
@@ -281,9 +302,9 @@ describe("test_generate_in_codebase_mode_calls_locate_and_shows_analysing", () =
   })
 })
 
-// ─── test_auto_proceed_shows_matched_and_starts_generation ───────────────────
+// ─── auto_proceed shows matched and starts generation ───────────────────
 
-describe("test_auto_proceed_shows_matched_and_starts_generation", () => {
+describe("auto_proceed shows matched and starts generation", () => {
   it("shows the transient 'matched: <screen>' line when a screen resolves", () => {
     const html = renderModal({ _testFlowPhase: "generating", _testMatchedRoute: "/team" })
     expect(html).toContain('data-testid="generate-loading-matched"')
@@ -302,7 +323,7 @@ describe("test_auto_proceed_shows_matched_and_starts_generation", () => {
   })
 
   it("fires runGenerateFlow after an auto_proceed locate response", async () => {
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(AUTO_PROCEED)
+    mockLocateResolves(AUTO_PROCEED)
     const buttons = captureButtons(baseCodebaseProps())
     const btn = buttons.find((b) => b["data-testid"] === "generate-btn")
     ;(btn!["onClick"] as () => void)()
@@ -311,12 +332,12 @@ describe("test_auto_proceed_shows_matched_and_starts_generation", () => {
   })
 })
 
-// ─── test_proceed_with_note_starts_generation ────────────────────────────────
+// ─── proceed_with_note starts generation ────────────────────────────────
 
-describe("test_proceed_with_note_starts_generation", () => {
+describe("proceed_with_note starts generation", () => {
   it("fires runGenerateFlow on proceed_with_note without blocking picker", async () => {
     const proceedWithNote: LocateResponse = { ...AUTO_PROCEED, decision: "proceed_with_note" }
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(proceedWithNote)
+    mockLocateResolves(proceedWithNote)
     const buttons = captureButtons(baseCodebaseProps())
     const btn = buttons.find((b) => b["data-testid"] === "generate-btn")
     ;(btn!["onClick"] as () => void)()
@@ -325,9 +346,9 @@ describe("test_proceed_with_note_starts_generation", () => {
   })
 })
 
-// ─── test_ambiguous_match_shows_picker ───────────────────────────────────────
+// ─── ambiguous match shows picker ───────────────────────────────────────
 
-describe("test_ambiguous_match_shows_picker", () => {
+describe("ambiguous match shows picker", () => {
   it("picker renders with candidates in the picker phase", () => {
     const html = renderModal({
       _testFlowPhase: "picker",
@@ -347,9 +368,9 @@ describe("test_ambiguous_match_shows_picker", () => {
   })
 })
 
-// ─── test_pick_carries_chosen_route_into_genstart ────────────────────────────
+// ─── pick carries chosen route into genstart ────────────────────────────
 
-describe("test_pick_carries_chosen_route_into_genstart", () => {
+describe("pick carries chosen route into genstart", () => {
   it("clicking a picker candidate calls onGenStart with chosenScreenRoute", () => {
     const onGenStart = vi.fn()
     const buttons = captureButtons({
@@ -367,9 +388,9 @@ describe("test_pick_carries_chosen_route_into_genstart", () => {
   })
 })
 
-// ─── test_unmapped_shows_resolve_no_autostart ────────────────────────────────
+// ─── unmapped shows resolve, no autostart ────────────────────────────────
 
-describe("test_unmapped_shows_resolve_no_autostart", () => {
+describe("unmapped shows resolve, no autostart", () => {
   it("renders the unmapped-resolve UI in the unmapped-resolve phase", () => {
     const html = renderModal({ _testFlowPhase: "unmapped-resolve" })
     expect(html).toContain('data-testid="unmapped-resolve"')
@@ -389,7 +410,7 @@ describe("test_unmapped_shows_resolve_no_autostart", () => {
 
   it("does not call runGenerateFlow when locate returns unmapped", async () => {
     const unmapped: LocateResponse = { ...RANKED_CONFIRM, unmapped: true }
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(unmapped)
+    mockLocateResolves(unmapped)
     const buttons = captureButtons(baseCodebaseProps())
     const btn = buttons.find((b) => b["data-testid"] === "generate-btn")
     ;(btn!["onClick"] as () => void)()
@@ -398,33 +419,32 @@ describe("test_unmapped_shows_resolve_no_autostart", () => {
   })
 })
 
-// ─── test_locate_error_is_non_fatal_falls_back ───────────────────────────────
+// ─── locate error is explicit, no PRD collapse ───────────────────────────
+// The load-bearing behaviour: a failed/errored locate surfaces an EXPLICIT
+// error phase with a Retry button — it does NOT silently collapse to the config
+// (PRD) form. This replaces the old non-fatal fall-back-to-config behaviour.
 
-describe("test_locate_error_is_non_fatal_falls_back", () => {
-  it("renders inline error with role=alert when _testLocateError is set", () => {
-    const msg = "Couldn't analyse the codebase — pick a screen or switch source"
-    const html = renderModal({ _testLocateError: msg })
+describe("locate error is explicit, no PRD collapse", () => {
+  it("renders the explicit error surface with role=alert in the error phase", () => {
+    const msg = "Codebase analysis failed — try again or switch source"
+    const html = renderModal({ _testFlowPhase: "error", _testLocateError: msg })
+    expect(html).toContain('data-testid="locate-error-state"')
     expect(html).toContain('data-testid="locate-error"')
     expect(html).toContain('role="alert"')
-    expect(html).toContain("Couldn")
+    expect(html).toContain("failed")
+    // A Retry affordance is present.
+    expect(html).toContain('data-testid="locate-retry"')
   })
 
-  it("calls locate but does not start generation when locate throws", async () => {
-    const onClose = vi.fn()
-    vi.spyOn(designAgentApi, "locate").mockRejectedValue(new Error("net error"))
-    const buttons = captureButtons({ ...baseCodebaseProps(), onClose })
-    const btn = buttons.find((b) => b["data-testid"] === "generate-btn")
-    ;(btn!["onClick"] as () => void)()
-    await flushAsync()
-    expect(designAgentApi.locate).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
-    expect(onClose).not.toHaveBeenCalled()
+  it("does NOT render the config-phase Generate button in the error phase (no PRD collapse)", () => {
+    const html = renderModal({ _testFlowPhase: "error", _testLocateError: "boom" })
+    expect(html).not.toContain('data-testid="generate-btn"')
   })
 })
 
-// ─── test_codebase_mode_requires_repo_disabled_helper_text ───────────────────
+// ─── codebase mode requires repo, disabled helper text ───────────────────
 
-describe("test_codebase_mode_requires_repo_disabled_helper_text", () => {
+describe("codebase mode requires repo, disabled helper text", () => {
   it("shows helper text and disables Generate when codebase mode with no repo selected", () => {
     const html = renderModal({ _testInitRepoSel: "" })
     expect(html).toContain("Connect Figma or a codebase to generate")
@@ -439,9 +459,9 @@ describe("test_codebase_mode_requires_repo_disabled_helper_text", () => {
   })
 })
 
-// ─── test_figma_mode_runs_without_locate_call ────────────────────────────────
+// ─── figma mode runs without locate call ────────────────────────────────
 
-describe("test_figma_mode_runs_without_locate_call", () => {
+describe("figma mode runs without locate call", () => {
   it("clicking Generate in figma mode does not call designAgentApi.locate", async () => {
     const spy = vi.spyOn(designAgentApi, "locate")
     const figmaProps: ModalProps = {
@@ -461,9 +481,9 @@ describe("test_figma_mode_runs_without_locate_call", () => {
   })
 })
 
-// ─── test_approve_modal_mount_unchanged_optional_context ─────────────────────
+// ─── approve modal mount unchanged, optional context ─────────────────────
 
-describe("test_approve_modal_mount_unchanged_optional_context", () => {
+describe("approve modal mount unchanged, optional context", () => {
   it("ApproveModal still imports and mounts GenerateModal with onGenStart", () => {
     const src = readFileSync(
       join(process.cwd(), "app", "components", "shared", "ApproveModal.tsx"),
@@ -485,9 +505,9 @@ describe("test_approve_modal_mount_unchanged_optional_context", () => {
   })
 })
 
-// ─── test_no_prohibited_tokens_in_appended_lines ─────────────────────────────
+// ─── no prohibited tokens in appended lines ─────────────────────────────
 
-describe("test_no_prohibited_tokens_in_appended_lines", () => {
+describe("no prohibited tokens in appended lines", () => {
   it("no ticket-series or decision IDs in the new test file", () => {
     const src = readFileSync(
       join(

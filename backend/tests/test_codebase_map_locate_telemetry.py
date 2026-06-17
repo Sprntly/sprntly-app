@@ -88,11 +88,11 @@ def _make_gate(
                       threshold=threshold, top_confidence=top_confidence)
 
 
-# ── helper line shape (ACs 1-4) ───────────────────────────────────────────────
+# ── helper line shape ─────────────────────────────────────────────────────────
 
 
 def test_telemetry_line_auto_proceed_fields(caplog):
-    """AC1: auto_proceed gate emits all expected k=v fields in the calibration line."""
+    """auto_proceed gate emits all expected k=v fields in the calibration line."""
     from app.design_agent.codebase_map.locate import emit_locate_telemetry
     gate = _make_gate(decision="auto_proceed", top_confidence=90, chosen_route="/team",
                       ambiguous=False, n_ranked=3, threshold=80)
@@ -112,7 +112,7 @@ def test_telemetry_line_auto_proceed_fields(caplog):
 
 
 def test_telemetry_line_ranked_confirm_empty_chosen(caplog):
-    """AC2: ranked_confirm gate emits decision=ranked_confirm and empty chosen_screen."""
+    """ranked_confirm gate emits decision=ranked_confirm and empty chosen_screen."""
     from app.design_agent.codebase_map.gate import GateResult
     from app.design_agent.codebase_map.locate import LocateCandidate, emit_locate_telemetry
     ranked = [LocateCandidate(route="/about", entry_component="AboutScreen",
@@ -128,7 +128,7 @@ def test_telemetry_line_ranked_confirm_empty_chosen(caplog):
 
 
 def test_telemetry_line_unmapped_empty_sha(caplog):
-    """AC3: unmapped fail-open path emits sha='' and n_candidates=0."""
+    """unmapped fail-open path emits sha='' and n_candidates=0."""
     from app.design_agent.codebase_map.gate import GateResult
     from app.design_agent.codebase_map.locate import emit_locate_telemetry
     gate = GateResult(decision="ranked_confirm", chosen=[], ranked=[],
@@ -143,7 +143,7 @@ def test_telemetry_line_unmapped_empty_sha(caplog):
 
 
 def test_telemetry_line_reflects_ambiguous(caplog):
-    """AC4: when the leading ranked candidate has ambiguous=True, the line carries ambiguous=True."""
+    """when the leading ranked candidate has ambiguous=True, the line carries ambiguous=True."""
     from app.design_agent.codebase_map.gate import GateResult
     from app.design_agent.codebase_map.locate import LocateCandidate, emit_locate_telemetry
     ambig = LocateCandidate(route="/home", entry_component="HomeScreen",
@@ -156,11 +156,11 @@ def test_telemetry_line_reflects_ambiguous(caplog):
     assert "ambiguous=True" in msg
 
 
-# ── discipline (AC6) ──────────────────────────────────────────────────────────
+# ── discipline ────────────────────────────────────────────────────────────────
 
 
 def test_telemetry_no_prd_or_rationale_or_token_leak(caplog):
-    """AC6: PRD body, rationale text, and installation token must never appear in the log."""
+    """PRD body, rationale text, and installation token must never appear in the log."""
     from app.design_agent.codebase_map.gate import GateResult
     from app.design_agent.codebase_map.locate import LocateCandidate, emit_locate_telemetry
 
@@ -181,11 +181,19 @@ def test_telemetry_no_prd_or_rationale_or_token_leak(caplog):
     assert TOKEN_SENTINEL not in all_logs
 
 
-# ── emission count + call-site (ACs 5, 7) ────────────────────────────────────
+# ── emission count + call-site ───────────────────────────────────────────────
 
 
 def test_emitted_exactly_once_per_request(client, env, monkeypatch, caplog):
-    """AC5 + AC7: one /locate request produces exactly one codebase_map.locate line."""
+    """One /locate request produces exactly one codebase_map.locate line.
+
+    /locate is now accept + poll: the POST mints a job and the pipeline (incl. the
+    telemetry emission) runs in the background task. We suppress the fire-and-forget
+    task on POST and drive ``_run_locate_bg`` once deterministically so the emission
+    count is exactly one — the same single-emission guarantee the synchronous
+    endpoint had."""
+    import asyncio
+
     _seed_prd()
     monkeypatch.setattr(
         "app.routes.design_agent._resolve_github_installation_id_for_repo",
@@ -207,14 +215,28 @@ def test_emitted_exactly_once_per_request(client, env, monkeypatch, caplog):
             return map_result
         return locate_result
 
+    async def _noop_bg(**_kw):
+        return None
+
     with caplog.at_level(logging.INFO, logger="app.design_agent.codebase_map.locate"):
-        with patch("asyncio.to_thread", new=_fake_to_thread):
-            resp = client.post(
+        with patch.object(env.routes, "_run_locate_bg", new=_noop_bg):
+            accepted = client.post(
                 "/v1/design-agent/locate",
                 json={"prd_id": 1, "github_repo": "org/repo"},
             )
+        assert accepted.status_code == 202
+        job_id = accepted.json()["job_id"]
+        rec = env.routes._locate_jobs[job_id]
+        with patch("asyncio.to_thread", new=_fake_to_thread):
+            asyncio.run(env.routes._run_locate_bg(
+                job_id=job_id,
+                workspace_id=rec["workspace_id"],
+                github_repo="org/repo",
+                ref=None,
+                prd_text="",
+                installation_id=42,
+            ))
 
-    assert resp.status_code == 200
     calibration_lines = [r for r in caplog.records
                          if "codebase_map.locate" in r.getMessage()]
     assert len(calibration_lines) == 1, (
@@ -222,11 +244,11 @@ def test_emitted_exactly_once_per_request(client, env, monkeypatch, caplog):
     )
 
 
-# ── distinct from cost-summary (AC8) ─────────────────────────────────────────
+# ── distinct from cost-summary ───────────────────────────────────────────────
 
 
 def test_distinct_from_cost_summary_line(isolated_settings, caplog):
-    """AC8: codebase_map.locate and design_agent.locate.complete have distinct operation tokens."""
+    """codebase_map.locate and design_agent.locate.complete have distinct operation tokens."""
     import json as _json
     from app.design_agent.codebase_map.gate import GateResult, decide_gate
     from app.design_agent.codebase_map.locate import (
@@ -292,11 +314,11 @@ def test_distinct_from_cost_summary_line(isolated_settings, caplog):
     assert all("codebase_map.locate" not in m or m.startswith("codebase_map.locate ") for m in cost_summary)
 
 
-# ── integrity (ACs 9, 10) ─────────────────────────────────────────────────────
+# ── integrity ─────────────────────────────────────────────────────────────────
 
 
 def test_no_existing_route_reference_broken_imports_clean(env):
-    """AC9: import app.routes.design_agent succeeds; no existing route path removed."""
+    """import app.routes.design_agent succeeds; no existing route path removed."""
     import app.routes.design_agent as routes_mod
     paths = {route.path for route in routes_mod.router.routes}  # type: ignore[attr-defined]
     assert "/v1/design-agent/locate" in paths
@@ -304,7 +326,7 @@ def test_no_existing_route_reference_broken_imports_clean(env):
 
 
 def test_no_prohibited_tokens_in_appended_lines():
-    """AC10: no internal coordinates in this new test file."""
+    """No internal coordinates in this new test file."""
     _PATTERN = re.compile("|".join([
         r"C[0-9]+-[0-9]+", "C" + "-series", r"H[0-9]+-[0-9]+", r"P[0-9]+-[0-9]+",
         r"\bAD[0-9]+", r"\bF[0-9]{1,2}\b", "D" + "BD", "Babaj" + "ide", r"\bspike\b",

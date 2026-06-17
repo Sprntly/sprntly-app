@@ -74,6 +74,57 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
 
+def _design_agent_enabled() -> bool:
+    """Request-time read of the Design Agent flag (mirrors routes/design_agent's
+    ``_feature_enabled``; default-off). Read here — not
+    imported from the route module — to avoid a connectors→design_agent import
+    cycle. Gates the codebase-map pre-warm so it no-ops cleanly when the feature
+    is dark."""
+    import os
+
+    val = (os.environ.get("DESIGN_AGENT_ENABLED") or "").strip().lower()
+    return val in {"1", "true", "yes"}
+
+
+def _prewarm_codebase_map_on_connect(installation_id: int) -> None:
+    """Best-effort: warm the codebase map for a just-bound installation so the
+    first /locate is hot. No-ops when the Design Agent is disabled. NEVER blocks or
+    raises into the connect flow — coalescing + a single build permit live inside
+    the pre-warm module, so this stays load-safe even on a many-repo install."""
+    if not _design_agent_enabled():
+        return
+    try:
+        from app.design_agent.codebase_map.prewarm import prewarm_installation
+
+        prewarm_installation(int(installation_id))
+    except Exception:  # noqa: BLE001 — pre-warm must never break connect.
+        logger.warning(
+            "codebase-map connect pre-warm skipped for installation %s",
+            installation_id, exc_info=True,
+        )
+
+
+def _prewarm_codebase_map_on_push(installation_id: int, repo: str, ref: str | None) -> None:
+    """Best-effort: a push is a new commit_sha, hence a natural L1/L2 cache miss;
+    warm the new sha in the bounded background lane so the NEXT /locate is hot
+    instead of paying the cold rebuild inline. No-ops when the Design Agent is
+    disabled. NEVER blocks or raises into the webhook flow."""
+    if not _design_agent_enabled():
+        return
+    try:
+        from app.design_agent.codebase_map.prewarm import prewarm_map
+
+        # ref=None lets build_map resolve the default-branch SHA itself; we pass it
+        # so a non-default-branch push doesn't warm the wrong ref. build_map keys on
+        # the resolved commit_sha regardless.
+        prewarm_map(int(installation_id), repo, ref)
+    except Exception:  # noqa: BLE001 — pre-warm must never break the webhook.
+        logger.warning(
+            "codebase-map push pre-warm skipped for installation %s repo %s",
+            installation_id, repo, exc_info=True,
+        )
+
+
 def _public_connection(row: dict) -> dict:
     config = {}
     if row.get("config_json"):
@@ -957,6 +1008,12 @@ def _bind_installation_company(installation_id: int, company_id: str) -> None:
             "Failed to bind GitHub installation %s to company", installation_id,
             exc_info=True,
         )
+        return
+
+    # Connection is established: warm the codebase map ahead of the first /locate.
+    # Best-effort + bounded + coalesced + non-blocking (see helper); a failure here
+    # must never affect the just-completed bind.
+    _prewarm_codebase_map_on_connect(installation_id)
 
 
 def _has_github_install_for(account_login: str, company_id: str) -> bool:
@@ -1910,12 +1967,33 @@ def _handle_installation_repositories_event(payload: dict) -> None:
 def _handle_push_event(payload: dict) -> None:
     """A push to a connected repo may have changed its design tokens, so mark
     any cached design system extracted from that repo stale. The next design
-    generation then re-extracts instead of serving a now-outdated cached row."""
+    generation then re-extracts instead of serving a now-outdated cached row.
+
+    A push is also a NEW commit_sha, hence a natural L1/L2 codebase-map cache miss
+    — so we additionally fire a best-effort, bounded, coalesced background pre-warm
+    of the new sha so the NEXT /locate is hot instead of paying the cold
+    rebuild inline. No explicit cache deletion is needed: commit_sha keying already
+    makes the old map unreachable, so the warm is purely a latency optimization."""
     repo = payload.get("repository") or {}
     repo_full_name = str(repo.get("full_name") or "").strip()
     if not repo_full_name:
         return
     db.mark_github_design_systems_stale(repo_full_name)
+
+    # Pre-warm. The installation id rides on the push payload's `installation`
+    # block; the pushed branch is `refs/heads/<branch>` in `ref`. We ONLY warm the
+    # default branch — that is what /locate resolves against, so warming a feature
+    # branch nobody will locate against would be wasted cold-build load. We pass
+    # ref=None and let build_map resolve the current default-branch SHA itself
+    # (avoids trusting a possibly-stale payload sha). A non-default-branch push, or
+    # a payload missing the installation id, simply skips the warm (best-effort).
+    install = payload.get("installation") or {}
+    install_id = install.get("id")
+    pushed_ref = str(payload.get("ref") or "")  # e.g. "refs/heads/main"
+    default_branch = str(repo.get("default_branch") or "")
+    is_default_push = bool(default_branch) and pushed_ref == f"refs/heads/{default_branch}"
+    if install_id and is_default_push:
+        _prewarm_codebase_map_on_push(int(install_id), repo_full_name, None)
 
 
 def _handle_pull_request_event(payload: dict) -> None:

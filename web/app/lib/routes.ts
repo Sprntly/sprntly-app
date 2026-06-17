@@ -13,10 +13,26 @@ export const PROTOTYPE_PATH = "/prototype"
 /** Build the prototype path, threading the PRD context as `?prd=<id>` when
  *  present. With no PRD it returns the bare `/prototype`. This is the single
  *  destination for opening a prototype: the in-tab canvas resolves the PRD's
- *  ready prototype from the `?prd=` param. Pure → unit-testable. */
-export function prototypePath(prdId?: number | string | null): string {
-  if (prdId == null || prdId === "") return PROTOTYPE_PATH
-  return `${PROTOTYPE_PATH}?prd=${encodeURIComponent(String(prdId))}`
+ *  ready prototype from the `?prd=` param. Pure → unit-testable.
+ *
+ *  `opts.generate` appends a one-shot `&generate=1` (or `?generate=1` when there
+ *  is no prd) — the explicit-generate-intent signal a "Generate Prototype" nav
+ *  carries so PrototypeRoute opens the generate panel directly instead of landing
+ *  on the empty-state gate. The route CONSUMES the param on mount (strips it via
+ *  router.replace) so a later refresh after dismiss does not re-open the panel.
+ *  Omitted/false → no signal, the existing default-closed gate behaviour. The
+ *  default no-opts call keeps the bare `?prd=` form for all view-intent callers. */
+export function prototypePath(
+  prdId?: number | string | null,
+  opts?: { generate?: boolean },
+): string {
+  const base =
+    prdId == null || prdId === ""
+      ? PROTOTYPE_PATH
+      : `${PROTOTYPE_PATH}?prd=${encodeURIComponent(String(prdId))}`
+  if (!opts?.generate) return base
+  const sep = base.includes("?") ? "&" : "?"
+  return `${base}${sep}generate=1`
 }
 
 /** Read the PRD id carried in the prototype page's `?prd=` query param, or null

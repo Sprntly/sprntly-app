@@ -1,38 +1,36 @@
-"""Design Agent HTTP routes (P1-07).
+"""Design Agent HTTP routes.
 
-Wires P1-04 (`generate_prototype` agent loop), P1-05 (scaffold prompts), and
-P1-06 (`prototypes` DB helpers) into the FastAPI surface:
+Wires the `generate_prototype` agent loop, the scaffold prompts, and the
+`prototypes` DB helpers into the FastAPI surface:
 
     POST /v1/design-agent/generate  {prd_id, target_platform, instructions, figma_file_key}
     GET  /v1/design-agent/{id}
 
-Per BUILD-PHASES.md §Phase 1 AC #1: POST /generate returns within 200ms — it
-inserts a `generating` row, fires the agent loop in a background task, and
-returns the prototype_id immediately (no Anthropic call in the request path).
-Per BUILD.md §6 isolation: `APIRouter(prefix="/v1/design-agent")`.
-Per skill-config §Architecture Rule #27: feature-flag-gated — both endpoints
-return 404 when `DESIGN_AGENT_ENABLED` is unset / "0" / "false", so the feature
-is invisible until Apurva flips it.
-Per skill-config §Architecture Rules #21-#22: workspace-isolated — `workspace_id`
-is read from the session `aud` claim at insert time and every user-driven query
-filters by it.
+POST /generate returns within 200ms — it inserts a `generating` row, fires the
+agent loop in a background task, and returns the prototype_id immediately (no
+Anthropic call in the request path). Routes are isolated under
+`APIRouter(prefix="/v1/design-agent")`.
+Feature-flag-gated — both endpoints return 404 when `DESIGN_AGENT_ENABLED` is
+unset / "0" / "false", so the feature is invisible until it is flipped on.
+Workspace-isolated — `workspace_id` is read from the session `aud` claim at
+insert time and every user-driven query filters by it.
 
-CALL-STYLE NOTE (P1-06 carry-forward): the `db.prototypes` helpers are
-*synchronous* (supabase-py is sync; this mirrors `db/prds.py` + `routes/prd.py`
-exactly). They are called WITHOUT `await`, directly from the async handler —
-the same pattern `routes/prd.py` uses for `start_prd` / `find_existing_prd`.
-The only awaited call in this module is `generate_prototype` (P1-04, genuinely
-async), which runs off the request path inside the background task.
+CALL-STYLE NOTE: the `db.prototypes` helpers are *synchronous* (supabase-py is
+sync; this mirrors `db/prds.py` + `routes/prd.py` exactly). They are called
+WITHOUT `await`, directly from the async handler — the same pattern
+`routes/prd.py` uses for `start_prd` / `find_existing_prd`. The only awaited
+call in this module is `generate_prototype` (genuinely async), which runs off
+the request path inside the background task.
 
-SCOPE (what this ticket does NOT do, per the ticket's scope boundaries):
-- Bundle staging to storage + `complete_prototype(bundle_url=...)` — wired by
-  P1-08 (`_run_generation_bg` → `_stage_complete_run`: vite_build → checkpoint →
+SCOPE (what this initial slice does NOT do):
+- Bundle staging to storage + `complete_prototype(bundle_url=...)` — wired later
+  (`_run_generation_bg` → `_stage_complete_run`: vite_build → checkpoint →
   stage_bundle → complete_prototype on the success path).
-- CSRF / Origin check — P5-06 (matches Sprntly's existing routes, which have no
-  CSRF defense; design-agent inherits the gap until P5 hardens it).
-- Per-session rate limiter — P5-04.
+- CSRF / Origin check — added later (matches Sprntly's existing routes, which
+  have no CSRF defense; design-agent inherits the gap until it is hardened).
+- Per-session rate limiter — added later.
 - `POST /complete | /resume | /share | /export | /iterate | /manual-edit` —
-  appended to this file in later phases (P2/P3/P4).
+  appended to this file in later phases.
 """
 from __future__ import annotations
 
@@ -41,6 +39,8 @@ import hashlib
 import json
 import logging
 import os
+import time
+import uuid
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -52,13 +52,17 @@ from app.auth import CompanyContext, require_company, require_company_from_query
 from app.config import settings
 from app.connectors import github_app
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
-from app.design_agent.csrf import require_same_origin  # P5-06 server-side CSRF/Origin gate
-from app.design_agent.rate_limit import (  # P5-07 public-surface rate limits
+from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
+from app.design_agent.rate_limit import (  # public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
 from app.db.companies import slug_for_company_id
 from app.db.connections import get_connection
+from app.db.design_agent_jobs import (  # Tier 2 opt-in worker queue
+    enqueue_job,
+    worker_heartbeat_fresh,
+)
 from app.db.prds import get_prd_rendered, list_prds_by_brief, reset_prd_to_draft
 from app.db.github import find_github_installation_for_repo
 from app.db.products import get_company_website  # onboarding-website fallback source
@@ -138,15 +142,107 @@ def _prd_variant() -> str:
 # Strong refs to in-flight background generation tasks. asyncio only holds a
 # weak reference to a bare `create_task` result, so without this the task can be
 # garbage-collected mid-run. The done-callback discards each task on completion.
-# The fuller in-flight discipline (cancellation, draining on shutdown) lands in
-# P5-05; this is the P1 minimum to keep the task alive (AC #6).
+# The fuller in-flight discipline (cancellation, draining on shutdown) lands
+# later; this is the minimum to keep the task alive.
 _inflight_tasks: set[asyncio.Task] = set()
+
+
+# ── Tier 0: graceful drain ───────────────────────────────────────────────────
+# Set True by the lifespan teardown (via request_shutdown()) when the process is
+# draining on SIGTERM. While True, POST /generate rejects NEW in-process work
+# with 503 rather than starting a task that a pending SIGKILL would abandon
+# mid-run (the deploy-time 502 class). The frontend retry treats a 503 here
+# as the self-heal signal: the next boot accepts the retried request cleanly.
+_shutting_down = False
+
+
+def request_shutdown() -> None:
+    """Mark the process as draining so /generate stops admitting new work.
+
+    Called from the lifespan teardown in app/main.py (after `yield`). Idempotent;
+    safe to call more than once.
+    """
+    global _shutting_down
+    _shutting_down = True
+
+
+async def drain_inflight(deadline_seconds: float) -> None:
+    """Wait up to ``deadline_seconds`` for in-flight generation tasks to finish.
+
+    Called from the lifespan teardown after request_shutdown(). Does NOT cancel
+    on timeout: the heavy section runs a vite subprocess on an uncancellable
+    worker thread (asyncio.to_thread), so a cancel would not stop it and would
+    only corrupt the partial bundle. Instead, any still-running prototype is
+    logged by id and left in its 'generating' DB state; the startup
+    invalidate_orphan_generating_prototypes() sweep demotes it to 'failed' on the
+    next boot (system-wide, status-only — it handles a drain-timeout leftover
+    with no extra checkpoint code). Never raises: a drain error must not block
+    process shutdown.
+    """
+    global _shutting_down
+    _shutting_down = True
+    pending = {t for t in _inflight_tasks if not t.done()}
+    if not pending:
+        # asyncio.wait raises ValueError on an empty set — skip cleanly.
+        return
+    try:
+        logger.info(
+            "design_agent.drain_start pending=%d deadline_s=%s",
+            len(pending), deadline_seconds,
+        )
+        _done, still_running = await asyncio.wait(
+            pending, timeout=deadline_seconds
+        )
+        if still_running:
+            # Deadline elapsed with work outstanding. Do NOT cancel (uncancellable
+            # vite thread). Name the still-running tasks; the startup orphan sweep
+            # recovers their 'generating' rows on next boot.
+            logger.warning(
+                "design_agent.drain_timeout still_running=%d tasks=%s — "
+                "leaving 'generating' rows for the next-boot orphan sweep",
+                len(still_running),
+                [getattr(t, "get_name", lambda: "?")() for t in still_running],
+            )
+        else:
+            logger.info("design_agent.drain_complete drained=%d", len(_done))
+    except Exception:  # noqa: BLE001 — drain must never block shutdown
+        logger.warning("design_agent.drain_error", exc_info=True)
+
+
+# ── Tier 1: generation concurrency guard ─────────────────────────────────────
+# Lazy-initialised so a test can monkeypatch the setting before first use and so
+# the limit is read at CALL-TIME, not frozen at import (the import-bound-settings
+# gotcha). One semaphore per process; the limit comes from
+# settings.design_agent_generation_concurrency (default 1).
+_generation_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_generation_semaphore() -> asyncio.Semaphore:
+    """Return the process-wide generation semaphore, creating it on first use.
+
+    The limit is read from settings AT CALL-TIME (first acquire), so a test that
+    sets DESIGN_AGENT_GENERATION_CONCURRENCY (and reloads config) before the
+    first generation gets the configured limit. Values <= 0 fall back to 1 (a 0
+    permit would deadlock every generation).
+    """
+    global _generation_semaphore
+    if _generation_semaphore is None:
+        # Defensive getattr: a stale/reloaded Settings singleton from another
+        # test's importlib.reload can lack this field (in-suite reload pollution);
+        # fall back to the default 1 rather than AttributeError. In prod the field
+        # always exists, so this reads the real configured value. Mirrors the
+        # getattr-defensive pattern used for theme_expectations below.
+        limit = getattr(settings, "design_agent_generation_concurrency", 1)
+        if limit <= 0:
+            limit = 1
+        _generation_semaphore = asyncio.Semaphore(limit)
+    return _generation_semaphore
 
 
 def _feature_enabled() -> bool:
     """Read DESIGN_AGENT_ENABLED at REQUEST TIME (never import time).
 
-    Per skill-config Rule #27: default-off; never default-1 in any commit.
+    Default-off; never default-1 in any commit.
     Request-time read means flipping the env var takes effect without a code
     deploy or process restart, and keeps the gate honest under module reload in
     tests. The frontend uses a *separate* var, `NEXT_PUBLIC_DESIGN_AGENT_ENABLED`
@@ -161,6 +257,51 @@ def _require_feature_enabled() -> None:
     if not _feature_enabled():
         # 404 (not 401, not a JSON error) so the feature is invisible when off.
         raise HTTPException(status_code=404, detail="Not found")
+
+
+# ── Tier 2: opt-in worker queue ──────────────────────────────────────────────
+# When ON *and* a worker heartbeat is fresh, /generate enqueues the generation
+# onto `design_agent_jobs` for `python -m app.worker` to run off the API request
+# process. OTHERWISE — flag off, no fresh heartbeat, or any enqueue/table error —
+# /generate falls back to today's in-process create_task path verbatim. The
+# fallback is the load-bearing safety: a box without the worker systemd unit
+# behaves exactly as today. Read at REQUEST TIME (os.environ, mirroring
+# _feature_enabled) so a flip needs no deploy and survives module reload in tests.
+_WORKER_HEARTBEAT_FRESH_SECONDS = 30
+
+
+def _worker_enabled() -> bool:
+    """Read DESIGN_AGENT_WORKER_ENABLED at REQUEST TIME (never import time)."""
+    val = (os.environ.get("DESIGN_AGENT_WORKER_ENABLED") or "").strip().lower()
+    return val in {"1", "true", "yes"}
+
+
+def _serialize_generation_payload(kwargs: dict) -> dict:
+    """Make the `_run_generation_bg` kwargs JSON-serializable for the job queue.
+
+    Every value is already a scalar / str / int / None EXCEPT `manual_design`
+    (a `ManualDesignInput` Pydantic model). We `model_dump()` it to a plain dict
+    so the whole payload round-trips through jsonb losslessly. The worker calls
+    `_deserialize_generation_payload` to reconstruct the model, so the inline
+    path and the worker path invoke the IDENTICAL `_run_generation_bg` body with
+    byte-for-byte identical inputs.
+    """
+    out = dict(kwargs)
+    md = out.get("manual_design")
+    if md is not None and hasattr(md, "model_dump"):
+        out["manual_design"] = md.model_dump()
+    return out
+
+
+def _deserialize_generation_payload(payload: dict) -> dict:
+    """Inverse of `_serialize_generation_payload`: reconstruct the
+    `ManualDesignInput` model from its dict so the worker calls
+    `_run_generation_bg(**kwargs)` with the same types the inline path uses."""
+    out = dict(payload)
+    md = out.get("manual_design")
+    if isinstance(md, dict):
+        out["manual_design"] = ManualDesignInput.model_validate(md)
+    return out
 
 
 def _resolve_github_installation_id_for_repo(
@@ -211,10 +352,10 @@ def _resolve_github_installation_id_for_repo(
 
 
 class ManualDesignInput(BaseModel):
-    """P5-02: the absolute Scenario-B floor — a user-supplied brand color + font
+    """The absolute Scenario-B floor — a user-supplied brand color + font
     that styles the prototype even when there is no Figma and no extractable
-    website design system (the noon-Day-11 manual cut). Both fields required when
-    the object is present; the whole object is optional on the request."""
+    website design system. Both fields required when the object is present; the
+    whole object is optional on the request."""
 
     primary_color: str = Field(..., min_length=1)   # e.g. "#3b82f6"
     font_family: str = Field(..., min_length=1)      # e.g. "Inter"
@@ -231,8 +372,8 @@ class GenerateRequest(BaseModel):
     #                                       param, hyphen→colon converted client-side).
     #                                       When set, the fetch_figma tool targets this
     #                                       specific frame instead of the file's top-5.
-    website_url: str | None = None        # P5-02: Scenario B fallback source
-    manual_design: ManualDesignInput | None = None  # P5-02: absolute floor
+    website_url: str | None = None        # Scenario B fallback source
+    manual_design: ManualDesignInput | None = None  # absolute floor
     github_repo: str | None = None        # connected-repo full_name ("org/repo");
     #                                       no fetch, no clone, no agent tool. The repo
     #                                       identifier travels into the scaffold prompt
@@ -281,7 +422,7 @@ class GenerateResponse(BaseModel):
 @router.post(
     "/generate",
     response_model=GenerateResponse,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 async def generate(
     body: GenerateRequest,
@@ -294,6 +435,16 @@ async def generate(
     dedupe) so a double-click on Generate does not fan out duplicate runs.
     """
     _require_feature_enabled()
+    # Tier 0: while the process is draining on SIGTERM, reject new work
+    # cleanly rather than start a task a pending SIGKILL would abandon mid-run.
+    # 503 is the retry signal the frontend retry self-heals on (the next
+    # boot accepts it). Checked after the feature gate so the feature stays
+    # invisible (404) when off.
+    if _shutting_down:
+        raise HTTPException(
+            status_code=503,
+            detail="service is draining, retry shortly",
+        )
     workspace_id = company.company_id
 
     # Sync DB helpers, called directly (no await) — see CALL-STYLE NOTE.
@@ -360,35 +511,80 @@ async def generate(
         github_installation_id=github_installation_id,
     )
 
-    task = asyncio.create_task(
-        _run_generation_bg(
+    # The exact `_run_generation_bg` kwargs — computed ONCE here so the inline
+    # create_task path and the Tier 2 worker path run the IDENTICAL
+    # generation body with byte-for-byte identical inputs. The enqueue boundary
+    # is these already-resolved request-level inputs (resolved website_url,
+    # resolved github_installation_id, etc.); the worker replays
+    # `_run_generation_bg(**payload)` rather than re-deriving them, so the two
+    # paths cannot diverge.
+    bg_kwargs = dict(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        prd_id=body.prd_id,
+        target_platform=body.normalised_platform(),
+        instructions=body.instructions,
+        figma_file_key=body.figma_file_key,
+        figma_node_id=body.figma_node_id,  # frame-level targeting; None when absent
+        website_url=effective_website_url,  # resolved value incl. onboarding fallback
+        manual_design=body.manual_design,
+        github_repo=repo,  # normalised connected-repo full_name; prompt context only
+        github_installation_id=github_installation_id,
+        design_source=body.design_source,
+        chosen_screen_route=body.chosen_screen_route,
+        chosen_screen_id=body.chosen_screen_id,
+        map_commit_sha=body.map_commit_sha,
+    )
+
+    # Tier 2: 3-way enqueue decision. ARM the worker queue ONLY when the
+    # flag is on AND a worker heartbeat is fresh. enqueue_job is fail-soft
+    # (returns None on a missing table / DB error), so even an armed attempt that
+    # fails to land a row degrades to the in-process path — never a 500. A box
+    # without the worker unit therefore behaves exactly as today.
+    if _worker_enabled() and worker_heartbeat_fresh(
+        within_seconds=_WORKER_HEARTBEAT_FRESH_SECONDS
+    ):
+        job = enqueue_job(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
-            prd_id=body.prd_id,
-            target_platform=body.normalised_platform(),
-            instructions=body.instructions,
-            figma_file_key=body.figma_file_key,
-            figma_node_id=body.figma_node_id,  # frame-level targeting; None when absent
-            website_url=effective_website_url,  # resolved value incl. onboarding fallback
-            manual_design=body.manual_design,
-            github_repo=repo,  # normalised connected-repo full_name; prompt context only
-            github_installation_id=github_installation_id,
-            design_source=body.design_source,
-            chosen_screen_route=body.chosen_screen_route,
-            chosen_screen_id=body.chosen_screen_id,
-            map_commit_sha=body.map_commit_sha,
+            payload=_serialize_generation_payload(bg_kwargs),
         )
-    )
+        if job is not None:
+            # The prototype row is already 'generating'; the worker picks the job
+            # up and runs the identical body. Transparent to the frontend, which
+            # polls prototype status as today.
+            logger.info(
+                "design_agent_generation_enqueued prototype_id=%s job_id=%s",
+                prototype_id, job.get("id"),
+            )
+            return GenerateResponse(prototype_id=prototype_id, status="generating")
+        # enqueue failed (table missing / DB error) — fall through to in-process.
+        logger.warning(
+            "design_agent_enqueue_failed_inprocess_fallback prototype_id=%s",
+            prototype_id,
+        )
+    elif _worker_enabled():
+        # Flag on but no live worker (stale/absent heartbeat). Falling back keeps
+        # a box where the worker unit isn't running from stranding a queued job.
+        logger.warning(
+            "design_agent_worker_no_heartbeat_inprocess_fallback prototype_id=%s",
+            prototype_id,
+        )
+
+    # In-process path (verbatim pre-Tier-2 behaviour): flag off, no fresh
+    # heartbeat, or a failed enqueue all land here.
+    task = asyncio.create_task(_run_generation_bg(**bg_kwargs))
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
 
     return GenerateResponse(prototype_id=prototype_id, status="generating")
 
 
-# ─── PRD patches: list pending (P3-10, F11) ─────────────────────────────────────
+# ─── PRD patches: list pending ──────────────────────────────────────────────────
 #
-# F11's user-facing half. P3-09 persists agent-proposed PRD edits as `pending` rows
-# in `prd_patches` (NEVER touching `prds.payload_md`); the `PrdPatchBanner` surfaces
+# The user-facing half of the PRD-patch flow. Agent-proposed PRD edits are
+# persisted as `pending` rows in `prd_patches` (NEVER touching `prds.payload_md`);
+# the `PrdPatchBanner` surfaces
 # them and the POST accept/reject routes (at EOF) resolve them. Accept flips a row
 # to `applied`; the RENDERED PRD reflects it on the next load via
 # `apply_patches_to_prd_md` — the banner never mutates the PrdScreen contentEditable.
@@ -777,21 +973,168 @@ def _candidate_to_out(candidate, map_result) -> LocateCandidateOut:
     )
 
 
+# ── Async locate: job store + accept/poll contract ───────────────────────────
+# Under generation load the single API process is CPU-saturated, so the
+# previously synchronous /locate (map build → locate LLM → gate) hung past
+# nginx's read timeout and returned 504 — the frontend then silently collapsed
+# to the PRD. The fix decouples the request from the work: POST /locate kicks the
+# pipeline into a background task (registered for graceful drain) and returns a
+# job id immediately, and the client polls GET /locate/jobs/{id} for the result.
+# No 504 on the request itself; the frontend shows progress + retries.
+#
+# The store is intentionally PROCESS-LOCAL (a module-level dict), not a DB table:
+# locate jobs are seconds-long and the frontend retry re-submits if a deploy
+# restart loses one in flight, so durable persistence is not warranted here.
+# (Flagged for the reviewer: if cross-process durability is ever needed this is
+# the seam to revisit — but it is deliberately out of scope.)
+
+# job_id -> {status, workspace_id, created_at, result?, error?}
+_locate_jobs: dict[str, dict[str, Any]] = {}
+_LOCATE_JOB_TTL_SECONDS = 600  # drop entries older than ~10 min (opportunistic sweep)
+
+
+def _sweep_locate_jobs(now: float | None = None) -> None:
+    """Opportunistic TTL sweep: drop job entries older than the TTL so the
+    process-local dict cannot grow unbounded. Called on each store access; no
+    background timer. Cheap (a single pass over a small, short-lived dict)."""
+    cutoff = (now if now is not None else time.monotonic()) - _LOCATE_JOB_TTL_SECONDS
+    stale = [jid for jid, rec in _locate_jobs.items() if rec.get("created_at", 0) < cutoff]
+    for jid in stale:
+        _locate_jobs.pop(jid, None)
+
+
+class LocateJobAccepted(BaseModel):
+    """Returned by POST /locate the moment the background task is kicked off."""
+    job_id: str
+    status: Literal["running"]
+
+
+class LocateJobStatus(BaseModel):
+    """Returned by GET /locate/jobs/{job_id} on each poll."""
+    status: Literal["running", "done", "error"]
+    result: LocateResponse | None = None
+    error: str | None = None
+
+
+async def _run_locate_bg(
+    *,
+    job_id: str,
+    workspace_id: str,
+    github_repo: str,
+    ref: str | None,
+    prd_text: str,
+    installation_id: int | None,
+) -> None:
+    """Run the locate pipeline off the request path and record the terminal
+    state in the process-local job store.
+
+    Resolves to the same LocateResponse the endpoint used to return synchronously:
+    installation resolve → build_map → locate_screen → decide_gate → telemetry →
+    serialize. Installation/map failures degrade to the unmapped fail-open
+    response (status "done"); a locate-LLM failure records status "error".
+
+    Never raises: a background task whose exception escaped would only log a
+    noisy "Task exception was never retrieved" and the poller would hang on
+    "running" forever. Every path writes a terminal record instead.
+    """
+    from app.design_agent.codebase_map.service import build_map
+    from app.design_agent.codebase_map.locate import emit_locate_telemetry, locate_screen
+    from app.design_agent.codebase_map.gate import decide_gate, threshold_for_repo
+    from app.design_agent.codebase_map.shell import APP_SHELL_NODE_ID
+
+    def _store(status: str, *, result: LocateResponse | None = None, error: str | None = None) -> None:
+        rec = _locate_jobs.get(job_id)
+        if rec is None:  # swept away (TTL) — nothing to update
+            return
+        rec["status"] = status
+        if result is not None:
+            rec["result"] = result
+        if error is not None:
+            rec["error"] = error
+
+    try:
+        if installation_id is None:
+            _store("done", result=_unmapped_locate_response(github_repo))
+            return
+
+        try:
+            map_result = await asyncio.to_thread(build_map, installation_id, github_repo, ref)
+        except Exception:
+            logger.info("design_agent.locate.map_failed repo=%s", github_repo)
+            _store("done", result=_unmapped_locate_response(github_repo))
+            return
+
+        if map_result is None:
+            _store("done", result=_unmapped_locate_response(github_repo))
+            return
+
+        locate_result = await asyncio.to_thread(locate_screen, prd_text, map_result)
+
+        threshold = threshold_for_repo(github_repo)
+        # The gate's spans-routing rescue (attach a cross-cutting would-be-decline
+        # to the app shell) only fires when it knows the map promoted an app-shell
+        # surface. Derive that minimal signal from the already-built map — the
+        # single kind="shell" node and its stable id — instead of handing the gate
+        # the whole map. No shell node => has_app_shell=False, leaving routed-node
+        # decisions byte-for-byte unchanged.
+        shell_node = next((n for n in map_result.nodes if n.kind == "shell"), None)
+        has_app_shell = shell_node is not None
+        app_shell_node_id = shell_node.id if shell_node is not None else APP_SHELL_NODE_ID
+        gate = decide_gate(
+            locate_result,
+            threshold=threshold,
+            has_app_shell=has_app_shell,
+            app_shell_node_id=app_shell_node_id,
+        )
+        emit_locate_telemetry(
+            repo=github_repo,
+            sha=map_result.commit_sha,
+            gate_result=gate,
+            n_candidates=len(gate.ranked),
+        )
+
+        _store("done", result=LocateResponse(
+            decision=gate.decision,
+            chosen=[_candidate_to_out(c, map_result) for c in gate.chosen],
+            ranked=[_candidate_to_out(c, map_result) for c in gate.ranked],
+            top_confidence=gate.top_confidence,
+            threshold=gate.threshold,
+            repo=github_repo,
+            posture=map_result.posture,
+            unmapped=False,
+            commit_sha=map_result.commit_sha,
+        ))
+    except Exception as exc:  # noqa: BLE001 — terminal record, never let the task die unhandled
+        # error_class only in logs (no PII rule); the full message is locate
+        # metadata, not PRD content, so it is safe to surface in the job record.
+        logger.warning(
+            "design_agent.locate.failed repo=%s error_class=%s",
+            github_repo, type(exc).__name__,
+        )
+        _store("error", error=str(exc))
+
+
 @router.post(
     "/locate",
-    response_model=LocateResponse,
+    response_model=LocateJobAccepted,
+    status_code=202,
     dependencies=[Depends(require_same_origin)],
 )
 async def locate(
     body: LocateRequest,
     company: CompanyContext = Depends(require_company),
-) -> LocateResponse:
-    """Resolve the locate pipeline: map → locate LLM → gate → serialize.
+) -> LocateJobAccepted:
+    """Accept a locate request and run the pipeline in the background.
 
-    Feature-flag gated (404 when off). Workspace-isolated via PRD ownership
-    check (require_owned_prd). Blocking I/O and LLM calls run off the event
-    loop via asyncio.to_thread. Map or installation failures degrade to
-    unmapped=True (200); locate-LLM failures return 502.
+    Validates + authorizes inline (feature gate, PRD ownership, installation
+    resolve), creates a process-local job record, kicks the heavy work
+    (build_map → locate LLM → gate) into a background task registered in
+    _inflight_tasks (so graceful drain awaits an in-flight locate), and returns a
+    job id immediately. The client polls GET /locate/jobs/{job_id}.
+
+    Unlike /generate, /locate is NOT rejected while draining: it is the
+    lightweight path we keep serving. An already-running locate task is still
+    awaited by drain because it is registered in _inflight_tasks.
     """
     _require_feature_enabled()
     workspace_id = company.company_id
@@ -801,7 +1144,9 @@ async def locate(
         body.prd_id, body.github_repo, workspace_id,
     )
 
-    # Workspace isolation: PRD must belong to this company's workspace.
+    # Workspace isolation: PRD must belong to this company's workspace. Resolved
+    # inline (not in the background task) so an unauthorized request fails fast
+    # with the right status instead of leaking a pollable job id.
     from app.deps.ownership import require_owned_prd
     require_owned_prd(body.prd_id, workspace_id)
     prd_row = get_prd_rendered(body.prd_id)
@@ -810,61 +1155,54 @@ async def locate(
     installation_id = _resolve_github_installation_id_for_repo(
         workspace_id, body.github_repo
     )
-    if installation_id is None:
-        return _unmapped_locate_response(body.github_repo)
 
-    from app.design_agent.codebase_map.service import build_map
-    from app.design_agent.codebase_map.locate import emit_locate_telemetry, locate_screen
-    from app.design_agent.codebase_map.gate import decide_gate, threshold_for_repo
-    from app.design_agent.codebase_map.shell import APP_SHELL_NODE_ID
+    _sweep_locate_jobs()
+    job_id = uuid.uuid4().hex
+    _locate_jobs[job_id] = {
+        "status": "running",
+        "workspace_id": workspace_id,
+        "created_at": time.monotonic(),
+    }
 
-    try:
-        map_result = await asyncio.to_thread(build_map, installation_id, body.github_repo, body.ref)
-    except Exception:
-        logger.info("design_agent.locate.map_failed repo=%s", body.github_repo)
-        return _unmapped_locate_response(body.github_repo)
-
-    if map_result is None:
-        return _unmapped_locate_response(body.github_repo)
-
-    try:
-        locate_result = await asyncio.to_thread(locate_screen, prd_text, map_result)
-    except Exception:
-        raise HTTPException(status_code=502, detail="locate failed")
-
-    threshold = threshold_for_repo(body.github_repo)
-    # The gate's spans-routing rescue (attach a cross-cutting would-be-decline to
-    # the app shell) only fires when it knows the map promoted an app-shell
-    # surface. Derive that minimal signal from the already-built map — the single
-    # kind="shell" node and its stable id — instead of handing the gate the whole
-    # map. No shell node => has_app_shell=False, leaving routed-node decisions
-    # byte-for-byte unchanged.
-    shell_node = next((n for n in map_result.nodes if n.kind == "shell"), None)
-    has_app_shell = shell_node is not None
-    app_shell_node_id = shell_node.id if shell_node is not None else APP_SHELL_NODE_ID
-    gate = decide_gate(
-        locate_result,
-        threshold=threshold,
-        has_app_shell=has_app_shell,
-        app_shell_node_id=app_shell_node_id,
+    task = asyncio.create_task(
+        _run_locate_bg(
+            job_id=job_id,
+            workspace_id=workspace_id,
+            github_repo=body.github_repo,
+            ref=body.ref,
+            prd_text=prd_text,
+            installation_id=installation_id,
+        )
     )
-    emit_locate_telemetry(
-        repo=body.github_repo,
-        sha=map_result.commit_sha,
-        gate_result=gate,
-        n_candidates=len(gate.ranked),
-    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
 
-    return LocateResponse(
-        decision=gate.decision,
-        chosen=[_candidate_to_out(c, map_result) for c in gate.chosen],
-        ranked=[_candidate_to_out(c, map_result) for c in gate.ranked],
-        top_confidence=gate.top_confidence,
-        threshold=gate.threshold,
-        repo=body.github_repo,
-        posture=map_result.posture,
-        unmapped=False,
-        commit_sha=map_result.commit_sha,
+    return LocateJobAccepted(job_id=job_id, status="running")
+
+
+@router.get("/locate/jobs/{job_id}", response_model=LocateJobStatus)
+async def locate_job(
+    job_id: str,
+    company: CompanyContext = Depends(require_company),
+) -> LocateJobStatus:
+    """Poll the status/result of a locate job.
+
+    Workspace-scoped: a job is only pollable by the workspace that created it. A
+    job_id belonging to another workspace (or one already swept / never minted)
+    returns 404 — not 403 — so cross-tenant existence is not even disclosed.
+    """
+    _require_feature_enabled()
+    workspace_id = company.company_id
+
+    _sweep_locate_jobs()
+    rec = _locate_jobs.get(job_id)
+    if rec is None or rec.get("workspace_id") != workspace_id:
+        raise HTTPException(status_code=404, detail="Locate job not found")
+
+    return LocateJobStatus(
+        status=rec["status"],
+        result=rec.get("result"),
+        error=rec.get("error"),
     )
 
 
@@ -873,12 +1211,12 @@ def get_one(
     prototype_id: int,
     company: CompanyContext = Depends(require_company),
 ) -> dict[str, Any]:
-    """Return the full prototype row for the frontend poller (P1-09).
+    """Return the full prototype row for the frontend poller.
 
     Sync handler (mirrors routes/prd.py's GET) — FastAPI runs it in the
     threadpool, so the blocking supabase read does not stall the event loop.
     Workspace-filtered: a row in a different workspace returns 404, not 403,
-    so cross-tenant existence is not even disclosed (Rule #22).
+    so cross-tenant existence is not even disclosed.
     """
     _require_feature_enabled()
     workspace_id = company.company_id
@@ -935,13 +1273,13 @@ async def _run_generation_bg(
     On any exception, sets prototype.status='failed' with the error message in
     the existing Sprntly format (`f"{type(exc).__name__}: {exc}"`, prd_runner.py
     style). The structured cost-summary log line is emitted by
-    `generate_prototype` itself (P1-04). On a complete run with emitted files,
-    `_stage_complete_run` (P1-08) builds + stages the bundle and marks the row
+    `generate_prototype` itself. On a complete run with emitted files,
+    `_stage_complete_run` builds + stages the bundle and marks the row
     ready; every other terminal state fails the row.
     """
     try:
         prd_md = _load_prd_body(prd_id)
-        # Single "design source" slot. Figma always wins when present (AC3) — the
+        # Single "design source" slot. Figma always wins when present — the
         # website block is not even built in that case. When there is no Figma,
         # Scenario B (extracted/manual website design system) takes the slot;
         # `_website_context_block` returns None when there is neither a website
@@ -968,8 +1306,8 @@ async def _run_generation_bg(
         source_block = website_block or _figma_context_block(figma_file_key)
 
         # Exactly one system block; cache_control at the END of the stable
-        # prefix (AD2 / TICKET_STANDARD §2 LLM-calling AC). The agent loop reads
-        # the LAST block's cache_control to cache the stable system prefix.
+        # prefix. The agent loop reads the LAST block's cache_control to cache
+        # the stable system prefix.
         system_blocks = [{
             "type": "text",
             "text": DESIGN_AGENT_SCAFFOLD_SYSTEM,
@@ -990,13 +1328,13 @@ async def _run_generation_bg(
         # Derive the scenario label once at the call boundary so the runner can
         # surface it in the cost-summary log without re-deriving (single
         # inference site, db/prototypes.py). Codebase-target detection
-        # (Scenario C) lands in P4-05 — for P1, prd_references_codebase is
+        # (Scenario C) lands later — for now, prd_references_codebase is
         # always False, so C never fires here regardless of inputs.
         scenario_set = infer_scenario_from_inputs(
             figma_file_key=figma_file_key,
-            website_url=website_url,        # P5-02: derives 'B' (url, no figma) / '0'
+            website_url=website_url,        # derives 'B' (url, no figma) / '0'
             github_installation_id=github_installation_id,
-            prd_references_codebase=False,  # P4-05 implements the detector
+            prd_references_codebase=False,  # the detector lands later
         )
         scenario_label = ",".join(sorted(scenario_set))  # "A" | "A,C" | "0" ...
 
@@ -1053,82 +1391,92 @@ async def _run_generation_bg(
                 )
                 located = None
 
-        result, virtual_fs = await generate_prototype(
-            prototype_id=prototype_id,
-            workspace_id=workspace_id,
-            system_blocks=system_blocks,
-            user_message=user_message,
-            figma_file_key=figma_file_key,
-            figma_node_id=figma_node_id,  # frame-level targeting; None when absent
-            scenario=scenario_label,
-            github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
-            github_installation_id=github_installation_id,
-            website_url=None if figma_file_key else website_url,  # Scenario B pre-seed source
-            website_sample=website_sample,  # reuse the single extractor run for the pre-seed
-            design_source=design_source,
-            located_screen=located,
-        )
-        # Success path (P1-08): a complete run that emitted files gets built +
-        # staged + marked ready. A complete run with no files, or any non-complete
-        # terminal state, fails the row.
-        if result.status == "complete" and virtual_fs:
-            # Derive the interactivity-containment scope on the recreate path
-            # only (located is not None). The PRD's named interactions, derived
-            # deterministically from the PRD text + the located screen — no LLM.
-            # On the blank-canvas path (located is None) the scope is None, so
-            # _stage_complete_run skips the containment check (byte-identical to
-            # today).
-            interactive_scope = (
-                derive_interactive_scope(prd_md, located)
-                if located is not None
-                else None
-            )
-            await _stage_complete_run(
+        # Tier 1: serialise the HEAVY section (LLM recreate loop + vite
+        # build + screenshot — the part that pins both cores on the 2-vCPU prod
+        # box) under a process-wide semaphore. Default concurrency 1 keeps CPU
+        # headroom for a concurrent /locate, softening the 504-under-load class.
+        # The cheap setup above (PRD load, block assembly, route resolution) runs
+        # OUTSIDE the guard. The prototype row stays 'generating' while a queued
+        # run waits here (start_prototype set it; nothing flips it before this),
+        # so a queued-but-not-yet-running prototype is correctly still generating.
+        async with _get_generation_semaphore():
+            result, virtual_fs = await generate_prototype(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
-                virtual_fs=virtual_fs,
                 system_blocks=system_blocks,
+                user_message=user_message,
                 figma_file_key=figma_file_key,
-                figma_node_id=figma_node_id,
+                figma_node_id=figma_node_id,  # frame-level targeting; None when absent
                 scenario=scenario_label,
-                # Carries the theme-bridge expectations set on the recreate path
-                # (None on every blank-canvas run). Getattr defensively so older
-                # test stubs that return a bare SimpleNamespace keep working.
-                theme_expectations=getattr(result, "theme_expectations", None),
-                interactive_scope=interactive_scope,
-                # Recreate path only (located is not None) — the structural-parity
-                # self-check's ground truth (real shell + located node). None on
-                # every blank-canvas run, so the check is skipped there.
-                parity_located=located,
+                github_repo=github_repo,  # cost-summary identifier only; does NOT alter the scenario label
+                github_installation_id=github_installation_id,
+                website_url=None if figma_file_key else website_url,  # Scenario B pre-seed source
+                website_sample=website_sample,  # reuse the single extractor run for the pre-seed
+                design_source=design_source,
+                located_screen=located,
             )
-        elif result.status == "complete" and not virtual_fs:
-            fail_prototype(
-                prototype_id=prototype_id,
-                workspace_id=workspace_id,
-                error="agent_loop completed but emitted no files",
-            )
-        else:
-            # P2-02: include the structured error_message / error_class from
-            # RunResult so the underlying failure (e.g. an Anthropic
-            # BadRequestError) is preserved for triage rather than dropped on
-            # the floor. The 500-char cap is applied downstream in
-            # fail_prototype, so no caller-side truncation is needed here.
-            error_parts = [
-                f"agent_loop ended with status={result.status} iters={result.iters}"
-            ]
-            error_message = getattr(result, "error_message", None)
-            error_class = getattr(result, "error_class", None)
-            if error_message:
-                error_parts.append(f"error_message={error_message}")
-            if error_class:
-                error_parts.append(f"error_class={error_class}")
-            fail_prototype(
-                prototype_id=prototype_id,
-                workspace_id=workspace_id,
-                error=" | ".join(error_parts),
-            )
+            # Success path: a complete run that emitted files gets built +
+            # staged + marked ready. A complete run with no files, or any non-complete
+            # terminal state, fails the row. Build + screenshot stay inside the guard
+            # because the vite build is the CPU pin we are protecting against.
+            if result.status == "complete" and virtual_fs:
+                # Derive the interactivity-containment scope on the recreate path
+                # only (located is not None). The PRD's named interactions, derived
+                # deterministically from the PRD text + the located screen — no LLM.
+                # On the blank-canvas path (located is None) the scope is None, so
+                # _stage_complete_run skips the containment check (byte-identical to
+                # today).
+                interactive_scope = (
+                    derive_interactive_scope(prd_md, located)
+                    if located is not None
+                    else None
+                )
+                await _stage_complete_run(
+                    prototype_id=prototype_id,
+                    workspace_id=workspace_id,
+                    virtual_fs=virtual_fs,
+                    system_blocks=system_blocks,
+                    figma_file_key=figma_file_key,
+                    figma_node_id=figma_node_id,
+                    scenario=scenario_label,
+                    # Carries the theme-bridge expectations set on the recreate path
+                    # (None on every blank-canvas run). Getattr defensively so older
+                    # test stubs that return a bare SimpleNamespace keep working.
+                    theme_expectations=getattr(result, "theme_expectations", None),
+                    interactive_scope=interactive_scope,
+                    # Recreate path only (located is not None) — the structural-parity
+                    # self-check's ground truth (real shell + located node). None on
+                    # every blank-canvas run, so the check is skipped there.
+                    parity_located=located,
+                )
+            elif result.status == "complete" and not virtual_fs:
+                fail_prototype(
+                    prototype_id=prototype_id,
+                    workspace_id=workspace_id,
+                    error="agent_loop completed but emitted no files",
+                )
+            else:
+                # Include the structured error_message / error_class from
+                # RunResult so the underlying failure (e.g. an Anthropic
+                # BadRequestError) is preserved for triage rather than dropped on
+                # the floor. The 500-char cap is applied downstream in
+                # fail_prototype, so no caller-side truncation is needed here.
+                error_parts = [
+                    f"agent_loop ended with status={result.status} iters={result.iters}"
+                ]
+                error_message = getattr(result, "error_message", None)
+                error_class = getattr(result, "error_class", None)
+                if error_message:
+                    error_parts.append(f"error_message={error_message}")
+                if error_class:
+                    error_parts.append(f"error_class={error_class}")
+                fail_prototype(
+                    prototype_id=prototype_id,
+                    workspace_id=workspace_id,
+                    error=" | ".join(error_parts),
+                )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
-        # error_class only in the structured log (Rule #24 — no PII / no PRD /
+        # error_class only in the structured log (no PII / no PRD /
         # no instructions / no figma contents); the full message is stored in
         # the row's `error` column (truncated to 500 chars by fail_prototype).
         logger.warning(
@@ -1234,12 +1582,12 @@ async def _stage_complete_run(
     interactive_scope: list[str] | None = None,
     parity_located: "LocatedScreen | None" = None,
 ) -> None:
-    """Post-run hook (P1-08): vite_build → checkpoint → stage_bundle → complete.
+    """Post-run hook: vite_build → checkpoint → stage_bundle → complete.
 
     Four steps, each gating the next:
 
-    1. **Vite build** runs the P0-02 anchor-id plugin over the agent's raw TSX
-       (per AD4 — load-bearing for F8/F13/F5). A build failure (bad JSX, missing
+    1. **Vite build** runs the anchor-id plugin over the agent's raw TSX
+       (load-bearing for comments, manual edits, and share). A build failure (bad JSX, missing
        runtime, timeout) marks the row failed and creates NO checkpoint.
     2. **Checkpoint** row is inserted first so its id seeds the bundle prefix.
     3. **Stage** the BUILT dist/ (never the raw virtual_fs) to Supabase Storage
@@ -1254,7 +1602,7 @@ async def _stage_complete_run(
     log lines) rather than propagated, so the error strings match the ticket ACs
     exactly; a DB-helper failure propagates to the caller's outer except.
     """
-    # Step 1 — Vite build (anchor-id plugin runs here). P6-07: the bounded
+    # Step 1 — Vite build (anchor-id plugin runs here). The bounded
     # unresolved-relative-import repair wrapper stubs/strips an orphan `./screens/*`
     # import (the degrade-converged 2/2-repro) and rebuilds instead of shipping
     # status=failed; on exhaustion it raises UnresolvedImportRepairExhausted (a
@@ -1420,10 +1768,10 @@ async def _stage_complete_run(
             error=f"{type(exc).__name__}: {exc}",
         )
         return
-    # P6-07: rebind to the repaired source BEFORE the `_source/` staging step so
+    # Rebind to the repaired source BEFORE the `_source/` staging step so
     # the staged source matches the built dist. On a clean build this is the same
     # map. When a repair was applied (the map changed), emit build_repair_applied
-    # with an action count only (Rule #24 — no source / no import paths): stubs add
+    # with an action count only (no source / no import paths): stubs add
     # keys, strips change file bodies.
     if repaired_virtual_fs != virtual_fs:
         repair_actions = len(set(repaired_virtual_fs) - set(virtual_fs)) + sum(
@@ -1441,12 +1789,12 @@ async def _stage_complete_run(
     )
 
     # Step 2 — checkpoint row (id seeds the bundle prefix). prd/figma hashes +
-    # comment_state land in P3; for P1 the checkpoint records the bundle only.
+    # comment_state land later; for now the checkpoint records the bundle only.
     checkpoint_id = create_checkpoint(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
         bundle_url=None,            # populated on the prototype row after staging
-        prd_revision_hash=None,     # P3-12 wires PRD-hash + figma-hash
+        prd_revision_hash=None,     # PRD-hash + figma-hash wired later
         figma_frame_hash=None,
         prompt_history=[],
         comment_state=[],
@@ -1468,7 +1816,7 @@ async def _stage_complete_run(
         return
 
     # Step 3.5 — Stage the RAW virtual_fs alongside dist/ under _source/ so the
-    # export serialiser (P2-08) can read raw TSX, not minified bundles.
+    # export serialiser can read raw TSX, not minified bundles.
     # Best-effort: a source-stage failure logs and proceeds — the prototype is
     # still ready (the load-bearing artefact is the dist/ bundle). The serialiser
     # gracefully falls back to its "no source staged" message if this step failed.
@@ -1485,7 +1833,7 @@ async def _stage_complete_run(
             prototype_id, checkpoint_id, type(exc).__name__,
         )
 
-    # Step 3.6 — AD12 orphan/re-attach. Orphan every OPEN comment whose anchor
+    # Step 3.6 — orphan/re-attach. Orphan every OPEN comment whose anchor
     # vanished from THIS build's bundle. Best-effort: the bundle is already
     # staged, so a reconcile failure must NOT fail the build — it logs and the
     # prototype still completes ready (orphaning is housekeeping, not a gate).
@@ -1553,12 +1901,12 @@ async def _stage_complete_run(
 def _load_prd_body(prd_id: int) -> str:
     """Fetch the PRD's `payload_md` for the agent's user message.
 
-    Uses `get_prd_rendered` (db/prds.py, P3-17) so the body the agent sees in its
+    Uses `get_prd_rendered` (db/prds.py) so the body the agent sees in its
     iterate user-message reflects accepted (status='applied') prd_patches folded
-    in at read time (F11 render-on-read). Like the underlying `get_prd`, this is
+    in at read time (render-on-read). Like the underlying `get_prd`, this is
     NOT workspace-scoped — PRDs predate the workspace_id primitive, and
-    `routes/prd.py` reads them the same way under its own auth dependency. Per AC
-    #10 this is the documented fallback: the route's `require_app_session` gate is
+    `routes/prd.py` reads them the same way under its own auth dependency. This
+    is the documented fallback: the route's `require_app_session` gate is
     the access boundary; a workspace filter is added if/when `get_prd` grows a
     `workspace_id` param. Raises 404 (surfaced into the row's error via the
     caller's except) when the PRD does not exist.
@@ -1596,9 +1944,9 @@ def _is_usable_color(value: str | None) -> bool:
     zero-alpha ``rgba(...)`` / ``hsla(...)`` (alpha component == 0). Everything
     else (hex, ``rgb()``, named colors, non-zero-alpha ``rgba()``) is usable.
 
-    Why this is load-bearing (P5-01 verifier finding, 2026-06-02): the extractor's
+    Why this is load-bearing (verifier finding, 2026-06-02): the extractor's
     own ``_below_confidence`` guard only checks for an EMPTY color string, so a
-    NON-empty transparent value like ``rgba(0,0,0,0)`` — which P5-01's live runs
+    NON-empty transparent value like ``rgba(0,0,0,0)`` — which live runs
     returned as the "primary color" on Stripe/Linear (modern CSS-layered sites) —
     passes that guard and would otherwise flow straight into the scaffold prose.
     This is the second gate that catches it. Do NOT call this on font/logo fields.
@@ -1744,18 +2092,18 @@ async def _website_context_block(
     source at all (the caller then uses the Figma block / the generic
     "(no source)" string). Precedence: extracted > manual > url-only.
 
-      1. ``website_url`` set → ``extract_website_design_system`` (P5-01). On a
+      1. ``website_url`` set → ``extract_website_design_system``. On a
          non-``None`` dict, render it (with the transparent-color gate).
       2. extractor ``None`` + ``manual_design`` present → manual prose.
       3. extractor ``None`` + no manual + a URL was given → url-only neutral block.
       4. no ``website_url`` but ``manual_design`` present → manual prose
          (Scenario-0-with-manual-hints; the run is labelled '0' because
          `infer_scenario_from_inputs` keys 'B' off `website_url`, but the hints
-         MUST still reach the scaffold — decision 2026-06-02, AC10).
+         MUST still reach the scaffold — decision 2026-06-02).
       5. neither → ``None``.
 
-    The P5-01 import is lazy + ImportError-guarded so the manual-floor half ships
-    independently of the extractor (the noon-Day-11 cut, AC5).
+    The extractor import is lazy + ImportError-guarded so the manual-floor half
+    ships independently of the extractor.
     """
     if website_url:
         host = urlsplit(website_url).hostname or website_url
@@ -1772,7 +2120,7 @@ async def _website_context_block(
                 )
                 ds = await extract_website_design_system(website_url)
             except ImportError:
-                ds = None  # P5-01 not merged → fall through to manual / url-only.
+                ds = None  # extractor not merged → fall through to manual / url-only.
         if ds is not None:
             return _website_design_system_block(ds, host=host, manual_design=manual_design)
         if manual_design is not None:
@@ -1789,15 +2137,15 @@ async def _website_context_block(
     return None
 
 
-# ─── Public share viewer (P2-05) ──────────────────────────────────────────
+# ─── Public share viewer ───────────────────────────────────────────────────
 #
 # These two routes back the unauthenticated `/p/<token>` viewer (web/app/p/[token]).
-# They are NO-AUTH BY DESIGN: the share_token IS the access primitive (F6), so
+# They are NO-AUTH BY DESIGN: the share_token IS the access primitive, so
 # they carry NO `require_app_session` dependency and NO workspace filter —
 # `find_prototype_by_share_token` is the one legitimate cross-workspace read
 # (see db/prototypes.py). Both are feature-flag-gated via the shared
 # `_require_feature_enabled()` so a brute-force scan returns 404, matching the
-# auth'd routes' invisibility posture (Rule #15 / F6: 404-not-401).
+# auth'd routes' invisibility posture (404-not-401).
 #
 # The response is MINIMUM-DISCLOSURE: exactly four fields. No prototype_id,
 # prd_id, workspace_id, instructions, figma_file_key, created_at, or error ever
@@ -1807,7 +2155,7 @@ async def _website_context_block(
 
 
 def _share_token_hash(token: str) -> str:
-    """sha256 prefix of a share token, for log correlation only (Rule #24).
+    """sha256 prefix of a share token, for log correlation only.
 
     The full token must NEVER reach log aggregation: it is the access primitive,
     so logging it verbatim is equivalent to logging the share URL. An 8-char
@@ -1858,7 +2206,7 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
     """
     _require_feature_enabled()
     th = _share_token_hash(token)
-    # P5-07: per-token view rate limit (60/min/token). Mounted AFTER the feature
+    # Per-token view rate limit (60/min/token). Mounted AFTER the feature
     # gate (feature-off still 404s first) and BEFORE token resolution: the 429 fires
     # on scan velocity for a VALID-FORMAT token regardless of whether it resolves, so
     # it reveals only "you are scanning fast," never whether a token exists. A
@@ -1902,14 +2250,14 @@ def verify_passcode(
     token: str, body: PasscodeAttempt, request: Request, response: Response
 ) -> PublicPrototypeView:
     """Verify a passcode against a passcode-mode share; on success return the
-    bundle_url. Rate-limited 5/min/token (P2-06 primitive). The rate-limit check
+    bundle_url. Rate-limited 5/min/token. The rate-limit check
     runs FIRST so counter exhaustion is observable as 429 BEFORE any hash
     comparison; under the limit, a wrong passcode returns 401 `invalid_passcode`.
     404 (not 401) for a bad/non-passcode/not-ready token preserves invisibility.
     """
     _require_feature_enabled()
     th = _share_token_hash(token)
-    # Rate-limit FIRST (AC6): a token over the limit gets 429 before we touch the
+    # Rate-limit FIRST: a token over the limit gets 429 before we touch the
     # row or the hash, so a brute-forcer cannot distinguish rate-limited from
     # wrong-passcode by timing the hash compare.
     client_ip = request.client.host if request.client else "0.0.0.0"
@@ -1947,11 +2295,11 @@ def verify_passcode(
     )
 
 
-# ─── Lifecycle: Mark Complete / Resume Iteration / Set Share (P2-07) ──────────
+# ─── Lifecycle: Mark Complete / Resume Iteration / Set Share ──────────────────
 #
-# F14 (complete) locks a prototype; F15 (resume) unlocks it AND flags any open
-# downstream handoff (the most-recent export row) as stale per spec §8; F6
-# (share) sets share_mode/token/passcode. All three reuse `require_app_session`
+# Complete locks a prototype; resume unlocks it AND flags any open
+# downstream handoff (the most-recent export row) as stale per spec §8;
+# share sets share_mode/token/passcode. All three reuse `require_app_session`
 # (app-audience auth) and `_require_feature_enabled` so they are invisible (404)
 # while the flag is off and 401 without an app session — identical gates to
 # /generate above. The handlers are sync (mirrors get_one): FastAPI runs them in
@@ -1973,21 +2321,21 @@ class CompleteResponse(BaseModel):
 @router.post(
     "/{prototype_id}/complete",
     response_model=CompleteResponse,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 async def post_complete(
     prototype_id: int,
     company: CompanyContext = Depends(require_company),
 ) -> CompleteResponse:
-    """F14: lock the prototype. Sets is_complete=true and promotes
+    """Lock the prototype. Sets is_complete=true and promotes
     current_checkpoint_id → complete_checkpoint_id. Idempotent: a second
     /complete on an already-complete prototype is a no-op (200; no row change).
     Returns 404 if the prototype is not in the caller's workspace.
     Returns 409 if `status != 'ready'` (cannot mark a generating/failed/invalidated
     prototype complete).
 
-    `async def` because the export-write hook (`record_export_at_complete`,
-    filled in by P2-09) is now async — it awaits the markdown serialiser. The
+    `async def` because the export-write hook (`record_export_at_complete`)
+    is async — it awaits the markdown serialiser. The
     sync DB helpers (`get_prototype`, `mark_complete`) are still called WITHOUT
     `await` per the CALL-STYLE NOTE; only the export hook is awaited.
     """
@@ -1999,7 +2347,7 @@ async def post_complete(
     if row["status"] != "ready":
         raise HTTPException(status_code=409, detail=f"Cannot complete: status={row['status']}")
     updated = mark_complete(prototype_id=prototype_id, workspace_id=workspace_id)
-    # P2-09 fills in the export-write hook (async): it generates the markdown
+    # The export-write hook (async) generates the markdown
     # brief and persists it to prototype_exports. Awaited inline so the export
     # row is committed before the /complete response returns (no fire-and-forget
     # coroutine — an un-awaited call would silently never insert the row).
@@ -2020,13 +2368,13 @@ class ResumeResponse(BaseModel):
 @router.post(
     "/{prototype_id}/resume",
     response_model=ResumeResponse,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 def post_resume(
     prototype_id: int,
     company: CompanyContext = Depends(require_company),
 ) -> ResumeResponse:
-    """F15: unlock the prototype + flag any open handoff record as stale.
+    """Unlock the prototype + flag any open handoff record as stale.
 
     Sets is_complete=false. Calls flag_stale_handoff(prototype_id) which marks the
     most-recent `prototype_exports` row stale (that row IS the handoff record per
@@ -2062,14 +2410,14 @@ class ShareResponse(BaseModel):
 @router.post(
     "/{prototype_id}/share",
     response_model=ShareResponse,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 def post_share(
     prototype_id: int,
     body: ShareRequest,
     company: CompanyContext = Depends(require_company),
 ) -> ShareResponse:
-    """F6: set / update share configuration. Wraps set_share_config (P2-06).
+    """Set / update share configuration. Wraps set_share_config.
 
     On passcode mode without a passcode, returns 400. On unknown mode → 422
     (caught by pydantic). On row-not-found in this workspace → 404.
@@ -2097,9 +2445,9 @@ def post_share(
     )
 
 
-# ─── Export read (P2-09) ──────────────────────────────────────────────────────
+# ─── Export read ────────────────────────────────────────────────────────────
 #
-# F16/F17: return the markdown brief of the locked checkpoint. The /complete
+# Return the markdown brief of the locked checkpoint. The /complete
 # handler snapshots the markdown into prototype_exports (record_export_at_complete);
 # this route reads that snapshot, falling back to a fresh serialiser render if the
 # snapshot row is missing (defensive against a partial-failure during /complete).
@@ -2112,9 +2460,9 @@ async def get_export(
     prototype_id: int,
     company: CompanyContext = Depends(require_company),
 ) -> Response:
-    """F16/F17: return the markdown export of the locked checkpoint.
+    """Return the markdown export of the locked checkpoint.
 
-    Returns 409 when the prototype is not complete (is_complete=false) per F17.
+    Returns 409 when the prototype is not complete (is_complete=false).
     Returns 404 when not in the caller's workspace.
     Returns 200 with Content-Type: text/markdown; charset=utf-8 and
     Content-Disposition: attachment; filename="<slug>-design-brief.md".
@@ -2127,7 +2475,7 @@ async def get_export(
     if not proto:
         raise HTTPException(status_code=404, detail="Prototype not found")
     if not proto.get("is_complete"):
-        # F17: WIP prototypes viewable but not exportable.
+        # WIP prototypes viewable but not exportable.
         raise HTTPException(status_code=409, detail="Mark prototype complete first")
     export_row = find_prototype_export(
         prototype_id=prototype_id, workspace_id=workspace_id,
@@ -2159,12 +2507,12 @@ def _export_filename(proto: dict[str, Any]) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "-", base) + "-design-brief.md"
 
 
-# ─── Anchored comments (P3-02) ─────────────────────────────────────────────
+# ─── Anchored comments ──────────────────────────────────────────────────────
 #
-# F8: anyone with the share URL can comment; spec §4 Stage 2 splits write access
+# Anyone with the share URL can comment; spec §4 Stage 2 splits write access
 # by surface, not by capability gate — internal users act through the authed app
 # routes, external viewers through the public `/p/<token>` variant. This block
-# mounts the HTTP surface over P3-01's `db.prototype_comments` helpers:
+# mounts the HTTP surface over the `db.prototype_comments` helpers:
 #
 #   POST  /{prototype_id}/comments              (authed — create)
 #   GET   /{prototype_id}/comments              (authed — list, all statuses)
@@ -2174,12 +2522,12 @@ def _export_filename(proto: dict[str, Any]) -> str:
 #
 # The internal routes reuse the authed-route gates verbatim (feature flag +
 # require_app_session + workspace filter via get_prototype). The public routes
-# mirror get_by_token's posture exactly: the token IS the access primitive (F6),
+# mirror get_by_token's posture exactly: the token IS the access primitive,
 # so NO auth dependency and NO session workspace claim — workspace_id is taken
 # from the RESOLVED prototype row. Per spec §4 Stage 2 ("only internal users with
 # credentials can act"), external viewers create + read only; there is NO public
-# resolve route. Public-write rate limiting is OUT of scope here — it lands in
-# P5-07 (per TICKET_LIST shared-resources).
+# resolve route. Public-write rate limiting is OUT of scope here — it lands
+# later.
 from app.db.prototype_comments import insert_comment, list_comments, resolve_comment, delete_comment
 
 
@@ -2235,7 +2583,7 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
 @router.post(
     "/{prototype_id}/comments",
     response_model=CommentOut,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 def post_comment(
     prototype_id: int,
@@ -2244,7 +2592,7 @@ def post_comment(
 ) -> CommentOut:
     """Create a comment as an internal user. Workspace-filtered: 404 if the
     prototype is not in the caller's workspace (cross-tenant existence is not
-    disclosed — Rule #22). Attributed to the internal author label."""
+    disclosed). Attributed to the internal author label."""
     _require_feature_enabled()
     workspace_id = company.company_id
     proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
@@ -2285,7 +2633,7 @@ def get_comments(
 @router.patch(
     "/{prototype_id}/comments/{cid}/resolve",
     response_model=CommentOut,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 def patch_resolve_comment(
     prototype_id: int,
@@ -2318,11 +2666,11 @@ def delete_comment_route(
 
 # ─── Public (token-resolved, NO auth) comment routes ──────────────────────
 #
-# F8: "anyone with the URL can comment." The token IS the access primitive.
+# "Anyone with the URL can comment." The token IS the access primitive.
 # Workspace is taken from the RESOLVED prototype row (not a session claim).
 # External viewers may CREATE + READ comments but NOT resolve them. The
 # resolution posture matches get_by_token exactly (404 for missing / private /
-# not-ready) so brute-force scanning discloses nothing (Rule #15 / F6).
+# not-ready) so brute-force scanning discloses nothing.
 
 
 @router.post("/by-token/{token}/comments", response_model=CommentOut)
@@ -2334,12 +2682,12 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     session claim.
 
     Anonymous public comment WRITES are ENABLED: the share token IS the access
-    primitive (F8 — anyone with the URL can comment). This is an unauthenticated
+    primitive (anyone with the URL can comment). This is an unauthenticated
     write endpoint by design; the abuse controls are unchanged and load-bearing:
       - the feature-flag gate (`_require_feature_enabled`) — invisible when off;
       - the resolution 404-posture (missing / private / not-ready all 404,
         indistinguishable from each other, so brute-force scanning discloses
-        nothing — Rule #15 / F6);
+        nothing);
       - the per-IP `PUBLIC_COMMENT_LIMITER` (10/hour/IP), mounted after the 404
         resolution and before the write;
       - log hygiene: the token is hashed (never raw) and neither the comment body
@@ -2348,7 +2696,7 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
         raise HTTPException(status_code=404, detail="Not found")
-    # P5-07: per-IP public-comment rate limit (10/hour/IP). Mounted AFTER the 404
+    # Per-IP public-comment rate limit (10/hour/IP). Mounted AFTER the 404
     # resolution (a private/missing/not-ready prototype 404s first, so the limiter
     # never discloses a hidden prototype's existence) and BEFORE insert_comment (the
     # spend-meaningful write). Keyed by client IP — the same machine can spam across
@@ -2379,7 +2727,7 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
         pin_y_pct=body.pin_y_pct,
         resolved_anchor_id=body.resolved_anchor_id,
     )
-    # Token hashed, never raw (Rule #24 — the token is the access primitive); no
+    # Token hashed, never raw (the token is the access primitive); no
     # comment body in the log line (PII). insert_comment emits its own
     # `comment_created` line; this adds the public-surface correlation marker.
     logger.info(
@@ -2464,30 +2812,30 @@ def clarify_comment_route(
     return ClarifyCommentResponse(question=question)
 
 
-# ─── Iterate: re-prompt + Apply-driven edits (P3-05) ───────────────────────────
+# ─── Iterate: re-prompt + Apply-driven edits ───────────────────────────────────
 #
-# AD8 mandates a SEPARATE iterate prompt distinct from scaffold; this block lands
-# the iterate spine the rest of P3 hangs on. F9 (re-prompt) and F10 (Apply-on-
-# comment pre-fills the prompt) both route through `POST /{id}/iterate`:
+# A SEPARATE iterate prompt distinct from scaffold; this block lands the iterate
+# spine. Re-prompt and Apply-on-comment (pre-fills the prompt) both route through
+# `POST /{id}/iterate`:
 #
 #   POST /v1/design-agent/{prototype_id}/iterate  {prompt, applied_comment_id?, mode?}
 #
-# Cache discipline (AD2): the iterate system blocks + the current bundle source +
+# Cache discipline: the iterate system blocks + the current bundle source +
 # the open comment threads form the STABLE cacheable prefix; the user's iterate
 # prompt is the per-call volatile suffix (render_iterate_user owns the breakpoint).
 #
-# Staging (B2 — AC6a): a complete iterate run stages via `_stage_iterate_run`, NOT
+# Staging: a complete iterate run stages via `_stage_iterate_run`, NOT
 # `_stage_complete_run`. An iterate is a checkpoint ADVANCE, not a first
 # completion, so it MUST NOT call `complete_prototype` (which re-stamps
 # completed_at + emits prototype_completed). Advancing `current_checkpoint_id` +
-# threading the new bundle_url onto the prototype row is P3-12's
-# `advance_current_checkpoint` helper (F7: stable URL, no share_token rotation),
+# threading the new bundle_url onto the prototype row is the
+# `advance_current_checkpoint` helper (stable URL, no share_token rotation),
 # called at the tail of `_stage_iterate_run`.
 #
-# Mode (P3-05 → P3-07): EXECUTE is the default; `mode='plan'` is now FULLY wired
-# (P3-07) — the plan/execute tool split + the distinct plan system prompt + the
+# Mode: EXECUTE is the default; `mode='plan'` is now FULLY wired — the
+# plan/execute tool split + the distinct plan system prompt + the
 # Plan→Execute transition (`POST /{id}/iterate/confirm-plan`) all land here.
-# Concurrency / queueing is P3-06 (the queue serialises plan + execute runs alike).
+# Concurrency / queueing serialises plan + execute runs alike.
 from app.design_agent.prompts import (
     DESIGN_AGENT_ITERATE_SYSTEM,
     DESIGN_AGENT_PLAN_SYSTEM,
@@ -2510,34 +2858,34 @@ from app.db.prototype_pending_iterations import (
 
 class IterateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=8000)
-    applied_comment_id: int | None = None        # F10: set when Apply pre-filled the prompt
-    mode: Literal["plan", "execute"] = "execute"  # P3-07 implements 'plan'; P3-05 runs 'execute'
+    applied_comment_id: int | None = None        # set when Apply pre-filled the prompt
+    mode: Literal["plan", "execute"] = "execute"  # 'plan' and 'execute' modes
 
 
 class IterateResponse(BaseModel):
     prototype_id: int
     status: str                                   # 'generating' (kicked off in the bg)
-    queue_position: int                           # P3-06: derived slot in the iterate queue
+    queue_position: int                           # derived slot in the iterate queue
 
 
 @router.post(
     "/{prototype_id}/iterate",
     response_model=IterateResponse,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 async def post_iterate(
     prototype_id: int,
     body: IterateRequest,
     company: CompanyContext = Depends(require_company),
 ) -> IterateResponse:
-    """F9/F10: kick off an iterate of an existing prototype; return in <200ms.
+    """Kick off an iterate of an existing prototype; return in <200ms.
 
     Gates (identical posture to /generate): feature-flag (404 when off) +
     require_app_session (401) + workspace filter (404 cross-tenant). Two iterate-
     specific 409s:
-      - `is_complete` (locked, F14): cannot iterate until Resume Iteration (P2-07).
+      - `is_complete` (locked): cannot iterate until Resume Iteration.
       - `status != 'ready'`: cannot iterate a generating/failed/invalidated row.
-    On success enqueues the iterate (AD11 5-slot queue), kicks the serial drain in
+    On success enqueues the iterate (5-slot queue), kicks the serial drain in
     the background, and returns status='generating' + the derived queue_position.
     A full queue returns 429. No Anthropic call in the request path.
     """
@@ -2551,7 +2899,7 @@ async def post_iterate(
     if proto.get("status") != "ready":
         raise HTTPException(status_code=409, detail="Prototype not ready to iterate")
 
-    # P5-04 (AD15 spend control): per-prototype iterate rate limit — 6 calls/hr.
+    # Spend control: per-prototype iterate rate limit — 6 calls/hr.
     # Mounted AFTER the feature/session/workspace/lock/ready gates (so a feature-off
     # or cross-tenant request gets its 404/401 first and the limiter never leaks
     # existence) and BEFORE enqueue_iteration (enqueue is the spend-meaningful action;
@@ -2571,7 +2919,7 @@ async def post_iterate(
         )
     ITERATE_LIMITER.register(key)
 
-    # P3-06 (AD11): enqueue instead of firing a raw bg task. The queue caps at 5
+    # Enqueue instead of firing a raw bg task. The queue caps at 5
     # active (pending + running) iterations per prototype; a 6th enqueue raises
     # QueueFullError → 429. The drain kick is idempotent (it no-ops if a row is
     # already running), so firing it on every enqueue never spawns a second
@@ -2607,14 +2955,14 @@ class EstimateRequest(BaseModel):
 
 @router.post(
     "/{prototype_id}/iterate/estimate",
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed POST)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed POST)
 )
 async def post_iterate_estimate(
     prototype_id: int,
     body: EstimateRequest,
     company: CompanyContext = Depends(require_company),
 ) -> dict:
-    """Pre-flight cost estimate (AD14): return the token + dollar estimate + soft-cap
+    """Pre-flight cost estimate: return the token + dollar estimate + soft-cap
     warning the CostEstimateModal renders BEFORE an iterate run. Deterministic, no
     Anthropic call in the request path — cancelling the modal costs nothing.
 
@@ -2625,7 +2973,7 @@ async def post_iterate_estimate(
     `GET /{prototype_id}` catch-all cannot shadow it (different method AND more segments),
     matching the existing `POST /{id}/iterate` + `/iterate/confirm-plan` siblings.
 
-    Observability (Rule #24): logs identifiers + token counts only — never the prompt or
+    Observability: logs identifiers + token counts only — never the prompt or
     bundle content.
     """
     _require_feature_enabled()
@@ -2653,7 +3001,7 @@ async def post_iterate_estimate(
 
 
 class ConfirmPlanRequest(BaseModel):
-    """Plan->Execute transition body (P3-07, AD10). The team reviewed the plan a
+    """Plan->Execute transition body. The team reviewed the plan a
     `mode='plan'` run emitted and approved (or refined) it; `plan` carries the
     approved text back, `prompt` is the iterate request the plan was for."""
     prompt: str = Field(..., min_length=1, max_length=8000)
@@ -2664,14 +3012,14 @@ class ConfirmPlanRequest(BaseModel):
 @router.post(
     "/{prototype_id}/iterate/confirm-plan",
     response_model=IterateResponse,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 async def post_confirm_plan(
     prototype_id: int,
     body: ConfirmPlanRequest,
     company: CompanyContext = Depends(require_company),
 ) -> IterateResponse:
-    """Plan->Execute transition (P3-07, AD10): run the approved plan in EXECUTE mode.
+    """Plan->Execute transition: run the approved plan in EXECUTE mode.
 
     Same gates/posture as POST /iterate (feature-flag 404, require_app_session 401,
     workspace 404, locked/not-ready 409, full-queue 429). Enqueues an EXECUTE
@@ -2728,16 +3076,16 @@ async def _run_iterate_bg(
 
     Source load (S2): `get_prototype` FIRST to obtain `current_checkpoint_id`, then
     `read_source_files_for_checkpoint(prototype_id, current_checkpoint_id)`
-    (P2-04 — positional args, async, storage-path read, NOT workspace-filtered) to
+    (positional args, async, storage-path read, NOT workspace-filtered) to
     pre-fill the agent's virtual_fs. On any exception the row is marked failed in
     the existing Sprntly error format; the prior bundle_url is preserved.
 
-    PLAN vs EXECUTE (P3-07, AD10), keyed on `body.mode`:
+    PLAN vs EXECUTE, keyed on `body.mode`:
       - 'plan'    : uses DESIGN_AGENT_PLAN_SYSTEM + the plan tool registry (no
                     write/line_replace). On completion the emitted textual plan is
                     persisted to the queue row (`set_iteration_plan`, needs
                     `iteration_id`) and the run stages NOTHING — a plan builds no
-                    bundle and advances no checkpoint (AC6). A plan run NEVER fails
+                    bundle and advances no checkpoint. A plan run NEVER fails
                     the prototype row: the bundle is untouched.
       - 'execute' : the existing path. `approved_plan` (set by the confirm-plan
                     transition) is prepended to the system blocks as an addendum.
@@ -2753,7 +3101,7 @@ async def _run_iterate_bg(
             if checkpoint_id else {}
         )
 
-        # Open comment threads — the stable cacheable signal (P3-01 list_comments,
+        # Open comment threads — the stable cacheable signal (list_comments,
         # filtered to open). Project to the {anchor_id, body, author} shape the
         # prompt renderer expects.
         all_comments = list_comments(prototype_id=prototype_id, workspace_id=workspace_id)
@@ -2762,7 +3110,7 @@ async def _run_iterate_bg(
             for c in all_comments if c.get("status") == "open"
         ]
 
-        # F10 applied-comment: workspace-filtered (it came from the same
+        # Applied-comment: workspace-filtered (it came from the same
         # list_comments read, which filters by workspace) lookup by id, projected
         # to {anchor_id, body}. None when no applied_comment_id or no match.
         applied_comment = None
@@ -2781,10 +3129,10 @@ async def _run_iterate_bg(
             iterate_prompt=body.prompt,
             applied_comment=applied_comment,
         )
-        # System block(s) cached at the END of the stable prefix (AD2), mirroring
+        # System block(s) cached at the END of the stable prefix, mirroring
         # _run_generation_bg. The bundle+comments user prefix is cached too (its
         # last block carries cache_control); the volatile prompt block does not.
-        # PLAN mode swaps in the distinct plan/discuss system prompt (AD10); the
+        # PLAN mode swaps in the distinct plan/discuss system prompt; the
         # explore-only tool registry is selected downstream by mode in agent_loop.
         system_text = (
             DESIGN_AGENT_PLAN_SYSTEM if body.mode == "plan" else DESIGN_AGENT_ITERATE_SYSTEM
@@ -2801,7 +3149,7 @@ async def _run_iterate_bg(
             figma_file_key=figma_file_key,
             website_url=proto.get("website_url"),
             github_installation_id=proto.get("github_installation_id"),
-            prd_references_codebase=False,  # P4-05 implements the codebase detector
+            prd_references_codebase=False,  # the codebase detector lands later
         )
         scenario_label = ",".join(sorted(scenario_set))
 
@@ -2822,7 +3170,7 @@ async def _run_iterate_bg(
             current_source=current_source,
             figma_file_key=figma_file_key,
             scenario=scenario_label,
-            # Tool-partition mode (AD17 / P3-07): canonical 'plan' or 'execute',
+            # Tool-partition mode: canonical 'plan' or 'execute',
             # never 'iterate'. agent_loop -> tools_for_mode selects the registry.
             mode=body.mode,
             # Plan->Execute transition: the approved plan (if any) is prepended to
@@ -2830,8 +3178,8 @@ async def _run_iterate_bg(
             approved_plan=approved_plan,
         )
 
-        # PLAN mode (AD10): persist the emitted plan, stage NOTHING (no checkpoint,
-        # no bundle — a plan builds nothing, AC6). A plan run never fails the
+        # PLAN mode: persist the emitted plan, stage NOTHING (no checkpoint,
+        # no bundle — a plan builds nothing). A plan run never fails the
         # prototype row; the bundle is untouched regardless of run status.
         if body.mode == "plan":
             if result.status == "complete":
@@ -2867,14 +3215,14 @@ async def _run_iterate_bg(
                 error="iterate agent_loop completed but emitted no files",
             )
         elif result.status == "awaiting_clarification":
-            # F12 (P4-08): a clarifying_question terminal-PAUSE is NOT a failure.
-            # The runner already persisted the question on `pending_question`
-            # (P3-08); leave the row in a clean PAUSED state (status='ready',
-            # pending_question set, no completed_at, no error) so the P3-16
+            # A clarifying_question terminal-PAUSE is NOT a failure.
+            # The runner already persisted the question on `pending_question`;
+            # leave the row in a clean PAUSED state (status='ready',
+            # pending_question set, no completed_at, no error) so the
             # answer-resume iterate is NOT 409-blocked by `post_iterate`'s
             # `status != 'ready'` guard. Do NOT fail_prototype — that flip is
-            # exactly the bug this ticket fixes. (Iterate path only; the
-            # generate-time pause is scoped out — see P4-08 Open question.)
+            # exactly the bug this fixes. (Iterate path only; the
+            # generate-time pause is scoped out.)
             mark_awaiting_clarification(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
@@ -2884,7 +3232,7 @@ async def _run_iterate_bg(
                 prototype_id,
             )
         else:
-            # Mirror _run_generation_bg's structured failure (P2-02): surface the
+            # Mirror _run_generation_bg's structured failure: surface the
             # RunResult error_message / error_class so an Anthropic failure is
             # triageable rather than dropped. fail_prototype caps at 500 chars.
             error_parts = [
@@ -2902,7 +3250,7 @@ async def _run_iterate_bg(
                 error=" | ".join(error_parts),
             )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
-        # error_class only in the structured log (Rule #24 — no PRD / comment /
+        # error_class only in the structured log (no PRD / comment /
         # Figma content); the full message goes to the row's error column.
         logger.warning(
             "design_agent.iterate_failed prototype_id=%s error_class=%s",
@@ -2916,7 +3264,7 @@ async def _run_iterate_bg(
 
 
 async def _run_one_iteration(row: dict[str, Any]) -> None:
-    """Run a single dequeued queue row through the P3-05 iterate body (P3-06).
+    """Run a single dequeued queue row through the iterate body.
 
     Adapter for `runner.drain_iteration_queue`: reconstructs the `IterateRequest`
     from the persisted queue row and delegates to `_run_iterate_bg` (UNCHANGED) so
@@ -2936,7 +3284,7 @@ async def _run_one_iteration(row: dict[str, Any]) -> None:
         prototype_id=row["prototype_id"],
         workspace_id=row["workspace_id"],
         body=body,
-        # P3-07: the queue row's `plan` column is the APPROVED plan for a confirm
+        # The queue row's `plan` column is the APPROVED plan for a confirm
         # row (prepended as a system addendum in execute mode) AND the write target
         # for a plan-mode run's emitted plan. `iteration_id` lets the plan branch
         # persist back to this row. `.get` tolerates pre-migration schemas (None).
@@ -2946,7 +3294,7 @@ async def _run_one_iteration(row: dict[str, Any]) -> None:
 
 
 def _extract_plan_text(final_content: list[dict[str, Any]]) -> str:
-    """Concatenate the text blocks of a plan run's final assistant turn (P3-07).
+    """Concatenate the text blocks of a plan run's final assistant turn.
 
     The plan IS the final assistant message's text (plan mode ends its turn with
     the plan and no tool calls). Non-text blocks (there should be none on a clean
@@ -2967,8 +3315,8 @@ async def _stage_iterate_run(
     virtual_fs: dict[str, str],
     iterate_prompt: str,
 ) -> None:
-    """Iterate-completion staging path (B2). DELIBERATELY SEPARATE from
-    `_stage_complete_run`: it does NOT call `complete_prototype` (AC6a). An iterate
+    """Iterate-completion staging path. DELIBERATELY SEPARATE from
+    `_stage_complete_run`: it does NOT call `complete_prototype`. An iterate
     is a checkpoint ADVANCE on an already-completed prototype, so re-stamping
     `completed_at` and emitting `prototype_completed` would be wrong — that whole
     separation is the point of this helper. Do NOT fold it back into the scaffold
@@ -2976,14 +3324,14 @@ async def _stage_iterate_run(
 
     Steps: vite_build (anchor-id plugin runs here) → create_checkpoint (threading
     the iterate prompt into prompt_history) → stage_bundle (dist + raw _source so
-    the NEXT iterate can read it back). Then the P3-12 seam advances
+    the NEXT iterate can read it back). Then the seam advances
     `current_checkpoint_id` + bundle_url WITHOUT a completed_at re-stamp.
     """
-    # Step 1 — Vite build (anchor-id plugin runs here, AD4).
+    # Step 1 — Vite build (anchor-id plugin runs here).
     try:
         dist_files = await vite_build(virtual_fs)
     except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
-        # P3-15 cross-ticket seam: the type-check runs inside the shared
+        # Cross-cutting seam: the type-check runs inside the shared
         # _vite_build_sync, so it fires on the ITERATE build too. A runtime-broken
         # iterate must fail the iterate (route to fail_prototype), not silently
         # stage — mirror _stage_complete_run's widened tuple.
@@ -3002,12 +3350,12 @@ async def _stage_iterate_run(
         prototype_id, len(dist_files),
     )
 
-    # Step 2 — new checkpoint; thread the iterate prompt into prompt_history (AC6a).
+    # Step 2 — new checkpoint; thread the iterate prompt into prompt_history.
     checkpoint_id = create_checkpoint(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
         bundle_url=None,
-        prd_revision_hash=None,    # P3-12 wires PRD-hash + figma-hash on this path
+        prd_revision_hash=None,    # PRD-hash + figma-hash wired later on this path
         figma_frame_hash=None,
         prompt_history=[{"kind": "iterate", "prompt": iterate_prompt}],
         comment_state=[],
@@ -3044,8 +3392,8 @@ async def _stage_iterate_run(
             prototype_id, checkpoint_id, type(exc).__name__,
         )
 
-    # Step 3.6 — AD12 orphan/re-attach on the ITERATE path. An iterate is a new
-    # checkpoint build, so per AD12 it MUST reconcile comments too (P3-05 shipped
+    # Step 3.6 — orphan/re-attach on the ITERATE path. An iterate is a new
+    # checkpoint build, so it MUST reconcile comments too (the iterate path shipped
     # before this helper existed; wired here so generate AND iterate both orphan
     # vanished anchors). Same path-agnostic helper as _stage_complete_run — it
     # keys on prototype_id, not checkpoint_id. Best-effort: a reconcile failure
@@ -3062,8 +3410,8 @@ async def _stage_iterate_run(
             prototype_id, type(exc).__name__,
         )
 
-    # Step 4 — P3-12. Advance current_checkpoint_id + bundle_url WITHOUT a
-    # completed_at re-stamp (NOT complete_prototype — AC6a). F7: this does not
+    # Step 4 — Advance current_checkpoint_id + bundle_url WITHOUT a
+    # completed_at re-stamp (NOT complete_prototype). This does not
     # rotate share_token / share_mode, so the public /p/<token> URL is unchanged
     # and now resolves to the new checkpoint's bundle. NO-BYPASS (plan §8): store
     # the STABLE app-origin proxy base (not the staged signed URL `bundle_url`,
@@ -3076,9 +3424,9 @@ async def _stage_iterate_run(
     )
 
 
-# ─── PRD patches: accept / reject (P3-10, F11) ──────────────────────────────────
+# ─── PRD patches: accept / reject ───────────────────────────────────────────────
 #
-# Accept/reject resolve a PENDING `prd_patches` proposal (P3-09). The companion
+# Accept/reject resolve a PENDING `prd_patches` proposal. The companion
 # LIST route (`GET /prd-patches`) + the `PrdPatchOut` model + `_patch_to_out` + the
 # `prd_patches` import are declared ABOVE the `GET /{prototype_id}` catch-all (see
 # the "PRD patches: list pending" block there) — the list path is a SINGLE segment
@@ -3087,32 +3435,32 @@ async def _stage_iterate_run(
 # against the single-segment catch-all, so they stay at EOF and reuse the
 # module-level `PrdPatchOut` / `_patch_to_out` / `mark_patch_*` symbols defined in
 # that block. Same gate posture as the authed routes above: feature-flag 404 when
-# off + require_app_session 401 + workspace 404 (cross-tenant invisibility, Rule
-# #22). Sync handlers (mirrors get_one): FastAPI runs them in the threadpool.
+# off + require_app_session 401 + workspace 404 (cross-tenant invisibility).
+# Sync handlers (mirrors get_one): FastAPI runs them in the threadpool.
 
 
 @router.post(
     "/prd-patches/{patch_id}/accept",
     response_model=PrdPatchOut,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 def post_accept_patch(
     patch_id: int,
     company: CompanyContext = Depends(require_company),
 ) -> PrdPatchOut:
-    """Accept a proposed PRD patch: flip its status to `applied` (P3-09
-    `mark_patch_applied`) and return the updated row. The rendered PRD reflects the
+    """Accept a proposed PRD patch: flip its status to `applied`
+    (`mark_patch_applied`) and return the updated row. The rendered PRD reflects the
     applied patch on its NEXT load (read path folds it in via
     `apply_patches_to_prd_md`); this route does NOT mutate `prds.payload_md` or the
     PrdScreen `contentEditable`. 404 when the patch is not in the caller's
-    workspace (cross-tenant invisibility, Rule #22). Idempotent: re-accepting an
+    workspace (cross-tenant invisibility). Idempotent: re-accepting an
     already-applied patch is a no-op flip that returns the row."""
     _require_feature_enabled()
     workspace_id = company.company_id
     row = mark_patch_applied(patch_id=patch_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found")
-    # Route-level state-transition log (Rule #24 / AC12): identifiers only — never
+    # Route-level state-transition log: identifiers only — never
     # patch_md / rationale (they can embed PRD body). Logged on the route's own
     # logger so the observability AC is satisfied at this surface.
     logger.info("prd_patch_applied patch_id=%s", patch_id)
@@ -3122,14 +3470,14 @@ def post_accept_patch(
 @router.post(
     "/prd-patches/{patch_id}/reject",
     response_model=PrdPatchOut,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 def post_reject_patch(
     patch_id: int,
     company: CompanyContext = Depends(require_company),
 ) -> PrdPatchOut:
-    """Reject a proposed PRD patch: flip its status to `rejected` (P3-09
-    `mark_patch_rejected`) and return the updated row. The PRD is unaffected
+    """Reject a proposed PRD patch: flip its status to `rejected`
+    (`mark_patch_rejected`) and return the updated row. The PRD is unaffected
     (rejected patches are excluded by `apply_patches_to_prd_md`). 404 when not in
     the caller's workspace. Idempotent (mirrors accept)."""
     _require_feature_enabled()
@@ -3137,16 +3485,16 @@ def post_reject_patch(
     row = mark_patch_rejected(patch_id=patch_id, workspace_id=workspace_id)
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found")
-    # Identifiers only — never patch_md / rationale (Rule #24 / AC12).
+    # Identifiers only — never patch_md / rationale.
     logger.info("prd_patch_rejected patch_id=%s", patch_id)
     return PrdPatchOut(**_patch_to_out(row))
 
 
-# ─── F13 manual edit: commit-back (P4-02, AD23) ─────────────────────────────────
+# ─── Manual edit: commit-back ───────────────────────────────────────────────────
 #
-# The commit-back half of F13: when the user clicks "Save edits" in the
-# ManualEditOverlay (P4-01), the accumulated `{anchor_id, property, old_value,
-# new_value}` triples are POSTed here. Per AD23 the visual change was ALREADY
+# The commit-back half of manual edit: when the user clicks "Save edits" in the
+# ManualEditOverlay, the accumulated `{anchor_id, property, old_value,
+# new_value}` triples are POSTed here. The visual change was ALREADY
 # applied client-side (no LLM); the LLM is invoked ONLY to COMMIT the change into
 # the prototype's SOURCE (not to compute it) — exactly once per Save.
 #
@@ -3161,7 +3509,7 @@ def post_reject_patch(
 # real request in test_design_agent_manual_edit.py (asserts the route is hit, not
 # 422-shadowed by the int-coerced catch-all).
 #
-# QUEUE DECISION (AD23): manual edit does NOT go through the P3-06 iterate queue —
+# QUEUE DECISION: manual edit does NOT go through the iterate queue —
 # it is a distinct, small, 2-iter operation. It runs as a single fire-and-forget bg
 # task (held in `_inflight_tasks`, strong-ref discipline mirroring post_iterate).
 # `queue_position` is always 0 in the response (kept in the shape for client parity
@@ -3169,7 +3517,7 @@ def post_reject_patch(
 # last-write-wins on `current_checkpoint_id` via advance_current_checkpoint
 # (acceptable for MVP).
 #
-# Localized imports (mirror the P3-05 block near _run_iterate_bg): the manual-edit
+# Localized imports (mirror the iterate block near _run_iterate_bg): the manual-edit
 # runner entrypoint + prompt symbols. _stage_iterate_run / read_source_files_for_checkpoint
 # / fail_prototype / get_prototype / infer_scenario_from_inputs are already in module scope.
 from app.design_agent.prompts import (
@@ -3180,9 +3528,9 @@ from app.design_agent.runner import manual_edit_prototype
 
 
 class ManualEditTriple(BaseModel):
-    """One fixed-property visual edit (P4-01 ManualEditTriple wire-shape). `old_value`
+    """One fixed-property visual edit (ManualEditTriple wire-shape). `old_value`
     is the pristine value at first selection; `new_value` is the value at Save. The
-    closed `property` set matches P4-01's EditableProperty exactly."""
+    closed `property` set matches the frontend's EditableProperty exactly."""
     anchor_id: str = Field(..., min_length=1)
     property: Literal["text", "font-size", "padding", "color", "background"]
     old_value: str
@@ -3203,22 +3551,22 @@ class ManualEditResponse(BaseModel):
 @router.post(
     "/{prototype_id}/manual-edit",
     response_model=ManualEditResponse,
-    dependencies=[Depends(require_same_origin)],  # P5-06 CSRF/Origin gate (authed mutating)
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
 )
 async def post_manual_edit(
     prototype_id: int,
     body: ManualEditRequest,
     company: CompanyContext = Depends(require_company),
 ) -> ManualEditResponse:
-    """F13/AD23: commit a batch of manual visual edits into the prototype source.
+    """Commit a batch of manual visual edits into the prototype source.
 
     Gates (identical posture to POST /iterate): feature-flag (404 when off) +
     require_app_session (401) + workspace filter (404 cross-tenant). Two 409s:
-      - `is_complete` (locked, F14): cannot edit until Resume Iteration.
+      - `is_complete` (locked): cannot edit until Resume Iteration.
       - `status != 'ready'`: cannot edit a generating/failed/invalidated row.
     On success fires `_run_manual_edit_bg` as a single bg task (NOT the iterate
     queue) and returns status='generating', queue_position=0 in <200ms. No
-    Anthropic call in the request path (AC1/AC4 — the LLM runs once, in the bg).
+    Anthropic call in the request path (the LLM runs once, in the bg).
     """
     _require_feature_enabled()
     workspace_id = company.company_id
@@ -3230,7 +3578,7 @@ async def post_manual_edit(
     if proto.get("status") != "ready":
         raise HTTPException(status_code=409, detail="Prototype not ready to edit")
 
-    # Observability (Rule #24 / AC14): identifiers only — never the edit triples
+    # Observability: identifiers only — never the edit triples
     # (old/new values can embed user-facing copy).
     logger.info("prototype_manual_edit_started prototype_id=%s", prototype_id)
     task = asyncio.create_task(
@@ -3255,18 +3603,18 @@ async def _run_manual_edit_bg(
     workspace_id: str,
     body: ManualEditRequest,
 ) -> None:
-    """Background manual-edit run (AD23): load the current bundle source, render the
+    """Background manual-edit run: load the current bundle source, render the
     commit-only prompts (cache-disciplined), run the thin 2-iter agent loop, then
     stage the result via the iterate path (a manual edit is a checkpoint ADVANCE,
     not a first completion — reuses `_stage_iterate_run` verbatim).
 
-    STALE-ANCHOR (fail-closed, AC10): the run is NOT pre-validated for anchor
+    STALE-ANCHOR (fail-closed): the run is NOT pre-validated for anchor
     presence (the anchors live in the BUILT dist, not the staged `_source/` TSX).
     The DESIGN_AGENT_MANUAL_EDIT_SYSTEM prompt instructs the agent to `search` the
     source for each triple's element and, when it cannot resolve one, to end its
     turn WITHOUT editing. We detect that no-target outcome as "the run ended but the
     source is byte-identical to the seed" → `fail_prototype` with a loud
-    `manual_edit: anchor … not found` error and NO checkpoint advance. P4-01
+    `manual_edit: anchor … not found` error and NO checkpoint advance. The frontend
     surfaces the error toast from `status='failed'` + the error on the next poll.
     Do NOT silently succeed on a missing anchor.
     """
@@ -3285,7 +3633,7 @@ async def _run_manual_edit_bg(
             current_source=current_source,
             edits=[e.model_dump() for e in body.edits],
         )
-        # System block cached at the END of the stable prefix (AD2), mirroring
+        # System block cached at the END of the stable prefix, mirroring
         # _run_iterate_bg. The source user prefix is cached too (its last block
         # carries cache_control); the volatile edit-triple block does not.
         system_blocks = [{
@@ -3317,7 +3665,7 @@ async def _run_manual_edit_bg(
         source_changed = virtual_fs != current_source
         if result.status == "complete" and virtual_fs and source_changed:
             # Reuse the iterate staging path verbatim — a manual edit is a checkpoint
-            # ADVANCE (no complete_prototype, no completed_at re-stamp; F7 stable URL).
+            # ADVANCE (no complete_prototype, no completed_at re-stamp; stable URL).
             await _stage_iterate_run(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
@@ -3325,7 +3673,7 @@ async def _run_manual_edit_bg(
                 iterate_prompt="<manual edit>",
             )
         elif result.status == "complete":
-            # AD23 stale-anchor fail-closed: the run ended but committed NO source
+            # Stale-anchor fail-closed: the run ended but committed NO source
             # change → the agent could not resolve a triple's target element. Record
             # a loud error and do NOT advance the checkpoint.
             anchors = ", ".join(e.anchor_id for e in body.edits)
@@ -3356,7 +3704,7 @@ async def _run_manual_edit_bg(
                 error=" | ".join(error_parts),
             )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
-        # error_class only in the structured log (Rule #24 — no source / edit
+        # error_class only in the structured log (no source / edit
         # content); the full message goes to the row's error column.
         logger.warning(
             "design_agent.manual_edit_failed prototype_id=%s error_class=%s",

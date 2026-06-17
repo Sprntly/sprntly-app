@@ -72,6 +72,7 @@ const THREE_CANDIDATES: LocateConfirmCandidate[] = [
     route: "/team",
     entry_component: "TeamScreen",
     component_count: 3,
+    rationale: "Where teammates are invited and their roles are managed.",
     is_top: true,
   },
   {
@@ -79,6 +80,7 @@ const THREE_CANDIDATES: LocateConfirmCandidate[] = [
     route: "/dashboard",
     entry_component: "DashboardPage",
     component_count: 7,
+    rationale: "The home overview a user lands on after signing in.",
     is_top: false,
   },
   {
@@ -86,19 +88,38 @@ const THREE_CANDIDATES: LocateConfirmCandidate[] = [
     route: "/settings",
     entry_component: "SettingsPanel",
     component_count: 2,
+    rationale: "Where account and workspace preferences are changed.",
     is_top: false,
   },
 ]
 
 // ---- Rendering --------------------------------------------------------------
 
-describe("test_renders_each_candidate_with_route_and_count", () => {
-  it("renders three choice buttons each showing label + route · N components (AC1)", () => {
+describe("renders each candidate with narrative", () => {
+  it("renders three choice buttons each showing label + PM-facing narrative", () => {
     const html = renderView({ candidates: THREE_CANDIDATES, onChoose: vi.fn() })
     const choiceCount = (
       html.match(/data-testid="locate-confirm-choice"/g) ?? []
     ).length
     expect(choiceCount).toBe(3)
+    // The narrative (rationale) is the primary, load-bearing PM-facing line.
+    const narrativeCount = (
+      html.match(/data-testid="locate-confirm-narrative"/g) ?? []
+    ).length
+    expect(narrativeCount).toBe(3)
+    expect(html).toContain(
+      "Where teammates are invited and their roles are managed.",
+    )
+    expect(html).toContain(
+      "The home overview a user lands on after signing in.",
+    )
+    expect(html).toContain(
+      "Where account and workspace preferences are changed.",
+    )
+  })
+
+  it("still surfaces route + component count as a demoted secondary detail", () => {
+    const html = renderView({ candidates: THREE_CANDIDATES, onChoose: vi.fn() })
     expect(html).toContain("/team")
     expect(html).toContain("3 components")
     expect(html).toContain("/dashboard")
@@ -106,10 +127,28 @@ describe("test_renders_each_candidate_with_route_and_count", () => {
     expect(html).toContain("/settings")
     expect(html).toContain("2 components")
   })
+
+  it("omits the narrative line when rationale is empty, keeping the heading", () => {
+    const html = renderView({
+      candidates: [
+        {
+          id: "/team",
+          route: "/team",
+          entry_component: "TeamScreen",
+          component_count: 3,
+          rationale: "",
+          is_top: false,
+        },
+      ],
+      onChoose: vi.fn(),
+    })
+    expect(html).not.toContain('data-testid="locate-confirm-narrative"')
+    expect(html).toContain("Team")
+  })
 })
 
-describe("test_top_candidate_marker_only_on_leading", () => {
-  it("renders the Top candidate badge only where is_top === true (AC2)", () => {
+describe("top candidate marker only on leading", () => {
+  it("renders the Top candidate badge only where is_top === true", () => {
     const html = renderView({ candidates: THREE_CANDIDATES, onChoose: vi.fn() })
     const badgeCount = (
       html.match(/data-testid="locate-confirm-top-badge"/g) ?? []
@@ -119,8 +158,8 @@ describe("test_top_candidate_marker_only_on_leading", () => {
   })
 })
 
-describe("test_default_question_text_when_omitted", () => {
-  it("renders the default question text when question prop is omitted (AC1)", () => {
+describe("default question text when omitted", () => {
+  it("renders the default question text when question prop is omitted", () => {
     const html = renderView({ candidates: THREE_CANDIDATES, onChoose: vi.fn() })
     expect(html).toContain("Which screen does this change affect?")
     expect(html).toContain('data-testid="locate-confirm-question"')
@@ -136,8 +175,8 @@ describe("test_default_question_text_when_omitted", () => {
   })
 })
 
-describe("test_label_derived_from_entry_component_with_route_fallback", () => {
-  it("strips a trailing Screen suffix and returns the base word (AC7)", () => {
+describe("label derived from entry component with route fallback", () => {
+  it("strips a trailing Screen suffix and returns the base word", () => {
     const html = renderView({
       candidates: [
         {
@@ -145,6 +184,7 @@ describe("test_label_derived_from_entry_component_with_route_fallback", () => {
           route: "/team",
           entry_component: "TeamScreen",
           component_count: 1,
+          rationale: "Manage teammates and roles.",
           is_top: false,
         },
       ],
@@ -163,6 +203,7 @@ describe("test_label_derived_from_entry_component_with_route_fallback", () => {
           route: "/briefing",
           entry_component: "BriefingPage",
           component_count: 4,
+          rationale: "Read the weekly briefing.",
           is_top: false,
         },
       ],
@@ -172,7 +213,7 @@ describe("test_label_derived_from_entry_component_with_route_fallback", () => {
     expect(html).not.toContain("BriefingPage")
   })
 
-  it("falls back to the raw route when entry_component yields an empty label (AC7)", () => {
+  it("falls back to the raw route when entry_component yields an empty label", () => {
     const html = renderView({
       candidates: [
         {
@@ -180,6 +221,7 @@ describe("test_label_derived_from_entry_component_with_route_fallback", () => {
           route: "/team",
           entry_component: "",
           component_count: 1,
+          rationale: "Manage teammates and roles.",
           is_top: false,
         },
       ],
@@ -195,7 +237,7 @@ describe("test_label_derived_from_entry_component_with_route_fallback", () => {
 
 // ---- Interaction ------------------------------------------------------------
 
-describe("test_onChoose_fires_exact_route", () => {
+describe("onChoose fires exact route", () => {
   it("clicking a candidate button calls onChoose with the exact route string AND its stable id", () => {
     const onChoose = vi.fn()
     const buttons = captureButtonProps({ candidates: THREE_CANDIDATES, onChoose })
@@ -210,8 +252,8 @@ describe("test_onChoose_fires_exact_route", () => {
   })
 })
 
-describe("test_search_other_conditional_render_and_callback", () => {
-  it("renders the search button when onSearchOther is provided (AC4)", () => {
+describe("search other conditional render and callback", () => {
+  it("renders the search button when onSearchOther is provided", () => {
     const html = renderView({
       candidates: THREE_CANDIDATES,
       onChoose: vi.fn(),
@@ -221,12 +263,12 @@ describe("test_search_other_conditional_render_and_callback", () => {
     expect(html).toContain("Search for another screen")
   })
 
-  it("omits the search button when onSearchOther is undefined (AC4)", () => {
+  it("omits the search button when onSearchOther is undefined", () => {
     const html = renderView({ candidates: THREE_CANDIDATES, onChoose: vi.fn() })
     expect(html).not.toContain('data-testid="locate-confirm-search-other"')
   })
 
-  it("calls onSearchOther when the search button is clicked (AC4)", () => {
+  it("calls onSearchOther when the search button is clicked", () => {
     const onSearchOther = vi.fn()
     const buttons = captureButtonProps({
       candidates: THREE_CANDIDATES,
@@ -244,8 +286,8 @@ describe("test_search_other_conditional_render_and_callback", () => {
 
 // ---- State ------------------------------------------------------------------
 
-describe("test_busy_disables_all_buttons", () => {
-  it("every candidate button and the search button are disabled when busy=true (AC5)", () => {
+describe("busy disables all buttons", () => {
+  it("every candidate button and the search button are disabled when busy=true", () => {
     const html = renderView({
       candidates: THREE_CANDIDATES,
       onChoose: vi.fn(),
@@ -258,8 +300,8 @@ describe("test_busy_disables_all_buttons", () => {
   })
 })
 
-describe("test_error_renders_alert", () => {
-  it("renders the error markup with role=alert when error is non-null (AC6)", () => {
+describe("error renders alert", () => {
+  it("renders the error markup with role=alert when error is non-null", () => {
     const html = renderView({
       candidates: THREE_CANDIDATES,
       onChoose: vi.fn(),
@@ -282,8 +324,8 @@ describe("test_error_renders_alert", () => {
 
 // ---- Non-breakage (existing usage) ------------------------------------------
 
-describe("test_existing_clarifying_surface_view_tests_still_green", () => {
-  it("existing choice-mode still renders candidate buttons (AC8)", () => {
+describe("existing clarifying surface view tests still green", () => {
+  it("existing choice-mode still renders candidate buttons", () => {
     // Spot-check that the existing view export is unchanged after the append.
     // Full coverage lives in ClarifyingQuestionSurface.test.tsx.
     const html = renderToStaticMarkup(
@@ -298,7 +340,7 @@ describe("test_existing_clarifying_surface_view_tests_still_green", () => {
     expect(html).toContain("Grid")
   })
 
-  it("existing free-text mode still renders input + submit (AC8)", () => {
+  it("existing free-text mode still renders input + submit", () => {
     const html = renderToStaticMarkup(
       React.createElement(ClarifyingQuestionSurfaceView, {
         question: "What tone?",
@@ -311,8 +353,8 @@ describe("test_existing_clarifying_surface_view_tests_still_green", () => {
   })
 })
 
-describe("test_no_globals_css_change", () => {
-  it("LocateConfirmView only uses existing clarifying-question-* class names (AC9)", () => {
+describe("no globals css change", () => {
+  it("LocateConfirmView only uses existing clarifying-question-* class names", () => {
     const src = readFileSync(
       join(
         process.cwd(),
@@ -341,8 +383,8 @@ describe("test_no_globals_css_change", () => {
 
 // ---- Integrity ---------------------------------------------------------------
 
-describe("test_no_prohibited_tokens_in_appended_lines", () => {
-  it("no internal ticket/decision IDs in the new view addition (AC10)", () => {
+describe("no prohibited tokens in appended lines", () => {
+  it("no internal ticket/decision IDs in the new view addition", () => {
     const src = readFileSync(
       join(
         process.cwd(),

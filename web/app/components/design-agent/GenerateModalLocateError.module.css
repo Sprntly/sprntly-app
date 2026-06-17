@@ -1,0 +1,23 @@
+/*
+ * Co-located styling for the GenerateModal locate ERROR phase.
+ *
+ * The explicit error/Retry surface that replaces the old silent collapse to the
+ * config form when a locate job fails or times out. Layout only — colour and
+ * button chrome come from the global modal/.btn classes the rest of the modal
+ * already uses. Nothing is added to the shared global stylesheet.
+ */
+
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 28px 20px;
+  text-align: center;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}

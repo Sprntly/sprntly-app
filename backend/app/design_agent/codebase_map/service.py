@@ -4,12 +4,17 @@ Ties the read + probe + extract steps into a single entry point,
 ``build_map``, that downstream callers (locate, the codebase-context phase
 gate harness) use as their sole interface to the deterministic screen map.
 
-Cache shape (no persistence):
-    Bounded LRU + TTL, keyed on ``(installation_id, repo, commit_sha)``.
-    Process-local — no Redis, no DB, no shared store. A cache miss simply
-    re-runs the deterministic map (cheap, correct). Tenant isolation is
-    structural: the key carries the upstream-tenant-scoped installation_id,
-    and the value is derived only from that installation's repo bytes, so a
+Cache shape (two tiers):
+    L1 — bounded LRU + TTL, keyed on ``(installation_id, repo, commit_sha)``,
+    process-local. L2 — a durable second tier behind L1, keyed the same
+    way, that survives a deploy/restart so the first post-restart locate is warm
+    instead of re-paying the full cold build. L2 is reached through an injected
+    hook (see ``_l2`` below), keeping this module's persistence boundary clean.
+    A miss at both tiers simply re-runs the deterministic map (cheap, correct).
+    The L2 layer is purely additive + fail-soft: if it is unavailable the build
+    behaves exactly as the L1-only path always has. Tenant isolation is
+    structural: the key carries the upstream-tenant-scoped installation_id, and
+    the value is derived only from that installation's repo bytes, so a
     cross-tenant collision is not reachable.
 
 Sub-step degradation:
@@ -20,10 +25,12 @@ Sub-step degradation:
 """
 from __future__ import annotations
 
+import importlib
 import logging
 import time
 from collections import OrderedDict
 from threading import Lock
+from types import ModuleType
 from typing import Callable, TypeVar
 
 from app.design_agent.codebase_map.edges import resolve_edges
@@ -113,6 +120,40 @@ class _MapCache:
 _CACHE = _MapCache(_CACHE_MAX_ENTRIES, _CACHE_TTL_SECONDS)
 
 
+# ── L2 (durable) seam ─────────────────────────────────────────────────────────
+#
+# The durable second cache tier lives in the persistence layer. This
+# module reaches it through a lazily-imported hook so the orchestrator keeps its
+# clean persistence boundary (no direct persistence import at module top, no
+# storage vocabulary in this file). The hook is resolved once and memoized; a
+# resolution failure leaves L2 disabled and the build runs L1-only, exactly as
+# it always has.
+
+_l2_module: ModuleType | None = None
+_l2_resolved = False
+
+
+def _l2() -> ModuleType | None:
+    """The durable-cache helper module, or None if it cannot be loaded.
+
+    Memoized. Any import failure disables L2 silently (fail-soft) — the build
+    degrades to the in-process LRU, which is the historical behavior.
+    """
+    global _l2_module, _l2_resolved
+    if _l2_resolved:
+        return _l2_module
+    _l2_resolved = True
+    try:
+        _l2_module = importlib.import_module("app.db.design_agent_map_cache")
+    except Exception:
+        logger.warning(
+            "codebase_map durable cache layer unavailable; running in-process only",
+            exc_info=True,
+        )
+        _l2_module = None
+    return _l2_module
+
+
 def clear_map_cache(installation_id: int | None = None) -> None:
     """Drop one installation's cached maps or every entry."""
     _CACHE.clear(installation_id)
@@ -157,10 +198,45 @@ def build_map(
     cached = _CACHE.get(key)
     if cached is not None:
         logger.info(
-            "codebase_map.build repo=%s sha=%s cache=hit",
+            "codebase_map.build repo=%s sha=%s cache=hit tier=l1",
             repo, snapshot.commit_sha,
         )
         return cached
+
+    # L1 miss → consult the durable L2. A hit there means a prior process built
+    # this exact (installation, repo, commit) map; a deploy/restart wiped L1 but
+    # not L2, so we serve warm without rebuilding. Populate L1 so subsequent
+    # same-process requests stay on the fast tier. Fail-soft: any L2 trouble
+    # returns None and we fall through to the cold build, identical to today.
+    l2 = _l2()
+    if l2 is not None:
+        try:
+            l2_payload = l2.get_cached_map(installation_id, repo, snapshot.commit_sha)
+        except Exception:
+            # The helper is itself fail-soft, but guard the seam too so a
+            # misbehaving hook can never break locate.
+            logger.warning(
+                "codebase_map.build repo=%s sha=%s l2 get raised; treating as miss",
+                repo, snapshot.commit_sha, exc_info=True,
+            )
+            l2_payload = None
+        if l2_payload is not None:
+            try:
+                revived = MapResult.model_validate(l2_payload)
+            except Exception:
+                # A malformed/garbage payload must never break locate; treat it
+                # as a miss and rebuild.
+                logger.warning(
+                    "codebase_map.build repo=%s sha=%s l2 payload invalid; rebuilding",
+                    repo, snapshot.commit_sha, exc_info=True,
+                )
+            else:
+                _CACHE.put(key, revived)
+                logger.info(
+                    "codebase_map.build repo=%s sha=%s cache=hit tier=l2",
+                    repo, snapshot.commit_sha,
+                )
+                return revived
 
     start = time.monotonic()
     probe: ProbeResult = _safe(
@@ -209,6 +285,20 @@ def build_map(
 
     duration_ms = int((time.monotonic() - start) * 1000)
     _CACHE.put(key, result)
+    # Write-through to the durable L2 so the NEXT deploy's first locate is warm.
+    # Fail-soft: an L2 write error is swallowed inside the helper; the map is
+    # already in L1 and returned below regardless.
+    if l2 is not None:
+        try:
+            l2.put_cached_map(
+                installation_id, repo, snapshot.commit_sha,
+                result.model_dump(mode="json"),
+            )
+        except Exception:
+            logger.warning(
+                "codebase_map.build repo=%s sha=%s l2 put raised; L1 unaffected",
+                repo, snapshot.commit_sha, exc_info=True,
+            )
     n_resolved = sum(1 for e in edges if e.resolved)
     logger.info(
         "codebase_map.build repo=%s sha=%s posture=%s n_nodes=%d n_edges=%d "

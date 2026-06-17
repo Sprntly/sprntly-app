@@ -1,0 +1,19 @@
+/* Scoped styles for the /prototype route's in-tab loading (resolving) state.
+   Co-located here rather than in globals.css per the hot-file rule. The spinner
+   itself reuses the shared `.da-spinner` animation from design-agent.css; this
+   module only owns the centered layout for the resolving placeholder so it is no
+   longer a blank aria-busy div (visual polish). */
+.resolving {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 240px;
+  color: var(--muted);
+}
+
+.resolvingLabel {
+  font-size: 13px;
+  color: var(--muted);
+}

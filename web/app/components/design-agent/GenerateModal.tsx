@@ -29,6 +29,8 @@ import {
   type GitHubRepo,
   type LocateResponse,
   type LocateCandidate,
+  type LocateJobHandle,
+  type LocateJobStatus,
 } from "../../lib/api"
 import {
   runDesignAgentGeneration,
@@ -50,6 +52,8 @@ import {
 import type { DesignSourcePreference } from "../../lib/onboarding/types"
 import { SourceTypePills } from "./SourceTypePills"
 import { GenerateLoadingState } from "./GenerateLoadingState"
+import locateErrorStyles from "./GenerateModalLocateError.module.css"
+import type { LocatePhaseState } from "./GenerationLoadingScreen"
 
 const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "desktop", label: "Desktop" },
@@ -61,23 +65,53 @@ const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
  * Single-modal phase machine for the generate-entry flow.
  *
  *   config            → the source/platform/instructions form (the resting state)
- *   locating          → loading UI is visible while the screen-resolve call runs
+ *   locating          → loading UI is visible while the screen-resolve job runs
  *   picker            → an ambiguous match needs the user to pick a screen
  *   unmapped-resolve  → no match; pick a screen or switch back to config
+ *   error             → the resolve job failed or timed out; an explicit error
+ *                       message + Retry button on the loading surface. This is a
+ *                       FIRST-CLASS phase, not a fall-through to config: a failed
+ *                       locate must NOT silently collapse back to the PRD form
+ *                       (the prod hang→collapse bug). Retry re-runs from the POST.
  *   generating        → a real run exists; hand off to the loading screen + drawer
  *
  * The modal stays MOUNTED across every phase and only hands off (onGenStart /
  * onKickoff / onGenDone) once a real prototype run has been kicked off. The key
  * fix this encodes: the loading SCREEN is decoupled from the resolve CALL —
- * `locating` mounts immediately on generate-click, and the resolve call fires
- * behind it, so the user never stares at a frozen form.
+ * `locating` mounts immediately on generate-click, and the resolve job (POST →
+ * poll) fires behind it, so the user never stares at a frozen form.
  */
 type FlowPhase =
   | "config"
   | "locating"
   | "picker"
   | "unmapped-resolve"
+  | "error"
   | "generating"
+
+// Poll loop tuning for the async locate contract. The POST returns a
+// job id; we GET the job on an interval until it is done/error, capped by an
+// overall timeout so a stuck job surfaces an explicit error instead of hanging
+// forever (and never collapses back to the PRD form).
+//   - INTERVAL: cadence between successive poll GETs (~1s).
+//   - TIMEOUT:  overall ceiling on the whole resolve (~90s). On expiry → error.
+//   - MAX_RETRIES: transient-failure budget. A poll GET that 5xxs or network-
+//     errors (or a 5xx on the POST) is retried up to this many times with
+//     linear backoff before the flow gives up. A 404/400 is TERMINAL — it is
+//     not retried; it goes straight to the error phase.
+const LOCATE_POLL_INTERVAL_MS = 1000
+const LOCATE_POLL_TIMEOUT_MS = 90_000
+const LOCATE_POLL_MAX_RETRIES = 4
+
+/** A transient failure is a 5xx or a non-ApiError (network/abort-adjacent). A
+ *  404 or 400 from the poll/POST is terminal — distinguishing the two is what
+ *  lets the loop retry a flaky backend while failing fast on an unknown job. */
+function isTransientLocateError(err: unknown): boolean {
+  if (err instanceof ApiError) return err.status >= 500
+  // Anything that is not a structured ApiError (network error, JSON parse,
+  // fetch reject) is treated as transient and retried.
+  return true
+}
 
 /** Maps LocateCandidate[] to the shape LocateConfirmView expects. */
 export function mapLocateCandidates(ranked: LocateCandidate[]): LocateConfirmCandidate[] {
@@ -86,6 +120,7 @@ export function mapLocateCandidates(ranked: LocateCandidate[]): LocateConfirmCan
     route: c.route,
     entry_component: c.entry_component,
     component_count: c.component_count,
+    rationale: c.rationale,
     is_top: i === 0,
   }))
 }
@@ -114,6 +149,12 @@ export function GenerateModal({
   // without user interaction and closes itself. Pass null to always show.
   savedPreference,
   onSavePreference,
+  // Pre-build locate phase bridge. Emits the current locate phase so the parent
+  // can thread it into the full-screen GenerationLoadingScreen. Accepted here
+  // for forward-compat with the locate-in-loading-screen rollout; this version
+  // of the modal drives locate in-modal (no-op on the callback).
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onLocatePhase: _onLocatePhase,
   // Injected for testing — bypass the async useEffect cycle so node-env vitest
   // can render the modal in a known connector/repo/source state without a DOM.
   // Omit in production; defaults preserve real behaviour.
@@ -126,6 +167,9 @@ export function GenerateModal({
   _testLocateError,
   _testMatchedRoute,
   _testProceedNote,
+  _testPollIntervalMs,
+  _testPollTimeoutMs,
+  _testPollMaxRetries,
 }: {
   open: boolean
   onClose: () => void
@@ -147,6 +191,10 @@ export function GenerateModal({
   onGenDone?: (result?: DesignAgentGenResult) => void
   savedPreference?: DesignSourcePreference | null
   onSavePreference?: (pref: DesignSourcePreference) => Promise<void>
+  /** Emits the current pre-build locate phase so the parent can thread it into
+   *  the full-screen GenerationLoadingScreen. This version drives locate in-modal;
+   *  the callback is accepted for forward-compat and is a no-op here. */
+  onLocatePhase?: (phase: LocatePhaseState | null) => void
   _testConnections?: ConnectionSummary[] | null
   _testRepos?: GitHubRepo[] | null
   _testInitSource?: "figma" | "github" | "website"
@@ -160,6 +208,12 @@ export function GenerateModal({
   _testMatchedRoute?: string | null
   // The optional explanatory note shown beneath the matched line.
   _testProceedNote?: string | null
+  // Poll tuning overrides (tests only). Production uses the LOCATE_POLL_*
+  // constants. Tests shrink the interval/timeout (and disable retry backoff
+  // delay implicitly via the interval) so the loop runs without fake timers.
+  _testPollIntervalMs?: number
+  _testPollTimeoutMs?: number
+  _testPollMaxRetries?: number
 }) {
   const { showToast } = useNavigation()
 
@@ -194,6 +248,51 @@ export function GenerateModal({
   //     superseded flow can never write phase/result state for a newer one).
   const locateInFlightRef = useRef(false)
   const flowTokenRef = useRef(0)
+
+  // One-shot gate for the saved-preference AUTO-SKIP effect. The effect
+  // re-runs on every dep churn (connections / repos / savedPreference identity
+  // changes from context re-renders), so without a latch a locate FAILURE — which
+  // clears locateInFlightRef and leaves flowPhase==="error" — would let the effect
+  // re-enter enterLoadingFlow() (its guard allows re-entry from "error" for the
+  // Retry button) and re-POST in a storm: the surface thrashes config-auto-skip →
+  // locating → error → locating … which on the live /prototype tab reads as a
+  // blank/unstable screen and hammers the failing endpoint. This latch makes the
+  // AUTO-SKIP fire the loading flow AT MOST ONCE per open; only the explicit Retry
+  // button may re-run locate after a failure. Reset when the modal re-opens.
+  const autoSkipFiredRef = useRef(false)
+
+  // Holds the function that re-runs the most recent locate from scratch (the
+  // POST), so the explicit error phase's Retry button can re-fire it. Set when
+  // a flow enters; invoked by the Retry affordance.
+  const locateRetryRef = useRef<(() => void) | null>(null)
+  // Flipped on unmount / modal-close so an in-flight poll loop aborts: the loop
+  // checks it between polls and bails without setState. Prevents leaked
+  // intervals and setState-after-unmount.
+  const pollAbortedRef = useRef(false)
+
+  // Abort any in-flight poll loop on unmount so it cannot setState after the
+  // modal is gone or leak a pending timer.
+  useEffect(() => {
+    return () => {
+      pollAbortedRef.current = true
+      flowTokenRef.current++
+    }
+  }, [])
+
+  // When the modal closes, abort the in-flight poll too (the component may stay
+  // mounted but hidden). Re-arm when it re-opens.
+  useEffect(() => {
+    if (!open) {
+      pollAbortedRef.current = true
+      flowTokenRef.current++
+      locateInFlightRef.current = false
+      // Re-arm the auto-skip one-shot so a fresh open evaluates the saved
+      // preference again (a closed-then-reopened modal is a new flow).
+      autoSkipFiredRef.current = false
+    } else {
+      pollAbortedRef.current = false
+    }
+  }, [open])
 
   // Figma URL paste state — URL input, extracted key, extracted node-id,
   // resolved label, and validating flag. When figmaUrlKey is set it is
@@ -364,6 +463,12 @@ export function GenerateModal({
   useEffect(() => {
     if (!open) return
     if (!savedPreference) return
+    // One-shot: once this open's auto-skip has fired a flow, dep churn must not
+    // re-trigger it. Without this, a locate FAILURE (which leaves flowPhase
+    // ==="error" and clears locateInFlightRef) lets a re-run re-enter the loading
+    // flow and re-POST in a storm — the blank/unstable-surface bug. Only
+    // the explicit Retry button re-runs locate after a failure.
+    if (autoSkipFiredRef.current) return
     if (connections === null) return
     const src = savedPreference.design_source
     if (src === "github" && repos === null) return
@@ -388,7 +493,22 @@ export function GenerateModal({
       setRepoSel(savedPreference.github_repo)
     }
 
-    if (prdId == null) return
+    // Latch the one-shot now that we are committed to acting on the saved
+    // preference. Set BEFORE the fire so any subsequent dep-churn re-run is a
+    // no-op (the storm guard), and so a locate failure can never be auto-retried
+    // by the effect — only the explicit Retry button re-enters.
+    autoSkipFiredRef.current = true
+
+    if (prdId == null) {
+      // Defense-in-depth: the render guard suppresses the config form when the
+      // saved preference is healthy, so a missing prdId here would otherwise
+      // leave the modal in a permanent null-rendering config-auto-skip state — a
+      // blank screen with no error or Retry. Surface the explicit error phase
+      // instead so the never-blank guarantee holds even on this edge.
+      setLocateError("Couldn't start generation — no PRD is selected")
+      setFlowPhase("error")
+      return
+    }
 
     // GitHub auto-skip MUST go through the SAME guarded loading flow the manual
     // Generate click uses — NOT its own bare locate-then-generate that closes
@@ -466,21 +586,44 @@ export function GenerateModal({
 
   if (!open) return null
 
-  // Suppress the modal only for the figma/website auto-skip paths, which still
-  // close the modal and generate directly (no resolve call). For those, showing
-  // the form for a frame before the effect closes it would flash.
+  // Suppress the config form whenever a saved preference is healthy (the
+  // auto-skip effect is about to fire) or while connector data hasn't loaded
+  // yet (so the form never flashes for a frame before the effect acts).
   //
-  // The github saved-preference path is the redesign's whole point: it NO LONGER
-  // suppresses. Instead it stays open and drives the locating phase immediately
-  // (the loading UI is the point), so there is nothing to hide. Once we are in
-  // any loading phase (past config) the modal must always render its phase UI.
+  // Once we are past "config" (in any loading phase) the modal must always
+  // render its phase UI — suppress only applies in the config phase.
   //
-  // Health checks mirror the auto-skip effect.
-  if (savedPreference && flowPhase === "config") {
+  // Health checks mirror the auto-skip effect exactly.
+  //
+  // CRITICAL: this suppression is ONLY for the INITIAL pre-auto-skip
+  // flash window. Once the auto-skip has fired (autoSkipFiredRef.current), any
+  // return to flowPhase==="config" is an EXPLICIT user navigation — the "Switch
+  // source" / Retry-fallback buttons set flowPhase back to "config" after a
+  // locate failure (or an ambiguous / unmapped result). With a healthy saved
+  // github/figma/website preference still set, the guard below would return null
+  // and BLANK the in-tab /prototype surface (the tester's repro:
+  // failure → error/Retry → Switch source → blank). So we only suppress while
+  // the one-shot has NOT yet fired; afterwards the config/source-picker form
+  // renders so the user can pick a different source. The effect's own
+  // autoSkipFiredRef latch (set ~line 500) guarantees this does not re-arm an
+  // auto-skip storm — only the explicit Retry button re-runs locate.
+  if (savedPreference && flowPhase === "config" && !autoSkipFiredRef.current) {
     const src = savedPreference.design_source
 
-    // github never suppresses now — it renders the loading phase in-modal.
-    if (src !== "github") {
+    if (src === "github") {
+      // Github auto-skip routes through enterLoadingFlow (no modal close —
+      // the loading UI IS the point). Suppress the config form while:
+      //   1. connector / repo data hasn't loaded yet (can't decide), OR
+      //   2. the saved preference is healthy (effect will fire loading flow).
+      // An unhealthy pref (repo missing from list) falls through so the user
+      // sees the form as a recovery path.
+      const dataStillLoading = connections === null || repos === null
+      const githubHealthy =
+        githubActive &&
+        !!savedPreference.github_repo &&
+        !!repos?.find((r) => r.full_name === savedPreference.github_repo)
+      if (dataStillLoading || githubHealthy) return null
+    } else {
       const dataStillLoading = connections === null
 
       const figmaHealthy = src === "figma" && figmaActive && !!savedPreference.figma_file_key
@@ -632,83 +775,195 @@ export function GenerateModal({
   //     so it can never write phase/result state for a newer flow.
   // The FIRST ranked_confirm goes straight to the picker — never re-sample for a
   // luckier confidence.
+  // Branch on a settled LocateResponse exactly as the old synchronous flow did
+  // (unmapped / auto_proceed / proceed_with_note / ranked_confirm). Pulled out
+  // so the POST→poll resolver and any future caller share one success path —
+  // behaviour here is preserved byte-for-byte from the pre-poll version.
+  function handleLocateResult(result: LocateResponse, opts: { repo: string }) {
+    setLocateResult(result)
+
+    if (result.unmapped) {
+      setFlowPhase("unmapped-resolve")
+      return
+    }
+    if (
+      result.decision === "auto_proceed" ||
+      result.decision === "proceed_with_note"
+    ) {
+      const route = result.chosen[0]?.route ?? null
+      const id = result.chosen[0]?.id ?? null
+      setMatchedRoute(route)
+      if (result.decision === "proceed_with_note") {
+        const note = result.chosen[0]?.rationale ?? null
+        setProceedNote(note)
+      }
+      // Persist the source preference now that a confident match exists.
+      void onSavePreference?.({
+        design_source: "github",
+        figma_file_key: null,
+        github_repo: opts.repo || null,
+        website_url: null,
+      })
+      // Transition locating → generating and kick off the real run. The SHA
+      // is passed explicitly because the setLocateResult above has not yet
+      // re-rendered this closure. forCodebase=true forces the github wiring
+      // on even when the auto-skip path's setState has not re-rendered.
+      runGenerateForRoute(
+        route,
+        result.commit_sha || null,
+        id,
+        opts.repo,
+        true,
+      )
+      return
+    }
+    // FIRST ranked_confirm → straight to the picker. Never re-sample.
+    setFlowPhase("picker")
+  }
+
+  // Drive the async locate contract: POST → job id → poll until done/error,
+  // capped by an overall timeout and tolerant of transient backend failures.
+  //
+  // Failure handling is the load-bearing change: on a terminal failure (404/400
+  // job, exhausted transient budget, or timeout) the flow goes to the EXPLICIT
+  // "error" phase — NOT back to "config". A failed locate no longer silently
+  // collapses to the PRD form (the prod hang→collapse bug).
+  async function runLocateResolve(opts: { repo: string }, token: number): Promise<void> {
+    const intervalMs = _testPollIntervalMs ?? LOCATE_POLL_INTERVAL_MS
+    const timeoutMs = _testPollTimeoutMs ?? LOCATE_POLL_TIMEOUT_MS
+    const maxRetries = _testPollMaxRetries ?? LOCATE_POLL_MAX_RETRIES
+    const localPrdId = prdId!
+    const deadline = Date.now() + timeoutMs
+
+    // True iff this flow was superseded (newer flow), aborted (unmount/close),
+    // or the overall deadline has passed.
+    const isStale = () =>
+      token !== flowTokenRef.current || pollAbortedRef.current
+
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+    // Move to the explicit error phase with a message + Retry affordance.
+    const fail = (message: string) => {
+      if (isStale()) return
+      locateInFlightRef.current = false
+      setLocateError(message)
+      setFlowPhase("error")
+    }
+
+    try {
+      // 1) POST to start the job, retrying transient (5xx/network) failures.
+      //    A 404 here is terminal (feature off / PRD not owned / cross-workspace).
+      let handle: LocateJobHandle | null = null
+      let postAttempts = 0
+      while (handle === null) {
+        if (isStale()) return
+        try {
+          handle = await designAgentApi.locate({
+            prd_id: localPrdId,
+            github_repo: opts.repo,
+          })
+        } catch (err) {
+          if (isStale()) return
+          if (!isTransientLocateError(err) || postAttempts >= maxRetries) {
+            fail("Couldn't start codebase analysis — try again or switch source")
+            return
+          }
+          postAttempts++
+          await sleep(intervalMs * postAttempts)
+        }
+      }
+      if (isStale()) return
+
+      // 2) Poll the job until done/error/timeout. Transient poll failures are
+      //    retried within the same budget; a 404/400 job is terminal.
+      let transientPolls = 0
+      // First poll fires immediately (no leading delay) so an already-done job
+      // resolves promptly; subsequent polls wait `intervalMs`.
+      let firstPoll = true
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        if (isStale()) return
+        if (Date.now() > deadline) {
+          fail("Codebase analysis timed out — try again or switch source")
+          return
+        }
+        if (!firstPoll) await sleep(intervalMs)
+        firstPoll = false
+        if (isStale()) return
+
+        let status: LocateJobStatus
+        try {
+          status = await designAgentApi.locateJob(handle.job_id)
+        } catch (err) {
+          if (isStale()) return
+          if (!isTransientLocateError(err) || transientPolls >= maxRetries) {
+            // 404/400 (unknown/TTL-swept/cross-workspace job) or exhausted
+            // transient budget — terminal.
+            fail("Couldn't analyse the codebase — try again or switch source")
+            return
+          }
+          transientPolls++
+          await sleep(intervalMs * transientPolls)
+          continue
+        }
+
+        if (status.status === "running") continue
+        if (status.status === "error") {
+          fail(
+            status.error
+              ? `Codebase analysis failed — ${status.error}`
+              : "Codebase analysis failed — try again or switch source",
+          )
+          return
+        }
+        // status.status === "done"
+        if (isStale()) return
+        if (!status.result) {
+          fail("Codebase analysis returned no result — try again or switch source")
+          return
+        }
+        locateInFlightRef.current = false
+        handleLocateResult(status.result, opts)
+        return
+      }
+    } catch {
+      // Defensive catch-all — any unexpected throw still surfaces the explicit
+      // error phase rather than hanging or collapsing to config.
+      fail("Couldn't analyse the codebase — try again or switch source")
+    }
+  }
+
   function enterLoadingFlow(opts: { repo: string }) {
     if (prdId == null) return
-    // Re-entry guard: one resolve call per flow. Covers the auto-skip effect
+    // Re-entry guard: one resolve flow at a time. Covers the auto-skip effect
     // re-running on connections/repos churn and an accidental double-click.
     if (locateInFlightRef.current) return
-    if (flowPhase !== "config") return
+    // Allowed entry phases: the resting config form, or a retry from the error
+    // phase. Never re-enter from a live/decided phase.
+    if (flowPhase !== "config" && flowPhase !== "error") return
 
-    const localPrdId = prdId
     const token = ++flowTokenRef.current
     locateInFlightRef.current = true
+    pollAbortedRef.current = false
 
     // Move to locating FIRST so the loading UI mounts before the (slow) resolve
-    // call runs. Reset any stale carry-over from a previous flow.
+    // job runs. Reset any stale carry-over from a previous flow.
     setLocateError(null)
     setLocateResult(null)
     setMatchedRoute(null)
     setProceedNote(null)
     setFlowPhase("locating")
 
-    // Fire the resolve call behind the loading UI — NOT awaited before render.
-    void (async () => {
-      try {
-        const result = await designAgentApi.locate({
-          prd_id: localPrdId,
-          github_repo: opts.repo,
-        })
-        // Ignore a stale result from a superseded flow.
-        if (token !== flowTokenRef.current) return
-        locateInFlightRef.current = false
-        setLocateResult(result)
+    // Remember how to re-run THIS flow from scratch so the error phase's Retry
+    // button can re-fire the whole POST→poll sequence.
+    locateRetryRef.current = () => {
+      locateInFlightRef.current = false
+      enterLoadingFlow(opts)
+    }
 
-        if (result.unmapped) {
-          setFlowPhase("unmapped-resolve")
-          return
-        }
-        if (
-          result.decision === "auto_proceed" ||
-          result.decision === "proceed_with_note"
-        ) {
-          const route = result.chosen[0]?.route ?? null
-          const id = result.chosen[0]?.id ?? null
-          setMatchedRoute(route)
-          if (result.decision === "proceed_with_note") {
-            const note = result.chosen[0]?.rationale ?? null
-            setProceedNote(note)
-          }
-          // Persist the source preference now that a confident match exists.
-          void onSavePreference?.({
-            design_source: "github",
-            figma_file_key: null,
-            github_repo: opts.repo || null,
-            website_url: null,
-          })
-          // Transition locating → generating and kick off the real run. The SHA
-          // is passed explicitly because the setLocateResult above has not yet
-          // re-rendered this closure. forCodebase=true forces the github wiring
-          // on even when the auto-skip path's setState has not re-rendered.
-          runGenerateForRoute(
-            route,
-            result.commit_sha || null,
-            id,
-            opts.repo,
-            true,
-          )
-          return
-        }
-        // FIRST ranked_confirm → straight to the picker. Never re-sample.
-        setFlowPhase("picker")
-      } catch {
-        if (token !== flowTokenRef.current) return
-        locateInFlightRef.current = false
-        setLocateError(
-          "Couldn't analyse the codebase — pick a screen or switch source",
-        )
-        setFlowPhase("config")
-      }
-    })()
+    // Fire the resolve flow behind the loading UI — NOT awaited before render.
+    void runLocateResolve(opts, token)
   }
 
   const handleGenerate = () => {
@@ -915,13 +1170,6 @@ export function GenerateModal({
             />
           </div>
 
-          {/* A resolve error from a prior attempt drops back to config with the
-              message shown above the form so the user can retry / switch source. */}
-          {locateError && (
-            <p className="locate-error" data-testid="locate-error" role="alert">
-              {locateError}
-            </p>
-          )}
           </>
           )}
 
@@ -934,6 +1182,65 @@ export function GenerateModal({
               matchedRoute={matchedRoute}
               note={proceedNote}
             />
+          )}
+
+          {/* error phase — the resolve job failed or timed out. An EXPLICIT
+              error message + Retry on the loading surface. Critically this is a
+              terminal phase of its OWN, not a fall-through to config: a failed
+              locate must never silently collapse back to the PRD form. Retry
+              re-runs the whole POST→poll sequence; Switch source returns to the
+              form deliberately (a user choice, not a silent collapse). */}
+          {flowPhase === "error" && (
+            <div
+              className={`locate-error-state ${locateErrorStyles.state}`}
+              data-testid="locate-error-state"
+            >
+              <p
+                className="locate-error"
+                data-testid="locate-error"
+                role="alert"
+              >
+                {locateError ??
+                  "Couldn't analyse the codebase — try again or switch source"}
+              </p>
+              <div className={`locate-error-actions ${locateErrorStyles.actions}`}>
+                <button
+                  type="button"
+                  className="btn btn-accent"
+                  data-testid="locate-retry"
+                  onClick={() => {
+                    // Re-run the full locate from the POST. Falls back to a clean
+                    // config return only if no retry was ever armed (shouldn't
+                    // happen — the error phase is only reachable from a flow).
+                    if (locateRetryRef.current) {
+                      locateRetryRef.current()
+                    } else {
+                      locateInFlightRef.current = false
+                      flowTokenRef.current++
+                      setLocateError(null)
+                      setFlowPhase("config")
+                    }
+                  }}
+                >
+                  Retry
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  data-testid="locate-error-switch-source"
+                  onClick={() => {
+                    locateInFlightRef.current = false
+                    pollAbortedRef.current = true
+                    flowTokenRef.current++
+                    setLocateError(null)
+                    setLocateResult(null)
+                    setFlowPhase("config")
+                  }}
+                >
+                  Switch source
+                </button>
+              </div>
+            </div>
           )}
 
           {/* picker phase — an ambiguous match; the user picks the screen. Reuses

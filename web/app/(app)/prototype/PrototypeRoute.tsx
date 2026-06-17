@@ -12,8 +12,11 @@
 //                   (<PostGenerationResult>) wired exactly like the modal canvas:
 //                   a local useIterateRun, the PRD context pulled by prd_id, the
 //                   iterate + comments slots, share re-fetch, and reload nonce.
-//   3. no proto   — no ready prototype yet → the always-open generate panel; a
-//                   successful generation reveals the new prototype IN-TAB (no
+//   3. no proto   — no ready prototype yet → an empty state with a "Generate
+//                   prototype" button (NOT an auto-open panel). The GenerateModal
+//                   mounts only on explicit click (generateRequested), so the
+//                   locate pipeline never fires without user intent; a successful
+//                   generation then reveals the new prototype IN-TAB (no
 //                   navigation to a full-screen overlay).
 //
 // Bare /prototype (no ?prd=) shows an empty state prompting the user to choose a
@@ -26,7 +29,7 @@
 //
 // The generation surface reuses the same GenerateModal as the approve flow (real
 // connector/figma/repo wiring, the shared runGenerateFlow via
-// designAgentApi.generate), rendered as the always-open panel. The
+// designAgentApi.generate), opened on explicit request (generateRequested). The
 // GenerationLoadingScreen overlay provides kickoff-to-ready feedback. The
 // figma_file_key is pulled from ContentContext when the loaded PRD matches the
 // URL's prd id; it degrades to null otherwise.
@@ -37,10 +40,11 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
-import { prdIdFromPrototypeSearch } from "../../lib/routes"
+import { useWorkspace } from "../../context/WorkspaceContext"
+import { prdIdFromPrototypeSearch, prototypePath } from "../../lib/routes"
 import { AppLayout } from "../../components/screens/app/AppLayout"
 import { GenerateModal } from "../../components/design-agent/GenerateModal"
-import { GenerationLoadingScreen } from "../../components/design-agent/GenerationLoadingScreen"
+import { GenerationLoadingScreen, type LocatePhaseState } from "../../components/design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../../components/design-agent/PostGenerationResult"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
 import { IterateComposer } from "../../components/design-agent/IterateComposer"
@@ -55,6 +59,7 @@ import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
 } from "../../lib/runDesignAgentGeneration"
+import styles from "./PrototypeRoute.module.css"
 
 /** Pure: build the modal onClose handler that is safe to capture as a closure.
  *  Navigation only fires when no generation is in flight. The loading state is
@@ -132,6 +137,34 @@ export function prototypeTabState(
   if (proto) return "ready"
   if (resolving) return "resolving"
   return "generate"
+}
+
+/** Pure: derive the initial `generateRequested` gate for a no-prototype PRD.
+ *  The generate panel is GATED behind an explicit click by default — a plain
+ *  navigation / refresh to `/prototype?prd=<id>` for a PRD with no prototype must
+ *  land on the empty state, NOT auto-open the panel (which would auto-fire the
+ *  locate pipeline with no user intent, worsened by the savedPreference auto-skip).
+ *
+ *  An explicit-generate-intent signal — the `?generate=1` query param a
+ *  "Generate Prototype" navigation carries (built by `prototypePath(id, {
+ *  generate: true })`) — honors a direct open: pass it as `intent` and the panel
+ *  opens on mount with no extra click. The route reads the param via
+ *  `generateIntentFromSearch`, seeds the gate with it, then CONSUMES it (strips
+ *  it from the URL via router.replace) so a later refresh after dismiss does not
+ *  re-open the panel. A plain `?prd=<id>` nav carries no signal → `intent=false`
+ *  → the empty state stays the default. Extracted + exported so the gate's
+ *  default-closed contract is unit-testable without a DOM. */
+export function initialGenerateRequested(intent: boolean): boolean {
+  return intent
+}
+
+/** Pure: read the explicit-generate-intent signal from the URL's `generate`
+ *  query param. Only the exact string "1" is the intent signal (matches the
+ *  `&generate=1` prototypePath builds); anything else (absent, "0", garbage) is
+ *  no-intent. Accepts the raw value from `useSearchParams().get` (string | null).
+ *  Extracted + exported so the intent read is unit-testable without a DOM. */
+export function generateIntentFromSearch(raw: string | null): boolean {
+  return raw === "1"
 }
 
 /** Pure: derive the initial fullscreen state from the `fs` URL query param.
@@ -389,15 +422,36 @@ export function PrototypeRoute() {
   const search = useSearchParams()
   const { goTo } = useNavigation()
   const { content } = useContent()
+  const { workspace } = useWorkspace()
 
   const prdId = prdIdFromPrototypeSearch(search.get("prd"))
   const figmaFileKey = figmaKeyForPrototype(prdId, content.prd)
+  const savedPreference = workspace?.design_source ?? null
+
+  // Explicit-generate-intent signal carried by a "Generate Prototype" navigation
+  // (`prototypePath(id, { generate: true })` → `?generate=1`). Captured ONCE at
+  // mount into a ref, BEFORE the consume effect strips the param: the ref is the
+  // single source of truth for "did this mount arrive with intent", so the later
+  // url-stripping render (which makes search.get("generate") read null) cannot
+  // flip the gate back. The live `search` read is used only for the initial ref
+  // seed and to decide whether a consume/strip is still pending.
+  const initialGenerateIntentRef = useRef(generateIntentFromSearch(search.get("generate")))
 
   // The PRD's resolved ready prototype (read-only via getByPrd), or null. When a
   // generation kicked off from this tab completes, this is set to the new
   // prototype so the in-tab canvas reveals it WITHOUT navigating to an overlay.
   const [proto, setProto] = useState<PrototypeRecord | null>(null)
   const [resolving, setResolving] = useState(false)
+  // Gate for the generate panel on a no-prototype PRD. Default-closed: a plain
+  // `?prd=` navigation / refresh lands on the empty state, and the GenerateModal
+  // opens ONLY when the empty-state "Generate prototype" button sets this true.
+  // EXCEPTION — an explicit `?generate=1` intent nav (a "Generate Prototype"
+  // action) seeds the gate OPEN on mount so the panel opens directly with no
+  // second click; that intent is then consumed (the param stripped) by the effect
+  // below so a refresh after dismiss does not re-open it.
+  const [generateRequested, setGenerateRequested] = useState(() =>
+    initialGenerateRequested(initialGenerateIntentRef.current),
+  )
   // The prototype id whose canvas should open with the within-session "Generated
   // v1…" seed turn — set only when a generation completes in this session, never
   // on the read-only load path. Drives InTabCanvas's one-shot seed. Live-only.
@@ -413,6 +467,10 @@ export function PrototypeRoute() {
   const [genFigmaKey, setGenFigmaKey] = useState<string | null>(null)
   const [genGithubRepo, setGenGithubRepo] = useState<string | null>(null)
   const [genProtoId, setGenProtoId] = useState<number | null>(null)
+  // The pre-build locate phase (locating / crumb / picker) emitted by
+  // GenerateModal, threaded into the full-screen loading surface so ONE surface
+  // runs Locating → (crumb | picker) → Building. Null = Building / no locate phase.
+  const [locatePhase, setLocatePhase] = useState<LocatePhaseState | null>(null)
 
   // Resolve the PRD's prototype read-only on prd change, and RE-ATTACH to an
   // in-flight generation. getActiveByPrd returns the newest ready-OR-generating
@@ -468,6 +526,53 @@ export function PrototypeRoute() {
     }
     // handleGenDone is a stable closure over setters/refs (no reactive deps).
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prdId])
+
+  // Tracks whether the mount's `?generate=1` intent (if any) has been honored +
+  // consumed. The consume effect below flips it; the prd-reset effect reads it to
+  // know whether its first run should preserve the seeded-open gate.
+  const intentConsumedRef = useRef(false)
+
+  // One-shot consume of the `?generate=1` intent. The gate was already seeded OPEN
+  // from the ref at useState init, so here we only STRIP the param from the URL —
+  // via router.replace to the param-less `?prd=<id>` path — so that a later HARD
+  // REFRESH (after the user dismisses the panel) does NOT re-open it: the signal is
+  // gone from the URL. Guarded by the ref so it fires exactly once and never loops;
+  // stripping the param does not itself flip generateRequested (the gate is state,
+  // not derived from the live search read), so there is no re-set cycle. If there
+  // was no intent, this is a no-op that simply marks the intent "consumed" so the
+  // prd-reset effect resumes its normal default-closed re-gate from the first run.
+  useEffect(() => {
+    if (intentConsumedRef.current) return
+    intentConsumedRef.current = true
+    if (initialGenerateIntentRef.current) {
+      // Drop `generate` from the URL, preserving the prd context. prdId is the
+      // mount's parsed id; prototypePath(prdId) rebuilds the bare `?prd=` form.
+      router.replace(prototypePath(prdId))
+    }
+    // Runs once on mount; deliberately not keyed on prdId/router so a later prd
+    // switch (handled by the reset effect) cannot re-trigger a strip.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Re-gate the generate panel on every prd change. Navigating between PRDs must
+  // never carry an open panel across: a PRD whose panel was opened by a click,
+  // then a switch to a different no-prototype PRD, drops back to that PRD's empty
+  // state rather than auto-opening (and auto-firing locate) for the new id.
+  //
+  // FIRST RUN GUARD: on mount this effect also fires. When the mount arrived with
+  // `?generate=1` intent, the gate was seeded OPEN and must be PRESERVED on the
+  // first run (otherwise this would immediately clobber the intent to closed). We
+  // skip exactly the first run in that case; every subsequent prdId change resets
+  // to the default-closed gate as before. With no intent, the first run resets to
+  // false (a harmless no-op, since the gate was already seeded false).
+  const prdResetFirstRunRef = useRef(true)
+  useEffect(() => {
+    if (prdResetFirstRunRef.current) {
+      prdResetFirstRunRef.current = false
+      if (initialGenerateIntentRef.current) return
+    }
+    setGenerateRequested(initialGenerateRequested(false))
   }, [prdId])
 
   // Show the overlay the instant generation kicks off; capture the source context
@@ -559,22 +664,81 @@ export function PrototypeRoute() {
     return (
       <AppLayout>
         <div
-          className="design-agent-surface da-prototype-page"
+          className={`design-agent-surface da-prototype-page ${styles.resolving}`}
           data-testid="prototype-route-loading"
           aria-busy="true"
-        />
+        >
+          {/* Minimal loading indicator — reuses the shared .da-spinner SVG
+              pattern (DesignAgentLauncher / da-prototype-generating) so this is no
+              longer a blank flash while getActiveByPrd is in flight. */}
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 16 16"
+            fill="none"
+            aria-hidden="true"
+            className="da-spinner"
+          >
+            <circle cx="8" cy="8" r="6" stroke="var(--accent-alpha-28)" strokeWidth="2" />
+            <path d="M8 2a6 6 0 0 1 6 6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+          <span className={styles.resolvingLabel}>Loading prototype…</span>
+        </div>
       </AppLayout>
     )
   }
 
-  // No ready prototype yet → the always-open generate panel. A successful
-  // generation reveals the new prototype IN-TAB via handleGenDone (no overlay
-  // navigation). The GenerationLoadingScreen covers kickoff-to-ready feedback.
+  // No ready prototype yet, and generation NOT yet requested → the empty state
+  // with an explicit "Generate prototype" button. The GenerateModal is NOT mounted
+  // here: not mounting it (open=false) keeps its connector-load + savedPreference
+  // auto-skip / locate-on-mount effects from firing, so the locate pipeline never
+  // runs without user intent. Reuses the native da-prototype-empty block (same
+  // classes / control as the no-PRD empty state above) so styling stays consistent.
+  if (!generateRequested) {
+    return (
+      <AppLayout>
+        <div className="design-agent-surface da-prototype-empty" data-testid="prototype-route-empty">
+          <h2 className="da-prototype-empty-title">No prototype yet</h2>
+          <p className="da-prototype-empty-sub">
+            This PRD doesn't have a prototype. Generate one to start.
+          </p>
+          <button
+            type="button"
+            className="btn btn-accent"
+            onClick={() => setGenerateRequested(true)}
+          >
+            Generate prototype
+          </button>
+        </div>
+      </AppLayout>
+    )
+  }
+
+  // Generation requested via the empty-state button → mount the generate panel.
+  // open is gated on generateRequested (never a hardcoded literal): the panel
+  // opens only after an explicit click, and the prd-keyed reset effect re-gates it
+  // on navigation between PRDs. A successful generation reveals the new prototype
+  // IN-TAB via handleGenDone (no overlay navigation). The GenerationLoadingScreen
+  // covers kickoff-to-ready feedback.
+  //
+  // The open prop is ALSO gated on `!genLoading` so the modal yields the instant the
+  // full-screen build loader takes over: when generation kicks off, handleGenStart
+  // flips genLoading true and the "Building your prototype" GenerationLoadingScreen
+  // opens — without this gate the modal would stay open for the build's ~1-2s tail,
+  // stacking its locate/loading UI under the full-screen loader. Closing via
+  // open=false here is SAFE: the generate POST already fired (the prototype id was
+  // captured via onKickoff/onGenStart), so closing does NOT abort the in-flight
+  // generation — handleGenDone + the resolve/poll path + the loading screen own the
+  // rest. The onClose gate (buildGatedOnClose reads genLoadingRef.current) also
+  // suppresses the "navigate to brief" close while genLoading is true, so this
+  // unmount fires no spurious navigation. During LOCATE, genLoading is still false
+  // (it only flips at generation kickoff), so the modal stays open showing the
+  // locate / picker / error UI exactly as before.
   return (
     <AppLayout>
       <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
         <GenerateModal
-          open
+          open={generateRequested && !genLoading}
           onClose={buildGatedOnClose(
             () => genLoadingRef.current,
             () => goTo("brief"),
@@ -584,12 +748,15 @@ export function PrototypeRoute() {
           onGenStart={handleGenStart}
           onKickoff={(id) => setGenProtoId(id)}
           onGenDone={handleGenDone}
+          savedPreference={savedPreference}
+          onLocatePhase={setLocatePhase}
         />
         <GenerationLoadingScreen
           open={genLoading}
           figmaFileKey={genFigmaKey}
           githubRepo={genGithubRepo}
           prototypeId={genProtoId}
+          locatePhase={locatePhase ?? undefined}
         />
       </div>
     </AppLayout>

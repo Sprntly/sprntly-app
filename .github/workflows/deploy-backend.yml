@@ -87,6 +87,14 @@ jobs:
             sudo cp ~/Sprntly/backend/deploy/nginx.conf /etc/nginx/conf.d/sprintly.conf
             sudo nginx -t
             sudo systemctl reload nginx
+            # Install a systemd drop-in that extends the stop timeout (graceful
+            # drain on deploy). It OVERLAYS only TimeoutStopSec onto whatever base
+            # unit the box runs — it does NOT replace the unit — so the live
+            # [Service] config (data dir, db path, env file) is untouched.
+            # daemon-reload before restart so the overlay takes effect.
+            sudo mkdir -p /etc/systemd/system/sprintly.service.d
+            sudo cp ~/Sprntly/backend/deploy/sprintly.service.d/timeout.conf /etc/systemd/system/sprintly.service.d/timeout.conf
+            sudo systemctl daemon-reload
             sudo /bin/systemctl restart sprintly
             # Wait up to 15s for FastAPI to bind. Avoids races when two deploys
             # restart the service close together.

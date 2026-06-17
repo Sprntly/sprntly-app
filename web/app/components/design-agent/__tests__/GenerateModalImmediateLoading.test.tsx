@@ -149,8 +149,24 @@ function manualProps(overrides: Record<string, unknown> = {}) {
     _testRepos: REPOS,
     _testInitSource: "github" as const,
     _testInitRepoSel: SEL_REPO,
+    // Zero inter-poll delay so the live POST→poll loop settles fast under
+    // waitFor (the async locate contract).
+    _testPollIntervalMs: 0,
+    _testPollTimeoutMs: 5000,
     ...overrides,
   }
+}
+
+/** Mock the async locate contract: POST → job handle, first poll → done(result). */
+function mockLocateResolves(result: LocateResponse) {
+  vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+    job_id: "job-1",
+    status: "running",
+  })
+  vi.spyOn(designAgentApi, "locateJob").mockResolvedValue({
+    status: "done",
+    result,
+  })
 }
 
 function clickGenerate(container: HTMLElement) {
@@ -177,10 +193,16 @@ afterEach(() => vi.resetAllMocks())
 
 describe("loading UI is immediate (decoupled from the resolve call)", () => {
   it("mounts the loading state on generate-click BEFORE the resolve call resolves", async () => {
-    // A resolve call that never settles — the loading UI must still appear.
-    let resolveLater: (r: LocateResponse) => void = () => {}
-    vi.spyOn(designAgentApi, "locate").mockReturnValue(
-      new Promise<LocateResponse>((res) => {
+    // The POST returns a job handle but the poll never settles — the loading UI
+    // must still appear immediately (the resolve runs behind it).
+    let resolveLater: (s: { status: "done"; result: LocateResponse }) => void =
+      () => {}
+    vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+      job_id: "job-1",
+      status: "running",
+    })
+    vi.spyOn(designAgentApi, "locateJob").mockReturnValue(
+      new Promise((res) => {
         resolveLater = res
       }),
     )
@@ -188,7 +210,7 @@ describe("loading UI is immediate (decoupled from the resolve call)", () => {
     const { container } = render(React.createElement(GenerateModal, manualProps()))
     clickGenerate(container)
 
-    // Loading UI is visible even though locate has not resolved.
+    // Loading UI is visible even though the resolve has not settled.
     await waitFor(() =>
       expect(
         container.querySelector('[data-testid="generate-loading-state"]'),
@@ -200,11 +222,11 @@ describe("loading UI is immediate (decoupled from the resolve call)", () => {
     expect(container.querySelector('[data-testid="generate-btn"]')).toBeNull()
 
     // Clean up the dangling promise.
-    act(() => resolveLater(autoProceed()))
+    act(() => resolveLater({ status: "done", result: autoProceed() }))
   })
 
   it("confident match → shows the matched line and kicks off generation on the located screen", async () => {
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(autoProceed())
+    mockLocateResolves(autoProceed())
 
     const onGenStart = vi.fn()
     const { container } = render(
@@ -235,7 +257,7 @@ describe("loading UI is immediate (decoupled from the resolve call)", () => {
 
 describe("ambiguous match surfaces the inline picker", () => {
   it("ranked_confirm → picker; pick fires generation on the picked screen", async () => {
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(ambiguous())
+    mockLocateResolves(ambiguous())
     const onGenStart = vi.fn()
     const { container } = render(
       React.createElement(GenerateModal, manualProps({ onGenStart })),
@@ -270,7 +292,7 @@ describe("ambiguous match surfaces the inline picker", () => {
 
 describe("unmapped match surfaces the inline resolve", () => {
   it("unmapped → resolve UI; switch-source returns to the config form", async () => {
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue(
+    mockLocateResolves(
       autoProceed({ unmapped: true, decision: "ranked_confirm", chosen: [] }),
     )
     const { container } = render(React.createElement(GenerateModal, manualProps()))
@@ -295,7 +317,7 @@ describe("unmapped match surfaces the inline resolve", () => {
 
   it("unmapped → pick a fallback screen fires generation on that screen", async () => {
     // unmapped but with ranked fallbacks present.
-    vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+    mockLocateResolves({
       ...ambiguous(),
       unmapped: true,
     })
@@ -334,9 +356,14 @@ describe("unmapped match surfaces the inline resolve", () => {
 
 describe("re-entry guard — exactly one resolve call per flow", () => {
   it("a double generate-click fires the resolve call only ONCE", async () => {
-    let resolveLater: (r: LocateResponse) => void = () => {}
-    const spy = vi.spyOn(designAgentApi, "locate").mockReturnValue(
-      new Promise<LocateResponse>((res) => {
+    let resolveLater: (s: { status: "done"; result: LocateResponse }) => void =
+      () => {}
+    const spy = vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+      job_id: "job-1",
+      status: "running",
+    })
+    vi.spyOn(designAgentApi, "locateJob").mockReturnValue(
+      new Promise((res) => {
         resolveLater = res
       }),
     )
@@ -353,7 +380,7 @@ describe("re-entry guard — exactly one resolve call per flow", () => {
     )
 
     expect(spy).toHaveBeenCalledTimes(1)
-    act(() => resolveLater(autoProceed()))
+    act(() => resolveLater({ status: "done", result: autoProceed() }))
     // Even after the flow resolves and generation kicks off, no second resolve.
     await waitFor(() =>
       expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
@@ -364,7 +391,8 @@ describe("re-entry guard — exactly one resolve call per flow", () => {
   it("auto-skip effect re-runs (dep churn) do NOT re-fire the resolve call", async () => {
     // The auto-skip effect depends on connections/repos; a re-render that
     // settles those must NOT trigger a second resolve sample.
-    const spy = vi.spyOn(designAgentApi, "locate").mockResolvedValue(autoProceed())
+    mockLocateResolves(autoProceed())
+    const spy = vi.mocked(designAgentApi.locate)
     const GITHUB_PREF = {
       design_source: "github" as const,
       github_repo: SEL_REPO,
@@ -412,7 +440,8 @@ describe("re-entry guard — exactly one resolve call per flow", () => {
   it("ambiguous match is NOT re-sampled — first ranked_confirm goes straight to the picker", async () => {
     // If the flow ever re-fired locate hunting for a luckier confidence, the
     // spy would be called more than once. The first ambiguous result must stick.
-    const spy = vi.spyOn(designAgentApi, "locate").mockResolvedValue(ambiguous())
+    mockLocateResolves(ambiguous())
+    const spy = vi.mocked(designAgentApi.locate)
     const { container } = render(React.createElement(GenerateModal, manualProps()))
     clickGenerate(container)
 

@@ -778,7 +778,7 @@ Return STRICT JSON matching this schema — raw JSON only, no markdown, no expla
       "id": "the-id-in-square-brackets",
       "entry_component": "TheComponent",
       "confidence": 85,
-      "rationale": "One sentence explaining why this screen matches.",
+      "rationale": "A plain-language, one-sentence description of what this screen is and what a user does on it — written so a non-technical product manager can tell the candidates apart; no jargon, no route names, no component counts.",
       "ambiguous": false,
       "classification": "modify-existing",
       "spans_multi_surface": false,
@@ -812,7 +812,10 @@ candidates array. Instead return a single candidate with "classification": \
 "no-host-decline" — leave "id", "route", and "entry_component" empty and set \
 "classification_confidence" to how certain you are that nothing hosts it. This is the \
 representable way to decline: an empty array is silent, a decline candidate is not.
-- "rationale" must be a single sentence with no line breaks.
+- "rationale" must be a single sentence with no line breaks, describing WHAT the \
+screen is and what a user does on it (not WHY it matches the request), in plain \
+language a non-technical product manager can choose between candidates with. Keep \
+it under 300 characters.
 
 Classification — for each candidate, also label the KIND of placement the PRD implies:
 - "classification" is one of three values: "modify-existing" (the PRD changes or \

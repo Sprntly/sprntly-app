@@ -7,6 +7,8 @@
 // router). The launcher redirect contract is pinned in the source-assertion test
 // in components/shared/__tests__/ApproveModal.test.tsx.
 import * as React from "react"
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   PROTOTYPE_PATH,
@@ -24,6 +26,8 @@ import {
   actionForActiveProto,
   resolvePrdTitle,
   needsTitleFetch,
+  initialGenerateRequested,
+  generateIntentFromSearch,
 } from "../PrototypeRoute"
 import type { PrototypeRecord } from "../../../lib/api"
 
@@ -297,5 +301,326 @@ describe("prototype route — fs param derivation (fsParamToFullscreen)", () => 
   // Exactly "0" → in-shell split view (the only suppression value).
   it("returns false only when fs param is exactly '0'", () => {
     expect(fsParamToFullscreen("0")).toBe(false)
+  })
+})
+
+// ─── generate-panel gate (initialGenerateRequested) ──────────────────────────
+//
+// The bug: a no-prototype PRD rendered <GenerateModal open> on mount, auto-firing
+// the locate pipeline with zero clicks (worsened by the savedPreference auto-skip
+// that immediately drives the open modal into the locate flow). The fix gates the
+// panel behind an explicit click: the empty state's "Generate prototype" button
+// sets generateRequested=true, and the modal renders open={generateRequested}.
+// initialGenerateRequested derives the INITIAL gate value — default-closed unless
+// an explicit-generate-intent signal is present. No navigation currently carries
+// such a signal (every nav to /prototype is ?prd=<id> only), so the route always
+// seeds it false, landing on the empty state.
+
+describe("prototype route — generate-panel gate (initialGenerateRequested)", () => {
+  it("defaults to closed (false) for a plain navigation with no generate intent", () => {
+    // Plain nav / refresh to a no-prototype PRD → empty state, panel NOT auto-open.
+    expect(initialGenerateRequested(false)).toBe(false)
+  })
+
+  it("opens (true) when an explicit-generate-intent signal IS present", () => {
+    // Future-proofs the brief→generate path: if a nav signal is ever wired, the
+    // panel opens on mount with no extra click. Honored here, not fabricated.
+    expect(initialGenerateRequested(true)).toBe(true)
+  })
+
+  it("settled no-prototype state is 'generate' but the panel stays gated until clicked", () => {
+    // prototypeTabState classifies the branch as 'generate' (PRD set, resolve
+    // settled, no proto) — but reaching that branch no longer means an open panel:
+    // the route renders the empty state until generateRequested flips true. The
+    // two are independent: state classification ≠ panel visibility.
+    expect(prototypeTabState(42, false, null)).toBe("generate")
+    expect(initialGenerateRequested(false)).toBe(false)
+  })
+})
+
+// ─── generate-intent read (generateIntentFromSearch) ─────────────────────────
+//
+// A "Generate Prototype" navigation carries an explicit `?generate=1`
+// signal (built by prototypePath(id, { generate: true })). The route reads it via
+// generateIntentFromSearch, seeds the gate open with it, then strips it. Only the
+// exact string "1" is the intent — matching what prototypePath emits.
+
+describe("prototype route — generate-intent read (generateIntentFromSearch)", () => {
+  it("treats the exact '1' value as intent (matches prototypePath's &generate=1)", () => {
+    expect(generateIntentFromSearch("1")).toBe(true)
+  })
+
+  it("treats absent / '0' / any other value as NO intent (bare nav stays gated)", () => {
+    expect(generateIntentFromSearch(null)).toBe(false)
+    expect(generateIntentFromSearch("")).toBe(false)
+    expect(generateIntentFromSearch("0")).toBe(false)
+    expect(generateIntentFromSearch("true")).toBe(false)
+    expect(generateIntentFromSearch("2")).toBe(false)
+  })
+
+  it("round-trips with prototypePath: read(build(id, {generate:true})) is intent", () => {
+    // The query param prototypePath emits must be the one the route reads as intent.
+    const qs = prototypePath(42, { generate: true }) // "/prototype?prd=42&generate=1"
+    const generateVal = qs.split("generate=")[1] ?? null
+    expect(generateIntentFromSearch(generateVal)).toBe(true)
+    // And a plain nav (no generate option) carries no intent signal.
+    const bare = prototypePath(42) // "/prototype?prd=42"
+    expect(bare.includes("generate=")).toBe(false)
+  })
+
+  it("feeds initialGenerateRequested: intent param opens the gate, bare nav keeps it closed", () => {
+    // The composed contract the route relies on at mount: read → seed.
+    expect(initialGenerateRequested(generateIntentFromSearch("1"))).toBe(true)
+    expect(initialGenerateRequested(generateIntentFromSearch(null))).toBe(false)
+  })
+})
+
+// ─── PrototypeRoute consumes the ?generate=1 intent on mount ─────────
+//
+// Source-assertion suite (same rationale as the other PrototypeRoute source
+// blocks: the component pulls the full Next.js navigation + workspace/content
+// context pyramid, so a node-env mount buys no coverage over a source check; the
+// behavioural contract is fully covered by the pure-helper tests above). These
+// pin the read+seed+CONSUME wiring: the gate is seeded from the URL's intent, and
+// the intent is stripped from the URL on mount (router.replace to the param-less
+// prototypePath) so a refresh after dismiss does NOT re-open the panel.
+
+describe("PrototypeRoute — consumes ?generate=1 intent on mount (no refresh re-open)", () => {
+  const src = readFileSync(
+    resolve(process.cwd(), "app/(app)/prototype/PrototypeRoute.tsx"),
+    "utf8",
+  )
+
+  it("reads the generate param and seeds the gate with the intent (not a hardcoded false)", () => {
+    // The gate must be seeded from the URL intent, captured into a ref at mount.
+    expect(src).toContain('generateIntentFromSearch(search.get("generate"))')
+    expect(src).toContain("initialGenerateRequested(initialGenerateIntentRef.current)")
+  })
+
+  it("CONSUMES the intent by stripping the param via router.replace(prototypePath(prdId))", () => {
+    // The one-shot consume must replace the URL with the param-less prototype path
+    // (preserves prd, drops generate) so a refresh after dismiss has no signal left.
+    expect(src).toContain("router.replace(prototypePath(prdId))")
+    // Guarded so it fires once — never loops.
+    expect(src).toContain("intentConsumedRef")
+  })
+
+  it("does not re-derive the gate from the live search read (strip cannot flip it back)", () => {
+    // generateRequested is React state seeded once; the strip render makes
+    // search.get("generate") read null, but the gate is NOT recomputed from that
+    // live read — the seed flows through the ref, so the re-render cannot re-set it.
+    // Assert the gate seed reads the REF, not a fresh search.get in the useState.
+    const seedsFromRef =
+      /useState\(\(\)\s*=>\s*initialGenerateRequested\(initialGenerateIntentRef\.current\)/.test(
+        src,
+      )
+    expect(seedsFromRef).toBe(true)
+  })
+
+  it("preserves the seeded-open gate on the prd-reset effect's FIRST run when intent is present", () => {
+    // The [prdId] reset effect also fires on mount; it must NOT clobber the
+    // intent-seeded-open gate on its first run. A first-run guard short-circuits.
+    expect(src).toContain("prdResetFirstRunRef")
+    const firstRunGuard =
+      /prdResetFirstRunRef\.current[\s\S]*?initialGenerateIntentRef\.current[\s\S]*?return/.test(
+        src,
+      )
+    expect(firstRunGuard).toBe(true)
+  })
+
+  it("REGRESSION: a refresh after dismiss cannot re-open — the gate seed depends only on the URL param, which the consume stripped", () => {
+    // Models the owner's explicit bug: after consume, the URL is param-less, so a
+    // fresh mount reads generateIntentFromSearch(null) === false → gated. Prove the
+    // seed is a pure function of the (now-stripped) param, NOT a sticky literal.
+    // (Behavioural proof at the unit level: with the param gone, the seed is false.)
+    expect(initialGenerateRequested(generateIntentFromSearch(null))).toBe(false)
+    // And the source consumes (strips) rather than leaving the param in place — the
+    // load-bearing line whose ABSENCE would reintroduce the refresh-reopen bug.
+    expect(src).toContain("router.replace(prototypePath(prdId))")
+  })
+})
+
+// ─── PrototypeRoute wires savedPreference + onLocatePhase to GenerateModal ────
+//
+// These source-assertion tests prove that PrototypeRoute passes the two props
+// that were previously missing, following the same pattern as the ApproveModal
+// source-assertion tests. The assertions FAIL on the old unwired mount (before
+// the fix) and PASS on the wired version.
+//
+// Why source-assertion rather than jsdom mount: PrototypeRoute reads
+// useSearchParams + useRouter (Next.js navigation) and useWorkspace (auth-
+// guarded context); mounting it in vitest's node-env requires a large context
+// pyramid with no additional coverage over what the source check provides.
+
+describe("PrototypeRoute — savedPreference + onLocatePhase wired to GenerateModal", () => {
+  const src = readFileSync(
+    resolve(process.cwd(), "app/(app)/prototype/PrototypeRoute.tsx"),
+    "utf8",
+  )
+
+  it("reads workspace.design_source via useWorkspace and derives savedPreference", () => {
+    // useWorkspace must be imported and called to source the saved preference.
+    expect(src).toContain("useWorkspace")
+    expect(src).toContain("workspace?.design_source")
+    expect(src).toContain("savedPreference")
+  })
+
+  it("passes savedPreference to GenerateModal on the /prototype surface", () => {
+    // The always-open GenerateModal on PrototypeRoute must receive the saved
+    // preference so the github flash-suppression render guard and the
+    // auto-skip effect have the data they need.
+    expect(src).toContain("savedPreference={savedPreference}")
+  })
+
+  it("passes onLocatePhase to GenerateModal wired to setLocatePhase", () => {
+    // onLocatePhase drives the pre-build locate phase into the loading screen
+    // so Locating → crumb / picker → Building shows on the /prototype surface.
+    expect(src).toContain("onLocatePhase={setLocatePhase}")
+  })
+
+  it("threads locatePhase into GenerationLoadingScreen", () => {
+    // The locate phase emitted by GenerateModal must reach the loading screen
+    // so the Locating / crumb / picker phases render on this surface too.
+    expect(src).toContain("locatePhase={locatePhase")
+  })
+
+  it("declares locatePhase state with the LocatePhaseState type", () => {
+    // The state variable and its type annotation must be present — ensures the
+    // import of LocatePhaseState was not accidentally omitted.
+    expect(src).toContain("LocatePhaseState")
+    expect(src).toContain("useState<LocatePhaseState | null>")
+  })
+})
+
+// ─── PrototypeRoute gates the generate panel behind the empty-state button ────
+//
+// Source-assertion suite (same rationale as the savedPreference block above:
+// PrototypeRoute pulls the full Next.js navigation + workspace/content/navigation
+// context pyramid, so a node-env mount buys no coverage over a source check). These
+// pin the FIX: the no-prototype branch renders the native empty state with a
+// "Generate prototype" button, the modal's open is gated on generateRequested (NOT
+// a hardcoded literal), and the gate re-seeds on prdId change. They FAIL on the old
+// `<GenerateModal open ...>` mount and PASS after the gate is introduced.
+
+describe("PrototypeRoute — generate panel gated behind empty-state button", () => {
+  const src = readFileSync(
+    resolve(process.cwd(), "app/(app)/prototype/PrototypeRoute.tsx"),
+    "utf8",
+  )
+
+  it("does NOT mount GenerateModal with a hardcoded open prop", () => {
+    // The bug was a bare `open` literal on the modal (always-open). The fix gates
+    // it, so the bare-literal form must be gone. We assert the JSX never contains
+    // `<GenerateModal` immediately followed by a bare `open` line (no `={...}`).
+    const bareOpen = /<GenerateModal[\s\S]*?\n\s*open\s*\n/.test(src)
+    expect(bareOpen).toBe(false)
+  })
+
+  it("renders GenerateModal open gated on the generateRequested state", () => {
+    // open must be driven by the generateRequested gate, never a literal. The gate
+    // also yields to the build loader via `&& !genLoading` (pinned in the
+    // transition-polish block below); assert the generateRequested gate is the base.
+    expect(src).toContain("open={generateRequested && !genLoading}")
+  })
+
+  it("declares the generateRequested gate state initialised closed by default", () => {
+    expect(src).toContain("generateRequested")
+    expect(src).toContain("setGenerateRequested")
+    expect(src).toContain("initialGenerateRequested(false)")
+  })
+
+  it("renders a 'Generate prototype' empty state (native da-prototype-empty block) for the no-proto branch", () => {
+    // The no-prototype, not-yet-requested branch reuses the native empty-state
+    // pattern (same classes as the no-PRD empty state) with its own testid.
+    expect(src).toContain('data-testid="prototype-route-empty"')
+    expect(src).toContain("da-prototype-empty-title")
+    expect(src).toContain("da-prototype-empty-sub")
+    expect(src).toContain("Generate prototype")
+    // The empty-state button is the only thing that flips the gate open.
+    expect(src).toContain("onClick={() => setGenerateRequested(true)}")
+  })
+
+  it("re-gates the panel on prdId change (a useEffect resets generateRequested)", () => {
+    // Navigating between PRDs must never carry an open panel across: an effect
+    // keyed on prdId resets the gate to its default-closed value.
+    const resetEffect =
+      /setGenerateRequested\(initialGenerateRequested\(false\)\)[\s\S]*?\},\s*\[prdId\]\)/.test(
+        src,
+      )
+    expect(resetEffect).toBe(true)
+  })
+
+  it("keeps the no-PRD (prdId == null) empty state unchanged", () => {
+    // The pre-existing no-PRD empty state and its testid are untouched by the fix.
+    expect(src).toContain('data-testid="prototype-route-empty"')
+    expect(src).toContain("No PRD selected")
+    expect(src).toContain('goTo("brief")')
+  })
+})
+
+// ─── PrototypeRoute — transition polish ──────────────────────────────
+//
+// Source-assertion suite (same rationale as the gate blocks above: PrototypeRoute
+// pulls the full Next.js navigation + workspace/content context pyramid, so a
+// node-env mount buys no coverage over a source check; the open prop is pinned the
+// same way the generateRequested gate is pinned in the block above). Two visual
+// fixes:
+//   FIX 1 — the GenerateModal yields to the full-screen build loader: its `open`
+//           is gated on `generateRequested && !genLoading`, so the instant
+//           genLoading flips true (build kickoff) the modal unmounts instead of
+//           stacking under the "Building your prototype" GenerationLoadingScreen.
+//   FIX 2 — the resolving branch renders a real loading indicator (spinner +
+//           label) rather than a blank aria-busy div (no initial-load blank flash).
+
+describe("PrototypeRoute — transition polish: modal yields to build loader", () => {
+  const src = readFileSync(
+    resolve(process.cwd(), "app/(app)/prototype/PrototypeRoute.tsx"),
+    "utf8",
+  )
+
+  it("gates the GenerateModal open on `!genLoading` so it yields to the build loader", () => {
+    // The instant genLoading flips true (build kickoff), the modal must unmount so
+    // it never renders stacked under the full-screen GenerationLoadingScreen.
+    expect(src).toContain("open={generateRequested && !genLoading}")
+  })
+
+  it("does NOT leave the modal open on a bare generateRequested (no !genLoading guard)", () => {
+    // The pre-fix form `open={generateRequested}` (no genLoading guard) on the
+    // GenerateModal is exactly what caused the ~1-2s stacked render; assert it is
+    // gone from the modal mount. (The gated form above is the only open prop.)
+    const bareGate = /<GenerateModal[\s\S]*?\n\s*open=\{generateRequested\}\s*\n/.test(
+      src,
+    )
+    expect(bareGate).toBe(false)
+  })
+
+  it("still keeps the GenerationLoadingScreen open driven by genLoading (unchanged)", () => {
+    // The full-screen build loader's visibility is unchanged — it is the surface the
+    // modal yields TO.
+    expect(src).toContain("open={genLoading}")
+  })
+})
+
+describe("PrototypeRoute — resolving state renders a loading indicator", () => {
+  const src = readFileSync(
+    resolve(process.cwd(), "app/(app)/prototype/PrototypeRoute.tsx"),
+    "utf8",
+  )
+
+  it("keeps the testid + aria-busy on the resolving placeholder", () => {
+    expect(src).toContain('data-testid="prototype-route-loading"')
+    expect(src).toContain('aria-busy="true"')
+  })
+
+  it("renders a non-empty loading indicator (spinner + label), not a blank div", () => {
+    // The resolving placeholder must carry the shared .da-spinner and a visible
+    // label rather than self-closing into an empty aria-busy div (the blank flash).
+    expect(src).toContain('className="da-spinner"')
+    expect(src).toContain("Loading prototype…")
+    // The old empty self-closed form `data-testid="prototype-route-loading" ...  />`
+    // (a blank div) must be gone — the placeholder now has children.
+    const blankDiv =
+      /data-testid="prototype-route-loading"[\s\S]*?aria-busy="true"\s*\/>/.test(src)
+    expect(blankDiv).toBe(false)
   })
 })
