@@ -33,3 +33,16 @@ export async function runEvidenceGeneration(
   }
   return { ok: true, evidence: markdownToEvidenceState(doc.payload_md) }
 }
+
+/** Read-only sibling of runEvidenceGeneration: fetch the EXISTING evidence for a
+ *  brief insight (no generation) and parse it for the panel. Returns null when
+ *  no ready evidence exists yet. Used to populate the Evidence tab for the
+ *  insight whose PRD is being viewed/generated. */
+export async function loadEvidenceByInsight(
+  briefId: number,
+  insightIndex: number,
+): Promise<PrdContent | null> {
+  const rec = await evidenceApi.byInsight(briefId, insightIndex)
+  if (!rec || rec.status !== "ready" || !rec.payload_md) return null
+  return markdownToEvidenceState(rec.payload_md)
+}

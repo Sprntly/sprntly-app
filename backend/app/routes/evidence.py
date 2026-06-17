@@ -103,6 +103,28 @@ async def generate(
     }
 
 
+@router.get("/by-insight/{brief_id}/{insight_index}")
+def get_by_insight(
+    brief_id: int,
+    insight_index: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Return the latest evidence for a brief insight (ready or in-flight), or 404.
+
+    Read-by-insight lookup so the UI can populate the Evidence tab for the
+    insight whose PRD is being viewed/generated. Evidence is produced (multi-
+    agent Phase 1) keyed by brief_id+insight_index but there was no read-by-
+    insight endpoint, so the panel stayed empty. Ownership-scoped via the brief
+    (404 on a foreign/missing brief). Two-segment-deeper path, so it can never be
+    shadowed by the single-segment `GET /{evidence_id}` below.
+    """
+    require_owned_brief(brief_id, company.company_id)
+    row = find_existing_evidence(brief_id, insight_index, variant=_VARIANT)
+    if not row:
+        raise HTTPException(status_code=404, detail="No evidence for this insight")
+    return row
+
+
 @router.get("/{evidence_id}")
 def get(
     evidence_id: int,

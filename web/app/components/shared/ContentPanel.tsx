@@ -6,7 +6,7 @@ import { useContent } from "../../context/ContentContext"
 import { EvidenceSections } from "./EvidenceSections"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
-import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
+import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
@@ -156,6 +156,7 @@ function EvidenceTab() {
   >({ kind: "idle" })
   const [generatingPrd, setGeneratingPrd] = useState(false)
   const loadedKeyRef = useRef<string | null>(null)
+  const prdEvidenceKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!detail?.meta) return
@@ -180,6 +181,32 @@ function EvidenceTab() {
       })
     return () => { cancelled = true }
   }, [detail?.meta?.briefId, detail?.meta?.insightIndex, evidence, setContent])
+
+  // PRD-driven population: when a PRD is being viewed/generated for an insight
+  // (content.prdMeta) WITHOUT an explicit finding-detail context, READ-load that
+  // insight's existing evidence so the Evidence tab is populated instead of
+  // empty. Pure read (loadEvidenceByInsight) — never kicks off generation; the
+  // detail.meta loader above owns the generate-if-clicked-from-a-finding case.
+  const prdMeta = content.prdMeta
+  useEffect(() => {
+    if (detail?.meta) return
+    if (!prdMeta) return
+    const key = `${prdMeta.briefId}:${prdMeta.insightIndex}`
+    if (prdEvidenceKeyRef.current === key && evidence) return
+    if (prdEvidenceKeyRef.current !== key) setContent({ evidence: null })
+    prdEvidenceKeyRef.current = key
+    let cancelled = false
+    loadEvidenceByInsight(prdMeta.briefId, prdMeta.insightIndex)
+      .then((ev) => {
+        if (!cancelled && ev) setContent({ evidence: ev })
+      })
+      .catch(() => {
+        /* read-only best effort — leave the panel's empty/generate state */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [detail?.meta, prdMeta?.briefId, prdMeta?.insightIndex, evidence, setContent])
 
   const handleGeneratePrd = async () => {
     if (!detail?.meta) {

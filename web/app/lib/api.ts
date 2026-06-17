@@ -324,6 +324,21 @@ export const evidenceApi = {
       force,
     }),
   get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
+  /** Read the latest evidence for a brief insight (ready or in-flight), or null.
+   *  Lets the Evidence tab populate for the insight whose PRD is being viewed /
+   *  generated — a pure read, never kicks off generation. Swallows 404→null. */
+  byInsight: async (
+    briefId: number,
+    insightIndex: number,
+  ): Promise<EvidenceRecord | null> => {
+    try {
+      return await api.get<EvidenceRecord>(
+        `/v1/evidence/by-insight/${encodeURIComponent(String(briefId))}/${encodeURIComponent(String(insightIndex))}`,
+      )
+    } catch {
+      return null
+    }
+  },
 }
 
 // ---- companies --------------------------------------------------------------
