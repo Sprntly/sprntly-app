@@ -43,10 +43,18 @@ _FAKE_PNG = b"\x89PNG\r\n\x1a\nfake-screenshot-bytes"
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _build_fake(*, screenshot_return=_FAKE_PNG, goto_side_effect=None, launch_side_effect=None):
+def _build_fake(
+    *,
+    screenshot_return=_FAKE_PNG,
+    goto_side_effect=None,
+    launch_side_effect=None,
+    wait_for_selector_side_effect=None,
+):
     """Fake Playwright graph + a factory matching the ``async with`` contract."""
     page = MagicMock(name="page")
     page.goto = AsyncMock(side_effect=goto_side_effect)
+    page.wait_for_selector = AsyncMock(side_effect=wait_for_selector_side_effect)
+    page.wait_for_load_state = AsyncMock()
     page.screenshot = AsyncMock(return_value=screenshot_return)
 
     context = MagicMock(name="context")
@@ -83,21 +91,62 @@ def _install(monkeypatch, handles):
     monkeypatch.setattr(screenshot, "_resolve_async_playwright", lambda: handles.factory)
 
 
+# A tiny multi-file SPA bundle: index.html with a module script that populates
+# #root + an assets/ js (mirrors the Vite dist/ shape the capture re-serves).
+# `index.html` MUST be present (the capture refuses an entry-less bundle).
+_SPA_BUNDLE = {
+    "index.html": (
+        '<!doctype html><html><head>'
+        '<script type="module" src="./assets/index-abc123.js"></script>'
+        '</head><body><div id="root"></div></body></html>'
+    ),
+    "assets/index-abc123.js": (
+        "const r=document.getElementById('root');"
+        "const d=document.createElement('div');"
+        "d.textContent='rendered';r.appendChild(d);"
+    ),
+}
+
+
 # ─── capture_bundle_screenshot — happy path ──────────────────────────────────
 
 
 async def test_capture_returns_png_bytes_on_success(monkeypatch):
     h = _build_fake()
     _install(monkeypatch, h)
-    out = await screenshot.capture_bundle_screenshot("https://x.example/prototypes/1/1/index.html")
+    out = await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
     assert out == _FAKE_PNG
     assert h.page.screenshot.await_count == 1
+
+
+async def test_capture_points_at_local_loopback_not_signed_url(monkeypatch):
+    """Navigation targets a local 127.0.0.1 loopback URL, NOT a signed storage URL.
+
+    This is the core of the fix: rendering from the signed Supabase object URL
+    paints only the un-hydrated shell because relative ./assets/* cannot resolve.
+    """
+    h = _build_fake()
+    _install(monkeypatch, h)
+    await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
+    nav_url = h.page.goto.await_args.args[0]
+    assert nav_url.startswith("http://127.0.0.1:")
+    assert nav_url.endswith("/index.html")
+    assert "supabase" not in nav_url and "signed" not in nav_url
+
+
+async def test_capture_waits_for_root_to_populate(monkeypatch):
+    """The render-wait gate: wait_for_selector('#root > *') before screenshot."""
+    h = _build_fake()
+    _install(monkeypatch, h)
+    await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
+    assert h.page.wait_for_selector.await_count == 1
+    assert h.page.wait_for_selector.await_args.args[0] == "#root > *"
 
 
 async def test_capture_navigation_cap_is_8s(monkeypatch):
     h = _build_fake()
     _install(monkeypatch, h)
-    await screenshot.capture_bundle_screenshot("https://x.example/index.html")
+    await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
     assert h.page.goto.await_args.kwargs["timeout"] == 8000
     assert h.page.goto.await_args.kwargs["wait_until"] == "load"
 
@@ -105,7 +154,7 @@ async def test_capture_navigation_cap_is_8s(monkeypatch):
 async def test_capture_disposes_browser_on_success(monkeypatch):
     h = _build_fake()
     _install(monkeypatch, h)
-    await screenshot.capture_bundle_screenshot("https://x.example/index.html")
+    await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
     assert h.context.close.await_count == 1
     assert h.browser.close.await_count == 1
 
@@ -122,15 +171,24 @@ def _import_error_resolver():
 async def test_capture_returns_none_on_import_error(monkeypatch):
     """No Playwright installed → resolver raises ImportError → None (no raise)."""
     monkeypatch.setattr(screenshot, "_resolve_async_playwright", _import_error_resolver())
-    out = await screenshot.capture_bundle_screenshot("https://x.example/index.html")
+    out = await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
     assert out is None
+
+
+async def test_capture_returns_none_on_empty_bundle(monkeypatch):
+    """No renderable entry (no index.html) → None, no browser launched."""
+    h = _build_fake()
+    _install(monkeypatch, h)
+    out = await screenshot.capture_bundle_screenshot({"assets/x.js": "1"})
+    assert out is None
+    assert h.chromium.launch.await_count == 0
 
 
 async def test_capture_returns_none_on_launch_failure(monkeypatch):
     """Chromium not provisioned → launch raises → None (no raise)."""
     h = _build_fake(launch_side_effect=RuntimeError("Executable doesn't exist"))
     _install(monkeypatch, h)
-    out = await screenshot.capture_bundle_screenshot("https://x.example/index.html")
+    out = await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
     assert out is None
 
 
@@ -140,33 +198,49 @@ async def test_capture_returns_none_on_timeout(monkeypatch):
 
     h = _build_fake(goto_side_effect=TimeoutError("Timeout 8000ms exceeded"))
     _install(monkeypatch, h)
-    out = await screenshot.capture_bundle_screenshot("https://x.example/index.html")
+    out = await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
     assert out is None
+
+
+async def test_capture_returns_none_when_root_never_populates(monkeypatch):
+    """Render-wait honest-degrade: a bundle whose #root never gets a child →
+    wait_for_selector times out → None within the cap, no crash, no shell PNG."""
+    class TimeoutError(Exception):  # noqa: A001 — mimic playwright's class name
+        pass
+
+    h = _build_fake(wait_for_selector_side_effect=TimeoutError("Timeout 8000ms"))
+    _install(monkeypatch, h)
+    out = await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
+    assert out is None
+    assert h.page.screenshot.await_count == 0   # never screenshot the empty shell
 
 
 async def test_capture_returns_none_on_nav_error(monkeypatch):
     h = _build_fake(goto_side_effect=RuntimeError("net::ERR_NAME_NOT_RESOLVED"))
     _install(monkeypatch, h)
-    out = await screenshot.capture_bundle_screenshot("https://x.example/index.html")
+    out = await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
     assert out is None
 
 
 async def test_capture_disposes_browser_on_nav_error(monkeypatch):
     h = _build_fake(goto_side_effect=RuntimeError("net::ERR_TIMED_OUT"))
     _install(monkeypatch, h)
-    await screenshot.capture_bundle_screenshot("https://x.example/index.html")
+    await screenshot.capture_bundle_screenshot(_SPA_BUNDLE)
     # Disposed even when goto raised (no browser pool).
     assert h.context.close.await_count == 1
     assert h.browser.close.await_count == 1
 
 
-async def test_capture_never_logs_the_bundle_url(monkeypatch, caplog):
-    """The bundle_url (possibly a signed URL) is never logged by the capture module."""
+async def test_capture_never_logs_bundle_contents(monkeypatch, caplog):
+    """Bundle contents are never logged by the capture module."""
     h = _build_fake(goto_side_effect=RuntimeError("boom"))
     _install(monkeypatch, h)
-    secret_url = "https://signed.example/SECRET-TOKEN/index.html"
+    secret_bundle = {
+        "index.html": '<div id="root"></div><!--SECRET-TOKEN-->',
+        "assets/x.js": "1",
+    }
     with caplog.at_level(logging.DEBUG):
-        await screenshot.capture_bundle_screenshot(secret_url)
+        await screenshot.capture_bundle_screenshot(secret_bundle)
     assert all("SECRET-TOKEN" not in r.getMessage() for r in caplog.records)
 
 

@@ -1063,6 +1063,100 @@ def _read_source_filesystem_sync(sub_prefix: str) -> dict[str, str]:
     return out
 
 
+# ─── Bundle readback (re-render staged dist/ for preview backfill) ────────────
+#
+# The preview-backfill one-off re-renders an already-staged bundle without an
+# LLM call or a vite rebuild: it reads the BUILT dist/ back from storage in the
+# same {relative_path: content} shape stage_bundle staged (binary assets under a
+# `.b64` sentinel, mirroring storage._read_dist), then hands it to the local
+# render capture. The `_source/` and `_preview/` sibling sub-prefixes are
+# excluded so only the renderable dist/ tree (index.html + ./assets/*) is read.
+
+_BUNDLE_SUBDIR_EXCLUDE = ("_source/", "_preview/")
+
+
+async def read_bundle_files_for_checkpoint(
+    prototype_id: int,
+    checkpoint_id: int,
+) -> dict[str, str]:
+    """Read the staged dist/ bundle for a checkpoint as {relative_path: content}.
+
+    Returns the same dict shape `stage_bundle` staged — `index.html`, relative
+    `assets/*`, and binary assets under a `.b64` sentinel key — so it can be
+    re-served by the local render capture. The `_source/` and `_preview/` sibling
+    sub-prefixes are excluded. Returns {} when nothing is staged (graceful).
+
+    Supabase path (primary): recursive list + download. Filesystem path
+    (fallback): walk the bundle dir under settings.storage_dir.
+    """
+    prefix = _bundle_prefix(prototype_id, checkpoint_id)
+    bucket = _bucket_name()
+    if bucket:
+        return await asyncio.to_thread(_read_bundle_supabase_sync, bucket, prefix)
+    return await asyncio.to_thread(_read_bundle_filesystem_sync, prefix)
+
+
+def _read_bundle_supabase_sync(bucket: str, prefix: str) -> dict[str, str]:
+    from app.db.client import require_client
+
+    storage = require_client().storage.from_(bucket)
+
+    def _walk(rel_prefix: str) -> list[str]:
+        # Supabase list() is one level deep; recurse into folder entries (those
+        # carry no `id`) to gather every object's prefix-relative path.
+        try:
+            objects = storage.list(rel_prefix) or []
+        except Exception:
+            return []
+        paths: list[str] = []
+        for obj in objects:
+            name = obj.get("name") if isinstance(obj, dict) else getattr(obj, "name", None)
+            obj_id = obj.get("id") if isinstance(obj, dict) else getattr(obj, "id", None)
+            if not name:
+                continue
+            child = f"{rel_prefix}/{name}"
+            if obj_id is None:
+                paths.extend(_walk(child))
+            else:
+                paths.append(child)
+        return paths
+
+    out: dict[str, str] = {}
+    for full_path in _walk(prefix):
+        rel = full_path[len(prefix) + 1:]
+        if rel.startswith(_BUNDLE_SUBDIR_EXCLUDE):
+            continue
+        try:
+            data = storage.download(full_path)
+        except Exception:
+            continue
+        raw = bytes(data) if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+        try:
+            out[rel] = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            out[f"{rel}.b64"] = base64.b64encode(raw).decode("ascii")
+    return out
+
+
+def _read_bundle_filesystem_sync(prefix: str) -> dict[str, str]:
+    target = Path(settings.storage_dir).resolve() / prefix
+    if not target.exists():
+        return {}
+    out: dict[str, str] = {}
+    for path in sorted(target.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(target))
+        if rel.startswith(_BUNDLE_SUBDIR_EXCLUDE):
+            continue
+        raw = path.read_bytes()
+        try:
+            out[rel] = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            out[f"{rel}.b64"] = base64.b64encode(raw).decode("ascii")
+    return out
+
+
 # ─── Preview-image staging (BINARY — sibling to stage_bundle) ─────────────────
 #
 # stage_bundle is text-only: it does content.encode("utf-8") / write_text and so

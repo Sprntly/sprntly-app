@@ -1253,3 +1253,61 @@ async def test_preview_image_staged_log_identifiers_only(monkeypatch, tmp_path, 
     # The raw PNG bytes never appear in the log line.
     assert "PNG" not in msg
     assert _FAKE_PNG.decode("latin-1") not in msg
+
+
+# ─── Bundle readback (re-render staged dist/ for preview backfill) ────────────
+#
+# read_bundle_files_for_checkpoint reads the BUILT dist/ back from storage in the
+# same {relative_path: content} shape stage_bundle staged, so the preview
+# backfill can re-serve + re-render it. These prove the dist/ tree round-trips
+# (incl. nested assets/ + binary .b64 sentinel) and that the _source/ + _preview/
+# sibling sub-prefixes are excluded.
+
+
+async def test_read_bundle_filesystem_round_trips_dist_tree(monkeypatch, tmp_path):
+    _fs_settings(monkeypatch, tmp_path)
+    files = {
+        "index.html": "<div id='root'></div>",
+        "assets/index-abc.js": "console.log(1)",
+        "assets/index-abc.css": "body{}",
+    }
+    await storage.stage_bundle(prototype_id=12, checkpoint_id=34, files=files)
+    out = await storage.read_bundle_files_for_checkpoint(12, 34)
+    assert out == files
+
+
+async def test_read_bundle_filesystem_excludes_source_and_preview(monkeypatch, tmp_path):
+    _fs_settings(monkeypatch, tmp_path)
+    await storage.stage_bundle(
+        prototype_id=13, checkpoint_id=35,
+        files={"index.html": "<html></html>", "assets/a.js": "1"},
+    )
+    # Sibling sub-prefixes that must NOT come back in the dist readback.
+    await storage.stage_bundle(
+        prototype_id=13, checkpoint_id=35,
+        files={"src/App.tsx": "x"}, sub_prefix="_source",
+    )
+    await storage.stage_preview_image(prototype_id=13, checkpoint_id=35, png_bytes=_FAKE_PNG)
+    out = await storage.read_bundle_files_for_checkpoint(13, 35)
+    assert set(out) == {"index.html", "assets/a.js"}
+    assert not any(k.startswith(("_source/", "_preview/")) for k in out)
+
+
+async def test_read_bundle_filesystem_preserves_binary_as_b64(monkeypatch, tmp_path):
+    _fs_settings(monkeypatch, tmp_path)
+    # A binary asset written under the bundle prefix (font/image) round-trips as
+    # a `.b64` sentinel key — the same shape storage._read_dist produces.
+    base = tmp_path / "prototypes" / "14" / "36"
+    (base / "assets").mkdir(parents=True, exist_ok=True)
+    (base / "index.html").write_text("<html></html>", encoding="utf-8")
+    (base / "assets" / "font.woff2").write_bytes(b"\x00\x01\x02\xff\xfe")
+    out = await storage.read_bundle_files_for_checkpoint(14, 36)
+    import base64 as _b64
+    assert out["index.html"] == "<html></html>"
+    assert out["assets/font.woff2.b64"] == _b64.b64encode(b"\x00\x01\x02\xff\xfe").decode("ascii")
+
+
+async def test_read_bundle_returns_empty_when_absent(monkeypatch, tmp_path):
+    _fs_settings(monkeypatch, tmp_path)
+    out = await storage.read_bundle_files_for_checkpoint(999, 888)
+    assert out == {}
