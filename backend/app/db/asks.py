@@ -1,12 +1,15 @@
-"""Ask logging + cached Ask responses.
+"""Ask logging + cached Ask responses + fire-and-forget Ask jobs.
 
 ask_log:    append-only history of every /v1/ask call.
 cached_asks: pre-computed answers keyed by (dataset, question), feeds
              the warmer + answers cache hits in O(1).
+ask_jobs:   per-request, per-tenant status row for the blur-safe chat Ask
+             flow — POST persists a `generating` row + kicks the answer in a
+             background task; the client polls GET /v1/ask/{id}.
 """
 import json
 
-from app.db.client import require_client
+from app.db.client import require_client, retry_on_disconnect
 
 
 # ─────────────────────── ask_log (append-only) ───────────────────────
@@ -122,3 +125,77 @@ def invalidate_orphan_generating_cached_asks() -> int:
     if ids:
         c.table("cached_asks").update({"status": "invalidated"}).in_("id", ids).execute()
     return len(ids)
+
+
+# ─────────────────────── ask_jobs (fire-and-forget) ───────────────────────
+
+
+@retry_on_disconnect
+def start_ask_job(
+    company_id: str,
+    dataset: str,
+    question: str,
+    conversation_id: int | None = None,
+    pinned_skill: str | None = None,
+) -> int:
+    """Persist a `generating` Ask job row and return its id. The POST returns
+    this id immediately; the background worker fills `response` and flips the
+    status to `ready` (or `error`)."""
+    c = require_client()
+    resp = c.table("ask_jobs").insert({
+        "company_id": company_id,
+        "dataset": dataset,
+        "question": question,
+        "conversation_id": conversation_id,
+        "pinned_skill": pinned_skill,
+        "status": "generating",
+        "response": {},
+    }).execute()
+    return resp.data[0]["id"]
+
+
+def complete_ask_job(ask_id: int, payload: dict) -> None:
+    """Store the citation-stripped answer payload and mark the job `ready`."""
+    c = require_client()
+    c.table("ask_jobs").update({
+        "response": payload or {},
+        "status": "ready",
+        "error": None,
+        "updated_at": _now(),
+    }).eq("id", ask_id).execute()
+
+
+def fail_ask_job(ask_id: int, error: str) -> None:
+    """Mark the job `error` (best-effort — the worker never crashes on this)."""
+    c = require_client()
+    c.table("ask_jobs").update({
+        "status": "error",
+        "error": (error or "")[:500],
+        "updated_at": _now(),
+    }).eq("id", ask_id).execute()
+
+
+@retry_on_disconnect
+def get_ask_job(ask_id: int) -> dict | None:
+    """Fetch an Ask job row by id, or None. `response` is decoded to a dict
+    (jsonb in prod / JSON-string in the SQLite test fake)."""
+    c = require_client()
+    resp = c.table("ask_jobs").select("*").eq("id", ask_id).limit(1).execute()
+    if not resp.data:
+        return None
+    row = resp.data[0]
+    raw = row.get("response")
+    if isinstance(raw, str):
+        try:
+            row["response"] = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            row["response"] = {}
+    elif raw is None:
+        row["response"] = {}
+    return row
+
+
+def _now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()

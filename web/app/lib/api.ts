@@ -280,9 +280,41 @@ export type SkillInfo = {
   description: string
 }
 
+/** POST /v1/ask is fire-and-forget: it returns an ask_id immediately and the
+ *  answer keeps generating server-side (blur/remount-safe). The client polls
+ *  askApi.get(id) until status leaves 'generating'. */
+export type AskStartResponse = {
+  ask_id: number
+  status: "generating" | "ready" | "error"
+}
+
+/** GET /v1/ask/{id} status + result. Once status === 'ready' the answer /
+ *  key_points / citations / confidence / unanswered fields carry the SAME
+ *  citation-stripped shape the old synchronous POST returned, so downstream
+ *  rendering is unchanged. `error` is set when status === 'error'. */
+export type AskStatusResponse = AskResponse & {
+  status: "generating" | "ready" | "error"
+  error?: string | null
+  /** Extra qa_agent metadata (e.g. routed skill) passed through verbatim. */
+  [extra: string]: unknown
+}
+
 export const askApi = {
-  ask: (question: string, company: string = "asurion") =>
-    api.post<AskResponse>("/v1/ask", { question, dataset: company }),
+  /** Kick off an Ask in the background. Returns immediately with an ask_id;
+   *  poll askApi.get(ask_id) until status !== 'generating'. */
+  start: (
+    question: string,
+    company: string = "asurion",
+    opts?: { conversation_id?: number; pinned_skill?: string },
+  ) =>
+    api.post<AskStartResponse>("/v1/ask", {
+      question,
+      dataset: company,
+      ...(opts?.conversation_id != null ? { conversation_id: opts.conversation_id } : {}),
+      ...(opts?.pinned_skill != null ? { pinned_skill: opts.pinned_skill } : {}),
+    }),
+  /** Read the status + result of an Ask job. */
+  get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
   /** List available skills the chat can route to. */
   skills: () =>
     api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),

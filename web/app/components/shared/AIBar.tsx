@@ -5,7 +5,8 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
-import { ApiError, askApi, briefApi, prdApi, type AskResponse } from "../../lib/api"
+import { ApiError, briefApi, prdApi, type AskResponse } from "../../lib/api"
+import { runAskGeneration } from "../../lib/runAskGeneration"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
@@ -340,7 +341,13 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
     setAgentAction(null)
     setLastSubmittedQuestion(q)
     try {
-      const res = await askApi.ask(q, activeCompany)
+      // Fire-and-forget + visibility-aware poll (blur/remount-safe): the answer
+      // keeps generating server-side if the tab is backgrounded.
+      const scopeId =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `aibar-${Date.now()}`
+      const res = await runAskGeneration(q, activeCompany, scopeId)
       setLastReply(res)
       setAIBarValue("")
       const ta = textareaRef.current

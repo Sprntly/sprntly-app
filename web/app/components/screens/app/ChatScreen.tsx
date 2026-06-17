@@ -14,9 +14,10 @@ import { AskReplyBody } from "../../shared/AskReplyBody"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
 import { ApiError, askApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
-import { isComposerBusy, runTabAsk } from "../../../lib/chatAskState"
+import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration } from "../../../lib/runPrdGeneration"
 import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
+import { runAskGeneration, resumeAskGeneration, getPendingAsk } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { PrdState, PrdContent } from "../../../types/content"
@@ -690,7 +691,11 @@ export function ChatScreen() {
         targetTabId,
         asking: askingTabsRef.current,
         setBusy: setBusyTabs,
-        ask: () => askApi.ask(query, activeCompany),
+        // Fire-and-forget + poll: POST returns an ask_id, the answer keeps
+        // generating server-side, and the active ask_id is persisted per tab
+        // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
+        // resume effect instead of re-asking.
+        ask: () => runAskGeneration(query, activeCompany, targetTabId),
         onResult: (tabId, res) => {
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
@@ -729,6 +734,58 @@ export function ChatScreen() {
     },
     [activeCompany, activeTabId, attachments, finalizeConversationTurn, openTab, pushPendingConversation, showToast],
   )
+
+  // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
+  // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps
+  // generating server-side. The pending USER turn lives in the persisted
+  // tab.thread (so the question survives a remount), but the awaiting poll
+  // closure + the in-memory asking/busy markers do NOT. If a pending ask_id was
+  // persisted (jobResume), re-enter the visibility-aware poll against the
+  // existing status endpoint — NOT re-POST — and re-show the "asking…" state.
+  // Runs once per tab per mount.
+  const resumedAskTabsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    for (const tab of tabsRef.current) {
+      if (resumedAskTabsRef.current.has(tab.id)) continue
+      const pending = getPendingAsk(activeCompany, tab.id)
+      if (!pending) continue
+      const askId = Number(pending.id)
+      if (!Number.isFinite(askId)) continue
+      // Re-attach only when the last turn is still awaiting a reply (the
+      // canonical "asking…" marker that survives in the persisted thread).
+      const last = tab.thread[tab.thread.length - 1]
+      if (!last || last.reply !== undefined || last.error !== undefined) continue
+      if (askingTabsRef.current.has(tab.id)) continue
+      resumedAskTabsRef.current.add(tab.id)
+      const turnId = last.id
+      const targetTabId = tab.id
+      // Restore the optimistic asking/busy UX for this tab.
+      askingTabsRef.current.add(targetTabId)
+      setBusyTabs((prev) => addToSet(prev, targetTabId))
+      void (async () => {
+        try {
+          const res = await resumeAskGeneration(askId, activeCompany, targetTabId)
+          setTabs((prev) => prev.map((t) =>
+            t.id !== targetTabId ? t : {
+              ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, reply: res } : turn),
+            }
+          ))
+          finalizeConversationTurn(turnId, { reply: res }, targetTabId)
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "Something went wrong"
+          setTabs((prev) => prev.map((t) =>
+            t.id !== targetTabId ? t : {
+              ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, error: msg } : turn),
+            }
+          ))
+          finalizeConversationTurn(turnId, { error: msg }, targetTabId)
+        } finally {
+          askingTabsRef.current.delete(targetTabId)
+          setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+        }
+      })()
+    }
+  }, [activeCompany, finalizeConversationTurn])
 
   const handleComposerSubmit = () => {
     const q = draft.trim()

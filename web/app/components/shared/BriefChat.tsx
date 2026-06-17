@@ -7,7 +7,8 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { useWorkspace } from "../../context/WorkspaceContext"
-import { ApiError, askApi, briefApi, type AskResponse } from "../../lib/api"
+import { ApiError, briefApi, type AskResponse } from "../../lib/api"
+import { runAskGeneration, resumeAskGeneration, getPendingAsk } from "../../lib/runAskGeneration"
 import { runPrdGeneration, loadPrdById, loadLatestPrd } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
@@ -49,6 +50,9 @@ interface ChatTurn {
   error?: string | null
   actions?: AgentAction[]
   fresh?: boolean
+  /** When set (to this turn's id), an Ask job is in flight for this agent turn.
+   *  Persisted so a remount can re-attach to the fire-and-forget poll. */
+  askPending?: string
 }
 
 const STORAGE_PREFIX = "sprntly_brief_chat_"
@@ -708,7 +712,10 @@ export function BriefChat() {
     }
     try {
       const persistable = turns
-        .filter((t) => t.state !== "thinking")
+        // Drop transient "thinking" turns — EXCEPT a pending Ask, whose
+        // working state must survive a remount so the resume effect can
+        // re-attach to the in-flight fire-and-forget answer.
+        .filter((t) => t.state !== "thinking" || !!t.askPending)
         .map(({ fresh: _fresh, ...rest }) => rest)
       localStorage.setItem(key, JSON.stringify(persistable))
     } catch {
@@ -919,19 +926,64 @@ export function BriefChat() {
   const plainAsk = useCallback(
     async (q: string) => {
       const aId = uid()
-      setTurns((t) => [...t, { id: aId, role: "agent", persona: "ds", status: "thinking…", state: "thinking" }])
+      // Persist a pending-ask marker keyed by this agent turn so a
+      // backgrounded/remounted tab re-attaches via the mount resume effect
+      // instead of orphaning the in-flight answer. The "thinking…" agent turn
+      // is itself persisted (STORAGE_PREFIX), so the working state survives too.
+      setTurns((t) => [...t, { id: aId, role: "agent", persona: "ds", status: "thinking…", state: "thinking", askPending: aId }])
       scrollToEnd()
       try {
-        const res = await askApi.ask(q, activeCompany)
-        setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "done", status: undefined, reply: res, fresh: true } : x)))
+        // Fire-and-forget + visibility-aware poll (blur/remount-safe).
+        const res = await runAskGeneration(q, activeCompany, aId)
+        setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "done", status: undefined, reply: res, fresh: true, askPending: undefined } : x)))
       } catch (e) {
         const msg = parseAskError(e)
-        setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error: msg } : x)))
+        setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error: msg, askPending: undefined } : x)))
         showToast("Ask failed", msg.slice(0, 120))
       }
     },
     [activeCompany, scrollToEnd, showToast],
   )
+
+  // ── Resume an orphaned in-flight ASK on (re)mount ─────────────────────────
+  // A plainAsk is fire-and-forget: the persisted "thinking…" agent turn carries
+  // an `askPending` marker, and the active ask_id is persisted (jobResume). On
+  // remount, re-attach to the visibility-aware poll against the existing status
+  // endpoint — NOT re-ask — and clear the working state when it resolves.
+  const resumedAskRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!activeCompany) return
+    for (const turn of turns) {
+      if (turn.role !== "agent" || !turn.askPending) continue
+      if (turn.reply !== undefined && turn.reply !== null) continue
+      if (resumedAskRef.current.has(turn.id)) continue
+      const pending = getPendingAsk(activeCompany, turn.id)
+      if (!pending) continue
+      const askId = Number(pending.id)
+      if (!Number.isFinite(askId)) continue
+      resumedAskRef.current.add(turn.id)
+      const aId = turn.id
+      busyRef.current = true
+      setBusy(true)
+      void (async () => {
+        try {
+          const res = await resumeAskGeneration(askId, activeCompany, aId)
+          if (!mountedRef.current) return
+          setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "done", status: undefined, reply: res, fresh: true, askPending: undefined } : x)))
+        } catch (e) {
+          if (!mountedRef.current) return
+          const msg = parseAskError(e)
+          setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error: msg, askPending: undefined } : x)))
+        } finally {
+          if (mountedRef.current) {
+            busyRef.current = false
+            setBusy(false)
+            scrollToEnd()
+          }
+        }
+      })()
+    }
+  }, [activeCompany, turns, scrollToEnd])
 
   const runGate = useCallback(
     async (fn: () => void | Promise<void>) => {
