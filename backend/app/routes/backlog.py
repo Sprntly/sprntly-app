@@ -34,6 +34,7 @@ from app.db.backlog import (
 )
 from app.db.briefs import get_current_brief
 from app.db.companies import slug_for_company_id
+from app.db.finding_state import COMPLETED_ACTIONS, list_findings_by_action
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,33 @@ def get_backlog(company: CompanyContext = Depends(require_company)):
     if not _company_has_brief(company.company_id):
         return {"items": [], "count": 0}
     items = list_backlog_items(company.company_id)
+    return {"items": items, "count": len(items)}
+
+
+@router.get("/completed")
+def get_completed(company: CompanyContext = Depends(require_company)):
+    """The enterprise's COMPLETED findings (Phase 2 lifecycle).
+
+    "Completed" = brief findings whose action is 'prd_created' or 'done'
+    (see db/finding_state.py). Backs the Backlog screen's Completed tab. Each
+    item carries title / theme_id / action / last_surfaced_at. Titles are
+    resolved from the company's backlog_items (keyed by the same theme_id);
+    when a theme has no backlog row we fall back to the theme_id so the item
+    still renders."""
+    rows = list_findings_by_action(company.company_id, COMPLETED_ACTIONS)
+    titles = {
+        r.get("theme_id"): r.get("title")
+        for r in list_backlog_items(company.company_id)
+    }
+    items = [
+        {
+            "theme_id": r.get("theme_id"),
+            "title": titles.get(r.get("theme_id")) or r.get("theme_id"),
+            "action": r.get("action"),
+            "last_surfaced_at": r.get("last_surfaced_at"),
+        }
+        for r in rows
+    ]
     return {"items": items, "count": len(items)}
 
 
