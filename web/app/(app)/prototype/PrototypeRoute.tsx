@@ -52,6 +52,13 @@ import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
 import { IterateComposer } from "../../components/design-agent/IterateComposer"
 import { useIterateRun } from "../../components/design-agent/useIterateRun"
 import {
+  IconGrid,
+  IconPin,
+  IconCopy,
+  IconShare,
+  IconPlus,
+} from "../../components/shared/app-icons"
+import {
   designAgentApi,
   prdApi,
   type CommentRecord,
@@ -759,18 +766,50 @@ export function PrototypeRoute() {
   if (!generateRequested) {
     return (
       <AppLayout>
-        <div className="design-agent-surface da-prototype-empty" data-testid="prototype-route-empty">
-          <h2 className="da-prototype-empty-title">No prototype yet</h2>
-          <p className="da-prototype-empty-sub">
-            This PRD doesn't have a prototype. Generate one to start.
-          </p>
-          <button
-            type="button"
-            className="btn btn-accent"
-            onClick={() => setGenerateRequested(true)}
-          >
-            Generate prototype
-          </button>
+        <div
+          className="design-agent-surface da-prototype-empty da-empty-hero-stage"
+          data-testid="prototype-route-empty"
+        >
+          <div className="da-empty-hero">
+            <div className="da-empty-hero-art" aria-hidden="true">
+              <IconGrid size={48} />
+            </div>
+            <h2 className="da-empty-hero-title">Bring this PRD to life</h2>
+            <p className="da-empty-hero-sub">
+              Generate an interactive, clickable prototype straight from your PRD
+              — grounded in your connected codebase, so it looks like your real
+              app. Share it and refine it with comments.
+            </p>
+            <button
+              type="button"
+              className="btn btn-accent da-empty-hero-cta"
+              onClick={() => setGenerateRequested(true)}
+            >
+              <IconPlus size={16} />
+              Generate prototype
+            </button>
+            <div className="da-empty-hero-meta">
+              <span>~2–3 min</span>
+              <span className="da-empty-hero-dot" aria-hidden="true" />
+              <span>scoped against your connected repo</span>
+              <span className="da-empty-hero-dot" aria-hidden="true" />
+              <span>you'll pick the screen</span>
+            </div>
+            <div className="da-empty-hero-chips">
+              <span className="da-empty-hero-chip">
+                <IconPin size={15} />
+                Interactive &amp; clickable
+              </span>
+              <span className="da-empty-hero-chip">
+                <IconCopy size={15} />
+                Matches your app&apos;s UI
+              </span>
+              <span className="da-empty-hero-chip">
+                <IconShare size={15} />
+                Shareable + comments
+              </span>
+            </div>
+          </div>
         </div>
       </AppLayout>
     )

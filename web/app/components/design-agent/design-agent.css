@@ -3218,3 +3218,98 @@
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+/* ── No-prototype empty state — "Value hero" (Direction 1) ─────────────────
+ * Replaces the bare "No prototype yet" heading + line + button. A centered,
+ * vertically-filled hero that sells the action and sets expectations at the
+ * high-intent post-PRD moment. Presentation-only — the "Generate prototype"
+ * button still drives the existing generateRequested click-gate (button-
+ * gated, no auto-popup). Tokens only; structure follows the approved mockup but
+ * the colours/serif come from the Lightfield :root, not the mockup's hex.
+ */
+.design-agent-surface.da-empty-hero-stage {
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 28px;
+  min-height: 60vh;
+}
+.design-agent-surface .da-empty-hero {
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.design-agent-surface .da-empty-hero-art {
+  width: 96px;
+  height: 96px;
+  border-radius: var(--radius-lg);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-alpha-18);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 22px;
+}
+.design-agent-surface .da-empty-hero-title {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: -0.012em;
+  line-height: 1.1;
+  color: var(--ink);
+  margin: 0 0 10px;
+}
+.design-agent-surface .da-empty-hero-sub {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  max-width: 440px;
+  margin: 0 0 22px;
+}
+.design-agent-surface .da-empty-hero-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.design-agent-surface .da-empty-hero-meta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.design-agent-surface .da-empty-hero-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--muted);
+  display: inline-block;
+}
+.design-agent-surface .da-empty-hero-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 30px;
+}
+.design-agent-surface .da-empty-hero-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 14px;
+}
+.design-agent-surface .da-empty-hero-chip svg {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
