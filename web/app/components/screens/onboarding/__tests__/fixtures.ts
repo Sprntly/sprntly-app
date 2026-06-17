@@ -68,6 +68,7 @@ export function makeAnalysis(
 export function makeOnboardingCtx(over: Record<string, unknown> = {}) {
   return {
     loading: false,
+    refreshing: false,
     profile: null,
     workspace: makeWorkspace(),
     refresh: () => Promise.resolve(),
