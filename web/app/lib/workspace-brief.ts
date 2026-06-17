@@ -64,12 +64,18 @@ export async function pollBriefStatus(
   opts?: { maxMs?: number; onTick?: (status: BriefStatus) => void },
 ): Promise<BriefStatus> {
   const maxMs = opts?.maxMs ?? DEFAULT_MAX_MS
+  // Wall-clock budget (Date.now), so a backgrounded tab whose timers are
+  // throttled to ~1/min still measures elapsed time correctly.
   const start = Date.now()
   while (Date.now() - start < maxMs) {
     const status = await briefApi.status(slug)
     opts?.onTick?.(status)
     if (status.status === "ready" || status.status === "failed") return status
-    await sleep(POLL_MS)
+    // Sleep until the next poll, but wake IMMEDIATELY if a backgrounded tab is
+    // refocused (visibilitychange → visible). Background tabs throttle
+    // setTimeout to ~1/min, which stalls polling; refocusing should catch the
+    // UI up to the (server-side, idempotent) job's real status at once.
+    await sleepUntilNextPoll(POLL_MS)
   }
   return { company: slug, status: "generating" }
 }
@@ -99,6 +105,33 @@ export function briefPreviewInsight(brief: Brief): {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
+/**
+ * Resolve after `ms`, OR as soon as a hidden tab becomes visible again —
+ * whichever comes first. Background tabs throttle setTimeout to ~1/min, so
+ * without the visibility wakeup a refocused tab would stall up to a minute
+ * before its next status poll. The brief job is server-side and idempotent, so
+ * waking early simply re-reads the real status and lets the UI catch up.
+ */
+function sleepUntilNextPoll(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisible)
+      }
+      resolve()
+    }
+    const onVisible = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        finish()
+      }
+    }
+    const timer = setTimeout(finish, ms)
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisible)
+    }
+  })
 }
