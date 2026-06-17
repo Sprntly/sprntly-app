@@ -78,6 +78,24 @@ jobs:
             fi
             cd backend
             ./.venv/bin/pip install -q -r requirements.txt
+            # Provision Playwright's headless Chromium + its OS libraries for the
+            # design-agent "Website" design-source extractor. `pip install
+            # playwright` ships the package but NOT the browser; the Dockerfile
+            # installs it, but prod runs bare systemd (not the image), so without
+            # this every Website-source prototype fell back to low-confidence
+            # styling. Idempotent + guarded on the browser binary so it only runs
+            # on first provision / after a Chromium version bump — a no-op
+            # (instant) on normal deploys. AL2023 uses dnf (Playwright's
+            # install-deps is Debian-only), so the libs are listed explicitly.
+            if ! ls ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome >/dev/null 2>&1; then
+              echo "Provisioning Chromium for Playwright…"
+              sudo dnf install -y -q \
+                atk at-spi2-atk at-spi2-core alsa-lib cairo cups-libs libdrm \
+                mesa-libgbm pango libX11 libXcomposite libXdamage libXext \
+                libXfixes libXrandr libxcb libxkbcommon nss nspr libXrender \
+                libXtst libXi libxshmfence
+              ./.venv/bin/python -m playwright install chromium
+            fi
             # Keep the shared nginx.conf in sync — the /_da-bundle bundle-proxy
             # (and /agent) locations live in the same file as the main backend,
             # so re-apply it on every backend deploy (mirrors deploy-agent.yml).
