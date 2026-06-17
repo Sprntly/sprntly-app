@@ -753,3 +753,89 @@ def test_rank_decision_log_carries_skill_hash_not_bare_constant(
     assert rank["factors"]["prompt_version"] != synth.PROMPT_VERSION
     # the bound-skill suffix is the differentiator
     assert rank["prompt_version"].endswith("@deadbeef")
+
+
+# ---------- brief de-dup wiring (don't resurface unless changed) ----------
+
+def _ranked_for_themes(themes):
+    """Build a judge payload that surfaces one insight per given (theme, label)."""
+    base = _RANKED["insights"][0]
+    return {**_RANKED, "insights": [
+        {**base, "theme_id": t.id, "title": f"{lbl} finding"}
+        for t, lbl in themes
+    ]}
+
+
+def _seed_company(isolated_settings, ent_id="ent-A"):
+    """brief_finding_state.enterprise_id FK-references companies(id); seed a bare
+    company row so the fingerprint upsert isn't dropped on a FK violation."""
+    isolated_settings["supabase"].table("companies").insert(
+        {"id": ent_id, "slug": ent_id, "display_name": ent_id}
+    ).execute()
+
+
+def test_run_synthesis_records_finding_state_for_surfaced_themes(facade, isolated_settings):
+    from app.synthesis import agent as synth
+
+    _seed_company(isolated_settings)
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    with patch.object(synth, "llm_call", return_value=_llm_result(_ranked_for_themes([(theme, "SSO")]))):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    rows = isolated_settings["supabase"].table("brief_finding_state").select("*") \
+        .eq("enterprise_id", "ent-A").execute().data
+    assert len(rows) == 1
+    fp = rows[0]
+    assert fp["theme_id"] == theme.id
+    assert fp["fp_signal_count"] == 2
+    assert fp["fp_breadth"] == 2
+    assert fp["fp_revenue_at_stake"] == 1400000
+
+
+def test_unchanged_prior_finding_is_suppressed_from_next_brief(facade, isolated_settings):
+    """An already-surfaced theme that didn't change is dropped from the next
+    brief's candidates; a sibling that DID change still appears."""
+    from app.synthesis import agent as synth
+
+    _seed_company(isolated_settings)
+    a = _seed_theme_with_signals(facade, "ent-A", "Alpha", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 500000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    b = _seed_theme_with_signals(facade, "ent-A", "Beta", [
+        ("project_mgmt", "bug", {}, 1),
+        ("communication", "feature_request", {}, 2),
+    ])
+
+    # Run 1 — surface both → fingerprints recorded for Alpha and Beta.
+    with patch.object(synth, "llm_call",
+                      return_value=_llm_result(_ranked_for_themes([(a, "Alpha"), (b, "Beta")]))):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    # Change ONLY Alpha — add a fresh signal so its issue materially changed.
+    from app.graph.types import Relationship, Signal
+    from datetime import datetime, timezone
+    sig = Signal(enterprise_id="ent-A", source_type="revenue", kind="deal_blocker",
+                 content="Alpha new blocker", properties={"revenue_at_risk_usd": 900000},
+                 valid_at=datetime.now(timezone.utc))
+    facade.write_signal("ent-A", sig)
+    facade.write_relationship("ent-A", Relationship(
+        enterprise_id="ent-A", type="REQUESTS", source_kind="signal",
+        source_id=sig.id, target_kind="entity", target_id=a.id))
+
+    # Run 2 — capture the judge's candidate payload.
+    captured = {}
+
+    def _capture(**kw):
+        captured["input"] = kw.get("input", "")
+        return _llm_result(_ranked_for_themes([(a, "Alpha")]))
+
+    with patch.object(synth, "llm_call", side_effect=_capture):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    # Alpha changed → still a candidate; Beta unchanged → suppressed.
+    assert "Alpha" in captured["input"]
+    assert "Beta" not in captured["input"]

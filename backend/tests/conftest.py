@@ -521,6 +521,26 @@ CREATE TABLE backlog_items (
 );
 CREATE INDEX backlog_items_rank_idx ON backlog_items (enterprise_id, rank);
 
+-- Per-theme brief de-dup fingerprint (mirrors 20260616130000_brief_finding_state.sql).
+-- One row per theme ever surfaced in a brief; carries the convergence state at
+-- last surface so the next run can tell whether the issue changed.
+CREATE TABLE brief_finding_state (
+    id                  TEXT PRIMARY KEY,
+    enterprise_id       TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    theme_id            TEXT NOT NULL,
+    last_brief_id       INTEGER,
+    last_surfaced_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    fp_signal_count     INTEGER NOT NULL DEFAULT 0,
+    fp_effective_weight REAL NOT NULL DEFAULT 0,
+    fp_revenue_at_stake REAL NOT NULL DEFAULT 0,
+    fp_breadth          INTEGER NOT NULL DEFAULT 0,
+    fp_latest_signal_at TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (enterprise_id, theme_id)
+);
+CREATE INDEX brief_finding_state_enterprise_idx ON brief_finding_state (enterprise_id);
+
 -- Mirrors supabase/migrations/20260611100000_ticket_data.sql (SQLite-ized).
 -- Ticket overrides keyed by a stable ticket_key + company_id.
 CREATE TABLE ticket_edits (
