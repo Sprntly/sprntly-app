@@ -432,7 +432,6 @@ function BriefFindingCard({
   } | null
 }) {
   const accent = finding.actionAccent
-  const pct = Math.round((finding.confidence ?? 0) * 100)
   const category = finding.category || finding.actionLabel
   const priority = finding.priority || "P0"
   const statTiles = finding.statTiles || []
@@ -483,17 +482,13 @@ function BriefFindingCard({
 
   return (
     <article className={`fc fc--${accent}`}>
-      {/* Top row: category · priority badge + confidence + icons */}
+      {/* Top row: category · priority badge + icons */}
       <div className="fc-top">
         <span className={`fc-pill fc-pill--${accent}`}>
           <span className="fc-dot" aria-hidden />
           {category} · {priority}
         </span>
         <div className="fc-top-right">
-          <span className="fc-conf" title="Model confidence">
-            <span className="fc-conf-dot" aria-hidden />
-            {pct}%
-          </span>
           <button type="button" className="fc-iconbtn" title="Ask about this finding" aria-label="Ask about this finding" onClick={onAsk}>
             <IconSparkle size={13} />
           </button>
@@ -563,17 +558,23 @@ function BriefFindingCard({
                 </button>
               )
             })()}
-            <button type="button" className="fc-btn-secondary" onClick={onPreview}>
-              <IconTerminalPrompt size={13} />
-              View prototype
-            </button>
+            {/* Prototype option only when the fix can be visualized as a UI
+                prototype (LLM `prototypeable` flag). Backend/data/pricing/ops
+                findings have nothing to render, so we don't offer it. */}
+            {finding.prototypeable ? (
+              <button type="button" className="fc-btn-secondary" onClick={onPreview}>
+                <IconTerminalPrompt size={13} />
+                View prototype
+              </button>
+            ) : null}
           </div>
         </div>
 
-        {/* Right rail — only rendered when there is a ready prototype WITH a real preview image.
-            Every other state (ready-but-no-image, PRD-exists-but-not-ready, no PRD, map not
-            yet loaded) renders nothing — no mock, no shimmer, no stand-in. */}
-        {insightState?.hasPrd && insightState.prototypeReady && insightState.previewImageUrl ? (
+        {/* Right rail — only rendered when this finding is prototypeable AND there is a
+            ready prototype WITH a real preview image. Every other state (not prototypeable,
+            ready-but-no-image, PRD-exists-but-not-ready, no PRD, map not yet loaded) renders
+            nothing — no mock, no shimmer, no stand-in. */}
+        {finding.prototypeable && insightState?.hasPrd && insightState.prototypeReady && insightState.previewImageUrl ? (
           <button type="button" className="fc-preview" onClick={onPreview} title="Open prototype">
             <img
               className="fc-preview-img"

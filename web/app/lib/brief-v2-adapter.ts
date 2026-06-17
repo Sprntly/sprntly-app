@@ -60,6 +60,10 @@ interface BriefV2CardBase {
   category: string
   priority: string
   confidence: number
+  // Whether this finding's fix can be visualized as a UI prototype. Drives
+  // whether the "Generate/View prototype" option is offered. Defaults to true
+  // for legacy briefs that predate the LLM `prototypeable` flag.
+  prototypeable: boolean
   title: string
   body: string
   metricHighlight: string
@@ -294,6 +298,9 @@ function buildCardBase(
     category: categoryFor(insight, m.actionAccent),
     priority,
     confidence: insight.confidence ?? 0,
+    // Missing flag (legacy briefs) ⇒ treat as prototypeable so we don't hide
+    // the option on briefs generated before the flag existed.
+    prototypeable: insight.prototypeable !== false,
     title: insight.title,
     body: bodyFor(insight),
     metricHighlight: metricHighlightFor(insight, m.actionAccent),

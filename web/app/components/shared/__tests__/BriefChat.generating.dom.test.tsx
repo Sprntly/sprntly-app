@@ -93,6 +93,7 @@ const READY_BRIEF: BriefV2State = {
     category: "Retention",
     priority: "P0",
     confidence: 0.82,
+    prototypeable: true,
     title: "Day-30 retention is slipping",
     body: "Retention dropped 6 points week over week.",
     metricHighlight: "",
