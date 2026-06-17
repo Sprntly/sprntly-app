@@ -25,6 +25,15 @@ export function IconCheck({ size = 14 }: { size?: number }) {
   )
 }
 
+/** Plus / add — primary "Generate" action affordance. */
+export function IconPlus({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M12 5v14M5 12h14" {...stroke} />
+    </svg>
+  )
+}
+
 /** Small stroke sparkle (replaces decorative star dingbat). */
 export function IconSparkle({ size = 16 }: { size?: number }) {
   return (

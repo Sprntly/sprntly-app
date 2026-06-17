@@ -48,9 +48,17 @@ import { GenerationErrorBanner, reasonCopy } from "../../components/design-agent
 import { GenerateSurfaceErrorBoundary } from "../../components/design-agent/GenerateSurfaceErrorBoundary"
 import { GenerationLoadingScreen, type LocatePhaseState } from "../../components/design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../../components/design-agent/PostGenerationResult"
+import { PrototypeEmptyState } from "../../components/design-agent/PrototypeEmptyState"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
 import { IterateComposer } from "../../components/design-agent/IterateComposer"
 import { useIterateRun } from "../../components/design-agent/useIterateRun"
+import {
+  IconGrid,
+  IconPin,
+  IconCopy,
+  IconShare,
+  IconPlus,
+} from "../../components/shared/app-icons"
 import {
   designAgentApi,
   prdApi,
@@ -651,15 +659,16 @@ export function PrototypeRoute() {
   if (prdId == null) {
     return (
       <AppLayout>
-        <div className="design-agent-surface da-prototype-empty" data-testid="prototype-route-empty">
-          <h2 className="da-prototype-empty-title">No PRD selected</h2>
-          <p className="da-prototype-empty-sub">
-            Open a PRD and choose "Generate Prototype" to start a prototype here.
-          </p>
-          <button type="button" className="btn btn-accent" onClick={() => goTo("brief")}>
-            Go to brief
-          </button>
-        </div>
+        <PrototypeEmptyState
+          testid="prototype-route-empty"
+          title="No PRD selected"
+          sub={'Open a PRD and choose "Generate Prototype" to start a prototype here.'}
+          action={
+            <button type="button" className="btn btn-accent" onClick={() => goTo("brief")}>
+              Go to brief
+            </button>
+          }
+        />
       </AppLayout>
     )
   }
@@ -759,19 +768,29 @@ export function PrototypeRoute() {
   if (!generateRequested) {
     return (
       <AppLayout>
-        <div className="design-agent-surface da-prototype-empty" data-testid="prototype-route-empty">
-          <h2 className="da-prototype-empty-title">No prototype yet</h2>
-          <p className="da-prototype-empty-sub">
-            This PRD doesn't have a prototype. Generate one to start.
-          </p>
-          <button
-            type="button"
-            className="btn btn-accent"
-            onClick={() => setGenerateRequested(true)}
-          >
-            Generate prototype
-          </button>
-        </div>
+        <PrototypeEmptyState
+          variant="hero"
+          testid="prototype-route-empty"
+          art={<IconGrid size={48} />}
+          title="Bring this PRD to life"
+          sub="Generate an interactive, clickable prototype straight from your PRD — grounded in your connected codebase, so it looks like your real app. Share it and refine it with comments."
+          action={
+            <button
+              type="button"
+              className="btn btn-accent da-empty-hero-cta"
+              onClick={() => setGenerateRequested(true)}
+            >
+              <IconPlus size={16} />
+              Generate prototype
+            </button>
+          }
+          meta={["scoped against your codebase or design source"]}
+          chips={[
+            { icon: <IconPin size={15} />, label: "Interactive & clickable" },
+            { icon: <IconCopy size={15} />, label: "Matches your app's UI" },
+            { icon: <IconShare size={15} />, label: "Shareable + comments" },
+          ]}
+        />
       </AppLayout>
     )
   }

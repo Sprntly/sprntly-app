@@ -529,15 +529,30 @@ describe("PrototypeRoute — generate panel gated behind empty-state button", ()
     expect(src).toContain("initialGenerateRequested(false)")
   })
 
-  it("renders a 'Generate prototype' empty state (native da-prototype-empty block) for the no-proto branch", () => {
-    // The no-prototype, not-yet-requested branch reuses the native empty-state
-    // pattern (same classes as the no-PRD empty state) with its own testid.
-    expect(src).toContain('data-testid="prototype-route-empty"')
-    expect(src).toContain("da-prototype-empty-title")
-    expect(src).toContain("da-prototype-empty-sub")
+  it("renders a 'Generate prototype' empty state (shared PrototypeEmptyState) for the no-proto branch", () => {
+    // The no-prototype, not-yet-requested branch routes through the shared
+    // PrototypeEmptyState primitive (hero variant) with its own testid.
+    expect(src).toContain('testid="prototype-route-empty"')
+    expect(src).toContain("PrototypeEmptyState")
+    expect(src).toContain('variant="hero"')
     expect(src).toContain("Generate prototype")
     // The empty-state button is the only thing that flips the gate open.
     expect(src).toContain("onClick={() => setGenerateRequested(true)}")
+  })
+
+  it("homes the established empty-state classes in the shared primitive (consolidation, no per-route markup)", () => {
+    // The da-prototype-empty class set lives once, in the shared primitive — not
+    // re-hand-rolled in the route. This pins the de-duplication: the route
+    // delegates to PrototypeEmptyState and does not inline the empty-state markup.
+    const primSrc = readFileSync(
+      resolve(
+        process.cwd(),
+        "app/components/design-agent/PrototypeEmptyState.tsx",
+      ),
+      "utf8",
+    )
+    expect(primSrc).toContain("da-prototype-empty-title")
+    expect(primSrc).toContain("da-prototype-empty-sub")
   })
 
   it("re-gates the panel on prdId change (a useEffect resets generateRequested)", () => {
@@ -550,10 +565,12 @@ describe("PrototypeRoute — generate panel gated behind empty-state button", ()
     expect(resetEffect).toBe(true)
   })
 
-  it("keeps the no-PRD (prdId == null) empty state unchanged", () => {
-    // The pre-existing no-PRD empty state and its testid are untouched by the fix.
-    expect(src).toContain('data-testid="prototype-route-empty"')
-    expect(src).toContain("No PRD selected")
+  it("routes the no-PRD (prdId == null) empty state through the shared primitive", () => {
+    // The no-PRD empty state delegates to the same PrototypeEmptyState primitive
+    // (default variant), preserving its testid, copy, and the brief CTA.
+    expect(src).toContain('testid="prototype-route-empty"')
+    expect(src).toContain("PrototypeEmptyState")
+    expect(src).toContain('title="No PRD selected"')
     expect(src).toContain('goTo("brief")')
   })
 })

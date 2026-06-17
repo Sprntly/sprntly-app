@@ -617,7 +617,22 @@ export function GenerateModal({
       //   2. the saved preference is healthy (effect will fire loading flow).
       // An unhealthy pref (repo missing from list) falls through so the user
       // sees the form as a recovery path.
-      const dataStillLoading = connections === null || repos === null
+      //
+      // CRITICAL: `repos === null` only counts as "still loading" when github
+      // is ACTUALLY connected (githubActive) — the repos fetch effect is gated
+      // on githubActive, so when github is NOT connected the repos fetch NEVER
+      // runs and `repos` stays null forever. Without the `githubActive &&`
+      // guard here, a saved github preference whose connector is disconnected
+      // (e.g. the saved pref outlived the connection) would make this branch
+      // `return null` PERMANENTLY: the empty state is gone, the auto-skip effect
+      // also waits forever on `repos !== null` (and never fires, since an
+      // unhealthy pref must not auto-skip), so NOTHING ever replaces it — a
+      // fully blank /prototype surface with no locate call and no error. Gating
+      // the repos-pending check on githubActive lets the form render as the
+      // recovery path (the "Connect a codebase / switch source" affordance)
+      // exactly as the unhealthy-repo case already does.
+      const dataStillLoading =
+        connections === null || (githubActive && repos === null)
       const githubHealthy =
         githubActive &&
         !!savedPreference.github_repo &&
