@@ -100,7 +100,7 @@ from app.design_agent.prompts import (
 )
 from app.design_agent.event_stream import publish_step, subscribe as _sse_subscribe
 from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
-from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_typecheck_run
+from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_build_run
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.codebase_map.recreate import (
     ThemeExpectations,
@@ -1490,14 +1490,15 @@ async def _run_generation_bg(
         )
 
 
-# The post-build typecheck-repair loop: at most a few agent re-entries, each held
+# The post-build build-repair loop: at most a few agent re-entries, each held
 # under its own small spend budget so repair can never reignite the very cost
 # pressure that caused the dangling-import failure in the first place.
-_TYPECHECK_REPAIR_MAX_ITERS = 3
-_TYPECHECK_REPAIR_CAP_USD = 0.10
+_BUILD_REPAIR_MAX_ITERS = 3
+_BUILD_REPAIR_CAP_USD = 0.10
 
 
-async def _typecheck_repair_loop(
+
+async def _build_repair_loop(
     *,
     prototype_id: int,
     workspace_id: str,
@@ -1508,15 +1509,24 @@ async def _typecheck_repair_loop(
     scenario: str,
     first_diagnostics: str,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Recover a build that failed its runtime-breaking type check.
+    """Recover a build that failed — a runtime-breaking type check OR a generic
+    `vite build` error (bad CSS `@apply`, an unresolved import the build's own
+    deterministic repair could not fix, etc.).
 
-    Re-enter the agent up to a few times to write the missing file(s) the build
-    referenced, rebuilding after each pass. Returns `(dist_files, repaired_fs)` on
-    a green build. On exhaustion — re-tries used or the repair spend budget reached
-    — deterministically drop the dangling imports (the same strip the build's own
-    repair uses) and rebuild once, so the prototype still renders (incomplete but
-    visible). If even that still fails, raise TypeCheckRepairExhausted so the
-    caller fails the row with a precise reason.
+    Re-enter the agent up to a few times to fix the offending source the build
+    error names, rebuilding after each pass. Returns `(dist_files, repaired_fs)` on
+    a green build. The build error headline leads each diagnostics string, so the
+    agent sees the offending class/import on every re-entry.
+
+    On exhaustion — re-tries used or the repair spend budget reached — the recovery
+    is CLASS-AWARE. When the residual is a runtime-breaking type error (a dangling
+    import the agent could not resolve), deterministically drop those imports (the
+    same strip the build's own repair uses) and rebuild once, so the prototype still
+    renders (incomplete but visible); if even that fails, raise
+    TypeCheckRepairExhausted so the caller fails the row with a precise reason. When
+    the residual is a generic ViteBuildError (e.g. an `@apply <unknown>` CSS error),
+    stripping dangling imports does NOT help, so it is HONEST-FAILED: the residual
+    propagates to the caller's fail path, which the frontend renders as error+Retry.
 
     Repair spend is tracked on its own budget, independent of the generation soft
     and hard caps, so a repair turn can run even when the original generation was
@@ -1528,10 +1538,14 @@ async def _typecheck_repair_loop(
     publish_step(prototype_id, FINISHING_STEP)
     diagnostics = first_diagnostics
     repair_cost_usd = 0.0
-    for _ in range(_TYPECHECK_REPAIR_MAX_ITERS):
-        if repair_cost_usd >= _TYPECHECK_REPAIR_CAP_USD:
+    # The most recent build error across the bounded re-tries. The exhaustion
+    # branch reads its TYPE to pick the right recovery (strip-to-green for the
+    # import/typecheck class, honest-fail for any other ViteBuildError).
+    last_exc: TypeCheckError | ViteBuildError = TypeCheckError(first_diagnostics)
+    for _ in range(_BUILD_REPAIR_MAX_ITERS):
+        if repair_cost_usd >= _BUILD_REPAIR_CAP_USD:
             break
-        result, virtual_fs = await repair_typecheck_run(
+        result, virtual_fs = await repair_build_run(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
             system_blocks=system_blocks,
@@ -1545,19 +1559,31 @@ async def _typecheck_repair_loop(
         try:
             dist_files, virtual_fs = await vite_build_with_repair(virtual_fs)
             logger.info(
-                "typecheck_repair_succeeded prototype_id=%s repair_cost_usd=%.4f",
+                "build_repair_succeeded prototype_id=%s repair_cost_usd=%.4f",
                 prototype_id, repair_cost_usd,
             )
             return dist_files, virtual_fs
-        except TypeCheckError as exc:
-            diagnostics = str(exc)  # feed the residual diagnostics into the next pass
+        except (TypeCheckError, ViteBuildError) as exc:
+            # Feed the residual back into the next pass. The headline leads, so the
+            # agent sees the offending class/import (typecheck symbol OR CSS class).
+            last_exc = exc
+            diagnostics = str(exc)
             continue
-        # A non-typecheck build failure (bad JSX, timeout, unresolved import the
-        # build's own repair could not fix) propagates to the caller and fails the
-        # row, exactly as a first-build failure of that kind does.
-    # Exhausted: deterministically drop the dangling imports and rebuild once.
+        # A non-build failure (e.g. a missing runtime/scaffold file) propagates to
+        # the caller and fails the row, exactly as a first-build failure of that
+        # kind does — it is not model-fixable here.
+    # Exhausted. Recover by residual class: only the import/typecheck class benefits
+    # from stripping dangling imports. A generic build error (e.g. CSS `@apply` of an
+    # undefined utility) does not — stripping imports cannot fix it — so honest-fail.
+    if not isinstance(last_exc, TypeCheckError):
+        logger.info(
+            "build_repair_exhausted prototype_id=%s repair_cost_usd=%.4f "
+            "error_class=%s action=honest_fail",
+            prototype_id, repair_cost_usd, type(last_exc).__name__,
+        )
+        raise last_exc
     logger.info(
-        "typecheck_repair_exhausted prototype_id=%s repair_cost_usd=%.4f action=strip_to_green",
+        "build_repair_exhausted prototype_id=%s repair_cost_usd=%.4f action=strip_to_green",
         prototype_id, repair_cost_usd,
     )
     stripped_fs, _actions = repair_unresolved_relative_imports(virtual_fs)
@@ -1565,7 +1591,7 @@ async def _typecheck_repair_loop(
         return await vite_build_with_repair(stripped_fs)
     except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
         raise TypeCheckRepairExhausted(
-            f"type check still failing after repair and strip: {exc}"
+            f"build still failing after repair and strip: {exc}"
         ) from exc
 
 
@@ -1709,13 +1735,17 @@ async def _stage_complete_run(
                     "design_agent.structural_parity_check_errored prototype_id=%s",
                     prototype_id,
                 )
-    except TypeCheckError as exc:
-        # A runtime-breaking type error (most often a screen the agent imported but
-        # was cut off before writing) does NOT fail outright. Re-enter the agent a
-        # few times to write the missing file(s); on exhaustion, deterministically
-        # drop the dangling imports so the prototype still renders. Only if we have
-        # the agent context to re-enter with — a direct staging call without it
-        # falls back to failing precisely, as before.
+    except (TypeCheckError, ViteBuildError) as exc:
+        # A model-fixable build failure does NOT fail outright. This covers a
+        # runtime-breaking type error (most often a screen the agent imported but
+        # was cut off before writing) AND a generic `vite build` error whose
+        # headline names a fixable cause (e.g. an `@apply` of an undefined utility
+        # class, or an unresolved import the build's own repair could not stub).
+        # Re-enter the agent a few times to fix the offending source; on exhaustion
+        # the recovery is class-aware (strip-to-green for the import/typecheck class,
+        # honest-fail for any other build error). Only if we have the agent context
+        # to re-enter with — a direct staging call without it falls back to failing
+        # precisely, as before.
         if system_blocks is None:
             logger.warning(
                 "vite_build_failed prototype_id=%s error_class=%s",
@@ -1728,7 +1758,7 @@ async def _stage_complete_run(
             )
             return
         try:
-            dist_files, repaired_virtual_fs = await _typecheck_repair_loop(
+            dist_files, repaired_virtual_fs = await _build_repair_loop(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
                 virtual_fs=virtual_fs,
@@ -1749,9 +1779,12 @@ async def _stage_complete_run(
                 error=f"{type(repair_exc).__name__}: {repair_exc}",
             )
             return
-    except (ViteBuildError, FileNotFoundError, ThemeBridgeError) as exc:
-        # A build failure or theme-bridge miss fails the row. For ThemeBridgeError
-        # the log names the missing signals; for build errors it names the error class.
+    except (FileNotFoundError, ThemeBridgeError) as exc:
+        # The fail-fast path: a missing runtime/scaffold file (not model-fixable) or
+        # a theme-bridge miss (not a build error) fails the row. A ViteBuildError is
+        # NOT handled here — it routes into the agent-driven repair loop above,
+        # alongside TypeCheckError. For ThemeBridgeError the log names the missing
+        # signals; for the missing-file case it names the error class.
         if isinstance(exc, ThemeBridgeError):
             logger.warning(
                 "theme_bridge_failed prototype_id=%s missing=%s",
