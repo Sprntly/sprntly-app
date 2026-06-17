@@ -36,7 +36,12 @@ logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "backlog-sequence-v1"
 TRIAGE_SKILL = "backlog-triage"
-MAX_BACKLOG = 30   # cap the themes we sequence (and the LLM payload) — keep cost sane
+# We persist EVERY non-brief converged theme into the backlog (the whole point:
+# nothing the synthesis surfaced gets dropped). The LLM triage (tag + one-line
+# rationale) is the expensive part, so we bound only THAT to the top-ranked
+# themes; lower-ranked tail items are still persisted, just without an LLM-written
+# tag/rationale (rank + score alone place them).
+TRIAGE_CAP = 30
 
 _TRIAGE_SCHEMA = {
     "type": "object",
@@ -110,7 +115,8 @@ def sequence_backlog(
     """
     exclude = set(exclude_theme_ids or [])
     convergence = compute_convergence(facade, enterprise_id)
-    cands = [c for c in convergence if c.theme_id not in exclude][:MAX_BACKLOG]
+    # EVERY non-brief converged theme is sequenced into the backlog — no cap.
+    cands = [c for c in convergence if c.theme_id not in exclude]
     if not cands:
         return []
 
@@ -127,6 +133,9 @@ def sequence_backlog(
 
     # TRIAGE — one batched call (skill-bound) for tag + one-line rationale each.
     # The score already set the order; the skill explains, it does not re-rank.
+    # Bounded to the top TRIAGE_CAP themes to keep the LLM payload/cost sane; the
+    # rest are still persisted below, just without an LLM tag/rationale.
+    triage_pool = cands[:TRIAGE_CAP]
     bizctx_block = ""
     doc = load_business_context(enterprise_id)
     if doc is not None:
@@ -139,7 +148,7 @@ def sequence_backlog(
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="sequence_backlog",
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
-        input=bizctx_block + _candidates_payload(cands),
+        input=bizctx_block + _candidates_payload(triage_pool),
         json_schema=_TRIAGE_SCHEMA,
         skill=TRIAGE_SKILL,
     )
