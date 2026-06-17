@@ -419,6 +419,62 @@ def invalidate_stale_prototypes(current_version: int, variant: str = "v1") -> in
     return len(stale_ids)
 
 
+# ─── Preview-image backfill helpers ───────────────────────────────────────
+#
+# Used by the `python -m app.backfill_previews` one-off to repair prototypes
+# whose preview captured the un-hydrated SPA shell (or never captured at all).
+# The backfill re-renders the staged bundle locally and writes the result with
+# `set_preview_image_url`; it iterates candidate rows with
+# `list_ready_prototypes_for_backfill`. Status/completed_at are left untouched —
+# only the thumbnail is corrected.
+
+
+def set_preview_image_url(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    preview_image_url: str,
+) -> None:
+    """Update ONLY `preview_image_url` on a single row. Workspace-filtered.
+
+    A targeted update for the preview backfill — it does not touch status,
+    bundle_url, or completed_at, so re-running it on an already-correct row only
+    rewrites the same column (idempotent). Workspace-filtered.
+    """
+    c = require_client()
+    (
+        c.table(_TABLE)
+        .update({"preview_image_url": preview_image_url})
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)
+        .execute()
+    )
+    logger.info("prototype_preview_backfilled prototype_id=%s", prototype_id)
+
+
+@retry_on_disconnect
+def list_ready_prototypes_for_backfill() -> list[dict[str, Any]]:
+    """Return ready rows that have a current_checkpoint, for the preview backfill.
+
+    Operates ACROSS ALL WORKSPACES — an operator-run repair, not user-driven, so
+    it does NOT filter by workspace_id (a system-side sweep, like the invalidation hooks).
+    Projects only the columns the backfill needs (id, workspace_id,
+    current_checkpoint_id, preview_image_url) so the caller can repair BOTH
+    wrong-capture rows AND null-preview rows. A row with no current_checkpoint_id
+    is skipped (nothing staged to re-render).
+    """
+    c = require_client()
+    rows = (
+        c.table(_TABLE)
+        .select("id, workspace_id, current_checkpoint_id, preview_image_url")
+        .eq("status", "ready")
+        .execute()
+        .data
+        or []
+    )
+    return [r for r in rows if r.get("current_checkpoint_id") is not None]
+
+
 # ─── Sharing config + passcode + public-route lookup (P2-06) ──────────────
 #
 # F6: share_token is an OPAQUE uuid4 — NOT a JWT, NOT derived from prototype_id,

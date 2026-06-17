@@ -1857,7 +1857,13 @@ async def _stage_complete_run(
     # provisioned on the host the thumbnail just works; until then it degrades to null.
     preview_image_url = None
     try:
-        png = await capture_bundle_screenshot(bundle_url)
+        # Render LOCALLY from the built dist/ files, NOT the signed Supabase URL:
+        # the SPA's relative ./assets/* module scripts cannot resolve under a
+        # per-object signature, so a signed-URL capture only ever paints the
+        # un-hydrated #root shell. capture_bundle_screenshot serves dist_files
+        # over a loopback static server so the SPA hydrates and the screenshot
+        # captures the rendered app.
+        png = await capture_bundle_screenshot(dist_files)
         if png is not None:
             preview_image_url = await stage_preview_image(
                 prototype_id=prototype_id,
