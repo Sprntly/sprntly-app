@@ -48,6 +48,7 @@ import { GenerationErrorBanner, reasonCopy } from "../../components/design-agent
 import { GenerateSurfaceErrorBoundary } from "../../components/design-agent/GenerateSurfaceErrorBoundary"
 import { GenerationLoadingScreen, type LocatePhaseState } from "../../components/design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../../components/design-agent/PostGenerationResult"
+import { PrototypeEmptyState } from "../../components/design-agent/PrototypeEmptyState"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
 import { IterateComposer } from "../../components/design-agent/IterateComposer"
 import { useIterateRun } from "../../components/design-agent/useIterateRun"
@@ -658,15 +659,16 @@ export function PrototypeRoute() {
   if (prdId == null) {
     return (
       <AppLayout>
-        <div className="design-agent-surface da-prototype-empty" data-testid="prototype-route-empty">
-          <h2 className="da-prototype-empty-title">No PRD selected</h2>
-          <p className="da-prototype-empty-sub">
-            Open a PRD and choose "Generate Prototype" to start a prototype here.
-          </p>
-          <button type="button" className="btn btn-accent" onClick={() => goTo("brief")}>
-            Go to brief
-          </button>
-        </div>
+        <PrototypeEmptyState
+          testid="prototype-route-empty"
+          title="No PRD selected"
+          sub={'Open a PRD and choose "Generate Prototype" to start a prototype here.'}
+          action={
+            <button type="button" className="btn btn-accent" onClick={() => goTo("brief")}>
+              Go to brief
+            </button>
+          }
+        />
       </AppLayout>
     )
   }
@@ -766,20 +768,13 @@ export function PrototypeRoute() {
   if (!generateRequested) {
     return (
       <AppLayout>
-        <div
-          className="design-agent-surface da-prototype-empty da-empty-hero-stage"
-          data-testid="prototype-route-empty"
-        >
-          <div className="da-empty-hero">
-            <div className="da-empty-hero-art" aria-hidden="true">
-              <IconGrid size={48} />
-            </div>
-            <h2 className="da-empty-hero-title">Bring this PRD to life</h2>
-            <p className="da-empty-hero-sub">
-              Generate an interactive, clickable prototype straight from your PRD
-              — grounded in your connected codebase, so it looks like your real
-              app. Share it and refine it with comments.
-            </p>
+        <PrototypeEmptyState
+          variant="hero"
+          testid="prototype-route-empty"
+          art={<IconGrid size={48} />}
+          title="Bring this PRD to life"
+          sub="Generate an interactive, clickable prototype straight from your PRD — grounded in your connected codebase, so it looks like your real app. Share it and refine it with comments."
+          action={
             <button
               type="button"
               className="btn btn-accent da-empty-hero-cta"
@@ -788,29 +783,14 @@ export function PrototypeRoute() {
               <IconPlus size={16} />
               Generate prototype
             </button>
-            <div className="da-empty-hero-meta">
-              <span>~2–3 min</span>
-              <span className="da-empty-hero-dot" aria-hidden="true" />
-              <span>scoped against your connected repo</span>
-              <span className="da-empty-hero-dot" aria-hidden="true" />
-              <span>you'll pick the screen</span>
-            </div>
-            <div className="da-empty-hero-chips">
-              <span className="da-empty-hero-chip">
-                <IconPin size={15} />
-                Interactive &amp; clickable
-              </span>
-              <span className="da-empty-hero-chip">
-                <IconCopy size={15} />
-                Matches your app&apos;s UI
-              </span>
-              <span className="da-empty-hero-chip">
-                <IconShare size={15} />
-                Shareable + comments
-              </span>
-            </div>
-          </div>
-        </div>
+          }
+          meta={["~2–3 min", "scoped against your connected repo", "you'll pick the screen"]}
+          chips={[
+            { icon: <IconPin size={15} />, label: "Interactive & clickable" },
+            { icon: <IconCopy size={15} />, label: "Matches your app's UI" },
+            { icon: <IconShare size={15} />, label: "Shareable + comments" },
+          ]}
+        />
       </AppLayout>
     )
   }
