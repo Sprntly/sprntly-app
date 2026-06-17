@@ -26,7 +26,11 @@ from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.types import Entity, Relationship
 from app.prompts import BRIEF_SCHEMA_VERSION
-from app.synthesis.convergence import ThemeConvergence, compute_convergence
+from app.synthesis.convergence import (
+    ThemeConvergence,
+    compute_convergence,
+    has_sufficient_evidence,
+)
 from app.synthesis.delivery import deliver_brief_to_slack
 from app.synthesis.email_delivery import deliver_brief_to_email
 from app.synthesis.backlog import sequence_backlog
@@ -161,6 +165,38 @@ def _candidates_payload(cands: list[ThemeConvergence]) -> str:
     return "\n\n".join(lines)
 
 
+def _save_empty_brief(enterprise_id: str, dataset_slug: str, *, reason: str) -> dict:
+    """Persist + return an EMPTY brief (no insights) when the KG lacks enough
+    connected-source evidence to say anything real.
+
+    Same payload SHAPE as run_synthesis' normal return (so route/UI handle it
+    unchanged) but with insights=[] and a minimal summary, plus the
+    ``_insufficient_evidence`` flag + ``_empty_reason`` so callers/telemetry can
+    tell this apart from a content-rich brief. Slack/email delivery is SKIPPED
+    (nothing to deliver), and the backlog/judge are not run. Distinct from
+    EmptyKnowledgeGraphError, which still signals a totally empty KG.
+    """
+    now = datetime.now(timezone.utc)
+    week_label = f"Week of {now.strftime('%B')} {now.day}, {now.year}"
+    brief = {
+        "week_label": week_label,
+        "summary_headline": "",
+        "company": dataset_slug,
+        "insights": [],
+        "_generated_by": "synthesis_agent",
+        "_schema_version": BRIEF_SCHEMA_VERSION,
+        "_insufficient_evidence": True,
+        "_empty_reason": reason,
+    }
+    save_brief(dataset_slug, week_label, brief, schema_version=BRIEF_SCHEMA_VERSION)
+    logger.info(
+        "synthesis: insufficient connected-source evidence for company=%s "
+        "(slug=%s) — saved EMPTY brief (no delivery). %s",
+        enterprise_id, dataset_slug, reason,
+    )
+    return brief
+
+
 def run_synthesis(
     facade: GraphFacade,
     enterprise_id: str,
@@ -175,6 +211,33 @@ def run_synthesis(
             "Knowledge graph has no themes with signals for this enterprise — "
             "run extraction/seeding first"
         )
+
+    # EVIDENCE GATE: a new company that hasn't connected enough REAL sources (or
+    # only supplied onboarding/business-context metadata) should get an EMPTY
+    # brief — the frontend then shows its "connect more sources" empty state —
+    # rather than fabricated findings derived from profile metadata. We generate
+    # a brief ONLY when the KG clears a minimum connected-source bar; otherwise
+    # we save + return an empty brief (a valid outcome, distinct from the
+    # totally-empty-KG case above which still raises). Runs BEFORE de-dup: if
+    # there isn't enough real evidence there's nothing worth de-duping.
+    min_connected = int(config_get(
+        "brief.min_connected_signals", enterprise_id, default=3))
+    require_multi_source = bool(config_get(
+        "brief.require_multi_source", enterprise_id, default=True))
+    if not has_sufficient_evidence(
+        convergence,
+        min_connected_signals=min_connected,
+        require_multi_source=require_multi_source,
+    ):
+        return _save_empty_brief(
+            enterprise_id, dataset_slug,
+            reason=(
+                "Not enough connected-source evidence yet "
+                f"(need a multi-source theme or >= {min_connected} connected "
+                "signals; only onboarding/profile metadata present)."
+            ),
+        )
+
     # Brief de-dup: a theme already surfaced in a prior brief is dropped from
     # brief candidacy unless its issue materially changed since (new evidence /
     # ≥20% metric move — see synthesis/dedup.py). Suppressed themes are not lost:

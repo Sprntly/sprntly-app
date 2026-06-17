@@ -85,7 +85,8 @@ def test_synthesis_attaches_delivery_status(isolated_settings, monkeypatch):
 
     facade = GraphFacade()
     theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
-        ("revenue", "deal_blocker", {}, 1)])
+        ("revenue", "deal_blocker", {}, 1),
+        ("customer_voice", "feature_request", {}, 1)])  # multi-source: clears gate
     monkeypatch.setattr(synth, "load_kpi_tree", lambda eid: None)
     monkeypatch.setattr(synth, "llm_call", lambda **kw: LLMResult(
         output={**_RANKED, "insights": [{**_RANKED["insights"][0], "theme_id": theme.id}]},

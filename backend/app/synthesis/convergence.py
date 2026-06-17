@@ -18,6 +18,19 @@ from app.graph.facade import GraphFacade
 from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal
 from app.synthesis.scoring import voc_score
 
+# Source types that represent REAL connected-source evidence (a connector sync
+# or a corpus document run through the extractor), as opposed to onboarding /
+# business-context / agent-inference SEEDED metadata. The seeded source types
+# are pm_manual + agent_inferred (business_context_projection / ds anomaly
+# inferences) and verbal_claim (unverified self-reported claims) — none of which
+# represent a connected data source. Used by has_sufficient_evidence() to gate
+# brief generation so a brand-new, source-less company gets an EMPTY brief
+# instead of fabricated findings derived from onboarding metadata.
+CONNECTED_SOURCE_TYPES: frozenset[str] = frozenset({
+    "analytics", "project_mgmt", "communication", "customer_voice", "revenue",
+    "outcome_measured",
+})
+
 
 @dataclass
 class ThemeConvergence:
@@ -34,10 +47,19 @@ class ThemeConvergence:
     # input to brief de-dup (synthesis/dedup.py). None when the theme has no
     # signals (it won't be emitted in that case).
     latest_signal_at: datetime | None = None
+    # Distinct signals on this theme whose source_type is a connected source
+    # (see CONNECTED_SOURCE_TYPES) — the real-evidence subset used by the
+    # sufficiency gate. <= signal_count.
+    connected_signal_count: int = 0
 
     @property
     def breadth(self) -> int:
         return len(self.source_types)
+
+    @property
+    def connected_breadth(self) -> int:
+        """Distinct CONNECTED source types agreeing on this theme."""
+        return len(self.source_types & CONNECTED_SOURCE_TYPES)
 
 
 def _recency_factor(signal: Signal, now: datetime) -> float:
@@ -83,6 +105,8 @@ def compute_convergence(
             if tc.latest_signal_at is None or sig.valid_at > tc.latest_signal_at:
                 tc.latest_signal_at = sig.valid_at
             tc.source_types.add(sig.source_type)
+            if sig.source_type in CONNECTED_SOURCE_TYPES:
+                tc.connected_signal_count += 1
             tc.effective_weight += w
             rev = sig.properties.get("revenue_at_risk_usd") or sig.properties.get("revenue_usd") or 0
             try:
@@ -113,3 +137,35 @@ def compute_convergence(
 
     out.sort(key=lambda t: (-t.breadth, -t.effective_weight))
     return out
+
+
+def has_sufficient_evidence(
+    convergence: list[ThemeConvergence],
+    *,
+    min_connected_signals: int = 3,
+    require_multi_source: bool = True,
+) -> bool:
+    """Is there enough REAL connected-source evidence to justify a brief?
+
+    Pure + unit-testable. Returns True (generate a brief) when EITHER:
+
+      - a theme shows multi-source convergence across CONNECTED sources
+        (connected_breadth >= 2) — independent connected sources agreeing is
+        the strongest possible signal that there is something real to say; OR
+      - the total count of distinct connected-source signals across all themes
+        is >= ``min_connected_signals`` (default 3).
+
+    Otherwise the only evidence is onboarding / business-context / agent-inferred
+    metadata (pm_manual, agent_inferred, verbal_claim) or a single thin source,
+    so we return False and the caller emits an EMPTY brief rather than
+    fabricating low-value findings from profile metadata.
+
+    ``require_multi_source`` lets a deployment drop the breadth>=2 fast-path and
+    rely purely on the connected-signal count (default keeps the breadth path).
+    """
+    if require_multi_source and any(
+        tc.connected_breadth >= 2 for tc in convergence
+    ):
+        return True
+    total_connected = sum(tc.connected_signal_count for tc in convergence)
+    return total_connected >= min_connected_signals

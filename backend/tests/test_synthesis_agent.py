@@ -332,6 +332,156 @@ def test_run_synthesis_empty_kg_raises(facade):
         synth.run_synthesis(facade, "ent-empty", dataset_slug="empty")
 
 
+# ---------- evidence gate: has_sufficient_evidence (pure) ----------
+
+def test_sufficient_when_multi_source_connected_theme(facade):
+    """A single theme with >=2 distinct CONNECTED source types clears the bar."""
+    from app.synthesis.convergence import (
+        compute_convergence, has_sufficient_evidence)
+
+    _seed_theme_with_signals(facade, "ent-A", "multi", [
+        ("revenue", "deal_blocker", {}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    conv = compute_convergence(facade, "ent-A")
+    assert has_sufficient_evidence(conv, min_connected_signals=3) is True
+
+
+def test_sufficient_when_connected_signal_count_meets_threshold(facade):
+    """No multi-source theme, but >= MIN_CONNECTED_SIGNALS connected signals
+    across themes ⇒ sufficient (each theme single-source here)."""
+    from app.synthesis.convergence import (
+        compute_convergence, has_sufficient_evidence)
+
+    _seed_theme_with_signals(facade, "ent-A", "a", [
+        ("communication", "feature_request", {}, 0),
+        ("communication", "feature_request", {}, 1),
+    ])
+    _seed_theme_with_signals(facade, "ent-A", "b", [
+        ("project_mgmt", "bug", {}, 0),
+    ])
+    conv = compute_convergence(facade, "ent-A")
+    # 3 connected signals total, but no theme has connected_breadth>=2.
+    assert all(tc.connected_breadth < 2 for tc in conv)
+    assert has_sufficient_evidence(conv, min_connected_signals=3) is True
+    # Raising the bar above the count flips it insufficient.
+    assert has_sufficient_evidence(conv, min_connected_signals=4) is False
+
+
+def test_insufficient_when_only_onboarding_metadata(facade):
+    """The screenshot case: only pm_manual/agent_inferred onboarding signals and
+    a single thin theme ⇒ INSUFFICIENT (those source types are not connected
+    sources, so they don't count toward the bar)."""
+    from app.synthesis.convergence import (
+        compute_convergence, has_sufficient_evidence)
+
+    _seed_theme_with_signals(facade, "ent-A", "north-star", [
+        ("pm_manual", "constraint", {}, 0),
+        ("agent_inferred", "good_outcome", {}, 0),
+    ])
+    _seed_theme_with_signals(facade, "ent-A", "stage", [
+        ("verbal_claim", "claim", {}, 0),
+    ])
+    conv = compute_convergence(facade, "ent-A")
+    assert sum(tc.connected_signal_count for tc in conv) == 0
+    assert has_sufficient_evidence(conv, min_connected_signals=3) is False
+
+
+def test_insufficient_single_connected_source_thin(facade):
+    """One single-source theme with one connected signal ⇒ insufficient
+    (breadth 1, count 1 < 3)."""
+    from app.synthesis.convergence import (
+        compute_convergence, has_sufficient_evidence)
+
+    _seed_theme_with_signals(facade, "ent-A", "thin", [
+        ("communication", "feature_request", {}, 0),
+    ])
+    conv = compute_convergence(facade, "ent-A")
+    assert has_sufficient_evidence(conv, min_connected_signals=3) is False
+
+
+def test_require_multi_source_false_ignores_breadth_path(facade):
+    """With require_multi_source=False a multi-source theme no longer auto-passes;
+    only the connected-signal count matters."""
+    from app.synthesis.convergence import (
+        compute_convergence, has_sufficient_evidence)
+
+    _seed_theme_with_signals(facade, "ent-A", "multi", [
+        ("revenue", "deal_blocker", {}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    conv = compute_convergence(facade, "ent-A")
+    # 2 connected signals; breadth path would pass, count path needs >=3.
+    assert has_sufficient_evidence(
+        conv, min_connected_signals=3, require_multi_source=False) is False
+    assert has_sufficient_evidence(
+        conv, min_connected_signals=2, require_multi_source=False) is True
+
+
+# ---------- evidence gate: run_synthesis wiring ----------
+
+def test_run_synthesis_thin_kg_saves_empty_brief(facade, isolated_settings):
+    """A thin KG (one single-source theme, one signal) → EMPTY brief saved, the
+    LLM judge is NOT invoked, and the _insufficient_evidence flag is set."""
+    from app.synthesis import agent as synth
+
+    _seed_theme_with_signals(facade, "ent-A", "thin", [
+        ("communication", "feature_request", {}, 0),
+    ])
+
+    judge_calls: list = []
+
+    def _spy_llm(**kw):
+        judge_calls.append(kw)
+        return _llm_result(_RANKED)
+
+    with patch.object(synth, "llm_call", side_effect=_spy_llm):
+        brief = synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    # Judge never ran — the gate short-circuited before any LLM call.
+    assert judge_calls == []
+    assert brief["insights"] == []
+    assert brief["_insufficient_evidence"] is True
+    assert brief["_generated_by"] == "synthesis_agent"
+    assert "_empty_reason" in brief
+
+    # Empty brief persisted in the same `briefs` table the UI reads.
+    rows = isolated_settings["supabase"].table("briefs").select("*") \
+        .eq("dataset", "acme").execute().data
+    assert len(rows) == 1
+    assert rows[0]["payload"]["insights"] == []
+    assert rows[0]["payload"]["_insufficient_evidence"] is True
+
+    # No hypothesis ledger entities created for an empty brief.
+    assert facade.query_entities("ent-A", type="hypothesis") == []
+
+
+def test_run_synthesis_rich_kg_generates_normal_brief(facade, isolated_settings):
+    """A rich (multi-source) KG → normal brief as before; judge invoked."""
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    ranked = {**_RANKED, "insights": [
+        {**_RANKED["insights"][0], "theme_id": theme.id}]}
+
+    judge_calls: list = []
+
+    def _spy_llm(**kw):
+        judge_calls.append(kw)
+        return _llm_result(ranked)
+
+    with patch.object(synth, "llm_call", side_effect=_spy_llm):
+        brief = synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    assert judge_calls, "judge should run for a sufficiently-rich KG"
+    assert len(brief["insights"]) == 1
+    assert "_insufficient_evidence" not in brief
+    assert facade.query_entities("ent-A", type="hypothesis")
+
+
 # ---------- chart_hints parity (BUG 1) ----------
 
 def _run_with_ranked(facade, ranked):
@@ -587,7 +737,11 @@ def test_factor_reorders_low_fit_below_high_fit(facade, isolated_settings, monke
 
 
 def test_decision_log_factors_carry_four_score_fields(facade, isolated_settings, monkeypatch):
-    _seed_theme_with_signals(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 0)])
+    # Multi-source (revenue + customer_voice) so it clears the evidence gate;
+    # still a single theme, so per-candidate assertions below are unchanged.
+    _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {}, 0),
+        ("customer_voice", "feature_request", {}, 0)])
     synth = _run_with_fits(facade, monkeypatch, "ent-A", {"SSO": "med"}, tree=_kpi_tree())
     synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
 
@@ -604,7 +758,11 @@ def test_decision_log_factors_carry_four_score_fields(facade, isolated_settings,
 def test_flag_off_factors_all_one_and_no_classification(facade, isolated_settings, monkeypatch):
     from app.synthesis import agent as synth
 
-    _seed_theme_with_signals(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 0)])
+    # Multi-source (revenue + customer_voice) so it clears the evidence gate;
+    # still a single theme, so per-candidate assertions below are unchanged.
+    _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {}, 0),
+        ("customer_voice", "feature_request", {}, 0)])
     monkeypatch.setattr(synth, "load_kpi_tree", lambda eid: _kpi_tree())
     monkeypatch.setitem(
         __import__("app.graph.config_layers", fromlist=["PLATFORM_DEFAULTS"])
@@ -637,7 +795,11 @@ def test_judge_prompt_has_no_rerank_instruction(facade, isolated_settings, monke
     captured = {}
     synth = _run_with_fits(facade, monkeypatch, "ent-A", {"SSO": "high"},
                            tree=_kpi_tree(), captured=captured)
-    _seed_theme_with_signals(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 0)])
+    # Multi-source (revenue + customer_voice) so it clears the evidence gate;
+    # still a single theme, so per-candidate assertions below are unchanged.
+    _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {}, 0),
+        ("customer_voice", "feature_request", {}, 0)])
     synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
     text = captured["input"]
     assert "do NOT re-rank by strategic fit" in text
@@ -648,7 +810,11 @@ def test_no_tree_path_factors_neutral_no_classification(facade, isolated_setting
     from app.synthesis import agent as synth
     from app.synthesis import scoring
 
-    _seed_theme_with_signals(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 0)])
+    # Multi-source (revenue + customer_voice) so it clears the evidence gate;
+    # still a single theme, so per-candidate assertions below are unchanged.
+    _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {}, 0),
+        ("customer_voice", "feature_request", {}, 0)])
     monkeypatch.setattr(synth, "load_kpi_tree", lambda eid: None)
     # Real classify_theme_fit runs (no-tree branch), but it must make no llm_call.
     llm_calls = []
