@@ -1185,7 +1185,7 @@ async def test_complete_path_repairs_then_precise_fails_on_typecheck_error(env, 
         result = SimpleNamespace(usage=SimpleNamespace(est_cost_usd=lambda m: 0.0))
         return result, kwargs["virtual_fs"]
 
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", _repair_noop)
+    monkeypatch.setattr(env.routes, "repair_build_run", _repair_noop)
     monkeypatch.setattr(env.routes, "stage_bundle", stage_mock)
     prd_id = _seed_prd(env.db)
     pid = env.proto.start_prototype(prd_id=prd_id, workspace_id="app", template_version=1)

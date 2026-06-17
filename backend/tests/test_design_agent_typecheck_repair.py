@@ -12,7 +12,7 @@ Conventions (env fixture, fake Supabase, _PROTOTYPE_DDL, _async_return,
 _checkpoints_for) are duplicated from test_design_agent_build_repair.py — each
 test file in this repo is self-contained. The route's `vite_build_with_repair`
 is REAL; tests stub the underlying `storage.vite_build` so the repair loop runs,
-and monkeypatch `env.routes.repair_typecheck_run` (the agent re-entry seam).
+and monkeypatch `env.routes.repair_build_run` (the agent re-entry seam).
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def _stateful_typecheck_build(*, required_key, dist=None):
 
 
 def _fake_repair_run(*, writes=None, cost_usd=0.02):
-    """A fake repair_typecheck_run: records calls, optionally writes `writes` into the
+    """A fake repair_build_run: records calls, optionally writes `writes` into the
     returned vfs (simulating the agent fixing the build), returns (result, vfs) where
     result.usage.est_cost_usd(model) == cost_usd."""
     state = {"calls": 0, "diagnostics": []}
@@ -218,7 +218,7 @@ async def test_repair_writes_missing_screen_then_completes(env, monkeypatch):
         writes={"src/screens/HomeScreen.tsx": "export default function HomeScreen(){return <div/>;}"},
     )
     monkeypatch.setattr(storage, "vite_build", build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -240,7 +240,7 @@ async def test_repair_feeds_diagnostics_to_agent(env, monkeypatch):
         writes={"src/screens/HomeScreen.tsx": "export default function HomeScreen(){return <div/>;}"},
     )
     monkeypatch.setattr(storage, "vite_build", build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -260,7 +260,7 @@ async def test_exhaustion_strips_to_green(env, monkeypatch):
     build, _ = _stateful_typecheck_build(required_key="src/screens/HomeScreen.tsx")
     repair, repair_state = _fake_repair_run(writes=None)     # agent never fixes it
     monkeypatch.setattr(storage, "vite_build", build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -270,7 +270,7 @@ async def test_exhaustion_strips_to_green(env, monkeypatch):
     )
     row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
     assert row["status"] == "ready"
-    assert repair_state["calls"] == env.routes._TYPECHECK_REPAIR_MAX_ITERS
+    assert repair_state["calls"] == env.routes._BUILD_REPAIR_MAX_ITERS
 
 
 async def test_exhaustion_strip_cannot_fix_fails_with_distinct_class(env, monkeypatch, caplog):
@@ -281,7 +281,7 @@ async def test_exhaustion_strip_cannot_fix_fails_with_distinct_class(env, monkey
     build, _ = _stateful_typecheck_build(required_key="__never__.tsx")
     repair, _repair_state = _fake_repair_run(writes=None)
     monkeypatch.setattr(storage, "vite_build", build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -307,7 +307,7 @@ async def test_repair_cost_cap_stops_early(env, monkeypatch):
     build, _ = _stateful_typecheck_build(required_key="src/screens/HomeScreen.tsx")
     repair, repair_state = _fake_repair_run(writes=None, cost_usd=0.06)
     monkeypatch.setattr(storage, "vite_build", build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -328,7 +328,7 @@ async def test_clean_build_runs_zero_repairs(env, monkeypatch):
 
     repair, repair_state = _fake_repair_run()
     monkeypatch.setattr(storage, "vite_build", _clean_build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -351,7 +351,7 @@ async def test_generic_build_failure_enters_repair_then_honest_fails(env, monkey
 
     repair, repair_state = _fake_repair_run(writes=None)   # agent never fixes it
     monkeypatch.setattr(storage, "vite_build", _syntax_error)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -375,7 +375,7 @@ async def test_typecheck_error_without_system_blocks_fails_precisely(env, monkey
 
     repair, repair_state = _fake_repair_run()
     monkeypatch.setattr(storage, "vite_build", _typecheck_fail)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -401,7 +401,7 @@ async def test_repair_progress_is_generic_label_only(env, monkeypatch):
         writes={"src/screens/HomeScreen.tsx": "export default function HomeScreen(){return <div/>;}"},
     )
     monkeypatch.setattr(storage, "vite_build", build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -435,7 +435,7 @@ async def test_apply_build_error_repairs_then_completes(env, monkeypatch, headli
     build, _ = _stateful_vite_build_error(headline=headline, fixed_key="src/_fixed.css")
     repair, repair_state = _fake_repair_run(writes={"src/_fixed.css": ".card{}"})
     monkeypatch.setattr(storage, "vite_build", build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -462,7 +462,7 @@ async def test_rollup_unresolved_import_takes_repair_path(env, monkeypatch):
         writes={"src/components/Header.tsx": "export default function Header(){return <div/>;}"},
     )
     monkeypatch.setattr(storage, "vite_build", build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -484,7 +484,7 @@ async def test_persistent_vite_build_error_honest_fails_no_strip(env, monkeypatc
     build, build_state = _always_vite_build_error(_APPLY_INVENTED_TOKEN_MSG)
     repair, repair_state = _fake_repair_run(writes=None)   # agent never fixes it
     monkeypatch.setattr(storage, "vite_build", build)
-    monkeypatch.setattr(env.routes, "repair_typecheck_run", repair)
+    monkeypatch.setattr(env.routes, "repair_build_run", repair)
     _wire_staging(env, monkeypatch)
 
     pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
@@ -615,10 +615,10 @@ def test_render_repair_user_embeds_diagnostics():
     """Supporting: the diagnostics ride in the agent's USER turn, not in the
     user-facing step copy. The rendered user message contains the diagnostics; the
     progress label does not."""
-    from app.design_agent.runner import _render_typecheck_repair_user
+    from app.design_agent.runner import _render_build_repair_user
 
     diagnostics = "src/App.tsx(1,8): error TS2304: Cannot find name 'HomeScreen'"
-    rendered = _render_typecheck_repair_user(diagnostics)
+    rendered = _render_build_repair_user(diagnostics)
     assert diagnostics in rendered
     assert diagnostics not in FINISHING_LABEL
 
@@ -626,11 +626,11 @@ def test_render_repair_user_embeds_diagnostics():
 def test_render_repair_user_has_apply_hint_without_hardcoded_class():
     """The repair prompt is build-error general (not type-only) and carries a concise
     `@apply` hint — without hardcoding any specific utility class name."""
-    from app.design_agent.runner import _render_typecheck_repair_user
+    from app.design_agent.runner import _render_build_repair_user
 
     # Diagnostics deliberately free of any utility token, so the only place a token
     # could appear is the prompt's static text — which must hardcode none.
-    rendered = _render_typecheck_repair_user("build failed")
+    rendered = _render_build_repair_user("build failed")
     # Reads as a build error, with the @apply guidance present.
     assert "build error" in rendered.lower() or "build" in rendered.lower()
     assert "@apply" in rendered

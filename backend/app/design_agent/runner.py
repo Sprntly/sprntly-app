@@ -1500,7 +1500,7 @@ async def generate_prototype(
     return result, out_virtual_fs
 
 
-def _render_typecheck_repair_user(diagnostics: str) -> str:
+def _render_build_repair_user(diagnostics: str) -> str:
     """Build the user turn for a repair re-entry. Plain English; the diagnostics
     are the build's own message (real file, symbol, and class names), never
     internal IDs. Covers both runtime-breaking type errors and generic build
@@ -1521,7 +1521,7 @@ def _render_typecheck_repair_user(diagnostics: str) -> str:
     )
 
 
-async def repair_typecheck_run(
+async def repair_build_run(
     *,
     prototype_id: int,
     workspace_id: str,
@@ -1557,7 +1557,7 @@ async def repair_typecheck_run(
     )
     user_message = {
         "role": "user",
-        "content": [{"type": "text", "text": _render_typecheck_repair_user(diagnostics)}],
+        "content": [{"type": "text", "text": _render_build_repair_user(diagnostics)}],
     }
     result = await agent_loop(
         system_blocks=system_blocks,

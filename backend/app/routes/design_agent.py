@@ -100,7 +100,7 @@ from app.design_agent.prompts import (
 )
 from app.design_agent.event_stream import publish_step, subscribe as _sse_subscribe
 from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
-from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_typecheck_run
+from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_build_run
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
 from app.design_agent.codebase_map.recreate import (
     ThemeExpectations,
@@ -1490,22 +1490,15 @@ async def _run_generation_bg(
         )
 
 
-# The post-build typecheck-repair loop: at most a few agent re-entries, each held
+# The post-build build-repair loop: at most a few agent re-entries, each held
 # under its own small spend budget so repair can never reignite the very cost
 # pressure that caused the dangling-import failure in the first place.
 _BUILD_REPAIR_MAX_ITERS = 3
 _BUILD_REPAIR_CAP_USD = 0.10
 
-# Back-compat aliases: the original names were typecheck-specific. The loop now
-# repairs ANY model-fixable build failure (typecheck diagnostics AND generic
-# `vite build` errors — e.g. an `@apply` of an undefined utility class), so the
-# canonical names are build-scoped. Tests and any external readers that still
-# reference the old names keep working.
-_TYPECHECK_REPAIR_MAX_ITERS = _BUILD_REPAIR_MAX_ITERS
-_TYPECHECK_REPAIR_CAP_USD = _BUILD_REPAIR_CAP_USD
 
 
-async def _typecheck_repair_loop(
+async def _build_repair_loop(
     *,
     prototype_id: int,
     workspace_id: str,
@@ -1552,7 +1545,7 @@ async def _typecheck_repair_loop(
     for _ in range(_BUILD_REPAIR_MAX_ITERS):
         if repair_cost_usd >= _BUILD_REPAIR_CAP_USD:
             break
-        result, virtual_fs = await repair_typecheck_run(
+        result, virtual_fs = await repair_build_run(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
             system_blocks=system_blocks,
@@ -1765,7 +1758,7 @@ async def _stage_complete_run(
             )
             return
         try:
-            dist_files, repaired_virtual_fs = await _typecheck_repair_loop(
+            dist_files, repaired_virtual_fs = await _build_repair_loop(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
                 virtual_fs=virtual_fs,
