@@ -73,6 +73,72 @@ def test_get_evidence_cross_tenant_returns_404(tenant_client, isolated_settings)
     assert a.client.get(f"/v1/evidence/{evidence_id}").status_code == 200
 
 
+# ---- GET /v1/evidence/by-insight/{brief_id}/{insight_index} -----------------
+
+def test_by_insight_returns_evidence(tenant_client, isolated_settings):
+    # The read-by-insight lookup resolves a brief insight's evidence so the UI
+    # can populate the Evidence tab for the PRD being viewed/generated.
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset="acme")
+    evidence_id = db_mod.start_evidence(
+        brief_id=brief_id, insight_index=1, title="t",
+        template_version=1, variant="v2",
+    )
+    db_mod.complete_evidence(evidence_id, title="t", md="# insight-1 evidence")
+
+    resp = t.client.get(f"/v1/evidence/by-insight/{brief_id}/1")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == evidence_id
+    assert body["insight_index"] == 1
+    assert body["payload_md"] == "# insight-1 evidence"
+
+
+def test_by_insight_returns_404_when_none(tenant_client, isolated_settings):
+    # Brief exists but the insight has no evidence yet → 404 (UI swallows → empty).
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset="acme")
+    assert t.client.get(f"/v1/evidence/by-insight/{brief_id}/0").status_code == 404
+
+
+def test_by_insight_cross_tenant_returns_404(tenant_client, isolated_settings):
+    # Company B can't read company A's brief-insight evidence (ownership via brief).
+    a = tenant_client.make(slug="company-a")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset="company-a")
+    evidence_id = db_mod.start_evidence(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=1, variant="v2",
+    )
+    db_mod.complete_evidence(evidence_id, title="t", md="# A's evidence")
+
+    b = tenant_client.make(slug="company-b")
+    assert b.client.get(f"/v1/evidence/by-insight/{brief_id}/0").status_code == 404
+    assert a.client.get(f"/v1/evidence/by-insight/{brief_id}/0").status_code == 200
+
+
+def test_by_insight_without_auth_returns_401(unauth_client, isolated_settings):
+    assert unauth_client.get("/v1/evidence/by-insight/1/0").status_code == 401
+
+
+def test_by_insight_three_segment_not_shadowed(tenant_client, isolated_settings):
+    # The 3-segment /by-insight/{brief}/{idx} path resolves to get_by_insight and
+    # is never coerced into the single-segment GET /{evidence_id} (no 422).
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset="acme")
+    evidence_id = db_mod.start_evidence(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=1, variant="v2",
+    )
+    db_mod.complete_evidence(evidence_id, title="t", md="# body")
+    resp = t.client.get(f"/v1/evidence/by-insight/{brief_id}/0")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == evidence_id
+
+
 # ---- POST /v1/evidence/generate --------------------------------------------
 
 def test_generate_without_auth_returns_401(unauth_client, isolated_settings):
