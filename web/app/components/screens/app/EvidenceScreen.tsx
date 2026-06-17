@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { evidenceApi, type EvidenceRecord } from "../../../lib/api"
+import { sleepUntilNextPoll } from "../../../lib/poll"
 import { AppLayout } from "./AppLayout"
 import { IconSparkles } from "@tabler/icons-react"
 
@@ -150,7 +151,9 @@ export function EvidenceScreen() {
 
         while (doc.status === "generating" && Date.now() - startedAt < MAX_MS) {
           if (cancelled) return
-          await new Promise((r) => setTimeout(r, 4000))
+          // Visibility-aware sleep: refocusing a backgrounded tab (whose timers
+          // throttle to ~1/min) wakes immediately to re-read the real status.
+          await sleepUntilNextPoll(4000)
           doc = await evidenceApi.get(startRes.evidence_id)
         }
 

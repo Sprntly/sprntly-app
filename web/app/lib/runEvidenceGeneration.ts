@@ -1,27 +1,35 @@
 import { evidenceApi } from "./api"
 import { markdownToEvidenceState } from "./evidence-adapter"
+import { sleepUntilNextPoll } from "./poll"
+import { clearPendingJob, insightScope, setPendingJob } from "./jobResume"
 import type { DetailState, PrdContent } from "../types/content"
 
 export type EvidenceGenResult =
   | { ok: true; evidence: PrdContent }
   | { ok: false; message: string }
 
-/** Polls until the Evidence Page is ready, then parses the markdown with
- *  the evidence adapter (typed semantic blocks + standard markdown). */
-export async function runEvidenceGeneration(
-  meta: DetailState["meta"],
+const MAX_MS = 6 * 60 * 1000
+
+/**
+ * Poll an already-kicked-off evidence doc by id until terminal. Shared by
+ * `runEvidenceGeneration` (calls generate first) and `resumeEvidenceGeneration`
+ * (re-enters against a persisted id on remount). Clears the persisted
+ * pending-job marker on every terminal exit.
+ */
+async function pollEvidenceToResult(
+  evidenceId: number,
+  scope: string | null,
 ): Promise<EvidenceGenResult> {
-  if (!meta) {
-    return { ok: false, message: "Open this evidence from the brief first." }
-  }
-  const start = await evidenceApi.generate(meta.briefId, meta.insightIndex)
-  let doc = await evidenceApi.get(start.evidence_id)
+  let doc = await evidenceApi.get(evidenceId)
   const startedAt = Date.now()
-  const MAX_MS = 6 * 60 * 1000
   while (doc.status === "generating" && Date.now() - startedAt < MAX_MS) {
-    await new Promise((r) => setTimeout(r, 4000))
-    doc = await evidenceApi.get(start.evidence_id)
+    // Visibility-aware sleep: a backgrounded tab throttles setTimeout to ~1/min,
+    // which stalls polling though the server-side evidence job finishes.
+    // Refocusing wakes immediately and re-reads the real status.
+    await sleepUntilNextPoll(4000)
+    doc = await evidenceApi.get(evidenceId)
   }
+  if (scope) clearPendingJob("evidence", "_", scope)
   if (doc.status === "failed") {
     return {
       ok: false,
@@ -32,6 +40,35 @@ export async function runEvidenceGeneration(
     return { ok: false, message: "Timed out waiting for evidence" }
   }
   return { ok: true, evidence: markdownToEvidenceState(doc.payload_md) }
+}
+
+/** Polls until the Evidence Page is ready, then parses the markdown with
+ *  the evidence adapter (typed semantic blocks + standard markdown). Persists
+ *  the active evidence_id so a remount can resume via
+ *  `resumeEvidenceGeneration`. */
+export async function runEvidenceGeneration(
+  meta: DetailState["meta"],
+): Promise<EvidenceGenResult> {
+  if (!meta) {
+    return { ok: false, message: "Open this evidence from the brief first." }
+  }
+  const start = await evidenceApi.generate(meta.briefId, meta.insightIndex)
+  const scope = insightScope(meta.briefId, meta.insightIndex)
+  setPendingJob("evidence", "_", scope, start.evidence_id)
+  return pollEvidenceToResult(start.evidence_id, scope)
+}
+
+/**
+ * Re-enter polling for an evidence doc whose generation was already kicked off
+ * (id persisted via `setPendingJob`) — used on remount so a background-finished
+ * job resumes instead of being orphaned. Does NOT call generate again.
+ */
+export async function resumeEvidenceGeneration(
+  evidenceId: number,
+  meta: DetailState["meta"],
+): Promise<EvidenceGenResult> {
+  const scope = meta ? insightScope(meta.briefId, meta.insightIndex) : null
+  return pollEvidenceToResult(evidenceId, scope)
 }
 
 /** Read-only sibling of runEvidenceGeneration: fetch the EXISTING evidence for a

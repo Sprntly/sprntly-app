@@ -86,9 +86,27 @@ export function usePipelineStatus(company: string): PipelineHookResult {
     prevStatusRef.current = null
     void poll()
 
+    // Background tabs throttle setTimeout to ~1/min, so the self-scheduling
+    // poll stalls while backgrounded though the pipeline runs server-side.
+    // When the tab is refocused, cancel the (throttled) pending timer and poll
+    // immediately so the UI catches up to the real status at once.
+    const onVisible = () => {
+      if (cancelledRef.current) return
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        if (timerRef.current) clearTimeout(timerRef.current)
+        void poll()
+      }
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisible)
+    }
+
     return () => {
       cancelledRef.current = true
       if (timerRef.current) clearTimeout(timerRef.current)
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisible)
+      }
     }
   }, [company, poll])
 
