@@ -390,6 +390,77 @@ async def test_vite_build_raises_on_nonzero_exit(monkeypatch):
     assert "SyntaxError" in str(ei.value)
 
 
+# ─── failed-build stderr observability ───────────────────────────────────────
+# vite/rollup/postcss print the line that NAMES the failure (offending class /
+# unresolved import) FIRST, then a long tail of stack frames. The error string
+# must lead with that headline so (a) the model-driven build-repair loop and
+# production triage see it, and (b) the route's `f"{type(exc).__name__}: {exc}"`
+# truncated to 500 chars before being persisted still retains it.
+
+# Real headlines from a deterministic build-failure repro, each followed below by
+# >2000 chars of synthetic stack-frame filler.
+_TAILWIND_HEADLINE = (
+    "[vite:css] [postcss] /tmp/build/src/index.css:1:1: The "
+    "`some-utility-that-does-not-exist-2026` class does not exist. If "
+    "`some-utility-...` is a custom class, make sure it is defined within a "
+    "`@layer` directive."
+)
+_TAILWIND_TOKEN = "some-utility-that-does-not-exist-2026"
+_ROLLUP_HEADLINE = (
+    'Could not resolve "./this-module-does-not-exist" from "src/App.tsx"'
+)
+_ROLLUP_TOKEN = 'Could not resolve "./this-module-does-not-exist"'
+
+# Filler stack frames that DWARF the headline, so a tail-keeping truncation
+# (the old `[-1000:]`) would drop the identifying line entirely.
+_STDERR_FILLER = "\n".join(
+    f"    at expandApplyAtRules (/app/node_modules/tailwindcss/lib/lib/expandApplyAtRules.js:380:{i})"
+    for i in range(120)
+)
+
+
+@pytest.mark.parametrize(
+    "headline, token",
+    [
+        (_TAILWIND_HEADLINE, _TAILWIND_TOKEN),
+        (_ROLLUP_HEADLINE, _ROLLUP_TOKEN),
+    ],
+    ids=["tailwind_apply", "rollup_import"],
+)
+async def test_failed_build_error_leads_with_headline(monkeypatch, caplog, headline, token):
+    """A non-zero build raises a ViteBuildError whose message LEADS with the line
+    naming the failure (not a tail of stack frames), and logs the head of stderr
+    to journald. Proves the headline survives a downstream 500-char truncation."""
+    stderr = f"{headline}\n{_STDERR_FILLER}"
+    assert len(stderr) > 2000  # filler genuinely dwarfs the headline
+
+    monkeypatch.setattr(
+        storage.subprocess, "run",
+        _fake_vite_run(returncode=1, stderr=stderr),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.design_agent.storage"):
+        with pytest.raises(ViteBuildError) as ei:
+            await storage.vite_build({"src/App.tsx": "broken"})
+
+    msg = str(ei.value)
+    assert "exit=1" in msg
+    # The identifier survives AND sits at the FRONT of the message.
+    assert token in msg
+    assert msg.index(token) < 200
+
+    # The DB persists `f"{type(exc).__name__}: {exc}"` truncated to 500 chars
+    # (fail_prototype). Simulate that and prove the headline is still retained,
+    # so no cap bump is needed downstream.
+    db_error = (f"ViteBuildError: {ei.value}")[:500]
+    assert token in db_error
+
+    # The head of stderr is logged for triage (no local repro needed in prod).
+    failure_logs = [r for r in caplog.records if "vite_build_failed" in r.getMessage()]
+    assert failure_logs, "expected a vite_build_failed WARNING log"
+    assert token in failure_logs[0].getMessage()
+
+
 async def test_vite_build_raises_on_timeout(monkeypatch):
     def _timeout(cmd, cwd=None, **kwargs):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 60))

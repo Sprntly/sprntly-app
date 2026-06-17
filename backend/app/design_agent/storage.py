@@ -76,6 +76,29 @@ _RUNTIME_ROOT = Path(__file__).resolve().parent.parent.parent.parent / "prototyp
 # so they don't affect the build; skipping keeps the copy small).
 _SCAFFOLD_EXCLUDE = {"node_modules", "dist", "dist-fixture", ".vite", "test", "__tests__"}
 
+# How much of a failed build's stderr to carry in the ViteBuildError message.
+# vite/rollup/postcss print the line that NAMES the failure (the missing class,
+# the unresolved import) FIRST; the long tail after it is stack frames. So we
+# keep the identifying HEAD plus a slice of the terminal frame, head-led — a tail
+# slice would have dropped exactly the line triage and the build-repair loop need.
+_STDERR_HEAD_CHARS = 1500
+_STDERR_TAIL_CHARS = 500
+# Bound the journald warning to the first lines of stderr — enough to carry the
+# headline diagnostic without flooding the log with the full frame dump.
+_STDERR_LOG_LINES = 20
+
+
+def _headline_preserving(stderr: str, head: int = _STDERR_HEAD_CHARS, tail: int = _STDERR_TAIL_CHARS) -> str:
+    """Keep the identifying HEAD (vite/rollup/postcss print the offending class
+    or import on the first line) plus the terminal frame. Head-led so a
+    downstream truncation of the error string still retains the headline, and the
+    build-repair loop (and production triage) see the line that names the
+    failure rather than an arbitrary tail of stack frames."""
+    s = (stderr or "").strip()
+    if len(s) <= head + tail:
+        return s
+    return f"{s[:head]}\n…\n{s[-tail:]}"
+
 # Build/config files the scaffold owns - the agent may emit React source under
 # src/ and its own index.html, but it must never overwrite the build harness
 # (clobbering vite.config.ts drops base:"./" and the anchor-id plugin, which
@@ -269,8 +292,20 @@ def _vite_build_sync(runtime_root: Path, virtual_fs: dict[str, str]) -> dict[str
                 f"vite build timed out after {timeout_s}s"
             ) from exc
         if result.returncode != 0:
-            stderr_tail = (result.stderr or "")[-1000:]
-            raise ViteBuildError(f"vite build exit={result.returncode}: {stderr_tail}")
+            full_stderr = result.stderr or ""
+            # Log the head of stderr to journald so production triage never needs
+            # a local repro — these are compiler diagnostics over the agent's
+            # generated code (no user data), and stderr already flowed into the
+            # error string. Bounded to the first lines to keep the log readable.
+            stderr_head = "\n".join(full_stderr.splitlines()[:_STDERR_LOG_LINES])
+            logger.warning(
+                "vite_build_failed exit=%s stderr_head=%s",
+                result.returncode,
+                stderr_head,
+            )
+            raise ViteBuildError(
+                f"vite build exit={result.returncode}: {_headline_preserving(full_stderr)}"
+            )
         dist_dir = build_path / "dist"
         if not dist_dir.exists():
             raise ViteBuildError("vite build succeeded but dist/ was not produced")
