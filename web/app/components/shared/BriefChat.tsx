@@ -79,28 +79,18 @@ const isPrototypeCommand = (q: string) =>
 const isTicketsCommand = (q: string) =>
   /\b(create|generate|make|draft|break)\b.*\btickets?\b/i.test(q)
 
-// Short headline for the greeting (drop everything after the first em/en dash).
-function shortTitle(title: string): string {
-  const t = title.split(/\s+[—–-]\s+/)[0].trim()
-  return t.length > 64 ? `${t.slice(0, 61)}…` : t
-}
-function humanList(items: string[]): string {
-  if (items.length === 0) return ""
-  if (items.length === 1) return items[0]
-  if (items.length === 2) return `${items[0]} and ${items[1]}`
-  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`
-}
 function buildGreeting(v2: BriefV2State | null, firstName: string | null): string {
   const who = firstName ? `, ${firstName}` : ""
   if (!v2 || (!v2.hero && v2.supporting.length === 0)) {
-    return `Good day${who} — I don't see a brief for this week yet. Run the market-intelligence pipeline at the top of the page and I'll lay out the findings here, then help you turn any of them into a PRD, tickets, or a prototype.`
+    return `Good day${who} — there isn't enough connected yet to generate a weekly brief. Please add more sources and connect them to us, and your brief will appear here.`
   }
-  const findings = [v2.hero, ...v2.supporting].filter(Boolean) as Finding[]
-  const list = humanList(findings.map((f) => shortTitle(f.title)))
-  const n = findings.length
+  // Lead with a clean one-line intro and let the finding cards below carry the
+  // titles — inlining the (Title-Cased) finding titles into this sentence read
+  // as an awkward run-on.
+  const n = [v2.hero, ...v2.supporting].filter(Boolean).length
   return `Good day${who} — here's this week's brief. I spotted ${n} thing${
     n !== 1 ? "s" : ""
-  } worth your attention: ${list}.`
+  } worth your attention this week.`
 }
 
 function weekLabel(weekOf: string | null): string {

@@ -156,7 +156,7 @@ function mountHarness() {
 }
 
 const WIP_TITLE = "Generating your Monday brief…"
-const EMPTY_GREETING = "I don't see a brief for this week yet"
+const EMPTY_GREETING = "Please add more sources"
 
 afterEach(() => {
   cleanup()
