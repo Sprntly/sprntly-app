@@ -52,6 +52,7 @@ import {
   type PendingQuestion,
   type PrototypeRecord,
 } from "../../lib/api"
+import { IconArrowRight } from "../shared/app-icons"
 
 // ---- pure helpers (dependency-injected, SSR-free) ---------------------------
 
@@ -338,11 +339,46 @@ function deriveScreenLabel(entryComponent: string, route: string): string {
   return label || rt
 }
 
-/** Pure presentational view for the pre-gen screen-selection gate. No hooks,
- *  no I/O — SSR-renderable in node-env vitest. Reuses the
- *  clarifying-question-* CSS class family; introduces no new class names
- *  requiring globals.css changes. The top-candidate marker is grayscale/opacity
- *  only (no new colour, per design-system restraint). */
+/** Split the candidate list into a single lead (the one currently promoted into
+ *  the Suggested slot) and the remaining alternatives in original order. Pure →
+ *  unit-testable without a DOM. The lead is resolved by `promotedId`; when that
+ *  id matches no current candidate (e.g. the candidates prop changed under the
+ *  picker) it falls back to the first `is_top` candidate, then to index 0.
+ *  Tolerates a candidate whose id is null/missing — never indexes an empty
+ *  array unguarded; returns `lead: null` only when the list is empty. */
+export function selectLeadAndAlternatives(
+  candidates: LocateConfirmCandidate[],
+  promotedId: string,
+): { lead: LocateConfirmCandidate | null; alternatives: LocateConfirmCandidate[] } {
+  if (!candidates || candidates.length === 0) {
+    return { lead: null, alternatives: [] }
+  }
+  const promoted = candidates.find((c) => (c?.id ?? "") === promotedId)
+  const fallback = candidates.find((c) => c?.is_top) ?? candidates[0]!
+  const lead = promoted ?? fallback
+  const alternatives = candidates.filter((c) => c !== lead)
+  return { lead, alternatives }
+}
+
+/** The id the picker promotes into the Suggested slot on first render: the
+ *  highest-confidence (`is_top`) candidate, else the first candidate. */
+function defaultPromotedId(candidates: LocateConfirmCandidate[]): string {
+  if (!candidates || candidates.length === 0) return ""
+  const top = candidates.find((c) => c?.is_top) ?? candidates[0]!
+  return top?.id ?? ""
+}
+
+/** Presentational view for the pre-gen screen-selection gate, "Suggested +
+ *  alternatives" layout. Leads with the suggested screen (full description +
+ *  primary action); the remaining candidates render as compact clickable rows
+ *  that PROMOTE into the Suggested slot when clicked (local state only — the
+ *  promote click never confirms; confirmation is always the explicit "Use this
+ *  screen" button so the user commits from the full description).
+ *
+ *  Scoped class names: a `locate-*` family in the component-scoped
+ *  design-agent.css plus the existing global `btn`/`btn-accent` for the primary
+ *  action — no new global class, no globals.css change. Every candidate field
+ *  read is null-safe so a partial/degraded candidate never throws at render. */
 export function LocateConfirmView({
   question = "Which screen does this change affect?",
   candidates,
@@ -351,6 +387,12 @@ export function LocateConfirmView({
   onChoose,
   onSearchOther,
 }: LocateConfirmViewProps) {
+  const [promotedId, setPromotedId] = useState<string>(() =>
+    defaultPromotedId(candidates),
+  )
+
+  const { lead, alternatives } = selectLeadAndAlternatives(candidates, promotedId)
+
   return (
     <div
       className="clarifying-question-surface"
@@ -364,51 +406,80 @@ export function LocateConfirmView({
       >
         {question}
       </p>
-      <div
-        className="clarifying-question-choices"
-        data-testid="locate-confirm-choices"
-      >
-        {candidates.map((c) => (
-          <button
-            key={c.id}
-            type="button"
-            className="clarifying-question-choice"
-            data-testid="locate-confirm-choice"
-            disabled={busy}
-            onClick={() => onChoose(c.route, c.id)}
-          >
-            <span data-testid="locate-confirm-choice-label">
-              {deriveScreenLabel(c.entry_component, c.route)}
-            </span>
-            {c.rationale && (
-              <span
-                className="clarifying-question-context"
-                data-testid="locate-confirm-narrative"
-              >
-                {c.rationale}
-              </span>
-            )}{" "}
-            <span
-              data-testid="locate-confirm-route-info"
-              style={{ opacity: 0.55, fontSize: "0.85em" }}
+
+      {lead && (
+        <div className="locate-lead" data-testid="locate-lead">
+          <span className="locate-badge" data-testid="locate-suggested-badge">
+            Suggested
+          </span>
+          <div className="locate-lead-name" data-testid="locate-lead-name">
+            {deriveScreenLabel(lead.entry_component, lead.route)}
+          </div>
+          {lead.rationale && (
+            <div
+              className="locate-lead-desc"
+              data-testid="locate-confirm-narrative"
             >
-              {c.route} · {c.component_count} components
-            </span>
-            {c.is_top && (
-              <span
-                data-testid="locate-confirm-top-badge"
-                style={{ opacity: 0.55 }}
-              >
-                {" "}Top candidate
-              </span>
-            )}
+              {lead.rationale}
+            </div>
+          )}
+          <div
+            className="locate-route-info"
+            data-testid="locate-confirm-route-info"
+          >
+            {lead.route ?? ""} · {lead.component_count ?? 0} components
+          </div>
+          <button
+            type="button"
+            className="btn btn-accent"
+            data-testid="locate-confirm-use"
+            disabled={busy}
+            onClick={() => onChoose(lead.route ?? "", lead.id ?? "")}
+          >
+            Use this screen
           </button>
-        ))}
-      </div>
+        </div>
+      )}
+
+      {alternatives.length > 0 && (
+        <>
+          <div className="locate-others-label" data-testid="locate-others-label">
+            Other options
+          </div>
+          <div className="locate-alt-list">
+            {alternatives.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className="locate-alt-row"
+                data-testid="locate-alt-row"
+                disabled={busy}
+                onClick={() => setPromotedId(c.id ?? "")}
+              >
+                <span className="locate-alt-name" data-testid="locate-alt-name">
+                  {deriveScreenLabel(c.entry_component, c.route)}
+                </span>
+                {c.rationale && (
+                  <span
+                    className="locate-alt-desc"
+                    data-testid="locate-alt-desc"
+                  >
+                    {c.rationale}
+                  </span>
+                )}
+                <span className="locate-alt-chev" aria-hidden>
+                  <IconArrowRight />
+                </span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
       {onSearchOther !== undefined && (
         <button
           type="button"
-          className="clarifying-question-choice"
+          className="locate-search-other"
           data-testid="locate-confirm-search-other"
           disabled={busy}
           onClick={onSearchOther}

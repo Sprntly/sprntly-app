@@ -1,8 +1,11 @@
 // LocateConfirmView — node-env vitest, no DOM, no testing-library.
-// Pure views are SSR-rendered via renderToStaticMarkup for markup assertions.
-// Click-handler wiring is verified by intercepting React.createElement to
-// capture button props (same technique as the sibling surface test), then
-// invoking the captured onClick directly.
+// The view is SSR-rendered via renderToStaticMarkup for default-state markup
+// assertions (renderToStaticMarkup honours useState's initial value, so the
+// default lead/alternatives split renders deterministically). Click-handler
+// wiring is verified by intercepting React.createElement to capture button
+// props, then invoking the captured onClick directly. The click-to-PROMOTE
+// interaction (which needs a state update + re-render) is covered separately in
+// LocateConfirmPromote.test.tsx under a jsdom environment.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { readFileSync } from "node:fs"
@@ -14,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   LocateConfirmView,
+  selectLeadAndAlternatives,
   ClarifyingQuestionSurfaceView,
   type LocateConfirmViewProps,
   type LocateConfirmCandidate,
@@ -93,42 +97,42 @@ const THREE_CANDIDATES: LocateConfirmCandidate[] = [
   },
 ]
 
-// ---- Rendering --------------------------------------------------------------
+// ---- Lead card + alternatives layout ----------------------------------------
 
-describe("renders each candidate with narrative", () => {
-  it("renders three choice buttons each showing label + PM-facing narrative", () => {
+describe("suggested lead + alternative rows", () => {
+  it("leads with the top candidate: name, full rationale, and a Use button", () => {
     const html = renderView({ candidates: THREE_CANDIDATES, onChoose: vi.fn() })
-    const choiceCount = (
-      html.match(/data-testid="locate-confirm-choice"/g) ?? []
-    ).length
-    expect(choiceCount).toBe(3)
-    // The narrative (rationale) is the primary, load-bearing PM-facing line.
-    const narrativeCount = (
-      html.match(/data-testid="locate-confirm-narrative"/g) ?? []
-    ).length
-    expect(narrativeCount).toBe(3)
+    // Lead is the is_top candidate (/team) — full description, no truncation.
+    expect(html).toContain('data-testid="locate-suggested-badge"')
+    expect(html).toContain("Suggested")
+    expect(html).toContain('data-testid="locate-lead-name"')
+    expect(html).toContain("Team")
+    expect(html).toContain('data-testid="locate-confirm-use"')
+    // The lead's full rationale is the load-bearing PM-facing narrative.
+    expect(html).toContain('data-testid="locate-confirm-narrative"')
     expect(html).toContain(
       "Where teammates are invited and their roles are managed.",
     )
-    expect(html).toContain(
-      "The home overview a user lands on after signing in.",
-    )
-    expect(html).toContain(
-      "Where account and workspace preferences are changed.",
-    )
   })
 
-  it("still surfaces route + component count as a demoted secondary detail", () => {
+  it("renders the other candidates as alt rows (count = candidates - 1)", () => {
     const html = renderView({ candidates: THREE_CANDIDATES, onChoose: vi.fn() })
+    const altCount = (html.match(/data-testid="locate-alt-row"/g) ?? []).length
+    expect(altCount).toBe(THREE_CANDIDATES.length - 1)
+    // Alternative descriptions (CSS-truncated) are present in the markup.
+    expect(html).toContain("The home overview a user lands on after signing in.")
+    expect(html).toContain("Where account and workspace preferences are changed.")
+    expect(html).toContain('data-testid="locate-others-label"')
+  })
+
+  it("surfaces the lead's route + component count as a demoted secondary line", () => {
+    const html = renderView({ candidates: THREE_CANDIDATES, onChoose: vi.fn() })
+    expect(html).toContain('data-testid="locate-confirm-route-info"')
     expect(html).toContain("/team")
     expect(html).toContain("3 components")
-    expect(html).toContain("/dashboard")
-    expect(html).toContain("7 components")
-    expect(html).toContain("/settings")
-    expect(html).toContain("2 components")
   })
 
-  it("omits the narrative line when rationale is empty, keeping the heading", () => {
+  it("omits the lead narrative line when rationale is empty, keeping the name", () => {
     const html = renderView({
       candidates: [
         {
@@ -147,14 +151,45 @@ describe("renders each candidate with narrative", () => {
   })
 })
 
-describe("top candidate marker only on leading", () => {
-  it("renders the Top candidate badge only where is_top === true", () => {
-    const html = renderView({ candidates: THREE_CANDIDATES, onChoose: vi.fn() })
-    const badgeCount = (
-      html.match(/data-testid="locate-confirm-top-badge"/g) ?? []
-    ).length
-    expect(badgeCount).toBe(1)
-    expect(html).toContain("Top candidate")
+describe("single-candidate edge case", () => {
+  it("renders only the lead — no Other options label and no alt rows", () => {
+    const html = renderView({
+      candidates: [THREE_CANDIDATES[0]!],
+      onChoose: vi.fn(),
+    })
+    expect(html).toContain('data-testid="locate-confirm-use"')
+    expect(html).not.toContain('data-testid="locate-others-label"')
+    expect(html).not.toContain('data-testid="locate-alt-row"')
+  })
+})
+
+// ---- Pure split helper ------------------------------------------------------
+
+describe("selectLeadAndAlternatives", () => {
+  it("promotes the candidate whose id matches promotedId; rest keep order", () => {
+    const { lead, alternatives } = selectLeadAndAlternatives(
+      THREE_CANDIDATES,
+      "/settings",
+    )
+    expect(lead?.id).toBe("/settings")
+    expect(alternatives.map((c) => c.id)).toEqual(["/team", "/dashboard"])
+  })
+
+  it("falls back to the is_top candidate when promotedId matches nothing", () => {
+    const { lead } = selectLeadAndAlternatives(THREE_CANDIDATES, "/nope")
+    expect(lead?.id).toBe("/team")
+  })
+
+  it("falls back to index 0 when no candidate is is_top", () => {
+    const noTop = THREE_CANDIDATES.map((c) => ({ ...c, is_top: false }))
+    const { lead } = selectLeadAndAlternatives(noTop, "/nope")
+    expect(lead?.id).toBe("/team")
+  })
+
+  it("returns lead null + empty alternatives for an empty list", () => {
+    const { lead, alternatives } = selectLeadAndAlternatives([], "/x")
+    expect(lead).toBeNull()
+    expect(alternatives).toEqual([])
   })
 })
 
@@ -190,7 +225,6 @@ describe("label derived from entry component with route fallback", () => {
       ],
       onChoose: vi.fn(),
     })
-    // Readable label "Team" is present; raw entry_component is not shown as-is
     expect(html).toContain("Team")
     expect(html).not.toContain("TeamScreen")
   })
@@ -227,28 +261,39 @@ describe("label derived from entry component with route fallback", () => {
       ],
       onChoose: vi.fn(),
     })
-    // The label span should contain the route string as the fallback
     const labelMatch = html.match(
-      /data-testid="locate-confirm-choice-label">(.*?)<\/span>/,
+      /data-testid="locate-lead-name">(.*?)<\/div>/,
     )
     expect(labelMatch?.[1]).toBe("/team")
   })
 })
 
-// ---- Interaction ------------------------------------------------------------
+// ---- Interaction (default lead) ---------------------------------------------
 
-describe("onChoose fires exact route", () => {
-  it("clicking a candidate button calls onChoose with the exact route string AND its stable id", () => {
+describe("Use this screen confirms the default lead", () => {
+  it("clicking Use calls onChoose with the top candidate's route AND id", () => {
     const onChoose = vi.fn()
     const buttons = captureButtonProps({ candidates: THREE_CANDIDATES, onChoose })
-    // First candidate button → route "/team", id "/team"
-    const firstChoice = buttons.find(
-      (b) => b["data-testid"] === "locate-confirm-choice",
+    const useBtn = buttons.find(
+      (b) => b["data-testid"] === "locate-confirm-use",
     )
-    expect(firstChoice).toBeDefined()
-    ;(firstChoice!["onClick"] as () => void)()
+    expect(useBtn).toBeDefined()
+    ;(useBtn!["onClick"] as () => void)()
     expect(onChoose).toHaveBeenCalledTimes(1)
     expect(onChoose).toHaveBeenCalledWith("/team", "/team")
+  })
+
+  it("clicking an alt row does NOT call onChoose (promote-only)", () => {
+    const onChoose = vi.fn()
+    const buttons = captureButtonProps({ candidates: THREE_CANDIDATES, onChoose })
+    const altRows = buttons.filter(
+      (b) => b["data-testid"] === "locate-alt-row",
+    )
+    expect(altRows.length).toBe(2)
+    for (const row of altRows) {
+      ;(row["onClick"] as () => void)()
+    }
+    expect(onChoose).not.toHaveBeenCalled()
   })
 })
 
@@ -286,15 +331,15 @@ describe("search other conditional render and callback", () => {
 
 // ---- State ------------------------------------------------------------------
 
-describe("busy disables all buttons", () => {
-  it("every candidate button and the search button are disabled when busy=true", () => {
+describe("busy disables the Use button, every alt row, and search", () => {
+  it("all actionable buttons are disabled when busy=true", () => {
     const html = renderView({
       candidates: THREE_CANDIDATES,
       onChoose: vi.fn(),
       onSearchOther: vi.fn(),
       busy: true,
     })
-    // 3 candidates + 1 search button = 4 total; all must be disabled
+    // Use (1) + alt rows (2) + search (1) = 4 disabled controls.
     const disabledCount = (html.match(/disabled=""/g) ?? []).length
     expect(disabledCount).toBe(4)
   })
@@ -326,8 +371,6 @@ describe("error renders alert", () => {
 
 describe("existing clarifying surface view tests still green", () => {
   it("existing choice-mode still renders candidate buttons", () => {
-    // Spot-check that the existing view export is unchanged after the append.
-    // Full coverage lives in ClarifyingQuestionSurface.test.tsx.
     const html = renderToStaticMarkup(
       React.createElement(ClarifyingQuestionSurfaceView, {
         question: "List or grid?",
@@ -354,7 +397,7 @@ describe("existing clarifying surface view tests still green", () => {
 })
 
 describe("no globals css change", () => {
-  it("LocateConfirmView only uses existing clarifying-question-* class names", () => {
+  it("LocateConfirmView only uses scoped picker classes (no new global class)", () => {
     const src = readFileSync(
       join(
         process.cwd(),
@@ -365,17 +408,27 @@ describe("no globals css change", () => {
       ),
       "utf8",
     )
-    // Check the appended section only (from the LocateConfirmCandidate type onward)
+    // Check the appended section only (from the LocateConfirmCandidate type onward).
     const appended = src.slice(src.indexOf("export type LocateConfirmCandidate"))
     const classMatches = [...appended.matchAll(/className="([^"]+)"/g)].map(
       (m) => m[1],
     )
+    // Allowed: the pre-existing scoped clarifying-question-* family, the new
+    // scoped picker classes (locate-*, styled in the component-scoped
+    // design-agent.css — NOT globals.css), the pre-existing global button
+    // classes (btn / btn-accent), and the shared "error" utility. Any other
+    // token would imply a brand-new global class requiring a globals.css edit.
+    const allowed = (token: string) =>
+      token.startsWith("clarifying-question") ||
+      token.startsWith("locate") ||
+      token === "error" ||
+      token === "btn" ||
+      token === "btn-accent"
     for (const cls of classMatches) {
       for (const token of cls.split(" ")) {
-        expect(
-          token.startsWith("clarifying-question") || token === "error",
-          `Unexpected class "${token}" in LocateConfirmView`,
-        ).toBe(true)
+        expect(allowed(token), `Unexpected class "${token}" in LocateConfirmView`).toBe(
+          true,
+        )
       }
     }
   })
@@ -396,7 +449,6 @@ describe("no prohibited tokens in appended lines", () => {
       "utf8",
     )
     const appended = src.slice(src.indexOf("export type LocateConfirmCandidate"))
-    // Check for common prohibited pattern families (ticket series, framework IDs)
     const seriesPattern = /[CPH]\d-\d/
     const adPattern = /\bAD\d/
     const fPattern = /\bF\d{1,2}\b/

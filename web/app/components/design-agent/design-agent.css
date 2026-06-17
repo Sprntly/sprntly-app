@@ -3089,3 +3089,132 @@
   font-size: 14px;
   color: var(--danger);
 }
+
+/* ── Pre-gen screen picker — Suggested + alternatives layout ────────────────
+ * Styles the screen-disambiguation picker shown before a generation run when
+ * the located screen is ambiguous. Leads with a Suggested card (full
+ * description + primary "Use this screen" action); the remaining candidates
+ * render as compact clickable rows that promote into the Suggested slot. Every
+ * colour is a token reference; scoped under `.design-agent-surface` (the modal
+ * root carries it). Reuses the existing accent-card and clickable-row idioms
+ * already used elsewhere in this sheet. */
+.design-agent-surface .locate-lead {
+  border: 1px solid var(--accent-alpha-14);
+  background: var(--accent-muted);
+  border-radius: var(--radius);
+  padding: 15px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.design-agent-surface .locate-badge {
+  align-self: flex-start;
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--surface);
+  background: var(--accent);
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+.design-agent-surface .locate-lead-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.design-agent-surface .locate-lead-desc {
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.55;
+}
+.design-agent-surface .locate-route-info {
+  font-size: 11px;
+  color: var(--muted);
+}
+.design-agent-surface .locate-lead .btn-accent {
+  align-self: flex-start;
+  margin-top: 6px;
+}
+.design-agent-surface .locate-others-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 2px 2px 6px;
+}
+.design-agent-surface .locate-alt-list {
+  display: flex;
+  flex-direction: column;
+}
+.design-agent-surface .locate-alt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.design-agent-surface .locate-alt-row:hover {
+  background: var(--surface-3);
+}
+.design-agent-surface .locate-alt-row:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.design-agent-surface .locate-alt-name {
+  flex: 0 0 auto;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.design-agent-surface .locate-alt-desc {
+  flex: 1;
+  min-width: 0;
+  max-width: 230px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.design-agent-surface .locate-alt-chev {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+}
+/* Tertiary "Search for another screen…" affordance — quiet, text-forward, sits
+   below the alternatives. */
+.design-agent-surface .locate-search-other {
+  align-self: flex-start;
+  padding: 8px 2px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  cursor: pointer;
+  text-align: left;
+}
+.design-agent-surface .locate-search-other:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+.design-agent-surface .locate-search-other:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
