@@ -157,6 +157,11 @@ export type Insight = {
    *  Brief v2 render. Older briefs omit it; frontend falls back to
    *  highest-confidence selection in that case. */
   is_headline?: boolean
+  /** v5 schema: LLM marks whether this finding's fix can be visualized as a
+   *  UI prototype (a screen/flow change), vs. a backend/data/pricing/ops
+   *  change that has nothing to render. Gates the "Generate prototype"
+   *  option. Older briefs omit it → treated as prototypeable (shown). */
+  prototypeable?: boolean
 }
 export type Brief = {
   id: number

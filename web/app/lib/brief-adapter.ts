@@ -357,12 +357,6 @@ function detailFromInsight(
   ]
   if (insight.domain) tags.push({ label: insight.domain.toUpperCase(), className: "tag-domain" })
   if (insight.subdomain) tags.push({ label: insight.subdomain.toUpperCase(), className: "tag-sub" })
-  if (typeof insight.confidence === "number") {
-    tags.push({
-      label: `CONFIDENCE ${insight.confidence.toFixed(2)}`,
-      className: "tag-confidence",
-    })
-  }
 
   const valueClass =
     tagMeta.tagType === "fix"

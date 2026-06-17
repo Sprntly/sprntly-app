@@ -102,9 +102,7 @@ function HeroFindingCard({
         <div className="briefv2-card-top">
           <span className="briefv2-card-action">{card.actionLabel}</span>
           <span className="briefv2-card-eyebrow">HEADLINE FINDING</span>
-          <span className="briefv2-card-metric">{card.metricHighlight}</span>
-          <ConfidenceBadge value={card.confidence} />
-        </div>
+          <span className="briefv2-card-metric">{card.metricHighlight}</span>        </div>
         <h2 className="briefv2-card-headline">{card.title}</h2>
         <p className="briefv2-card-body">{card.body}</p>
         <ConvergenceChipRow rows={card.convergence} extra={0} />
@@ -149,9 +147,7 @@ function CompactFindingCard({
       <div className="briefv2-card-inner">
         <div className="briefv2-card-top">
           <span className="briefv2-card-action">{card.actionLabel}</span>
-          <span className="briefv2-card-metric">{card.metricHighlight}</span>
-          <ConfidenceBadge value={card.confidence} />
-        </div>
+          <span className="briefv2-card-metric">{card.metricHighlight}</span>        </div>
         <h3 className="briefv2-card-headline">{card.title}</h3>
         <p className="briefv2-card-body">{card.body}</p>
         <ConvergenceChipRow rows={card.convergence} extra={card.extraConvergenceCount} />
@@ -165,17 +161,6 @@ function CompactFindingCard({
         />
       </div>
     </article>
-  )
-}
-
-function ConfidenceBadge({ value }: { value: number }) {
-  // Confidence comes from the LLM as a 0–1 float; render as a percent so
-  // the meaning is self-evident without needing the user to know the scale.
-  const pct = Math.round((value ?? 0) * 100)
-  return (
-    <span className="briefv2-confidence" title="Model confidence">
-      Confidence {pct}%
-    </span>
   )
 }
 

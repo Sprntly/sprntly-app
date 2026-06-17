@@ -158,6 +158,7 @@ function baseFinding(detailKey: string, title: string, chart: BriefV2InlineChart
     category: "RETENTION",
     priority: "P0",
     confidence: 0.82,
+    prototypeable: true,
     title,
     body: `Body copy for ${title} that should disappear when the card is dismissed.`,
     metricHighlight: "41% completion",
@@ -411,5 +412,37 @@ describe("BriefChat composer chips — gated on the PRD rail being open", () => 
     // The brief has findings (the chip stack would otherwise render), but the
     // PRD content panel is closed by default, so "Create ticket" must be absent.
     expect(screen.queryByRole("button", { name: /create ticket/i })).toBeNull()
+  })
+})
+
+describe("BriefChat finding card — prototype option gated on prototypeable", () => {
+  function renderBriefWith(brief: BriefV2State) {
+    return render(
+      React.createElement(
+        NavigationProvider,
+        null,
+        React.createElement(
+          ContentProvider,
+          null,
+          React.createElement(InjectBrief, { brief }),
+          React.createElement(BriefChat),
+        ),
+      ),
+    )
+  }
+
+  it("hides 'View prototype' on a finding the fix can't be visualized (prototypeable=false)", async () => {
+    const brief: BriefV2State = {
+      ...BRIEF,
+      hero: { ...HERO, prototypeable: false },
+      supporting: [{ ...SUPPORTING, prototypeable: true }],
+    }
+    await act(async () => {
+      renderBriefWith(brief)
+    })
+    // Non-visualizable finding → no prototype affordance.
+    expect(within(cardFor(HERO.title)).queryByText("View prototype")).toBeNull()
+    // A sibling visualizable finding still offers it.
+    expect(within(cardFor(SUPPORTING.title)).queryByText("View prototype")).not.toBeNull()
   })
 })
