@@ -151,8 +151,16 @@ def retrieve_context(
 
     # 3) Per-theme inbound signals, boosted by theme similarity.
     #    by_id dedupes; we keep the highest rank seen for any signal.
+    #
+    #    Gather the inbound signal edges for every matched theme FIRST, batch
+    #    the signal fetch into ONE query (kills the per-edge N+1), then walk the
+    #    themes again applying the per-theme cap exactly as before. The pre-walk
+    #    only reads `edges_to` (one query per theme — same as before) and records
+    #    each theme's ordered signal source_ids; no per-signal round-trips here.
     by_id: dict[str, tuple[float, dict]] = {}
     themes_out: list[dict] = []
+    theme_edge_ids: list[tuple[Any, float, list[str]]] = []
+    needed_ids: list[str] = []
     for theme, score in matched_themes:
         themes_out.append(
             {"entity_id": theme.id, "label": theme.canonical_label, "score": round(float(score), 4)}
@@ -166,11 +174,17 @@ def retrieve_context(
         except Exception as exc:  # noqa: BLE001
             logger.info("Ask KG retrieval: edges_to(%s) failed (%s)", theme.id, exc)
             continue
+        edge_ids = [e.source_id for e in edges if e.source_kind == "signal"]
+        theme_edge_ids.append((theme, boost, edge_ids))
+        needed_ids.extend(edge_ids)
+
+    # ONE batched fetch for every theme-edge signal across all matched themes.
+    signals_by_id = facade.get_signals(enterprise_id, needed_ids)
+
+    for theme, boost, edge_ids in theme_edge_ids:
         kept = 0
-        for edge in edges:
-            if edge.source_kind != "signal":
-                continue
-            sig = facade.get_signal(enterprise_id, edge.source_id)
+        for sid in edge_ids:
+            sig = signals_by_id.get(sid)
             if sig is None or (sig.properties or {}).get("superseded_by"):
                 continue
             rank = _signal_rank(sig, now, boost)
@@ -377,10 +391,12 @@ def insight_evidence_trail(
 
     by_id: dict[str, dict] = {}  # dedupe; SUPPORTS edges win over theme edges
 
-    # 1) SUPPORTS signals — the direct backing the synthesis agent wired to the
-    #    hypothesis. These are the strongest evidence for the insight.
+    # Collect the SUPPORTS + theme inbound signal edges FIRST, then batch the
+    # signal fetch into ONE query (kills the per-edge N+1). The `edges_to` reads
+    # are unchanged (one per target); only the per-signal lookups are batched.
     hyp = resolve_insight_hypothesis(facade, enterprise_id, theme_id, insight_title)
     hyp_out: Optional[dict] = None
+    support_ids: list[str] = []
     if hyp is not None:
         hyp_out = {
             "entity_id": hyp.id,
@@ -392,35 +408,41 @@ def insight_evidence_trail(
         except Exception as exc:  # noqa: BLE001
             logger.info("evidence trail: edges_to(hyp=%s) failed (%s)", hyp.id, exc)
             edges = []
-        for edge in edges:
-            if edge.source_kind != "signal":
-                continue
-            sig = facade.get_signal(enterprise_id, edge.source_id)
-            if sig is None or (sig.properties or {}).get("superseded_by"):
-                continue
-            by_id[sig.id] = _trail_signal_payload(sig, edge_type="SUPPORTS")
+        support_ids = [e.source_id for e in edges if e.source_kind == "signal"]
 
-    # 2) Theme convergence signals — every non-stale signal wired to the theme,
-    #    for breadth the SUPPORTS set may not fully carry. Doesn't overwrite a
-    #    signal already tagged SUPPORTS.
+    theme_edge_ids: list[str] = []
     if theme_id:
         try:
             theme_edges = facade.edges_to(enterprise_id, theme_id)
         except Exception as exc:  # noqa: BLE001
             logger.info("evidence trail: edges_to(theme=%s) failed (%s)", theme_id, exc)
             theme_edges = []
-        kept = 0
-        for edge in theme_edges:
-            if edge.source_kind != "signal":
-                continue
-            sig = facade.get_signal(enterprise_id, edge.source_id)
-            if sig is None or (sig.properties or {}).get("superseded_by"):
-                continue
-            if sig.id not in by_id:
-                by_id[sig.id] = _trail_signal_payload(sig, edge_type="theme")
-            kept += 1
-            if kept >= _TRAIL_THEME_SIGNALS:
-                break
+        theme_edge_ids = [e.source_id for e in theme_edges if e.source_kind == "signal"]
+
+    # ONE batched fetch for both edge sets.
+    signals_by_id = facade.get_signals(enterprise_id, support_ids + theme_edge_ids)
+
+    # 1) SUPPORTS signals — the direct backing the synthesis agent wired to the
+    #    hypothesis. These are the strongest evidence for the insight.
+    for sid in support_ids:
+        sig = signals_by_id.get(sid)
+        if sig is None or (sig.properties or {}).get("superseded_by"):
+            continue
+        by_id[sig.id] = _trail_signal_payload(sig, edge_type="SUPPORTS")
+
+    # 2) Theme convergence signals — every non-stale signal wired to the theme,
+    #    for breadth the SUPPORTS set may not fully carry. Doesn't overwrite a
+    #    signal already tagged SUPPORTS.
+    kept = 0
+    for sid in theme_edge_ids:
+        sig = signals_by_id.get(sid)
+        if sig is None or (sig.properties or {}).get("superseded_by"):
+            continue
+        if sig.id not in by_id:
+            by_id[sig.id] = _trail_signal_payload(sig, edge_type="theme")
+        kept += 1
+        if kept >= _TRAIL_THEME_SIGNALS:
+            break
 
     # SUPPORTS-edged signals first (direct backing), theme-convergence after.
     signals_out = sorted(

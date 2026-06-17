@@ -93,10 +93,18 @@ def compute_convergence(
         # `seen` dedup in evidence_kg's trail builder so the base score is
         # computed over DISTINCT signals.
         seen: set[str] = set()
-        for edge in facade.edges_to(enterprise_id, theme.id):
+        edges = facade.edges_to(enterprise_id, theme.id)
+        # Batch the per-edge signal fetch into ONE query (kills the N+1). The
+        # dedup `seen` semantics below are preserved exactly — only the per-edge
+        # round-trips are collapsed.
+        signals_by_id = facade.get_signals(
+            enterprise_id,
+            [e.source_id for e in edges if e.source_kind == "signal"],
+        )
+        for edge in edges:
             if edge.source_kind != "signal" or edge.source_id in seen:
                 continue
-            sig = facade.get_signal(enterprise_id, edge.source_id)
+            sig = signals_by_id.get(edge.source_id)
             if sig is None or sig.properties.get("superseded_by"):
                 continue
             seen.add(sig.id)

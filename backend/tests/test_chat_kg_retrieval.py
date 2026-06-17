@@ -150,6 +150,44 @@ def test_retrieve_context_theme_match_boosts_above_recent(facade):
     assert "loose recent signal" in contents
 
 
+def test_retrieve_context_uses_one_batched_signal_fetch(facade, monkeypatch):
+    """N+1 kill: the per-theme signal walk must batch via get_signals across
+    ALL matched themes, never the per-id get_signal once per edge."""
+    from app.graph.retrieval import retrieve_context
+
+    theme_a, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Theme A",
+        [("revenue", "deal_blocker", "a1", {}, 0),
+         ("customer_voice", "feature_request", "a2", {}, 0)],
+    )
+    theme_b, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Theme B",
+        [("project_mgmt", "bug", "b1", {}, 0)],
+    )
+
+    counts = {"get_signal": 0, "get_signals": 0}
+    orig_signals = facade.get_signals
+
+    def _no_get_signal(*a, **k):
+        counts["get_signal"] += 1
+        raise AssertionError("get_signal should not be called per-edge anymore")
+
+    def _wrapped_get_signals(*a, **k):
+        counts["get_signals"] += 1
+        return orig_signals(*a, **k)
+
+    monkeypatch.setattr(facade, "get_signal", _no_get_signal)
+    monkeypatch.setattr(facade, "get_signals", _wrapped_get_signals)
+    with _patch_embed(), _patch_candidates([(theme_a, 0.9), (theme_b, 0.8)]):
+        bundle = retrieve_context(facade, "ent-A", "q")
+
+    assert bundle["empty"] is False
+    assert counts["get_signal"] == 0
+    # ONE batched theme-edge fetch covering both matched themes (the recent-
+    # signals path uses active_signals, not get_signals).
+    assert counts["get_signals"] == 1
+
+
 def test_retrieve_context_dedupes_signal_across_paths(facade):
     """A signal reachable via BOTH a matched theme AND the recent-signals pull
     appears once."""

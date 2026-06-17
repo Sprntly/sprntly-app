@@ -208,6 +208,60 @@ def test_supersede_rejects_cross_tenant(facade):
         facade.supersede_signal("ent-B", a.id, "anything")
 
 
+# ---------- batched get_signals (N+1 kill) ----------
+
+def test_get_signals_batched_returns_dict(facade):
+    from app.graph import Signal
+    a = Signal(enterprise_id="ent-A", source_type="revenue", kind="x", content="aa")
+    b = Signal(enterprise_id="ent-A", source_type="communication", kind="y", content="bb")
+    facade.write_signal("ent-A", a)
+    facade.write_signal("ent-A", b)
+    got = facade.get_signals("ent-A", [a.id, b.id])
+    assert set(got) == {a.id, b.id}
+    assert got[a.id].content == "aa"
+    assert got[b.id].content == "bb"
+
+
+def test_get_signals_empty_list_returns_empty_dict(facade):
+    assert facade.get_signals("ent-A", []) == {}
+
+
+def test_get_signals_dedups_and_skips_missing_and_is_tenant_scoped(facade):
+    from app.graph import Signal
+    a = Signal(enterprise_id="ent-A", source_type="revenue", kind="x", content="aa")
+    other = Signal(enterprise_id="ent-B", source_type="revenue", kind="x", content="cc")
+    facade.write_signal("ent-A", a)
+    facade.write_signal("ent-B", other)
+    # duplicate id + a non-existent id + another tenant's id
+    got = facade.get_signals("ent-A", [a.id, a.id, "does-not-exist", other.id])
+    assert set(got) == {a.id}        # missing + cross-tenant absent, dup collapsed
+    assert got[a.id].content == "aa"
+
+
+def test_get_signals_single_query(facade, monkeypatch):
+    """The batch must issue ONE underlying read, not one per id."""
+    from app.graph import Signal
+    sigs = []
+    for i in range(5):
+        s = Signal(enterprise_id="ent-A", source_type="revenue", kind="x",
+                   content=f"s{i}")
+        facade.write_signal("ent-A", s)
+        sigs.append(s)
+
+    calls = {"n": 0}
+    orig_table = facade._client.table
+
+    def _counting_table(name):
+        if name == "kg_signal":
+            calls["n"] += 1
+        return orig_table(name)
+
+    monkeypatch.setattr(facade._client, "table", _counting_table)
+    got = facade.get_signals("ent-A", [s.id for s in sigs])
+    assert len(got) == 5
+    assert calls["n"] == 1   # exactly one kg_signal table access for the batch
+
+
 # ---------- decision log ----------
 
 def test_log_agent_decision_round_trip(isolated_settings):
@@ -236,3 +290,36 @@ def test_log_agent_decision_round_trip(isolated_settings):
     assert r["confidence"] == 0.82
     assert r["kg_refs"] == ["t-001", "deal-acme", "deal-globex"]
     assert r["reasoning"].startswith("Top theme")
+
+
+def test_log_agent_decision_swallows_write_failure(isolated_settings):
+    """A failed audit write must NEVER raise into the caller's primary flow —
+    fire-and-forget swallows + logs it."""
+    from app.graph import log_agent_decision
+
+    class _BoomClient:
+        def table(self, name):  # noqa: ARG002
+            raise RuntimeError("supabase is down")
+
+    # Should not raise even though the underlying insert blows up.
+    out = log_agent_decision(
+        enterprise_id="ent-A",
+        agent="synthesis",
+        decision_type="rank",
+        client=_BoomClient(),
+    )
+    assert out is None  # failed write yields no id, but no exception escapes
+
+
+def test_flush_decision_log_is_safe_to_call(isolated_settings):
+    """flush_decision_log drains pending writes and never raises (no-op inline
+    under pytest)."""
+    from app.graph import flush_decision_log, log_agent_decision
+
+    log_agent_decision(
+        enterprise_id="ent-A", agent="synthesis", decision_type="rank",
+    )
+    flush_decision_log()  # must not raise
+    rows = isolated_settings["supabase"].table("agent_decision_log") \
+        .select("*").eq("enterprise_id", "ent-A").execute().data
+    assert len(rows) == 1  # inline-under-pytest: row is present immediately

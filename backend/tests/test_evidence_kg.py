@@ -253,6 +253,31 @@ def test_trail_empty_when_no_signals(facade):
     assert trail == []
 
 
+def test_trail_uses_one_batched_signal_fetch(facade, monkeypatch):
+    """N+1 kill: gather_evidence_trail must batch via get_signals, not call
+    the per-id get_signal once per edge."""
+    from app.evidence_kg import gather_evidence_trail
+    theme, hyp, _ = _seed_theme_hypothesis(facade)
+
+    counts = {"get_signal": 0, "get_signals": 0}
+    orig_signals = facade.get_signals
+
+    def _wrapped_get_signal(*a, **k):
+        counts["get_signal"] += 1
+        raise AssertionError("get_signal should not be called per-edge anymore")
+
+    def _wrapped_get_signals(*a, **k):
+        counts["get_signals"] += 1
+        return orig_signals(*a, **k)
+
+    monkeypatch.setattr(facade, "get_signal", _wrapped_get_signal)
+    monkeypatch.setattr(facade, "get_signals", _wrapped_get_signals)
+    trail = gather_evidence_trail(facade, "ent-A", theme_id=theme.id, hypothesis=hyp)
+    assert {t["signal_id"] for t in trail}  # still produced a trail
+    assert counts["get_signal"] == 0
+    assert counts["get_signals"] == 1
+
+
 # ---------- build_evidence_kg (doc + grounding + decision log) ----------
 
 def test_build_feeds_signals_to_llm_and_logs_refs(facade, isolated_settings,
