@@ -484,6 +484,27 @@
   align-items: center;
 }
 
+/* ── Scoped generate-surface error-boundary fallback ──────────────────── */
+.design-agent-surface .generate-surface-boundary-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 13px 16px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+}
+.design-agent-surface .generate-surface-boundary-message {
+  font-size: 13px;
+  color: var(--danger);
+  margin: 0;
+}
+.design-agent-surface .generate-surface-boundary-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 /* ── Iterate composer (IterateComposer) ───────────────────────────────── */
 .design-agent-surface .iterate-composer {
   display: flex;
