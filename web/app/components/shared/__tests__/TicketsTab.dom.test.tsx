@@ -16,6 +16,12 @@ vi.hoisted(() => {
   ;(globalThis as Record<string, unknown>).React = require("react")
 })
 
+// TicketsTab now renders ArtifactFooterActions, which calls useRouter() for the
+// "View prototype" action — stub next/navigation so the footer mounts.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+}))
+
 const { generate, listClickUpLists, pushToClickUp } = vi.hoisted(() => ({
   generate: vi.fn(),
   listClickUpLists: vi.fn(),
