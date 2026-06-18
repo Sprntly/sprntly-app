@@ -1,4 +1,5 @@
 import { designAgentApi } from "./api"
+import { sleepUntilNextPoll } from "./poll"
 import type { PrototypeRecord } from "./api"
 
 export type DesignAgentGenResult =
@@ -28,7 +29,11 @@ export async function runDesignAgentGeneration({
   try {
     proto = await designAgentApi.get(prototypeId)
     while (proto.status === "generating" && Date.now() - startedAt < MAX_MS) {
-      await new Promise((r) => setTimeout(r, TICK_MS))
+      // Visibility-aware sleep (shared poll.ts): a backgrounded tab throttles
+      // setTimeout to ~1/min, stalling polling though the server-side job
+      // finishes. Refocusing wakes immediately and re-reads the real status.
+      // The TICK_MS/MAX_MS cadence stays local per the runner-cadence note.
+      await sleepUntilNextPoll(TICK_MS)
       proto = await designAgentApi.get(prototypeId)
     }
   } catch (err) {

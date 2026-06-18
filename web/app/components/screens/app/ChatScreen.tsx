@@ -15,8 +15,9 @@ import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-ic
 import { ApiError, askApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { isComposerBusy, runTabAsk } from "../../../lib/chatAskState"
-import { runPrdGeneration } from "../../../lib/runPrdGeneration"
-import { runEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
+import { runPrdGeneration, resumePrdGeneration } from "../../../lib/runPrdGeneration"
+import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
+import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { PrdState, PrdContent } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
@@ -407,6 +408,69 @@ export function ChatScreen() {
       showToast("Evidence generation failed", e instanceof Error ? e.message : "Unknown error")
     }
   }, [activeTabId, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
+
+  // ── Resume orphaned in-flight jobs on (re)mount ───────────────────────────
+  // PRD / evidence generation kicks off a fire-and-forget server job; the only
+  // client trace is an in-memory *Generating flag + an await closure. A remount
+  // (tab backgrounded long enough to unmount, navigate away+back) drops that
+  // closure and orphans the running job in the UI though the server finishes.
+  // If a pending job id was persisted (jobResume), re-enter the visibility-aware
+  // poll against the existing status endpoint — NOT generate again (the resume
+  // helpers only GET). Runs once per active tab.
+  const resumedTabsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!activeTabId) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    const meta = tab?.briefMeta
+    if (!meta) return
+    if (resumedTabsRef.current.has(activeTabId)) return
+    resumedTabsRef.current.add(activeTabId)
+    const scope = insightScope(meta.briefId, meta.insightIndex)
+
+    const pendingPrd = getPendingJob("prd", "_", scope)
+    if (pendingPrd && !tab?.prd && !tab?.prdGenerating) {
+      const prdId = Number(pendingPrd.id)
+      if (Number.isFinite(prdId)) {
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
+        setContent({ prd: null, prdMeta: null, prdGenerating: true })
+        void (async () => {
+          try {
+            const result = await resumePrdGeneration(prdId, meta)
+            if (result.ok) {
+              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd } : t))
+              setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+            } else {
+              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+              setContent({ prdGenerating: false })
+            }
+          } catch {
+            setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+            setContent({ prdGenerating: false })
+          }
+        })()
+      }
+    }
+
+    const pendingEvidence = getPendingJob("evidence", "_", scope)
+    if (pendingEvidence && !tab?.evidence && !tab?.evidenceGenerating) {
+      const evId = Number(pendingEvidence.id)
+      if (Number.isFinite(evId)) {
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: true } : t))
+        void (async () => {
+          try {
+            const result = await resumeEvidenceGeneration(evId, meta)
+            if (result.ok) {
+              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+            } else {
+              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
+            }
+          } catch {
+            setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
+          }
+        })()
+      }
+    }
+  }, [activeTabId, setContent])
 
   const conversations = content.conversations
   const starters = content.ondemandStarters

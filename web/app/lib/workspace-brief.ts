@@ -1,5 +1,6 @@
 import { ApiError, briefApi, companiesApi, type Brief, type BriefStatus } from "./api"
 import type { WorkspaceCompany } from "./onboarding/types"
+import { sleepUntilNextPoll } from "./poll"
 
 const POLL_MS = 2000
 const DEFAULT_MAX_MS = 5 * 60 * 1000
@@ -103,35 +104,4 @@ export function briefPreviewInsight(brief: Brief): {
     subtitle: top.subtitle || top.recommendation?.slice(0, 160) || "",
     tag: top.tag.replace(/_/g, " "),
   }
-}
-
-/**
- * Resolve after `ms`, OR as soon as a hidden tab becomes visible again —
- * whichever comes first. Background tabs throttle setTimeout to ~1/min, so
- * without the visibility wakeup a refocused tab would stall up to a minute
- * before its next status poll. The brief job is server-side and idempotent, so
- * waking early simply re-reads the real status and lets the UI catch up.
- */
-function sleepUntilNextPoll(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    let done = false
-    const finish = () => {
-      if (done) return
-      done = true
-      clearTimeout(timer)
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", onVisible)
-      }
-      resolve()
-    }
-    const onVisible = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "visible") {
-        finish()
-      }
-    }
-    const timer = setTimeout(finish, ms)
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", onVisible)
-    }
-  })
 }
