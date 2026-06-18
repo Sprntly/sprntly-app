@@ -10,8 +10,10 @@ documents both hint keys as optional.
 from app import prompts
 
 
-def test_prd_template_version_bumped_to_3():
-    assert prompts.PRD_TEMPLATE_VERSION == 3
+def test_prd_template_version_includes_design_block():
+    # The :::design block shipped at PRD_TEMPLATE_VERSION 3; the counter only
+    # ever increases (e.g. v4 appends VOICE_GUARD), so guard with >=.
+    assert prompts.PRD_TEMPLATE_VERSION >= 3
 
 
 def test_prd_system_contains_design_block_spec():

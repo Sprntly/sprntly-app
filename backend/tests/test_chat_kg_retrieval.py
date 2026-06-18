@@ -398,7 +398,7 @@ def test_render_context_section_includes_signals_and_provenance(facade):
     with _patch_embed(), _patch_candidates([(theme, 0.9)]):
         bundle = retrieve_context(facade, "ent-A", "q")
     text = render_context_section(bundle)
-    assert "KNOWLEDGE GRAPH CONTEXT" in text
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in text
     assert "Acme blocked on SSO" in text
     assert "revenue" in text  # source_type surfaced for citation
 
@@ -431,7 +431,7 @@ def test_compose_ask_answer_corpus_only_when_no_enterprise(
 
     assert len(fake_llm["calls"]) == 1
     user = fake_llm["calls"][0]["user"]
-    assert "KNOWLEDGE GRAPH CONTEXT" not in user
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in user
     rows = (
         isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
     )
@@ -463,7 +463,7 @@ def test_compose_ask_answer_injects_kg_section_and_logs_refs(
         ask_runner.compose_ask_answer("asurion", "How is pipeline?", enterprise_id="co-1")
 
     user = fake_llm["calls"][0]["user"]
-    assert "KNOWLEDGE GRAPH CONTEXT" in user
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in user
     assert "Acme blocked on SSO" in user
 
     rows = (
@@ -499,7 +499,7 @@ def test_compose_ask_answer_empty_kg_falls_back_to_corpus_only(
         ask_runner.compose_ask_answer("asurion", "q?", enterprise_id="co-empty")
 
     user = fake_llm["calls"][0]["user"]
-    assert "KNOWLEDGE GRAPH CONTEXT" not in user
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in user
     rows = (
         isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
     )
@@ -553,7 +553,7 @@ def test_ask_route_uses_kg_context_when_signals_exist(
     assert resp.status_code == 200
     assert resp.json()["citations"] == []  # still stripped
     user = fake_llm["calls"][-1]["user"]
-    assert "KNOWLEDGE GRAPH CONTEXT" in user
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in user
     assert "Acme blocked on SSO" in user
 
 
@@ -576,4 +576,4 @@ def test_ask_route_corpus_only_for_legacy_session(
     assert resp.status_code == 200
     body = resp.json()
     assert body["answer"] == "x"
-    assert "KNOWLEDGE GRAPH CONTEXT" not in fake_llm["calls"][-1]["user"]
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in fake_llm["calls"][-1]["user"]

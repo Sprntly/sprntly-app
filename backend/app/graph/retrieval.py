@@ -6,7 +6,7 @@ kNN primitive (`facade.find_candidates`), gathers the signals wired to those
 themes plus recent non-stale signals, and folds in the §20 session context
 (active hypotheses / recent decisions / measured outcomes). It returns a
 structured, ranked, deduped context bundle capped to a token budget that the
-Ask runner renders into a "KNOWLEDGE GRAPH CONTEXT" prompt section.
+Ask runner renders into a "LIVE CONTEXT FROM CONNECTED SOURCES" prompt section.
 
 Why this exists: connector data + agent findings live in the KG
 (kg_signal / kg_entity) and previously surfaced only through the weekly
@@ -509,17 +509,21 @@ def render_evidence_trail_section(trail: dict[str, Any]) -> str:
 
 def render_context_section(bundle: dict[str, Any]) -> str:
     """Render a retrieval bundle into the markdown block injected into the Ask
-    prompt under a "KNOWLEDGE GRAPH CONTEXT" header. Empty bundle → "" (the
-    caller then runs corpus-only). Provenance + source_type travel with each
-    signal so the grounding rules can cite them."""
+    prompt under a "LIVE CONTEXT FROM CONNECTED SOURCES" header. Empty bundle →
+    "" (the caller then runs source-material-only). Provenance + source_type
+    travel with each signal so the grounding rules can cite them.
+
+    The header is deliberately plain ("connected sources", not "knowledge
+    graph") so the model never echoes Sprntly's internal vocabulary into a
+    user-facing answer — see VOICE_GUARD in app/prompts.py."""
     if not bundle or bundle.get("empty"):
         return ""
 
-    lines: list[str] = ["# KNOWLEDGE GRAPH CONTEXT"]
+    lines: list[str] = ["# LIVE CONTEXT FROM CONNECTED SOURCES"]
     lines.append(
-        "Live signals + entities from connected sources and prior agent findings. "
-        "Treat these as first-class evidence alongside the corpus. Cite the "
-        "source_type (and provenance where present); never invent."
+        "Live signals from your connected sources and prior agent findings. "
+        "Treat these as first-class evidence alongside your source material. Cite "
+        "the source_type (and provenance where present); never invent."
     )
 
     themes = bundle.get("themes") or []

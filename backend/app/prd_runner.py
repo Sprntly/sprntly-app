@@ -63,11 +63,12 @@ from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.retrieval import insight_evidence_trail, render_evidence_trail_section
+from app.prompts import VOICE_GUARD
 from app.skills.loader import get_skill
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "prd-author-v1"
+PROMPT_VERSION = "prd-author-v2"
 _SKILL = "prd-author"
 _AGENT = "prd"
 # Storage variant for new PRD rows — shared by the on-demand route
@@ -92,16 +93,16 @@ the two parts on this call — honor the PART DIRECTIVE in the request.
 
 Ground every numeric claim, mechanism, metric, and acceptance criterion in \
 the supplied insight and the evidence it was derived from — falsifiable by a \
-reader who can pull the same data. The evidence is the knowledge graph's \
-data-source signals (the same trail that backs the brief insight) when \
-present, else the markdown corpus. Cite signals by source_type (and \
+reader who can pull the same data. The evidence is the company's \
+connected-source signals (the same trail that backs the brief insight) when \
+present, else the company's source data. Cite signals by source_type (and \
 provenance where present). Never invent numbers, users, sources, business \
 rules, or contracts; label unknowns per the METHOD (`[ASSUMPTION]` / \
 `[ASSUMPTION → T0]` / `[ESCALATE]`) rather than guessing.
 
 Emit Markdown only — no commentary outside the document. Produce ONLY the \
 part named in the PART DIRECTIVE; do NOT emit the other part and do NOT emit \
-the `---` horizontal rule that would separate them."""
+the `---` horizontal rule that would separate them.""" + VOICE_GUARD
 
 # Per-part directives. Each call carries the SAME shared context (insight +
 # evidence + template) plus exactly one of these so the model emits one half.
@@ -138,9 +139,11 @@ TEMPLATE (the full two-part structure — produce ONLY your assigned part of it)
 {template}
 """
 
-# Header for the corpus-grounded fallback block (KG trail unavailable / empty).
+# Header for the source-data fallback block (KG trail unavailable / empty).
+# Reader-facing wording deliberately avoids "corpus" — the model sees this
+# header and must never echo internal vocabulary (see VOICE_GUARD).
 _CORPUS_BLOCK = (
-    "CORPUS (the evidence the insight was derived from — ground claims here):\n"
+    "SOURCE DATA (the evidence the insight was derived from — ground claims here):\n"
     "{corpus}"
 )
 
