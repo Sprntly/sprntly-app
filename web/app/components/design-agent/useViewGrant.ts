@@ -17,7 +17,7 @@
 // verbatim (the hook never parses it). The public `/p/<token>` path does NOT use
 // this hook — it is token-in-URL and never mints a grant.
 //
-// BOUNDED RE-MINT (plan §16-1): the grant TTL is short, so a long-lived viewing
+// BOUNDED RE-MINT: the grant TTL is short, so a long-lived viewing
 // session can outlive its grant — the next asset GET then 401s. On such a
 // failure the caller invokes `notifyAssetError()`, which re-mints the grant
 // EXACTLY ONCE and forces a fresh iframe load (via a bumped `reloadKey`). If the
@@ -28,7 +28,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { designAgentApi } from "../../lib/api"
 
-/** The single re-mint cap (plan §16-1). One re-mint after the initial mint, then
+/** The single re-mint cap. One re-mint after the initial mint, then
  *  the hook surfaces an error rather than looping. The cap bounds a SINGLE
  *  mint→preflight→re-mint cycle; it is intentionally re-armed (the attempt counter
  *  is reset) when a NEW lapse is detected — e.g. the tab regains focus after the

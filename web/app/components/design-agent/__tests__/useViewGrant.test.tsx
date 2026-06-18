@@ -2,7 +2,7 @@
 //
 // Bundle-proxy view-grant flow (Option B — same-origin serving).
 //
-// What these prove (plan §1.2 / §11 / §16-1):
+// What these prove:
 //   1. The grant POST (designAgentApi.viewGrant) fires BEFORE the authed iframe
 //      `src` is set — the hook withholds `grantedBundleUrl` until the mint
 //      resolves, so the bundle is never loaded without the credential.
@@ -113,7 +113,7 @@ describe("useViewGrant — grant POST precedes the iframe src", () => {
   })
 })
 
-describe("useViewGrant — bounded single re-mint on asset 401 (plan §16-1)", () => {
+describe("useViewGrant — bounded single re-mint on asset 401", () => {
   it("re-mints EXACTLY ONCE on an asset error, then surfaces an error on a second failure", async () => {
     const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
 
