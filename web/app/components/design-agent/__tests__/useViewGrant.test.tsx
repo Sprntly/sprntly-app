@@ -406,3 +406,14 @@ describe("shouldRemint — the cap is unit-locked", () => {
     expect(shouldRemint(2)).toEqual({ remint: false, surfaceError: true })
   })
 })
+
+describe("GRANT_REFRESH_INTERVAL_MS — env-tunable, prod-default-locked", () => {
+  it("defaults to 5 minutes when NEXT_PUBLIC_DA_GRANT_REFRESH_MS is unset", () => {
+    // No override is set in the test environment, so the proactive-refresh cadence
+    // must be the 5-minute production default — proving the env knob never silently
+    // shifts prod behavior. (The override is read at build time; this locks the
+    // default so a deploy without the env var is byte-identical to pre-knob.)
+    expect(process.env.NEXT_PUBLIC_DA_GRANT_REFRESH_MS).toBeUndefined()
+    expect(GRANT_REFRESH_INTERVAL_MS).toBe(5 * 60 * 1000)
+  })
+})

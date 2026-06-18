@@ -39,8 +39,16 @@ export const VIEW_GRANT_REMINT_CAP = 1
 /** How often to proactively re-mint the grant while a bundle is being viewed.
  *  Sits comfortably under the backend grant TTL (currently 600s) so the cookie is
  *  refreshed BEFORE it can expire — an idle-but-open viewer never reaches the 401
- *  even without a visibility/focus event to trigger recovery. */
-export const GRANT_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+ *  even without a visibility/focus event to trigger recovery.
+ *
+ *  Defaults to 5 minutes. Overridable at build time via
+ *  `NEXT_PUBLIC_DA_GRANT_REFRESH_MS` (a positive integer of milliseconds) so the
+ *  cadence can be tuned per environment without a code change — unset/invalid
+ *  falls back to the 5-minute default, so production is unchanged. */
+export const GRANT_REFRESH_INTERVAL_MS = (() => {
+  const override = Number(process.env.NEXT_PUBLIC_DA_GRANT_REFRESH_MS)
+  return Number.isFinite(override) && override > 0 ? override : 5 * 60 * 1000
+})()
 
 export type ViewGrantState = {
   /** The opaque proxy bundle URL to load into the authed iframe, or null while
