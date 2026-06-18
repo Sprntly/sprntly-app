@@ -24,6 +24,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
+// jsdom doesn't implement window.matchMedia; AskReplyBody's typing-animation
+// hook reads prefers-reduced-motion on mount when a fresh reply renders (the
+// thread-preservation test below renders a chat tab that has a reply).
+if (typeof window !== "undefined" && !window.matchMedia) {
+  window.matchMedia = (query: string) =>
+    ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }) as unknown as MediaQueryList
+}
+
 // ── Boundary mocks (network / router / heavy contexts) ─────────────────────
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -49,10 +66,14 @@ vi.mock("../../../../lib/usePipelineStatus", () => ({
 // Router/search-params live in module-scoped mutable holders so tests can drive
 // the `?new=1` "New chat" hand-off and assert ChatScreen strips it via replace.
 let searchString = ""
+// Mutable pathname holder so a test can drive route-based screen derivation
+// (NavigationContext computes currentScreen from usePathname()). "/brief" →
+// currentScreen === "brief", which activates the pinned brief tab.
+let pathname = "/"
 const replaceSpy = vi.fn()
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: replaceSpy, prefetch: vi.fn() }),
-  usePathname: () => "/",
+  usePathname: () => pathname,
   useSearchParams: () => new URLSearchParams(searchString),
 }))
 
@@ -96,6 +117,7 @@ function renderScreen() {
 beforeEach(() => {
   localStorage.clear()
   searchString = ""
+  pathname = "/"
   replaceSpy.mockClear()
 })
 afterEach(() => {
@@ -165,5 +187,168 @@ describe("ChatScreen — pinned brief tab", () => {
     expect(tabBar().getByText("Monday brief")).toBeTruthy()
     // …and the one-shot param was stripped so a refresh won't re-trigger.
     expect(replaceSpy).toHaveBeenCalledWith("/")
+  })
+})
+
+// ── Brief-tab gap coverage (B5–B8) ──────────────────────────────────────────
+// These extend the suite above with behaviours NOT already covered here OR in
+// the pure-logic parallel-chats / concurrent-asks suites (which don't render
+// the surface at all): per-company localStorage persistence with the brief tab
+// EXCLUDED, thread preservation across a brief↔chat switch, route-driven brief
+// activation while mounted on a chat tab, and the ?new=1 one-shot latch.
+const tabsKey = "sprntly_chat_tabs_acme"
+const activeTabKey = "sprntly_chat_active_tab_acme"
+
+// A persisted chat tab (the slim shape ChatScreen writes — no prd/evidence/
+// *Generating). Used to model a restore and to drive thread preservation.
+function seedPersistedChatTab(opts?: { withReply?: boolean }) {
+  const tabId = "tab-persisted-1"
+  const thread = [
+    {
+      id: "turn-1",
+      query: "persisted question",
+      ...(opts?.withReply
+        ? { reply: { answer: "persisted answer", sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } }
+        : {}),
+    },
+  ]
+  localStorage.setItem(tabsKey, JSON.stringify([{ id: tabId, title: "Persisted chat", thread, dbConvId: null, briefMeta: null }]))
+  localStorage.setItem(activeTabKey, tabId)
+  return tabId
+}
+
+describe("ChatScreen — brief tab gaps (B5–B8)", () => {
+  // B5: open chat tabs persist to the per-company localStorage and restore on
+  // remount; the pinned brief tab is synthesized first and is NEVER written into
+  // the persisted tabs array or the persisted active-tab.
+  it("persists chat tabs (brief excluded) and restores them on remount", () => {
+    const tabId = seedPersistedChatTab()
+    const { unmount } = renderScreen()
+
+    // The persisted chat tab restored into the tab bar (alongside the synthesized
+    // brief tab), and selecting it shows its thread.
+    expect(tabBar().getByText("Persisted chat")).toBeTruthy()
+    act(() => {
+      fireEvent.click(tabBar().getByText("Persisted chat"))
+    })
+    expect(screen.getByText("persisted question")).toBeTruthy()
+
+    // The persisted `tabs` array contains ONLY the chat tab — the synthesized
+    // brief tab is never written to localStorage.
+    const persistedTabs = JSON.parse(localStorage.getItem(tabsKey) || "[]") as Array<{ id: string }>
+    expect(persistedTabs.map((t) => t.id)).toContain(tabId)
+    expect(persistedTabs.some((t) => t.id === "brief")).toBe(false)
+    // The persisted active tab is the chat tab id, never the brief sentinel.
+    expect(localStorage.getItem(activeTabKey)).toBe(tabId)
+
+    unmount()
+    // Remount → the tab is restored again from the same storage.
+    renderScreen()
+    expect(tabBar().getByText("Persisted chat")).toBeTruthy()
+  })
+
+  // B6: switching from a chat tab that HAS a thread → the brief tab → back PRESERVES
+  // that chat tab's thread (the brief tab is synthesized and never clobbers state).
+  it("preserves a chat tab's thread across a brief↔chat tab switch", () => {
+    seedPersistedChatTab({ withReply: true })
+    renderScreen()
+
+    // Activate the chat tab and confirm its thread is showing.
+    act(() => {
+      fireEvent.click(tabBar().getByText("Persisted chat"))
+    })
+    expect(screen.getByText("persisted question")).toBeTruthy()
+
+    // Switch to the synthesized brief tab → BriefChat shows, chat thread hidden.
+    act(() => {
+      fireEvent.click(tabBar().getByText("Monday brief"))
+    })
+    expect(screen.getByLabelText("Weekly brief")).toBeTruthy()
+    expect(screen.queryByText("persisted question")).toBeNull()
+
+    // Switch back to the chat tab → its thread is intact (not clobbered).
+    act(() => {
+      fireEvent.click(tabBar().getByText("Persisted chat"))
+    })
+    expect(screen.getByText("persisted question")).toBeTruthy()
+  })
+
+  // B7: route-driven activation — when currentScreen flips to "brief" while the
+  // surface is already mounted on a chat tab, it switches to the brief tab.
+  it("activates the brief tab when the route flips to /brief while on a chat tab", () => {
+    seedPersistedChatTab()
+    const { rerender } = renderScreen()
+
+    // Start on the chat tab (a thread surface, not the brief).
+    act(() => {
+      fireEvent.click(tabBar().getByText("Persisted chat"))
+    })
+    expect(screen.getByText("persisted question")).toBeTruthy()
+    expect(screen.queryByLabelText("Weekly brief")).toBeNull()
+
+    // Route lands on /brief (sidebar "Monday brief" → goTo("brief")). The
+    // currentScreen effect must switch the surface to the pinned brief tab.
+    act(() => {
+      pathname = "/brief"
+      rerender(
+        React.createElement(
+          NavigationProvider,
+          null,
+          React.createElement(ContentProvider, null, React.createElement(ChatScreen)),
+        ),
+      )
+    })
+    expect(screen.getByLabelText("Weekly brief")).toBeTruthy()
+    expect(screen.queryByText("persisted question")).toBeNull()
+  })
+
+  // B8: ?new=1 is a ONE-SHOT — it triggers a fresh chat landing exactly once, the
+  // param is stripped via router.replace("/"), and re-renders do NOT re-fire it
+  // (the consumedNewRef latch). It re-arms only when the param goes absent→present.
+  it("consumes ?new=1 exactly once and does not loop on re-render", () => {
+    searchString = "new=1"
+    const { rerender } = renderScreen()
+    // Landing showing; param stripped exactly once.
+    expect(screen.getByText(/Welcome back/i)).toBeTruthy()
+    expect(replaceSpy).toHaveBeenCalledTimes(1)
+    expect(replaceSpy).toHaveBeenCalledWith("/")
+
+    // Re-render with the param STILL present (useSearchParams hands back a fresh
+    // object each render) — the latch must prevent a second consume.
+    act(() => {
+      rerender(
+        React.createElement(
+          NavigationProvider,
+          null,
+          React.createElement(ContentProvider, null, React.createElement(ChatScreen)),
+        ),
+      )
+    })
+    expect(replaceSpy).toHaveBeenCalledTimes(1) // NOT re-fired
+
+    // Param goes absent → the latch re-arms; a SUBSEQUENT ?new=1 fires again.
+    act(() => {
+      searchString = ""
+      rerender(
+        React.createElement(
+          NavigationProvider,
+          null,
+          React.createElement(ContentProvider, null, React.createElement(ChatScreen)),
+        ),
+      )
+    })
+    expect(replaceSpy).toHaveBeenCalledTimes(1) // absent → no fire
+    act(() => {
+      searchString = "new=1"
+      rerender(
+        React.createElement(
+          NavigationProvider,
+          null,
+          React.createElement(ContentProvider, null, React.createElement(ChatScreen)),
+        ),
+      )
+    })
+    // Re-armed: the fresh ?new=1 consumed once more.
+    expect(replaceSpy).toHaveBeenCalledTimes(2)
   })
 })
