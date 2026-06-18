@@ -8,6 +8,7 @@ import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceCont
 import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard } from "../../../types/content"
 import { AppLayout } from "./AppLayout"
+import { BriefChat } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
@@ -52,6 +53,13 @@ type ChatTab = {
   prdGenerating: boolean
   evidenceGenerating: boolean
 }
+
+// The Weekly/Monday Brief is a pinned, non-closable FIRST tab on this surface.
+// It is synthesized in the render — never stored in the `tabs` state or
+// localStorage — and is identified by this sentinel id. `activeTabId ===
+// BRIEF_TAB_ID` means the brief tab is active (so we render <BriefChat/> instead
+// of the chat landing/thread). It is also the default active tab on first load.
+const BRIEF_TAB_ID = "brief"
 
 type HomeChipItem = { kind: "home" | "starter"; card: ChatHomeCard }
 
@@ -126,8 +134,13 @@ export function ChatScreen() {
   const animatedTurnIds = useRef<Set<string>>(new Set())
   const [activeTabId, setActiveTabId] = useState<string | null>(() => {
     try {
-      return localStorage.getItem(activeTabKey) || null
-    } catch { return null }
+      const stored = localStorage.getItem(activeTabKey)
+      // First load (no persisted active tab) → default to the pinned brief tab.
+      // A persisted "" means the user was on the chat landing/new-chat (active
+      // tab = null), so we honour that and DON'T fall back to the brief tab.
+      if (stored == null) return BRIEF_TAB_ID
+      return stored || null
+    } catch { return BRIEF_TAB_ID }
   })
 
   // When the active company changes (user switches workspace or logs in as
@@ -148,10 +161,13 @@ export function ChatScreen() {
       } else {
         setTabs([])
       }
-      setActiveTabId(localStorage.getItem(activeTabKey) || null)
+      const storedActive = localStorage.getItem(activeTabKey)
+      // No persisted active tab for this company → default to the pinned brief
+      // tab; a persisted "" honours the chat landing (active tab = null).
+      setActiveTabId(storedActive == null ? BRIEF_TAB_ID : storedActive || null)
     } catch {
       setTabs([])
-      setActiveTabId(null)
+      setActiveTabId(BRIEF_TAB_ID)
     }
   }, [activeCompany, tabsKey, activeTabKey])
 
@@ -166,6 +182,10 @@ export function ChatScreen() {
     try { localStorage.setItem(activeTabKey, activeTabId ?? "") } catch { /* ignore */ }
   }, [activeTabId, activeTabKey])
 
+  // The pinned brief tab is synthesized (not in `tabs`), so when it's active
+  // `activeTab` is null. `isBriefTab` lets the render swap in <BriefChat/> for
+  // the chat landing/thread + composer.
+  const isBriefTab = activeTabId === BRIEF_TAB_ID
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const thread = activeTab?.thread ?? []
 
@@ -577,6 +597,17 @@ export function ChatScreen() {
     }
   }, [currentScreen, checkResume])
 
+  // The brief is the pinned first tab of this surface. When the route lands on
+  // the brief screen (sidebar "Monday brief" → goTo("brief") → /brief, which
+  // also renders ChatScreen), activate the pinned brief tab — even if the surface
+  // was already mounted on a chat tab.
+  useEffect(() => {
+    if (currentScreen === "brief") {
+      setActiveTabId(BRIEF_TAB_ID)
+      setDraft("")
+    }
+  }, [currentScreen])
+
   const pushPendingConversation = useCallback(
     (turnId: string, query: string, targetTabId: string) => {
       const prev = conversationsRef.current
@@ -862,11 +893,29 @@ export function ChatScreen() {
         <div className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}>
 
           {/* Tab bar — always visible */}
-          <div style={{
+          <div data-testid="chat-tab-bar" style={{
             display: "flex", alignItems: "stretch", gap: 0,
             borderBottom: "1px solid var(--line, #E8E6E0)", background: "var(--surface, #fff)",
             height: 40, overflowX: "auto", overflowY: "visible", flexShrink: 0,
           }}>
+            {/* Pinned brief tab — always first, never closable (synthesized, not
+                in `tabs`/localStorage). Selecting it renders <BriefChat/> below. */}
+            <div
+              key={BRIEF_TAB_ID}
+              onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "0 14px", fontSize: 13, cursor: "pointer",
+                color: isBriefTab ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
+                fontWeight: isBriefTab ? 500 : 400,
+                borderBottom: isBriefTab ? "2px solid var(--ink, #1A1A17)" : "2px solid transparent",
+                marginBottom: -1,
+                whiteSpace: "nowrap", transition: "color 0.12s, border-color 0.12s",
+                userSelect: "none", flexShrink: 0,
+              }}
+            >
+              <span style={{ lineHeight: "1.3" }}>Monday brief</span>
+            </div>
             {tabs.map((tab) => {
               const isActive = activeTabId === tab.id
               return (
@@ -915,6 +964,12 @@ export function ChatScreen() {
             >+</button>
           </div>
 
+          {isBriefTab ? (
+            // Pinned brief tab → the full weekly-brief surface. ChatScreen already
+            // provides AppLayout, so BriefChat renders bare (it owns its own
+            // header + finding cards + composer + content-panel wiring).
+            <BriefChat />
+          ) : (
           <main className={`od-center ${hasThread ? "od-center--thread" : "od-center--landing"}`}>
             <div className={`od-center-scroll${!hasThread ? " od-center-scroll--home-landing" : ""}`}>
               {!hasThread ? (
@@ -1241,6 +1296,7 @@ export function ChatScreen() {
               </div>
             ) : null}
           </main>
+          )}
         </div>
       </div>
       {chatGenModalOpen && chatGenPrdId != null && (
