@@ -264,18 +264,25 @@ def _is_safe_return_to(value: str | None) -> bool:
 
 
 def _build_post_oauth_redirect(payload: dict, provider: str) -> RedirectResponse:
-    """Construct the post-callback redirect URL using state.return_to if
-    present, else the default settings URL. Both forms get
-    `?connected=<provider>` appended (or `&connected=` if return_to
-    already has a query string)."""
+    """Construct the post-callback redirect URL pointing at the lightweight
+    `/connectors/return` page (NOT a full re-load of the app).
+
+    That page broadcasts the new connection to the original Sprntly tab and
+    then closes itself, so the user lands back where they started with the
+    connector already showing connected. We pass `connected=<provider>` plus
+    the original (validated, relative) `return_to` so the return page can
+    fall back to navigating there if the tab can't self-close.
+
+    `return_to` is only forwarded when it passes `_is_safe_return_to`
+    (open-redirect guard); unsafe/empty values are dropped and the return
+    page uses its own default.
+    """
     return_to = payload.get("return_to")
     frontend = settings.frontend_url.rstrip("/")
+    params = {"connected": provider}
     if return_to and _is_safe_return_to(return_to):
-        sep = "&" if "?" in return_to else "?"
-        target = f"{frontend}{return_to}{sep}connected={provider}"
-    else:
-        q = urlencode({"section": "connectors", "connected": provider})
-        target = f"{frontend}/settings?{q}"
+        params["return_to"] = return_to
+    target = f"{frontend}/connectors/return?{urlencode(params)}"
     return RedirectResponse(target)
 
 
@@ -904,18 +911,26 @@ def github_callback(
                 # state expired or invalid — fall back to /settings
                 return_to = None
 
-        params = {"connected": "github"}
+        # Route through the lightweight /connectors/return page so this tab
+        # closes and the original Sprntly tab refreshes — same as the OAuth
+        # branch. The post-install extras (setup_action / installation_id)
+        # are meaningful to the app, so fold them onto the `return_to` path
+        # the return page navigates to if it can't self-close.
+        extra = {}
         if setup_action:
-            params["setup_action"] = setup_action
+            extra["setup_action"] = setup_action
         if installation_id is not None:
-            params["installation_id"] = str(installation_id)
+            extra["installation_id"] = str(installation_id)
 
-        if return_to:
-            sep = "&" if "?" in return_to else "?"
-            target = f"{base}{return_to}{sep}{urlencode(params)}"
-        else:
-            params["section"] = "connectors"
-            target = f"{base}/settings?{urlencode(params)}"
+        effective_return_to = return_to or "/settings?section=connectors"
+        if extra:
+            sep = "&" if "?" in effective_return_to else "?"
+            effective_return_to = f"{effective_return_to}{sep}{urlencode(extra)}"
+
+        params = {"connected": "github"}
+        if _is_safe_return_to(effective_return_to):
+            params["return_to"] = effective_return_to
+        target = f"{base}/connectors/return?{urlencode(params)}"
         return RedirectResponse(target, status_code=307)
 
     payload = github_app.verify_oauth_state(state)

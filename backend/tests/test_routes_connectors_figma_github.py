@@ -174,8 +174,10 @@ def test_figma_callback_stores_token(figma_env, monkeypatch):
         )
 
     assert r.status_code == 307
+    # Routes through the lightweight return page (closes the OAuth tab); no
+    # return_to in state → no return_to param, app uses its own default.
     assert r.headers["location"].startswith(
-        "http://localhost:3000/settings?section=connectors"
+        "http://localhost:3000/connectors/return?"
     )
     assert "connected=figma" in r.headers["location"]
 
@@ -305,9 +307,16 @@ def test_github_callback_post_install_redirect_no_state(github_env, monkeypatch)
     )
     assert r.status_code == 307
     loc = r.headers["location"]
-    assert "section=connectors" in loc
-    assert "connected=github" in loc
-    assert "setup_action=request" in loc
+    from urllib.parse import urlparse, parse_qs
+
+    q = parse_qs(urlparse(loc).query)
+    assert "/connectors/return" in loc
+    assert q["connected"] == ["github"]
+    # Post-install extras ride inside the (relative) return_to the return page
+    # navigates to if it can't self-close.
+    rt = q["return_to"][0]
+    assert "section=connectors" in rt
+    assert "setup_action=request" in rt
 
 
 def test_github_callback_post_install_with_installation_id(github_env, monkeypatch):
@@ -320,8 +329,11 @@ def test_github_callback_post_install_with_installation_id(github_env, monkeypat
     )
     assert r.status_code == 307
     loc = r.headers["location"]
-    assert "setup_action=install" in loc
-    assert "installation_id=12345" in loc
+    from urllib.parse import urlparse, parse_qs
+
+    rt = parse_qs(urlparse(loc).query)["return_to"][0]
+    assert "setup_action=install" in rt
+    assert "installation_id=12345" in rt
 
 
 def test_github_install_redirect_carries_state_param(github_env, monkeypatch):
@@ -383,12 +395,18 @@ def test_github_post_install_with_state_returns_to_onboarding(
     )
     assert r.status_code == 307
     loc = r.headers["location"]
-    assert "/onboarding/6" in loc
-    assert "connected=github" in loc
-    assert "setup_action=install" in loc
-    assert "installation_id=67890" in loc
-    # Should NOT have bounced to /settings since return_to was provided.
-    assert "section=connectors" not in loc
+    from urllib.parse import urlparse, parse_qs
+
+    q = parse_qs(urlparse(loc).query)
+    assert "/connectors/return" in loc
+    assert q["connected"] == ["github"]
+    rt = q["return_to"][0]
+    # return_to (e.g. /onboarding/6) survives; install extras ride along on it.
+    assert rt.startswith("/onboarding/6")
+    assert "setup_action=install" in rt
+    assert "installation_id=67890" in rt
+    # Should NOT have fallen back to /settings since return_to was provided.
+    assert "section=connectors" not in rt
 
 
 def test_github_post_install_with_invalid_state_falls_back_to_settings(
@@ -408,9 +426,14 @@ def test_github_post_install_with_invalid_state_falls_back_to_settings(
     )
     assert r.status_code == 307
     loc = r.headers["location"]
-    assert "/settings?" in loc
-    assert "section=connectors" in loc
-    assert "setup_action=install" in loc
+    from urllib.parse import urlparse, parse_qs
+
+    rt = parse_qs(urlparse(loc).query)["return_to"][0]
+    # Invalid state → no return_to from state → falls back to /settings,
+    # still carrying the install extras.
+    assert rt.startswith("/settings?")
+    assert "section=connectors" in rt
+    assert "setup_action=install" in rt
 
 
 def test_github_callback_with_no_install_redirects_to_app_install_url(

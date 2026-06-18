@@ -33,6 +33,7 @@ import type {
   ConnectorItemRow,
 } from "../../../../types/content"
 import { openOauthTab } from "../../../../lib/connectorsOauth"
+import { useConnectorConnectedSignal } from "../../../../lib/useConnectorConnectedSignal"
 import { ApiKeyPromptModal } from "../../../connectors/ApiKeyPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 
@@ -213,9 +214,17 @@ export function ConnectorsSettings() {
     void reload()
   }, [reload])
 
-  // When the user returns from authorizing in the sibling tab, pull the fresh
-  // connection list so the just-connected row flips to Active without a manual
-  // refresh. Gated on the in-flight flag so we don't reload on every tab focus.
+  // The OAuth tab signals back via BroadcastChannel / localStorage the moment
+  // a connector connects (see /connectors/return), so the just-connected row
+  // flips to Active immediately — no tab switch needed.
+  useConnectorConnectedSignal(() => {
+    oauthInFlight.current = false
+    void reload()
+  })
+
+  // Belt-and-suspenders fallback: when the user returns from authorizing in
+  // the sibling tab, pull the fresh connection list. Gated on the in-flight
+  // flag so we don't reload on every tab focus.
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === "visible" && oauthInFlight.current) {
