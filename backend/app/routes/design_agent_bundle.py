@@ -269,17 +269,39 @@ async def serve_public_bundle(
     _require_feature()
     rel_path = _decode_asset_path(asset_path)
     row = find_prototype_by_share_token(token)
-    # Re-apply the deny logic verbatim (design_agent.get_by_token).
+    # Re-apply the deny logic verbatim (the public get-by-token deny).
     if not row or row.get("share_mode") == "private" or row.get("status") != "ready":
+        # Distinct server-side log of WHICH sub-reason fired (the client body
+        # stays the identical "Not found" for enumeration-defense invisibility).
+        # The token is hashed (never logged raw — matches the redaction discipline
+        # used by the grant-mint logs); the share_mode/status values go to the log
+        # only, never the response body.
+        if not row:
+            sub_reason = "missing"
+        elif row.get("share_mode") == "private":
+            sub_reason = "private"
+        else:
+            sub_reason = "not_ready"
+        logger.info(
+            "da_bundle_deny route=by-token gate=%s token_hash=%s share_mode=%s status=%s",
+            sub_reason,
+            hashlib.sha256(token.encode()).hexdigest()[:8],
+            (row or {}).get("share_mode"),
+            (row or {}).get("status"),
+        )
         raise HTTPException(status_code=404, detail="Not found")
 
     checkpoint_id = _checkpoint_for_row(row)
     if checkpoint_id is None:
+        logger.info(
+            "da_bundle_deny route=by-token gate=checkpoint_none token_hash=%s",
+            hashlib.sha256(token.encode()).hexdigest()[:8],
+        )
         raise HTTPException(status_code=404, detail="Not found")
 
     mode = row["share_mode"]
     if mode == "passcode":
-        # PASSCODE: require a valid da_share_grant bound to THIS token (plan §5).
+        # PASSCODE: require a valid da_share_grant bound to THIS token.
         payload = _verify_grant(da_share_grant)
         if (
             not payload
@@ -287,7 +309,12 @@ async def serve_public_bundle(
             or payload.get("token") != token
             or payload.get("checkpoint_id") != checkpoint_id
         ):
-            # No valid grant → 404 (invisibility, same as a wrong token).
+            # No valid grant → 404 (invisibility, same as a wrong token). The
+            # passcode/grant value itself is NEVER logged — only that the gate fired.
+            logger.info(
+                "da_bundle_deny route=by-token gate=passcode_grant_invalid token_hash=%s",
+                hashlib.sha256(token.encode()).hexdigest()[:8],
+            )
             raise HTTPException(status_code=404, detail="Not found")
         cache = _CACHE_PRIVATE
         extra = {"Vary": "Cookie"}
@@ -417,13 +444,28 @@ async def serve_authed_bundle(
     # the NEXT asset, even under a still-valid unexpired grant.
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not row or row.get("status") != "ready":
+        # Distinct server-side log (client body stays the identical "Not found"):
+        # a missing row (non-owned / gone) vs a present-but-not-ready row.
+        logger.info(
+            "da_bundle_deny route=authed gate=%s prototype_id=%s",
+            "missing" if not row else "status",
+            prototype_id,
+        )
         raise HTTPException(status_code=404, detail="Not found")
 
     checkpoint_id = _checkpoint_for_row(row)
     if checkpoint_id is None:
+        logger.info(
+            "da_bundle_deny route=authed gate=checkpoint_none prototype_id=%s",
+            prototype_id,
+        )
         raise HTTPException(status_code=404, detail="Not found")
     # A Resume that advanced the checkpoint invalidates the grant → 401 (re-mint).
     if payload.get("checkpoint_id") != checkpoint_id:
+        logger.info(
+            "da_bundle_deny route=authed gate=checkpoint_stale prototype_id=%s",
+            prototype_id,
+        )
         raise HTTPException(status_code=401, detail="grant stale")
 
     # NO share_mode gate on this authed route — deliberately. This route is
