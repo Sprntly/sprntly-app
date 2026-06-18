@@ -1340,6 +1340,12 @@
   padding: 5px 12px;
   font-size: 12px;
 }
+/* Manual refresh — sits to the RIGHT of the Desktop/Mobile toggle in the left
+   cluster (which has no `gap`), so it needs an explicit left margin. Reuses the
+   square `.da-ctl-icon--square` look; only the spacing is added here. */
+.design-agent-surface .da-ctl-refresh {
+  margin-left: 8px;
+}
 /* Tool icon-buttons (comments toggle, Share, Actions, Fullscreen) — David's
    `.pct-icon`, mapped to neutral tokens. ~30px tall, hover bg, active `.on`. */
 .design-agent-surface .da-ctl-icon {

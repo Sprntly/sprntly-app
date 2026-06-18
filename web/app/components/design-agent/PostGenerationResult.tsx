@@ -69,6 +69,7 @@ import {
   IconPin,
   IconCopy,
   IconUndo,
+  IconRefresh,
 } from "../shared/app-icons"
 // subtle breadcrumb at the top of the
 // canvas ("PRDs / {PRD title} / Design"). Clicking a crumb closes the canvas and
@@ -210,6 +211,12 @@ export type PostGenerationResultProps = {
   /** bumped on each completed iterate
    *  to force the center iframe to reload the rebuilt bundle (cache-bust). */
   bundleReloadNonce?: number
+  /** Manual "Refresh preview" trigger for the signed-in editor control bar.
+   *  Reuses the same reload signal as a completed iterate (the parent bumps
+   *  `bundleReloadNonce`), so it cascades to the iframe remount + view-grant
+   *  re-mint with no extra machinery. Absent on the public/fullscreen paths →
+   *  the Refresh button is not rendered there. */
+  onRefreshBundle?: () => void
   /** Called when Mark Complete or Resume fires so the parent can merge the new
    *  `is_complete` value into its own copy of the record without a round-trip.
    *  Optional — existing callers that omit it keep type-checking. */
@@ -332,6 +339,10 @@ export type PostGenerationResultViewProps = {
   /** cache-bust nonce → forces the
    *  iframe to reload the rebuilt bundle on each completed iterate. */
   bundleReloadNonce?: number
+  /** Manual "Refresh preview" trigger, threaded down to DaControlBar. Reuses the
+   *  parent's `bundleReloadNonce` bump (no new reload/poll loop). Absent on the
+   *  public/fullscreen paths → the Refresh button is not rendered. */
+  onRefreshBundle?: () => void
   /** element-anchored computed positions for pins that have a `resolvedAnchorId`.
    *  Keyed by pin.n; when present overrides the static xPct/yPct so pins track
    *  the DOM element they were placed on across scroll and resize events. */
@@ -603,6 +614,7 @@ export function DaControlBar({
   onShared,
   platform,
   onPlatformChange,
+  onRefreshBundle,
   commentsOpen,
   onToggleComments,
   markMode,
@@ -622,6 +634,11 @@ export function DaControlBar({
   onShared?: (token: string | null) => void
   platform: Platform
   onPlatformChange?: (platform: Platform) => void
+  /** Manual "Refresh preview" trigger. When provided (signed-in editor only) a
+   *  Refresh button renders to the right of the Desktop/Mobile toggle and calls
+   *  this; the parent reuses the `bundleReloadNonce` bump so it cascades to the
+   *  iframe remount + grant re-mint. Absent (public/fullscreen) → no button. */
+  onRefreshBundle?: () => void
   commentsOpen: boolean
   onToggleComments?: () => void
   /** mark-and-comment tool state. */
@@ -685,6 +702,24 @@ export function DaControlBar({
             Mobile
           </button>
         </div>
+        {/* Manual refresh — sits to the RIGHT of the Desktop/Mobile toggle.
+            Rendered only when `onRefreshBundle` is provided (signed-in editor);
+            the public viewer + fullscreen don't pass it, so no dead button. It
+            reuses the parent's existing reload signal (the `bundleReloadNonce`
+            bump), cascading to the iframe remount + view-grant re-mint with no
+            second reload/poll loop. Reuses the `.da-ctl-icon--square` styling. */}
+        {onRefreshBundle && (
+          <button
+            type="button"
+            className="da-ctl-icon da-ctl-icon--square da-ctl-refresh"
+            data-testid="da-refresh-preview"
+            title="Refresh preview"
+            aria-label="Refresh preview"
+            onClick={() => onRefreshBundle()}
+          >
+            <IconRefresh size={15} />
+          </button>
+        )}
       </div>
 
       {/* RIGHT cluster — compact icon/button tools. */}
@@ -944,6 +979,7 @@ export function PostGenerationResultView({
   onToggleComments,
   platform = "desktop",
   onPlatformChange,
+  onRefreshBundle,
   markMode = false,
   onToggleMark,
   onStageClick,
@@ -1053,6 +1089,7 @@ export function PostGenerationResultView({
       onShared={onShared}
       platform={platform}
       onPlatformChange={onPlatformChange}
+      onRefreshBundle={onRefreshBundle}
       commentsOpen={commentsOpen}
       onToggleComments={onToggleComments}
       markMode={markMode}
@@ -1329,6 +1366,7 @@ export function PostGenerationResult({
   onAnswerQuestion,
   onSkipQuestion,
   bundleReloadNonce,
+  onRefreshBundle,
   onStateChange,
   defaultFullscreen,
   onFullscreenChange,
@@ -1488,6 +1526,7 @@ export function PostGenerationResult({
       onSkipQuestion={onSkipQuestion}
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
+      onRefreshBundle={onRefreshBundle}
       computedPinPositions={pin.computedPinPositions}
       leftPanelRef={leftPanelRef}
       hideBreadcrumb={hideBreadcrumb}

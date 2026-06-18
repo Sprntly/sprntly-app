@@ -1060,3 +1060,128 @@ describe("DaControlBar + PostGenerationResultView — isInTab title-bar restruct
     expect(html).not.toContain('data-testid="da-titlebar-title"')
   })
 })
+
+// ─── manual Refresh-preview button — reuses the bundleReloadNonce seam ────────
+// The signed-in editor control bar gains a Refresh button to the right of the
+// Desktop/Mobile toggle. It must (a) render with its accessible label only when
+// `onRefreshBundle` is provided, (b) call that callback exactly once on click,
+// and (c) be wired to the SAME nonce bump the iterate-complete path uses — NOT a
+// new fetch/poll. We walk the element tree (node-env vitest, no DOM) the same way
+// the onShared forwarding tests do, then invoke the button's onClick directly.
+describe("DaControlBar — manual Refresh-preview button (reuses bundleReloadNonce seam)", () => {
+  const baseProps = {
+    prototypeId: 42,
+    isComplete: false,
+    shareMode: "private" as const,
+    shareToken: null,
+    platform: "desktop" as const,
+    commentsOpen: false,
+    markMode: false,
+    canOpen: true,
+    isInTab: true,
+  }
+
+  function findByTestId(
+    node: React.ReactNode,
+    testId: string,
+  ): React.ReactElement | undefined {
+    for (const child of React.Children.toArray(node) as React.ReactElement[]) {
+      if (!child || typeof child !== "object") continue
+      const props = (child.props ?? {}) as {
+        "data-testid"?: string
+        children?: React.ReactNode
+        trigger?: (open: boolean) => React.ReactNode
+      }
+      if (props["data-testid"] === testId) return child
+      const found =
+        (props.children ? findByTestId(props.children, testId) : undefined) ??
+        (typeof props.trigger === "function"
+          ? findByTestId(props.trigger(false), testId)
+          : undefined)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  function findByType(
+    node: React.ReactNode,
+    type: React.ElementType,
+  ): React.ReactElement | undefined {
+    for (const child of React.Children.toArray(node) as React.ReactElement[]) {
+      if (!child || typeof child !== "object") continue
+      if (child.type === type) return child
+      const props = (child.props ?? {}) as {
+        children?: React.ReactNode
+        trigger?: (open: boolean) => React.ReactNode
+      }
+      const found =
+        (props.children ? findByType(props.children, type) : undefined) ??
+        (typeof props.trigger === "function"
+          ? findByType(props.trigger(false), type)
+          : undefined)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  it("renders the Refresh button with its accessible label when onRefreshBundle is provided", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, {
+        ...baseProps,
+        onRefreshBundle: () => {},
+      }),
+    )
+    expect(html).toContain('data-testid="da-refresh-preview"')
+    expect(html).toContain('aria-label="Refresh preview"')
+  })
+
+  it("clicking Refresh calls onRefreshBundle exactly once", () => {
+    const onRefreshBundle = vi.fn()
+    const tree = DaControlBar({ ...baseProps, onRefreshBundle }) as React.ReactElement
+    const btn = findByTestId(tree, "da-refresh-preview")
+    expect(btn).toBeTruthy()
+    const onClick = (btn!.props as { onClick?: () => void }).onClick
+    expect(typeof onClick).toBe("function")
+    onClick!()
+    expect(onRefreshBundle).toHaveBeenCalledTimes(1)
+  })
+
+  it("the wired callback bumps the existing reload nonce (reuses the seam, no new loop)", () => {
+    // Mirror PrototypeRoute: onRefreshBundle = () => setBundleReloadNonce((n) => n + 1).
+    // Clicking it must drive the SAME setter the iterate-complete path uses, passing
+    // an incrementer updater — proving the manual refresh rides the existing nonce
+    // seam rather than introducing a parallel fetch/poll.
+    const setBundleReloadNonce = vi.fn<(updater: (n: number) => number) => void>()
+    const onRefreshBundle = () => setBundleReloadNonce((n) => n + 1)
+    const tree = DaControlBar({ ...baseProps, onRefreshBundle }) as React.ReactElement
+    const btn = findByTestId(tree, "da-refresh-preview")
+    const onClick = (btn!.props as { onClick?: () => void }).onClick
+    onClick!()
+    expect(setBundleReloadNonce).toHaveBeenCalledTimes(1)
+    const updater = setBundleReloadNonce.mock.calls[0]![0]
+    expect(updater(0)).toBe(1)
+    expect(updater(7)).toBe(8)
+  })
+
+  it("the Refresh button is ABSENT when onRefreshBundle is not provided (public / fullscreen path)", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(DaControlBar, { ...baseProps }),
+    )
+    expect(html).not.toContain('data-testid="da-refresh-preview"')
+  })
+
+  it("end-to-end: the View threads onRefreshBundle down to DaControlBar", () => {
+    const onRefreshBundle = vi.fn()
+    const tree = PostGenerationResultView({
+      prototypeId: 42,
+      isComplete: false,
+      shareMode: "private",
+      shareToken: null,
+      bundleUrl: null,
+      onRefreshBundle,
+    }) as React.ReactElement
+    const bar = findByType(tree, DaControlBar)
+    expect(bar).toBeTruthy()
+    expect((bar!.props as { onRefreshBundle?: unknown }).onRefreshBundle).toBe(onRefreshBundle)
+  })
+})

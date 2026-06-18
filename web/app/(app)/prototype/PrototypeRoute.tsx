@@ -399,6 +399,10 @@ function InTabCanvas({
       onAnswerQuestion={iterateRun.answerQuestion}
       onSkipQuestion={iterateRun.dismissQuestion}
       bundleReloadNonce={bundleReloadNonce}
+      // Manual "Refresh preview" — reuses the SAME reload signal an iterate-complete
+      // uses (the `bundleReloadNonce` bump above), so it cascades to the iframe
+      // remount + view-grant re-mint with no second reload/poll loop.
+      onRefreshBundle={() => setBundleReloadNonce((n) => n + 1)}
       comments={
         proto.share_token ? (
           <CommentsPanel
