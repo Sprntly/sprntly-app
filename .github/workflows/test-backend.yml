@@ -10,9 +10,6 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/test-backend.yml'
-  schedule:
-    # Nightly full suite (integration lane) — 02:00 UTC
-    - cron: '0 2 * * *'
 
 jobs:
   # Fast lane: runs on every PR
@@ -39,14 +36,16 @@ jobs:
         working-directory: backend
         run: python -m pytest tests/ -q --strict-markers -m "not integration"
 
-  # Integration lane: gates merge-to-main + runs nightly
-  # Includes real vite builds, real tsc, real Node subprocesses.
-  # Runs: (a) on PRs targeting main, (b) on push to main, (c) nightly.
-  # Expected duration: ~7-8 minutes (full suite).
+  # Integration lane: gates merge-to-main.
+  # Includes real tsc, babel autofixer, real Node subprocesses —
+  # but EXCLUDES the heavy real `vite build` tests (marker: realbuild),
+  # which run in the separate `test-backend-realbuild.yml` workflow
+  # (post-merge on the build path + manual dispatch only).
+  # This keeps per-PR merges off the contended 120s vite cap (~30-min flake).
+  # Runs: (a) on PRs targeting main, (b) on push to main.
   pytest-integration:
     runs-on: ubuntu-latest
     if: |
-      github.event_name == 'schedule' ||
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' && github.base_ref == 'main')
     steps:
@@ -76,8 +75,10 @@ jobs:
         working-directory: prototype-runtime
         run: npm ci --no-audit --no-fund
 
-      - name: Run pytest (full suite incl. integration)
+      # Excludes the `realbuild`-marked real `vite build` tests — those run in
+      # test-backend-realbuild.yml (post-merge + manual) to keep this PR gate fast.
+      - name: Run pytest (integration minus realbuild vite builds)
         working-directory: backend
         env:
           DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -v -m "integration and not realbuild"

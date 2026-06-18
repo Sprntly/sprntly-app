@@ -600,6 +600,7 @@ _skip_no_toolchain = pytest.mark.skipif(
 
 
 @pytest.mark.integration
+@pytest.mark.realbuild
 @_skip_no_toolchain
 async def test_vite_build_emits_dist_with_index_html_integration():
     out = await storage.vite_build({
@@ -611,6 +612,7 @@ async def test_vite_build_emits_dist_with_index_html_integration():
 
 
 @pytest.mark.integration
+@pytest.mark.realbuild
 @_skip_no_toolchain
 async def test_vite_build_applies_anchor_id_plugin_integration():
     """AD4 load-bearing: the P0-02 plugin annotates JSX with an 8-hex anchor id.
@@ -627,6 +629,7 @@ async def test_vite_build_applies_anchor_id_plugin_integration():
 
 
 @pytest.mark.integration
+@pytest.mark.realbuild
 @_skip_no_toolchain
 async def test_vite_build_raises_on_syntax_error_integration():
     with pytest.raises(ViteBuildError) as ei:
@@ -881,6 +884,7 @@ def test_typecheck_real_tsc_clean_bundle_passes(tmp_path):
 
 
 @pytest.mark.integration
+@pytest.mark.realbuild
 @_skip_no_toolchain
 async def test_vite_build_full_path_blocks_runtime_break_integration():
     """AC #1 end-to-end: the #20 bundle transpiles under real vite (esbuild does no

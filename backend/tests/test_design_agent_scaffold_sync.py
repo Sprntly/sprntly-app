@@ -110,6 +110,7 @@ _skip_no_node = pytest.mark.skipif(
 
 
 @pytest.mark.integration
+@pytest.mark.realbuild
 @_skip_no_node
 async def test_real_build_every_registry_component_resolves():
     """REAL vite build of an App that imports EVERY allow-listed component.
@@ -136,6 +137,7 @@ async def test_real_build_every_registry_component_resolves():
 
 
 @pytest.mark.integration
+@pytest.mark.realbuild
 @_skip_no_node
 async def test_real_build_representative_prototype():
     """REAL vite build of a representative generated prototype shape: multiple

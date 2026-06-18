@@ -1,0 +1,65 @@
+name: Backend real-build suite
+
+# The heavy real-`vite build` tests (marker: realbuild) — the 9 that spawn a real
+# `npx vite build` subprocess (full generate→build). They are EXCLUDED from the
+# per-PR lane (test-backend.yml) so merges never wait on the contended 120s vite
+# cap. Instead they run here:
+#   (a) post-merge on `main` ONLY when the real-build surface changed (paths below),
+#       so a build-breaking change is caught right after it lands — never gating a PR,
+#       never running when the build path is untouched.
+#   (b) on manual dispatch, so a Design Agent PR can be validated on demand pre-merge.
+on:
+  push:
+    branches: [main]
+    paths:
+      # The real-build wrapper + its scaffold/registry source.
+      - 'backend/app/design_agent/storage.py'
+      - 'backend/app/design_agent/autofixer_data.py'
+      # The Vite scaffold that gets copied + built (config, anchor-id plugin,
+      # baseline src, vendored ui components) — repo-root, not under backend/.
+      - 'prototype-runtime/**'
+      # The test files carrying the 9 realbuild tests.
+      - 'backend/tests/test_design_agent_smoke.py'
+      - 'backend/tests/test_design_agent_scaffold_sync.py'
+      - 'backend/tests/test_design_agent_storage.py'
+      # This workflow itself.
+      - '.github/workflows/test-backend-realbuild.yml'
+  workflow_dispatch:
+
+jobs:
+  # Generous vite cap so a contended runner doesn't false-fail at the default 120s.
+  pytest-realbuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dev requirements
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # Node toolchain required for the real vite build.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install @babel/parser for autofixer
+        run: npm install --prefix /tmp/babel-deps @babel/parser
+
+      - name: Install prototype-runtime node_modules
+        working-directory: prototype-runtime
+        run: npm ci --no-audit --no-fund
+
+      - name: Run pytest (realbuild — the heavy real vite builds)
+        working-directory: backend
+        env:
+          DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules
+          DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS: "240"
+        run: python -m pytest tests/ -v -m "realbuild"
