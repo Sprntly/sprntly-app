@@ -2435,6 +2435,34 @@ def post_resume(
     )
 
 
+@router.post(
+    "/{prototype_id}/dismiss-question",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+def post_dismiss_question(
+    prototype_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> dict[str, bool]:
+    """Clear the prototype's pending clarifying question ("Skip this change").
+
+    The user chose not to answer the open question, so it must be cleared
+    server-side — the sidecar is the awaiting-answer signal, and leaving it set
+    would keep prompting on every poll. Workspace-filtered: a row in a different
+    workspace returns 404, not 403, so cross-tenant existence is not disclosed.
+    Idempotent: dismissing a prototype with no open question is a 200 no-op.
+    """
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+    clear_pending_question(prototype_id=prototype_id, workspace_id=workspace_id)
+    logger.info(
+        "prototype_question_dismissed prototype_id=%s", prototype_id
+    )
+    return {"ok": True}
+
+
 class ShareRequest(BaseModel):
     mode: Literal["private", "public", "passcode"]
     passcode: str | None = Field(default=None, max_length=128)

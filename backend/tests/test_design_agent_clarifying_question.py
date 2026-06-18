@@ -966,3 +966,98 @@ def test_prototypes_callsites_unchanged_plus_new_helper():
     for prior in ("def complete_prototype(", "def fail_prototype(",
                   "def set_pending_question(", "def advance_current_checkpoint("):
         assert prior in src
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# B — POST /{prototype_id}/dismiss-question: the real "Skip this change"
+#
+# Truly clears the row's pending_question server-side. Guards mirror the other
+# authed mutating DA routes: require_same_origin (CSRF/Origin) + require_company
+# (tenant gate), workspace-filtered clear.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_dismiss_question_clears_pending_question(env, client):
+    # B non-vacuity: seed a prototype WITH pending_question set, POST dismiss →
+    # the row's pending_question is NULL afterward (proven cleared, not a no-op).
+    pid = _seed_ready_route(env)
+    env.proto.set_pending_question(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        question={"question": "Submit or open a modal?",
+                  "choices": [{"label": "Submit", "description": "post the form"}]},
+    )
+    # Precondition: it really is set before we dismiss (else the test is vacuous).
+    before = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert before["pending_question"] is not None
+
+    resp = client.post(f"/v1/design-agent/{pid}/dismiss-question")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True}
+
+    after = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert after["pending_question"] is None   # proven cleared
+
+
+def test_dismiss_question_logs_state_transition(env, client, caplog):
+    # B: emits an identifier-only state-transition INFO log (no question text).
+    pid = _seed_ready_route(env)
+    secret = "SECRET_DISMISS_PRODUCT_DETAIL"
+    env.proto.set_pending_question(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        question={"question": secret},
+    )
+    with caplog.at_level(logging.INFO):
+        resp = client.post(f"/v1/design-agent/{pid}/dismiss-question")
+    assert resp.status_code == 200, resp.text
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert f"prototype_question_dismissed prototype_id={pid}" in blob
+    assert secret not in blob   # never the question text
+
+
+def test_dismiss_question_idempotent_no_open_question(env, client):
+    # B: dismissing a prototype with no open question is a clean 200 no-op.
+    pid = _seed_ready_route(env)
+    resp = client.post(f"/v1/design-agent/{pid}/dismiss-question")
+    assert resp.status_code == 200, resp.text
+    assert env.proto.get_prototype(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID)["pending_question"] is None
+
+
+def test_dismiss_question_cross_workspace_denied(env, client):
+    # B: a prototype seeded under a FOREIGN workspace is invisible to the company
+    # caller — 404 (cross-tenant invisibility), and its question is NOT cleared.
+    foreign_pid = env.proto.start_prototype(
+        prd_id=9, workspace_id="demo", template_version=1,
+    )
+    env.proto.set_pending_question(
+        prototype_id=foreign_pid, workspace_id="demo",
+        question={"question": "FOREIGN_Q"},
+    )
+    resp = client.post(f"/v1/design-agent/{foreign_pid}/dismiss-question")
+    assert resp.status_code == 404, resp.text
+    # The foreign row's question must be untouched (the clear never reached it).
+    row = env.proto.get_prototype(prototype_id=foreign_pid, workspace_id="demo")
+    assert row["pending_question"] == {"question": "FOREIGN_Q"}
+
+
+def test_dismiss_question_404_for_unknown_id(env, client):
+    assert client.post("/v1/design-agent/999999/dismiss-question").status_code == 404
+
+
+def test_dismiss_question_requires_origin(env, monkeypatch):
+    # B: the require_same_origin CSRF gate fires — a request whose Origin is NOT in
+    # the allow-list is rejected (403) before the handler runs. Mirrors the shared
+    # origin-deny pattern used for the other mutating DA routes.
+    pid = _seed_ready_route(env)
+    env.proto.set_pending_question(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, question={"question": "Q?"},
+    )
+    bad = TestClient(env.main.app)
+    resp = bad.post(
+        f"/v1/design-agent/{pid}/dismiss-question",
+        headers={"Origin": "https://evil.example.com"},
+    )
+    assert resp.status_code == 403, resp.text
+    # The CSRF rejection must NOT have cleared the question.
+    assert env.proto.get_prototype(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID)["pending_question"] is not None
