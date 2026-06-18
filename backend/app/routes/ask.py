@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import random
+import sys
 import time
 
 from fastapi import Depends, APIRouter, HTTPException
@@ -221,6 +222,23 @@ async def ask(
         conversation_id=body.conversation_id,
         pinned_skill=body.pinned_skill,
     )
+    if "pytest" in sys.modules:
+        # The TestClient does not keep the app's event loop alive between
+        # requests, so a fire-and-forget create_task would never run and the
+        # client's status-poll would spin forever. Run the worker inline under
+        # pytest for deterministic results (mirrors decision_log's test-mode
+        # handling). Production keeps the non-blocking create_task path below.
+        await run_ask_job(
+            ask_id=ask_id,
+            enterprise_id=enterprise_id,
+            question=body.question,
+            dataset=body.dataset,
+            history=history,
+            pinned_skill=body.pinned_skill,
+        )
+        row = get_ask_job(ask_id)
+        return {"ask_id": ask_id, "status": (row or {}).get("status", "ready")}
+
     task = asyncio.create_task(
         run_ask_job(
             ask_id=ask_id,
