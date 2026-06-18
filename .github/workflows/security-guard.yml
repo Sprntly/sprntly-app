@@ -1,0 +1,24 @@
+name: Security guard
+
+# Fast, dependency-free scan that fails any push or PR introducing an
+# obfuscated build-time malware signature into tracked source. No path filter
+# on purpose — the injection target (prototype-runtime/postcss.config.js) is
+# outside backend/** and web/**, so the existing test workflows would miss it.
+# Make this a REQUIRED status check in branch protection so it actually gates
+# merges. See scripts/security/scan-malware.sh for the rationale.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  malware-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked source for obfuscated malware signatures
+        run: bash scripts/security/scan-malware.sh
