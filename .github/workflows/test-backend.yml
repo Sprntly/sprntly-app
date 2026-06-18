@@ -80,4 +80,11 @@ jobs:
         working-directory: backend
         env:
           DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules
+          # The real-vite-build integration tests (test_design_agent_{smoke,storage,
+          # scaffold_sync}) run an actual `vite build`. The prod default cap is 120s
+          # (a user-facing latency budget), but on a contended GitHub runner a valid
+          # build can take longer and get SIGKILLed at 120s (returncode -9) — which
+          # flaked the whole lane (e.g. 2026-06-18). Raise the cap for CI only so a
+          # slow-but-correct build isn't killed; prod keeps the 120s default.
+          DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS: "300"
         run: python -m pytest tests/ -v
