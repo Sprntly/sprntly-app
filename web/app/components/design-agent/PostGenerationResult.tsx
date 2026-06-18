@@ -1228,7 +1228,8 @@ export function PostGenerationResultView({
               aria-live="polite"
               data-testid="da-bundle-loading"
             >
-              <span className="da-spinner" aria-hidden="true" /> Loading preview…
+              <span className="da-spinner da-bundle-loading-spinner" aria-hidden="true" />
+              <span className="da-bundle-loading-label">Applying changes…</span>
             </div>
           )}
           {/* View-grant failure (initial mint failed, or the bounded re-mint was

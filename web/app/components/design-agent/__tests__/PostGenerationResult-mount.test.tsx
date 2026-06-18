@@ -106,3 +106,33 @@ describe("Locked prototype on the internal mount — overlay intentionally absen
     expect(html).not.toContain('data-testid="manual-edit-locked-note"')
   })
 })
+
+describe("Bundle-loading overlay (Focus scrim restyle) — gated on bundleNotReady", () => {
+  // The overlay is a pure RESTYLE driven ENTIRELY by the existing
+  // `bundleNotReady` flip (set/cleared by the useViewGrant probe). These
+  // assert structure/copy/gating only (jsdom doesn't compute CSS) — the non-vacuity
+  // is present-when-notReady / absent-when-ready.
+  it("renders the overlay (spinner + 'Applying changes…' label) when bundleNotReady is true", () => {
+    const html = renderInternal({ bundleUrl: BUNDLE, bundleNotReady: true })
+    // Present, with the preserved testid + a11y semantics + reused spinner.
+    expect(html).toContain('data-testid="da-bundle-loading"')
+    expect(html).toContain('role="status"')
+    expect(html).toContain('aria-live="polite"')
+    // Reused .da-spinner via a modifier — no forked spinner class.
+    expect(html).toContain("da-spinner da-bundle-loading-spinner")
+    // The stacked label node + restyled copy.
+    expect(html).toContain('class="da-bundle-loading-label"')
+    expect(html).toContain("Applying changes…")
+    // The pre-restyle copy is gone (no stale assertion left behind).
+    expect(html).not.toContain("Loading preview…")
+  })
+
+  it("does NOT render the overlay when bundleNotReady is false (default)", () => {
+    // Same granted bundle, notReady false → the viewer renders but the overlay
+    // is absent. This is the non-vacuity counterpart.
+    const html = renderInternal({ bundleUrl: BUNDLE, bundleNotReady: false })
+    expect(html).toContain('class="da-prototype-iframe"')
+    expect(html).not.toContain('data-testid="da-bundle-loading"')
+    expect(html).not.toContain("Applying changes…")
+  })
+})

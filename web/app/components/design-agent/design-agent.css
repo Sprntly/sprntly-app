@@ -3319,19 +3319,46 @@
 
 /* Bundle-readiness loading overlay — covers the center stage iframe while the
    bundle is briefly 404ing through the proxy, so the raw error body is never
-   seen. Absolute fill of the position:relative .da-stage, centered spinner + a
-   neutral label. Surface background + muted text only (no new palette). */
+   seen. Absolute fill of the position:relative .da-stage. Restyled to the
+   Focus scrim, a soft translucent scrim + a larger centered ring
+   spinner stacked above the label, off the EXISTING `bundleNotReady` flip — no
+   new driver. The overlay mounts/unmounts entirely on `bundleNotReady`; the
+   `da-bundle-fade` keyframe is a one-shot reveal that fires on mount (cleared
+   by itself), NOT a new state machine. Token-only (no new palette). */
 .design-agent-surface .da-bundle-loading {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  background: var(--surface);
+  gap: 12px;
+  /* Soft translucent scrim over the iframe (not a hard opaque block), so the
+     swapping preview stays faintly visible — matches the mockup .refresh-ov. */
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(3px);
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
+  z-index: 5;
+  /* One-shot mount reveal — fires once when the overlay appears off the
+     existing notReady flip, then self-clears. No JS timer/poll backs it. */
+  animation: da-bundle-fade 0.25s ease;
 }
+/* Larger centered ring spinner — reuses the shared `da-spin` animation via the
+   .da-spinner base (do NOT fork a new spinner). The bare <span> gets its ring
+   here, sized up from the inline-icon usage to read as a centered loader. */
+.design-agent-surface .da-bundle-loading-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  margin-top: 0;
+}
+.design-agent-surface .da-bundle-loading-label {
+  letter-spacing: 0.01em;
+}
+@keyframes da-bundle-fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* ── Pre-gen screen picker — Suggested + alternatives layout ────────────────
  * Styles the screen-disambiguation picker shown before a generation run when
