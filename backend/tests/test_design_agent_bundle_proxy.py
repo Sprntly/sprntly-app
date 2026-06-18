@@ -431,7 +431,7 @@ def test_view_grant_over_limit_429(client, env):
 
 
 def test_authed_serves_through_owner_share_toggle(client, env):
-    # NON-VACUITY / B5 (was RED before the option-B fix): an owner toggling their
+    # NON-VACUITY (was RED before the share-toggle fix): an owner toggling their
     # OWN prototype's Share setting (private→public) must NOT 404 their own authed
     # preview. The grant bound 'private' at mint; after the flip the row is
     # 'public'. The authed route is workspace-member-only and no longer gates on
@@ -452,7 +452,7 @@ def test_authed_serves_through_owner_share_toggle(client, env):
 
 
 def test_authed_serve_cross_workspace_grant_404(client, env):
-    # B1 (tenant-isolation, BLOCKING): removing the share_mode gate must drop ONLY
+    # TENANT-ISOLATION (blocking): removing the share_mode gate must drop ONLY
     # that check, never the membership gate. A grant whose bound workspace_id does
     # NOT own the prototype is still denied at serve, because the per-object
     # get_prototype(prototype_id, workspace_id=grant.workspace_id) re-read returns
@@ -475,7 +475,7 @@ def test_authed_serve_cross_workspace_grant_404(client, env):
 
 
 def test_authed_serve_not_ready_404(client, env):
-    # B3 (no failed/half-built serve): a row with status != 'ready' still 404s on
+    # NO FAILED/HALF-BUILT SERVE: a row with status != 'ready' still 404s on
     # the authed route (the status gate is untouched by the option-B fix). Mint
     # while ready, then flip the row to a non-ready status under the same grant.
     _seed_company(_OWNER_COMPANY, _OWNER_USER)
@@ -494,9 +494,10 @@ def test_authed_serve_not_ready_404(client, env):
 
 
 def test_authed_serve_no_checkpoint_404(client, env):
-    # B3 (continued): a row whose current_checkpoint_id is None still 404s on the
-    # authed route (the checkpoint-None gate is untouched). Seed without a
-    # checkpoint so the mint itself 404s (no checkpoint to bind); the serve then
+    # NO FAILED/HALF-BUILT SERVE (continued): a row whose current_checkpoint_id is
+    # None still 404s on the authed route (the checkpoint-None gate is untouched).
+    # Seed without a checkpoint so the mint itself 404s (no checkpoint to bind); the
+    # serve then
     # has no usable grant → 404. This pins that the checkpoint-None gate survives
     # the share_mode-gate removal.
     _seed_company(_OWNER_COMPANY, _OWNER_USER)
@@ -511,7 +512,7 @@ def test_authed_serve_no_checkpoint_404(client, env):
 
 
 def test_authed_vs_by_token_share_mode_asymmetry(client, env):
-    # ASYMMETRY LOCK (B4): the authed and by-token routes treat share_mode
+    # ASYMMETRY LOCK: the authed and by-token routes treat share_mode
     # DIFFERENTLY, on purpose, and a future refactor must not collapse them:
     #   - serve_authed_bundle (member): self-serves 200 across a share toggle —
     #     membership, not share_mode, is the authz boundary (the option-B fix).

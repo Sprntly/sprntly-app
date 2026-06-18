@@ -1,4 +1,4 @@
-"""Design-Agent bundle PROXY (Option B — same-origin serving, Decision 2).
+"""Design-Agent bundle PROXY — same-origin serving.
 
 This router is the ONE authorizing streaming front door for every prototype
 bundle object. Per the approved plan it replaces the old "signed Supabase URL to
@@ -13,7 +13,7 @@ storage read — index.html and deep assets BOTH flow through it):
     GET  /v1/design-agent/{prototype_id}/bundle/{asset_path:path}     authed twin
     POST /v1/design-agent/{prototype_id}/view-grant                   mint da_view_grant
 
-Guardrails (all load-bearing — see the plan §2-§8 + §16):
+Guardrails (all load-bearing):
   1. TRAVERSAL — `storage._is_safe_bundle_relpath` (single unquote, reject
      `..`/leading-`/`/absolute/backslash/`%2e%2e`/NUL/CR/LF/control). Containment
      re-asserted in `storage._safe_object_key` BEFORE any create_signed_url (SSRF).
@@ -71,11 +71,11 @@ VIEW_GRANT_COOKIE = "da_view_grant"
 SHARE_GRANT_COOKIE = "da_share_grant"
 
 # Short grant TTL — the per-object DB re-read is the hard revocation gate; the TTL
-# is the backstop (plan §1.3 / §16-1). 600s keeps a long authed viewing session
+# is the backstop. 600s keeps a long authed viewing session
 # from re-minting more than ~once.
 _GRANT_TTL_SECONDS = 600
 
-# Cache headers per mode (plan §4 asymmetry — STATED here intentionally):
+# Cache headers per mode (the revocation asymmetry — STATED here intentionally):
 #   - authed/passcode: never cache (per-object DB re-read = INSTANT revocation;
 #     a flip-to-private denies the NEXT asset with zero lag). Vary: Cookie so a
 #     shared cache never serves one viewer's asset to another.
@@ -92,7 +92,7 @@ _CACHE_PUBLIC = "public, max-age=60, must-revalidate"
 _VIEW_GRANT_RL_PREFIX = "viewgrant:"
 
 
-# ─── token-secret fail-closed (plan §16-token / Part C) ──────────────────────
+# ─── token-secret fail-closed ────────────────────────────────────────────────
 
 
 def _require_token_secret() -> str:
@@ -145,16 +145,16 @@ def _verify_grant(raw: str | None) -> dict | None:
 
 
 def _grant_cookie_kwargs(path: str) -> dict:
-    """Cookie attrs for a grant. SameSite=Lax (plan §16-3): under Decision 2 the
-    iframe is same-origin to the app parent (`app.sprntly.ai`), so its subresource
-    asset GETs are SAME-SITE → Lax is attached. HttpOnly so the iframe never reads
-    it; Secure in prod (settings.cookie_secure).
+    """Cookie attrs for a grant. SameSite=Lax: under the same-origin serving model
+    the iframe is same-origin to the app parent (`app.sprntly.ai`), so its
+    subresource asset GETs are SAME-SITE → Lax is attached. HttpOnly so the iframe
+    never reads it; Secure in prod (settings.cookie_secure).
 
-    domain=None UNCONDITIONALLY (v3 §1.3 first-party design): grant cookies are
-    minted AND consumed only on the app/serving origin via /_da-bundle/, so they
-    MUST be HOST-ONLY to that origin. They are deliberately DECOUPLED from
+    domain=None UNCONDITIONALLY (first-party design): grant cookies are minted AND
+    consumed only on the app/serving origin via /_da-bundle/, so they MUST be
+    HOST-ONLY to that origin. They are deliberately DECOUPLED from
     settings.cookie_domain — using `.sprntly.ai` here would broaden the grant to
-    every subdomain (api., demo., …), which is exactly what Option A removes. The
+    every subdomain (api., demo., …), which the host-only design avoids. The
     SESSION cookie (auth.py) legitimately keeps .sprntly.ai to span api+app; the
     GRANT cookie must not."""
     return {
@@ -259,9 +259,10 @@ async def serve_public_bundle(
     request: Request,
     da_share_grant: str | None = Cookie(default=None),
 ) -> Response:
-    """Serve a bundle object for a PUBLIC or PASSCODE share (token-in-URL, F6).
+    """Serve a bundle object for a PUBLIC or PASSCODE share (token-in-URL, the
+    share-token feature).
 
-    Per-object auth (plan §3): every GET re-runs find_prototype_by_share_token and
+    Per-object auth: every GET re-runs find_prototype_by_share_token and
     re-applies the get_by_token deny logic (404 on missing / private / not-ready).
     For PASSCODE mode the da_share_grant cookie must also validate (HMAC bound to
     this token); no valid grant → 404. Cache: public = short public cache;
@@ -334,7 +335,7 @@ async def serve_public_bundle(
 
 
 def set_share_grant_cookie(response: Response, *, token: str, checkpoint_id: int) -> None:
-    """Set the scoped da_share_grant cookie on a passcode-verify success (plan §5).
+    """Set the scoped da_share_grant cookie on a passcode-verify success.
 
     Called from the EXISTING `design_agent.verify_passcode` route (NOT a second
     route at the same path) so the public-view response body is preserved and the
@@ -359,7 +360,7 @@ def mint_view_grant(
     request: Request,
     company: CompanyContext = Depends(require_company),
 ) -> Response:
-    """Mint a da_view_grant for the AUTHED viewer (plan §1.2 / §16-2).
+    """Mint a da_view_grant for the AUTHED viewer.
 
     Bearer-authed via require_company. RE-RESOLVES that the caller's workspace
     OWNS the prototype (get_prototype filtered by workspace_id) — 404 on miss
@@ -414,15 +415,18 @@ async def serve_authed_bundle(
 ) -> Response:
     """Serve a bundle object for the AUTHED twin via the da_view_grant cookie.
 
-    Per-object auth + REVOCATION (plan §1.3 / §16-5): the grant proves IDENTITY,
-    not current authorization. EVERY GET:
+    Per-object auth + REVOCATION: the grant proves IDENTITY, not current
+    authorization. EVERY GET:
       1. validates the HMAC + expiry (fail-closed on unset secret);
-      2. URL↔GRANT EQUALITY (#3) — the URL's prototype_id MUST equal the grant's
-         bound prototype_id (defeats cross-prototype replay; path-scope is
-         browser-side only);
+      2. URL↔GRANT EQUALITY — the URL's prototype_id MUST equal the grant's bound
+         prototype_id (defeats cross-prototype replay; path-scope is browser-side
+         only);
       3. re-reads the prototype from the DB filtered by the grant's workspace_id —
-         a flip to private / a workspace mismatch / a checkpoint advance denies the
-         NEXT asset even with a still-valid unexpired grant (the crux of Option B).
+         a workspace mismatch or a checkpoint advance denies the NEXT asset even
+         with a still-valid unexpired grant. (A public-share toggle does NOT deny
+         here: this route is workspace-member-only, so a member always sees their
+         own bundle regardless of its share_mode — see the no-share_mode-gate note
+         below.)
     Cache: private, no-store + Vary: Cookie (instant revocation)."""
     _require_feature()
     rel_path = _decode_asset_path(asset_path)
