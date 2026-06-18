@@ -227,12 +227,6 @@ function compactMetricValue(raw: string): string {
   return m ? m[0].replace(/\s+/g, "").trim() : s
 }
 
-// A short prototype-style name for the preview caption (drop trailing clauses).
-function previewName(finding: Finding): string {
-  const t = finding.title.split(/\s+[—–:]\s+/)[0].trim()
-  return t.length > 30 ? `${t.slice(0, 28)}…` : t
-}
-
 const num = (v: number | string) => (typeof v === "number" ? v : Number(v) || 0)
 
 // Compact ring / donut — share-of-whole or progress (card 2's "3/4 answered").
@@ -330,34 +324,6 @@ function FindingMiniBars({ chart }: { chart: BriefV2InlineChart }) {
 function FindingMiniChart({ chart }: { chart: BriefV2InlineChart }) {
   const ringKind = chart.kind === "pie" || chart.kind === "donut" || chart.kind === "gauge"
   return ringKind ? <FindingMiniRing chart={chart} /> : <FindingMiniBars chart={chart} />
-}
-
-// Right-rail prototype preview — a browser-style mock + caption, mirroring the
-// "First-Handoff Wizard" teaser in the reference. Clicking opens the prototype
-// flow (which routes to the PRD-first message when no PRD exists yet).
-function FindingPreview({ finding, onOpen }: { finding: Finding; onOpen: () => void }) {
-  return (
-    <button type="button" className="fc-preview" onClick={onOpen} title="Open prototype preview">
-      <span className="fc-preview-mock" aria-hidden>
-        <span className="fc-preview-mock-bar">
-          <i /><i /><i />
-        </span>
-        <span className="fc-preview-mock-body">
-          <span className="fc-preview-line fc-preview-line--a" />
-          <span className="fc-preview-line fc-preview-line--b" />
-          <span className="fc-preview-line fc-preview-line--c" />
-          <span className="fc-preview-line fc-preview-line--d" />
-        </span>
-      </span>
-      <span className="fc-preview-foot">
-        <span className="fc-preview-title">
-          <span className="fc-preview-glyph" aria-hidden>{">_"}</span>
-          {previewName(finding)}
-        </span>
-        <span className="fc-preview-sub">Prototype preview · open design</span>
-      </span>
-    </button>
-  )
 }
 
 // Data-driven fallback chart for insights whose payload carries no chart_hints.
@@ -560,26 +526,14 @@ function BriefFindingCard({
           </div>
         </div>
 
-        {/* Right rail — only rendered when this finding is prototypeable AND there is a
-            ready prototype WITH a real preview image. Every other state (not prototypeable,
-            ready-but-no-image, PRD-exists-but-not-ready, no PRD, map not yet loaded) renders
-            nothing — no mock, no shimmer, no stand-in. */}
-        {finding.prototypeable && insightState?.hasPrd && insightState.prototypeReady && insightState.previewImageUrl ? (
-          <button type="button" className="fc-preview" onClick={onPreview} title="Open prototype">
-            <img
-              className="fc-preview-img"
-              src={insightState.previewImageUrl}
-              alt="Prototype preview"
-            />
-            <span className="fc-preview-foot">
-              <span className="fc-preview-title">
-                <span className="fc-preview-glyph" aria-hidden>{">_"}</span>
-                {insightState.prdTitle ?? "Untitled prototype"}
-              </span>
-              <span className="fc-preview-sub">Prototype preview · open design</span>
-            </span>
-          </button>
-        ) : null}
+        {/* The right-rail prototype preview thumbnail was removed: the design-agent
+            screenshot capture serves the staged bundle as text/plain, so Chromium
+            photographs the raw index.html SOURCE instead of the rendered page — the
+            thumbnail showed HTML markup, not the prototype. Until that capture is
+            fixed (design-agent screenshot.py), there is no reliable image to show,
+            so we render nothing here. The full prototype is still reachable via the
+            "View prototype" button → /prototype?prd=<id>, which renders the live
+            bundle correctly. */}
       </div>
     </article>
   )
