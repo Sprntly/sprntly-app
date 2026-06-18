@@ -139,6 +139,19 @@ export function IterateActivityStream({
                 </p>
               </div>
             )
+          case "skipped":
+            return (
+              <div
+                key={e.id}
+                className="proto-msg proto-msg--agent"
+                data-testid="da-activity-skipped"
+              >
+                <p className="da-activity-agent-label">{label}</p>
+                <p className="proto-msg-body da-activity-skipped-body">
+                  {e.text}
+                </p>
+              </div>
+            )
           case "error":
             return (
               <div

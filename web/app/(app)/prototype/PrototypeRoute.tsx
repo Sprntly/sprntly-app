@@ -397,6 +397,7 @@ function InTabCanvas({
       iterateError={iterateRun.error}
       iteratePendingQuestion={iterateRun.pendingQuestion}
       onAnswerQuestion={iterateRun.answerQuestion}
+      onSkipQuestion={iterateRun.dismissQuestion}
       bundleReloadNonce={bundleReloadNonce}
       comments={
         proto.share_token ? (

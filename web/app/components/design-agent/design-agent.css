@@ -2692,6 +2692,160 @@
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
+   CLARIFYING-QUESTION CARD.
+   Structured replacement for the bare InlineClarifyAnswer surface: a badge +
+   question + radio options (label + optional muted description) + a write-your-
+   own row + a Skip/Continue footer. Renders inline in the iterate activity
+   stream. Forest-green tokens only.
+   ─────────────────────────────────────────────────────────────────────────── */
+.design-agent-surface .da-qcard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: var(--radius-sm, 12px);
+  padding: 14px;
+}
+.design-agent-surface .da-qcard-badge {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 5px;
+}
+.design-agent-surface .da-qcard-context {
+  margin: 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.design-agent-surface .da-qcard-question {
+  margin: 2px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.45;
+}
+.design-agent-surface .da-qcard-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.design-agent-surface .da-qcard-opt:hover {
+  border-color: var(--line-strong);
+}
+.design-agent-surface .da-qcard-opt--sel {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.design-agent-surface .da-qcard-opt:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.design-agent-surface .da-qcard-radio {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 2px solid var(--ink-3);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+}
+.design-agent-surface .da-qcard-opt--sel .da-qcard-radio {
+  border-color: var(--accent);
+}
+.design-agent-surface .da-qcard-opt--sel .da-qcard-radio::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.design-agent-surface .da-qcard-opt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.design-agent-surface .da-qcard-opt-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.design-agent-surface .da-qcard-opt-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.design-agent-surface .da-qcard-own-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 10px);
+  padding: 9px 11px;
+  font-size: 12.5px;
+  margin-top: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.design-agent-surface .da-qcard-own-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.design-agent-surface .da-qcard-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.design-agent-surface .da-qcard-spacer {
+  flex: 1;
+}
+.design-agent-surface .da-qcard-skip {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 7px 11px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+.design-agent-surface .da-qcard-skip:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+.design-agent-surface .da-qcard-skip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.design-agent-surface .da-qcard-continue {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.design-agent-surface .da-qcard-continue:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
    COMMENT-CLARIFY DIALOG.
    The "Confirm change" dialog that intercepts the Apply flow — shows the
    comment being applied, the LLM-generated clarifying question, and a

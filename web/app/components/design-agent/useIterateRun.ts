@@ -43,6 +43,7 @@ export type ActivityEventInput =
   | { kind: "step"; text: string; state: "active" | "done" }
   | { kind: "done"; text: string }
   | { kind: "question"; question: string }
+  | { kind: "skipped"; text: string }
   | { kind: "error"; text: string }
 
 /** An activity event with its assigned id + a client-captured wall-clock
@@ -91,7 +92,7 @@ export type UseIterateRunArgs = {
    *  (false), so the host must keep the current preview and NOT reload. */
   onComplete: (fresh: PrototypeRecord, opts?: { reloadBundle?: boolean }) => void
   /** Test seam: inject the api (poll + post). Defaults to the real one. */
-  api?: Pick<typeof designAgentApi, "iterate" | "get">
+  api?: Pick<typeof designAgentApi, "iterate" | "get" | "dismissQuestion">
 }
 
 export function useIterateRun({
@@ -427,6 +428,23 @@ export function useIterateRun({
     [runIterate],
   )
 
+  /** Skip the agent's clarifying question ("Skip this change"). Clears the open
+   *  question server-side (dismiss endpoint) so the poll stops re-prompting,
+   *  clears the FE pending state, and records a skipped turn. Does NOT iterate
+   *  and does NOT reload the preview — the prototype is left exactly as it is. */
+  const dismissQuestion = useCallback(async () => {
+    setPendingQuestion(null)
+    lastQuestionRef.current = null
+    appendActivity({ kind: "skipped", text: "Change skipped — prototype left unchanged" })
+    try {
+      await api.dismissQuestion(prototypeId)
+    } catch {
+      // The FE pending state is already cleared; a failed dismiss only means the
+      // backend sidecar may re-surface on a later poll. Non-fatal — no preview
+      // reload, no error toast for a skip.
+    }
+  }, [api, prototypeId, appendActivity])
+
   return {
     running,
     activity,
@@ -434,6 +452,7 @@ export function useIterateRun({
     error,
     runIterate,
     answerQuestion,
+    dismissQuestion,
     appendActivity,
   }
 }

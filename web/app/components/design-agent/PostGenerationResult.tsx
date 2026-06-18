@@ -37,6 +37,9 @@ import { PrototypeViewer, type Platform } from "./PrototypeViewer"
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
+// the structured clarifying-question CARD (badge + radio options + skip/continue)
+// shown inline in the iterate activity stream, replacing the old InlineClarifyAnswer.
+import { ClarifyingQuestionCard } from "./ClarifyingQuestionCard"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
@@ -54,7 +57,6 @@ import { usePinMarking } from "./usePinMarking"
 // exists and re-mints ONCE (bounded) on a later asset 401. The public
 // `/p/<token>` viewer does NOT use this surface, so it is untouched.
 import { useViewGrant } from "./useViewGrant"
-import type { PendingQuestion } from "../../lib/api"
 import {
   IconMessage,
   IconClose,
@@ -202,6 +204,9 @@ export type PostGenerationResultProps = {
   /** answer the clarifying question →
    *  continues the iterate via the shared runner. */
   onAnswerQuestion?: (answer: string) => void | Promise<void>
+  /** skip the clarifying question →
+   *  dismisses it without iterating (no preview reload). */
+  onSkipQuestion?: () => void | Promise<void>
   /** bumped on each completed iterate
    *  to force the center iframe to reload the rebuilt bundle (cache-bust). */
   bundleReloadNonce?: number
@@ -321,6 +326,7 @@ export type PostGenerationResultViewProps = {
   iterateRunning?: boolean
   iteratePendingQuestion?: import("../../lib/api").PendingQuestion | null
   onAnswerQuestion?: (answer: string) => void | Promise<void>
+  onSkipQuestion?: () => void | Promise<void>
   /** pin Apply → immediate iterate. */
   onPinIterate?: (instruction: string, appliedCommentId?: number | null) => void
   /** cache-bust nonce → forces the
@@ -811,90 +817,6 @@ export function DaControlBar({
   )
 }
 
-/**
- * the INLINE clarifying-answer surface
- * for the left-panel flow. When the shared iterate runner pauses on a
- * `pending_question`, this renders RIGHT IN THE ACTIVITY STREAM (not as a
- * detached surface): the question is already shown as an agent message above; this
- * is the answer affordance (choice buttons when the question carries `choices`,
- * else a free-text box). Answering routes a continuation iterate via the runner
- * (onAnswer → useIterateRun.answerQuestion). Local input state only → a leaf
- * client component (the file is already "use client").
- */
-function friendlyChoiceLabel(choice: string): string {
-  return choice.replace(/\s*\([^)]{1,50}\)\s*$/, '').trim() || choice
-}
-
-function InlineClarifyAnswer({
-  question,
-  busy,
-  onAnswer,
-}: {
-  question: PendingQuestion
-  busy: boolean
-  onAnswer: (answer: string) => void | Promise<void>
-}) {
-  const [answer, setAnswer] = useState("")
-  const choices = question.choices ?? null
-  const hasChoices = !!choices && choices.length > 0
-  return (
-    <div
-      className="da-activity-answer"
-      data-testid="da-activity-answer"
-      role="region"
-      aria-label="Answer the Design Agent"
-    >
-      {question.context && (
-        <p className="da-activity-answer-context">{question.context}</p>
-      )}
-      {hasChoices ? (
-        <div className="da-activity-answer-choices">
-          {choices!.map((choice, i) => (
-            <button
-              key={`${i}-${choice}`}
-              type="button"
-              className="da-activity-choice-btn"
-              data-testid="da-activity-answer-choice"
-              disabled={busy}
-              onClick={() => void onAnswer(choice)}
-            >
-              {friendlyChoiceLabel(choice)}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <form
-          className="da-activity-answer-form"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (!answer.trim()) return
-            void onAnswer(answer)
-            setAnswer("")
-          }}
-        >
-          <textarea
-            className="da-activity-answer-input"
-            data-testid="da-activity-answer-input"
-            value={answer}
-            placeholder="Answer the Design Agent…"
-            onChange={(e) => setAnswer(e.target.value)}
-          />
-          <div className="da-activity-answer-actions">
-            <button
-              type="submit"
-              className="btn btn-accent"
-              data-testid="da-activity-answer-submit"
-              disabled={busy || !answer.trim()}
-            >
-              Submit
-            </button>
-          </div>
-        </form>
-      )}
-    </div>
-  )
-}
-
 function FullscreenOverlay({
   bundleUrl,
   isComplete,
@@ -958,12 +880,14 @@ function ActivityPanel({
   iterateRunning,
   iteratePendingQuestion,
   onAnswerQuestion,
+  onSkipQuestion,
   userName,
 }: {
   iterateActivity: import("./useIterateRun").ActivityEvent[]
   iterateRunning: boolean
   iteratePendingQuestion: import("../../lib/api").PendingQuestion | null
   onAnswerQuestion?: (answer: string) => void | Promise<void>
+  onSkipQuestion?: () => void | Promise<void>
   userName?: string | null
 }) {
   const activityEndRef = useRef<HTMLDivElement>(null)
@@ -978,10 +902,11 @@ function ActivityPanel({
         userName={userName}
       />
       {iteratePendingQuestion && onAnswerQuestion && (
-        <InlineClarifyAnswer
+        <ClarifyingQuestionCard
           question={iteratePendingQuestion}
           busy={iterateRunning}
           onAnswer={onAnswerQuestion}
+          onSkip={onSkipQuestion ?? (() => {})}
         />
       )}
       <div ref={activityEndRef} />
@@ -1034,6 +959,7 @@ export function PostGenerationResultView({
   iterateRunning = false,
   iteratePendingQuestion = null,
   onAnswerQuestion,
+  onSkipQuestion,
   onPinIterate,
   bundleReloadNonce = 0,
   computedPinPositions = {},
@@ -1205,6 +1131,7 @@ export function PostGenerationResultView({
                 iterateRunning={iterateRunning}
                 iteratePendingQuestion={iteratePendingQuestion}
                 onAnswerQuestion={onAnswerQuestion}
+                onSkipQuestion={onSkipQuestion}
                 userName={userName}
               />
             )}
@@ -1395,6 +1322,7 @@ export function PostGenerationResult({
   // is intentionally not destructured/used directly here.
   iteratePendingQuestion,
   onAnswerQuestion,
+  onSkipQuestion,
   bundleReloadNonce,
   onStateChange,
   defaultFullscreen,
@@ -1552,6 +1480,7 @@ export function PostGenerationResult({
       iterateRunning={iterateRunning}
       iteratePendingQuestion={iteratePendingQuestion}
       onAnswerQuestion={onAnswerQuestion}
+      onSkipQuestion={onSkipQuestion}
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
       computedPinPositions={pin.computedPinPositions}
