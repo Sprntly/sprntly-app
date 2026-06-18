@@ -15,7 +15,7 @@
 // scoped per brief insight (briefId:insightIndex); multi-agent likewise. The id
 // is cleared when the job completes or errors.
 
-export type JobKind = "prd" | "evidence" | "multi-agent"
+export type JobKind = "prd" | "evidence" | "multi-agent" | "ask"
 
 const PREFIX = "sprntly_pending_job"
 
