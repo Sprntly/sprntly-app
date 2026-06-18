@@ -1,8 +1,6 @@
 "use client"
 
 import {
-  type CSSProperties,
-  type ReactNode,
   useCallback,
   useEffect,
   useRef,
@@ -22,11 +20,9 @@ import { runDesignAgentGeneration } from "../../lib/runDesignAgentGeneration"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
 import {
   IconCheck,
-  IconCopy,
   IconGrid,
   IconLinkInsert,
   IconListBullet,
-  IconMail,
   IconRedo,
   IconUndo,
 } from "./app-icons"
@@ -88,18 +84,6 @@ function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; saveStatus:
       <div className="prd-status">
         <span style={{ width: 6, height: 6, borderRadius: "50%", background: hasDoc ? statusColor : "var(--muted)", transition: "background 0.3s" }} />
         {hasDoc ? statusLabel : "No draft"}
-      </div>
-    </div>
-  )
-}
-
-function ShareMenuItem({ icon, iconStyle, title, desc, onClick }: { icon: ReactNode; iconStyle?: CSSProperties; title: string; desc: string; onClick: () => void }) {
-  return (
-    <div className="share-menu-item" onClick={onClick}>
-      <div className="share-menu-item-icon" style={iconStyle}>{icon}</div>
-      <div>
-        <div style={{ fontWeight: 600 }}>{title}</div>
-        <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{desc}</div>
       </div>
     </div>
   )
@@ -265,7 +249,7 @@ export function LlmReadableView({ prd, generating, loading }: { prd: PrdState | 
 type PrdSubTab = "human" | "llm"
 
 export function PrdPanelContent() {
-  const { openModal, shareMenuOpen, setShareMenuOpen, showToast } = useNavigation()
+  const { openModal, showToast } = useNavigation()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const prd = content.prd
@@ -351,16 +335,6 @@ export function PrdPanelContent() {
   const exec = (cmd: string, value?: string) => {
     bodyRef.current?.focus()
     document.execCommand(cmd, false, value)
-  }
-
-  const handleShare = (type: "email" | "slack" | "link") => {
-    setShareMenuOpen(false)
-    const messages = {
-      email: { title: "Opening email draft", sub: "Your email client will open with the PRD attached." },
-      slack: { title: "Posted to Slack", sub: "PRD shared in #product." },
-      link: { title: "Link copied", sub: "Anyone with the link can view this PRD." },
-    }
-    showToast(messages[type].title, messages[type].sub)
   }
 
   return (
@@ -475,20 +449,6 @@ export function PrdPanelContent() {
             </button>
           </div>
           <div className="prd-foot-right">
-            <div style={{ position: "relative" }}>
-              <button type="button" className="btn" disabled={!prd} onClick={(e) => { e.stopPropagation(); if (!prd) return; setShareMenuOpen(!shareMenuOpen) }}>
-                Share
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><path d="M5 7L1 3h8z" /></svg>
-              </button>
-              {shareMenuOpen && prd && (
-                <div className="share-menu open">
-                  <ShareMenuItem icon={<IconMail size={14} />} title="Email" desc="Send to teammates" onClick={() => handleShare("email")} />
-                  <ShareMenuItem icon={<span style={{ fontWeight: 700, fontSize: 10 }}>Sl</span>} iconStyle={{ background: "#4A154B", color: "#fff" }} title="Slack" desc="Post to a channel" onClick={() => handleShare("slack")} />
-                  <div className="share-menu-divider" />
-                  <ShareMenuItem icon={<IconCopy size={14} />} title="Copy link" desc="Viewable by your team" onClick={() => handleShare("link")} />
-                </div>
-              )}
-            </div>
             <button type="button" className="btn btn-accent" disabled={!prd} onClick={() => prd && openModal("approve")}>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                 <IconCheck size={16} /> Approve & next step
