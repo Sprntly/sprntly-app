@@ -1029,6 +1029,11 @@ export function PostGenerationResultView({
       platform={platform}
       onPlatformChange={onPlatformChange}
       hideToggle
+      // Edge-to-edge signed-in editor preview: suppress the cosmetic browser-frame
+      // decoration (traffic lights + URL bar). The toggle is already lifted into
+      // the top control bar (`hideToggle`), so the iframe sits flush. The public
+      // viewer + fullscreen overlay leave this unset and keep the full chrome.
+      hideChrome
       onAssetError={onBundleAssetError}
       onBundleLoad={onBundleLoad}
     />

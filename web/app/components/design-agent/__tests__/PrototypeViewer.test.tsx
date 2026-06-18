@@ -41,6 +41,8 @@ function renderViewer(
     urlSlug?: string
     initialPlatform?: Platform
     isComplete?: boolean
+    hideChrome?: boolean
+    hideToggle?: boolean
   } = {},
 ): string {
   return renderToStaticMarkup(
@@ -50,6 +52,8 @@ function renderViewer(
       chrome: over.chrome,
       urlSlug: over.urlSlug,
       initialPlatform: over.initialPlatform,
+      hideChrome: over.hideChrome,
+      hideToggle: over.hideToggle,
     }),
   )
 }
@@ -278,8 +282,14 @@ describe("call-site propagation (AC5)", () => {
     expect(html).toContain('class="da-prototype-iframe"')
     // ManualEditOverlay trigger not rendered on the canvas — mark-and-comment is the path.
     expect(html).not.toContain('data-testid="manual-edit-overlay"')
-    // default slug fills (signed-in call site passes no urlSlug)
-    expect(html).toContain(`>${DEFAULT_URL_SLUG}</span>`)
+    // Edge-to-edge signed-in editor preview: the cosmetic browser-frame
+    // decoration is suppressed (`hideChrome`), so the URL bar + traffic lights
+    // are NOT rendered. The Desktop/Mobile toggle lives in the top control bar.
+    expect(html).not.toContain(`>${DEFAULT_URL_SLUG}</span>`)
+    expect(html).not.toContain('data-testid="proto-url"')
+    expect(html).not.toContain('class="proto-dot r"')
+    // the toggle still reaches the user — lifted into the control bar.
+    expect(html).toContain('class="platform-toggle da-controlbar-platform"')
   })
 
   it("test_public_viewer_mounts_viewer_with_chrome — public read-only chrome fragment wraps inside proto-frame", () => {
@@ -342,5 +352,69 @@ describe("device-frame CSS (AC6)", () => {
     expect(protoStageBlock![1]).toMatch(/border:\s*9px solid var\(--ink\)/)
     // P6-11's .share-menu override is untouched (no P6-11 lines removed)
     expect(CSS).toMatch(/\.design-agent-surface\s+\.share-menu\s*\{/)
+  })
+})
+
+// ── hideChrome: edge-to-edge signed-in editor preview ─────────────────────
+// The signed-in non-fullscreen editor preview suppresses the cosmetic browser-
+// frame decoration (traffic-light dots + URL bar) so the iframe is edge-to-edge.
+// The functional Desktop/Mobile toggle survives. Public + fullscreen keep the head.
+describe("hideChrome edge-to-edge preview", () => {
+  it("test_hide_chrome_drops_traffic_lights_and_url_bar — decoration gone; iframe + toggle still render", () => {
+    // The signed-in editor lifts the toggle into the control bar (`hideToggle`),
+    // so with `hideChrome` the head disappears entirely and the iframe is flush.
+    const html = renderViewer({ hideChrome: true, hideToggle: true })
+    // cosmetic decoration is gone
+    expect(html).not.toContain("proto-frame-head")
+    expect(html).not.toContain('class="proto-dot r"')
+    expect(html).not.toContain('class="proto-dot y"')
+    expect(html).not.toContain('class="proto-dot g"')
+    expect(html).not.toContain('data-testid="proto-url"')
+    expect(html).not.toContain(DEFAULT_URL_SLUG)
+    // the iframe is still rendered (exactly one)
+    expect(html).toContain('class="da-prototype-iframe"')
+    expect((html.match(/da-prototype-iframe/g) ?? []).length).toBe(1)
+  })
+
+  it("test_hide_chrome_keeps_toggle — decoration gone but the in-frame Desktop/Mobile toggle survives", () => {
+    // `hideChrome` suppresses ONLY the decoration. A caller that keeps its
+    // in-frame toggle (hideToggle absent) still renders it — proving the toggle
+    // is not coupled to the cosmetic head.
+    const html = renderViewer({ hideChrome: true })
+    // decoration suppressed
+    expect(html).not.toContain('class="proto-dot r"')
+    expect(html).not.toContain('data-testid="proto-url"')
+    // functional toggle survives
+    expect(html).toContain('class="platform-toggle"')
+    expect(html).toContain("Desktop")
+    expect(html).toContain("Mobile")
+    expect(html).toContain('aria-label="Preview platform"')
+    // and the toggle still functions — driving the seam flips the stage class
+    const mobile = renderViewer({ hideChrome: true, initialPlatform: "mobile" })
+    expect(mobile).toContain('class="proto-stage mobile"')
+    expect(mobile).toMatch(
+      /<button[^>]*class="active"[^>]*aria-pressed="true"[^>]*>Mobile<\/button>/,
+    )
+    const desktop = renderViewer({
+      hideChrome: true,
+      initialPlatform: "desktop",
+    })
+    expect(desktop).toContain('class="proto-stage desktop"')
+  })
+
+  it("test_default_preserves_head — default (public + fullscreen path) keeps the full chrome (regression guard)", () => {
+    // hideChrome absent/falsy — the head, traffic lights and URL bar are all
+    // present exactly as before. This is the RED guard: it proves the change is
+    // non-vacuous (the head exists by default and only `hideChrome` removes it).
+    const html = renderViewer()
+    expect(html).toContain('class="proto-frame-head"')
+    expect(html).toContain('class="proto-dot r"')
+    expect(html).toContain('class="proto-dot y"')
+    expect(html).toContain('class="proto-dot g"')
+    expect(html).toContain('data-testid="proto-url"')
+    expect(html).toContain(DEFAULT_URL_SLUG)
+    // toggle present by default too
+    expect(html).toContain("Desktop")
+    expect(html).toContain("Mobile")
   })
 })

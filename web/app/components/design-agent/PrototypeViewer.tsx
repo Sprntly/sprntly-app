@@ -62,6 +62,15 @@ type Props = {
    *  signed-in PostGenerationResult call site (which passes no headControls) is
    *  byte-for-byte unchanged. */
   headControls?: ReactNode
+  /** When true, the COSMETIC browser-frame decoration — the three traffic-light
+   *  dots + the non-navigable URL bar — is NOT rendered, so the iframe sits
+   *  edge-to-edge. Set ONLY on the signed-in non-fullscreen editor preview, where
+   *  the Desktop/Mobile toggle is already lifted into the top control bar. The
+   *  public `/p/<token>` viewer and the fullscreen overlay leave this unset and
+   *  keep the full chrome. The FUNCTIONAL toggle (and any `headControls`) is NOT
+   *  suppressed by this flag — only the decoration is — so a call site that keeps
+   *  its in-frame toggle still renders it. */
+  hideChrome?: boolean
   /** Bundle-proxy view-grant: called when the authed bundle iframe fails to load
    *  (e.g. an asset GET 401s because the `da_view_grant` cookie expired or was
    *  revoked). The authed container wires this to a BOUNDED single re-mint
@@ -98,6 +107,7 @@ export function PrototypeViewer({
   stageOverlay,
   onAssetError,
   onBundleLoad,
+  hideChrome = false,
 }: Props) {
   // UX-EXPLORE (throwaway — REVERT): controlled when a `platform` prop is given;
   // otherwise own the state locally as before. Either way `platform` below is the
@@ -118,48 +128,62 @@ export function PrototypeViewer({
       data-complete={isComplete ? "true" : "false"}
     >
       <div className="proto-frame">
-        {/* browser-frame head: traffic lights + cosmetic URL bar + toggle */}
-        <div className="proto-frame-head">
-          <span className="proto-dot r" />
-          <span className="proto-dot y" />
-          <span className="proto-dot g" />
-          <span className="proto-url" data-testid="proto-url">
-            {slug}
-          </span>
-          {/* The toggle is hidden when lifted
-              into the control bar (`hideToggle`); otherwise it renders in-frame
-              exactly as before for the public viewer + fullscreen overlay. */}
-          {!hideToggle && (
-            <div
-              className="platform-toggle"
-              role="group"
-              aria-label="Preview platform"
-            >
-              <button
-                type="button"
-                className={platform === "desktop" ? "active" : ""}
-                aria-pressed={platform === "desktop"}
-                onClick={() => setPlatform("desktop")}
+        {/* browser-frame head: cosmetic decoration (traffic lights + URL bar) +
+            the functional toggle + headControls. The head wrapper renders only
+            when it has SOMETHING to show — so when `hideChrome` suppresses the
+            decoration AND the toggle has been lifted out (`hideToggle`), the head
+            disappears entirely and the iframe sits edge-to-edge. The toggle and
+            headControls are NOT gated by `hideChrome` — only the decoration is —
+            so a caller that keeps its in-frame toggle still renders it. */}
+        {(!hideChrome || !hideToggle || headControls) && (
+          <div className="proto-frame-head">
+            {/* Cosmetic, non-navigable decoration — suppressed for the signed-in
+                edge-to-edge editor preview via `hideChrome`. */}
+            {!hideChrome && (
+              <>
+                <span className="proto-dot r" />
+                <span className="proto-dot y" />
+                <span className="proto-dot g" />
+                <span className="proto-url" data-testid="proto-url">
+                  {slug}
+                </span>
+              </>
+            )}
+            {/* The toggle is hidden when lifted
+                into the control bar (`hideToggle`); otherwise it renders in-frame
+                exactly as before for the public viewer + fullscreen overlay. */}
+            {!hideToggle && (
+              <div
+                className="platform-toggle"
+                role="group"
+                aria-label="Preview platform"
               >
-                Desktop
-              </button>
-              <button
-                type="button"
-                className={platform === "mobile" ? "active" : ""}
-                aria-pressed={platform === "mobile"}
-                onClick={() => setPlatform("mobile")}
-              >
-                Mobile
-              </button>
-            </div>
-          )}
-          {/* C2a: right-aligned head control group (public viewer's Mark +
-              Comment buttons). The `.proto-url` flex:1 pushes this to the right
-              edge alongside the toggle. Renders nothing when omitted. */}
-          {headControls && (
-            <div className="proto-head-controls">{headControls}</div>
-          )}
-        </div>
+                <button
+                  type="button"
+                  className={platform === "desktop" ? "active" : ""}
+                  aria-pressed={platform === "desktop"}
+                  onClick={() => setPlatform("desktop")}
+                >
+                  Desktop
+                </button>
+                <button
+                  type="button"
+                  className={platform === "mobile" ? "active" : ""}
+                  aria-pressed={platform === "mobile"}
+                  onClick={() => setPlatform("mobile")}
+                >
+                  Mobile
+                </button>
+              </div>
+            )}
+            {/* C2a: right-aligned head control group (public viewer's Mark +
+                Comment buttons). The `.proto-url` flex:1 pushes this to the right
+                edge alongside the toggle. Renders nothing when omitted. */}
+            {headControls && (
+              <div className="proto-head-controls">{headControls}</div>
+            )}
+          </div>
+        )}
         {/* The chrome slot is ALWAYS rendered (even when `chrome` is undefined)
             so the testid stays queryable and the overlay has a stable mount
             point — an empty div is the no-op state. */}
