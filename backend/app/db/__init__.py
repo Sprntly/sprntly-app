@@ -60,12 +60,16 @@ from app.db.evidences import (
 
 # Asks (log + cache)
 from app.db.asks import (
+    complete_ask_job,
     complete_cached_ask,
+    fail_ask_job,
     fail_cached_ask,
     find_cached_ask,
+    get_ask_job,
     invalidate_orphan_generating_cached_asks,
     invalidate_stale_cached_asks,
     log_ask,
+    start_ask_job,
     start_cached_ask,
 )
 
@@ -177,12 +181,16 @@ __all__ = [
     "invalidate_stale_evidences",
     "start_evidence",
     # asks
+    "complete_ask_job",
     "complete_cached_ask",
+    "fail_ask_job",
     "fail_cached_ask",
     "find_cached_ask",
+    "get_ask_job",
     "invalidate_orphan_generating_cached_asks",
     "invalidate_stale_cached_asks",
     "log_ask",
+    "start_ask_job",
     "start_cached_ask",
     # datasets
     "dataset_exists",

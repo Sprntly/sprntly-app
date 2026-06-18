@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { ChatsListView, type BriefEntry } from "../ChatsScreen"
+import { ChatsListView, isMirroredBrief, type BriefEntry } from "../ChatsScreen"
 import type { ConversationRow } from "../../../../types/content"
 
 // A conversation row, with the private `_pinned` / `_dbId` markers the screen
@@ -138,6 +138,55 @@ describe("ChatsListView — brief sorts above everything", () => {
     const { container } = render(React.createElement(ChatsListView, defaults()))
     const html = container.innerHTML
     expect(html.indexOf("This week's brief")).toBeLessThan(html.indexOf("On-call SEV-2 incident"))
+  })
+})
+
+describe("isMirroredBrief — brief de-duplication", () => {
+  // A persisted row, with the private markers the screen attaches.
+  type DbRow = ConversationRow & { _agentType?: string; _dbId?: number }
+  const dbRow = (over: Partial<DbRow>): DbRow => ({
+    id: "x",
+    title: "Some chat",
+    time: iso(now),
+    savedTurn: { id: "x", query: "hi" },
+    ...over,
+  })
+
+  it("suppresses a conversation tagged with the brief agent_type (structural signal)", () => {
+    // Even with a totally generic title, the structural signal wins.
+    expect(isMirroredBrief(dbRow({ title: "Untitled", _agentType: "brief" }), BRIEF)).toBe(true)
+    expect(isMirroredBrief(dbRow({ title: "Untitled", _agentType: "BRIEF" }), BRIEF)).toBe(true)
+  })
+
+  it("suppresses a conversation whose title is a canonical brief pin title", () => {
+    expect(isMirroredBrief(dbRow({ title: "This week's brief" }), BRIEF)).toBe(true)
+    expect(isMirroredBrief(dbRow({ title: "Monday Brief" }), BRIEF)).toBe(true)
+    expect(isMirroredBrief(dbRow({ title: "  monday brief  " }), BRIEF)).toBe(true)
+  })
+
+  it("suppresses a conversation whose title exactly matches the live brief week label or headline", () => {
+    expect(isMirroredBrief(dbRow({ title: "Week of May 20" }), BRIEF)).toBe(true)
+    expect(isMirroredBrief(dbRow({ title: "handoff threshold is costing 8% retention." }), BRIEF)).toBe(true)
+  })
+
+  it("does NOT suppress a legitimate chat that merely MENTIONS 'brief' (no substring match)", () => {
+    expect(isMirroredBrief(dbRow({ title: "Brief me on the latency regression" }), BRIEF)).toBe(false)
+    expect(isMirroredBrief(dbRow({ title: "Debrief from the Cerner call" }), BRIEF)).toBe(false)
+    expect(isMirroredBrief(dbRow({ title: "Brainstorm a brief PRD" }), BRIEF)).toBe(false)
+  })
+
+  it("does NOT match the brief week label / headline as a substring", () => {
+    // A title that contains the headline but isn't equal to it must survive.
+    expect(
+      isMirroredBrief(dbRow({ title: "Follow-up: Handoff threshold is costing 8% retention. — next steps" }), BRIEF),
+    ).toBe(false)
+  })
+
+  it("returns false for unrelated chats and tolerates a null brief", () => {
+    expect(isMirroredBrief(dbRow({ title: "Cohort breakdown analytics" }), BRIEF)).toBe(false)
+    expect(isMirroredBrief(dbRow({ title: "Cohort breakdown analytics" }), null)).toBe(false)
+    // Pin titles still suppress even without a live brief entry.
+    expect(isMirroredBrief(dbRow({ title: "Monday Brief" }), null)).toBe(true)
   })
 })
 

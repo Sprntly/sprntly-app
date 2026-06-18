@@ -523,6 +523,26 @@ def _seed_corpus(data_dir, dataset="asurion", body="some corpus body"):
     (ds / "a.md").write_text(body)
 
 
+def _ask_and_wait(client, question, dataset="asurion", *, timeout=5.0):
+    """POST /v1/ask (fire-and-forget) then poll GET /v1/ask/{id} until terminal,
+    returning the citation-stripped status body once the worker has run."""
+    import time as _time
+
+    start = client.post("/v1/ask", json={"question": question, "dataset": dataset})
+    assert start.status_code == 200, start.text
+    ask_id = start.json()["ask_id"]
+    deadline = _time.monotonic() + timeout
+    body = None
+    while _time.monotonic() < deadline:
+        resp = client.get(f"/v1/ask/{ask_id}")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        if body["status"] != "generating":
+            return body
+        _time.sleep(0.02)
+    return body
+
+
 def test_ask_route_uses_kg_context_when_signals_exist(
     tenant_client, isolated_settings, fake_llm
 ):
@@ -547,11 +567,9 @@ def test_ask_route_uses_kg_context_when_signals_exist(
     )
 
     with _patch_embed(), _patch_candidates([(theme, 0.9)]):
-        resp = t.client.post(
-            "/v1/ask", json={"question": "How is my pipeline?", "dataset": "asurion"}
-        )
-    assert resp.status_code == 200
-    assert resp.json()["citations"] == []  # still stripped
+        body = _ask_and_wait(t.client, "How is my pipeline?")
+    assert body["status"] == "ready"
+    assert body["citations"] == []  # still stripped
     user = fake_llm["calls"][-1]["user"]
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" in user
     assert "Acme blocked on SSO" in user
@@ -570,10 +588,7 @@ def test_ask_route_corpus_only_for_legacy_session(
     fake_llm["payload"] = {
         "answer": "x", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": "",
     }
-    resp = t.client.post(
-        "/v1/ask", json={"question": "What is churn?", "dataset": "asurion"}
-    )
-    assert resp.status_code == 200
-    body = resp.json()
+    body = _ask_and_wait(t.client, "What is churn?")
+    assert body["status"] == "ready"
     assert body["answer"] == "x"
     assert "LIVE CONTEXT FROM CONNECTED SOURCES" not in fake_llm["calls"][-1]["user"]

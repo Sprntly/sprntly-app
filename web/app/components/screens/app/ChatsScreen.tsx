@@ -119,6 +119,53 @@ function formatTime(timeStr: string): string {
 
 const GROUP_ORDER = ["Pinned", "Today", "Yesterday", "This week", "Earlier"] as const
 
+// ── Brief de-duplication ──
+//
+// The weekly brief is surfaced EXACTLY ONCE, via the synthetic always-pinned
+// `BriefPinRow` (see below). A persisted conversation can sometimes MIRROR that
+// brief (e.g. a brief chat that was saved to history, or seed/demo data titled
+// "Monday Brief"), which would render the brief a SECOND time as an ordinary
+// row. `isMirroredBrief` identifies such a row so it can be dropped.
+//
+// We deliberately avoid a fragile `title.includes("brief")` test — that would
+// wrongly hide legitimate user chats that merely mention "brief". Two robust
+// signals, in order of reliability:
+//   1. STRUCTURAL: the row's `_agentType` is the brief agent ("brief"). This is
+//      the canonical signal when the backend tags it.
+//   2. EXACT TITLE: the row's title is an exact (case-insensitive, trimmed)
+//      match for one of the canonical brief identifiers — the literal pin
+//      titles ("this week's brief", "monday brief") or the live brief's own
+//      week label / headline. Exact equality, never a substring contains.
+
+/** Canonical brief titles the synthetic pin can render under. Lowercased. */
+const BRIEF_PIN_TITLES = ["this week's brief", "monday brief", "weekly brief"]
+
+function normalizeTitle(s: string): string {
+  return s.trim().toLowerCase()
+}
+
+/**
+ * True when `row` is a persisted conversation that mirrors the canonical weekly
+ * brief already shown by `BriefPinRow`, and so must be suppressed from the list.
+ * `brief` is the current `BriefEntry` (null when there's no current brief).
+ */
+export function isMirroredBrief(
+  row: ConversationRow & { _agentType?: string },
+  brief: BriefEntry | null,
+): boolean {
+  // 1. Structural signal: the backend tagged this conversation as the brief.
+  if (normalizeTitle(row._agentType ?? "") === "brief") return true
+
+  // 2. Exact-title match against canonical brief identifiers (never substring).
+  const t = normalizeTitle(row.title)
+  if (BRIEF_PIN_TITLES.includes(t)) return true
+  if (brief) {
+    if (t === normalizeTitle(brief.weekLabel)) return true
+    if (t === normalizeTitle(brief.headline)) return true
+  }
+  return false
+}
+
 // ── Weekly-brief pin ──
 //
 // The current weekly brief is surfaced as a synthetic, always-pinned entry at
@@ -760,21 +807,27 @@ export function ChatsScreen() {
     } as ConversationRow & { _pinned?: boolean; _agentType?: string; _dbId?: number })),
   [dbChats])
 
-  // Merge DB chats + in-memory chats (dedup by title), fallback to mock
+  // Merge DB chats + in-memory chats (dedup by title), fallback to mock.
+  // The weekly brief is rendered EXACTLY ONCE via the synthetic `BriefPinRow`;
+  // any conversation that mirrors it (`isMirroredBrief`) is dropped here so it
+  // never appears a second time as an ordinary row.
   const allChats = useMemo(() => {
-    const inMemory = (content.conversations ?? []).map((c) => ({
-      ...c,
-      time: c.time.includes("T") ? c.time : new Date().toISOString(),
-    }))
+    const inMemory = (content.conversations ?? [])
+      .map((c) => ({
+        ...c,
+        time: c.time.includes("T") ? c.time : new Date().toISOString(),
+      }))
+      .filter((c) => !isMirroredBrief(c, briefEntry))
     // If DB has data, merge with in-memory (DB is source of truth for persisted ones)
     if (dbRows.length > 0) {
-      const dbTitles = new Set(dbRows.map((r) => r.title))
+      const persisted = dbRows.filter((r) => !isMirroredBrief(r, briefEntry))
+      const dbTitles = new Set(persisted.map((r) => r.title))
       // Add any in-memory conversations not yet in DB
       const extra = inMemory.filter((c) => !dbTitles.has(c.title))
-      return [...dbRows, ...extra]
+      return [...persisted, ...extra]
     }
     return inMemory
-  }, [dbRows, content.conversations])
+  }, [dbRows, content.conversations, briefEntry])
 
   const handleDelete = useCallback((row: ConversationRow) => {
     const dbId = (row as any)._dbId
