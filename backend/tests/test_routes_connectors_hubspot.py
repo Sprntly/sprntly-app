@@ -214,8 +214,9 @@ def test_v3_callback_stores_connection_with_normalised_label(hubspot_env_v3, mon
         )
 
     assert r.status_code == 307
+    # Routes through the lightweight return page (closes the OAuth tab).
     assert r.headers["location"].startswith(
-        "http://localhost:3000/settings?section=connectors"
+        "http://localhost:3000/connectors/return?"
     )
     assert "connected=hubspot" in r.headers["location"]
 

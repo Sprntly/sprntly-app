@@ -8,6 +8,7 @@ import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
+import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedSignal"
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
 import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
 import { Check } from "../../auth/icons"
@@ -199,10 +200,16 @@ export function Connectors() {
     })
   }
 
-  // OAuth now opens the provider in a sibling tab instead of navigating this
-  // one away. When the user authorizes there and switches back with the
-  // connect modal still open, refresh so the modal flips to its connected
-  // state (and the grid card to "Live") without a manual reload.
+  // The OAuth tab signals back via BroadcastChannel / localStorage the moment
+  // a connector connects (see /connectors/return). Refresh connections so the
+  // grid flips to "Live" and the open modal (if any) flips to its connected
+  // state — no manual reload, no tab switch needed.
+  useConnectorConnectedSignal(() => reloadConnections())
+
+  // Belt-and-suspenders: OAuth opens the provider in a sibling tab. If the
+  // return-page signal is missed (e.g. the tab closed before posting), a
+  // refresh on tab focus still picks up the new connection while the modal
+  // is open.
   useEffect(() => {
     if (modalProvider == null) return
     const onVisible = () => {

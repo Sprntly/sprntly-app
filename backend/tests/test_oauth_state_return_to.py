@@ -9,8 +9,10 @@ managed from Settings, but the onboarding flow needs callbacks to
 bounce back to `/onboarding/4` instead.
 
 `return_to` is signed into the state at `/start-oauth` time, validated
-as a safe relative path (defends open-redirect), and the callback
-appends `?connected=<provider>` and redirects there.
+as a safe relative path (defends open-redirect). The callback now
+redirects to the lightweight `/connectors/return` page with
+`?connected=<provider>&return_to=<safe path>`; that page closes the
+OAuth tab and (on fallback) navigates the app to `return_to`.
 """
 from __future__ import annotations
 
@@ -235,8 +237,14 @@ def test_callback_redirects_to_return_to_when_state_carries_it(
         )
     assert r.status_code == 307, r.text
     location = r.headers["location"]
-    assert "/onboarding/4" in location
+    # Now routes through the lightweight return page (closes the OAuth tab),
+    # carrying the validated return_to so the app can fall back to it.
+    assert "/connectors/return" in location
     assert "connected=figma" in location
+    # return_to is url-encoded onto the return page URL.
+    from urllib.parse import urlparse, parse_qs
+    q = parse_qs(urlparse(location).query)
+    assert q["return_to"] == ["/onboarding/4"]
 
 
 def test_callback_falls_back_to_settings_when_state_has_no_return_to(
@@ -269,5 +277,10 @@ def test_callback_falls_back_to_settings_when_state_has_no_return_to(
         )
     assert r.status_code == 307, r.text
     location = r.headers["location"]
-    assert "section=connectors" in location
+    # No return_to in state → return page gets connected= only and uses its
+    # own default; the URL must NOT carry an unsafe/empty return_to param.
+    assert "/connectors/return" in location
     assert "connected=figma" in location
+    from urllib.parse import urlparse, parse_qs
+    q = parse_qs(urlparse(location).query)
+    assert "return_to" not in q
