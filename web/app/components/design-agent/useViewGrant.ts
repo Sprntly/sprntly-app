@@ -152,10 +152,22 @@ export function useViewGrant(
         // NOT interrupt an active viewing session with an iframe reload.
         if (isRemint && forceReload) setReloadKey((k) => k + 1)
       } catch {
-        // Mint failed (network / 401 / 404 / 429). Withhold the bundle url and
-        // surface an error; do not load an iframe that will only 401 on assets.
-        setGrantedBundleUrl(null)
-        setError("Couldn't load the prototype. Please refresh and try again.")
+        // Mint failed (network / 401 / 404 / 429). For the initial mint and a
+        // reactive recovery re-mint (forceReload = true), withhold the bundle url
+        // and surface an error — we don't yet have (or have lost) a usable grant,
+        // so loading the iframe would only 401 on assets.
+        //
+        // A PROACTIVE silent renewal (forceReload = false) is different: it runs
+        // on a timer while a still-valid grant is already exposed, refreshing the
+        // cookie BEFORE it can expire. A transient failure there must NOT tear
+        // down a healthy viewer — the current grant is almost certainly still
+        // valid, and a real lapse is independently caught by the preflight /
+        // visibility recovery. So a failed proactive renewal is swallowed; the
+        // next interval (or a genuine 401) handles it.
+        if (forceReload) {
+          setGrantedBundleUrl(null)
+          setError("Couldn't load the prototype. Please refresh and try again.")
+        }
       } finally {
         setPending(false)
         mintingRef.current = false

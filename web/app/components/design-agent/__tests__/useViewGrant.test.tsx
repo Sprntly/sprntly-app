@@ -287,6 +287,38 @@ describe("useViewGrant — recovers a lapsed grant without a manual reload", () 
     }
   })
 
+  it("TIMER tolerates failure: a transient blip on a proactive renewal does NOT blank a healthy viewer", async () => {
+    vi.useFakeTimers()
+    try {
+      const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+
+      await act(async () => {
+        await vi.runOnlyPendingTimersAsync()
+      })
+      expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+      expect(viewGrant).toHaveBeenCalledTimes(1)
+
+      // The proactive renewal hits a transient failure (network blip / 429 / 5xx)
+      // while the CURRENT grant is still valid (we refresh under the TTL).
+      viewGrant.mockRejectedValueOnce(new Error("transient"))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(GRANT_REFRESH_INTERVAL_MS + 1)
+      })
+
+      // It tried to renew (call #2) and failed — but the still-valid grant + bundle
+      // are LEFT INTACT: the viewer is NOT blanked and NO error is surfaced. (A
+      // genuine lapse is still caught by the preflight / visibility recovery; a
+      // proactive pre-expiry renewal failing is harmless and must not tear down a
+      // working session — that would itself be a regression introduced by the timer.)
+      expect(viewGrant).toHaveBeenCalledTimes(2)
+      expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+      expect(result.current.error).toBeNull()
+      expect(result.current.reloadKey).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("RE-ARMABLE: two separate lapses both recover (cap reset per lapse), no loop within one lapse", async () => {
     const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
     await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
