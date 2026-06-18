@@ -16,7 +16,7 @@
 // jsdom + renderHook drives the hook's effect/callback; the pure cap decision
 // (shouldRemint) is also asserted directly so the bound is unit-locked.
 import * as React from "react"
-import { act, renderHook, waitFor } from "@testing-library/react"
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -37,6 +37,7 @@ import {
   shouldRemint,
   preflightBundle,
   VIEW_GRANT_REMINT_CAP,
+  GRANT_REFRESH_INTERVAL_MS,
 } from "../useViewGrant"
 
 const PID = 99
@@ -61,6 +62,10 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // Unmount any mounted hook BEFORE clearing globals so its visibilitychange /
+  // focus listeners are torn down (they live on the shared window/document) and
+  // can't fire into a later test.
+  cleanup()
   vi.clearAllMocks()
   vi.unstubAllGlobals()
 })
@@ -203,6 +208,136 @@ describe("useViewGrant — 401-bodied index.html preflight drives the bounded re
     expect(viewGrant).toHaveBeenCalledTimes(1)
     expect(result.current.error).toBeNull()
     expect(result.current.reloadKey).toBe(0)
+  })
+})
+
+// The PROD INCIDENT this whole family of effects exists for: the grant TTL is
+// short (~10 min) and, once the initial mint→preflight cycle settled, NOTHING
+// re-checked the grant. A viewer left open past the TTL hit a 401-bodied asset
+// GET on its next request with no re-mint — only a full manual page reload
+// recovered. These prove the viewer now self-heals: on tab refocus, and proactively
+// on a timer before the grant can even expire.
+describe("useViewGrant — recovers a lapsed grant without a manual reload", () => {
+  it("REPRO→FIX: a grant that lapses while the bundle is open re-mints + reloads on tab refocus", async () => {
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+
+    // Initial mint + healthy (200) preflight → bundle exposed, clean first load.
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+    expect(result.current.reloadKey).toBe(0)
+
+    // The grant TTL elapses while the tab is backgrounded: the recovery probe 401s
+    // once (the lapsed grant), then the re-mint restores it so the next probe is
+    // healthy again — the real recovery shape. (Pre-fix there was NO listener
+    // watching for this, so the lapse went unnoticed until a manual reload — the bug.)
+    let probe = 0
+    fetchMock.mockImplementation(() => {
+      probe += 1
+      return Promise.resolve(
+        new Response(probe === 1 ? '{"detail":"grant required"}' : "<!doctype html>", {
+          status: probe === 1 ? 401 : 200,
+        }),
+      )
+    })
+
+    // Tab comes back to the foreground → recover.
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", {
+        value: "visible",
+        configurable: true,
+      })
+      document.dispatchEvent(new Event("visibilitychange"))
+      await Promise.resolve()
+    })
+
+    // Recovery fired: a fresh re-mint POST AND a forced iframe reload (reloadKey bump),
+    // and the bundle stays exposed (the raw 401 body is never pointed at the iframe).
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.reloadKey).toBe(1))
+    expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+    expect(result.current.error).toBeNull()
+  })
+
+  it("TIMER: proactively re-mints before the TTL, silently (no iframe reload)", async () => {
+    vi.useFakeTimers()
+    try {
+      const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+
+      // Let the initial mint + preflight settle under fake timers.
+      await act(async () => {
+        await vi.runOnlyPendingTimersAsync()
+      })
+      expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+      expect(viewGrant).toHaveBeenCalledTimes(1)
+      expect(result.current.reloadKey).toBe(0)
+
+      // Advance past the refresh interval — the grant is still "ok" (200), but we
+      // refresh it anyway so it can never reach the TTL.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(GRANT_REFRESH_INTERVAL_MS + 1)
+      })
+
+      // A proactive re-mint fired...
+      expect(viewGrant).toHaveBeenCalledTimes(2)
+      // ...silently: the live iframe is NOT reloaded out from under the user.
+      expect(result.current.reloadKey).toBe(0)
+      expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("RE-ARMABLE: two separate lapses both recover (cap reset per lapse), no loop within one lapse", async () => {
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+    // Let the INITIAL post-mint preflight settle so the lapse mock below only
+    // governs the recovery probes, not a trailing initial probe.
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    // --- Lapse #1: preflight 401 once (the lapsed grant), then healthy again. ---
+    // A boolean flag, flipped by the recovery re-mint, models "the re-mint restored
+    // the grant" — so the re-mint's own post-mint preflight is healthy and the cycle
+    // settles: no infinite re-mint↔401 loop within a single lapse.
+    let lapsed = true
+    viewGrant.mockImplementation(() => {
+      lapsed = false // a successful (re)mint restores the grant
+      return Promise.resolve(undefined)
+    })
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        lapsed
+          ? new Response('{"detail":"grant required"}', { status: 401 })
+          : new Response("<!doctype html>", { status: 200 }),
+      ),
+    )
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2)) // ONE re-mint
+    await waitFor(() => expect(result.current.reloadKey).toBe(1))
+    expect(result.current.error).toBeNull()
+    // Settle any trailing post-mint preflight, then prove no extra re-mint looped.
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(viewGrant).toHaveBeenCalledTimes(2)
+
+    // --- Lapse #2: a NEW lapse later — recovery must fire AGAIN (cap re-armed). ---
+    lapsed = true
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"))
+      await Promise.resolve()
+    })
+    // A THIRD mint — proving the per-lapse cap was re-armed and did not permanently
+    // disable recovery after lapse #1.
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(3))
+    await waitFor(() => expect(result.current.reloadKey).toBe(2))
+    expect(result.current.error).toBeNull()
   })
 })
 
