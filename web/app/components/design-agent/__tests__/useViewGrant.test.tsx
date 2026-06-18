@@ -498,6 +498,46 @@ describe("useViewGrant — bundle-readiness recovery via the iframe onLoad probe
     await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2)) // one re-mint
     expect(result.current.notReady).toBe(false)
   })
+
+  it("REPRO→FIX: the post-mint preflight (not onLoad) that sees 404 sets notReady + recovers", async () => {
+    // The prod gap this closes: right after a (re)mint — first load / post-
+    // completion — the proxy can briefly 404 a freshly-staged build. The post-mint
+    // preflight effect ALREADY runs on every (re)mint, but used to DROP "notready"
+    // (it only handled 401), so that first-load transient-404 flash was not
+    // covered until the iframe onLoad probe fired. Wiring "notready" into the same
+    // readiness path closes it with no extra probe. RED before the fix: notReady
+    // never went true and no retry was scheduled because the post-mint preflight
+    // ignored the 404.
+    //
+    // Make the VERY FIRST preflight (the post-mint one) 404, the next two 404, then
+    // ready — exercising the bounded retry the post-mint path now drives.
+    let probe = 0
+    fetchMock.mockImplementation(() => {
+      probe += 1
+      const notReadyStill = probe <= 3
+      return Promise.resolve(
+        new Response(notReadyStill ? '{"detail":"Not found"}' : "<!doctype html>", {
+          status: notReadyStill ? 404 : 200,
+        }),
+      )
+    })
+
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    // Mint resolves and exposes the bundle; the post-mint preflight then 404s.
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    // The post-mint preflight saw 404 → the loading state is up WITHOUT any
+    // onLoad call (we never invoke notifyBundleLoaded here).
+    await waitFor(() => expect(result.current.notReady).toBe(true))
+
+    // The bounded retry the post-mint path started re-probes; once ready it clears
+    // notReady and bumps reloadKey to force a fresh iframe load — no manual reload.
+    await waitFor(() => expect(result.current.notReady).toBe(false), { timeout: 5000 })
+    await waitFor(() => expect(result.current.reloadKey).toBe(1))
+    expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+    expect(result.current.error).toBeNull()
+    // The 404 drove the readiness retry, NOT the grant re-mint (cap-1) path.
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe("GRANT_REFRESH_INTERVAL_MS — env-tunable, prod-default-locked", () => {

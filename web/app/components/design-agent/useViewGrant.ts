@@ -265,11 +265,10 @@ export function useViewGrant(
     readyRetryingRef.current = false
   }, [])
 
-  // BUNDLE-READINESS RECOVERY: the iframe `onLoad` fires even for a 404-bodied
-  // document (the proxy briefly returns `{"detail":"Not found"}` for a not-yet-
-  // staged build — the prod incident), so a clean `load` event does NOT mean the
-  // real bundle painted. This credentialed probe inspects the status the load
-  // event hides and routes it:
+  // BUNDLE-READINESS RECOVERY (shared): given a preflight `status` for the granted
+  // bundle, route it. Reused by BOTH the iframe `onLoad` probe (notifyBundleLoaded)
+  // AND the post-(re)mint preflight effect, so a transient-404 is closed on the
+  // first load / right after a (re)mint with NO second retry mechanism:
   //   - unauthorized (401) → the grant lapsed; hand off to the bounded re-mint.
   //   - notready (404)     → set the loading state and start a BOUNDED retry loop
   //                          that re-probes until the bundle is ready, then bumps
@@ -278,9 +277,9 @@ export function useViewGrant(
   // The retry is bounded (BUNDLE_READY_RETRY_CAP attempts) so it can never loop
   // forever; if the cap is hit while still 404ing, the loading state persists and
   // a manual reload remains the escape.
-  const notifyBundleLoaded = useCallback(() => {
-    if (!grantedBundleUrl) return
-    void preflightBundle(grantedBundleUrl).then((status) => {
+  const handleReadiness = useCallback(
+    (status: "ok" | "unauthorized" | "notready") => {
+      if (!grantedBundleUrl) return
       const action = readinessAction(status)
       if (action === "remint") {
         clearReadyRetry()
@@ -294,7 +293,7 @@ export function useViewGrant(
         return
       }
       // notready → cover the iframe and start a single bounded retry loop (guard
-      // against overlapping loops from repeated onLoad probes).
+      // against overlapping loops from repeated probes — onLoad or post-mint).
       setNotReady(true)
       if (readyRetryingRef.current) return
       readyRetryingRef.current = true
@@ -326,8 +325,18 @@ export function useViewGrant(
         }, BUNDLE_READY_RETRY_MS)
       }
       tick()
-    })
-  }, [grantedBundleUrl, notifyAssetError, clearReadyRetry])
+    },
+    [grantedBundleUrl, notifyAssetError, clearReadyRetry],
+  )
+
+  // The iframe `onLoad` fires even for a 404-bodied document (the proxy briefly
+  // returns `{"detail":"Not found"}` for a not-yet-staged build — the prod
+  // incident), so a clean `load` event does NOT mean the real bundle painted.
+  // Probe the real status the load event hides and route it via handleReadiness.
+  const notifyBundleLoaded = useCallback(() => {
+    if (!grantedBundleUrl) return
+    void preflightBundle(grantedBundleUrl).then(handleReadiness)
+  }, [grantedBundleUrl, handleReadiness])
 
   // Clear a pending readiness retry on unmount and whenever the bundle changes,
   // so a stale loop can't reload a frame that has moved on to a new build.
@@ -385,24 +394,28 @@ export function useViewGrant(
     return () => clearInterval(id)
   }, [grantedBundleUrl, bundleUrl, mint])
 
-  // Preflight the granted bundle after each (re)mint. A 401-bodied index.html
-  // LOADS in the iframe (fires `load`, not `error` — see preflightBundle), so the
-  // iframe onError can't detect a lapsed/withheld grant; this credentialed GET
-  // does, and routes a 401 through the SAME bounded re-mint path (notifyAssetError
-  // / remintAttemptsRef, cap = 1 — NO parallel counter). Keyed on the granted url
-  // + reloadKey so it re-runs after a re-mint bumps the key; once the cap is hit
-  // notifyAssetError nulls grantedBundleUrl and this guard returns — so the
-  // preflight→re-mint cycle is bounded too (no preflight↔mint loop).
+  // Preflight the granted bundle after each (re)mint and route it through the
+  // SAME readiness path the iframe onLoad probe uses (handleReadiness). A
+  // 401-bodied index.html LOADS in the iframe (fires `load`, not `error` — see
+  // preflightBundle), so the iframe onError can't detect a lapsed/withheld grant;
+  // this credentialed GET does. A 401 routes through the bounded re-mint
+  // (notifyAssetError / remintAttemptsRef, cap = 1 — NO parallel counter); a 404
+  // ("notready") — a freshly-staged build the proxy is briefly 404ing right after
+  // a (re)mint, e.g. on first load / post-completion — now drives the SAME bounded
+  // readiness retry + loading state instead of being dropped, closing the
+  // transient-404 flash with NO new per-load latency (the preflight already ran).
+  // Keyed on the granted url + reloadKey so it re-runs after a re-mint bumps the
+  // key; the re-mint / retry cycles are each bounded, so there is no loop.
   useEffect(() => {
     if (!grantedBundleUrl) return
     let active = true
     void preflightBundle(grantedBundleUrl).then((status) => {
-      if (active && status === "unauthorized") notifyAssetError()
+      if (active) handleReadiness(status)
     })
     return () => {
       active = false
     }
-  }, [grantedBundleUrl, reloadKey, notifyAssetError])
+  }, [grantedBundleUrl, reloadKey, handleReadiness])
 
   return {
     grantedBundleUrl,
