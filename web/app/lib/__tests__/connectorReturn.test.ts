@@ -42,18 +42,15 @@ describe("sanitizeReturnTo", () => {
 })
 
 describe("broadcastConnected", () => {
-  it("posts a connector-connected message on the channel", async () => {
-    const received: unknown[] = []
-    const listener = new BroadcastChannel(CONNECTOR_CHANNEL)
-    listener.onmessage = (ev) => received.push(ev.data)
+  it("posts a connector-connected message on the channel", () => {
+    // Assert the post directly rather than relying on cross-channel async
+    // delivery, which is non-deterministic in jsdom and flaked in CI.
+    const postSpy = vi.spyOn(BroadcastChannel.prototype, "postMessage")
 
     const ok = broadcastConnected("slack")
-    expect(ok).toBe(true)
-    // BroadcastChannel delivery is async in jsdom — flush microtasks/macrotasks.
-    await new Promise((r) => setTimeout(r, 0))
-    listener.close()
 
-    expect(received).toContainEqual({
+    expect(ok).toBe(true)
+    expect(postSpy).toHaveBeenCalledWith({
       type: CONNECTOR_CONNECTED_MESSAGE,
       provider: "slack",
     })

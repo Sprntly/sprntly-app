@@ -58,15 +58,26 @@ export function broadcastConnected(provider: string): boolean {
       provider,
     }
     channel.postMessage(msg)
+    // Defer close to a macrotask: closing the channel synchronously can drop
+    // the just-queued message before it's delivered to other tabs (observed in
+    // jsdom and not guaranteed across browsers). The return page calls
+    // window.close() right after, so the channel won't outlive the tab anyway.
+    const ch = channel
+    setTimeout(() => {
+      try {
+        ch.close()
+      } catch {
+        /* best-effort */
+      }
+    }, 0)
     return true
   } catch {
-    return false
-  } finally {
     try {
       channel?.close()
     } catch {
       /* best-effort */
     }
+    return false
   }
 }
 
