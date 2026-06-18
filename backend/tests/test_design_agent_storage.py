@@ -486,10 +486,10 @@ async def test_build_timeout_reads_configured_value(monkeypatch):
     assert capture["timeout"] == 90
 
 
-def test_default_build_timeout_is_120():
-    """AC2: with no env override, the configured default is 120s."""
+def test_default_build_timeout_is_180():
+    """AC2: with no env override, the configured default is 180s."""
     from app.config import settings as live_settings
-    assert live_settings.design_agent_vite_build_timeout_seconds == 120
+    assert live_settings.design_agent_vite_build_timeout_seconds == 180
 
 
 def test_env_override_build_timeout(monkeypatch):
@@ -572,7 +572,7 @@ def test_settings_field_additive():
     from app.config import settings as live_settings
     val = live_settings.design_agent_vite_build_timeout_seconds
     assert isinstance(val, int)
-    assert val == 120
+    assert val == 180
 
 
 async def test_vite_build_raises_when_dist_not_produced(monkeypatch):

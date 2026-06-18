@@ -214,16 +214,16 @@ async def lifespan(app: FastAPI):
     # for any in-flight generation to finish (up to a tunable deadline) so the
     # process is not SIGKILLed mid-build (the deploy-time 502 class). The
     # deadline EXCEEDS the vite-build subprocess timeout
-    # (settings.design_agent_vite_build_timeout_seconds, default 120s) — default
-    # 130s — so a build in flight at shutdown is given room to complete. On
+    # (settings.design_agent_vite_build_timeout_seconds, default 180s) — default
+    # 200s — so a build in flight at shutdown is given room to complete. On
     # deadline-elapse we do NOT cancel (the vite thread is uncancellable); the
     # startup invalidate_orphan_generating_prototypes() sweep recovers any
     # left-behind 'generating' row on the next boot. Wrapped so a drain error
     # never blocks shutdown.
     #
     # SYSTEMD IMPLICATION (load-bearing): the unit running this process MUST set
-    # TimeoutStopSec greater than design_agent_drain_deadline_seconds (>=150s for
-    # the 130s default) — otherwise systemd sends SIGKILL before the drain
+    # TimeoutStopSec greater than design_agent_drain_deadline_seconds (>=220s for
+    # the 200s default) — otherwise systemd sends SIGKILL before the drain
     # finishes and this fix is inert.
     design_agent.request_shutdown()
     try:
