@@ -85,8 +85,11 @@ export type IterateRunState = {
 export type UseIterateRunArgs = {
   prototypeId: number
   /** Called with the FRESH ready prototype row once the run completes, so the
-   *  host can update the center canvas (the iframe reloads the new bundle). */
-  onComplete: (fresh: PrototypeRecord) => void
+   *  host can update the center canvas (the iframe reloads the new bundle).
+   *  `opts.reloadBundle` gates the center-iframe reload: a real completion staged
+   *  a new bundle (true), but a clarifying-question pause built no new bundle
+   *  (false), so the host must keep the current preview and NOT reload. */
+  onComplete: (fresh: PrototypeRecord, opts?: { reloadBundle?: boolean }) => void
   /** Test seam: inject the api (poll + post). Defaults to the real one. */
   api?: Pick<typeof designAgentApi, "iterate" | "get">
 }
@@ -219,8 +222,12 @@ export function useIterateRun({
         lastQuestionRef.current = pq.question
         setPendingQuestion(pq)
         appendActivity({ kind: "question", question: pq.question })
-        // The center canvas still reflects the paused prototype.
-        onComplete(paused)
+        // The center canvas still reflects the paused prototype. A clarifying-
+        // question pause builds NO new bundle, so the center preview must NOT
+        // reload — it keeps showing the current prototype. Reloading here would
+        // re-fetch the unchanged bundle through the proxy and briefly expose a
+        // transient 404 window (the prod bug). `reloadBundle: false` suppresses it.
+        onComplete(paused, { reloadBundle: false })
       }
 
       // 2) Open a real backend SSE stream for per-step events. The backend
@@ -380,7 +387,8 @@ export function useIterateRun({
           kind: "done",
           text: doneSummaryRef.current ?? "Change applied",
         })
-        onComplete(proto)
+        // A real completion staged a new bundle — reload the center iframe.
+        onComplete(proto, { reloadBundle: true })
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Could not run the change"
         setError(msg)
