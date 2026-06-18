@@ -23,13 +23,13 @@ class Settings(BaseSettings):
     # legit run, 10× the soft cap). Env-overridable via DESIGN_AGENT_HARD_CAP_USD;
     # never lower than the soft cap, and never below the $1.52 legit-run floor.
     design_agent_hard_cap_usd: float = 5.00
-    # Vite build budget for a prototype gen. Default 120s — the typical
+    # Vite build budget for a prototype gen. Default 180s — the typical
     # scaffold builds in ~5-15s, but a cold node start, a large single-file emit,
-    # or a busy host (esp. the colder prod EC2 build host) can exceed the prior
-    # hardcoded 60s and floor an otherwise-valid build. Env-overridable per
+    # or a busy host (esp. the colder prod EC2 build host) can exceed a tighter
+    # budget and floor an otherwise-valid build. Env-overridable per
     # environment via DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS. Read at call-time
     # in design_agent/storage.py:_vite_build_sync so it stays tunable + testable.
-    design_agent_vite_build_timeout_seconds: int = 120
+    design_agent_vite_build_timeout_seconds: int = 180
     # Process-wide cap on in-flight Anthropic model calls (see app/llm.py).
     # The small prod box thrashes at 4+ concurrent streams, so calls beyond
     # this QUEUE instead of piling on. Default 3 fits one PRD's two parallel
@@ -49,14 +49,14 @@ class Settings(BaseSettings):
     # Tier 0 — how long the lifespan teardown waits for in-flight generation
     # to drain on SIGTERM before giving up (deploy/restart graceful-drain). MUST
     # exceed the vite-build subprocess timeout (design_agent_vite_build_timeout_seconds,
-    # default 120s) or a build in flight at shutdown is abandoned and the deploy
-    # 502s recur — so the default 130s sits above the 120s build budget. On
+    # default 180s) or a build in flight at shutdown is abandoned and the deploy
+    # 502s recur — so the default 200s sits above the 180s build budget. On
     # deadline-elapse the teardown does NOT cancel (the vite thread is
     # uncancellable); the startup orphan sweep recovers any left-behind 'generating'
     # row on next boot. Env-overridable via DESIGN_AGENT_DRAIN_DEADLINE_SECONDS so
     # it can be tuned per environment. NOTE: the systemd unit must set
-    # TimeoutStopSec > this value (>=150s) or systemd SIGKILLs mid-drain.
-    design_agent_drain_deadline_seconds: int = 130
+    # TimeoutStopSec > this value (>=220s) or systemd SIGKILLs mid-drain.
+    design_agent_drain_deadline_seconds: int = 200
     # Tier 2 — OPT-IN worker queue. When True AND a worker heartbeat is
     # fresh, POST /generate enqueues the generation onto `design_agent_jobs` for
     # a separate `python -m app.worker` process to run, removing the heavy work
