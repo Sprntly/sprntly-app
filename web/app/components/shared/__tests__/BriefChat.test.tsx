@@ -38,9 +38,12 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 // NavigationProvider depends on next/navigation. Stub the router/pathname so the
-// provider mounts without a Next router context.
+// provider mounts without a Next router context. `pushSpy` is hoisted + stable so
+// a test can assert the exact URL a navigation pushed (the router mock returned a
+// fresh push per call before, which was unassertable).
+const { pushSpy } = vi.hoisted(() => ({ pushSpy: vi.fn() }))
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push: pushSpy, replace: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => "/brief",
 }))
 
@@ -109,6 +112,7 @@ import type {
 } from "../../../lib/brief-v2-adapter"
 import { BriefChat, prdCtaState } from "../BriefChat"
 import { runMultiAgentGeneration } from "../../../lib/runMultiAgentGeneration"
+import { prototypePath } from "../../../lib/routes"
 
 describe("prdCtaState — smart View/Generate PRD button", () => {
   it("offers 'View PRD' when a PRD already exists for the insight", () => {
@@ -444,5 +448,60 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
     expect(within(cardFor(HERO.title)).queryByText("View prototype")).toBeNull()
     // A sibling visualizable finding still offers it.
     expect(within(cardFor(SUPPORTING.title)).queryByText("View prototype")).not.toBeNull()
+  })
+})
+
+// ── Composer "generate a prototype" → carries the open PRD's id in the URL ─────
+// Regression for the gap where the composer prototype command (and the post-build
+// reveal) navigated to a BARE /prototype, dropping the ?prd= context, so the route
+// landed on its "No PRD selected" empty state and the prototype looked lost. With
+// an open PRD in ContentContext, the command must push /prototype?prd=<id>.
+describe("BriefChat composer — 'generate a prototype' navigation", () => {
+  // Seeds a brief AND an open PRD (prd_id) into ContentContext so prototypeFlow
+  // takes its `content.prd` branch (the composer path under test).
+  function InjectBriefWithPrd({ prdId }: { prdId: number }) {
+    const { setContent } = useContent()
+    React.useEffect(() => {
+      setContent({
+        briefV2: BRIEF,
+        userName: "Apurva Jain",
+        // Minimal open-PRD state — prototypeFlow only reads content.prd.prd_id.
+        prd: { prd_id: prdId } as never,
+        prdMeta: { briefId: 1, insightIndex: 0 },
+        briefDetails: {
+          "something_wrong-0": { meta: { briefId: 1, insightIndex: 0 } },
+          "something_wrong-1": { meta: { briefId: 1, insightIndex: 1 } },
+        } as never,
+      })
+    }, [setContent, prdId])
+    return null
+  }
+
+  it("pushes /prototype?prd=<id> (NOT a bare /prototype) when a PRD is open", async () => {
+    await act(async () => {
+      render(
+        React.createElement(
+          NavigationProvider,
+          null,
+          React.createElement(
+            ContentProvider,
+            null,
+            React.createElement(InjectBriefWithPrd, { prdId: 515 }),
+            React.createElement(BriefChat),
+          ),
+        ),
+      )
+    })
+
+    const composer = screen.getByPlaceholderText(/Ask anything/i)
+    await act(async () => {
+      fireEvent.change(composer, { target: { value: "generate a prototype" } })
+      fireEvent.keyDown(composer, { key: "Enter" })
+    })
+
+    // The navigation carries the PRD context — and is NOT the bare path.
+    expect(pushSpy).toHaveBeenCalledWith(prototypePath(515))
+    expect(pushSpy).toHaveBeenCalledWith("/prototype?prd=515")
+    expect(pushSpy).not.toHaveBeenCalledWith("/prototype")
   })
 })

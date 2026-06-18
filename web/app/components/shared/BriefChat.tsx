@@ -707,9 +707,12 @@ export function BriefChat() {
     setGenLoading(false)
     setGenModalOpen(false)
     if (result?.ok && genPrdId != null) {
-      goTo("prototype")
+      // Carry the prd context: /prototype?prd=<id>, NOT a bare goTo("prototype").
+      // PrototypeRoute resolves the just-built prototype from `?prd=`; a bare nav
+      // drops to the "No PRD selected" empty state (the build looks lost).
+      router.push(prototypePath(genPrdId))
     }
-  }, [genPrdId, goTo])
+  }, [genPrdId, router])
 
   const greetTime = useMemo(() => nowTime(), [])
 
@@ -876,7 +879,10 @@ export function BriefChat() {
 
   const prototypeFlow = useCallback(() => {
     if (content.prd) {
-      goTo("prototype")
+      // Carry the open PRD's id: /prototype?prd=<id>, NOT a bare goTo("prototype")
+      // — the route needs `?prd=` to resolve the prototype, else it lands on the
+      // "No PRD selected" empty state.
+      router.push(prototypePath(content.prd.prd_id))
       return
     }
     setTurns((t) => [
@@ -892,7 +898,7 @@ export function BriefChat() {
       },
     ])
     scrollToEnd()
-  }, [content.prd, goTo, scrollToEnd])
+  }, [content.prd, router, scrollToEnd])
 
   const evidenceFlow = useCallback(() => {
     openContentPanel("evidence")
