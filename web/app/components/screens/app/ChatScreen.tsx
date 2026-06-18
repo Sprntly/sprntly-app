@@ -24,7 +24,7 @@ import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { PrdState, PrdContent } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
 import { prototypePath } from "../../../lib/routes"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { GenerateModal } from "../../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../../design-agent/GenerationLoadingScreen"
@@ -98,6 +98,7 @@ export function ChatScreen() {
     contentPanelTab,
   } = useNavigation()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const auth = useAuth()
   const { profile, workspace } = useWorkspace()
   const { content, setContent } = useContent()
@@ -860,14 +861,40 @@ export function ChatScreen() {
     goTo(c.target)
   }
 
-  const startNewThread = () => {
+  const startNewThread = useCallback(() => {
     // Remove any empty tabs (no messages) to keep things clean
     setTabs((prev) => prev.filter((t) => t.thread.length > 0))
     setActiveTabId(null)
     setDraft("")
     setActiveConv(null)
     // No shared conv-id to reset — each tab tracks its own dbConvId.
-  }
+  }, [])
+
+  // ── "New chat" hand-off (`/?new=1`) ───────────────────────────────────────
+  // The sidebar's "New chat" affordance pushes `/?new=1` (goToNewChat). The home
+  // surface otherwise DEFAULTS to the pinned brief tab on a fresh load, so this
+  // one-shot param is what makes "New chat" reliably land on a fresh chat landing
+  // instead of the brief. We start a new thread, then strip the param via
+  // router.replace so a later refresh doesn't re-open a new chat. Works whether
+  // the surface is freshly mounted (param present on first render) or already on
+  // screen (the param change re-runs this effect).
+  //
+  // `consumedNewRef` guards against re-consuming while the param is still present:
+  // `useSearchParams()` can hand back a fresh object each render (and startNewThread
+  // itself re-renders), so without the latch the effect would loop. It re-arms when
+  // the param is absent, so a *subsequent* `/?new=1` nav fires a fresh new-chat.
+  const consumedNewRef = useRef(false)
+  useEffect(() => {
+    const hasNew = searchParams.get("new") != null
+    if (!hasNew) {
+      consumedNewRef.current = false
+      return
+    }
+    if (consumedNewRef.current) return
+    consumedNewRef.current = true
+    startNewThread()
+    router.replace("/")
+  }, [searchParams, startNewThread, router])
 
   const hasThread = thread.length > 0
   const displayChips = useMemo(() => {

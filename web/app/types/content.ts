@@ -510,7 +510,7 @@ export interface AppContentState {
   brief: BriefState
   /** Brief v2 render state — narrative-shaped (hero + supporting findings,
    *  KPI strip, convergence chips). Hydrated alongside `brief` so toggling
-   *  formats on BriefScreen doesn't require a second fetch. `null` until
+   *  formats on the brief surface doesn't require a second fetch. `null` until
    *  the first brief load completes. */
   briefV2: import("../lib/brief-v2-adapter").BriefV2State | null
   /** Coarse lifecycle of the current brief load, mirrored from
