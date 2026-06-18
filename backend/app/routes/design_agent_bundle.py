@@ -170,7 +170,7 @@ def _grant_cookie_kwargs(path: str) -> dict:
 def _view_grant_path(prototype_id: int) -> str:
     """Browser-side path-scope for da_view_grant — the cookie is only sent to this
     prototype's bundle route (a grant for one prototype is never sent to another's
-    asset GETs). The SERVER-SIDE gate is URL↔grant equality (#3); path-scope is
+    asset GETs). The SERVER-SIDE gate is URL↔grant equality; path-scope is
     defence in depth only."""
     prefix = "/" + (settings.design_agent_bundle_path_prefix or "").strip("/")
     if prefix == "/":
@@ -435,7 +435,7 @@ async def serve_authed_bundle(
     if not payload or payload.get("grant_kind") != "authed":
         raise HTTPException(status_code=401, detail="grant required")
 
-    # (#3) URL↔GRANT EQUALITY — bound prototype_id must match the URL's.
+    # URL↔GRANT EQUALITY — bound prototype_id must match the URL's.
     if payload.get("prototype_id") != prototype_id:
         raise HTTPException(status_code=401, detail="grant mismatch")
 

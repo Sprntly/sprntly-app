@@ -1,4 +1,4 @@
-"""Tests for the bundle PROXY router (Option B — same-origin serving).
+"""Tests for the bundle PROXY router (same-origin serving).
 
 Covers the authorizing streaming proxy that serves every prototype bundle object
 through one route family:
@@ -396,7 +396,7 @@ def test_view_grant_unauth_401(client, env):
 
 
 def test_view_grant_cookie_is_host_only_and_path_scoped(client, env, monkeypatch):
-    # Option A (v3 §1.3/§1.6): the da_view_grant cookie MUST be HOST-ONLY (NO Domain
+    # The da_view_grant cookie MUST be HOST-ONLY (NO Domain
     # attr) and Path-scoped to THIS prototype's bundle route, HttpOnly + SameSite=Lax.
     # CRITICAL: set cookie_domain=".sprntly.ai" (the PROD value) and assert the grant
     # cookie STILL has no Domain — i.e. the grant cookie is DECOUPLED from
