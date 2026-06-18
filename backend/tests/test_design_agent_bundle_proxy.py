@@ -510,6 +510,40 @@ def test_authed_serve_no_checkpoint_404(client, env):
     assert mint.status_code == 404, "minted a grant for a checkpoint-less row"
 
 
+def test_authed_vs_by_token_share_mode_asymmetry(client, env):
+    # ASYMMETRY LOCK (B4): the authed and by-token routes treat share_mode
+    # DIFFERENTLY, on purpose, and a future refactor must not collapse them:
+    #   - serve_authed_bundle (member): self-serves 200 across a share toggle —
+    #     membership, not share_mode, is the authz boundary (the option-B fix).
+    #   - serve_public_bundle (by-token): hard-denies a 'private' share with 404 —
+    #     a private prototype is NOT publicly viewable regardless of any toggle.
+    # If someone later applies the authed relaxation to the by-token route (drops
+    # its private-deny), the by-token half of this test goes RED. The two halves
+    # share ONE prototype so the asymmetry is on the SAME row at the SAME instant.
+    _seed_company(_OWNER_COMPANY, _OWNER_USER)
+    pid, token = _seed_prototype(env, share_mode="public")
+    cookie = _view_grant(client, env, pid)
+    authed_headers = {"Cookie": f"da_view_grant={cookie}"}
+
+    # Member's authed serve: 200 while public, still 200 after a flip to private
+    # (the grant bound 'public'; membership carries it through the toggle).
+    assert client.get(
+        f"/v1/design-agent/{pid}/bundle/index.html", headers=authed_headers
+    ).status_code == 200
+    env.proto.set_share_config(
+        prototype_id=pid, workspace_id=_OWNER_COMPANY, share_mode="private"
+    )
+    assert client.get(
+        f"/v1/design-agent/{pid}/bundle/assets/app.js", headers=authed_headers
+    ).status_code == 200, "authed member serve broke on a share toggle"
+
+    # By-token serve on the SAME now-private row: hard 404 (the private-deny that
+    # must NEVER be relaxed to match the authed route).
+    assert client.get(
+        f"/v1/design-agent/by-token/{token}/bundle/index.html"
+    ).status_code == 404, "by-token route served a private share (asymmetry collapsed)"
+
+
 def test_authed_url_grant_mismatch(client, env):
     # A valid grant for prototype A used on prototype B's URL ⇒ rejected.
     _seed_company(_OWNER_COMPANY, _OWNER_USER)
