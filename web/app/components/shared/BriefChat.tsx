@@ -774,7 +774,7 @@ export function BriefChat() {
     })
   }, [])
 
-  // ── Card "Ask" hand-off: BriefScreen / cards set aiBarValue → prefill ─────
+  // ── Card "Ask" hand-off: cards set aiBarValue → prefill ─────
   useEffect(() => {
     if (!aiBarValue) return
     setDraft((d) => (d.trim() ? `${d}\n\n${aiBarValue}` : aiBarValue))
@@ -1054,7 +1054,7 @@ export function BriefChat() {
     [suggestStage, onAction],
   )
 
-  // ── Per-card actions (replicate BriefScreen's evidence/PRD wiring) ────────
+  // ── Per-card actions (evidence/PRD wiring) ────────
   const cardAsk = useCallback(
     (finding: Finding) => {
       const q = finding.askQuestion

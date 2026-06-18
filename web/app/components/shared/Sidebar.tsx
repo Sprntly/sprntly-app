@@ -15,7 +15,7 @@ interface SidebarProps {
 }
 
 export function Sidebar(_props: SidebarProps = {}) {
-  const { currentScreen, goTo } = useNavigation()
+  const { currentScreen, goTo, goToNewChat } = useNavigation()
   const { content } = useContent()
   const auth = useAuth()
   const { profile, workspace } = useWorkspace()
@@ -90,7 +90,7 @@ export function Sidebar(_props: SidebarProps = {}) {
         className="sb-rail-new"
         title="New chat"
         aria-label="New chat"
-        onClick={() => goTo("chat")}
+        onClick={goToNewChat}
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
           <line x1="12" y1="5" x2="12" y2="19" />

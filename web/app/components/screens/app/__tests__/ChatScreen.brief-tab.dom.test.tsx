@@ -46,9 +46,14 @@ vi.mock("../../../../lib/usePipelineStatus", () => ({
   }),
 }))
 
+// Router/search-params live in module-scoped mutable holders so tests can drive
+// the `?new=1` "New chat" hand-off and assert ChatScreen strips it via replace.
+let searchString = ""
+const replaceSpy = vi.fn()
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: replaceSpy, prefetch: vi.fn() }),
   usePathname: () => "/",
+  useSearchParams: () => new URLSearchParams(searchString),
 }))
 
 vi.mock("../../../../context/WorkspaceContext", () => ({
@@ -90,6 +95,8 @@ function renderScreen() {
 
 beforeEach(() => {
   localStorage.clear()
+  searchString = ""
+  replaceSpy.mockClear()
 })
 afterEach(() => {
   cleanup()
@@ -142,5 +149,21 @@ describe("ChatScreen — pinned brief tab", () => {
       fireEvent.click(tabBar().getByText("Monday brief"))
     })
     expect(screen.queryByText(/Welcome back/i)).toBeNull()
+  })
+
+  // The sidebar "New chat" affordance navigates to `/?new=1` (goToNewChat). On a
+  // fresh load `/` would default to the brief tab, so the `?new=1` one-shot param
+  // is what makes "New chat" land on the chat landing instead. ChatScreen must
+  // consume it (start a fresh chat) and strip it via router.replace("/").
+  it("'?new=1' hand-off opens the chat landing (not the brief) and strips the param", () => {
+    searchString = "new=1"
+    renderScreen()
+    // The chat landing composer is showing — NOT the brief surface.
+    expect(screen.getByText(/Welcome back/i)).toBeTruthy()
+    expect(screen.queryByLabelText("Weekly brief")).toBeNull()
+    // …the pinned brief tab is still present (never removed)…
+    expect(tabBar().getByText("Monday brief")).toBeTruthy()
+    // …and the one-shot param was stripped so a refresh won't re-trigger.
+    expect(replaceSpy).toHaveBeenCalledWith("/")
   })
 })

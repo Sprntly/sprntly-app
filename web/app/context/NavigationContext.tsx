@@ -35,6 +35,14 @@ export const CPANEL_AUTO_COLLAPSE_MAX_W = 1600
 interface NavigationContextType {
   currentScreen: ScreenId
   goTo: (screen: ScreenId) => void
+  /** Open a FRESH chat on the unified home surface. The home surface (`/`,
+   *  ChatScreen) defaults to the pinned Monday-brief tab on a fresh load, so a
+   *  plain `goTo("chat")` would land on the brief — not a new chat. This pushes
+   *  `/?new=1`; ChatScreen consumes the one-shot `new` param on mount/param-change
+   *  to start a new chat (via startNewThread) and strips it so a later refresh
+   *  doesn't re-trigger. Works whether the surface is freshly mounted or already
+   *  on screen (the search-param change re-runs the consume effect). */
+  goToNewChat: () => void
 
   // Drawer state
   activeDrawer: "claude" | "ticket" | "design-agent" | null
@@ -244,6 +252,19 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     [router],
   )
 
+  const goToNewChat = useCallback(() => {
+    setActiveDrawer(null)
+    setActiveModal(null)
+    setShareMenuOpen(false)
+    setReviewPastOpen(false)
+    setPendingOndemandDraft(null)
+    // `/?new=1` — the one-shot "start a fresh chat" signal ChatScreen consumes on
+    // mount/param-change (then strips). Without the param, `/` defaults to the
+    // pinned brief tab, so this is what makes "New chat" land on a new chat.
+    router.push("/?new=1")
+    window.scrollTo({ top: 0, behavior: "instant" })
+  }, [router])
+
   const openDrawer = useCallback((drawer: "claude" | "ticket" | "design-agent") => {
     setActiveDrawer(drawer)
   }, [])
@@ -284,6 +305,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
       value={{
         currentScreen,
         goTo,
+        goToNewChat,
         activeDrawer,
         openDrawer,
         closeDrawers,
