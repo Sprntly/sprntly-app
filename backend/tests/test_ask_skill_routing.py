@@ -14,6 +14,8 @@ that reference directly.
 """
 from __future__ import annotations
 
+import time
+
 import app.graph.gateway as gateway_mod
 
 
@@ -21,6 +23,25 @@ def _seed_corpus(data_dir, dataset, body="some corpus body"):
     ds = data_dir / dataset
     ds.mkdir(exist_ok=True)
     (ds / "a.md").write_text(body)
+
+
+def _ask_and_wait(client, question, dataset, *, timeout=5.0):
+    """POST /v1/ask (fire-and-forget) then poll GET /v1/ask/{id} until terminal,
+    returning the status body (same citation-stripped shape the old sync POST
+    returned, plus any extra qa_agent fields like `_skill`)."""
+    start = client.post("/v1/ask", json={"question": question, "dataset": dataset})
+    assert start.status_code == 200, start.text
+    ask_id = start.json()["ask_id"]
+    deadline = time.monotonic() + timeout
+    body = None
+    while time.monotonic() < deadline:
+        resp = client.get(f"/v1/ask/{ask_id}")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        if body["status"] != "generating":
+            return body
+        time.sleep(0.02)
+    return body
 
 
 def _patch_gateway_call_json(monkeypatch, payload):
@@ -54,16 +75,10 @@ def test_ask_skill_route_executes_via_gateway(
     }
     gw_calls = _patch_gateway_call_json(monkeypatch, skill_payload)
 
-    resp = t.client.post(
-        "/v1/ask",
-        json={
-            "question": "Write user stories for the checkout flow",
-            "dataset": "acme",
-        },
+    body = _ask_and_wait(
+        t.client, "Write user stories for the checkout flow", "acme"
     )
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
+    assert body["status"] == "ready"
     # Answer came from the skill payload, tagged with the matched skill.
     assert body["answer"].startswith("## Stories")
     assert body["_skill"] == "user-stories"
@@ -95,13 +110,10 @@ def test_ask_non_skill_question_uses_generic_path(
         "unanswered": "",
     }
 
-    resp = t.client.post(
-        "/v1/ask",
-        json={"question": "What happened in our business last week?", "dataset": "acme"},
+    body = _ask_and_wait(
+        t.client, "What happened in our business last week?", "acme"
     )
-
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
+    assert body["status"] == "ready"
     assert body["answer"] == "generic answer"
     assert "_skill" not in body  # answered directly, not via a skill
     # The one gateway call was the router (skill menu), not a skill answer.

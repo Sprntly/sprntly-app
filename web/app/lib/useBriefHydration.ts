@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { useContent } from "../context/ContentContext"
 import { briefApi, ApiError, type Brief } from "./api"
 import { briefToContentPatch } from "./brief-adapter"
+import { sleepUntilNextPoll } from "./poll"
 
 type HydrationState =
   | { kind: "idle" }
@@ -81,12 +82,12 @@ export function useBriefHydration(company: string = "asurion"): HydrationState {
               setState({ kind: "empty" })
               return
             }
-            await sleep(POLL_MS)
+            await sleepUntilNextPoll(POLL_MS)
             continue
           }
           if (s.status === "generating" || s.status === "empty") {
             setState({ kind: "generating" })
-            await sleep(POLL_MS)
+            await sleepUntilNextPoll(POLL_MS)
             continue
           }
           setState({ kind: "empty" })
@@ -107,8 +108,4 @@ export function useBriefHydration(company: string = "asurion"): HydrationState {
   }, [company, setContent])
 
   return state
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
 }

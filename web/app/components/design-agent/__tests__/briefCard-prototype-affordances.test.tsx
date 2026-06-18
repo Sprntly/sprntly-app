@@ -1,13 +1,18 @@
 /**
- * Tests for the brief-card prototype affordances introduced in the
- * c3-fidelity-live worktree.
+ * Tests for the brief-card prototype affordances.
  *
  * Approach: node-env vitest (no jsdom). Pure function tests for
- * prototypeStateForInsight + branch-logic function. renderToStaticMarkup for
- * the markup tests where BriefFindingCard is tested indirectly via its helpers.
+ * prototypeStateForInsight + the open/generate branch logic.
+ *
+ * NOTE: the right-rail preview-thumbnail render tests were removed when the
+ * thumbnail itself was removed from the brief card — the design-agent screenshot
+ * capture photographed the bundle's raw HTML source (served as text/plain), so
+ * there was no reliable image to show. `prototypeStateForInsight` still exposes
+ * `previewImageUrl` (covered below) for when that capture is fixed; the card just
+ * no longer renders a thumbnail from it. The "no preview thumbnail" contract is
+ * asserted against the real component in BriefChat.test.tsx.
  */
 import * as React from "react"
-import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 import { prototypeStateForInsight } from "../briefPrototypeMap.helpers"
 import type { BriefPrototypeMapEntry } from "../../../lib/api"
@@ -15,53 +20,6 @@ import type { BriefPrototypeMapEntry } from "../../../lib/api"
 // Expose React globally — repo convention for node-env vitest (esbuild classic runtime).
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-// ── Right-rail tile helper (mirrors BriefChat.tsx right-rail conditional exactly) ───
-// BriefFindingCard itself cannot be SSR-rendered in node-env (it imports useRouter,
-// ReactMarkdown, and context hooks that need a real runtime). Instead we encode the
-// same conditional as a minimal stateless component so the markup assertions are
-// testing the LOGIC, not the host component's render plumbing.
-
-type InsightState = {
-  hasPrd: boolean
-  prdId: number | null
-  prototypeReady: boolean
-  previewImageUrl: string | null
-  prdTitle?: string | null
-} | null | undefined
-
-function RightRail({
-  insightState,
-  findingTitle,
-  onPreview,
-}: {
-  insightState: InsightState
-  findingTitle: string
-  onPreview: () => void
-}) {
-  if (insightState?.hasPrd && insightState.prototypeReady && insightState.previewImageUrl) {
-    return React.createElement(
-      "button",
-      { type: "button", className: "fc-preview", onClick: onPreview, title: "Open prototype" },
-      React.createElement("img", {
-        className: "fc-preview-img",
-        src: insightState.previewImageUrl,
-        alt: "Prototype preview",
-      }),
-      React.createElement(
-        "span",
-        { className: "fc-preview-foot" },
-        React.createElement(
-          "span",
-          { className: "fc-preview-title" },
-          React.createElement("span", { className: "fc-preview-glyph", "aria-hidden": true }, ">_"),
-          insightState.prdTitle ?? "Untitled prototype",
-        ),
-        React.createElement("span", { className: "fc-preview-sub" }, "Prototype preview · open design"),
-      ),
-    )
-  }
-  return null
-}
 
 // ── 1. Map hydration test ────────────────────────────────────────────────────
 describe("map hydration", () => {
@@ -257,207 +215,3 @@ describe("branch logic — wrong-wiring detection", () => {
   })
 })
 
-// ── 7. Render-level: right-rail tile markup ──────────────────────────────────
-// Uses RightRail (defined above) + renderToStaticMarkup to assert the
-// FIX B and FIX C contract at the markup level.
-
-describe("right-rail tile render — ready + previewImageUrl (FIX C)", () => {
-  it("renders fc-preview button with img, prd title (not finding title), and caption", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(RightRail, {
-        insightState: {
-          hasPrd: true,
-          prdId: 42,
-          prototypeReady: true,
-          previewImageUrl: "https://cdn/thumb.png",
-          prdTitle: "My Cool Prototype",
-        },
-        findingTitle: "Discharge handoff latency",
-        onPreview: () => {},
-      }),
-    )
-    // img with correct src and class
-    expect(html).toContain('class="fc-preview-img"')
-    expect(html).toContain('src="https://cdn/thumb.png"')
-    // prd title (from insightState.prdTitle) is present — NOT finding.title
-    expect(html).toContain("My Cool Prototype")
-    // finding title must NOT appear in the tile (it is not the source)
-    expect(html).not.toContain("Discharge handoff latency")
-    // sub-caption text
-    expect(html).toContain("Prototype preview · open design")
-    // foot block classes
-    expect(html).toContain('class="fc-preview-foot"')
-    expect(html).toContain('class="fc-preview-title"')
-    expect(html).toContain('class="fc-preview-sub"')
-    // glyph (renderToStaticMarkup HTML-escapes ">" → "&gt;")
-    expect(html).toContain("&gt;_")
-    // the button wrapper
-    expect(html).toContain('class="fc-preview"')
-    // NO mock/shimmer classes
-    expect(html).not.toContain("fc-preview-mock")
-    expect(html).not.toContain("fc-preview-line")
-  })
-})
-
-describe("right-rail tile render — ready but NO previewImageUrl (FIX B)", () => {
-  it("renders nothing when prototype ready but previewImageUrl is null", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(RightRail, {
-        insightState: {
-          hasPrd: true,
-          prdId: 7,
-          prototypeReady: true,
-          previewImageUrl: null,
-        },
-        findingTitle: "Some insight",
-        onPreview: () => {},
-      }),
-    )
-    // No tile at all
-    expect(html).toBe("")
-    expect(html).not.toContain("fc-preview")
-  })
-})
-
-describe("right-rail tile render — hasPrd + !prototypeReady (FIX B)", () => {
-  it("renders nothing when PRD exists but prototype not yet ready", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(RightRail, {
-        insightState: {
-          hasPrd: true,
-          prdId: 99,
-          prototypeReady: false,
-          previewImageUrl: null,
-        },
-        findingTitle: "Some insight",
-        onPreview: () => {},
-      }),
-    )
-    expect(html).toBe("")
-    expect(html).not.toContain("fc-preview")
-  })
-})
-
-describe("right-rail tile render — no PRD / null / undefined insightState (FIX B)", () => {
-  it("renders nothing when insightState is null (map not loaded)", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(RightRail, {
-        insightState: null,
-        findingTitle: "Some insight",
-        onPreview: () => {},
-      }),
-    )
-    expect(html).toBe("")
-  })
-
-  it("renders nothing when insightState is undefined (meta not resolved)", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(RightRail, {
-        insightState: undefined,
-        findingTitle: "Some insight",
-        onPreview: () => {},
-      }),
-    )
-    expect(html).toBe("")
-  })
-
-  it("renders nothing when hasPrd is false", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(RightRail, {
-        insightState: {
-          hasPrd: false,
-          prdId: null,
-          prototypeReady: false,
-          previewImageUrl: null,
-        },
-        findingTitle: "Some insight",
-        onPreview: () => {},
-      }),
-    )
-    expect(html).toBe("")
-    expect(html).not.toContain("fc-preview")
-  })
-})
-
-// ── 8. FIX B regression proof ────────────────────────────────────────────────
-// A mock-fallback RightRail (simulating the old FindingPreview behaviour) is
-// introduced here. The no-tile tests MUST fail against it, proving the guards
-// are real and would catch a regression that re-introduces the mock.
-
-function RightRailWithMockFallback({
-  insightState,
-  findingTitle,
-  onPreview,
-}: {
-  insightState: InsightState
-  findingTitle: string
-  onPreview: () => void
-}) {
-  if (insightState?.hasPrd && insightState.prototypeReady && insightState.previewImageUrl) {
-    return React.createElement(
-      "button",
-      { type: "button", className: "fc-preview", onClick: onPreview, title: "Open prototype" },
-      React.createElement("img", {
-        className: "fc-preview-img",
-        src: insightState.previewImageUrl,
-        alt: "Prototype preview",
-      }),
-    )
-  }
-  // BUG: mock fallback — renders a stand-in even with no ready prototype
-  return React.createElement(
-    "div",
-    { className: "fc-preview-mock" },
-    React.createElement("div", { className: "fc-preview-line" }),
-    React.createElement("span", null, `›_ ${findingTitle}`),
-    React.createElement("span", null, "Prototype preview · open design"),
-  )
-}
-
-describe("FIX B regression proof — mock-fallback RightRail fails the no-tile tests", () => {
-  it("mock-fallback renders mock HTML for null insightState (PROVES test is a real guard)", () => {
-    const brokenHtml = renderToStaticMarkup(
-      React.createElement(RightRailWithMockFallback, {
-        insightState: null,
-        findingTitle: "Any insight",
-        onPreview: () => {},
-      }),
-    )
-    // The broken version renders something — confirming the no-tile assertion would fail
-    expect(brokenHtml).not.toBe("")
-    expect(brokenHtml).toContain("fc-preview-mock")
-    // The correct RightRail renders nothing for the same input
-    const correctHtml = renderToStaticMarkup(
-      React.createElement(RightRail, {
-        insightState: null,
-        findingTitle: "Any insight",
-        onPreview: () => {},
-      }),
-    )
-    expect(correctHtml).toBe("")
-    // The two outputs diverge — proving the guard is real
-    expect(brokenHtml).not.toBe(correctHtml)
-  })
-
-  it("mock-fallback renders mock HTML for hasPrd+!prototypeReady (PROVES test is a real guard)", () => {
-    const brokenHtml = renderToStaticMarkup(
-      React.createElement(RightRailWithMockFallback, {
-        insightState: { hasPrd: true, prdId: 5, prototypeReady: false, previewImageUrl: null },
-        findingTitle: "Any insight",
-        onPreview: () => {},
-      }),
-    )
-    expect(brokenHtml).toContain("fc-preview-mock")
-    expect(brokenHtml).toContain("fc-preview-line")
-    // Correct renders nothing
-    const correctHtml = renderToStaticMarkup(
-      React.createElement(RightRail, {
-        insightState: { hasPrd: true, prdId: 5, prototypeReady: false, previewImageUrl: null },
-        findingTitle: "Any insight",
-        onPreview: () => {},
-      }),
-    )
-    expect(correctHtml).toBe("")
-    expect(brokenHtml).not.toBe(correctHtml)
-  })
-})

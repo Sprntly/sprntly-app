@@ -92,6 +92,7 @@ _RELOAD_ORDER = [
     "app.datasets",
     "app.prompts",
     "app.ask_runner",
+    "app.ask_job_runner",
     "app.evidence_runner",
     "app.prd_runner",
     "app.brief_runner",
@@ -204,6 +205,24 @@ CREATE TABLE cached_asks (
     cache_version INTEGER,
     generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Fire-and-forget Ask job rows (mirrors 20260617120000_ask_jobs.sql). Status
+-- walks generating → ready (or error); `response` holds the citation-stripped
+-- answer JSON. Per-request + per-tenant — distinct from cached_asks/ask_log.
+CREATE TABLE ask_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    dataset         TEXT NOT NULL,
+    question        TEXT NOT NULL,
+    conversation_id INTEGER,
+    pinned_skill    TEXT,
+    status          TEXT NOT NULL DEFAULT 'generating',
+    response        TEXT NOT NULL DEFAULT '{}',
+    error           TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX ask_jobs_company_idx ON ask_jobs (company_id, id DESC);
 
 -- slug PRIMARY KEY mirrors the prod UNIQUE on datasets.slug
 -- (20260608160000_datasets_slug_unique.sql); a duplicate INSERT raises

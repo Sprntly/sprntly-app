@@ -65,6 +65,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "briefs":               {"payload"},
     "ask_log":              {"citations"},
     "cached_asks":          {"response"},
+    "ask_jobs":             {"response"},
     "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings"},
     "connections":          {"config"},
     "github_installations": {"permissions", "events"},

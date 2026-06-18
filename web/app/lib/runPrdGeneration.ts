@@ -1,22 +1,34 @@
 import { prdApi } from "./api"
 import { markdownToPrdState } from "./prd-adapter"
+import { sleepUntilNextPoll } from "./poll"
+import { clearPendingJob, insightScope, setPendingJob } from "./jobResume"
 import type { DetailState, PrdState } from "../types/content"
 
 export type PrdGenResult = { ok: true; prd: PrdState } | { ok: false; message: string }
 
-/** Polls until PRD is ready (same contract as DetailScreen). */
-export async function runPrdGeneration(meta: DetailState["meta"]): Promise<PrdGenResult> {
-  if (!meta) {
-    return { ok: false, message: "Open this evidence from the brief first." }
-  }
-  const start = await prdApi.generate(meta.briefId, meta.insightIndex)
-  let prd = await prdApi.get(start.prd_id)
+const MAX_MS = 6 * 60 * 1000
+
+/**
+ * Poll an already-kicked-off PRD by id until terminal, then map to the result
+ * shape. Shared by `runPrdGeneration` (which calls generate first) and
+ * `resumePrdGeneration` (which re-enters against a persisted id on remount).
+ * Clears the persisted pending-job marker on every terminal exit (ready /
+ * failed / timeout) so the resume only fires while a job is genuinely running.
+ */
+async function pollPrdToResult(
+  prdId: number,
+  scope: string | null,
+): Promise<PrdGenResult> {
+  let prd = await prdApi.get(prdId)
   const startedAt = Date.now()
-  const MAX_MS = 6 * 60 * 1000
   while (prd.status === "generating" && Date.now() - startedAt < MAX_MS) {
-    await new Promise((r) => setTimeout(r, 4000))
-    prd = await prdApi.get(start.prd_id)
+    // Visibility-aware sleep: a backgrounded tab throttles setTimeout to ~1/min,
+    // which stalls polling though the server-side PRD job finishes. Refocusing
+    // wakes immediately and re-reads the real status.
+    await sleepUntilNextPoll(4000)
+    prd = await prdApi.get(prdId)
   }
+  if (scope) clearPendingJob("prd", "_", scope)
   if (prd.status === "failed") {
     return { ok: false, message: prd.error || "PRD generation failed on the backend" }
   }
@@ -25,11 +37,11 @@ export async function runPrdGeneration(meta: DetailState["meta"]): Promise<PrdGe
   }
   // Carry the PRD's DB id (and the — for now always-undefined — Figma file
   // key) onto the returned PrdState so the F2 "Generate Prototype" flow can
-  // call designAgentApi.generate({ prd_id }). `prd.id` and `start.prd_id` are
-  // the same value; `prd.id` is read from the freshly-fetched ready record.
-  // figma_file_key stays undefined here — sourcing it from the user's Figma
-  // connector is out of scope for P1-13 (handled by the drawer's
-  // sourceDetectedLabel as "No Figma source connected").
+  // call designAgentApi.generate({ prd_id }). `prd.id` is read from the
+  // freshly-fetched ready record. figma_file_key stays undefined here —
+  // sourcing it from the user's Figma connector is out of scope for P1-13
+  // (handled by the drawer's sourceDetectedLabel as "No Figma source
+  // connected").
   return {
     ok: true,
     prd: {
@@ -38,6 +50,34 @@ export async function runPrdGeneration(meta: DetailState["meta"]): Promise<PrdGe
       figma_file_key: undefined,
     },
   }
+}
+
+/** Polls until PRD is ready (same contract as DetailScreen). Persists the
+ *  active prd_id so a remount can resume via `resumePrdGeneration`. */
+export async function runPrdGeneration(meta: DetailState["meta"]): Promise<PrdGenResult> {
+  if (!meta) {
+    return { ok: false, message: "Open this evidence from the brief first." }
+  }
+  const start = await prdApi.generate(meta.briefId, meta.insightIndex)
+  // briefId is globally unique, so the insight scope alone is unambiguous
+  // across companies — the "_" company token keeps the key shape uniform.
+  const scope = insightScope(meta.briefId, meta.insightIndex)
+  setPendingJob("prd", "_", scope, start.prd_id)
+  return pollPrdToResult(start.prd_id, scope)
+}
+
+/**
+ * Re-enter polling for a PRD whose generation was already kicked off (its
+ * prd_id was persisted via `setPendingJob`) — used on screen/tab remount so a
+ * background-finished job resumes in the UI instead of being orphaned. Does NOT
+ * call generate again. `meta` is used only to clear the right persisted marker.
+ */
+export async function resumePrdGeneration(
+  prdId: number,
+  meta: DetailState["meta"],
+): Promise<PrdGenResult> {
+  const scope = meta ? insightScope(meta.briefId, meta.insightIndex) : null
+  return pollPrdToResult(prdId, scope)
 }
 
 export type PrdLoadResult = { ok: true; prd: PrdState } | { ok: false; message: string }

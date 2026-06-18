@@ -10,6 +10,7 @@ import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvide
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { ArtifactFooterActions } from "./ArtifactFooterActions"
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare } from "@tabler/icons-react"
 
 const TABS = [
@@ -304,6 +305,8 @@ function EvidenceTab() {
             placeholders={0}
           />
         ) : null}
+
+        {evidence && <ArtifactFooterActions current="evidence" />}
       </div>
 
       {/* Sticky footer CTA */}
@@ -577,6 +580,8 @@ export function TicketsTab() {
         </svg>
         <span>Tickets are generated from the PRD.{!isClickUpConnected && " Connect ClickUp in Settings to push them."}</span>
       </div>
+
+      <ArtifactFooterActions current="tickets" />
     </div>
   )
 }
