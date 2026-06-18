@@ -11,7 +11,9 @@ import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { ArtifactFooterActions } from "./ArtifactFooterActions"
-import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare } from "@tabler/icons-react"
+import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
+import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx } from "../../lib/prdExport"
+import type { PrdState } from "../../types/content"
 
 const TABS = [
   { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
@@ -28,8 +30,92 @@ function clampCpanelWidth(px: number): number {
   return Math.min(max, Math.max(CPANEL_WIDTH_MIN, Math.round(px)))
 }
 
+// Header Share dropdown — Email (mailto) / Download PDF (jsPDF) / Download DOCX
+// (docx). Enabled only when a PRD is loaded. The heavy generators are
+// lazy-imported inside the handlers (see lib/prdExport).
+function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: string, sub: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const enabled = !!prd
+
+  useEffect(() => {
+    if (!open) return
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener("mousedown", onDocClick)
+    return () => document.removeEventListener("mousedown", onDocClick)
+  }, [open])
+
+  const handleEmail = () => {
+    if (!prd) return
+    setOpen(false)
+    const link = typeof window !== "undefined" ? window.location.href : ""
+    window.location.href = buildPrdMailto(prd.title, link)
+  }
+  const handlePdf = async () => {
+    if (!prd) return
+    setOpen(false)
+    try {
+      await downloadPrdPdf(prd)
+    } catch {
+      onToast("PDF export failed", "Could not generate the PDF. Please try again.")
+    }
+  }
+  const handleDocx = async () => {
+    if (!prd) return
+    setOpen(false)
+    try {
+      await downloadPrdDocx(prd)
+    } catch {
+      onToast("DOCX export failed", "Could not generate the document. Please try again.")
+    }
+  }
+
+  return (
+    <div style={{ position: "relative" }} ref={ref}>
+      <button
+        type="button"
+        className="cpanel-action-btn"
+        disabled={!enabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={(e) => { e.stopPropagation(); if (enabled) setOpen((o) => !o) }}
+      >
+        <IconShare size={12} />Share
+      </button>
+      {open && enabled && (
+        <div className="share-menu share-menu--down open" role="menu">
+          <div className="share-menu-item" role="menuitem" onClick={handleEmail}>
+            <div className="share-menu-item-icon"><IconMail size={14} /></div>
+            <div>
+              <div style={{ fontWeight: 600 }}>Email</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Draft a mail with a link</div>
+            </div>
+          </div>
+          <div className="share-menu-divider" />
+          <div className="share-menu-item" role="menuitem" onClick={handlePdf}>
+            <div className="share-menu-item-icon"><IconFileTypePdf size={14} /></div>
+            <div>
+              <div style={{ fontWeight: 600 }}>Download PDF</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export as .pdf</div>
+            </div>
+          </div>
+          <div className="share-menu-item" role="menuitem" onClick={handleDocx}>
+            <div className="share-menu-item-icon"><IconFileTypeDocx size={14} /></div>
+            <div>
+              <div style={{ fontWeight: 600 }}>Download DOCX</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export as .docx</div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ContentPanel() {
-  const { contentPanelTab, openContentPanel, closeContentPanel } = useNavigation()
+  const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
   const { content } = useContent()
 
   // Tracks the live pixel width; null = use the CSS default (60vw).
@@ -123,9 +209,7 @@ export function ContentPanel() {
             <button className="cpanel-action-btn">
               <IconDeviceFloppy size={12} />Save
             </button>
-            <button className="cpanel-action-btn">
-              <IconShare size={12} />Share
-            </button>
+            <ShareMenu prd={content.prd} onToast={showToast} />
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
             </button>

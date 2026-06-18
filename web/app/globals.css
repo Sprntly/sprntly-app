@@ -3740,6 +3740,18 @@
     pointer-events: auto;
   }
 
+  /* Header Share dropdown opens DOWNWARD (the footer one opens upward). */
+  .share-menu--down {
+    bottom: auto;
+    top: calc(100% + 6px);
+  }
+
+  .share-menu-item[aria-disabled="true"] {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
   .share-menu-item {
     display: flex;
     align-items: center;
