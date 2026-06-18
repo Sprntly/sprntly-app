@@ -361,11 +361,13 @@ def mint_view_grant(
         "prototype_id": prototype_id,
         "checkpoint_id": checkpoint_id,
         "workspace_id": company.company_id,
-        # Bind the row's share_mode AT MINT TIME. The serve path denies if the
-        # current mode no longer matches — so a flip to a different mode (e.g.
-        # public→private) AFTER the grant was minted revokes it on the NEXT asset
-        # even under a still-valid unexpired grant (plan §16-5 crux). A normal
-        # owner-only prototype mints+serves as 'private' (match → serve).
+        # Bind the row's share_mode AT MINT TIME. RETAINED for forward-compat /
+        # symmetry with the by-token grant payload, but NOT enforced on the authed
+        # serve: serve_authed_bundle no longer gates on share_mode (it is
+        # workspace-member-only — membership, re-checked via the workspace_id-
+        # filtered get_prototype, is the authorization boundary; a public-share
+        # toggle must not 404 the owner's own preview). No authed-serve code reads
+        # this field. Public-viewer revocation lives solely on the by-token route.
         "share_mode": row.get("share_mode") or "private",
         "grant_kind": "authed",
         "exp": int(time.time()) + _GRANT_TTL_SECONDS,
@@ -424,13 +426,18 @@ async def serve_authed_bundle(
     if payload.get("checkpoint_id") != checkpoint_id:
         raise HTTPException(status_code=401, detail="grant stale")
 
-    # REVOCATION CRUX (plan §16-5): the grant binds the row's share_mode at mint
-    # time. If the current mode no longer matches (e.g. an owner flipped a shared
-    # prototype to 'private', or a private one to 'public'), DENY the NEXT asset
-    # even though the grant HMAC is still valid + unexpired. The per-object DB
-    # re-read — not the grant — is the authorization gate.
-    if row.get("share_mode") != payload.get("share_mode"):
-        raise HTTPException(status_code=404, detail="Not found")
+    # NO share_mode gate on this authed route — deliberately. This route is
+    # workspace-member-only: membership is the authorization boundary, and it is
+    # enforced twice — at mint time (require_company + the workspace_id-filtered
+    # get_prototype, which 404s for a non-owned prototype) and on every serve via
+    # the workspace_id-filtered get_prototype re-read above. share_mode
+    # (private/public/passcode) is a PUBLIC-SHARE setting with no member-visibility
+    # meaning: a workspace member must always be able to view their own bundle
+    # regardless of its public-share state. Gating share_mode here used to 404 the
+    # owner's own preview the moment they toggled Share (e.g. private→public),
+    # because the still-valid grant bound the OLD mode. Public-viewer revocation is
+    # enforced solely on the by-token route (serve_public_bundle, which hard-denies
+    # a private share); it has no place on the member-authed route.
 
     return await _serve(
         prototype_id=prototype_id,

@@ -430,10 +430,13 @@ def test_view_grant_over_limit_429(client, env):
     assert client.post(url, headers=hdr).status_code == 429
 
 
-def test_authed_revocation_under_valid_grant(client, env):
-    # THE CRUX: authed asset 200 with a valid grant → flip share_mode (public) →
-    # next asset with the SAME unexpired grant ⇒ 404 (per-object DB re-read, not
-    # the grant, is the authorization gate).
+def test_authed_serves_through_owner_share_toggle(client, env):
+    # NON-VACUITY / B5 (was RED before the option-B fix): an owner toggling their
+    # OWN prototype's Share setting (private→public) must NOT 404 their own authed
+    # preview. The grant bound 'private' at mint; after the flip the row is
+    # 'public'. The authed route is workspace-member-only and no longer gates on
+    # share_mode, so the SAME unexpired grant keeps serving (200). Before the fix
+    # this returned 404 (the share_mode-equality deny) — the reported bug.
     _seed_company(_OWNER_COMPANY, _OWNER_USER)
     pid, _ = _seed_prototype(env, share_mode="private")
     cookie = _view_grant(client, env, pid)
@@ -442,7 +445,69 @@ def test_authed_revocation_under_valid_grant(client, env):
     # Owner flips share_mode AFTER the grant was minted (it bound 'private').
     env.proto.set_share_config(prototype_id=pid, workspace_id=_OWNER_COMPANY, share_mode="public")
     r = client.get(f"/v1/design-agent/{pid}/bundle/assets/app.js", headers=headers)
-    assert r.status_code == 404, "grant kept serving after a share-mode flip"
+    assert r.status_code == 200, "owner share toggle 404'd the owner's own preview"
+    # And the reverse toggle (public→private) is equally a no-op for the member.
+    env.proto.set_share_config(prototype_id=pid, workspace_id=_OWNER_COMPANY, share_mode="private")
+    assert client.get(f"/v1/design-agent/{pid}/bundle/index.html", headers=headers).status_code == 200
+
+
+def test_authed_serve_cross_workspace_grant_404(client, env):
+    # B1 (tenant-isolation, BLOCKING): removing the share_mode gate must drop ONLY
+    # that check, never the membership gate. A grant whose bound workspace_id does
+    # NOT own the prototype is still denied at serve, because the per-object
+    # get_prototype(prototype_id, workspace_id=grant.workspace_id) re-read returns
+    # None → 404. We forge a structurally-valid grant bound to a different
+    # workspace_id (a real cross-tenant grant can't be minted for a non-owned
+    # prototype — mint 404s — so we sign one directly to isolate the SERVE gate).
+    _seed_company(_OWNER_COMPANY, _OWNER_USER)
+    pid, _ = _seed_prototype(env, share_mode="private", workspace_id=_OWNER_COMPANY)
+    forged = env.bundle._sign_grant({
+        "prototype_id": pid,
+        "checkpoint_id": 1,
+        "workspace_id": _OTHER_COMPANY,
+        "share_mode": "private",
+        "grant_kind": "authed",
+        "exp": int(__import__("time").time()) + 600,
+    })
+    headers = {"Cookie": f"da_view_grant={forged}"}
+    r = client.get(f"/v1/design-agent/{pid}/bundle/index.html", headers=headers)
+    assert r.status_code == 404, "cross-workspace grant served a non-owned prototype"
+
+
+def test_authed_serve_not_ready_404(client, env):
+    # B3 (no failed/half-built serve): a row with status != 'ready' still 404s on
+    # the authed route (the status gate is untouched by the option-B fix). Mint
+    # while ready, then flip the row to a non-ready status under the same grant.
+    _seed_company(_OWNER_COMPANY, _OWNER_USER)
+    pid, _ = _seed_prototype(env, share_mode="private")
+    cookie = _view_grant(client, env, pid)
+    headers = {"Cookie": f"da_view_grant={cookie}"}
+    assert client.get(f"/v1/design-agent/{pid}/bundle/index.html", headers=headers).status_code == 200
+    # Flip the row to a non-ready status directly (no public mutator for status).
+    from tests import _fake_supabase
+
+    _fake_supabase.get_fake_db().execute(
+        "UPDATE prototypes SET status = ? WHERE id = ?", ["generating", pid],
+    )
+    r = client.get(f"/v1/design-agent/{pid}/bundle/index.html", headers=headers)
+    assert r.status_code == 404, "served a non-ready row on the authed route"
+
+
+def test_authed_serve_no_checkpoint_404(client, env):
+    # B3 (continued): a row whose current_checkpoint_id is None still 404s on the
+    # authed route (the checkpoint-None gate is untouched). Seed without a
+    # checkpoint so the mint itself 404s (no checkpoint to bind); the serve then
+    # has no usable grant → 404. This pins that the checkpoint-None gate survives
+    # the share_mode-gate removal.
+    _seed_company(_OWNER_COMPANY, _OWNER_USER)
+    pid, _ = _seed_prototype(
+        env, share_mode="private", checkpoint_id=None, stage_files=False,
+    )
+    mint = client.post(
+        f"/v1/design-agent/{pid}/view-grant",
+        headers={"Authorization": f"Bearer {_mint_bearer(_OWNER_USER)}"},
+    )
+    assert mint.status_code == 404, "minted a grant for a checkpoint-less row"
 
 
 def test_authed_url_grant_mismatch(client, env):
