@@ -268,6 +268,66 @@ describe("useIterateRun — terminal state follows the real poll, not a timer", 
 })
 
 // ---------------------------------------------------------------------------
+// onComplete reload-gating: a clarifying-question pause builds no new bundle, so
+// the center preview must NOT reload (reloading re-fetches the unchanged bundle
+// through the proxy and briefly exposes a transient 404 — the prod bug). A real
+// completion DID stage a new bundle, so it reloads. These assert the opts flag
+// the host reads to decide whether to bump its reload nonce.
+// ---------------------------------------------------------------------------
+
+describe("useIterateRun — reload only on a real completion, not on a pause", () => {
+  it("a clarifying-question pause calls onComplete with reloadBundle:false (no preview reload)", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValueOnce(
+        proto("generating", { question: "Which header variant?" }),
+      )
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("update the header")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    // The paused row is handed to the canvas, but flagged as a non-reload so the
+    // host keeps the current preview (no transient 404 window).
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(onComplete.mock.calls[0][1]).toEqual({ reloadBundle: false })
+  })
+
+  it("a real completion calls onComplete with reloadBundle:true (preview reloads the new bundle)", async () => {
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(proto("generating"))
+      .mockResolvedValue(proto("ready"))
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("tweak the spacing")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(onComplete.mock.calls[0][1]).toEqual({ reloadBundle: true })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // SSE seam contract
 // ---------------------------------------------------------------------------
 

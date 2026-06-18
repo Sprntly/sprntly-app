@@ -1,4 +1,4 @@
-"""Design-Agent bundle PROXY (Option B — same-origin serving, Decision 2).
+"""Design-Agent bundle PROXY — same-origin serving.
 
 This router is the ONE authorizing streaming front door for every prototype
 bundle object. Per the approved plan it replaces the old "signed Supabase URL to
@@ -13,7 +13,7 @@ storage read — index.html and deep assets BOTH flow through it):
     GET  /v1/design-agent/{prototype_id}/bundle/{asset_path:path}     authed twin
     POST /v1/design-agent/{prototype_id}/view-grant                   mint da_view_grant
 
-Guardrails (all load-bearing — see the plan §2-§8 + §16):
+Guardrails (all load-bearing):
   1. TRAVERSAL — `storage._is_safe_bundle_relpath` (single unquote, reject
      `..`/leading-`/`/absolute/backslash/`%2e%2e`/NUL/CR/LF/control). Containment
      re-asserted in `storage._safe_object_key` BEFORE any create_signed_url (SSRF).
@@ -71,11 +71,11 @@ VIEW_GRANT_COOKIE = "da_view_grant"
 SHARE_GRANT_COOKIE = "da_share_grant"
 
 # Short grant TTL — the per-object DB re-read is the hard revocation gate; the TTL
-# is the backstop (plan §1.3 / §16-1). 600s keeps a long authed viewing session
+# is the backstop. 600s keeps a long authed viewing session
 # from re-minting more than ~once.
 _GRANT_TTL_SECONDS = 600
 
-# Cache headers per mode (plan §4 asymmetry — STATED here intentionally):
+# Cache headers per mode (the revocation asymmetry — STATED here intentionally):
 #   - authed/passcode: never cache (per-object DB re-read = INSTANT revocation;
 #     a flip-to-private denies the NEXT asset with zero lag). Vary: Cookie so a
 #     shared cache never serves one viewer's asset to another.
@@ -92,7 +92,7 @@ _CACHE_PUBLIC = "public, max-age=60, must-revalidate"
 _VIEW_GRANT_RL_PREFIX = "viewgrant:"
 
 
-# ─── token-secret fail-closed (plan §16-token / Part C) ──────────────────────
+# ─── token-secret fail-closed ────────────────────────────────────────────────
 
 
 def _require_token_secret() -> str:
@@ -145,16 +145,16 @@ def _verify_grant(raw: str | None) -> dict | None:
 
 
 def _grant_cookie_kwargs(path: str) -> dict:
-    """Cookie attrs for a grant. SameSite=Lax (plan §16-3): under Decision 2 the
-    iframe is same-origin to the app parent (`app.sprntly.ai`), so its subresource
-    asset GETs are SAME-SITE → Lax is attached. HttpOnly so the iframe never reads
-    it; Secure in prod (settings.cookie_secure).
+    """Cookie attrs for a grant. SameSite=Lax: under the same-origin serving model
+    the iframe is same-origin to the app parent (`app.sprntly.ai`), so its
+    subresource asset GETs are SAME-SITE → Lax is attached. HttpOnly so the iframe
+    never reads it; Secure in prod (settings.cookie_secure).
 
-    domain=None UNCONDITIONALLY (v3 §1.3 first-party design): grant cookies are
-    minted AND consumed only on the app/serving origin via /_da-bundle/, so they
-    MUST be HOST-ONLY to that origin. They are deliberately DECOUPLED from
+    domain=None UNCONDITIONALLY (first-party design): grant cookies are minted AND
+    consumed only on the app/serving origin via /_da-bundle/, so they MUST be
+    HOST-ONLY to that origin. They are deliberately DECOUPLED from
     settings.cookie_domain — using `.sprntly.ai` here would broaden the grant to
-    every subdomain (api., demo., …), which is exactly what Option A removes. The
+    every subdomain (api., demo., …), which the host-only design avoids. The
     SESSION cookie (auth.py) legitimately keeps .sprntly.ai to span api+app; the
     GRANT cookie must not."""
     return {
@@ -170,7 +170,7 @@ def _grant_cookie_kwargs(path: str) -> dict:
 def _view_grant_path(prototype_id: int) -> str:
     """Browser-side path-scope for da_view_grant — the cookie is only sent to this
     prototype's bundle route (a grant for one prototype is never sent to another's
-    asset GETs). The SERVER-SIDE gate is URL↔grant equality (#3); path-scope is
+    asset GETs). The SERVER-SIDE gate is URL↔grant equality; path-scope is
     defence in depth only."""
     prefix = "/" + (settings.design_agent_bundle_path_prefix or "").strip("/")
     if prefix == "/":
@@ -259,9 +259,10 @@ async def serve_public_bundle(
     request: Request,
     da_share_grant: str | None = Cookie(default=None),
 ) -> Response:
-    """Serve a bundle object for a PUBLIC or PASSCODE share (token-in-URL, F6).
+    """Serve a bundle object for a PUBLIC or PASSCODE share (token-in-URL, the
+    share-token feature).
 
-    Per-object auth (plan §3): every GET re-runs find_prototype_by_share_token and
+    Per-object auth: every GET re-runs find_prototype_by_share_token and
     re-applies the get_by_token deny logic (404 on missing / private / not-ready).
     For PASSCODE mode the da_share_grant cookie must also validate (HMAC bound to
     this token); no valid grant → 404. Cache: public = short public cache;
@@ -269,17 +270,39 @@ async def serve_public_bundle(
     _require_feature()
     rel_path = _decode_asset_path(asset_path)
     row = find_prototype_by_share_token(token)
-    # Re-apply the deny logic verbatim (design_agent.get_by_token).
+    # Re-apply the deny logic verbatim (the public get-by-token deny).
     if not row or row.get("share_mode") == "private" or row.get("status") != "ready":
+        # Distinct server-side log of WHICH sub-reason fired (the client body
+        # stays the identical "Not found" for enumeration-defense invisibility).
+        # The token is hashed (never logged raw — matches the redaction discipline
+        # used by the grant-mint logs); the share_mode/status values go to the log
+        # only, never the response body.
+        if not row:
+            sub_reason = "missing"
+        elif row.get("share_mode") == "private":
+            sub_reason = "private"
+        else:
+            sub_reason = "not_ready"
+        logger.info(
+            "da_bundle_deny route=by-token gate=%s token_hash=%s share_mode=%s status=%s",
+            sub_reason,
+            hashlib.sha256(token.encode()).hexdigest()[:8],
+            (row or {}).get("share_mode"),
+            (row or {}).get("status"),
+        )
         raise HTTPException(status_code=404, detail="Not found")
 
     checkpoint_id = _checkpoint_for_row(row)
     if checkpoint_id is None:
+        logger.info(
+            "da_bundle_deny route=by-token gate=checkpoint_none token_hash=%s",
+            hashlib.sha256(token.encode()).hexdigest()[:8],
+        )
         raise HTTPException(status_code=404, detail="Not found")
 
     mode = row["share_mode"]
     if mode == "passcode":
-        # PASSCODE: require a valid da_share_grant bound to THIS token (plan §5).
+        # PASSCODE: require a valid da_share_grant bound to THIS token.
         payload = _verify_grant(da_share_grant)
         if (
             not payload
@@ -287,7 +310,12 @@ async def serve_public_bundle(
             or payload.get("token") != token
             or payload.get("checkpoint_id") != checkpoint_id
         ):
-            # No valid grant → 404 (invisibility, same as a wrong token).
+            # No valid grant → 404 (invisibility, same as a wrong token). The
+            # passcode/grant value itself is NEVER logged — only that the gate fired.
+            logger.info(
+                "da_bundle_deny route=by-token gate=passcode_grant_invalid token_hash=%s",
+                hashlib.sha256(token.encode()).hexdigest()[:8],
+            )
             raise HTTPException(status_code=404, detail="Not found")
         cache = _CACHE_PRIVATE
         extra = {"Vary": "Cookie"}
@@ -307,7 +335,7 @@ async def serve_public_bundle(
 
 
 def set_share_grant_cookie(response: Response, *, token: str, checkpoint_id: int) -> None:
-    """Set the scoped da_share_grant cookie on a passcode-verify success (plan §5).
+    """Set the scoped da_share_grant cookie on a passcode-verify success.
 
     Called from the EXISTING `design_agent.verify_passcode` route (NOT a second
     route at the same path) so the public-view response body is preserved and the
@@ -332,7 +360,7 @@ def mint_view_grant(
     request: Request,
     company: CompanyContext = Depends(require_company),
 ) -> Response:
-    """Mint a da_view_grant for the AUTHED viewer (plan §1.2 / §16-2).
+    """Mint a da_view_grant for the AUTHED viewer.
 
     Bearer-authed via require_company. RE-RESOLVES that the caller's workspace
     OWNS the prototype (get_prototype filtered by workspace_id) — 404 on miss
@@ -361,11 +389,13 @@ def mint_view_grant(
         "prototype_id": prototype_id,
         "checkpoint_id": checkpoint_id,
         "workspace_id": company.company_id,
-        # Bind the row's share_mode AT MINT TIME. The serve path denies if the
-        # current mode no longer matches — so a flip to a different mode (e.g.
-        # public→private) AFTER the grant was minted revokes it on the NEXT asset
-        # even under a still-valid unexpired grant (plan §16-5 crux). A normal
-        # owner-only prototype mints+serves as 'private' (match → serve).
+        # Bind the row's share_mode AT MINT TIME. RETAINED for forward-compat /
+        # symmetry with the by-token grant payload, but NOT enforced on the authed
+        # serve: serve_authed_bundle no longer gates on share_mode (it is
+        # workspace-member-only — membership, re-checked via the workspace_id-
+        # filtered get_prototype, is the authorization boundary; a public-share
+        # toggle must not 404 the owner's own preview). No authed-serve code reads
+        # this field. Public-viewer revocation lives solely on the by-token route.
         "share_mode": row.get("share_mode") or "private",
         "grant_kind": "authed",
         "exp": int(time.time()) + _GRANT_TTL_SECONDS,
@@ -385,15 +415,18 @@ async def serve_authed_bundle(
 ) -> Response:
     """Serve a bundle object for the AUTHED twin via the da_view_grant cookie.
 
-    Per-object auth + REVOCATION (plan §1.3 / §16-5): the grant proves IDENTITY,
-    not current authorization. EVERY GET:
+    Per-object auth + REVOCATION: the grant proves IDENTITY, not current
+    authorization. EVERY GET:
       1. validates the HMAC + expiry (fail-closed on unset secret);
-      2. URL↔GRANT EQUALITY (#3) — the URL's prototype_id MUST equal the grant's
-         bound prototype_id (defeats cross-prototype replay; path-scope is
-         browser-side only);
+      2. URL↔GRANT EQUALITY — the URL's prototype_id MUST equal the grant's bound
+         prototype_id (defeats cross-prototype replay; path-scope is browser-side
+         only);
       3. re-reads the prototype from the DB filtered by the grant's workspace_id —
-         a flip to private / a workspace mismatch / a checkpoint advance denies the
-         NEXT asset even with a still-valid unexpired grant (the crux of Option B).
+         a workspace mismatch or a checkpoint advance denies the NEXT asset even
+         with a still-valid unexpired grant. (A public-share toggle does NOT deny
+         here: this route is workspace-member-only, so a member always sees their
+         own bundle regardless of its share_mode — see the no-share_mode-gate note
+         below.)
     Cache: private, no-store + Vary: Cookie (instant revocation)."""
     _require_feature()
     rel_path = _decode_asset_path(asset_path)
@@ -402,7 +435,7 @@ async def serve_authed_bundle(
     if not payload or payload.get("grant_kind") != "authed":
         raise HTTPException(status_code=401, detail="grant required")
 
-    # (#3) URL↔GRANT EQUALITY — bound prototype_id must match the URL's.
+    # URL↔GRANT EQUALITY — bound prototype_id must match the URL's.
     if payload.get("prototype_id") != prototype_id:
         raise HTTPException(status_code=401, detail="grant mismatch")
 
@@ -415,22 +448,42 @@ async def serve_authed_bundle(
     # the NEXT asset, even under a still-valid unexpired grant.
     row = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
     if not row or row.get("status") != "ready":
+        # Distinct server-side log (client body stays the identical "Not found"):
+        # a missing row (non-owned / gone) vs a present-but-not-ready row.
+        logger.info(
+            "da_bundle_deny route=authed gate=%s prototype_id=%s",
+            "missing" if not row else "status",
+            prototype_id,
+        )
         raise HTTPException(status_code=404, detail="Not found")
 
     checkpoint_id = _checkpoint_for_row(row)
     if checkpoint_id is None:
+        logger.info(
+            "da_bundle_deny route=authed gate=checkpoint_none prototype_id=%s",
+            prototype_id,
+        )
         raise HTTPException(status_code=404, detail="Not found")
     # A Resume that advanced the checkpoint invalidates the grant → 401 (re-mint).
     if payload.get("checkpoint_id") != checkpoint_id:
+        logger.info(
+            "da_bundle_deny route=authed gate=checkpoint_stale prototype_id=%s",
+            prototype_id,
+        )
         raise HTTPException(status_code=401, detail="grant stale")
 
-    # REVOCATION CRUX (plan §16-5): the grant binds the row's share_mode at mint
-    # time. If the current mode no longer matches (e.g. an owner flipped a shared
-    # prototype to 'private', or a private one to 'public'), DENY the NEXT asset
-    # even though the grant HMAC is still valid + unexpired. The per-object DB
-    # re-read — not the grant — is the authorization gate.
-    if row.get("share_mode") != payload.get("share_mode"):
-        raise HTTPException(status_code=404, detail="Not found")
+    # NO share_mode gate on this authed route — deliberately. This route is
+    # workspace-member-only: membership is the authorization boundary, and it is
+    # enforced twice — at mint time (require_company + the workspace_id-filtered
+    # get_prototype, which 404s for a non-owned prototype) and on every serve via
+    # the workspace_id-filtered get_prototype re-read above. share_mode
+    # (private/public/passcode) is a PUBLIC-SHARE setting with no member-visibility
+    # meaning: a workspace member must always be able to view their own bundle
+    # regardless of its public-share state. Gating share_mode here used to 404 the
+    # owner's own preview the moment they toggled Share (e.g. private→public),
+    # because the still-valid grant bound the OLD mode. Public-viewer revocation is
+    # enforced solely on the by-token route (serve_public_bundle, which hard-denies
+    # a private share); it has no place on the member-authed route.
 
     return await _serve(
         prototype_id=prototype_id,

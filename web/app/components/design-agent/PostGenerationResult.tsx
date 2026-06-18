@@ -242,9 +242,17 @@ export type PostGenerationResultViewProps = {
   /** Called when an authed iframe asset load 401s (grant missing/expired) so the
    *  container can re-mint ONCE (bounded). Absent on the public surface. */
   onBundleAssetError?: () => void
+  /** Called on the authed iframe `onLoad` so the container can probe the real
+   *  status (a 404 body fires `load`, not `error`) and cover a briefly-
+   *  unavailable bundle. Absent on the public surface. */
+  onBundleLoad?: () => void
   /** Bumped on a successful re-mint so the iframe is forced to reload the
    *  now-re-authorized bundle. Folded into the viewer remount key. */
   bundleGrantReloadKey?: number
+  /** True while the bundle is briefly unavailable (a 404 through the proxy) — the
+   *  center stage covers the iframe with a neutral loading overlay instead of the
+   *  raw 404 body, and clears it once the bundle is ready. */
+  bundleNotReady?: boolean
   onStateChange?: (state: { isComplete: boolean; staleHandoff: boolean }) => void
   /** P6-13 (UX-3): comments node for the right cell of the `design-pane` grid.
    *  When absent, the viewer renders full-width (no comments cell, no grid). */
@@ -992,7 +1000,9 @@ export function PostGenerationResultView({
   bundleUrl,
   bundleGrantError = null,
   onBundleAssetError,
+  onBundleLoad,
   bundleGrantReloadKey = 0,
+  bundleNotReady = false,
   onStateChange,
   comments,
   iterate,
@@ -1094,6 +1104,7 @@ export function PostGenerationResultView({
       onPlatformChange={onPlatformChange}
       hideToggle
       onAssetError={onBundleAssetError}
+      onBundleLoad={onBundleLoad}
     />
   ) : null
 
@@ -1237,6 +1248,20 @@ export function PostGenerationResultView({
           data-testid="da-canvas-center"
         >
           {viewer}
+          {/* Bundle briefly unavailable (a 404 through the proxy on a not-yet-
+              staged build). Cover the iframe with a neutral loading overlay so the
+              raw 404 body is never seen; it clears automatically once a re-probe
+              finds the bundle ready (the viewer reloads it). */}
+          {bundleNotReady && viewer && (
+            <div
+              className="da-bundle-loading"
+              role="status"
+              aria-live="polite"
+              data-testid="da-bundle-loading"
+            >
+              <span className="da-spinner" aria-hidden="true" /> Loading preview…
+            </div>
+          )}
           {/* View-grant failure (initial mint failed, or the bounded re-mint was
               exhausted — the grant was likely revoked mid-session). Non-blocking
               banner over the stage; a refresh re-runs the mint. */}
@@ -1478,7 +1503,9 @@ export function PostGenerationResult({
       bundleUrl={grant.grantedBundleUrl}
       bundleGrantError={grant.error}
       onBundleAssetError={grant.notifyAssetError}
+      onBundleLoad={grant.notifyBundleLoaded}
       bundleGrantReloadKey={grant.reloadKey}
+      bundleNotReady={grant.notReady}
       onStateChange={(state) => {
         setIsComplete(state.isComplete)
         onStateChange?.(state)

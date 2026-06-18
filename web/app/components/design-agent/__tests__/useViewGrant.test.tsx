@@ -35,6 +35,7 @@ import { designAgentApi } from "../../../lib/api"
 import {
   useViewGrant,
   shouldRemint,
+  readinessAction,
   preflightBundle,
   VIEW_GRANT_REMINT_CAP,
   GRANT_REFRESH_INTERVAL_MS,
@@ -382,9 +383,10 @@ describe("preflightBundle — credentialed 401 detection (pure, injectable fetch
 
     expect(await preflightBundle(BUNDLE, ok as unknown as typeof fetch)).toBe("ok")
     expect(await preflightBundle(BUNDLE, unauthorized as unknown as typeof fetch)).toBe("unauthorized")
-    // A non-401 non-ok (e.g. 404) is NOT the lapsed-grant case → don't burn the
-    // re-mint budget; the iframe load path covers it.
-    expect(await preflightBundle(BUNDLE, notReady as unknown as typeof fetch)).toBe("ok")
+    // A 404 is the briefly-unavailable bundle (a not-yet-staged build) — it is
+    // NOT the lapsed-grant case, so it never burns the re-mint budget; it drives
+    // the bounded readiness retry + loading state instead.
+    expect(await preflightBundle(BUNDLE, notReady as unknown as typeof fetch)).toBe("notready")
     // A transient network failure would also fail the real iframe load (onError),
     // so the preflight stays on that path and reports "ok".
     expect(await preflightBundle(BUNDLE, threw as unknown as typeof fetch)).toBe("ok")
@@ -404,6 +406,137 @@ describe("shouldRemint — the cap is unit-locked", () => {
     expect(shouldRemint(0)).toEqual({ remint: true, surfaceError: false })
     expect(shouldRemint(1)).toEqual({ remint: false, surfaceError: true })
     expect(shouldRemint(2)).toEqual({ remint: false, surfaceError: true })
+  })
+})
+
+describe("readinessAction — the iframe-load probe decision is unit-locked", () => {
+  it("maps each probe result to its action", () => {
+    // A 401 routes through the grant re-mint; a 404 (briefly-unavailable bundle)
+    // drives the loading state + bounded retry; an ok clears the loading state.
+    expect(readinessAction("unauthorized")).toBe("remint")
+    expect(readinessAction("notready")).toBe("retry")
+    expect(readinessAction("ok")).toBe("clear")
+  })
+})
+
+// The prod incident this whole readiness path exists for: after an iteration the
+// preview iframe painted the raw `{"detail":"Not found"}` 404 body from the bundle
+// proxy (a not-yet-staged build). A 404 body fires the iframe `load` event, NOT
+// `error`, so onError never caught it. notifyBundleLoaded — wired to the iframe
+// onLoad — probes the real status and recovers: it covers the iframe with a
+// loading state, then reloads the bundle once it is ready, with NO manual reload.
+describe("useViewGrant — bundle-readiness recovery via the iframe onLoad probe", () => {
+  it("REPRO→FIX: a 404 on load sets notReady, then clears + reloads once the bundle is ready", async () => {
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    // Initial mint + healthy (200) post-mint preflight → bundle exposed.
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    expect(result.current.notReady).toBe(false)
+    expect(result.current.reloadKey).toBe(0)
+
+    // The iframe loads but the proxy is briefly 404ing the bundle: the first probe
+    // (the onLoad probe) AND the first retry both 404; the second retry is ready.
+    let probe = 0
+    fetchMock.mockImplementation(() => {
+      probe += 1
+      const notReadyStill = probe <= 2
+      return Promise.resolve(
+        new Response(notReadyStill ? '{"detail":"Not found"}' : "<!doctype html>", {
+          status: notReadyStill ? 404 : 200,
+        }),
+      )
+    })
+
+    // The iframe fired `load` on the 404 body — the container calls notifyBundleLoaded.
+    await act(async () => {
+      result.current.notifyBundleLoaded()
+      await Promise.resolve()
+    })
+    // The loading state is up (the raw 404 body is covered).
+    await waitFor(() => expect(result.current.notReady).toBe(true))
+
+    // The bounded retry re-probes; once the bundle is ready it clears notReady and
+    // bumps reloadKey to force a fresh iframe load of the now-ready bundle.
+    await waitFor(() => expect(result.current.notReady).toBe(false), { timeout: 4000 })
+    await waitFor(() => expect(result.current.reloadKey).toBe(1))
+    expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+    expect(result.current.error).toBeNull()
+  })
+
+  it("a clean (200) load is a no-op — no loading state, no reload", async () => {
+    // Default fetchMock is 200 throughout. A normal load probes ok → notReady
+    // stays false and the iframe is never forced to reload.
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+
+    await act(async () => {
+      result.current.notifyBundleLoaded()
+      await Promise.resolve()
+    })
+    // Give any spurious retry a chance to fire, then assert it did not.
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(result.current.notReady).toBe(false)
+    expect(result.current.reloadKey).toBe(0)
+    expect(result.current.error).toBeNull()
+  })
+
+  it("a 401 on load routes through the bounded re-mint, not the readiness retry", async () => {
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    // The onLoad probe sees a 401 (a 401 body also fires `load`): hand off to the
+    // bounded grant re-mint (cap = 1) — NOT the readiness retry.
+    fetchMock.mockResolvedValue(
+      new Response('{"detail":"grant required"}', { status: 401 }),
+    )
+    await act(async () => {
+      result.current.notifyBundleLoaded()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2)) // one re-mint
+    expect(result.current.notReady).toBe(false)
+  })
+
+  it("REPRO→FIX: the post-mint preflight (not onLoad) that sees 404 sets notReady + recovers", async () => {
+    // The prod gap this closes: right after a (re)mint — first load / post-
+    // completion — the proxy can briefly 404 a freshly-staged build. The post-mint
+    // preflight effect ALREADY runs on every (re)mint, but used to DROP "notready"
+    // (it only handled 401), so that first-load transient-404 flash was not
+    // covered until the iframe onLoad probe fired. Wiring "notready" into the same
+    // readiness path closes it with no extra probe. RED before the fix: notReady
+    // never went true and no retry was scheduled because the post-mint preflight
+    // ignored the 404.
+    //
+    // Make the VERY FIRST preflight (the post-mint one) 404, the next two 404, then
+    // ready — exercising the bounded retry the post-mint path now drives.
+    let probe = 0
+    fetchMock.mockImplementation(() => {
+      probe += 1
+      const notReadyStill = probe <= 3
+      return Promise.resolve(
+        new Response(notReadyStill ? '{"detail":"Not found"}' : "<!doctype html>", {
+          status: notReadyStill ? 404 : 200,
+        }),
+      )
+    })
+
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    // Mint resolves and exposes the bundle; the post-mint preflight then 404s.
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    // The post-mint preflight saw 404 → the loading state is up WITHOUT any
+    // onLoad call (we never invoke notifyBundleLoaded here).
+    await waitFor(() => expect(result.current.notReady).toBe(true))
+
+    // The bounded retry the post-mint path started re-probes; once ready it clears
+    // notReady and bumps reloadKey to force a fresh iframe load — no manual reload.
+    await waitFor(() => expect(result.current.notReady).toBe(false), { timeout: 5000 })
+    await waitFor(() => expect(result.current.reloadKey).toBe(1))
+    expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+    expect(result.current.error).toBeNull()
+    // The 404 drove the readiness retry, NOT the grant re-mint (cap-1) path.
+    expect(viewGrant).toHaveBeenCalledTimes(1)
   })
 })
 

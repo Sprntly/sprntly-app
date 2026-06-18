@@ -311,9 +311,14 @@ function InTabCanvas({
   // reload nonce so the iframe reloads.
   const iterateRun = useIterateRun({
     prototypeId: proto.id,
-    onComplete: (fresh) => {
+    onComplete: (fresh, opts) => {
       onProtoChange(fresh)
-      setBundleReloadNonce((n) => n + 1)
+      // Only bump the reload nonce (force a fresh iframe load) when the run
+      // actually advanced the bundle. A clarifying-question pause passes
+      // `reloadBundle: false` — keep the current preview, don't re-fetch a bundle
+      // that didn't change (avoids a transient 404 window). Any caller that omits
+      // opts still reloads, preserving the prior behaviour.
+      if (opts?.reloadBundle !== false) setBundleReloadNonce((n) => n + 1)
     },
   })
 
