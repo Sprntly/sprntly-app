@@ -17,7 +17,7 @@
 // verbatim (the hook never parses it). The public `/p/<token>` path does NOT use
 // this hook — it is token-in-URL and never mints a grant.
 //
-// BOUNDED RE-MINT (plan §16-1): the grant TTL is short, so a long-lived viewing
+// BOUNDED RE-MINT: the grant TTL is short, so a long-lived viewing
 // session can outlive its grant — the next asset GET then 401s. On such a
 // failure the caller invokes `notifyAssetError()`, which re-mints the grant
 // EXACTLY ONCE and forces a fresh iframe load (via a bumped `reloadKey`). If the
@@ -28,9 +28,27 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { designAgentApi } from "../../lib/api"
 
-/** The single re-mint cap (plan §16-1). One re-mint after the initial mint, then
- *  the hook surfaces an error rather than looping. */
+/** The single re-mint cap. One re-mint after the initial mint, then
+ *  the hook surfaces an error rather than looping. The cap bounds a SINGLE
+ *  mint→preflight→re-mint cycle; it is intentionally re-armed (the attempt counter
+ *  is reset) when a NEW lapse is detected — e.g. the tab regains focus after the
+ *  grant TTL elapsed — so the viewer can recover for its whole lifetime without a
+ *  manual reload, while still never looping within one lapse. */
 export const VIEW_GRANT_REMINT_CAP = 1
+
+/** How often to proactively re-mint the grant while a bundle is being viewed.
+ *  Sits comfortably under the backend grant TTL (currently 600s) so the cookie is
+ *  refreshed BEFORE it can expire — an idle-but-open viewer never reaches the 401
+ *  even without a visibility/focus event to trigger recovery.
+ *
+ *  Defaults to 5 minutes. Overridable at build time via
+ *  `NEXT_PUBLIC_DA_GRANT_REFRESH_MS` (a positive integer of milliseconds) so the
+ *  cadence can be tuned per environment without a code change — unset/invalid
+ *  falls back to the 5-minute default, so production is unchanged. */
+export const GRANT_REFRESH_INTERVAL_MS = (() => {
+  const override = Number(process.env.NEXT_PUBLIC_DA_GRANT_REFRESH_MS)
+  return Number.isFinite(override) && override > 0 ? override : 5 * 60 * 1000
+})()
 
 export type ViewGrantState = {
   /** The opaque proxy bundle URL to load into the authed iframe, or null while
@@ -122,7 +140,7 @@ export function useViewGrant(
   const mintingRef = useRef(false)
 
   const mint = useCallback(
-    async (url: string, isRemint: boolean) => {
+    async (url: string, isRemint: boolean, forceReload = true) => {
       if (mintingRef.current) return
       mintingRef.current = true
       setPending(true)
@@ -135,15 +153,29 @@ export function useViewGrant(
         // Expose the bundle url only AFTER the grant cookie is set, so the iframe
         // asset GETs carry it on the very first request.
         setGrantedBundleUrl(url)
-        // Bump the reload key on a re-mint so the caller can force a fresh load
-        // of the now-re-authorized iframe. The initial mint leaves it at 0 (clean
-        // first load — no cache-bust needed).
-        if (isRemint) setReloadKey((k) => k + 1)
+        // Bump the reload key on a re-mint so the caller can force a fresh load of
+        // the now-re-authorized iframe. The initial mint leaves it at 0 (clean
+        // first load — no cache-bust needed). A PROACTIVE refresh (forceReload =
+        // false) renews the cookie silently and leaves the key untouched so it does
+        // NOT interrupt an active viewing session with an iframe reload.
+        if (isRemint && forceReload) setReloadKey((k) => k + 1)
       } catch {
-        // Mint failed (network / 401 / 404 / 429). Withhold the bundle url and
-        // surface an error; do not load an iframe that will only 401 on assets.
-        setGrantedBundleUrl(null)
-        setError("Couldn't load the prototype. Please refresh and try again.")
+        // Mint failed (network / 401 / 404 / 429). For the initial mint and a
+        // reactive recovery re-mint (forceReload = true), withhold the bundle url
+        // and surface an error — we don't yet have (or have lost) a usable grant,
+        // so loading the iframe would only 401 on assets.
+        //
+        // A PROACTIVE silent renewal (forceReload = false) is different: it runs
+        // on a timer while a still-valid grant is already exposed, refreshing the
+        // cookie BEFORE it can expire. A transient failure there must NOT tear
+        // down a healthy viewer — the current grant is almost certainly still
+        // valid, and a real lapse is independently caught by the preflight /
+        // visibility recovery. So a failed proactive renewal is swallowed; the
+        // next interval (or a genuine 401) handles it.
+        if (forceReload) {
+          setGrantedBundleUrl(null)
+          setError("Couldn't load the prototype. Please refresh and try again.")
+        }
       } finally {
         setPending(false)
         mintingRef.current = false
@@ -177,6 +209,58 @@ export function useViewGrant(
       setError("Couldn't load the prototype. Please refresh and try again.")
     }
   }, [bundleUrl, mint])
+
+  // Recover from a grant that lapsed WHILE the bundle was already exposed (the
+  // real prod gap): after the initial mint→preflight cycle settles, nothing was
+  // re-checking the grant, so once the short TTL elapsed the next iframe asset GET
+  // 401'd with no re-mint until a full manual page reload. This re-runs the
+  // credentialed preflight on demand and, if the grant has lapsed, RESETS the
+  // re-mint budget (a fresh lapse deserves a fresh single cycle — the cap bounds
+  // one cycle, it is not a lifetime kill-switch) and re-mints + forces a reload.
+  const recoverIfLapsed = useCallback(() => {
+    if (!grantedBundleUrl) return
+    void preflightBundle(grantedBundleUrl).then((status) => {
+      if (status !== "unauthorized") return
+      // Fresh lapse → re-arm the bounded cycle and re-mint once.
+      remintAttemptsRef.current = 0
+      notifyAssetError()
+    })
+  }, [grantedBundleUrl, notifyAssetError])
+
+  // RECOVER-ON-VISIBILITY: a backgrounded tab can sit past the grant TTL; when it
+  // comes back to the foreground (visibilitychange → visible, or window focus),
+  // re-check the grant and recover if it lapsed — the user never sees the raw
+  // 401 body, the iframe just silently reloads with a fresh grant. The grant
+  // cookie is HttpOnly, so JS can't read it; the preflight GET is the only way to
+  // observe the 401, exactly as the post-mint preflight does.
+  useEffect(() => {
+    if (!grantedBundleUrl) return
+    const onVisible = () => {
+      if (document.visibilityState === "visible") recoverIfLapsed()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    window.addEventListener("focus", recoverIfLapsed)
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible)
+      window.removeEventListener("focus", recoverIfLapsed)
+    }
+  }, [grantedBundleUrl, recoverIfLapsed])
+
+  // PROACTIVE REFRESH: re-mint on an interval under the grant TTL so the cookie is
+  // refreshed before it can expire. This covers the idle-but-foreground viewer
+  // (no visibility/focus event ever fires), so they never reach the 401 at all.
+  // It re-mints unconditionally (cheap, bounded by the interval) rather than
+  // waiting for a preflight to fail; the bounded post-mint preflight still guards
+  // against a revoked grant. mintingRef inside mint() coalesces any overlap.
+  useEffect(() => {
+    if (!grantedBundleUrl || !bundleUrl) return
+    const id = setInterval(() => {
+      // Renew the cookie silently — no reloadKey bump, so the live iframe is not
+      // reloaded out from under the user (forceReload = false).
+      void mint(bundleUrl, true, false)
+    }, GRANT_REFRESH_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [grantedBundleUrl, bundleUrl, mint])
 
   // Preflight the granted bundle after each (re)mint. A 401-bodied index.html
   // LOADS in the iframe (fires `load`, not `error` — see preflightBundle), so the
