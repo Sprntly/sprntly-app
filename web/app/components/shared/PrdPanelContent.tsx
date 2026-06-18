@@ -150,20 +150,39 @@ function PrototypeSection({ prdId, figmaFileKey, externalGeneratingId }: { prdId
 }
 
 // ── LLM-readable view ─────────────────────────────────────────────────────
-function LlmReadableView({ prd }: { prd: PrdState | null }) {
+export function LlmReadableView({ prd, generating, loading }: { prd: PrdState | null; generating?: boolean; loading?: boolean }) {
   const { showToast } = useNavigation()
 
   if (!prd) {
     return (
       <div className="llm-view-empty">
-        <p>Generate a PRD first — the implementation brief will appear here.</p>
+        {generating ? (
+          <p data-testid="llm-generating"><span className="prd-loader" aria-hidden /> Generating PRD… the implementation brief will appear here.</p>
+        ) : loading ? (
+          <p>Loading PRD…</p>
+        ) : (
+          <p>No PRD yet — generate one and the implementation brief will appear here.</p>
+        )}
       </div>
     )
   }
 
+  const tldr = prd.sections.find((s) => s.type === "prd-tldr")
   const problemSection = prd.sections.find((s) => s.type === "prd-problem")
   const acSection = prd.sections.find((s) => s.type === "prd-acceptance-criteria")
   const dodSection = prd.sections.find((s) => s.type === "prd-dod")
+
+  // Surface only what the PRD actually contains — no fabricated feature blurb,
+  // acceptance criteria, or definition of done. Missing sections get an honest
+  // empty line instead of invented content.
+  const featureText = tldr && tldr.type === "prd-tldr" && tldr.fix ? tldr.fix.trim() : null
+  const whyText =
+    tldr && tldr.type === "prd-tldr" && tldr.problem
+      ? tldr.problem.trim()
+      : problemSection && problemSection.type === "prd-problem" && problemSection.userStory
+        ? problemSection.userStory.trim()
+        : null
+  const mutedStyle = { color: "var(--ink-2)" } as const
 
   return (
     <div className="llm-view">
@@ -205,17 +224,17 @@ function LlmReadableView({ prd }: { prd: PrdState | null }) {
       <div className="llm-section">
         <div className="llm-section-label">FEATURE</div>
         <p className="llm-section-body">
-          Build the <strong>{prd.title}</strong>. It is a guided, inline experience that walks a brand-new user through completing their first task efficiently.
+          Build <strong>{prd.title}</strong>{featureText ? <>. {featureText}</> : "."}
         </p>
       </div>
 
       <div className="llm-section">
         <div className="llm-section-label">WHY WE ARE BUILDING IT</div>
-        <p className="llm-section-body">
-          {problemSection && problemSection.type === "prd-problem" && problemSection.userStory
-            ? problemSection.userStory
-            : `${prd.metaLine} — this feature addresses the core activation problem identified in the brief.`}
-        </p>
+        {whyText ? (
+          <p className="llm-section-body">{whyText}</p>
+        ) : (
+          <p className="llm-section-body" style={mutedStyle}>Not specified in this PRD.</p>
+        )}
       </div>
 
       <div className="llm-section">
@@ -225,13 +244,7 @@ function LlmReadableView({ prd }: { prd: PrdState | null }) {
             {acSection.rows.map((row, i) => <li key={i}>{row.givenWhenThen}</li>)}
           </ul>
         ) : (
-          <ul className="llm-criteria">
-            <li>Renders inline on first relevant event, after onboarding</li>
-            <li>Completes in under 60 seconds for the happy path</li>
-            <li>Skippable from any step; skip event is logged</li>
-            <li>Telemetry: started / step_completed / completed / skipped</li>
-            <li>No regression in existing flows or performance budgets</li>
-          </ul>
+          <p className="llm-section-body" style={mutedStyle}>No acceptance criteria were specified in this PRD.</p>
         )}
       </div>
 
@@ -242,12 +255,7 @@ function LlmReadableView({ prd }: { prd: PrdState | null }) {
             {dodSection.items.map((item, i) => <li key={i}>{item}</li>)}
           </ul>
         ) : (
-          <ul className="llm-criteria">
-            <li>Unit tests cover each step transition and skip path</li>
-            <li>E2E test verifies full happy path in staging</li>
-            <li>Telemetry events verified in Mixpanel dashboard</li>
-            <li>PM sign-off on UX after staging demo</li>
-          </ul>
+          <p className="llm-section-body" style={mutedStyle}>No definition of done was specified in this PRD.</p>
         )}
       </div>
     </div>
@@ -396,7 +404,7 @@ export function PrdPanelContent() {
       </div>
 
       {subTab === "llm" ? (
-        <LlmReadableView prd={prd} />
+        <LlmReadableView prd={prd} generating={content.prdGenerating} loading={prdLoading} />
       ) : (
       <>
       {prd && <PrdPatchBanner prdId={prd.prd_id} />}
