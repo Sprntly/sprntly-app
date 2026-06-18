@@ -3090,6 +3090,22 @@
   color: var(--danger);
 }
 
+/* Bundle-readiness loading overlay — covers the center stage iframe while the
+   bundle is briefly 404ing through the proxy, so the raw error body is never
+   seen. Absolute fill of the position:relative .da-stage, centered spinner + a
+   neutral label. Surface background + muted text only (no new palette). */
+.design-agent-surface .da-bundle-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 14px;
+}
+
 /* ── Pre-gen screen picker — Suggested + alternatives layout ────────────────
  * Styles the screen-disambiguation picker shown before a generation run when
  * the located screen is ambiguous. Leads with a Suggested card (full

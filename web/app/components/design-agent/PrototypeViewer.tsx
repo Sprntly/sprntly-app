@@ -70,6 +70,12 @@ type Props = {
    *  event on a failed top-document (index.html) load; per-subresource 401s on a
    *  same-origin bundle are tester-verified in the browser lane. */
   onAssetError?: () => void
+  /** Bundle-readiness: called on the iframe `onLoad`. A 404-bodied document
+   *  fires `load` (not `error`), so the authed container probes the real status
+   *  here to detect a briefly-unavailable bundle and cover it with a loading
+   *  state instead of the raw 404 body. Absent on the public `/p/<token>` surface
+   *  — that path is unchanged (no probe, no onLoad handler). */
+  onBundleLoad?: () => void
   /** C2b: optional overlay rendered INSIDE `.proto-stage` (which is
    *  position:relative), layered OVER the iframe. The public viewer passes the
    *  mark overlay + pin layer here so marking renders on top of the prototype.
@@ -91,6 +97,7 @@ export function PrototypeViewer({
   headControls,
   stageOverlay,
   onAssetError,
+  onBundleLoad,
 }: Props) {
   // UX-EXPLORE (throwaway — REVERT): controlled when a `platform` prop is given;
   // otherwise own the state locally as before. Either way `platform` below is the
@@ -177,6 +184,10 @@ export function PrototypeViewer({
             // grant lapsed) fires `error`; the authed container re-mints ONCE
             // (bounded). No-op when no handler is wired (public surface).
             onError={onAssetError ? () => onAssetError() : undefined}
+            // A 404-bodied document fires `load`, not `error`; the authed
+            // container probes the real status here to cover a briefly-
+            // unavailable bundle. No-op when no handler is wired (public surface).
+            onLoad={onBundleLoad ? () => onBundleLoad() : undefined}
           />
           {/* C2b: optional marking overlay, layered over the iframe inside the
               position:relative stage. Undefined → nothing (signed-in path). */}
