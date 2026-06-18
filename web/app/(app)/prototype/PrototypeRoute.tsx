@@ -397,7 +397,14 @@ function InTabCanvas({
       iterateError={iterateRun.error}
       iteratePendingQuestion={iterateRun.pendingQuestion}
       onAnswerQuestion={iterateRun.answerQuestion}
-      onSkipQuestion={iterateRun.dismissQuestion}
+      onSkipQuestion={async () => {
+        await iterateRun.dismissQuestion()
+        // Optimistically clear the held row's question too, so the prop-driven
+        // ClarifyingQuestionSurface (which self-gates on `pending_question`) can't
+        // un-suppress and re-render the just-skipped question. No bundle reload:
+        // onProtoChange patches only this field, never bumps bundleReloadNonce.
+        onProtoChange({ ...proto, pending_question: null })
+      }}
       bundleReloadNonce={bundleReloadNonce}
       // Manual "Refresh preview" — reuses the SAME reload signal an iterate-complete
       // uses (the `bundleReloadNonce` bump above), so it cascades to the iframe
