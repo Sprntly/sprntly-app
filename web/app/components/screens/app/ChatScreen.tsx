@@ -978,16 +978,24 @@ export function ChatScreen() {
                 </div>
               )
             })}
+            {/* New-tab button — styled like Chrome's: a small rounded control
+                just to the right of the last tab, vertically centered in the
+                strip, with a subtle circular highlight on hover. */}
             <button
               type="button"
               onClick={startNewThread}
+              aria-label="New chat"
+              title="New chat"
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F1EFEA)" }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent" }}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
-                background: "none", border: "none", cursor: "pointer",
-                width: 32, fontSize: 18, color: "var(--ink-4, #B0AEA6)",
-                flexShrink: 0, marginBottom: -1,
+                width: 28, height: 28, margin: "6px 4px 0 6px", padding: 0,
+                background: "transparent", border: "none", cursor: "pointer",
+                borderRadius: "50%", fontSize: 18, lineHeight: 1,
+                color: "var(--ink-3, #8C8A84)", flexShrink: 0,
+                transition: "background 0.12s",
               }}
-              title="New chat"
             >+</button>
           </div>
 
