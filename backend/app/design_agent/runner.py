@@ -74,6 +74,7 @@ from app.design_agent.storage import read_source_files_for_checkpoint
 from app.design_agent.tools import (
     ToolContext,
     dispatch,
+    normalize_choices,
     tool_definitions_for_mode,
 )
 from app.llm_telemetry import (
@@ -1039,7 +1040,10 @@ async def agent_loop(
                 result = _finish(usage, "awaiting_clarification", iters, start, content, ctx.prototype_id)
                 result.pending_question = {
                     "question": payload.get("question"),
-                    "choices": payload.get("choices"),
+                    # Normalize options to the {label, description?} shape so both
+                    # legacy plain-string choices and the new object form persist
+                    # (and reach the FE) uniformly; missing description -> None.
+                    "choices": normalize_choices(payload.get("choices")),
                     "context": payload.get("context"),
                 }
                 return result

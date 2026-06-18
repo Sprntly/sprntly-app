@@ -258,8 +258,24 @@ CLARIFYING_QUESTION = ToolDef(
             "question": {"type": "string", "description": "The single specific question. One sentence."},
             "choices": {
                 "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional 2-4 options rendered as buttons; omit for free-text.",
+                "items": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "description": "The short option label (1-4 words)."},
+                                "description": {"type": "string", "description": "One-line plain-language explanation of what picking this option does."},
+                            },
+                            "required": ["label"],
+                        },
+                    ],
+                },
+                "description": (
+                    "Optional 2-4 options rendered as buttons; omit for free-text. "
+                    "Prefer objects of {label, description} — a short label plus a one-line "
+                    "description of what the option does. A bare string label is also accepted."
+                ),
             },
             "context": {"type": "string", "description": "Optional 1-2 sentence reason it's ambiguous."},
         },
@@ -711,6 +727,41 @@ async def _exec_read_console(inp: dict, ctx: ToolContext) -> dict:
     return {"entries": [], "note": "No prototype runtime configured (AD20 stub)."}
 
 
+def normalize_choices(choices: Any) -> list[dict] | None:
+    """Normalize clarifying-question options to a list of `{label, description?}`.
+
+    The model may emit each option as a bare string (legacy / forward-compat) OR
+    as a `{label, description}` object. This collapses both to the object shape so
+    the persisted payload + the FE GET response are uniform:
+
+      - "Submit the form"                     -> {"label": "Submit the form", "description": None}
+      - {"label": "Submit", "description": d} -> {"label": "Submit", "description": d}
+      - {"label": "Submit"}                   -> {"label": "Submit", "description": None}
+
+    A missing/empty description round-trips as None (the FE renders label-only) —
+    the option is NEVER dropped and a malformed entry never raises. `None`/absent
+    choices pass through as `None` (free-text question)."""
+    if choices is None:
+        return None
+    if not isinstance(choices, (list, tuple)):
+        return None
+    normalized: list[dict] = []
+    for opt in choices:
+        if isinstance(opt, str):
+            normalized.append({"label": opt, "description": None})
+        elif isinstance(opt, dict):
+            label = opt.get("label")
+            if label is None:
+                # Tolerate a bare description-less / mis-keyed object without dropping it.
+                label = opt.get("value") or opt.get("text") or ""
+            desc = opt.get("description")
+            normalized.append({"label": label, "description": desc if desc else None})
+        else:
+            # Last-resort: coerce an unexpected scalar to a label rather than drop it.
+            normalized.append({"label": str(opt), "description": None})
+    return normalized
+
+
 async def _exec_clarifying_question(inp: dict, ctx: ToolContext) -> dict:
     """Sentinel executor: returns the question payload as the tool_result. The
     RUNNER detects the sentinel by tool NAME (`clarifying_question`) and breaks
@@ -719,11 +770,14 @@ async def _exec_clarifying_question(inp: dict, ctx: ToolContext) -> dict:
     is rarely reached on the loop path; it exists so a direct `dispatch(...)` call
     (and the AD17 dispatch-routes-to-executor non-breakage AC) still resolves to a
     structured payload. The `_sentinel` marker is for traceability only — the
-    loop-break decision keys on the name, not on this return value."""
+    loop-break decision keys on the name, not on this return value.
+
+    Choices are normalized to the `{label, description?}` shape on the way out so
+    both legacy plain-string options and the new object form echo uniformly."""
     return {
         "_sentinel": "clarifying_question",
         "question": inp.get("question"),
-        "choices": inp.get("choices"),
+        "choices": normalize_choices(inp.get("choices")),
         "context": inp.get("context"),
     }
 

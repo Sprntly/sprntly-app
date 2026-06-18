@@ -126,7 +126,7 @@ export function PrototypeViewer({
           <span className="proto-url" data-testid="proto-url">
             {slug}
           </span>
-          {/* UX-EXPLORE (throwaway — REVERT): the toggle is hidden when lifted
+          {/* The toggle is hidden when lifted
               into the control bar (`hideToggle`); otherwise it renders in-frame
               exactly as before for the public viewer + fullscreen overlay. */}
           {!hideToggle && (
