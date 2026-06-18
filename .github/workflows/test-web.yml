@@ -6,10 +6,19 @@ on:
     paths:
       - 'web/**'
       - '.github/workflows/test-web.yml'
+      # The cross-stack contract test (app/lib/__tests__/pipeline-contract.test.ts)
+      # reads these backend templates through the real adapters, so a backend-only
+      # edit that renames/breaks a `:::block` must run the web suite too.
+      - 'backend/data/sprntly_*_template.md'
+      - 'backend/data/sprntly_*_sample.md'
+      - 'backend/skills/prd-author/templates/prd-template.md'
   pull_request:
     paths:
       - 'web/**'
       - '.github/workflows/test-web.yml'
+      - 'backend/data/sprntly_*_template.md'
+      - 'backend/data/sprntly_*_sample.md'
+      - 'backend/skills/prd-author/templates/prd-template.md'
 
 jobs:
   vitest:
