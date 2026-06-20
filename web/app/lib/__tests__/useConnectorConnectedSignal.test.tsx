@@ -6,7 +6,7 @@
 // on unmount.
 import * as React from "react"
 import { cleanup, render } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   CONNECTOR_CHANNEL,
   CONNECTOR_CONNECTED_MESSAGE,
@@ -16,9 +16,40 @@ import { useConnectorConnectedSignal } from "../useConnectorConnectedSignal"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
+// jsdom's real BroadcastChannel delivers cross-instance async + unreliably,
+// which made these tests flake in CI. Stub a synchronous one: postMessage
+// dispatches to OTHER same-name instances' onmessage immediately, matching the
+// spec's "a channel never receives its own posts" semantics.
+class FakeBroadcastChannel {
+  static registry = new Map<string, Set<FakeBroadcastChannel>>()
+  onmessage: ((ev: { data: unknown }) => void) | null = null
+  constructor(public name: string) {
+    const set = FakeBroadcastChannel.registry.get(name) ?? new Set()
+    set.add(this)
+    FakeBroadcastChannel.registry.set(name, set)
+  }
+  postMessage(data: unknown) {
+    for (const ch of FakeBroadcastChannel.registry.get(this.name) ?? []) {
+      if (ch !== this) ch.onmessage?.({ data })
+    }
+  }
+  close() {
+    FakeBroadcastChannel.registry.get(this.name)?.delete(this)
+  }
+  addEventListener() {}
+  removeEventListener() {}
+}
+
+beforeEach(() => {
+  FakeBroadcastChannel.registry.clear()
+  vi.stubGlobal("BroadcastChannel", FakeBroadcastChannel)
+})
+
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  FakeBroadcastChannel.registry.clear()
 })
 
 function Harness({ onConnected }: { onConnected: (p: string) => void }) {

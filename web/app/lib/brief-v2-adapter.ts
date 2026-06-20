@@ -194,13 +194,44 @@ function convergenceRows(insight: Insight): BriefV2Convergence[] {
     }))
 }
 
+// Generous safety cap — well above the typical subtitle+recommendation length.
+// Only engaged to avoid pathological strings; the common case renders in full.
+const BODY_MAX = 900
+
 function bodyFor(insight: Insight): string {
-  const parts = [insight.subtitle?.trim(), insight.recommendation?.trim()].filter(
-    Boolean,
-  )
-  let t = parts.join(" ")
+  const subtitle = insight.subtitle?.trim() || ""
+  const recommendation = insight.recommendation?.trim() || ""
+
+  let t: string
+  if (subtitle && recommendation) {
+    // Clean join: if the subtitle already closes a sentence, a space reads fine;
+    // otherwise use an em-dash so a metrics teaser flows into an imperative
+    // ("…$15k deal stalled — Ship the two…") instead of a bare-space run-on.
+    const endsSentence = /[.!?…:]$/.test(subtitle)
+    const sep = endsSentence ? " " : " — "
+    t = `${subtitle}${sep}${recommendation}`
+  } else {
+    t = subtitle || recommendation
+  }
+
   if (!t.trim()) t = insight.headline?.trim() || insight.title
-  if (t.length > 560) return `${t.slice(0, 557)}…`
+
+  // Never cut mid-word: only truncate pathologically long text, and do so at the
+  // last sentence boundary (preferred) or last whole word under the cap.
+  if (t.length > BODY_MAX) {
+    const head = t.slice(0, BODY_MAX)
+    const lastSentence = Math.max(
+      head.lastIndexOf(". "),
+      head.lastIndexOf("! "),
+      head.lastIndexOf("? "),
+    )
+    if (lastSentence > BODY_MAX * 0.6) {
+      return `${head.slice(0, lastSentence + 1)} …`
+    }
+    const lastSpace = head.lastIndexOf(" ")
+    return `${(lastSpace > 0 ? head.slice(0, lastSpace) : head).trimEnd()}…`
+  }
+
   return t
 }
 

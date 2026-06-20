@@ -193,3 +193,87 @@ describe("briefToBriefV2State", () => {
     expect(out.headline).toBe("Three findings this week")
   })
 })
+
+describe("briefToBriefV2State — card body (bodyFor)", () => {
+  function bodyOf(overrides: Partial<Insight>): string {
+    const out = briefToBriefV2State(
+      makeBrief([
+        makeInsight({ tag: "something_broken", title: "X", ...overrides }),
+      ]),
+    )
+    return out.hero?.body ?? ""
+  }
+
+  it("joins a non-terminated subtitle to the recommendation with an em-dash", () => {
+    const body = bodyOf({
+      subtitle: "$15k deal stalled, root cause deductible step",
+      recommendation: "Ship the two-tap deductible fix this sprint",
+    })
+    expect(body).toBe(
+      "$15k deal stalled, root cause deductible step — " +
+        "Ship the two-tap deductible fix this sprint",
+    )
+    // no bare-space run-on between the teaser and the imperative
+    expect(body).not.toContain("step Ship")
+  })
+
+  it("uses a plain space when the subtitle already ends a sentence", () => {
+    const body = bodyOf({
+      subtitle: "$15k deal stalled at the deductible step.",
+      recommendation: "Ship the two-tap fix.",
+    })
+    expect(body).toBe(
+      "$15k deal stalled at the deductible step. Ship the two-tap fix.",
+    )
+    expect(body).not.toContain(" — ")
+  })
+
+  it("treats a colon-terminated subtitle as already-punctuated (plain space)", () => {
+    const body = bodyOf({
+      subtitle: "Three signals converge on checkout:",
+      recommendation: "Fix the deductible step.",
+    })
+    expect(body).toBe("Three signals converge on checkout: Fix the deductible step.")
+  })
+
+  it("renders a long subtitle+recommendation IN FULL without a mid-word cut", () => {
+    const subtitle =
+      "Checkout abandonment hit 57% at the deductible step, up from 41% last " +
+      "quarter, putting an estimated $2.3M of annualized recurring revenue at " +
+      "risk across 2.3M monthly active users on the flagship account"
+    const recommendation =
+      "Ship the redesigned two-tap deductible flow this sprint and instrument " +
+      "step-level drop-off so the team can confirm recovery within two weeks"
+    const body = bodyOf({ subtitle, recommendation })
+    // Full text present — nothing truncated, no ellipsis in the common case.
+    expect(body).toContain(subtitle)
+    expect(body).toContain(recommendation)
+    expect(body.endsWith("…")).toBe(false)
+    // Does not end on a chopped partial word.
+    expect(body.endsWith("within two weeks")).toBe(true)
+  })
+
+  it("only truncates pathologically long text, and never mid-word", () => {
+    // Build a >900-char body out of whole sentences.
+    const sentence = "The deductible step is the single biggest drop-off point. "
+    const subtitle = sentence.repeat(20).trim() // ~1140 chars, all whole words
+    const body = bodyOf({ subtitle, recommendation: "" })
+    expect(body.length).toBeLessThanOrEqual(902) // cap + trailing " …"
+    expect(body.endsWith("…")).toBe(true)
+    // Truncation lands on a sentence boundary, not mid-word: drop the trailing
+    // " …" and confirm the kept text closes a whole sentence/word.
+    const kept = body.replace(/\s*…$/, "")
+    expect(kept.endsWith("point.")).toBe(true)
+    // And every retained sentence is a complete copy of the source sentence.
+    expect(subtitle.startsWith(kept.replace(/\.$/, "."))).toBe(true)
+  })
+
+  it("falls back to headline then title when subtitle and recommendation are empty", () => {
+    expect(bodyOf({ subtitle: "", recommendation: "", headline: "Hero line" })).toBe(
+      "Hero line",
+    )
+    expect(
+      bodyOf({ subtitle: "", recommendation: "", headline: "", title: "Just a title" }),
+    ).toBe("Just a title")
+  })
+})
