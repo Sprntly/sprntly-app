@@ -49,6 +49,7 @@ from typing import Any
 import sys
 
 from app.config import settings
+from app.design_agent.build_env import scrubbed_node_env
 
 # On Windows, npx/tsc are .cmd batch files. subprocess.run(["npx", ...]) raises
 # FileNotFoundError unless shell=True, because the OS cannot exec a .cmd directly.
@@ -286,6 +287,10 @@ def _vite_build_sync(runtime_root: Path, virtual_fs: dict[str, str]) -> dict[str
                 timeout=timeout_s,
                 check=False,
                 shell=_SHELL,
+                # Secret-free env: the build runs agent-generated (user-influenced)
+                # code, so it must not inherit the backend's secrets. See build_env
+                # and the 2026-06-18 postcss-payload incident.
+                env=scrubbed_node_env(),
             )
         except subprocess.TimeoutExpired as exc:
             raise ViteBuildError(
@@ -342,6 +347,8 @@ def _typecheck_runtime_break(build_path: Path) -> None:
             timeout=_TSC_TIMEOUT_SECONDS,
             check=False,
             shell=_SHELL,
+            # Secret-free env — tsc loads the agent-generated tsconfig/code. See build_env.
+            env=scrubbed_node_env(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         # Fail-open: a tsc tooling problem must not nuke an otherwise-working
