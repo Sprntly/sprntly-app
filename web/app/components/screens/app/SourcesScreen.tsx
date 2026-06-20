@@ -88,12 +88,12 @@ export function SourcesScreen() {
     try {
       await pipelineApi.run(activeCompany)
       showToast(
-        "Pipeline started",
-        `Full pipeline running for ${companyName}: connectors → agents → knowledge graph → brief.`,
+        "Brief generation started",
+        `Analyzing your latest data and sources to generate this week's brief for ${companyName}. We'll let you know when it's ready.`,
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      showToast("Pipeline failed to start", msg)
+      showToast("Couldn't start brief generation", msg)
     } finally {
       setRunningPipeline(false)
     }
@@ -211,9 +211,9 @@ export function SourcesScreen() {
             className="btn btn-secondary"
             onClick={() => void onRunPipeline()}
             disabled={runningPipeline || fileCount === 0}
-            title="Sync connectors, run Marketing + Competitor agents, build Knowledge Graph, then regenerate brief"
+            title="Pull in your latest data and sources, then generate a fresh brief"
           >
-            {runningPipeline ? "Running pipeline…" : "Run pipeline"}
+            {runningPipeline ? "Generating brief…" : "Generate brief"}
           </button>
         </div>
       </div>
