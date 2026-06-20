@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from app.design_agent.autofixer_data import payload_data
+from app.design_agent.build_env import scrubbed_node_env
 
 logger = logging.getLogger(__name__)
 
@@ -63,17 +64,20 @@ def _node_modules_path() -> Path:
 
 
 def _subprocess_env() -> dict[str, str]:
-    """Env for the Node subprocess: NODE_PATH points at the node_modules that
-    holds @babel/parser so `require('@babel/parser')` resolves without a
-    backend-side install. Prepends to any inherited NODE_PATH rather than
-    clobbering it (but keeps DESIGN_AGENT_NODE_PATH first)."""
-    env = dict(os.environ)
+    """Secret-free env for the Node subprocess, with NODE_PATH pointing at the
+    node_modules that holds @babel/parser so `require('@babel/parser')` resolves
+    without a backend-side install. Prepends to any inherited NODE_PATH rather
+    than clobbering it.
+
+    The autofixer runs Node on agent-generated (user-influenced) code, so — like
+    the Vite build — it must NOT inherit the backend's secrets. We build from an
+    allowlisted base (see build_env) instead of `dict(os.environ)`."""
     node_modules = str(_node_modules_path())
-    existing = env.get("NODE_PATH")
-    env["NODE_PATH"] = (
+    existing = os.environ.get("NODE_PATH")
+    node_path = (
         f"{node_modules}{os.pathsep}{existing}" if existing else node_modules
     )
-    return env
+    return scrubbed_node_env({"NODE_PATH": node_path})
 
 
 async def run(file_path: str, content: str, virtual_fs: dict[str, str]) -> dict[str, Any]:
