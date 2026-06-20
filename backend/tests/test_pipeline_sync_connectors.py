@@ -78,3 +78,25 @@ def test_stage_does_not_silently_swallow_typeerror_on_list_connections(caplog):
         or "simulated db arity bug" in str(rec.exc_info)
         for rec in caplog.records
     ), "the underlying error must be logged, not swallowed"
+
+
+def test_stage_handles_non_slack_hubspot_connector_without_crashing():
+    """Regression (prod incident): an ACTIVE connector that isn't Slack/HubSpot
+    (e.g. Figma/GitHub/ClickUp/Drive) hit the `else` branch which used
+    `asyncio.coroutine(lambda: ...)()` — removed in Python 3.11 — raising
+    `module 'asyncio' has no attribute 'coroutine'`. That crashed the WHOLE
+    pipeline instantly, so a brand-new company that connected such a source
+    could never run "Run pipeline" (it just failed every time). The stage must
+    now COMPLETE and report the connector as 'no_sync', not raise.
+    """
+    from app.pipeline import _stage_sync_connectors
+
+    def fake_list(company_id: str):
+        return [{"provider": "figma", "status": "active"}]
+
+    with patch("app.pipeline.company_id_for_slug", return_value="co-new"), \
+         patch("app.pipeline.db.list_connections", side_effect=fake_list):
+        result = asyncio.run(_stage_sync_connectors("gravitios"))
+
+    assert result["status"] == "completed", result
+    assert result["providers"]["figma"]["status"] == "no_sync", result

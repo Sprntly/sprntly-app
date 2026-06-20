@@ -149,7 +149,7 @@ async def _stage_sync_connectors(dataset: str) -> dict[str, Any]:
             tasks.append(_sync_hubspot(dataset))
         else:
             # Other connectors don't have sync-to-corpus yet
-            tasks.append(asyncio.coroutine(lambda: {"status": "no_sync"})())
+            tasks.append(_no_corpus_sync())
 
     task_results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -164,6 +164,18 @@ async def _stage_sync_connectors(dataset: str) -> dict[str, Any]:
         "providers": results,
         "duration_s": round(time.time() - t0, 1),
     }
+
+
+async def _no_corpus_sync() -> dict[str, Any]:
+    """A connector with no corpus-sync support yet — nothing to do.
+
+    Replaces a removed-in-Python-3.11 `asyncio.coroutine(lambda: ...)()` call
+    that raised `module 'asyncio' has no attribute 'coroutine'` and crashed the
+    WHOLE pipeline for any company whose active connector wasn't Slack/HubSpot
+    (e.g. Figma/GitHub/ClickUp/Drive) — so a brand-new company that connected
+    such a source could never run the pipeline.
+    """
+    return {"status": "no_sync"}
 
 
 async def _sync_slack(dataset: str) -> dict[str, Any]:
