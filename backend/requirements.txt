@@ -13,14 +13,16 @@ cryptography==44.0.0
 google-auth==2.36.0
 google-auth-oauthlib==1.2.1
 google-api-python-client==2.154.0
-# 2.31.0: accepts the new sb_secret_/sb_publishable_ API key formats.
+# 2.16.0: accepts the new sb_secret_/sb_publishable_ API key formats.
 # 2.10.0 raised SupabaseException("Invalid API key") on the new keys, blocking
-# rotation off the (compromised) legacy JWT keys. Validated on Py3.11 against the
-# real project: query builder + auth.admin + storage.from_ + rpc all present, and
-# a live select succeeds with an sb_secret_ key. See the 2026-06-18 secret-rotation
-# incident. NOTE: CI mocks Supabase (FakeSupabaseClient), so the runtime lib bump
-# was validated out-of-band, not by pytest.
-supabase==2.31.0
+# rotation off the (compromised) legacy JWT keys. 2.16.0 is the HIGHEST supabase
+# that still resolves against our pinned pydantic==2.9.2 (2.17+ require a newer
+# pydantic). Validated on Py3.11 against the real project: full requirements
+# install (no pydantic conflict), create_client accepts an sb_secret_ key, a live
+# select succeeds, and auth.admin + storage.from_ + rpc are all present.
+# NOTE: CI mocks Supabase (FakeSupabaseClient), so the runtime lib bump was
+# validated out-of-band, not by pytest. See the 2026-06-18 secret-rotation incident.
+supabase==2.16.0
 argon2-cffi==23.1.0
 playwright==1.48.0
 apscheduler>=3.10,<4
