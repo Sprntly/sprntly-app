@@ -88,12 +88,12 @@ export function SourcesScreen() {
     try {
       await pipelineApi.run(activeCompany)
       showToast(
-        "Brief generation started",
-        `Analyzing your latest data and sources to generate this week's brief for ${companyName}. We'll let you know when it's ready.`,
+        "Brief incoming ✨",
+        `Digging through your data to whip up this week's brief for ${companyName} — hang tight, we'll give you a shout when it's ready.`,
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      showToast("Couldn't start brief generation", msg)
+      showToast("Hmm, that didn't take. Mind trying again?", msg)
     } finally {
       setRunningPipeline(false)
     }
@@ -211,9 +211,9 @@ export function SourcesScreen() {
             className="btn btn-secondary"
             onClick={() => void onRunPipeline()}
             disabled={runningPipeline || fileCount === 0}
-            title="Pull in your latest data and sources, then generate a fresh brief"
+            title="Pull in your latest data + sources and whip up a fresh brief"
           >
-            {runningPipeline ? "Generating brief…" : "Generate brief"}
+            {runningPipeline ? "Whipping it up…" : "Whip up a brief"}
           </button>
         </div>
       </div>
