@@ -275,6 +275,17 @@ async def _login(env):
         yield client
 
 
+@pytest.fixture
+def generous_vite_timeout(monkeypatch):
+    """600s headroom for the REAL `vite build` the generation bg-task runs, so a
+    slow-but-valid build finishes on a contended CI runner instead of being
+    SIGKILLed at the prod cap (180s). Pairs with the 600s generation poll below.
+    Prod default untouched; durable fix is a larger runner."""
+    monkeypatch.setattr(
+        _storage_mod.settings, "design_agent_vite_build_timeout_seconds", 600, raising=False
+    )
+
+
 async def _poll_until(client, prototype_id: int, *, terminal: set[str], timeout_s: float):
     """Poll GET /{id} until status ∈ terminal or timeout; return the final row."""
     deadline = time.monotonic() + timeout_s
@@ -642,7 +653,7 @@ def test_llm_telemetry_unchanged():
 
 @pytest.mark.integration
 @_skip_no_toolchain
-async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
+async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog, generous_vite_timeout):
     """The load-bearing P1 gate: POST → poll → ready + bundle_url, and the served
     bundle carries data-anchor-id (AD4 closure through a real `vite build`)."""
     monkeypatch.setattr(
@@ -678,7 +689,7 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
 
             # ── Step 2: Poll GET until ready (real build runs in the bg task).
             row = await _poll_until(
-                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=600
             )
 
     assert row is not None, "generation did not reach a terminal status within 60s"
@@ -730,7 +741,7 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
 
 @pytest.mark.integration
 @_skip_no_toolchain
-async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
+async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog, generous_vite_timeout):
     """Scenario B (P5-10 AC2): a website URL + NO Figma. The P5-01 extractor is
     mocked (no live browser in CI), but the run still flows through the real
     generate route → `infer_scenario_from_inputs` → real `vite build`, proving
@@ -786,7 +797,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
             prototype_id = body["prototype_id"]
 
             row = await _poll_until(
-                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=600
             )
 
     assert row is not None, "generation did not reach a terminal status within 60s"
@@ -832,7 +843,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
 
 @pytest.mark.integration
 @_skip_no_toolchain
-async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
+async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog, generous_vite_timeout):
     """Scenario 0 (P5-10 AC3): no Figma, no website URL, no manual design — the
     generic path. `infer_scenario_from_inputs` returns {'0'}; the run still
     reaches ready with an anchor-id bundle and all three source columns NULL."""
@@ -860,7 +871,7 @@ async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
             prototype_id = body["prototype_id"]
 
             row = await _poll_until(
-                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=600
             )
 
     assert row is not None, "generation did not reach a terminal status within 60s"

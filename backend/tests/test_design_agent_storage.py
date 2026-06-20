@@ -37,6 +37,21 @@ import pytest
 import app.design_agent.storage as storage
 from app.design_agent.storage import TypeCheckError, ViteBuildError
 
+
+@pytest.fixture
+def generous_vite_timeout(monkeypatch):
+    """Give the REAL `vite build` enough headroom to FINISH on a contended CI
+    runner. The build is slow under load (not hung — returncode -9 is the timeout
+    kill while it was still transforming), so the prod cap (180s, #409) and even
+    300s get SIGKILLed on the worst 2-vCPU GitHub runners. 600s lets a slow-but-
+    valid build complete so the lane passes on every PR. Prod default is untouched
+    (its guard test test_default_build_timeout_is_180 stays green); this applies
+    ONLY to the tests that run a real build. Durable fix is a larger runner."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 600, raising=False
+    )
+
+
 # ─── shared helpers ──────────────────────────────────────────────────────────
 
 
@@ -601,7 +616,7 @@ _skip_no_toolchain = pytest.mark.skipif(
 
 @pytest.mark.integration
 @_skip_no_toolchain
-async def test_vite_build_emits_dist_with_index_html_integration():
+async def test_vite_build_emits_dist_with_index_html_integration(generous_vite_timeout):
     out = await storage.vite_build({
         "src/App.tsx": "export default function App(){return <div><button>Submit</button></div>;}",
     })
@@ -612,7 +627,7 @@ async def test_vite_build_emits_dist_with_index_html_integration():
 
 @pytest.mark.integration
 @_skip_no_toolchain
-async def test_vite_build_applies_anchor_id_plugin_integration():
+async def test_vite_build_applies_anchor_id_plugin_integration(generous_vite_timeout):
     """AD4 load-bearing: the P0-02 plugin annotates JSX with an 8-hex anchor id.
 
     After build the attribute lands in the compiled JS chunk (not index.html),
@@ -882,7 +897,7 @@ def test_typecheck_real_tsc_clean_bundle_passes(tmp_path):
 
 @pytest.mark.integration
 @_skip_no_toolchain
-async def test_vite_build_full_path_blocks_runtime_break_integration():
+async def test_vite_build_full_path_blocks_runtime_break_integration(generous_vite_timeout):
     """AC #1 end-to-end: the #20 bundle transpiles under real vite (esbuild does no
     name resolution) but the scoped gate inside _vite_build_sync raises before staging."""
     with pytest.raises(TypeCheckError) as ei:
