@@ -18,7 +18,7 @@
 
 create table if not exists website_analysis_jobs (
     id          bigint generated always as identity primary key,
-    company_id  text not null references companies (id) on delete cascade,
+    company_id  uuid not null references companies (id) on delete cascade,
     url         text not null,
     status      text not null default 'generating'
                 check (status in ('generating', 'ready', 'error')),
