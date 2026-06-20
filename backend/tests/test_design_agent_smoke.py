@@ -102,10 +102,18 @@ ANCHOR_ID_RE = re.compile(r'data-anchor-id["\s:=]+["\'][0-9a-f]{8}')
 _HAS_TOOLCHAIN = (
     _storage_mod._RUNTIME_ROOT / "node_modules"
 ).exists() and shutil.which("npx") is not None
-_skip_no_toolchain = pytest.mark.skipif(
+_skipif_no_toolchain = pytest.mark.skipif(
     not _HAS_TOOLCHAIN,
     reason="prototype-runtime/node_modules or npx absent (dev env not provisioned)",
 )
+
+
+def _skip_no_toolchain(func):
+    """Guard a scenario smoke that runs a REAL vite build (see the matching helper
+    in test_design_agent_storage.py). Applies the `real_build` marker so CI runs
+    these CPU-heavy builds in an isolated sequential step (un-starved → no SIGKILL
+    flake), plus the toolchain skipif for Python-only dev envs."""
+    return pytest.mark.real_build(_skipif_no_toolchain(func))
 
 # SQLite-compatible DDL for the P1-06 prototypes tables (mirrors
 # test_design_agent_routes.py — the fake exercises SQL semantics, not PG DDL).

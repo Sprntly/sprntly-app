@@ -72,12 +72,43 @@ jobs:
       - name: Install @babel/parser for autofixer
         run: npm install --prefix /tmp/babel-deps @babel/parser
 
+      # Cache the prototype-runtime node_modules so the real-build step is ALWAYS
+      # warm (it is symlinked into each build dir by storage._symlink_node_modules,
+      # never `npm install`-ed per build — see test_vite_build_symlinks_node_modules_not_install).
+      # Keyed on the lockfile so a dependency bump busts the cache.
+      - name: Cache prototype-runtime node_modules
+        id: cache-runtime-nm
+        uses: actions/cache@v4
+        with:
+          path: prototype-runtime/node_modules
+          key: prototype-runtime-nm-${{ runner.os }}-node20-${{ hashFiles('prototype-runtime/package-lock.json') }}
+
       - name: Install prototype-runtime node_modules
+        if: steps.cache-runtime-nm.outputs.cache-hit != 'true'
         working-directory: prototype-runtime
         run: npm ci --no-audit --no-fund
 
-      - name: Run pytest (full suite incl. integration)
+      # Step 1 — the bulk of the suite (unit + mock + non-build integration),
+      # EXCLUDING the CPU-heavy real-`vite build`/`tsc` tests. Running these first,
+      # without the real builds competing, keeps both vCPUs free for step 2.
+      - name: Run pytest (full suite, excl. real-build)
         working-directory: backend
         env:
           DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -v -m "not real_build"
+
+      # Step 2 — the real-`vite build`/`tsc` tests, run SEQUENTIALLY on their own.
+      # ROOT-CAUSE FIX for the "vite build timed out" flake: when these ran inside
+      # the full `pytest tests/ -v` they competed with ~3,200 other tests for the
+      # 2-vCPU GitHub runner; a build, starved of CPU, was SIGKILLed at the timeout
+      # (returncode -9 while still transforming) — intermittently, depending on
+      # scheduling. Isolated here, each build runs uncontended (~10-15s locally) so
+      # the lane is deterministic. Coverage is unchanged — these run on EVERY PR,
+      # not quarantined to nightly. The build timeout is pinned generously for CI
+      # (read at call-time by storage._vite_build_sync); prod default stays 180s.
+      - name: Run pytest (real vite build / tsc — isolated, sequential)
+        working-directory: backend
+        env:
+          DESIGN_AGENT_NODE_PATH: /tmp/babel-deps/node_modules
+          DESIGN_AGENT_VITE_BUILD_TIMEOUT_SECONDS: '300'
+        run: python -m pytest tests/ -v -m "real_build"

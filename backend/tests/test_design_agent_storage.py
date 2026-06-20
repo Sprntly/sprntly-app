@@ -608,10 +608,23 @@ async def test_vite_build_raises_when_prototype_runtime_missing(monkeypatch, tmp
 # ─── vite_build REAL build — integration (AC #1, #2, #3) ─────────────────────
 
 _HAS_TOOLCHAIN = (storage._RUNTIME_ROOT / "node_modules").exists() and shutil.which("npx") is not None
-_skip_no_toolchain = pytest.mark.skipif(
+_skipif_no_toolchain = pytest.mark.skipif(
     not _HAS_TOOLCHAIN,
     reason="prototype-runtime/node_modules or npx absent (dev env not provisioned)",
 )
+
+
+def _skip_no_toolchain(func):
+    """Guard a test that spawns a REAL `npx vite`/`npx tsc` subprocess.
+
+    Applies TWO marks: `real_build` (so the CI workflow can run these CPU-heavy
+    real-build tests in their OWN sequential step, isolated from the ~3,200 other
+    tests that would otherwise saturate the 2-vCPU runner and SIGKILL the build —
+    the flake root cause) AND the toolchain skipif (skip cleanly in a Python-only
+    dev env). Coverage is NOT dropped: the main `pytest-integration` step runs
+    `-m 'not real_build'` and a dedicated step runs `-m real_build` — both on every
+    PR. See .github/workflows/test-backend.yml."""
+    return pytest.mark.real_build(_skipif_no_toolchain(func))
 
 
 @pytest.mark.integration
