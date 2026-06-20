@@ -224,6 +224,22 @@ CREATE TABLE ask_jobs (
 );
 CREATE INDEX ask_jobs_company_idx ON ask_jobs (company_id, id DESC);
 
+-- Fire-and-forget onboarding website-analysis job rows (mirrors
+-- 20260618120000_website_analysis_jobs.sql). Status walks generating → ready
+-- (or error); `result` holds the full analyze_website() dict. Per-request +
+-- per-tenant — backs the blur/remount-safe onboarding interstitial.
+CREATE TABLE website_analysis_jobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    url         TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'generating',
+    result      TEXT,
+    error       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX website_analysis_jobs_company_idx ON website_analysis_jobs (company_id, id DESC);
+
 -- slug PRIMARY KEY mirrors the prod UNIQUE on datasets.slug
 -- (20260608160000_datasets_slug_unique.sql); a duplicate INSERT raises
 -- IntegrityError here, which insert_dataset treats as "already exists".

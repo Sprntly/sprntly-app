@@ -298,43 +298,140 @@ def test_route_requires_auth(company_client):
     assert r.status_code == 401
 
 
-def test_route_returns_analysis_for_caller_company(company_client, monkeypatch):
+# The route is now fire-and-forget: POST persists a `generating` job in
+# website_analysis_jobs and (under pytest) runs the worker INLINE, returning
+# {job_id, status}. The full analysis dict is read from
+# GET /v1/onboarding/analyze-website/{job_id} as `result`. The worker calls the
+# same analyze_website pipeline, patched at its source module (the runner imports
+# it from app.onboarding.website_analysis) so we exercise the real job lifecycle.
+def test_route_returns_job_id_and_persists_generating(company_client, monkeypatch):
+    """POST returns {job_id, status} and persists a per-tenant job row."""
     captured = {}
 
     def fake_analyze(company_id, url):
         captured["company_id"] = company_id
         captured["url"] = url
-        return {"ok": True, "url": url, "industry": "B2B SaaS",
+        return {"ok": True, "reason": None, "url": url, "industry": "B2B SaaS",
                 "business_type": "SaaS", "stage": None, "sub_vertical": None,
                 "business_context": "brief", "suggested_metrics": [],
                 "provenance": "p", "business_context_version": 2}
 
-    monkeypatch.setattr("app.routes.onboarding.analyze_website", fake_analyze)
-    r = company_client.post("/v1/onboarding/analyze-website", json={"url": "https://acme.com"})
+    monkeypatch.setattr(
+        "app.website_analysis_job_runner.analyze_website", fake_analyze
+    )
+    r = company_client.post(
+        "/v1/onboarding/analyze-website", json={"url": "https://acme.com"}
+    )
     assert r.status_code == 200
     body = r.json()
-    assert body["ok"] is True
-    assert body["industry"] == "B2B SaaS"
-    # Tenant scoping: analyze_website is called with the CALLER's company_id,
-    # never a client-supplied one.
+    assert isinstance(body["job_id"], int)
+    # Under pytest the worker runs inline, so the row is already ready.
+    assert body["status"] in ("generating", "ready")
+    # Tenant scoping: analyze_website is called with the CALLER's company_id.
     assert captured["company_id"] == _COMPANY_ID
     assert captured["url"] == "https://acme.com"
 
+    from app.db import get_analysis_job
 
-def test_route_degrades_gracefully_with_200(company_client, monkeypatch):
-    """A blocked URL still returns HTTP 200 with ok:false (UI falls back to
-    manual entry rather than handling a request failure)."""
+    row = get_analysis_job(body["job_id"])
+    assert row is not None
+    assert row["company_id"] == _COMPANY_ID
+
+
+def test_route_get_walks_generating_to_ready_with_same_shape(
+    company_client, monkeypatch
+):
+    """The worker fills `result`; GET returns the SAME analyze_website dict the
+    old synchronous POST body carried (so setWebsiteAnalysis(result) is
+    unchanged)."""
+    analysis = {
+        "ok": True, "reason": None, "url": "https://acme.com",
+        "industry": "B2B SaaS", "business_type": "SaaS", "stage": "growth",
+        "sub_vertical": "field-service", "business_context": "brief",
+        "suggested_metrics": [{"metric": "Activation", "description": "first job"}],
+        "provenance": "p", "business_context_version": 3,
+    }
     monkeypatch.setattr(
-        "app.routes.onboarding.analyze_website",
-        lambda cid, url: {"ok": False, "reason": "blocked_url", "url": url,
-                          "industry": None, "business_type": None, "stage": None,
-                          "sub_vertical": None, "business_context": "",
-                          "suggested_metrics": [], "provenance": "blocked_url"},
+        "app.website_analysis_job_runner.analyze_website",
+        lambda cid, url: analysis,
     )
-    r = company_client.post(
+    start = company_client.post(
+        "/v1/onboarding/analyze-website", json={"url": "https://acme.com"}
+    ).json()
+    r = company_client.get(f"/v1/onboarding/analyze-website/{start['job_id']}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ready"
+    assert body["error"] is None
+    # The GET's `result` is the exact analyze_website dict.
+    assert body["result"] == analysis
+
+
+def test_route_degrades_gracefully_with_ok_false(company_client, monkeypatch):
+    """A blocked URL still resolves to a ready job carrying ok:false (UI falls
+    back to manual entry rather than handling a request failure)."""
+    degraded = {"ok": False, "reason": "blocked_url", "url": "http://169.254.169.254/",
+                "industry": None, "business_type": None, "stage": None,
+                "sub_vertical": None, "business_context": "",
+                "suggested_metrics": [], "provenance": "blocked_url"}
+    monkeypatch.setattr(
+        "app.website_analysis_job_runner.analyze_website",
+        lambda cid, url: degraded,
+    )
+    start = company_client.post(
         "/v1/onboarding/analyze-website",
         json={"url": "http://169.254.169.254/"},
-    )
+    ).json()
+    r = company_client.get(f"/v1/onboarding/analyze-website/{start['job_id']}")
     assert r.status_code == 200
-    assert r.json()["ok"] is False
-    assert r.json()["reason"] == "blocked_url"
+    body = r.json()
+    assert body["status"] == "ready"
+    assert body["result"]["ok"] is False
+    assert body["result"]["reason"] == "blocked_url"
+
+
+def test_route_worker_failure_marks_error_and_does_not_crash(
+    company_client, monkeypatch
+):
+    """An unexpected failure inside the analysis marks the job `error` (best-
+    effort) and the worker never propagates the exception."""
+    def _boom(company_id, url):  # noqa: ARG001
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr("app.website_analysis_job_runner.analyze_website", _boom)
+    start = company_client.post(
+        "/v1/onboarding/analyze-website", json={"url": "https://acme.com"}
+    ).json()
+    r = company_client.get(f"/v1/onboarding/analyze-website/{start['job_id']}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "error"
+    assert "kaboom" in (body["error"] or "")
+
+
+def test_route_get_nonexistent_returns_404(company_client):
+    r = company_client.get("/v1/onboarding/analyze-website/999999")
+    assert r.status_code == 404
+
+
+def test_route_get_foreign_job_returns_404(company_client, monkeypatch, isolated_settings):
+    """A job belonging to another company is not readable (404, no disclosure)."""
+    monkeypatch.setattr(
+        "app.website_analysis_job_runner.analyze_website",
+        lambda cid, url: {"ok": True, "reason": None, "url": url,
+                          "industry": None, "business_type": None, "stage": None,
+                          "sub_vertical": None, "business_context": "",
+                          "suggested_metrics": [], "provenance": "p"},
+    )
+    start = company_client.post(
+        "/v1/onboarding/analyze-website", json={"url": "https://acme.com"}
+    ).json()
+    # Re-point the job row at a different company → the caller can't read it.
+    isolated_settings["supabase"].table("companies").insert({
+        "id": "other-co", "slug": "other", "display_name": "Other",
+    }).execute()
+    isolated_settings["supabase"].table("website_analysis_jobs").update(
+        {"company_id": "other-co"}
+    ).eq("id", start["job_id"]).execute()
+    r = company_client.get(f"/v1/onboarding/analyze-website/{start['job_id']}")
+    assert r.status_code == 404
