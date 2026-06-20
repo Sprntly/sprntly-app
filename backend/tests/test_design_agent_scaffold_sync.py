@@ -114,10 +114,18 @@ def test_prompt_inventory_subset_of_registry():
 # ─── Layer 2: REAL build (integration; skipped without node) ─────────────────
 
 _NODE_OK = shutil.which("npx") is not None and (_RUNTIME_ROOT / "node_modules").exists()
-_skip_no_node = pytest.mark.skipif(
+_skipif_no_node = pytest.mark.skipif(
     not _NODE_OK,
     reason="needs npx + prototype-runtime/node_modules (real vite build)",
 )
+
+
+def _skip_no_node(func):
+    """Guard a real-`vite build` registry/prototype test. Applies the `real_build`
+    marker so CI runs these in an isolated sequential step (no 3,200-test storm
+    starving the build → no SIGKILL flake), plus the toolchain skipif for
+    Python-only dev envs. See test_design_agent_storage.py for the rationale."""
+    return pytest.mark.real_build(_skipif_no_node(func))
 
 
 @pytest.mark.integration
