@@ -8,7 +8,11 @@ import { describe, expect, it } from "vitest"
 
 import { ConnectorsSettingsView } from "../ConnectorsSettings"
 import { CONNECTOR_CATALOG } from "../../../../../lib/connectorsCatalog"
-import type { ConnectionSummary } from "../../../../../lib/api"
+import {
+  UPLOAD_ACCEPT_HINT,
+  UPLOAD_EXTENSIONS,
+} from "../../../../../lib/sources-helpers"
+import type { ConnectionSummary, SourceFile } from "../../../../../lib/api"
 
 function noop() {}
 function noopUpload() {}
@@ -40,6 +44,7 @@ function render(
     onConnect: noop,
     onConfigure: noop,
     onUpload: noopUpload,
+    files: [],
   }
   return renderToStaticMarkup(
     React.createElement(ConnectorsSettingsView, { ...defaults, ...override }),
@@ -151,19 +156,51 @@ describe("ConnectorsSettingsView — per-category upload strip", () => {
     expect(matches.length).toBe(8)
   })
 
-  it("shows each category's accepted-types hint", () => {
+  it("shows the broad accepted-types hint on every category", () => {
     const html = render()
-    // Match the catalog's uploadAccept strings (HTML-encoded · in markup may
-    // come through as raw · since renderToStaticMarkup outputs UTF-8).
-    expect(html).toContain("PDF · DOCX · CSV · XLSX") // Analytics
-    expect(html).toContain("PDF · DOCX · MD")          // Code + Monitoring
+    // FIX #3: all categories now advertise the same broad shared hint. The `&`
+    // in the hint is HTML-encoded as `&amp;` by renderToStaticMarkup.
+    const encoded = UPLOAD_ACCEPT_HINT.replace(/&/g, "&amp;")
+    const matches = html.split(encoded).length - 1
+    expect(matches).toBe(8)
   })
 
-  it("attaches an accept= attribute mirroring uploadExtensions", () => {
+  it("attaches a broad accept= attribute (same on every category)", () => {
     const html = render()
-    // Analytics: ".pdf,.doc,.docx,.csv,.xlsx"
-    expect(html).toContain('accept=".pdf,.doc,.docx,.csv,.xlsx"')
-    // Code: ".pdf,.doc,.docx,.md"
-    expect(html).toContain('accept=".pdf,.doc,.docx,.md"')
+    // FIX #3: every category accepts the shared broad extension list.
+    const accept = UPLOAD_EXTENSIONS.join(",")
+    const matches = html.match(
+      new RegExp(`accept="${accept.replace(/\./g, "\\.")}"`, "g"),
+    ) ?? []
+    expect(matches.length).toBe(8)
+  })
+})
+
+describe("ConnectorsSettingsView — uploaded files list (FIX #1)", () => {
+  function sourceFile(filename: string, kind = "pdf"): SourceFile {
+    return {
+      filename,
+      kind,
+      size_bytes: 2048,
+      md_chars: 100,
+      added_at: "2026-06-01T10:00:00Z",
+    }
+  }
+
+  it("renders nothing when there are no uploaded files", () => {
+    expect(render({ files: [] })).not.toContain("Uploaded files")
+  })
+
+  it("renders a single company-wide list when files exist", () => {
+    const html = render({
+      files: [sourceFile("q2-metrics.pdf"), sourceFile("notes.txt", "txt")],
+    })
+    expect(html).toContain("Uploaded files")
+    expect(html).toContain("across all categories")
+    expect(html).toContain("q2-metrics.pdf")
+    expect(html).toContain("notes.txt")
+    // One shared list, not one per category.
+    const lists = html.match(/class="src-list"/g) ?? []
+    expect(lists.length).toBe(1)
   })
 })
