@@ -11,6 +11,7 @@ import {
 } from "react"
 import type { Session, User } from "@supabase/supabase-js"
 import { authCallbackUrl } from "./supabase/client"
+import { normalizeEmail } from "./auth-validation"
 import { setAccessTokenProvider } from "./api"
 import {
   getSupabase,
@@ -116,7 +117,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signInWithPassword = useCallback(async (email: string, password: string) => {
     const supabase = getSupabase()
     const { error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
+      email: normalizeEmail(email),
       password,
     })
     if (error) throw error
@@ -135,7 +136,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (input: SignUpInput): Promise<SignUpResult> => {
       const supabase = getSupabase()
       const { data, error } = await supabase.auth.signUp({
-        email: input.email.trim(),
+        email: normalizeEmail(input.email),
         password: input.password,
         options: {
           emailRedirectTo: authCallbackUrl(),
@@ -154,7 +155,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const resetPassword = useCallback(async (email: string) => {
     const supabase = getSupabase()
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+    const { error } = await supabase.auth.resetPasswordForEmail(normalizeEmail(email), {
       redirectTo: authCallbackUrl(),
     })
     if (error) throw error
@@ -164,7 +165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const supabase = getSupabase()
     const { error } = await supabase.auth.resend({
       type: "signup",
-      email: email.trim(),
+      email: normalizeEmail(email),
       options: { emailRedirectTo: authCallbackUrl() },
     })
     if (error) throw error
