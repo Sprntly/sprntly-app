@@ -87,6 +87,20 @@ def test_warm_generates_top_n_in_background(warm_spy, monkeypatch):
     assert all(s[3] == prd_runner.PRD_VARIANT for s in warm_spy["started"])
 
 
+def test_default_warm_count_covers_all_three_brief_insights(warm_spy):
+    """With the default prd_warm_count (3 = the brief's MAX_INSIGHTS), every one
+    of the brief's 3 points gets its PRD auto-generated — no monkeypatch, so
+    this also pins the default-on behavior."""
+    assert prd_runner.settings.prd_warm_count >= 3
+    insights = [_insight("a", 0.4), _insight("hero", 0.2, headline=True), _insight("c", 0.9)]
+
+    asyncio.run(warm_prds_for_brief(_brief(insights)))
+
+    # All 3 insight indices warmed (order: hero first, then by confidence).
+    assert sorted(g[1] for g in warm_spy["generated"]) == [0, 1, 2]
+    assert all(g[2] is True for g in warm_spy["generated"])
+
+
 def test_warm_skips_existing_prds(warm_spy, monkeypatch):
     monkeypatch.setattr(prd_runner.settings, "prd_warm_count", 2)
     insights = [_insight("hero", 0.9, headline=True), _insight("b", 0.5)]

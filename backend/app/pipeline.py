@@ -316,6 +316,15 @@ async def _stage_brief_generation(dataset: str) -> dict[str, Any]:
                 "engine": "synthesis",
                 "duration_s": round(time.time() - t0, 1),
             }
+        # Warm the drill-downs for the fresh brief — same as the regenerate
+        # route + scheduler — so a pipeline-generated brief also auto-generates
+        # its PRDs (prd_warm_count, default 3 = all insights), evidence, and Ask
+        # answers. Fire-and-forget in the background lane; never fails the stage.
+        try:
+            from app.brief_runner import warm_synthesis_drilldowns
+            warm_synthesis_drilldowns(dataset)
+        except Exception:  # noqa: BLE001 — warming is best-effort, never blocks the run
+            logger.exception("pipeline: drill-down warming failed for %s", dataset)
         return {
             "status": "completed",
             "engine": "synthesis",
