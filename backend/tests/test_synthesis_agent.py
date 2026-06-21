@@ -507,7 +507,10 @@ def test_brief_schema_declares_chart_hints():
     insight_schema = synth._BRIEF_SCHEMA["properties"]["insights"]["items"]
     props = insight_schema["properties"]
     assert "chart_hints" in props
-    assert "chart_hints" in insight_schema["required"]
+    # chart_hints is intentionally OPTIONAL (not required) so an insight with no
+    # cleanly-chartable data emits [] instead of being forced to fabricate a
+    # chart — the old forcing function behind unrealistic/mixed-unit charts.
+    assert "chart_hints" not in insight_schema["required"]
     item = props["chart_hints"]["items"]
     # brief-adapter.ts reads h.kind, h.title, and h.data[].{label,value}
     assert {"kind", "title", "data"} <= set(item["properties"])
@@ -515,6 +518,50 @@ def test_brief_schema_declares_chart_hints():
     data_item = item["properties"]["data"]["items"]
     assert set(data_item["properties"]) == {"label", "value"}
     assert data_item["properties"]["value"]["type"] == "number"
+
+
+def test_system_prompt_forbids_mixed_unit_and_filler_charts():
+    """The chart rule must steer the model away from the unrealistic charts we
+    saw in prod: mixed-unit charts and trivial/filler ones."""
+    from app.synthesis import agent as synth
+
+    sys = synth._SYSTEM.lower()
+    assert "one unit per chart" in sys
+    assert "never mix units" in sys
+    assert "not trivial" in sys
+    # grounding requirement preserved
+    assert "never invent" in sys
+
+
+def test_sanitize_chart_hints_drops_junk_keeps_real():
+    """Deterministic backstop: empty/single-point/all-equal bar-line-pie charts
+    and non-numeric data are dropped; real multi-point charts and stat tiles
+    survive — so only sensible graphs reach the brief."""
+    from app.synthesis.agent import _sanitize_chart_hints
+
+    insights = [{
+        "chart_hints": [
+            # KEEP: real 2-point comparison
+            {"kind": "bar", "title": "ok", "data": [
+                {"label": "Android", "value": 63.5}, {"label": "iOS", "value": 88.0}]},
+            # KEEP: stat with a single standalone number
+            {"kind": "stat", "title": "ok", "data": [{"label": "sources", "value": 3}]},
+            # DROP: single-point bar (nothing to compare)
+            {"kind": "bar", "title": "junk", "data": [{"label": "x", "value": 1}]},
+            # DROP: all-equal flags
+            {"kind": "bar", "title": "junk", "data": [
+                {"label": "a", "value": 1}, {"label": "b", "value": 1}, {"label": "c", "value": 1}]},
+            # DROP: empty data
+            {"kind": "pie", "title": "junk", "data": []},
+            # DROP: non-numeric value
+            {"kind": "bar", "title": "junk", "data": [
+                {"label": "a", "value": "lots"}, {"label": "b", "value": 2}]},
+        ]
+    }]
+    _sanitize_chart_hints(insights)
+    kept = insights[0]["chart_hints"]
+    assert [h["kind"] for h in kept] == ["bar", "stat"]
+    assert all(h["title"] == "ok" for h in kept)
 
 
 def test_run_synthesis_persists_chart_hints(facade, isolated_settings):
