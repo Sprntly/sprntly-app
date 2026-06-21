@@ -4,6 +4,41 @@
  * Library involved).
  */
 
+/**
+ * Broad set of file extensions the upload UIs (Sources screen + connector
+ * portal) advertise via the `<input accept>` attribute. The backend accepts
+ * any file type, so this is a generous UX hint covering docs, sheets, slides,
+ * PDFs, plus common text/data formats — not a hard gate. Shared so the Sources
+ * screen and every connector category stay in sync.
+ */
+export const UPLOAD_EXTENSIONS = [
+  ".txt",
+  ".md",
+  ".markdown",
+  ".csv",
+  ".tsv",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".rtf",
+  ".odt",
+  ".xls",
+  ".xlsx",
+  ".ods",
+  ".ppt",
+  ".pptx",
+  ".html",
+  ".htm",
+  ".log",
+  ".zip",
+]
+
+/** Human-readable hint describing the broadly-accepted upload formats. */
+export const UPLOAD_ACCEPT_HINT = "Docs, sheets, slides, PDFs, text & data files"
+
 /** Format a byte count as a short human string ("12 B", "234 KB", "1.4 MB"). */
 export function humanizeBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—"

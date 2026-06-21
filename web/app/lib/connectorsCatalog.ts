@@ -10,14 +10,15 @@
  * Connection state is fetched separately from `GET /v1/connectors`.
  */
 import type { ConnectorCategoryRow } from "../types/content"
+import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 
 export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "analytics",
     title: "Analytics",
     subLabel: "required",
-    uploadAccept: "PDF · DOCX · CSV · XLSX",
-    uploadExtensions: [".pdf", ".doc", ".docx", ".csv", ".xlsx"],
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       { id: "mixpanel",         name: "Mixpanel",         logo: "M", logoText: "M", logoColor: "#7856FF", oauth: false },
       { id: "amplitude",        name: "Amplitude",        logo: "A", logoText: "A", logoColor: "#1A6CFF", oauth: false },
@@ -29,8 +30,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "pm",
     title: "Project Management",
-    uploadAccept: "PDF · PPT · DOCX",
-    uploadExtensions: [".pdf", ".ppt", ".pptx", ".doc", ".docx"],
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", oauth: false },
       { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", oauth: false },
@@ -46,8 +47,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "voice",
     title: "Customer Voice & Support",
-    uploadAccept: "PDF · DOCX · TXT",
-    uploadExtensions: [".pdf", ".doc", ".docx", ".txt"],
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", oauth: false },
       { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", oauth: false },
@@ -60,8 +61,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "revenue",
     title: "Revenue",
-    uploadAccept: "PDF · DOCX · PPT · XLSX",
-    uploadExtensions: [".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xlsx"],
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       { id: "stripe",     name: "Stripe",     logo: "S", logoText: "S", logoColor: "#635BFF", oauth: false },
       { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false },
@@ -71,8 +72,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "code",
     title: "Code",
-    uploadAccept: "PDF · DOCX · MD",
-    uploadExtensions: [".pdf", ".doc", ".docx", ".md"],
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", oauth: true },
       { id: "gitlab",    name: "GitLab",    logo: "G", logoText: "G", logoColor: "#FC6D26", oauth: false },
@@ -83,8 +84,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     key: "monitoring",
     title: "Monitoring & Reliability",
     subLabel: "powers On-Call Agent",
-    uploadAccept: "PDF · DOCX · MD",
-    uploadExtensions: [".pdf", ".doc", ".docx", ".md"],
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       { id: "sentry",    name: "Sentry",    logo: "S", logoText: "S", logoColor: "#362D59", oauth: false },
       { id: "datadog",   name: "Datadog",   logo: "D", logoText: "D", logoColor: "#632CA6", oauth: false },
@@ -95,8 +96,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "design",
     title: "Design",
-    uploadAccept: "PDF · DOCX · PNG · JPG",
-    uploadExtensions: [".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg"],
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       // Figma is OAuth-only. The legacy PAT connect path was removed entirely
       // (no figma_pat module, no /figma/pat route) — Figma's app review requires
@@ -108,8 +109,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "comms",
     title: "Communication",
-    uploadAccept: "PDF · DOCX · TXT",
-    uploadExtensions: [".pdf", ".doc", ".docx", ".txt"],
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
       // (Slack Marketplace requires OAuth install, not a pasted bot token).

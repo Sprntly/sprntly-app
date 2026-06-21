@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useContent } from "../../../../context/ContentContext"
+import { useNavigation } from "../../../../context/NavigationContext"
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_IDS_WITH_OAUTH,
@@ -23,11 +24,19 @@ import {
 import {
   companiesApi,
   connectorsApi,
+  sourcesApi,
   type ConnectionSummary,
+  type SourceFile,
 } from "../../../../lib/api"
 import {
   getConnectorRowState,
 } from "../../../../lib/connectorRowState"
+import {
+  formatRelativeDate,
+  humanizeBytes,
+  iconForKind,
+  truncateFilename,
+} from "../../../../lib/sources-helpers"
 import type {
   ConnectorCategoryRow,
   ConnectorItemRow,
@@ -66,6 +75,12 @@ export type ConnectorsSettingsViewProps = {
   onConfigure: (providerId: string) => void
   /** Fired when a category's upload strip receives one or more files. */
   onUpload: (categoryKey: string, files: FileList) => void
+  /**
+   * All files uploaded to the active company. The backend stores uploads at
+   * the company level with no per-category attribution, so this is a single
+   * company-wide list rendered once (not filtered per category).
+   */
+  files: SourceFile[]
 }
 
 export function ConnectorsSettingsView({
@@ -76,6 +91,7 @@ export function ConnectorsSettingsView({
   onConnect,
   onConfigure,
   onUpload,
+  files,
 }: ConnectorsSettingsViewProps) {
   return (
     <div className="set-pane sp-connectors">
@@ -165,6 +181,36 @@ export function ConnectorsSettingsView({
           </label>
         </div>
       ))}
+
+      {files.length > 0 ? (
+        <div className="set-block sp-conn-files">
+          <div className="set-block-h">
+            <div className="set-block-t">
+              Uploaded files
+              <span className="set-block-s-inline">
+                {"  ·  "}
+                {files.length} file{files.length === 1 ? "" : "s"} across all
+                categories
+              </span>
+            </div>
+          </div>
+          <ul className="src-list">
+            {files.map((f) => (
+              <li key={f.filename} className="src-row">
+                <span className="src-row-icon" aria-hidden>
+                  {iconForKind(f.kind)}
+                </span>
+                <span className="src-row-name" title={f.filename}>
+                  {truncateFilename(f.filename, 40)}
+                </span>
+                <span className="src-kind-chip">{f.kind.toUpperCase()}</span>
+                <span className="src-meta">{humanizeBytes(f.size_bytes)}</span>
+                <span className="src-meta">{formatRelativeDate(f.added_at)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -174,8 +220,10 @@ export function ConnectorsSettingsView({
 export function ConnectorsSettings() {
   const { activeCompany } = useCompany()
   const { setContent } = useContent()
+  const { showToast } = useNavigation()
 
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
+  const [files, setFiles] = useState<SourceFile[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [configuringProviderId, setConfiguringProviderId] = useState<
@@ -213,6 +261,27 @@ export function ConnectorsSettings() {
     setLoading(true)
     void reload()
   }, [reload])
+
+  // Company-wide uploaded-files list shown in the connectors pane. The backend
+  // stores uploads at the company level with no per-category attribution, so
+  // this is one shared list (mirrors SourcesScreen.reloadFiles).
+  const reloadFiles = useCallback(async () => {
+    if (!activeCompany) {
+      setFiles([])
+      return
+    }
+    try {
+      const r = await sourcesApi.list(activeCompany)
+      setFiles(r.files)
+    } catch {
+      // Non-fatal: the connectors grid still works without the file list.
+      setFiles([])
+    }
+  }, [activeCompany])
+
+  useEffect(() => {
+    void reloadFiles()
+  }, [reloadFiles])
 
   // The OAuth tab signals back via BroadcastChannel / localStorage the moment
   // a connector connects (see /connectors/return), so the just-connected row
@@ -304,12 +373,27 @@ export function ConnectorsSettings() {
   }, [])
 
   const onUpload = useCallback(
-    async (categoryKey: string, files: FileList) => {
+    async (categoryKey: string, picked: FileList) => {
+      const list = Array.from(picked)
+      if (list.length === 0) return
       try {
-        await companiesApi.uploadFiles(activeCompany, Array.from(files))
-        // No toast wiring in this commit — the user sees the file picker
-        // close and (later) the file appear in /sources. Real success/
-        // error toasts ride on top of the future shared toast system.
+        const r = await companiesApi.uploadFiles(activeCompany, list)
+        // Refresh the company-wide uploaded-files list so the new file shows
+        // up in the connectors pane immediately.
+        await reloadFiles()
+        if (r.ingested.length > 0) {
+          const title =
+            r.ingested.length === 1
+              ? `${r.ingested[0].filename} uploaded`
+              : `${r.ingested.length} files uploaded`
+          showToast(title, "Added to your sources.")
+        }
+        if (r.errors.length > 0) {
+          showToast(
+            "Some files failed",
+            r.errors.map((e) => `${e.filename}: ${e.error}`).join("; "),
+          )
+        }
       } catch (e) {
         if (typeof window !== "undefined") {
           window.console.error(
@@ -318,9 +402,11 @@ export function ConnectorsSettings() {
             e,
           )
         }
+        const msg = e instanceof Error ? e.message : String(e)
+        showToast("Upload failed", msg)
       }
     },
-    [activeCompany],
+    [activeCompany, reloadFiles, showToast],
   )
 
   const configuringConnection =
@@ -338,6 +424,7 @@ export function ConnectorsSettings() {
         onConnect={onConnect}
         onConfigure={onConfigure}
         onUpload={onUpload}
+        files={files}
       />
       <ConfigureConnectorDrawer
         providerId={configuringProviderId}

@@ -17,11 +17,11 @@ import {
   humanizeBytes,
   iconForKind,
   truncateFilename,
+  UPLOAD_ACCEPT_HINT,
+  UPLOAD_EXTENSIONS,
 } from "../../../lib/sources-helpers"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
-
-const SUPPORTED_EXT = [".doc", ".docx", ".xlsx", ".csv", ".pdf", ".txt", ".md", ".zip"]
 
 export function SourcesScreen() {
   const { activeCompany } = useCompany()
@@ -275,14 +275,14 @@ export function SourcesScreen() {
           ref={fileInputRef}
           type="file"
           multiple
-          accept={SUPPORTED_EXT.join(",")}
+          accept={UPLOAD_EXTENSIONS.join(",")}
           onChange={(e) => void onUploadFiles(e.target.files)}
           disabled={uploading}
         />
         <span>
           {uploading
             ? "Uploading…"
-            : "Click to choose files or drag-and-drop (.doc, .docx, .xlsx, .csv, .pdf, .txt, .md, or a .zip containing any files)"}
+            : `Click to choose files or drag-and-drop — ${UPLOAD_ACCEPT_HINT} (or a .zip containing any files)`}
         </span>
       </label>
 
