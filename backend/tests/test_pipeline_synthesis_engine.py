@@ -74,7 +74,8 @@ def test_stage_brief_calls_generate_brief_for():
     seen: list[str] = []
 
     with patch("app.synthesis_brief.generate_brief_for",
-               side_effect=lambda d: seen.append(d) or {"summary_headline": "ok"}) as gen:
+               side_effect=lambda d: seen.append(d) or {"summary_headline": "ok"}) as gen, \
+         patch("app.brief_runner.warm_synthesis_drilldowns"):
         result = asyncio.run(pipeline_mod._stage_brief_generation("acme"))
 
     gen.assert_called_once_with("acme")
@@ -82,6 +83,32 @@ def test_stage_brief_calls_generate_brief_for():
     assert result["status"] == "completed"
     assert result["engine"] == "synthesis"
     assert "duration_s" in result
+
+
+def test_stage_brief_warms_drilldowns_after_success():
+    """A pipeline-generated brief must auto-warm its drill-downs (PRDs for all 3
+    insights + evidence + Ask) — same as the regenerate route — so the
+    "Run pipeline" flow also auto-generates the brief's PRDs."""
+    with patch("app.synthesis_brief.generate_brief_for",
+               return_value={"summary_headline": "ok"}), \
+         patch("app.brief_runner.warm_synthesis_drilldowns") as warm:
+        result = asyncio.run(pipeline_mod._stage_brief_generation("acme"))
+
+    assert result["status"] == "completed"
+    warm.assert_called_once_with("acme")
+
+
+def test_stage_brief_does_not_warm_on_empty_kg():
+    """No brief → no warming (don't warm a brief that wasn't generated)."""
+    from app.synthesis.agent import EmptyKnowledgeGraphError
+
+    with patch("app.synthesis_brief.generate_brief_for",
+               side_effect=EmptyKnowledgeGraphError("empty")), \
+         patch("app.brief_runner.warm_synthesis_drilldowns") as warm:
+        result = asyncio.run(pipeline_mod._stage_brief_generation("acme"))
+
+    assert result["status"] == "skipped"
+    warm.assert_not_called()
 
 
 def test_stage_brief_empty_kg_maps_to_skipped():

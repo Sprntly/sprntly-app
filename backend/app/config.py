@@ -70,10 +70,12 @@ class Settings(BaseSettings):
     # deploy and a reloaded Settings singleton in tests stays honest.
     # Env-overridable via DESIGN_AGENT_WORKER_ENABLED.
     design_agent_worker_enabled: bool = False
-    # How many of a fresh brief's top insights get their PRD pre-warmed after
-    # brief generation (hero first, then confidence). Warm calls run in the
-    # LLM gate's background lane so they never delay a user's click. 0 disables.
-    prd_warm_count: int = 2
+    # How many of a fresh brief's top insights get their PRD auto-generated
+    # after brief generation (hero first, then confidence). Default 3 = every
+    # insight in the brief (the brief surfaces MAX_INSIGHTS=3), so all three
+    # points get a PRD automatically. Warm calls run in the LLM gate's
+    # background lane so they never delay a user's click. 0 disables.
+    prd_warm_count: int = 3
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 
