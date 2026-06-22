@@ -145,9 +145,9 @@ describe("Metrics (container) — consolidated metrics", () => {
   it("custom add then delete works, and deleting to empty shows the targets empty state", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        // no suggestions → start empty
-        workspace: makeWorkspace({ onboarding_step: 2 }),
-        websiteAnalysis: makeAnalysis({ suggested_metrics: [] }),
+        // no suggestions + a business type without curated defaults → start empty
+        workspace: makeWorkspace({ onboarding_step: 2, business_type: "Consumer" }),
+        websiteAnalysis: makeAnalysis({ business_type: "Consumer", suggested_metrics: [] }),
       }),
     )
     const { container } = render(React.createElement(Metrics))
@@ -224,9 +224,9 @@ describe("Metrics (container) — consolidated metrics", () => {
   it("adds a custom metric via Add your own (appended as a new tree target)", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        // no suggestions → start from an empty supporting list
-        workspace: makeWorkspace({ onboarding_step: 2 }),
-        websiteAnalysis: makeAnalysis({ suggested_metrics: [] }),
+        // no suggestions + a business type without curated defaults → start empty
+        workspace: makeWorkspace({ onboarding_step: 2, business_type: "Consumer" }),
+        websiteAnalysis: makeAnalysis({ business_type: "Consumer", suggested_metrics: [] }),
       }),
     )
     const { container } = render(React.createElement(Metrics))
@@ -263,7 +263,7 @@ describe("Metrics (container) — consolidated metrics", () => {
     const ns = document.querySelector(
       'input[placeholder="The one metric that best captures product value"]',
     ) as HTMLInputElement
-    fireEvent.change(ns, { target: { value: "Net revenue retention" } })
+    fireEvent.change(ns, { target: { value: "Incremental revenue" } })
 
     // The 2 suggested metrics are pre-seeded; delete one so we persist exactly
     // the post-edit set (the remaining "Active connected accounts").
@@ -301,12 +301,14 @@ describe("Metrics (container) — consolidated metrics", () => {
   it("works on the graceful-degrade path (analysis ok:false → manual entry)", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: null }),
+        // business_type Consumer (no curated defaults) so the empty manual
+        // fallback shows; the SaaS-default seeding only applies to SaaS.
+        workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: "Consumer" }),
         websiteAnalysis: makeAnalysis({
           ok: false,
           reason: "blocked_url",
           industry: null,
-          business_type: null,
+          business_type: "Consumer",
           business_context: "",
           suggested_metrics: [],
         }),
@@ -320,6 +322,50 @@ describe("Metrics (container) — consolidated metrics", () => {
     ) as HTMLSelectElement
     expect(industrySel).not.toBeNull()
     expect(industrySel.disabled).toBe(false)
+  })
+
+  it("renders each seeded goal with a green selected state (.sel) that can be toggled off", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 2 }),
+        websiteAnalysis: makeAnalysis(),
+      }),
+    )
+    const { container } = render(React.createElement(Metrics))
+    const targets = container.querySelectorAll(".mt-target")
+    expect(targets.length).toBe(2)
+    // every selected goal carries the green selected state
+    targets.forEach((t) => {
+      expect(t.classList.contains("sel")).toBe(true)
+      expect(t.getAttribute("aria-selected")).toBe("true")
+    })
+    // toggling off (delete) removes the selected item
+    const del = container.querySelector(
+      '.mt-target[data-metric="Reconciled volume"] .mt-target-del',
+    ) as HTMLButtonElement
+    fireEvent.click(del)
+    expect(
+      container.querySelector('.mt-target[data-metric="Reconciled volume"]'),
+    ).toBeNull()
+  })
+
+  it("seeds the SaaS default metrics when the analysis returned no suggestions", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        // business_type SaaS, no saved kpi_tree metrics
+        workspace: makeWorkspace({ onboarding_step: 2, business_type: "SaaS" }),
+        websiteAnalysis: makeAnalysis({ business_type: "SaaS", suggested_metrics: [] }),
+      }),
+    )
+    const { container } = render(React.createElement(Metrics))
+    const names = Array.from(container.querySelectorAll(".mt-target")).map(
+      (t) => t.getAttribute("data-metric"),
+    )
+    expect(names).toEqual([
+      "Incremental revenue",
+      "Number of new subscribers",
+      "Conversion rate",
+    ])
   })
 
   it("shows the loading shell while the workspace is loading", () => {

@@ -83,6 +83,7 @@ export const INDUSTRIES = [
   "Healthtech",
   "E-commerce",
   "Developer Tools",
+  "Gaming / Entertainment",
   "Other",
 ] as const
 

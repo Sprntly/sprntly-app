@@ -13349,6 +13349,9 @@
     background: var(--accent);
     color: #fff;
     border-color: var(--accent);
+    /* Bolder than the .btn base (500) — the primary onboarding action should
+       read clearly, not light. */
+    font-weight: 700;
   }
 
   .onb-shell .btn-brand:hover {
@@ -13380,6 +13383,8 @@
     background: transparent;
     color: var(--ink-2);
     padding: 10px 14px;
+    /* Skip links were reading too light — bolden them. */
+    font-weight: 600;
   }
 
   .onb-shell .btn-ghost:hover {
@@ -13592,6 +13597,18 @@
     border-radius: 12px;
     background: var(--surface-2);
     animation: mtTargetIn 0.3s ease both;
+  }
+
+  /* A selected goal/metric reads with a clear green selected state. Removing
+     it (the delete control) toggles it back off. */
+  .mt-target.sel {
+    border-color: var(--accent-2);
+    background: var(--accent-muted);
+    box-shadow: 0 0 0 1px var(--accent-2);
+  }
+
+  .mt-target.sel .mt-target-name {
+    color: var(--accent-ink);
   }
 
   @keyframes mtTargetIn {
@@ -13950,6 +13967,8 @@
     border: 0;
     padding: 0;
     font: inherit;
+    /* Bolden the skip affordance — it was reading too light. */
+    font-weight: 600;
     color: var(--accent-ink);
     cursor: pointer;
     text-decoration: underline;

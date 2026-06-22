@@ -205,7 +205,8 @@ export async function createWorkspace(input: {
   productWebsite?: string | null
   /** Optional on create — Claude infers it from the website; confirmed later. */
   industry?: string | null
-  stage: string
+  /** No longer collected in onboarding — captured later via business context. */
+  stage?: string | null
   /** Optional on create — Claude infers it from the website; confirmed later. */
   businessType?: string | null
   teamSize?: number | null
@@ -229,7 +230,7 @@ export async function createWorkspace(input: {
         slug: trySlug,
         display_name: input.companyName.trim(),
         industry: input.industry ?? null,
-        stage: input.stage,
+        stage: input.stage ?? null,
         business_type: input.businessType ?? null,
         team_size: input.teamSize ?? null,
         engineering_capacity: input.engineeringCapacity ?? null,

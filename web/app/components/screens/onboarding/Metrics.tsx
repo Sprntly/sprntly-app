@@ -48,12 +48,18 @@ const NORTH_STAR_SUGGESTIONS: Record<string, string[]> = {
   Healthtech: [
     "Day-30 active clinicians per deployment",
     "Weekly active clinicians",
-    "Net revenue retention",
+    "Incremental revenue",
   ],
-  "B2B SaaS": ["Net revenue retention", "Weekly active teams", "Activation rate"],
+  "B2B SaaS": ["Incremental revenue", "Weekly active teams", "Activation rate"],
   B2C: ["Day-30 retention", "DAU/MAU ratio", "Conversion rate"],
-  Fintech: ["Transaction volume", "Net revenue retention", "Activated accounts"],
-  default: ["Weekly active users", "Day-30 retention", "Net revenue retention"],
+  Fintech: ["Transaction volume", "Incremental revenue", "Activated accounts"],
+  default: ["Weekly active users", "Day-30 retention", "Incremental revenue"],
+}
+
+// Default suggested supporting metrics by business type, used when the website
+// analysis returned no suggestions. SaaS defaults are product-curated.
+const DEFAULT_METRICS_BY_BUSINESS_TYPE: Record<string, string[]> = {
+  SaaS: ["Incremental revenue", "Number of new subscribers", "Conversion rate"],
 }
 
 export type MetricsSetupViewProps = {
@@ -199,8 +205,9 @@ export function MetricsSetupView({
               {supporting.map((m, i) => (
                 <div
                   key={m.name}
-                  className="mt-target"
+                  className="mt-target sel"
                   data-metric={m.name}
+                  aria-selected="true"
                   style={{ ["--d" as string]: `${0.05 * (i + 1)}s` }}
                 >
                   <button
@@ -375,15 +382,33 @@ export function Metrics() {
   // no suggestions the list stays empty and the tree shows its empty state.
   useEffect(() => {
     if (supportingSeeded.current) return
-    if (suggestedMetrics.length === 0) return
-    supportingSeeded.current = true
-    setSupporting(
-      suggestedMetrics
-        .filter((m) => m.metric)
-        .slice(0, MAX_SUPPORTING)
-        .map((m) => ({ name: m.metric, description: m.description ?? "" })),
-    )
-  }, [suggestedMetrics])
+    if (suggestedMetrics.length > 0) {
+      supportingSeeded.current = true
+      setSupporting(
+        suggestedMetrics
+          .filter((m) => m.metric)
+          .slice(0, MAX_SUPPORTING)
+          .map((m) => ({ name: m.metric, description: m.description ?? "" })),
+      )
+      return
+    }
+    // No analysis suggestions → fall back to the business-type defaults (e.g.
+    // SaaS → Incremental revenue, Number of new subscribers, Conversion rate).
+    // Guarded by the same `supportingSeeded` ref so a user's later edits stick.
+    // Resolve the business type from the saved workspace / analysis (which is
+    // what the dropdown also settles to), not the local state — that local
+    // value starts at BUSINESS_TYPES[0] and is only corrected by an effect, so
+    // reading it here would race the seed and mis-key the defaults.
+    const resolvedBusinessType =
+      workspace?.business_type || websiteAnalysis?.business_type || businessType
+    const defaults = DEFAULT_METRICS_BY_BUSINESS_TYPE[resolvedBusinessType]
+    if (defaults && defaults.length > 0) {
+      supportingSeeded.current = true
+      setSupporting(
+        defaults.slice(0, MAX_SUPPORTING).map((name) => ({ name, description: "" })),
+      )
+    }
+  }, [suggestedMetrics, businessType, workspace?.business_type, websiteAnalysis?.business_type])
   const northStarHints =
     NORTH_STAR_SUGGESTIONS[industry] ?? NORTH_STAR_SUGGESTIONS.default
 
