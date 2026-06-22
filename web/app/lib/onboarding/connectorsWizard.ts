@@ -10,15 +10,28 @@
  * Pure state helpers (no React) so they're unit-testable under the
  * node/View test pattern.
  */
-import { CONNECTOR_CATALOG } from "../connectorsCatalog"
+import { CONNECTOR_CATALOG, connectableCatalog } from "../connectorsCatalog"
 import type { ConnectorCategoryRow } from "../../types/content"
 
 /** The category id that gates Continue — at least one must be connected. */
 export const REQUIRED_CATEGORY_KEY = "analytics"
 
-/** Categories surfaced in the wizard, in catalog order. */
-export function wizardCategories(): ConnectorCategoryRow[] {
-  return CONNECTOR_CATALOG
+/**
+ * Categories surfaced in the onboarding wizard, in catalog order.
+ *
+ * Mirrors Settings → Connectors: only connectors we actually support today
+ * (OAuth or API-key wired, per `isConnectableConnector`) are shown, and any
+ * category that ends up with no supported connector is hidden entirely — so
+ * we never ask the PM to "connect" something they can't yet use (e.g. the
+ * whole Analytics category today, or MS Teams under Communication).
+ *
+ * `alsoKeepIds` (e.g. providers with a live connection) are never hidden even
+ * if not yet wired, and a category kept alive by such a provider is retained.
+ */
+export function wizardCategories(
+  alsoKeepIds: ReadonlySet<string> = new Set(),
+): ConnectorCategoryRow[] {
+  return connectableCatalog(alsoKeepIds)
 }
 
 /** Connector ids belonging to the required (Analytics) category. */

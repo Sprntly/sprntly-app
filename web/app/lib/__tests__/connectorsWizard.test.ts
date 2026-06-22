@@ -13,15 +13,33 @@ import {
   toggleSelection,
   wizardCategories,
 } from "../onboarding/connectorsWizard"
+import { CONNECTOR_CATALOG } from "../connectorsCatalog"
 
 describe("wizard categories", () => {
-  it("exposes the full catalog in order, Analytics first", () => {
+  it("exposes only supported categories, in catalog order", () => {
     const cats = wizardCategories()
     expect(cats.length).toBeGreaterThan(0)
-    expect(cats[0].key).toBe(REQUIRED_CATEGORY_KEY)
+    // Analytics has no supported connector today → hidden from onboarding.
+    expect(cats.map((c) => c.key)).not.toContain(REQUIRED_CATEGORY_KEY)
+    // Project Management leads (its ClickUp is OAuth-wired).
+    expect(cats[0].key).toBe("pm")
   })
 
-  it("requiredCategoryIds returns the Analytics connector ids", () => {
+  it("drops connectors we don't support yet (e.g. Linear, MS Teams)", () => {
+    const ids = wizardCategories().flatMap((c) => c.items.map((i) => i.id))
+    expect(ids).toContain("slack") // supported
+    expect(ids).not.toContain("msteams") // coming soon
+    expect(ids).not.toContain("linear") // coming soon
+  })
+
+  it("keeps a live-but-unwired provider (and its category) visible", () => {
+    const cats = wizardCategories(new Set(["mixpanel"]))
+    const analytics = cats.find((c) => c.key === REQUIRED_CATEGORY_KEY)
+    expect(analytics).toBeTruthy()
+    expect(analytics!.items.map((i) => i.id)).toEqual(["mixpanel"])
+  })
+
+  it("requiredCategoryIds still reflects the raw Analytics category", () => {
     const ids = requiredCategoryIds()
     expect(ids).toContain("mixpanel")
     expect(ids).toContain("amplitude")
@@ -41,7 +59,8 @@ describe("hasRequiredConnector", () => {
 })
 
 describe("step navigation", () => {
-  const last = wizardCategories().length - 1
+  // clampStep/nextStep/isLastCategory index into the full catalog.
+  const last = CONNECTOR_CATALOG.length - 1
   it("clamps below 0 and above last", () => {
     expect(clampStep(-3)).toBe(0)
     expect(clampStep(last + 5)).toBe(last)
@@ -58,7 +77,7 @@ describe("step navigation", () => {
 
 describe("categoryTitle", () => {
   it("decorates the required category", () => {
-    const analytics = wizardCategories()[0]
+    const analytics = { key: "analytics", title: "Analytics", subLabel: "required", items: [] }
     expect(categoryTitle(analytics)).toMatch(/at least one required/i)
   })
   it("appends a sub-label when present and not required", () => {
