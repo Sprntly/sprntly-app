@@ -16,18 +16,17 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
     expect(you.items.map((i) => i.id)).toEqual(["profile", "comms-brief"])
   })
 
-  it("Workspace group contains Product & Category, Goals & metrics, Team & roles", () => {
+  it("Workspace group contains Product & Category, Team & roles", () => {
     const ws = SETTINGS_NAV.find((g) => g.groupLabel === "Workspace")!
     expect(ws.items.map((i) => i.id)).toEqual([
       "product-category",
-      "goals-metrics",
       "team",
     ])
   })
 
-  it("Data & Integrations group contains Connectors and the design source (Prototypes)", () => {
+  it("Data & Integrations group contains only Connectors", () => {
     const dat = SETTINGS_NAV.find((g) => g.groupLabel === "Data & Integrations")!
-    expect(dat.items.map((i) => i.id)).toEqual(["connectors", "design-source"])
+    expect(dat.items.map((i) => i.id)).toEqual(["connectors"])
   })
 
   it("Account group contains Billing and Security", () => {
@@ -42,22 +41,23 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       profile: "Profile",
       "comms-brief": "Comms & Brief",
       "product-category": "Product & Category",
-      "goals-metrics": "Goals & metrics",
       team: "Team & roles",
       connectors: "Connectors",
-      "design-source": "Prototypes",
       billing: "Billing",
       security: "Security",
     })
   })
 
-  it("does not surface dormant ids (strategic, flags) or old ids (workspace, kpi, notifications)", () => {
+  it("does not surface dormant ids (strategic, flags), old ids (workspace, kpi, notifications), or the removed Goals & metrics / Prototypes panes", () => {
     const allIds = SETTINGS_NAV.flatMap((g) => g.items).map((i) => i.id)
     expect(allIds).not.toContain("strategic")
     expect(allIds).not.toContain("flags")
     expect(allIds).not.toContain("workspace")
     expect(allIds).not.toContain("kpi")
     expect(allIds).not.toContain("notifications")
+    // Removed sections: Goals & metrics (KPI tree) and Prototypes (preview).
+    expect(allIds).not.toContain("goals-metrics")
+    expect(allIds).not.toContain("design-source")
   })
 
   it("marks Billing and Security as available stubs (not 'Soon' badge)", () => {
