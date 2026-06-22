@@ -29,6 +29,7 @@ import {
 } from "../../lib/api"
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
+import { ConnectorLogo } from "./ConnectorLogo"
 import { openOauthTab } from "../../lib/connectorsOauth"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
@@ -112,6 +113,7 @@ export function ConnectorConnectModalView({
     >
       <div className="modal modal-md" role="dialog" aria-label={`Connect ${item.name}`}>
         <div className="modal-head">
+          <ConnectorLogo item={item} className="conn-modal-logo" />
           <h2 className="modal-title">
             {isConnected ? `${item.name} connected` : `Connect ${item.name}`}
           </h2>

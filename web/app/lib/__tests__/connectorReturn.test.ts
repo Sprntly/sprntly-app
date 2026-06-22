@@ -5,7 +5,6 @@
 // navigation when close is blocked.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
-  CONNECTOR_CHANNEL,
   CONNECTOR_CONNECTED_MESSAGE,
   CONNECTOR_STORAGE_KEY,
   broadcastConnected,
@@ -80,20 +79,18 @@ describe("writeStorageSignal", () => {
 })
 
 describe("handleConnectorReturn", () => {
-  it("broadcasts, writes storage, and closes the tab", async () => {
+  it("broadcasts, writes storage, and closes the tab", () => {
     const close = vi.spyOn(window, "close").mockImplementation(() => {})
-    const received: unknown[] = []
-    const listener = new BroadcastChannel(CONNECTOR_CHANNEL)
-    listener.onmessage = (ev) => received.push(ev.data)
+    // Assert the broadcast via the post spy rather than relying on real
+    // cross-channel delivery, which is non-deterministic in jsdom and flakes
+    // depending on test-file scheduling (same approach as broadcastConnected).
+    const postSpy = vi.spyOn(BroadcastChannel.prototype, "postMessage")
 
     handleConnectorReturn({ provider: "slack", returnTo: "/onboarding/connectors" })
 
-    await new Promise((r) => setTimeout(r, 0))
-    listener.close()
-
     expect(close).toHaveBeenCalled()
     expect(window.localStorage.getItem(CONNECTOR_STORAGE_KEY)).not.toBeNull()
-    expect(received).toContainEqual({
+    expect(postSpy).toHaveBeenCalledWith({
       type: CONNECTOR_CONNECTED_MESSAGE,
       provider: "slack",
     })

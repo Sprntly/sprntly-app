@@ -28,6 +28,7 @@ import {
 } from "../../lib/api"
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
+import { ConnectorLogo } from "./ConnectorLogo"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
@@ -257,12 +258,7 @@ export function ConfigureConnectorDrawerView({
       >
         <div className="drawer-head">
           <h2 className="drawer-title">
-            <span
-              className="drawer-icon"
-              style={{ background: item.logoColor ?? undefined }}
-            >
-              {item.logoText ?? item.logo}
-            </span>
+            <ConnectorLogo item={item} className="drawer-icon" />
             {item.name}
           </h2>
           <button

@@ -245,12 +245,14 @@ export interface ConnectorItemRow {
   /** Hex brand color for the logo box background (e.g. "#7856FF"). */
   logoColor?: string
   /**
-   * Brand domain (e.g. "slack.com") used to fetch the connector's real
-   * full-color logo via the favicon service. When set, the connector shows
-   * its actual logo on a white tile; if the image fails to load the UI falls
-   * back to the single-letter `logoText` glyph.
+   * Path to the connector's real full-color brand logo, bundled locally
+   * under `web/public/connectors/<id>.svg` (e.g. "/connectors/slack.svg").
+   * When set, the connector renders its actual logo on a white tile; if the
+   * image fails to load the UI falls back to the single-letter `logoText`
+   * glyph. Bundling the SVG locally keeps logos pixel-perfect at any size and
+   * drops the runtime favicon fetch the catalog used previously.
    */
-  logoDomain?: string
+  logoSvg?: string
   /** True if a working OAuth backend exists for this connector. */
   oauth?: boolean
   /**
