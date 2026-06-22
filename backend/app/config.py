@@ -189,6 +189,16 @@ class Settings(BaseSettings):
     # domain; defaults to the verified mail.sprntly.ai sender.
     brief_email_from: str = "Sprntly <briefs@mail.sprntly.ai>"
 
+    # Synthetic sign-in monitor (added after the 2026-06-22 incident where a
+    # rotated/deleted Google OAuth secret silently broke "Sign in with Google"
+    # and no test caught it). Periodically authenticates the Google OAuth client
+    # against Google's token endpoint and alerts if the secret is rejected.
+    # See app/signin_monitor.py.
+    signin_monitor_enabled: bool = True
+    signin_monitor_interval_minutes: int = 15
+    # Where to email the alert on failure (empty => log-only / no email).
+    signin_monitor_alert_email: str = ""
+
     # Which engine produces the weekly brief.
     #   "synthesis" (default) — KG-driven: seed-if-empty → run_synthesis over the
     #                           knowledge graph (kg_signal/kg_entity) → save_brief.
