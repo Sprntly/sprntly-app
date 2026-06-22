@@ -36,12 +36,22 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", oauth: false },
       { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", oauth: false },
       { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoDomain: "clickup.com", oauth: true },
+      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", oauth: false },
+    ],
+  },
+  {
+    // Notion and Google Docs are documentation tools, not project trackers —
+    // they were previously miscategorized under "Project Management".
+    key: "docs",
+    title: "Business documentation",
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
+    items: [
       { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", oauth: false },
       // Backend provider is `google_drive` (existing OAuth + sync). Surface
       // it as "Google Docs" per design — the connector pulls Google Docs
       // out of Drive folders, so the label matches user expectation.
       { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoDomain: "docs.google.com", oauth: true },
-      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", oauth: false },
     ],
   },
   {

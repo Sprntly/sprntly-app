@@ -14,6 +14,7 @@ import {
 const EXPECTED_CATEGORIES = [
   "Analytics",
   "Project Management",
+  "Business documentation",
   "Customer Voice & Support",
   "Revenue",
   "Code",
@@ -23,7 +24,7 @@ const EXPECTED_CATEGORIES = [
 ] as const
 
 describe("CONNECTOR_CATALOG — design-3 shape", () => {
-  it("has exactly the 8 design-3 categories, in order", () => {
+  it("has exactly the 9 categories, in order (Business documentation added)", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
@@ -93,10 +94,14 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Project Management: Linear, Jira, ClickUp, Notion, Google Docs, Asana", () => {
+  it("Project Management: Linear, Jira, ClickUp, Asana (Notion + Google Docs moved out)", () => {
     expect(items("Project Management")).toEqual([
-      "Linear", "Jira", "ClickUp", "Notion", "Google Docs", "Asana",
+      "Linear", "Jira", "ClickUp", "Asana",
     ])
+  })
+
+  it("Business documentation: Notion, Google Docs", () => {
+    expect(items("Business documentation")).toEqual(["Notion", "Google Docs"])
   })
 
   it("Customer Voice & Support: Intercom, Zendesk, Fireflies, Gong, Dovetail, Salesforce", () => {
@@ -167,11 +172,22 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
 })
 
 describe("Google Docs uses the existing google_drive OAuth backend", () => {
-  it("the Google Docs row in PM has id 'google_drive' (matches backend provider)", () => {
-    const pm = CONNECTOR_CATALOG.find((c) => c.title === "Project Management")!
-    const gdocs = pm.items.find((i) => i.name === "Google Docs")
+  it("the Google Docs row in Business documentation has id 'google_drive' (matches backend provider)", () => {
+    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Business documentation")!
+    const gdocs = docs.items.find((i) => i.name === "Google Docs")
     expect(gdocs?.id).toBe("google_drive")
     expect(gdocs?.oauth).toBe(true)
+  })
+})
+
+describe("Business documentation category", () => {
+  it("contains Notion + Google Docs and they no longer sit under Project Management", () => {
+    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Business documentation")!
+    expect(docs.items.map((i) => i.id)).toEqual(["notion", "google_drive"])
+    const pm = CONNECTOR_CATALOG.find((c) => c.title === "Project Management")!
+    const pmIds = pm.items.map((i) => i.id)
+    expect(pmIds).not.toContain("notion")
+    expect(pmIds).not.toContain("google_drive")
   })
 })
 
@@ -179,6 +195,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
   it("keeps only the categories that still have a wired connector, in order", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
       "Project Management",
+      "Business documentation",
       "Customer Voice & Support",
       "Revenue",
       "Code",
@@ -211,7 +228,8 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(titles).not.toContain("Monitoring & Reliability")
     const byTitle = (t: string) =>
       connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
-    expect(byTitle("Project Management")).toEqual(["clickup", "google_drive"])
+    expect(byTitle("Project Management")).toEqual(["clickup"])
+    expect(byTitle("Business documentation")).toEqual(["google_drive"])
     expect(byTitle("Code")).toEqual(["github"])
     expect(byTitle("Communication")).toEqual(["slack"])
   })
