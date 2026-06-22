@@ -159,6 +159,24 @@ class TypeCheckRepairExhausted(TypeCheckError):
     route can surface a precise error name in the failed row and the logs."""
 
 
+# Minification-surviving sentinel embedded in the scaffold default App.tsx
+# (prototype-runtime/src/App.tsx). A real generation REPLACES that file, so the
+# token never reaches dist; if it does, the agent never wrote/wired an entry
+# point and the build shipped the scaffold placeholder ("Hi") with the agent's
+# real components tree-shaken out. String-literal tokens survive Vite
+# minification (component identifiers are mangled), so this is the only reliable
+# positive signal that the placeholder survived — name-grep is unusable.
+SCAFFOLD_SENTINEL = "__SPRNTLY_SCAFFOLD_UNRENDERED__"
+
+
+class PlaceholderShippedError(Exception):
+    """The built bundle still renders the scaffold placeholder — the agent's
+    generated UI was never wired into an entry point, so the prototype would ship
+    empty. Raised by `assert_mounts_generated_content`. NOT a ViteBuildError
+    subclass: a placeholder build is green, so it must be caught explicitly at the
+    build seams, not by the generic build-error tuple."""
+
+
 class ThemeBridgeError(RuntimeError):
     """Raised when the built dist/ does not carry the real theme signals.
 
@@ -436,6 +454,39 @@ def _read_dist(dist_dir: Path) -> dict[str, str]:
             # binary assets (fonts, images) under a .b64 sentinel key.
             dist_files[f"{rel}.b64"] = base64.b64encode(path.read_bytes()).decode("ascii")
     return dist_files
+
+
+def _concat_dist(dist_files: dict[str, str]) -> str:
+    """Concatenate built dist file contents for substring scanning, decoding the
+    `.b64` binary entries `_read_dist` produces so a token in any file is found."""
+    parts: list[str] = []
+    for key, value in dist_files.items():
+        if key.endswith(".b64"):
+            try:
+                parts.append(base64.b64decode(value).decode("latin-1"))
+            except ValueError:  # incl. binascii.Error (a ValueError subclass)
+                parts.append(value)
+        else:
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def assert_mounts_generated_content(dist_files: dict[str, str]) -> None:
+    """Fail-closed acceptance gate: raise if the built bundle still renders the
+    scaffold placeholder instead of agent-authored UI.
+
+    A generation that writes leaf components but never writes/wires `src/App.tsx`
+    leaves the scaffold default App.tsx in place; Vite tree-shakes the unreferenced
+    leaves out and the build is green, so the prototype would ship the "Hi"
+    placeholder. The scaffold default carries SCAFFOLD_SENTINEL; a real generation
+    replaces that file, so the token is absent from a correctly-wired build. Its
+    presence in dist is the positive signal that the entry was never wired. Purely
+    "did the scaffold default survive" — NOT a richness heuristic, so a small but
+    correctly-wired prototype passes."""
+    if SCAFFOLD_SENTINEL in _concat_dist(dist_files):
+        raise PlaceholderShippedError(
+            "built bundle still renders the scaffold placeholder — entry point not wired"
+        )
 
 
 # ─── Build-repair: bounded unresolved-relative-import repair (P6-07) ─────────

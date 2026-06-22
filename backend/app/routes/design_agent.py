@@ -112,10 +112,12 @@ from app.design_agent.codebase_map.recreate import (
     derive_interactive_scope,
 )
 from app.design_agent.storage import (
+    PlaceholderShippedError,
     ThemeBridgeError,
     TypeCheckError,
     TypeCheckRepairExhausted,
     ViteBuildError,
+    assert_mounts_generated_content,
     authed_bundle_url,
     fresh_bundle_url,
     public_bundle_proxy_url,
@@ -1620,6 +1622,19 @@ async def _run_generation_bg(
 _BUILD_REPAIR_MAX_ITERS = 3
 _BUILD_REPAIR_CAP_USD = 0.10
 
+# Repair directive for the fail-closed acceptance gate: the build was green but the
+# bundle still renders the scaffold placeholder (the agent wrote components but no
+# entry point composes them). Fed to `_build_repair_loop` as the re-entry
+# diagnostics so the agent wires an entry point instead of re-shipping the
+# placeholder. Phrased as a build diagnostic (the loop leads each re-entry with it).
+_ENTRY_POINT_REPAIR_DIRECTIVE = (
+    "The build succeeded but the rendered app is still the empty scaffold "
+    "placeholder: you created components but no entry point renders them. Write "
+    "src/App.tsx (a default-exported component) and src/main.tsx that import and "
+    "render your top-level component, so the app mounts your generated UI instead "
+    "of the placeholder."
+)
+
 
 
 async def _build_repair_loop(
@@ -1666,7 +1681,9 @@ async def _build_repair_loop(
     # The most recent build error across the bounded re-tries. The exhaustion
     # branch reads its TYPE to pick the right recovery (strip-to-green for the
     # import/typecheck class, honest-fail for any other ViteBuildError).
-    last_exc: TypeCheckError | ViteBuildError = TypeCheckError(first_diagnostics)
+    last_exc: TypeCheckError | ViteBuildError | PlaceholderShippedError = TypeCheckError(
+        first_diagnostics
+    )
     for _ in range(_BUILD_REPAIR_MAX_ITERS):
         if repair_cost_usd >= _BUILD_REPAIR_CAP_USD:
             break
@@ -1689,6 +1706,10 @@ async def _build_repair_loop(
             repair_usage.add(result.usage)
         try:
             dist_files, virtual_fs = await vite_build_with_repair(virtual_fs)
+            # Re-assert the acceptance gate each pass: a green rebuild that still
+            # renders the scaffold placeholder (entry never wired) must NOT be
+            # returned as a recovered build — feed the entry-point directive back in.
+            assert_mounts_generated_content(dist_files)
             logger.info(
                 "build_repair_succeeded prototype_id=%s repair_cost_usd=%.4f",
                 prototype_id, repair_cost_usd,
@@ -1699,6 +1720,12 @@ async def _build_repair_loop(
             # agent sees the offending class/import (typecheck symbol OR CSS class).
             last_exc = exc
             diagnostics = str(exc)
+            continue
+        except PlaceholderShippedError as exc:
+            # Green build, but still the placeholder — re-enter with the entry-point
+            # directive (not the generic build headline) so the agent wires an entry.
+            last_exc = exc
+            diagnostics = _ENTRY_POINT_REPAIR_DIRECTIVE
             continue
         # A non-build failure (e.g. a missing runtime/scaffold file) propagates to
         # the caller and fails the row, exactly as a first-build failure of that
@@ -1777,6 +1804,12 @@ async def _stage_complete_run(
     publish_step(prototype_id, VITE_PHASE_STEP)
     try:
         dist_files, repaired_virtual_fs = await vite_build_with_repair(virtual_fs)
+        # Fail-closed acceptance gate: a green build that still renders the scaffold
+        # placeholder (the agent wrote components but never wired an entry point)
+        # must be repaired, never shipped ready. Runs BEFORE the theme/checkpoint
+        # steps so a placeholder bundle never reaches staging. Raises
+        # PlaceholderShippedError → handled below (repair-then-fail).
+        assert_mounts_generated_content(dist_files)
         # Theme-bridge assertion gate (codebase-recreate path only). Runs BEFORE
         # checkpoint creation so a theme-miss fails the row without staging an
         # unstyled bundle. No-op for Scenario A/B blank-canvas runs (None).
@@ -1873,6 +1906,48 @@ async def _stage_complete_run(
                     "design_agent.structural_parity_check_errored prototype_id=%s",
                     prototype_id,
                 )
+    except PlaceholderShippedError as exc:
+        # Green build, but the bundle still renders the scaffold placeholder — the
+        # agent's UI was never wired into an entry point. With agent context
+        # (system_blocks present) re-enter the repair loop with the entry-point
+        # directive: the loop re-asserts this gate each pass and, on exhaustion,
+        # honest-fails (a placeholder is not strip-to-green recoverable). Without
+        # agent context (a direct staging call), fail precisely. NEVER complete a
+        # prototype while the sentinel is present.
+        if system_blocks is None:
+            logger.warning(
+                "placeholder_shipped prototype_id=%s scenario=%s error_class=placeholder_shipped",
+                prototype_id, scenario,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=f"placeholder_shipped: {exc}",
+            )
+            return False
+        try:
+            dist_files, repaired_virtual_fs = await _build_repair_loop(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                virtual_fs=virtual_fs,
+                system_blocks=system_blocks,
+                figma_file_key=figma_file_key,
+                figma_node_id=figma_node_id,
+                scenario=scenario,
+                first_diagnostics=_ENTRY_POINT_REPAIR_DIRECTIVE,
+                repair_usage=repair_usage,
+            )
+        except (PlaceholderShippedError, ViteBuildError, FileNotFoundError, TypeCheckError) as repair_exc:
+            logger.warning(
+                "placeholder_repair_failed prototype_id=%s scenario=%s error_class=placeholder_shipped",
+                prototype_id, scenario,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=f"placeholder_shipped: {repair_exc}",
+            )
+            return False
     except (TypeCheckError, ViteBuildError) as exc:
         # A model-fixable build failure does NOT fail outright. This covers a
         # runtime-breaking type error (most often a screen the agent imported but
@@ -3598,6 +3673,23 @@ async def _stage_iterate_run(
     # Step 1 — Vite build (anchor-id plugin runs here).
     try:
         dist_files = await vite_build(virtual_fs)
+        # Fail-closed acceptance gate. Unlike generate, iterate has NO agent
+        # re-entry context at this seam, so a placeholder build cannot be repaired
+        # here — fail-closed rather than silently advance the checkpoint. (Iterate
+        # edits existing source so rarely drops the entry, but must never ship the
+        # placeholder.)
+        assert_mounts_generated_content(dist_files)
+    except PlaceholderShippedError as exc:
+        logger.warning(
+            "iterate_placeholder_shipped prototype_id=%s error_class=placeholder_shipped",
+            prototype_id,
+        )
+        fail_prototype(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            error=f"placeholder_shipped: {exc}",
+        )
+        return False
     except (ViteBuildError, FileNotFoundError, TypeCheckError) as exc:
         # Cross-cutting seam: the type-check runs inside the shared
         # _vite_build_sync, so it fires on the ITERATE build too. A runtime-broken
