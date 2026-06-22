@@ -92,6 +92,8 @@ from app.db.prototypes import (
     verify_share_passcode,
     clear_pending_question,
 )
+from app.db.usage_events import finalize_usage_event, start_usage_event
+from app.llm_telemetry import RunUsage
 from app.design_agent.client import get_design_agent_client
 from app.design_agent.prompts import (
     DESIGN_AGENT_SCAFFOLD_SYSTEM,
@@ -511,6 +513,26 @@ async def generate(
         github_installation_id=github_installation_id,
     )
 
+    # Open a usage-ledger row for this generation (billing/observability). The id
+    # rides bg_kwargs so the SAME row is finalized at the bg-runner terminal on
+    # BOTH the in-process and Tier-2 worker paths. Fail-open: a ledger failure
+    # must never block a generation, so this never changes control flow.
+    # NOTE: prd ownership isn't workspace-verified on this path yet; usage
+    # attribution assumes caller == prd owner.
+    event_id: int | None = None
+    try:
+        event_id = start_usage_event(
+            workspace_id=workspace_id,
+            kind="full_generation",
+            prd_id=body.prd_id,
+            prototype_id=prototype_id,
+        )
+    except Exception:  # noqa: BLE001 — ledger is fail-open; identifiers only.
+        logger.warning(
+            "usage_event_start_failed kind=full_generation prototype_id=%s",
+            prototype_id,
+        )
+
     # The exact `_run_generation_bg` kwargs — computed ONCE here so the inline
     # create_task path and the Tier 2 worker path run the IDENTICAL
     # generation body with byte-for-byte identical inputs. The enqueue boundary
@@ -534,6 +556,10 @@ async def generate(
         chosen_screen_route=body.chosen_screen_route,
         chosen_screen_id=body.chosen_screen_id,
         map_commit_sha=body.map_commit_sha,
+        # Usage-ledger row id, threaded so the bg-runner can finalize the SAME
+        # row at the terminal. A plain int → round-trips losslessly through the
+        # Tier-2 job payload (serialize/deserialize copy scalars verbatim).
+        event_id=event_id,
     )
 
     # Tier 2: 3-way enqueue decision. ARM the worker queue ONLY when the
@@ -1250,6 +1276,64 @@ def delete_prototype_route(
 # ─── Background generation ────────────────────────────────────────────────
 
 
+def _finalize_generation_failed(
+    event_id: int | None,
+    workspace_id: str,
+    prototype_id: int,
+    error_class: str,
+) -> None:
+    """Fail-open finalize of a generation usage-ledger row to 'failed'.
+
+    A ledger-write failure must never change generation control flow, so every
+    finalize at a failure terminal is wrapped here: identifiers-only WARNING on
+    error, never propagated. No tokens are required on a failure (the run did not
+    bill a complete generation), so only the status + error_class are recorded.
+    """
+    if event_id is None:
+        return
+    try:
+        finalize_usage_event(
+            event_id=event_id,
+            workspace_id=workspace_id,
+            status="failed",
+            error_class=error_class,
+        )
+    except Exception:  # noqa: BLE001 — ledger is fail-open; identifiers only.
+        logger.warning(
+            "usage_event_finalize_failed event_id=%s prototype_id=%s kind=full_generation",
+            event_id, prototype_id,
+        )
+
+
+def _finalize_iteration_failed(
+    event_id: int | None,
+    workspace_id: str,
+    prototype_id: int,
+    error_class: str,
+) -> None:
+    """Fail-open finalize of an iteration usage-ledger row to 'failed'.
+
+    Iteration counterpart of `_finalize_generation_failed`: identifiers-only
+    WARNING on error, never propagated, so a ledger-write failure can never
+    change iteration control flow. A None event_id (PLAN mode, or a failure
+    before the row opened) is a no-op.
+    """
+    if event_id is None:
+        return
+    try:
+        finalize_usage_event(
+            event_id=event_id,
+            workspace_id=workspace_id,
+            status="failed",
+            error_class=error_class,
+        )
+    except Exception:  # noqa: BLE001 — ledger is fail-open; identifiers only.
+        logger.warning(
+            "usage_event_finalize_failed event_id=%s prototype_id=%s kind=iteration",
+            event_id, prototype_id,
+        )
+
+
 async def _run_generation_bg(
     *,
     prototype_id: int,
@@ -1267,6 +1351,7 @@ async def _run_generation_bg(
     chosen_screen_route: str | None = None,
     chosen_screen_id: str | None = None,
     map_commit_sha: str | None = None,
+    event_id: int | None = None,
 ) -> None:
     """Fired from POST /generate; assembles the first call + runs the agent loop.
 
@@ -1399,6 +1484,13 @@ async def _run_generation_bg(
         # OUTSIDE the guard. The prototype row stays 'generating' while a queued
         # run waits here (start_prototype set it; nothing flips it before this),
         # so a queued-but-not-yet-running prototype is correctly still generating.
+        # Accumulator for build/typecheck repair tokens. The repair runs as a
+        # SEPARATE agent loop inside _build_repair_loop, whose usage is NOT part
+        # of the primary RunResult.usage. _stage_complete_run threads this in and
+        # _build_repair_loop sums each repair pass into it, so the succeeded
+        # ledger row reflects primary + repair tokens (under-counting = under-
+        # billing). Empty when no repair ran.
+        repair_usage = RunUsage()
         async with _get_generation_semaphore():
             result, virtual_fs = await generate_prototype(
                 prototype_id=prototype_id,
@@ -1431,7 +1523,7 @@ async def _run_generation_bg(
                     if located is not None
                     else None
                 )
-                await _stage_complete_run(
+                staged_ok = await _stage_complete_run(
                     prototype_id=prototype_id,
                     workspace_id=workspace_id,
                     virtual_fs=virtual_fs,
@@ -1448,13 +1540,40 @@ async def _run_generation_bg(
                     # self-check's ground truth (real shell + located node). None on
                     # every blank-canvas run, so the check is skipped there.
                     parity_located=located,
+                    # Repair-token accumulator: _build_repair_loop sums each repair
+                    # pass's usage into this so the ledger captures primary + repair.
+                    repair_usage=repair_usage,
                 )
+                # Finalize the usage ledger. _stage_complete_run owns the prototype
+                # status write (ready on success, failed on build-exhaustion), so we
+                # mirror it: succeeded only when it staged. Tokens = primary run +
+                # any repair-loop passes (under-counting = under-billing). Fail-open.
+                if event_id is not None:
+                    total_usage = RunUsage()
+                    total_usage.add(getattr(result, "usage", None))
+                    total_usage.add(repair_usage)
+                    try:
+                        finalize_usage_event(
+                            event_id=event_id,
+                            workspace_id=workspace_id,
+                            status="succeeded" if staged_ok else "failed",
+                            usage=total_usage,
+                            model=MODEL,
+                            prototype_id=prototype_id,
+                            error_class=None if staged_ok else "build_stage_failed",
+                        )
+                    except Exception:  # noqa: BLE001 — ledger is fail-open.
+                        logger.warning(
+                            "usage_event_finalize_failed event_id=%s prototype_id=%s kind=full_generation",
+                            event_id, prototype_id,
+                        )
             elif result.status == "complete" and not virtual_fs:
                 fail_prototype(
                     prototype_id=prototype_id,
                     workspace_id=workspace_id,
                     error="agent_loop completed but emitted no files",
                 )
+                _finalize_generation_failed(event_id, workspace_id, prototype_id, "no_files")
             else:
                 # Include the structured error_message / error_class from
                 # RunResult so the underlying failure (e.g. an Anthropic
@@ -1475,6 +1594,10 @@ async def _run_generation_bg(
                     workspace_id=workspace_id,
                     error=" | ".join(error_parts),
                 )
+                _finalize_generation_failed(
+                    event_id, workspace_id, prototype_id,
+                    getattr(result, "error_class", None) or f"status_{result.status}",
+                )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
         # error_class only in the structured log (no PII / no PRD /
         # no instructions / no figma contents); the full message is stored in
@@ -1483,6 +1606,7 @@ async def _run_generation_bg(
             "design_agent.generation_failed prototype_id=%s error_class=%s",
             prototype_id, type(exc).__name__,
         )
+        _finalize_generation_failed(event_id, workspace_id, prototype_id, type(exc).__name__)
         fail_prototype(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
@@ -1508,6 +1632,7 @@ async def _build_repair_loop(
     figma_node_id: str | None,
     scenario: str,
     first_diagnostics: str,
+    repair_usage: RunUsage | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Recover a build that failed — a runtime-breaking type check OR a generic
     `vite build` error (bad CSS `@apply`, an unresolved import the build's own
@@ -1556,6 +1681,12 @@ async def _build_repair_loop(
             scenario=scenario,
         )
         repair_cost_usd += result.usage.est_cost_usd(MODEL)
+        # Surface repair tokens to the caller's usage ledger. This is a separate
+        # agent loop, so its tokens are NOT in the generation's primary
+        # RunResult.usage; accumulating here lets the succeeded ledger row reflect
+        # primary + repair. Independent of the cap math above (which is unchanged).
+        if repair_usage is not None:
+            repair_usage.add(result.usage)
         try:
             dist_files, virtual_fs = await vite_build_with_repair(virtual_fs)
             logger.info(
@@ -1607,8 +1738,15 @@ async def _stage_complete_run(
     theme_expectations: ThemeExpectations | None = None,
     interactive_scope: list[str] | None = None,
     parity_located: "LocatedScreen | None" = None,
-) -> None:
+    repair_usage: RunUsage | None = None,
+) -> bool:
     """Post-run hook: vite_build → checkpoint → stage_bundle → complete.
+
+    Returns True when the prototype reached 'ready' (staged), False when a build/
+    stage failure routed the row to `fail_prototype`. The caller uses this to set
+    the matching usage-ledger terminal status. `repair_usage`, when passed, is the
+    accumulator the build-repair loop sums its (separate-agent-loop) token usage
+    into so the caller's ledger row reflects primary + repair tokens.
 
     Four steps, each gating the next:
 
@@ -1756,7 +1894,7 @@ async def _stage_complete_run(
                 workspace_id=workspace_id,
                 error=f"{type(exc).__name__}: {exc}",
             )
-            return
+            return False
         try:
             dist_files, repaired_virtual_fs = await _build_repair_loop(
                 prototype_id=prototype_id,
@@ -1767,6 +1905,7 @@ async def _stage_complete_run(
                 figma_node_id=figma_node_id,
                 scenario=scenario,
                 first_diagnostics=str(exc),
+                repair_usage=repair_usage,
             )
         except (ViteBuildError, FileNotFoundError, TypeCheckError) as repair_exc:
             logger.warning(
@@ -1778,7 +1917,7 @@ async def _stage_complete_run(
                 workspace_id=workspace_id,
                 error=f"{type(repair_exc).__name__}: {repair_exc}",
             )
-            return
+            return False
     except (FileNotFoundError, ThemeBridgeError) as exc:
         # The fail-fast path: a missing runtime/scaffold file (not model-fixable) or
         # a theme-bridge miss (not a build error) fails the row. A ViteBuildError is
@@ -1800,7 +1939,7 @@ async def _stage_complete_run(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
-        return
+        return False
     # Rebind to the repaired source BEFORE the `_source/` staging step so
     # the staged source matches the built dist. On a clean build this is the same
     # map. When a repair was applied (the map changed), emit build_repair_applied
@@ -1846,7 +1985,7 @@ async def _stage_complete_run(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
-        return
+        return False
 
     # Step 3.5 — Stage the RAW virtual_fs alongside dist/ under _source/ so the
     # export serialiser can read raw TSX, not minified bundles.
@@ -1935,6 +2074,7 @@ async def _stage_complete_run(
         current_checkpoint_id=checkpoint_id,
         preview_image_url=preview_image_url,
     )
+    return True
 
 
 def _load_prd_body(prd_id: int) -> str:
@@ -3220,6 +3360,29 @@ async def _run_iterate_bg(
         )
         scenario_label = ",".join(sorted(scenario_set))
 
+        # Open a usage-ledger row for an EXECUTE iteration (billing/observability).
+        # PLAN mode bills nothing and returns before staging, so it gets NO event.
+        # Emitted here (not in post_iterate) because the iteration queue row stores
+        # inputs only — there is no clean column to thread an id through; the bg
+        # runner has prototype_id/prd_id/applied_comment_id in scope, so this is
+        # the single-scope point that covers the queue+drain path. Fail-open: a
+        # ledger failure must never block the iteration.
+        iter_event_id: int | None = None
+        if body.mode != "plan":
+            try:
+                iter_event_id = start_usage_event(
+                    workspace_id=workspace_id,
+                    kind="iteration",
+                    prd_id=proto.get("prd_id"),
+                    prototype_id=prototype_id,
+                    trigger_comment_id=body.applied_comment_id,
+                )
+            except Exception:  # noqa: BLE001 — ledger is fail-open; identifiers only.
+                logger.warning(
+                    "usage_event_start_failed kind=iteration prototype_id=%s",
+                    prototype_id,
+                )
+
         try:
             await asyncio.to_thread(
                 clear_pending_question,
@@ -3269,18 +3432,39 @@ async def _run_iterate_bg(
             return
 
         if result.status == "complete" and virtual_fs:
-            await _stage_iterate_run(
+            staged_ok = await _stage_iterate_run(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
                 virtual_fs=virtual_fs,
                 iterate_prompt=body.prompt,
             )
+            # Finalize the iteration ledger row. _stage_iterate_run owns the
+            # prototype write (advance on success, fail on build error), so we
+            # mirror it. Iterations do NOT run a separate build-repair loop, so
+            # result.usage already covers every Anthropic call in the run — no
+            # rollup needed (asserted in scope-confirm). Fail-open.
+            if iter_event_id is not None:
+                try:
+                    finalize_usage_event(
+                        event_id=iter_event_id,
+                        workspace_id=workspace_id,
+                        status="succeeded" if staged_ok else "failed",
+                        usage=getattr(result, "usage", None),
+                        model=MODEL,
+                        error_class=None if staged_ok else "build_stage_failed",
+                    )
+                except Exception:  # noqa: BLE001 — ledger is fail-open.
+                    logger.warning(
+                        "usage_event_finalize_failed event_id=%s prototype_id=%s kind=iteration",
+                        iter_event_id, prototype_id,
+                    )
         elif result.status == "complete" and not virtual_fs:
             fail_prototype(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
                 error="iterate agent_loop completed but emitted no files",
             )
+            _finalize_iteration_failed(iter_event_id, workspace_id, prototype_id, "no_files")
         elif result.status == "awaiting_clarification":
             # A clarifying_question terminal-PAUSE is NOT a failure.
             # The runner already persisted the question on `pending_question`;
@@ -3294,6 +3478,9 @@ async def _run_iterate_bg(
                 prototype_id=prototype_id,
                 workspace_id=workspace_id,
             )
+            # PAUSE, not completion: leave the 'started' ledger row OPEN. We only
+            # ever bill 'succeeded'; the row is finalized when the answer-resume
+            # iteration actually completes (which opens its own event).
             logger.info(
                 "prototype_iterate_paused_awaiting_clarification prototype_id=%s",
                 prototype_id,
@@ -3316,12 +3503,22 @@ async def _run_iterate_bg(
                 workspace_id=workspace_id,
                 error=" | ".join(error_parts),
             )
+            _finalize_iteration_failed(
+                iter_event_id, workspace_id, prototype_id,
+                getattr(result, "error_class", None) or f"status_{result.status}",
+            )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
         # error_class only in the structured log (no PRD / comment /
         # Figma content); the full message goes to the row's error column.
         logger.warning(
             "design_agent.iterate_failed prototype_id=%s error_class=%s",
             prototype_id, type(exc).__name__,
+        )
+        # iter_event_id may be unbound if the failure preceded its assignment
+        # (e.g. get_prototype raised); guard with locals() so the fail-open
+        # finalize never itself raises a NameError.
+        _finalize_iteration_failed(
+            locals().get("iter_event_id"), workspace_id, prototype_id, type(exc).__name__,
         )
         fail_prototype(
             prototype_id=prototype_id,
@@ -3381,13 +3578,17 @@ async def _stage_iterate_run(
     workspace_id: str,
     virtual_fs: dict[str, str],
     iterate_prompt: str,
-) -> None:
+) -> bool:
     """Iterate-completion staging path. DELIBERATELY SEPARATE from
     `_stage_complete_run`: it does NOT call `complete_prototype`. An iterate
     is a checkpoint ADVANCE on an already-completed prototype, so re-stamping
     `completed_at` and emitting `prototype_completed` would be wrong — that whole
     separation is the point of this helper. Do NOT fold it back into the scaffold
     staging path.
+
+    Returns True when the iterate staged (checkpoint advanced), False when a
+    build/stage failure routed the row to `fail_prototype`. The caller uses this
+    to set the matching usage-ledger terminal status.
 
     Steps: vite_build (anchor-id plugin runs here) → create_checkpoint (threading
     the iterate prompt into prompt_history) → stage_bundle (dist + raw _source so
@@ -3411,7 +3612,7 @@ async def _stage_iterate_run(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
-        return
+        return False
     logger.info(
         "iterate_vite_build_succeeded prototype_id=%s dist_file_count=%s",
         prototype_id, len(dist_files),
@@ -3441,7 +3642,7 @@ async def _stage_iterate_run(
             workspace_id=workspace_id,
             error=f"{type(exc).__name__}: {exc}",
         )
-        return
+        return False
 
     # Step 3.5 — stage the RAW virtual_fs under _source/ so the NEXT iterate's
     # read_source_files_for_checkpoint returns real TSX. Best-effort (mirrors
@@ -3489,6 +3690,7 @@ async def _stage_iterate_run(
         checkpoint_id=checkpoint_id,
         bundle_url=authed_bundle_url(prototype_id),
     )
+    return True
 
 
 # ─── PRD patches: accept / reject ───────────────────────────────────────────────
