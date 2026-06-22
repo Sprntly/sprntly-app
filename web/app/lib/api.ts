@@ -174,6 +174,15 @@ export type Brief = {
   week_label: string
   summary_headline: string
   insights: Insight[]
+  /** Backend evidence-gate flag: set when the brief was saved EMPTY because the
+   *  KG lacked enough connected-source evidence (vs. a brand-new account with no
+   *  data at all). Lets the UI tell "we got your upload, but need more connected
+   *  evidence" apart from "add your first source". Older/normal briefs omit it. */
+  _insufficient_evidence?: boolean
+  /** Human-readable reason that accompanies `_insufficient_evidence` (set by the
+   *  backend). Optional and may carry internal phrasing — the UI prefers its own
+   *  static copy unless this is clearly user-friendly. */
+  _empty_reason?: string
 }
 
 export type BriefStatus = {

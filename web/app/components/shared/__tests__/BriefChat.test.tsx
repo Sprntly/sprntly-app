@@ -201,6 +201,8 @@ const BRIEF: BriefV2State = {
   hero: HERO,
   supporting: [SUPPORTING],
   sourcesLine: "Zendesk · Amplitude",
+  insufficientEvidence: false,
+  emptyReason: null,
 }
 
 // Injects the fixture brief into ContentContext on mount so BriefChat renders it.
