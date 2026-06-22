@@ -5,7 +5,6 @@ import { useSearchParams, useRouter } from "next/navigation"
 import { AppLayout } from "./AppLayout"
 import { ProfileSettings } from "./settings/ProfileSettings"
 import { WorkspaceSettings } from "./settings/WorkspaceSettings"
-import { KpiSettings } from "./settings/KpiSettings"
 import { StrategicSettings } from "./settings/StrategicSettings"
 import { FeatureFlagsSettings } from "./settings/FeatureFlagsSettings"
 import { NotificationsSettings } from "./settings/NotificationsSettings"
@@ -13,7 +12,6 @@ import { BillingSettings } from "./settings/BillingSettings"
 import { SecuritySettings } from "./settings/SecuritySettings"
 import { ConnectorsSettings } from "./settings/ConnectorsSettings"
 import { TeamSettings } from "./settings/TeamSettings"
-import { DesignSourceSettings } from "./settings/DesignSourceSettings"
 import {
   SETTINGS_NAV,
   type SettingsSectionId,
@@ -25,14 +23,11 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
       return <ProfileSettings />
     // Renamed in commit B per sprntly_Design-3:
     //   workspace      → product-category
-    //   kpi            → goals-metrics
     //   notifications  → comms-brief
     // The underlying components are unchanged for now — visual content
     // tweaks (matching the design's layouts) are separate slices.
     case "product-category":
       return <WorkspaceSettings />
-    case "goals-metrics":
-      return <KpiSettings />
     case "comms-brief":
       return <NotificationsSettings />
     case "billing":
@@ -48,8 +43,6 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
       return <TeamSettings />
     case "connectors":
       return <ConnectorsSettings />
-    case "design-source":
-      return <DesignSourceSettings />
     default:
       return <ProfileSettings />
   }
@@ -63,15 +56,24 @@ function isKnownSectionId(value: string): value is SettingsSectionId {
   return ([...allIds, ...dormantIds] as string[]).includes(value)
 }
 
+/**
+ * Resolve a raw `?section=` value to a renderable section id. Unknown or
+ * removed ids (e.g. an old `goals-metrics` / `design-source` deep link) fall
+ * back to the default Profile pane rather than rendering blank.
+ */
+export function resolveSectionId(raw: string | null): SettingsSectionId {
+  return raw && isKnownSectionId(raw) ? raw : "profile"
+}
+
 function SettingsContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
   const raw = searchParams.get("section")
-  // Unknown section IDs (including old IDs like "workspace" or "kpi"
-  // that someone may have bookmarked) silently fall back to Profile.
+  // Unknown section IDs (including old IDs like "workspace" or "kpi", and
+  // removed ones like "goals-metrics" / "design-source", that someone may
+  // have bookmarked) silently fall back to Profile.
   // No shim — per SETTINGS_PAGE_PLAN.md §7 decision 1.
-  const section: SettingsSectionId =
-    raw && isKnownSectionId(raw) ? raw : "profile"
+  const section: SettingsSectionId = resolveSectionId(raw)
 
   function setSection(id: SettingsSectionId) {
     router.replace(`/settings?section=${id}`, { scroll: false })

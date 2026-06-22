@@ -17,10 +17,8 @@ export type SettingsSectionId =
   | "profile"
   | "comms-brief"
   | "product-category"
-  | "goals-metrics"
   | "team"
   | "connectors"
-  | "design-source"
   | "billing"
   | "security"
   // Dormant (kept for component-file compatibility, not linked)
@@ -55,7 +53,6 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     groupLabel: "Workspace",
     items: [
       { id: "product-category", label: "Product & Category", available: true },
-      { id: "goals-metrics", label: "Goals & metrics", available: true },
       { id: "team", label: "Team & roles", available: true },
     ],
   },
@@ -63,7 +60,6 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     groupLabel: "Data & Integrations",
     items: [
       { id: "connectors", label: "Connectors", available: true },
-      { id: "design-source", label: "Prototypes", available: true },
     ],
   },
   {
