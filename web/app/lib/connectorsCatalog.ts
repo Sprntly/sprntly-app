@@ -35,12 +35,12 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     items: [
       { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", oauth: false },
       { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", oauth: false },
-      { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoSlug: "clickup", oauth: true },
+      { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoDomain: "clickup.com", oauth: true },
       { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", oauth: false },
       // Backend provider is `google_drive` (existing OAuth + sync). Surface
       // it as "Google Docs" per design — the connector pulls Google Docs
       // out of Drive folders, so the label matches user expectation.
-      { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoSlug: "googledocs", oauth: true },
+      { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoDomain: "docs.google.com", oauth: true },
       { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", oauth: false },
     ],
   },
@@ -52,7 +52,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     items: [
       { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", oauth: false },
       { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", oauth: false },
-      { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey" },
+      { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", logoDomain: "fireflies.ai", oauth: false, authType: "apikey" },
       { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false },
       { id: "dovetail",   name: "Dovetail",   logo: "D", logoText: "D", logoColor: "#9B59B6", oauth: false },
       { id: "salesforce", name: "Salesforce", logo: "S", logoText: "S", logoColor: "#00A1E0", oauth: false },
@@ -66,7 +66,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     items: [
       { id: "stripe",     name: "Stripe",     logo: "S", logoText: "S", logoColor: "#635BFF", oauth: false },
       { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false },
-      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", logoSlug: "hubspot", oauth: true },
+      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", logoDomain: "hubspot.com", oauth: true },
     ],
   },
   {
@@ -75,7 +75,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", logoSlug: "github", oauth: true },
+      { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", logoDomain: "github.com", oauth: true },
       { id: "gitlab",    name: "GitLab",    logo: "G", logoText: "G", logoColor: "#FC6D26", oauth: false },
       { id: "bitbucket", name: "Bitbucket", logo: "B", logoText: "B", logoColor: "#205081", oauth: false },
     ],
@@ -102,7 +102,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // Figma is OAuth-only. The legacy PAT connect path was removed entirely
       // (no figma_pat module, no /figma/pat route) — Figma's app review requires
       // OAuth as the sole public connect mechanism.
-      { id: "figma",  name: "Figma",  logo: "F", logoText: "F", logoColor: "#F24E1E", logoSlug: "figma", oauth: true },
+      { id: "figma",  name: "Figma",  logo: "F", logoText: "F", logoColor: "#F24E1E", logoDomain: "figma.com", oauth: true },
       { id: "framer", name: "Framer", logo: "F", logoText: "F", logoColor: "#000000", oauth: false },
     ],
   },
@@ -114,7 +114,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     items: [
       // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
       // (Slack Marketplace requires OAuth install, not a pasted bot token).
-      { id: "slack",   name: "Slack",    logo: "S", logoText: "S", logoColor: "#4A154B", logoSlug: "slack", oauth: true },
+      { id: "slack",   name: "Slack",    logo: "S", logoText: "S", logoColor: "#4A154B", logoDomain: "slack.com", oauth: true },
       { id: "msteams", name: "MS Teams", logo: "M", logoText: "M", logoColor: "#5059C9", oauth: false },
     ],
   },

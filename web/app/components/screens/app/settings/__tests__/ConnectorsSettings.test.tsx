@@ -125,12 +125,11 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
     expect(html).toContain("design@meridian.health")
   })
 
-  it("uses inline brand-color background on the logo box", () => {
+  it("uses inline brand-color background on the logo box for letter-only connectors", () => {
     const html = render()
-    // Mixpanel's brand color from the catalog
-    expect(html).toContain("background:#7856FF")
-    // GitHub
-    expect(html).toContain("background:#181717")
+    // Coming-soon connectors have no logoDomain → brand-color box + letter.
+    expect(html).toContain("background:#7856FF") // Mixpanel
+    expect(html).toContain("background:#1A6CFF") // Amplitude
   })
 })
 
@@ -209,19 +208,20 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(1)
   })
 
-  it("renders the brand logo (Simple Icons) for connectors that have a slug", () => {
+  it("renders each connector's real brand logo (by domain) via the favicon service", () => {
     const html = render({ categories: connectableCatalog() })
-    for (const slug of [
-      "slack",
-      "github",
-      "figma",
-      "hubspot",
-      "clickup",
-      "googledocs",
+    for (const domain of [
+      "slack.com",
+      "github.com",
+      "figma.com",
+      "hubspot.com",
+      "clickup.com",
+      "docs.google.com",
+      "fireflies.ai",
     ]) {
-      expect(html).toContain(`cdn.simpleicons.org/${slug}/white`)
+      expect(html).toContain(`s2/favicons?domain=${domain}`)
     }
-    // Fireflies has no Simple Icons slug → no brand img (6 logos for 7 rows).
-    expect((html.match(/cdn\.simpleicons\.org/g) ?? []).length).toBe(6)
+    // All 7 wired connectors now have a real logo.
+    expect((html.match(/s2\/favicons\?domain=/g) ?? []).length).toBe(7)
   })
 })
