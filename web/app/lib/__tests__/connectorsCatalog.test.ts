@@ -7,6 +7,8 @@ import {
   CONNECTOR_CATALOG,
   CONNECTOR_IDS_CONNECTABLE,
   CONNECTOR_IDS_WITH_OAUTH,
+  connectableCatalog,
+  isConnectableConnector,
 } from "../connectorsCatalog"
 
 const EXPECTED_CATEGORIES = [
@@ -170,5 +172,70 @@ describe("Google Docs uses the existing google_drive OAuth backend", () => {
     const gdocs = pm.items.find((i) => i.name === "Google Docs")
     expect(gdocs?.id).toBe("google_drive")
     expect(gdocs?.oauth).toBe(true)
+  })
+})
+
+describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
+  it("keeps all 8 categories in the same order even when some end up empty", () => {
+    expect(connectableCatalog().map((c) => c.title)).toEqual([
+      ...EXPECTED_CATEGORIES,
+    ])
+  })
+
+  it("shows only the 7 wired connectors (OAuth + API key) and nothing else", () => {
+    const ids = connectableCatalog()
+      .flatMap((c) => c.items)
+      .map((i) => i.id)
+      .sort()
+    expect(ids).toEqual(
+      [
+        "clickup",
+        "figma",
+        "fireflies",
+        "github",
+        "google_drive",
+        "hubspot",
+        "slack",
+      ].sort(),
+    )
+  })
+
+  it("drops every 'Coming soon' connector (Analytics + Monitoring become empty)", () => {
+    const byTitle = (t: string) =>
+      connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
+    expect(byTitle("Analytics")).toEqual([])
+    expect(byTitle("Monitoring & Reliability")).toEqual([])
+    expect(byTitle("Project Management")).toEqual(["clickup", "google_drive"])
+    expect(byTitle("Code")).toEqual(["github"])
+    expect(byTitle("Communication")).toEqual(["slack"])
+  })
+
+  it("preserves each category's upload strip metadata (uploads still work when empty)", () => {
+    for (const cat of connectableCatalog()) {
+      expect(cat.uploadAccept).toBeTruthy()
+      expect(cat.uploadExtensions!.length).toBeGreaterThan(0)
+    }
+  })
+
+  it("never hides a provider that has a live connection, even if not yet wired", () => {
+    const cats = connectableCatalog(new Set(["mixpanel"]))
+    const analytics = cats.find((c) => c.title === "Analytics")!
+    expect(analytics.items.map((i) => i.id)).toEqual(["mixpanel"])
+  })
+
+  it("does not mutate the source CONNECTOR_CATALOG", () => {
+    const before = CONNECTOR_CATALOG.flatMap((c) => c.items).length
+    connectableCatalog()
+    expect(CONNECTOR_CATALOG.flatMap((c) => c.items).length).toBe(before)
+  })
+})
+
+describe("isConnectableConnector", () => {
+  it("true for OAuth and API-key connectors, false for 'Coming soon'", () => {
+    expect(isConnectableConnector({ id: "slack", name: "Slack", logo: "S", oauth: true })).toBe(true)
+    expect(
+      isConnectableConnector({ id: "fireflies", name: "Fireflies", logo: "F", oauth: false, authType: "apikey" }),
+    ).toBe(true)
+    expect(isConnectableConnector({ id: "mixpanel", name: "Mixpanel", logo: "M", oauth: false })).toBe(false)
   })
 })
