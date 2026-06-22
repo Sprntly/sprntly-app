@@ -357,6 +357,7 @@ def post_message(
     channel: str,
     text: str,
     blocks: list[dict[str, Any]] | None = None,
+    thread_ts: str | None = None,
 ) -> dict[str, Any]:
     """Post a single message to a Slack channel. Used by the Comms Agent
     (briefs, asks, alerts) — anywhere Sprntly needs to surface output in
@@ -365,12 +366,16 @@ def post_message(
     `channel` is the channel id (e.g. "C0123456789"), not the name.
     `text` is the plain-text fallback that always renders even when
     `blocks` is set (Slack requires it for accessibility + notifications).
+    `thread_ts` posts the message as a reply in that thread (used to keep
+    app_mention answers attached to the mention); omit it for flat posts/DMs.
 
     On Slack-side rejection (ok:false), raises HTTPException(400) so the
     caller surfaces a real error instead of silently dropping the message."""
     body: dict[str, Any] = {"channel": channel, "text": text}
     if blocks:
         body["blocks"] = blocks
+    if thread_ts:
+        body["thread_ts"] = thread_ts
     resp = requests.post(
         SLACK_POST_MESSAGE_URL,
         headers={

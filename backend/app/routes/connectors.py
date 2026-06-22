@@ -32,8 +32,11 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
+import sys
 import time
 from typing import Annotated
 from urllib.parse import urlencode
@@ -1623,6 +1626,11 @@ def slack_disconnect(
     return {"deleted": True, "provider": slack_oauth.SLACK_PROVIDER}
 
 
+# Strong refs to in-flight Slack reply tasks so the event loop doesn't GC a
+# bare create_task() mid-run (same pattern as routes/ask.py _inflight_tasks).
+_slack_inflight_tasks: set[asyncio.Task] = set()
+
+
 @router.post("/slack/events")
 async def slack_events(request: Request):
     """Slack Events API webhook. Unauthenticated by design — Slack calls it
@@ -1665,8 +1673,203 @@ async def slack_events(request: Request):
                         slack_oauth.publish_app_home(bot_token, slack_user)
                 except Exception:  # noqa: BLE001 — best-effort App Home
                     logger.warning("app_home_opened: publish failed", exc_info=True)
+        elif etype in ("message", "app_mention"):
+            # Inbound user message → run the Q&A agent and reply in Slack.
+            # Slack retries the webhook if we don't 200 within ~3s; the first
+            # attempt is already processing in the background, so never
+            # reprocess a retry (it would double-answer).
+            if request.headers.get("X-Slack-Retry-Num"):
+                return {"ok": True}
+            # Only plain user messages start a turn. Skip bot posts (our own
+            # replies carry bot_id — the primary reply-loop guard) and any
+            # subtype (edits, deletes, joins, channel_topic, …).
+            if event.get("bot_id") or event.get("subtype"):
+                return {"ok": True}
+            text = (event.get("text") or "").strip()
+            channel = event.get("channel") or ""
+            slack_user = event.get("user") or ""
+            if not (text and channel and slack_user):
+                return {"ok": True}
+            # app_mention answers thread under the mention; DMs stay flat.
+            thread_ts = (
+                (event.get("thread_ts") or event.get("ts"))
+                if etype == "app_mention"
+                else None
+            )
+            coro = _handle_slack_message(
+                team_id=team_id,
+                slack_user=slack_user,
+                channel=channel,
+                text=text,
+                is_mention=(etype == "app_mention"),
+                thread_ts=thread_ts,
+            )
+            # Under pytest the TestClient event loop doesn't persist between
+            # requests, so a fire-and-forget task would never run — await inline
+            # for deterministic tests (mirrors routes/ask.py). Production keeps
+            # the non-blocking create_task path so the webhook returns fast.
+            if "pytest" in sys.modules:
+                await coro
+            else:
+                task = asyncio.create_task(coro)
+                _slack_inflight_tasks.add(task)
+                task.add_done_callback(_slack_inflight_tasks.discard)
 
     return {"ok": True}
+
+
+async def _handle_slack_message(
+    *,
+    team_id: str,
+    slack_user: str,
+    channel: str,
+    text: str,
+    is_mention: bool,
+    thread_ts: str | None,
+) -> None:
+    """Resolve an inbound Slack message to a Sprntly company, run the Q&A agent
+    over it (multi-turn for DMs, using the conversation's recent history), and
+    post the answer back to the same channel/DM. Best-effort: every failure is
+    logged and swallowed so one bad event can never crash the webhook task."""
+    from app import qa_agent
+    from app.db.companies import slug_for_company_id
+
+    try:
+        resolved = _resolve_slack_inbound(team_id, slack_user)
+        if not resolved:
+            logger.info("slack inbound: no connection for team=%s — ignoring", team_id)
+            return
+        company_id, _user_id, bot_token, bot_user_id = resolved
+        # Defence-in-depth self-message guard (bot_id is checked at the webhook;
+        # this also catches the rare bot_id-less self post).
+        if bot_user_id and slack_user == bot_user_id:
+            return
+        question = (_strip_leading_mention(text) if is_mention else text).strip()
+        if not question:
+            return
+        dataset = slug_for_company_id(company_id)
+        if not dataset:
+            logger.warning("slack inbound: no dataset slug for company=%s", company_id)
+            return
+        # Multi-turn only for DMs, where the flat channel history IS the
+        # conversation. Channel @mentions answer single-turn (reading channel
+        # history would feed unrelated chatter to the agent as context).
+        history = (
+            _slack_conversation_history(bot_token, channel, bot_user_id)
+            if not is_mention
+            else []
+        )
+        payload = await asyncio.to_thread(
+            qa_agent.answer,
+            enterprise_id=company_id,
+            question=question,
+            dataset=dataset,
+            history=history,
+        )
+        answer_text = (payload.get("answer") or "").strip()
+        if not answer_text:
+            answer_text = (
+                "I couldn't find an answer to that one. Try rephrasing, or ask "
+                "me something about your product data."
+            )
+        await asyncio.to_thread(
+            slack_oauth.post_message,
+            bot_token,
+            channel=channel,
+            text=answer_text,
+            thread_ts=thread_ts,
+        )
+        # Analytics parity with the web Ask path (never fail the answer on this).
+        try:
+            from app.db import log_ask
+
+            log_ask(
+                question=question,
+                answer=answer_text,
+                citations=payload.get("citations", []),
+            )
+        except Exception:  # noqa: BLE001 — analytics logging is best-effort
+            logger.exception("slack inbound: log_ask failed")
+    except Exception:  # noqa: BLE001 — a webhook task must never crash the loop
+        logger.exception("slack inbound: handler failed team=%s", team_id)
+
+
+def _resolve_slack_inbound(
+    team_id: str, slack_user: str
+) -> tuple[str, str, str, str] | None:
+    """Map an inbound Slack (team_id, slack_user) to one Sprntly connection.
+
+    Returns (company_id, user_id, bot_token, bot_user_id), or None if the team
+    has no usable connection. The installing user's Slack id (authed_user_id)
+    lives inside the encrypted token blob — not an indexed column — so we list
+    the team's connections and prefer the one whose authed_user_id matches the
+    messaging user; absent a match we fall back to the team's first connection
+    (1 install = 1 company by design, so its bot token + company apply)."""
+    chosen: tuple[str, str, str, str] | None = None
+    fallback: tuple[str, str, str, str] | None = None
+    for row in db.list_slack_connections_by_team(team_id):
+        try:
+            tj = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+        except (TokenEncryptionError, json.JSONDecodeError):
+            continue
+        bot_token = tj.get("access_token")
+        if not bot_token:
+            continue
+        cand = (
+            row["company_id"],
+            row["user_id"],
+            bot_token,
+            tj.get("bot_user_id") or "",
+        )
+        if fallback is None:
+            fallback = cand
+        if tj.get("authed_user_id") and tj.get("authed_user_id") == slack_user:
+            chosen = cand
+            break
+    return chosen or fallback
+
+
+_MENTION_RE = re.compile(r"^\s*<@[^>]+>\s*")
+
+
+def _strip_leading_mention(text: str) -> str:
+    """Drop the leading <@BOTID> token Slack prepends to app_mention text."""
+    return _MENTION_RE.sub("", text, count=1)
+
+
+def _slack_conversation_history(
+    bot_token: str, channel: str, bot_user_id: str
+) -> list[dict]:
+    """Build a chronological [{role, content}] history for a DM so the agent can
+    answer follow-ups. Slack itself is the store: read recent messages, map the
+    bot's own posts to 'assistant', and drop the latest (it's the current
+    question, passed separately). Best-effort — returns [] if it can't read."""
+    try:
+        data = slack_oauth.fetch_conversation_history(
+            bot_token, channel=channel, limit=20
+        )
+    except Exception:  # noqa: BLE001 — history is a nicety, not required
+        return []
+    # conversations.history returns newest-first; reverse to chronological then
+    # drop the final entry (the message that triggered this event).
+    msgs = list(reversed(data.get("messages") or []))[:-1]
+    history: list[dict] = []
+    for m in msgs:
+        if m.get("subtype"):
+            continue
+        content = (m.get("text") or "").strip()
+        if not content:
+            continue
+        is_bot = bool(m.get("bot_id")) or (
+            bool(bot_user_id) and m.get("user") == bot_user_id
+        )
+        history.append(
+            {
+                "role": "assistant" if is_bot else "user",
+                "content": content if is_bot else _strip_leading_mention(content),
+            }
+        )
+    return history[-12:]
 
 
 def _slack_token_json(company_id: str, user_id: str) -> tuple[dict, dict]:
