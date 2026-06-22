@@ -77,7 +77,7 @@ def test_callback_stores_connection(google_env, monkeypatch):
         token_uri="https://oauth2.googleapis.com/token",
         client_id="test-client-id",
         client_secret="test-client-secret",
-        scopes=[google_oauth.DRIVE_READONLY_SCOPE],
+        scopes=[google_oauth.DRIVE_FILE_SCOPE],
     )
     mock_flow = MagicMock()
     mock_flow.credentials = creds
@@ -116,7 +116,7 @@ def test_disconnect(google_env, monkeypatch):
         token_uri="https://oauth2.googleapis.com/token",
         client_id="c",
         client_secret="s",
-        scopes=[google_oauth.DRIVE_READONLY_SCOPE],
+        scopes=[google_oauth.DRIVE_FILE_SCOPE],
     )
     mock_flow = MagicMock()
     mock_flow.credentials = creds
@@ -165,7 +165,7 @@ def _seed_drive_connection(company_id: str, *, config_json: str) -> None:
 
 def test_sync_no_dataset_auto_enable_uses_two_arg_get_connection(google_env, monkeypatch):
     ctx = company_client(monkeypatch)
-    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme","folder_id":"f1"}')
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme","files":[{"id":"file0001","name":"a.txt"}]}')
 
     fake_result = MagicMock()
     fake_result.to_dict.return_value = {"dataset": "acme", "ingested": 0, "skipped": 0}
@@ -192,7 +192,7 @@ def test_sync_no_dataset_auto_enable_uses_two_arg_get_connection(google_env, mon
 
 def test_sync_no_dataset_resolves_dataset_and_auto_enables_input_source(google_env, monkeypatch):
     ctx = company_client(monkeypatch)
-    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme","folder_id":"f1"}')
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme","files":[{"id":"file0001","name":"a.txt"}]}')
 
     fake_result = MagicMock()
     fake_result.to_dict.return_value = {"dataset": "acme"}
@@ -216,3 +216,91 @@ def test_sync_no_dataset_resolves_dataset_and_auto_enables_input_source(google_e
     assert upserts[0][0] == "acme"
     assert upserts[0][1] == "google_drive"
     assert upserts[0][2]["enabled"] is True
+
+
+# ─── POST /google-drive/files — save Picker-picked files + sync ──────────────
+
+
+def test_save_files_requires_connection(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/google-drive/files",
+        json={"files": [{"id": "abcdEFGH12", "name": "Plan"}]},
+    )
+    assert r.status_code == 404
+
+
+def test_save_files_stores_picked_files_in_config_and_syncs(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme"}')
+
+    import json as _json
+
+    import app.routes.connectors as routes_mod
+
+    captured: dict = {}
+
+    def fake_sync(*, company_id, dataset, files):
+        # Mirror the real sync's persistence so we can assert config storage.
+        from app import db as _db
+        from app.connectors.google_drive_sync import (
+            merge_config,
+            normalize_picked_files,
+        )
+
+        row = _db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+        merge_config(
+            row,
+            {"files": normalize_picked_files(files), "dataset": dataset or "acme"},
+        )
+        captured["files"] = files
+        captured["dataset"] = dataset
+        result = MagicMock()
+        result.to_dict.return_value = {
+            "dataset": "acme",
+            "synced": [],
+            "skipped": [],
+            "errors": [],
+        }
+        return result
+
+    with (
+        patch.object(routes_mod, "sync_google_drive", side_effect=fake_sync),
+        patch.object(routes_mod.db, "upsert_input_source", return_value={}),
+    ):
+        r = ctx.client.post(
+            "/v1/connectors/google-drive/files",
+            json={
+                "files": [
+                    {"id": "abcdEFGH12", "name": "Plan"},
+                    {"id": "zzzz9999xx"},
+                ],
+                "dataset": "acme",
+            },
+        )
+
+    assert r.status_code == 200, r.text
+    assert captured["files"] == [
+        {"id": "abcdEFGH12", "name": "Plan"},
+        {"id": "zzzz9999xx", "name": None},
+    ]
+
+    from app import db as _db
+
+    row = _db.get_connection(ctx.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    cfg = _json.loads(row["config_json"])
+    assert cfg["files"] == [
+        {"id": "abcdEFGH12", "name": "Plan"},
+        {"id": "zzzz9999xx", "name": None},
+    ]
+
+
+def test_save_files_rejects_bad_file_id(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme"}')
+    r = ctx.client.post(
+        "/v1/connectors/google-drive/files",
+        json={"files": [{"id": "bad id!"}]},
+    )
+    assert r.status_code == 400
+    assert "invalid Drive file id" in r.text

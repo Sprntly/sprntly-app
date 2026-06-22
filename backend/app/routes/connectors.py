@@ -4,9 +4,8 @@
 
   GET    /v1/connectors/google-drive/authorize  -> redirect to Google
   GET    /v1/connectors/google-drive/callback   -> OAuth callback
-  GET    /v1/connectors/google-drive/folders    -> browse folders to select
-  POST   /v1/connectors/google-drive/config     -> save folder + dataset
-  POST   /v1/connectors/google-drive/sync       -> pull folder into corpus
+  POST   /v1/connectors/google-drive/files      -> save Picker-picked files + sync
+  POST   /v1/connectors/google-drive/sync       -> pull picked files into corpus
   DELETE /v1/connectors/google-drive            -> disconnect
 
   GET    /v1/connectors/figma/authorize         -> redirect to Figma
@@ -63,9 +62,7 @@ from app.connectors import (
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
-    browse_folders,
-    merge_config,
-    parse_folder_id,
+    normalize_picked_files,
     sync_google_drive,
 )
 from app.connectors.tokens import (
@@ -538,71 +535,12 @@ def google_drive_callback(code: str, state: str):
     return _build_post_oauth_redirect(payload, google_oauth.GOOGLE_DRIVE_PROVIDER)
 
 
-class GoogleDriveConfigIn(BaseModel):
-    folder_id: str
-    folder_name: str | None = None
-    dataset: str | None = None
-
-
-class GoogleDriveSyncIn(BaseModel):
-    dataset: str | None = None
-    folder_id: str | None = None
-
-
-@router.get("/google-drive/folders")
-def google_drive_list_folders(
-    parent_id: str | None = None,
-    company: CompanyContext = Depends(require_company),
-):
-    try:
-        return browse_folders(company.company_id, parent_id)
-    except SyncConfigError as e:
-        logger.warning("Drive folder browse failed: %s", e)
-        raise HTTPException(400, str(e)) from e
-
-
-@router.post("/google-drive/config")
-def google_drive_config(
-    body: GoogleDriveConfigIn,
-    company: CompanyContext = Depends(require_company),
-):
-    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
-    row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
-    if not row:
-        raise HTTPException(404, "Google Drive is not connected")
-    try:
-        fid = parse_folder_id(body.folder_id)
-    except SyncConfigError as e:
-        raise HTTPException(422, str(e)) from e
-    patch: dict = {"folder_id": fid}
-    if body.folder_name:
-        patch["folder_name"] = body.folder_name.strip()
-    if body.dataset:
-        patch["dataset"] = body.dataset.strip()
-    updated = merge_config(row, patch)
-    return {"ok": True, "config": updated}
-
-
-@router.post("/google-drive/sync")
-def google_drive_sync(
-    body: GoogleDriveSyncIn | None = None,
-    company: CompanyContext = Depends(require_company),
-):
-    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
-    payload = body or GoogleDriveSyncIn()
-    try:
-        result = sync_google_drive(
-            company_id=company.company_id,
-            dataset=payload.dataset,
-            folder_id=payload.folder_id,
-        )
-    except SyncConfigError as e:
-        raise HTTPException(400, str(e)) from e
-
-    # Auto-enable the Google Drive input source for this dataset.
-    dataset_slug = payload.dataset
+def _auto_enable_drive_input_source(company_id: str, dataset: str | None) -> None:
+    """Flip the dataset's google_drive input source on after a sync. Falls back
+    to the dataset stored in the connection config when not passed explicitly."""
+    dataset_slug = dataset
     if not dataset_slug:
-        row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+        row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
         if row and row.get("config_json"):
             try:
                 cfg = json.loads(row["config_json"])
@@ -616,8 +554,77 @@ def google_drive_sync(
                 config={"last_sync_at": db.utc_now()},
             )
         except Exception:
-            logger.warning("Failed to auto-enable google_drive input source", exc_info=True)
+            logger.warning(
+                "Failed to auto-enable google_drive input source", exc_info=True
+            )
 
+
+class GoogleDrivePickedFile(BaseModel):
+    id: str
+    name: str | None = None
+
+
+class GoogleDriveFilesIn(BaseModel):
+    # The Google Picker frontend POSTs the files the user selected. Each entry
+    # carries the Drive file id and (optionally) its name for nicer ingest
+    # naming. Replaces the whole stored picked-file list (not a merge).
+    files: list[GoogleDrivePickedFile]
+    dataset: str | None = None
+
+
+class GoogleDriveSyncIn(BaseModel):
+    dataset: str | None = None
+
+
+@router.post("/google-drive/files")
+def google_drive_save_files(
+    body: GoogleDriveFilesIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Store the files the Google Picker selected (per-company) and sync them.
+
+    The Picker frontend must POST {"files": [{"id","name"}, ...]} — the file
+    ids it gets back from picker.getResponse(). Under the drive.file scope this
+    app can only read those specific files. We persist them in the connection
+    config under config["files"], then run a sync so the picked files land in
+    the corpus immediately."""
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Google Drive is not connected")
+
+    picked = [f.model_dump() for f in body.files]
+    try:
+        # Validate the ids up front (422 on a bad id) before kicking sync.
+        normalize_picked_files(picked)
+        result = sync_google_drive(
+            company_id=company.company_id,
+            dataset=body.dataset,
+            files=picked,
+        )
+    except SyncConfigError as e:
+        raise HTTPException(400, str(e)) from e
+
+    _auto_enable_drive_input_source(company.company_id, body.dataset)
+    return result.to_dict()
+
+
+@router.post("/google-drive/sync")
+def google_drive_sync(
+    body: GoogleDriveSyncIn | None = None,
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    payload = body or GoogleDriveSyncIn()
+    try:
+        result = sync_google_drive(
+            company_id=company.company_id,
+            dataset=payload.dataset,
+        )
+    except SyncConfigError as e:
+        raise HTTPException(400, str(e)) from e
+
+    _auto_enable_drive_input_source(company.company_id, payload.dataset)
     return result.to_dict()
 
 

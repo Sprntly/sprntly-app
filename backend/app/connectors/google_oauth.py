@@ -17,17 +17,22 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+# drive.file is the narrow per-file scope: it grants access ONLY to files the
+# user explicitly picks via the Google Picker (or that this app creates), never
+# the whole Drive. This replaces the old drive.readonly full-Drive grant —
+# folder browsing is gone; the frontend Picker hands us specific file IDs which
+# the connection stores and sync downloads.
+DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 # Google auto-adds openid / userinfo.email / userinfo.profile to the granted
 # set whenever the OAuth client is also a sign-in client (ours is). If we only
-# REQUEST drive.readonly, google-auth-oauthlib raises a "Scope has changed"
+# REQUEST drive.file, google-auth-oauthlib raises a "Scope has changed"
 # error at token exchange because the returned set is a superset of what we
 # asked for. Requesting the full set up front makes the requested and granted
 # scopes match, so the exchange succeeds without relying on a relax flag. We
 # also gain the user's verified email straight from the ID token. (The relax
 # env default in app.main is kept as belt-and-suspenders for openid reordering.)
 DRIVE_SCOPES = [
-    DRIVE_READONLY_SCOPE,
+    DRIVE_FILE_SCOPE,
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
