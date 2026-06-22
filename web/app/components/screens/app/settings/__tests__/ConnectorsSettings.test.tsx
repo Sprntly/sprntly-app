@@ -6,7 +6,12 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { ConnectorsSettingsView } from "../ConnectorsSettings"
+import {
+  ADMIN_GATE_CONNECT_MESSAGE,
+  ConnectorsSettingsView,
+  connectStartErrorMessage,
+  isAdminGateError,
+} from "../ConnectorsSettings"
 import {
   CONNECTOR_CATALOG,
   connectableCatalog,
@@ -15,7 +20,11 @@ import {
   UPLOAD_ACCEPT_HINT,
   UPLOAD_EXTENSIONS,
 } from "../../../../../lib/sources-helpers"
-import type { ConnectionSummary, SourceFile } from "../../../../../lib/api"
+import {
+  ApiError,
+  type ConnectionSummary,
+  type SourceFile,
+} from "../../../../../lib/api"
 
 function noop() {}
 function noopUpload() {}
@@ -244,5 +253,56 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     }
     // All 7 wired connectors now have a real logo.
     expect((html.match(/s2\/favicons\?domain=/g) ?? []).length).toBe(7)
+  })
+})
+
+describe("ConnectorsSettings — admin-gate connect error mapping", () => {
+  it("detects a 403 ApiError as the admin gate", () => {
+    const err = new ApiError(403, {
+      detail:
+        "Only admins can manage org-wide connectors. " +
+        "Ask your workspace admin to connect this integration.",
+    })
+    expect(isAdminGateError(err)).toBe(true)
+  })
+
+  it("detects the admin-gate by message even without an ApiError status", () => {
+    expect(
+      isAdminGateError(
+        new Error("Only admins can manage org-wide connectors."),
+      ),
+    ).toBe(true)
+  })
+
+  it("does NOT treat unrelated failures as the admin gate", () => {
+    expect(isAdminGateError(new ApiError(500, "boom"))).toBe(false)
+    expect(isAdminGateError(new Error("network down"))).toBe(false)
+  })
+
+  it("maps the admin gate to the friendly message (not the raw 'Could not start' string)", () => {
+    const err = new ApiError(403, {
+      detail: "Only admins can manage org-wide connectors.",
+    })
+    const msg = connectStartErrorMessage("google_drive", err)
+    expect(msg).toBe(ADMIN_GATE_CONNECT_MESSAGE)
+    expect(msg).not.toContain("Could not start")
+    expect(msg).not.toContain("google_drive")
+  })
+
+  it("keeps the diagnostic message for non-admin-gate failures", () => {
+    const msg = connectStartErrorMessage("figma", new Error("timeout"))
+    expect(msg).toBe("Could not start figma connect: timeout")
+  })
+
+  it("renders the friendly admin message in the pane's error alert (DOM)", () => {
+    const html = render({ loadError: ADMIN_GATE_CONNECT_MESSAGE })
+    expect(html).toContain(
+      "Only a workspace admin can connect org-wide sources like Google Drive",
+    )
+    expect(html).toContain("Ask an admin to set this up")
+    // The raw diagnostic string must NOT leak through.
+    expect(html).not.toContain("Could not start google_drive connect")
+    // It surfaces in the alert region for accessibility.
+    expect(html).toContain('role="alert"')
   })
 })
