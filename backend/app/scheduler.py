@@ -277,6 +277,26 @@ def start_scheduler() -> None:
             replace_existing=True,
         )
 
+    # Synthetic sign-in monitor: authenticate the Google OAuth client against
+    # Google's token endpoint on an interval; alert if the secret is rejected
+    # (the 2026-06-22 silent "Sign in with Google" break). Only registered when
+    # enabled and a Google client is configured.
+    if (
+        settings.signin_monitor_enabled
+        and settings.google_client_id
+        and settings.google_client_secret
+    ):
+        from app.signin_monitor import run_google_signin_health_check
+
+        signin_mins = getattr(settings, "signin_monitor_interval_minutes", 15) or 15
+        _scheduler.add_job(
+            run_google_signin_health_check,
+            trigger=IntervalTrigger(minutes=signin_mins),
+            id="signin_health_monitor",
+            name=f"Synthetic Google sign-in monitor (every {signin_mins}m)",
+            replace_existing=True,
+        )
+
     _scheduler.start()
     logger.info(
         "Scheduler started: weekly brief tick every %dm "
