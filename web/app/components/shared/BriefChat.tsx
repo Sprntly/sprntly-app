@@ -86,6 +86,15 @@ const isTicketsCommand = (q: string) =>
 function buildGreeting(v2: BriefV2State | null, firstName: string | null): string {
   const who = firstName ? `, ${firstName}` : ""
   if (!v2 || (!v2.hero && v2.supporting.length === 0)) {
+    // Distinguish "we received your data but it isn't connected-evidence-rich
+    // enough yet" from a brand-new, no-data account. The backend sets
+    // `insufficientEvidence` on the empty brief in the former case so we can
+    // reassure the user their upload landed instead of telling them to "add a
+    // first source". `_empty_reason` can carry internal jargon, so we only use
+    // it when it's clearly a user-facing sentence; otherwise static copy.
+    if (v2?.insufficientEvidence) {
+      return `We've got your data${who} — but there isn't enough connected evidence yet to build your brief. Connect another source or add richer data, and your brief will fill in.`
+    }
     return `Good day${who} — there isn't enough connected yet to generate a weekly brief. Please add more sources and connect them to us, and your brief will appear here.`
   }
   // Lead with a clean one-line intro and let the finding cards below carry the

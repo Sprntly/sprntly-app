@@ -102,6 +102,13 @@ export interface BriefV2State {
   hero: BriefV2HeroFinding | null
   supporting: BriefV2CompactFinding[]
   sourcesLine: string
+  /** Backend evidence-gate flag (mirrors Brief._insufficient_evidence): the
+   *  brief is empty because the KG lacked enough connected-source evidence, NOT
+   *  because the account is brand-new with no data. Lets the greeting copy
+   *  acknowledge the upload instead of saying "add your first source". */
+  insufficientEvidence: boolean
+  /** Optional human-readable reason from the backend (Brief._empty_reason). */
+  emptyReason: string | null
 }
 
 // ---- Internal helpers -----------------------------------------------------
@@ -427,6 +434,8 @@ function buildSourcesLine(insights: Insight[]): string {
 
 export function briefToBriefV2State(brief: Brief): BriefV2State {
   const insights = (brief.insights || []).filter((i) => Boolean(i))
+  const insufficientEvidence = brief._insufficient_evidence === true
+  const emptyReason = brief._empty_reason?.trim() || null
   const empty: BriefV2State = {
     headline: null,
     weekOf: null,
@@ -436,6 +445,8 @@ export function briefToBriefV2State(brief: Brief): BriefV2State {
     hero: null,
     supporting: [],
     sourcesLine: "",
+    insufficientEvidence,
+    emptyReason,
   }
   if (insights.length === 0) return empty
 
@@ -468,5 +479,7 @@ export function briefToBriefV2State(brief: Brief): BriefV2State {
     hero,
     supporting,
     sourcesLine: buildSourcesLine(insights),
+    insufficientEvidence,
+    emptyReason,
   }
 }
