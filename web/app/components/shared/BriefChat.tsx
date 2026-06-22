@@ -13,6 +13,7 @@ import { runPrdGeneration, loadPrdById, loadLatestPrd } from "../../lib/runPrdGe
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
+import { AGENT_NAME } from "../../lib/agent"
 import type {
   BriefV2CompactFinding,
   BriefV2HeroFinding,
@@ -1390,7 +1391,7 @@ export function BriefChat() {
                 <span className="bc-agent-mark">
                   <IconSparkle size={14} />
                 </span>
-                <span className="bc-agent-name">PM Agent</span>
+                <span className="bc-agent-name">{AGENT_NAME}</span>
                 <span className="bc-agent-badge">
                   <IconSparkle size={10} />
                   PM COWORKER
@@ -1582,7 +1583,7 @@ function AgentTurn({
   onAction: (a: AgentAction) => void
   busy: boolean
 }) {
-  const personaName = turn.persona === "pm" ? "PM Agent" : "DS Agent"
+  const personaName = turn.persona === "pm" ? AGENT_NAME : "DS Agent"
   const badge = turn.persona === "pm" ? "PM COWORKER" : "DS COWORKER"
   return (
     <div className="bc-turn">
