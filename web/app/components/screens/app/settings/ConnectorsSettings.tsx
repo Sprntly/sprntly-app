@@ -1,12 +1,13 @@
 /**
  * Settings → Connectors pane (commit D).
  *
- * Renders the connector grid grouped by the 8 CONNECTOR_CATALOG categories.
- * Only connectors with a working integration (OAuth / API key) are shown
- * (`connectableCatalog`) — "Coming soon" connectors are hidden so we don't
- * surface things the user can't use, and any category left with no connectors
- * is dropped. Connection state (Active vs Off) and the per-row
- * "Configure"/"Connect" action come from `connectorsApi.list()`.
+ * Renders a single flat list of connectors (no category grouping — that
+ * returns once the connector count grows). Only connectors with a working
+ * integration (OAuth / API key) are shown (`connectableCatalog`) — "Coming
+ * soon" connectors are hidden so we don't surface things the user can't use.
+ * Each row shows the brand logo (Simple Icons, falling back to a letter).
+ * Connection state (Active vs Off) and the per-row "Configure"/"Connect"
+ * action come from `connectorsApi.list()`.
  *
  * The exported View component is pure (no hooks, no IO) and unit-tested
  * via renderToStaticMarkup per the design-agent test convention. The
@@ -35,6 +36,8 @@ import {
   getConnectorRowState,
 } from "../../../../lib/connectorRowState"
 import {
+  UPLOAD_ACCEPT_HINT,
+  UPLOAD_EXTENSIONS,
   formatRelativeDate,
   humanizeBytes,
   iconForKind,
@@ -96,12 +99,14 @@ export function ConnectorsSettingsView({
   onUpload,
   files,
 }: ConnectorsSettingsViewProps) {
+  // Flat list for now — with only a handful of live connectors, category
+  // grouping is noise. Re-introduce category sections once the list grows.
+  const connectors = categories.flatMap((c) => c.items)
   return (
     <div className="set-pane sp-connectors">
       <div className="set-h">Connectors</div>
       <div className="set-sub">
-        Every source feeding your agents, grouped by category. Connect a tool
-        or upload files directly to any category.
+        Every source feeding your agents. Connect a tool or upload files.
       </div>
 
       {loadError ? (
@@ -111,79 +116,86 @@ export function ConnectorsSettingsView({
       ) : null}
       {loading ? <p className="settings-loading">Loading connectors…</p> : null}
 
-      {categories.map((cat) => (
-        <div key={cat.key} className="set-block">
-          <div className="set-block-h">
-            <div className="set-block-t">
-              {cat.title}
-              {cat.subLabel ? (
-                <span className="set-block-s-inline">  ·  {cat.subLabel}</span>
-              ) : null}
-            </div>
-          </div>
-
-          {cat.items.map((item) => {
-            const conn = connectionByProvider.get(item.id) ?? null
-            const state = getConnectorRowState(item, conn)
-            return (
-              <div key={item.id} className="set-conn-row">
-                <div
-                  className="logo"
-                  style={{ background: item.logoColor ?? "#444" }}
-                >
-                  {item.logoText ?? item.logo}
-                </div>
-                <div className="nm">
-                  <div className="t">{item.name}</div>
-                  <div className="s">{state.statsString}</div>
-                </div>
-                <span className={`st ${state.status === "active" ? "on" : "off"}`}>
-                  {state.status === "active" ? "Active" : "Off"}
-                </span>
-                <button
-                  type="button"
-                  className="ac"
-                  disabled={!state.canClick}
-                  title={
-                    state.canClick
-                      ? undefined
-                      : "Coming soon — no integration available yet"
-                  }
-                  onClick={() => {
-                    if (!state.canClick) return
-                    if (state.actionLabel === "Configure") onConfigure(item.id)
-                    else if (state.actionLabel === "Connect") onConnect(item.id)
-                  }}
-                >
-                  {state.actionLabel}
-                </button>
+      <div className="set-block">
+        {connectors.map((item) => {
+          const conn = connectionByProvider.get(item.id) ?? null
+          const state = getConnectorRowState(item, conn)
+          return (
+            <div key={item.id} className="set-conn-row">
+              <div
+                className="logo"
+                style={{ background: item.logoColor ?? "#444", position: "relative" }}
+              >
+                {/* Letter is the fallback; the brand glyph overlays it and is
+                    hidden on load error (e.g. unknown slug / blocked CDN). */}
+                <span>{item.logoText ?? item.logo}</span>
+                {item.logoSlug ? (
+                  <img
+                    src={`https://cdn.simpleicons.org/${item.logoSlug}/white`}
+                    alt=""
+                    aria-hidden
+                    loading="lazy"
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      margin: "auto",
+                      width: "60%",
+                      height: "60%",
+                      objectFit: "contain",
+                    }}
+                    onError={(e) => {
+                      e.currentTarget.style.display = "none"
+                    }}
+                  />
+                ) : null}
               </div>
-            )
-          })}
-
-          <label
-            className="set-conn-upload"
-            title={`Upload a file to the ${cat.title} category`}
-          >
-            <i className="ti ti-cloud-upload" aria-hidden />
-            Upload {cat.title.toLowerCase()} files
-            <span className="muted">{cat.uploadAccept ?? ""}</span>
-            <input
-              type="file"
-              multiple
-              accept={(cat.uploadExtensions ?? []).join(",")}
-              style={{ display: "none" }}
-              onChange={(e) => {
-                if (e.target.files && e.target.files.length > 0) {
-                  onUpload(cat.key, e.target.files)
-                  // Reset so the same file can be picked again after a failed run.
-                  e.target.value = ""
+              <div className="nm">
+                <div className="t">{item.name}</div>
+                <div className="s">{state.statsString}</div>
+              </div>
+              <span className={`st ${state.status === "active" ? "on" : "off"}`}>
+                {state.status === "active" ? "Active" : "Off"}
+              </span>
+              <button
+                type="button"
+                className="ac"
+                disabled={!state.canClick}
+                title={
+                  state.canClick
+                    ? undefined
+                    : "Coming soon — no integration available yet"
                 }
-              }}
-            />
-          </label>
-        </div>
-      ))}
+                onClick={() => {
+                  if (!state.canClick) return
+                  if (state.actionLabel === "Configure") onConfigure(item.id)
+                  else if (state.actionLabel === "Connect") onConnect(item.id)
+                }}
+              >
+                {state.actionLabel}
+              </button>
+            </div>
+          )
+        })}
+
+        <label className="set-conn-upload" title="Upload files">
+          <i className="ti ti-cloud-upload" aria-hidden />
+          Upload files
+          <span className="muted">{UPLOAD_ACCEPT_HINT}</span>
+          <input
+            type="file"
+            multiple
+            accept={UPLOAD_EXTENSIONS.join(",")}
+            style={{ display: "none" }}
+            onChange={(e) => {
+              if (e.target.files && e.target.files.length > 0) {
+                onUpload("all", e.target.files)
+                // Reset so the same file can be picked again after a failed run.
+                e.target.value = ""
+              }
+            }}
+          />
+        </label>
+      </div>
 
       {files.length > 0 ? (
         <div className="set-block sp-conn-files">
