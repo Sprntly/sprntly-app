@@ -211,6 +211,10 @@ describe("FirstBrief (container) — first brief", () => {
     expect(container.querySelector(".gen-ready")?.textContent).toContain(
       "Your Monday Brief is waiting",
     )
+    // And it tells the user about the recurring Monday-9am brief cadence.
+    const cadence = container.querySelector(".gen-ready .brief-cadence")?.textContent ?? ""
+    expect(cadence).toContain("every Monday at 9:00 AM")
+    expect(cadence).toMatch(/your timezone:|your local time/)
 
     // The footer button is the manual fallback and is enabled.
     const btn = continueButton("Open your Brief")

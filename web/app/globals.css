@@ -14128,6 +14128,11 @@
     line-height: 1.45;
   }
 
+  /* Recurring weekly-brief cadence note, set off from the line above it. */
+  .onb-card .gen-ready .s.brief-cadence {
+    margin-top: 8px;
+  }
+
   /* Workspace summary strip (replaces the old KPI-tree right pane). */
   .onb-card .ws-strip {
     display: flex;
