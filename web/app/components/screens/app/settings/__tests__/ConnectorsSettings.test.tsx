@@ -70,33 +70,15 @@ describe("ConnectorsSettingsView — chrome", () => {
   })
 })
 
-describe("ConnectorsSettingsView — categories + sub-labels", () => {
-  it("renders all 8 category titles in design order", () => {
+describe("ConnectorsSettingsView — flat list (no category grouping)", () => {
+  it("does not render category section headers or sub-labels", () => {
     const html = render()
-    const expected = [
-      "Analytics",
-      "Project Management",
-      "Customer Voice &amp; Support", // HTML-encoded &
-      "Revenue",
-      "Code",
-      "Monitoring &amp; Reliability",
-      "Design",
-      "Communication",
-    ]
-    let lastIdx = -1
-    for (const title of expected) {
-      const idx = html.indexOf(title)
-      expect(idx, `category not found or out of order: ${title}`).toBeGreaterThan(lastIdx)
-      lastIdx = idx
-    }
-  })
-
-  it("shows the 'required' sub-label on Analytics", () => {
-    expect(render()).toContain("required")
-  })
-
-  it("shows the 'powers On-Call Agent' sub-label on Monitoring & Reliability", () => {
-    expect(render()).toContain("powers On-Call Agent")
+    // The only `set-block-h` is the uploaded-files header, which isn't shown
+    // when files is empty — so with no files there are no section headers.
+    expect(html).not.toContain("set-block-h")
+    expect(html).not.toContain("powers On-Call Agent")
+    expect(html).not.toContain("Project Management")
+    expect(html).not.toContain("Customer Voice")
   })
 })
 
@@ -152,30 +134,22 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
   })
 })
 
-describe("ConnectorsSettingsView — per-category upload strip", () => {
-  it("renders an upload strip for every category", () => {
+describe("ConnectorsSettingsView — single upload control", () => {
+  it("renders exactly one upload control (uploads are company-wide)", () => {
     const html = render()
     const matches = html.match(/class="set-conn-upload"/g) ?? []
-    expect(matches.length).toBe(8)
+    expect(matches.length).toBe(1)
   })
 
-  it("shows the broad accepted-types hint on every category", () => {
+  it("advertises the shared accepted-types hint", () => {
     const html = render()
-    // FIX #3: all categories now advertise the same broad shared hint. The `&`
-    // in the hint is HTML-encoded as `&amp;` by renderToStaticMarkup.
-    const encoded = UPLOAD_ACCEPT_HINT.replace(/&/g, "&amp;")
-    const matches = html.split(encoded).length - 1
-    expect(matches).toBe(8)
+    // The `&` in the hint is HTML-encoded as `&amp;` by renderToStaticMarkup.
+    expect(html).toContain(UPLOAD_ACCEPT_HINT.replace(/&/g, "&amp;"))
   })
 
-  it("attaches a broad accept= attribute (same on every category)", () => {
+  it("accepts the shared broad extension list", () => {
     const html = render()
-    // FIX #3: every category accepts the shared broad extension list.
-    const accept = UPLOAD_EXTENSIONS.join(",")
-    const matches = html.match(
-      new RegExp(`accept="${accept.replace(/\./g, "\\.")}"`, "g"),
-    ) ?? []
-    expect(matches.length).toBe(8)
+    expect(html).toContain(`accept="${UPLOAD_EXTENSIONS.join(",")}"`)
   })
 })
 
@@ -227,12 +201,27 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     }
   })
 
-  it("drops empty categories (Analytics, Monitoring) and keeps upload strips for the 6 that remain", () => {
+  it("renders a flat list (no category headers) with one shared upload control", () => {
     const html = render({ categories: connectableCatalog() })
-    expect(html).not.toContain("Analytics")
-    expect(html).not.toContain("Monitoring")
-    // 6 categories remain (PM, Voice, Revenue, Code, Design, Comms), each with
-    // its own upload strip.
-    expect((html.match(/set-conn-upload/g) ?? []).length).toBe(6)
+    expect(html).not.toContain("set-block-h")
+    // 7 wired connector rows + one company-wide upload control.
+    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(7)
+    expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(1)
+  })
+
+  it("renders the brand logo (Simple Icons) for connectors that have a slug", () => {
+    const html = render({ categories: connectableCatalog() })
+    for (const slug of [
+      "slack",
+      "github",
+      "figma",
+      "hubspot",
+      "clickup",
+      "googledocs",
+    ]) {
+      expect(html).toContain(`cdn.simpleicons.org/${slug}/white`)
+    }
+    // Fireflies has no Simple Icons slug → no brand img (6 logos for 7 rows).
+    expect((html.match(/cdn\.simpleicons\.org/g) ?? []).length).toBe(6)
   })
 })

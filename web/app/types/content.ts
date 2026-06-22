@@ -244,6 +244,13 @@ export interface ConnectorItemRow {
   logoText?: string
   /** Hex brand color for the logo box background (e.g. "#7856FF"). */
   logoColor?: string
+  /**
+   * Simple Icons slug for the brand glyph (https://simpleicons.org), rendered
+   * white on the brand-color box. When set, the connector shows its real logo
+   * instead of the single-letter `logoText`; if the icon fails to load the UI
+   * falls back to `logoText`. Omit for connectors with no Simple Icons entry.
+   */
+  logoSlug?: string
   /** True if a working OAuth backend exists for this connector. */
   oauth?: boolean
   /**
