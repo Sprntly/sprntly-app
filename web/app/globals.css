@@ -12374,6 +12374,26 @@
     color: #aab2ac;
   }
 
+  /* Busy state while a manual upload converts + persists server-side. Gives
+     the click immediate, visible feedback (spinner + "Uploading…") instead of
+     appearing inert during the multi-second ingest. */
+  .set-conn-upload.is-uploading {
+    cursor: progress;
+    border-color: #b8e0cc;
+    background: #eaf6f0;
+    color: #0c6e4a;
+  }
+
+  .set-conn-upload .ti-spin {
+    animation: set-conn-upload-spin 0.8s linear infinite;
+  }
+
+  @keyframes set-conn-upload-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   /* ─── Settings sidebar group header (commit B chrome) ─── */
 
   .settings-nav-group {
