@@ -73,6 +73,14 @@ from app.db.asks import (
     start_cached_ask,
 )
 
+# Website-analysis jobs (onboarding, fire-and-forget)
+from app.db.website_analysis import (
+    complete_analysis_job,
+    fail_analysis_job,
+    get_analysis_job,
+    start_analysis_job,
+)
+
 # Datasets
 from app.db.datasets import (
     dataset_exists,
@@ -192,6 +200,11 @@ __all__ = [
     "log_ask",
     "start_ask_job",
     "start_cached_ask",
+    # website-analysis jobs
+    "complete_analysis_job",
+    "fail_analysis_job",
+    "get_analysis_job",
+    "start_analysis_job",
     # datasets
     "dataset_exists",
     "delete_dataset",

@@ -17,11 +17,11 @@ import {
   humanizeBytes,
   iconForKind,
   truncateFilename,
+  UPLOAD_ACCEPT_HINT,
+  UPLOAD_EXTENSIONS,
 } from "../../../lib/sources-helpers"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
-
-const SUPPORTED_EXT = [".doc", ".docx", ".xlsx", ".csv", ".pdf", ".txt", ".md", ".zip"]
 
 export function SourcesScreen() {
   const { activeCompany } = useCompany()
@@ -88,12 +88,12 @@ export function SourcesScreen() {
     try {
       await pipelineApi.run(activeCompany)
       showToast(
-        "Pipeline started",
-        `Full pipeline running for ${companyName}: connectors → agents → knowledge graph → brief.`,
+        "Brief incoming ✨",
+        `Digging through your data to whip up this week's brief for ${companyName} — hang tight, we'll give you a shout when it's ready.`,
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      showToast("Pipeline failed to start", msg)
+      showToast("Hmm, that didn't take. Mind trying again?", msg)
     } finally {
       setRunningPipeline(false)
     }
@@ -211,9 +211,9 @@ export function SourcesScreen() {
             className="btn btn-secondary"
             onClick={() => void onRunPipeline()}
             disabled={runningPipeline || fileCount === 0}
-            title="Sync connectors, run Marketing + Competitor agents, build Knowledge Graph, then regenerate brief"
+            title="Pull in your latest data + sources and whip up a fresh brief"
           >
-            {runningPipeline ? "Running pipeline…" : "Run pipeline"}
+            {runningPipeline ? "Whipping it up…" : "Whip up a brief"}
           </button>
         </div>
       </div>
@@ -275,14 +275,14 @@ export function SourcesScreen() {
           ref={fileInputRef}
           type="file"
           multiple
-          accept={SUPPORTED_EXT.join(",")}
+          accept={UPLOAD_EXTENSIONS.join(",")}
           onChange={(e) => void onUploadFiles(e.target.files)}
           disabled={uploading}
         />
         <span>
           {uploading
             ? "Uploading…"
-            : "Click to choose files or drag-and-drop (.doc, .docx, .xlsx, .csv, .pdf, .txt, .md, or a .zip containing any files)"}
+            : `Click to choose files or drag-and-drop — ${UPLOAD_ACCEPT_HINT} (or a .zip containing any files)`}
         </span>
       </label>
 

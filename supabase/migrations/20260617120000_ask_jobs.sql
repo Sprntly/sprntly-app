@@ -17,7 +17,7 @@
 
 create table if not exists ask_jobs (
     id              bigint generated always as identity primary key,
-    company_id      text not null references companies (id) on delete cascade,
+    company_id      uuid not null references companies (id) on delete cascade,
     dataset         text not null,
     question        text not null,
     conversation_id bigint,

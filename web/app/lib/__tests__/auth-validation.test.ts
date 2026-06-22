@@ -1,8 +1,10 @@
 import { describe, expect, it, vi, afterEach } from "vitest"
 import {
+  describeSignInError,
   isPersonalDomain,
   isWorkEmail,
   isAllowlistedEmail,
+  normalizeEmail,
   validateWorkEmail,
 } from "../auth-validation"
 
@@ -53,5 +55,47 @@ describe("email signup validation (post-gmail-unblock, 2026-06-06)", () => {
     vi.stubEnv("NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST", "qa@icloud.com")
     expect(isAllowlistedEmail("qa@icloud.com")).toBe(true)
     expect(isAllowlistedEmail("random@icloud.com")).toBe(false)
+  })
+})
+
+describe("normalizeEmail (case-insensitive login)", () => {
+  it("lowercases and trims", () => {
+    expect(normalizeEmail("  David@Gravitios.AI  ")).toBe("david@gravitios.ai")
+  })
+
+  it("is idempotent on already-normal input", () => {
+    expect(normalizeEmail("a@b.com")).toBe("a@b.com")
+  })
+
+  it("treats different-cased addresses as equal after normalizing", () => {
+    expect(normalizeEmail("USER@EXAMPLE.COM")).toBe(normalizeEmail("user@example.com"))
+  })
+})
+
+describe("describeSignInError", () => {
+  it("maps email-not-confirmed (by code) to a distinct message and does NOT count as a failed attempt", () => {
+    const r = describeSignInError({ code: "email_not_confirmed", message: "Email not confirmed" })
+    expect(r.kind).toBe("unconfirmed")
+    expect(r.countsAsFailedAttempt).toBe(false)
+    expect(r.message).toMatch(/confirm your email/i)
+  })
+
+  it("maps email-not-confirmed (by message only) too", () => {
+    const r = describeSignInError({ message: "Email not confirmed" })
+    expect(r.kind).toBe("unconfirmed")
+    expect(r.countsAsFailedAttempt).toBe(false)
+  })
+
+  it("keeps wrong-password and no-account merged as generic invalid_credentials (anti-enumeration), counts as a failed attempt", () => {
+    const r = describeSignInError({ message: "Invalid login credentials" })
+    expect(r.kind).toBe("invalid_credentials")
+    expect(r.message).toBe("Email or password incorrect.")
+    expect(r.countsAsFailedAttempt).toBe(true)
+  })
+
+  it("falls back to a generic retry message for unknown/network errors and counts as a failed attempt", () => {
+    expect(describeSignInError(new Error("Failed to fetch")).kind).toBe("unknown")
+    expect(describeSignInError(null).kind).toBe("unknown")
+    expect(describeSignInError(undefined).countsAsFailedAttempt).toBe(true)
   })
 })

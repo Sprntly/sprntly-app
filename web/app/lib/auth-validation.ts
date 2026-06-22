@@ -32,6 +32,13 @@ const CONSUMER_DOMAINS = new Set([
   "zoho.com",
 ])
 
+/** Normalize an email for auth: trim surrounding whitespace and lowercase so
+ *  sign-in / sign-up / reset are case-insensitive (matches GoTrue's own
+ *  server-side normalization and any app-side email lookups). */
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase()
+}
+
 export function emailDomain(email: string): string | null {
   const trimmed = email.trim().toLowerCase()
   const at = trimmed.lastIndexOf("@")
@@ -155,4 +162,45 @@ export function recordFailedSignIn(): void {
 
 export function clearSignInAttempts(): void {
   writeLockout({ attempts: 0, lockedUntil: null })
+}
+
+export type SignInErrorKind = "unconfirmed" | "invalid_credentials" | "unknown"
+
+/** Map a Supabase sign-in failure to the UI message and whether it should count
+ *  toward the failed-attempt lockout.
+ *
+ *  - "unconfirmed": credentials were valid, the email just isn't confirmed yet —
+ *    surface the real cause and do NOT count it as a failed attempt.
+ *  - "invalid_credentials": wrong password AND no-such-account both land here.
+ *    Supabase returns one generic error for both on purpose, to prevent account
+ *    enumeration, so we keep them merged.
+ *
+ *  Duck-types `code`/`message` so it stays a pure helper (no supabase import). */
+export function describeSignInError(error: unknown): {
+  kind: SignInErrorKind
+  message: string
+  countsAsFailedAttempt: boolean
+} {
+  const code = (error as { code?: unknown } | null)?.code
+  const message = (error as { message?: unknown } | null)?.message
+  if (code === "email_not_confirmed" || message === "Email not confirmed") {
+    return {
+      kind: "unconfirmed",
+      message:
+        "Please confirm your email first — check your inbox for the verification link.",
+      countsAsFailedAttempt: false,
+    }
+  }
+  if (message === "Invalid login credentials") {
+    return {
+      kind: "invalid_credentials",
+      message: "Email or password incorrect.",
+      countsAsFailedAttempt: true,
+    }
+  }
+  return {
+    kind: "unknown",
+    message: "Couldn't sign in. Try again in a moment.",
+    countsAsFailedAttempt: true,
+  }
 }

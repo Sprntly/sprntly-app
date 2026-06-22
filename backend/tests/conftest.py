@@ -224,6 +224,46 @@ CREATE TABLE ask_jobs (
 );
 CREATE INDEX ask_jobs_company_idx ON ask_jobs (company_id, id DESC);
 
+-- Fire-and-forget onboarding website-analysis job rows (mirrors
+-- 20260618120000_website_analysis_jobs.sql). Status walks generating → ready
+-- (or error); `result` holds the full analyze_website() dict. Per-request +
+-- per-tenant — backs the blur/remount-safe onboarding interstitial.
+CREATE TABLE website_analysis_jobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    url         TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'generating',
+    result      TEXT,
+    error       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX website_analysis_jobs_company_idx ON website_analysis_jobs (company_id, id DESC);
+
+-- Multi-agent generated docs (mirrors 20260613100000_multi_agent_docs.sql).
+-- No company_id column: tenant ownership is bound via brief_id -> brief ->
+-- dataset -> company (app.deps.ownership.require_owned_brief). Was previously
+-- absent from the fake schema, which is why this table shipped untested.
+CREATE TABLE multi_agent_docs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    brief_id      INTEGER NOT NULL,
+    insight_index INTEGER NOT NULL,
+    prd_id        INTEGER,
+    doc_type      TEXT NOT NULL CHECK (doc_type IN (
+        'qa_test_cases', 'technical_design', 'risk_analysis', 'traceability_matrix'
+    )),
+    title         TEXT NOT NULL DEFAULT '',
+    payload_md    TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'generating' CHECK (status IN (
+        'generating', 'ready', 'failed', 'invalidated'
+    )),
+    error         TEXT,
+    run_id        TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_multi_agent_docs_run_id ON multi_agent_docs (run_id);
+
 -- slug PRIMARY KEY mirrors the prod UNIQUE on datasets.slug
 -- (20260608160000_datasets_slug_unique.sql); a duplicate INSERT raises
 -- IntegrityError here, which insert_dataset treats as "already exists".

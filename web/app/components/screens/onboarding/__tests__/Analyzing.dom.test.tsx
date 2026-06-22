@@ -1,11 +1,17 @@
 // @vitest-environment jsdom
 //
-// Container-level mount test for the blocking "Gathering information about your
-// business" interstitial. This is the SENSITIVE part of the onboarding flow:
-// it must call analyze-website exactly once, advance to the metrics page on
-// success, and — critically — STILL advance on failure / ok:false / timeout so
-// the user is never trapped on the loader. All navigation is driven from
-// effects (never during render).
+// Container-level mount test for the "Gathering information about your business"
+// interstitial. This is the SENSITIVE part of the onboarding flow: it must kick
+// off the website analysis, advance to the metrics page on a ready result, and —
+// critically — STILL advance on error / ok:false / timeout / no result so the
+// user is never trapped on the loader.
+//
+// The analysis is now fire-and-forget + blur/remount-safe: the screen calls
+// runWebsiteAnalysis (POST → poll the status endpoint), persisting the job_id so
+// a remount re-attaches via resumeWebsiteAnalysis instead of re-POSTing. We mock
+// the runWebsiteAnalysis module (its own unit test covers the POST/poll/jobResume
+// internals) and assert the screen's orchestration: stash-on-ready, forward
+// always, resume-on-pending.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -16,14 +22,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
-const analyzeWebsiteMock = vi.fn()
+const runWebsiteAnalysisMock = vi.fn()
+const resumeWebsiteAnalysisMock = vi.fn()
+const getPendingAnalysisMock = vi.fn()
 
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
 }))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
-vi.mock("../../../../lib/api", () => ({
-  onboardingApi: { analyzeWebsite: (...a: unknown[]) => analyzeWebsiteMock(...a) },
+vi.mock("../../../../lib/onboarding/runWebsiteAnalysis", () => ({
+  runWebsiteAnalysis: (...a: unknown[]) => runWebsiteAnalysisMock(...a),
+  resumeWebsiteAnalysis: (...a: unknown[]) => resumeWebsiteAnalysisMock(...a),
+  getPendingAnalysis: (...a: unknown[]) => getPendingAnalysisMock(...a),
 }))
 
 import { Analyzing } from "../Analyzing"
@@ -45,6 +55,11 @@ function withWebsite(over: Record<string, unknown> = {}) {
   })
 }
 
+beforeEach(() => {
+  // Default: no pending job persisted → fresh POST path.
+  getPendingAnalysisMock.mockReturnValue(null)
+})
+
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
@@ -53,7 +68,7 @@ afterEach(() => {
 
 describe("Analyzing (interstitial)", () => {
   it("renders the gathering-information loader with a spinner", () => {
-    analyzeWebsiteMock.mockReturnValue(new Promise(() => {})) // never resolves
+    runWebsiteAnalysisMock.mockReturnValue(new Promise(() => {})) // never resolves
     onboardingMock.mockReturnValue(withWebsite())
     const { container } = render(React.createElement(Analyzing))
     expect(
@@ -62,20 +77,22 @@ describe("Analyzing (interstitial)", () => {
     expect(container.querySelector(".onb-spinner")).not.toBeNull()
   })
 
-  it("calls analyzeWebsite once with the product website", async () => {
-    analyzeWebsiteMock.mockResolvedValue(makeAnalysis())
-    const setWebsiteAnalysis = vi.fn()
-    onboardingMock.mockReturnValue(withWebsite({ setWebsiteAnalysis }))
+  it("kicks off runWebsiteAnalysis once with the website + workspace scope", async () => {
+    runWebsiteAnalysisMock.mockResolvedValue({ result: makeAnalysis() })
+    onboardingMock.mockReturnValue(withWebsite({ setWebsiteAnalysis: vi.fn() }))
     await act(async () => {
       render(React.createElement(Analyzing))
     })
-    expect(analyzeWebsiteMock).toHaveBeenCalledTimes(1)
-    expect(analyzeWebsiteMock).toHaveBeenCalledWith("https://acme.com")
+    expect(runWebsiteAnalysisMock).toHaveBeenCalledTimes(1)
+    // (url, company=workspaceId, workspaceId, isCancelled)
+    expect(runWebsiteAnalysisMock.mock.calls[0][0]).toBe("https://acme.com")
+    expect(runWebsiteAnalysisMock.mock.calls[0][1]).toBe("ws-1")
+    expect(runWebsiteAnalysisMock.mock.calls[0][2]).toBe("ws-1")
   })
 
-  it("on success: stashes the analysis and advances to the metrics page (route 2)", async () => {
+  it("on a ready result: stashes the analysis and advances to the metrics page", async () => {
     const analysis = makeAnalysis()
-    analyzeWebsiteMock.mockResolvedValue(analysis)
+    runWebsiteAnalysisMock.mockResolvedValue({ result: analysis })
     const setWebsiteAnalysis = vi.fn()
     onboardingMock.mockReturnValue(withWebsite({ setWebsiteAnalysis }))
     await act(async () => {
@@ -85,36 +102,35 @@ describe("Analyzing (interstitial)", () => {
     expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
   })
 
-  it("on transport FAILURE: still advances to the metrics page (manual fallback)", async () => {
-    analyzeWebsiteMock.mockRejectedValue(new Error("network down"))
-    onboardingMock.mockReturnValue(withWebsite())
-    await act(async () => {
-      render(React.createElement(Analyzing))
-    })
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
-  })
-
-  it("on ok:false (degraded): still advances to the metrics page", async () => {
-    const degraded = makeAnalysis({
-      ok: false,
-      reason: "blocked_url",
-      industry: null,
-      business_type: null,
-      suggested_metrics: [],
-    })
-    analyzeWebsiteMock.mockResolvedValue(degraded)
+  it("on result:null (error / timeout): forwards WITHOUT stashing (manual fallback)", async () => {
+    runWebsiteAnalysisMock.mockResolvedValue({ result: null })
     const setWebsiteAnalysis = vi.fn()
     onboardingMock.mockReturnValue(withWebsite({ setWebsiteAnalysis }))
     await act(async () => {
       render(React.createElement(Analyzing))
     })
-    expect(setWebsiteAnalysis).toHaveBeenCalledWith(degraded)
+    expect(setWebsiteAnalysis).not.toHaveBeenCalled()
     expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
   })
 
-  it("advances exactly ONCE even if both the promise and the timeout could fire", async () => {
-    analyzeWebsiteMock.mockResolvedValue(makeAnalysis())
-    onboardingMock.mockReturnValue(withWebsite())
+  it("re-attaches to a persisted pending job on mount (resume, no re-POST)", async () => {
+    getPendingAnalysisMock.mockReturnValue({ id: "321" })
+    resumeWebsiteAnalysisMock.mockResolvedValue({ result: makeAnalysis() })
+    const setWebsiteAnalysis = vi.fn()
+    onboardingMock.mockReturnValue(withWebsite({ setWebsiteAnalysis }))
+    await act(async () => {
+      render(React.createElement(Analyzing))
+    })
+    // Resume by id — never a fresh POST.
+    expect(resumeWebsiteAnalysisMock).toHaveBeenCalledTimes(1)
+    expect(resumeWebsiteAnalysisMock.mock.calls[0][0]).toBe(321)
+    expect(runWebsiteAnalysisMock).not.toHaveBeenCalled()
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
+  })
+
+  it("advances exactly ONCE on a ready result", async () => {
+    runWebsiteAnalysisMock.mockResolvedValue({ result: makeAnalysis() })
+    onboardingMock.mockReturnValue(withWebsite({ setWebsiteAnalysis: vi.fn() }))
     await act(async () => {
       render(React.createElement(Analyzing))
     })
@@ -122,18 +138,6 @@ describe("Analyzing (interstitial)", () => {
       (c) => c[0] === "/onboarding/metrics",
     )
     expect(toMetrics).toHaveLength(1)
-  })
-
-  it("has a TIMEOUT guard: advances even when analyze-website never resolves", async () => {
-    vi.useFakeTimers()
-    analyzeWebsiteMock.mockReturnValue(new Promise(() => {})) // hangs forever
-    onboardingMock.mockReturnValue(withWebsite())
-    render(React.createElement(Analyzing))
-    expect(routerMock.replace).not.toHaveBeenCalledWith("/onboarding/metrics")
-    await act(async () => {
-      vi.advanceTimersByTime(12_000)
-    })
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
   })
 
   it("with NO website: skips analysis and advances straight to metrics", async () => {
@@ -145,7 +149,8 @@ describe("Analyzing (interstitial)", () => {
     await act(async () => {
       render(React.createElement(Analyzing))
     })
-    expect(analyzeWebsiteMock).not.toHaveBeenCalled()
+    expect(runWebsiteAnalysisMock).not.toHaveBeenCalled()
+    expect(resumeWebsiteAnalysisMock).not.toHaveBeenCalled()
     expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
   })
 

@@ -2,11 +2,11 @@
 
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
 import {
   authLockoutRemainingMs,
   clearSignInAttempts,
+  describeSignInError,
   recordFailedSignIn,
   validateWorkEmail,
 } from "../lib/auth-validation"
@@ -53,13 +53,12 @@ export default function SignInPage() {
       clearSignInAttempts()
       router.replace(await auth.postLoginPath())
     } catch (e) {
-      recordFailedSignIn()
-      setLockoutMs(authLockoutRemainingMs())
-      if (e instanceof AuthApiError && e.message === "Invalid login credentials") {
-        setError("Email or password incorrect.")
-      } else {
-        setError("Couldn't sign in. Try again in a moment.")
+      const { message, countsAsFailedAttempt } = describeSignInError(e)
+      if (countsAsFailedAttempt) {
+        recordFailedSignIn()
+        setLockoutMs(authLockoutRemainingMs())
       }
+      setError(message)
     } finally {
       setSubmitting(false)
     }

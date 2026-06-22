@@ -102,10 +102,18 @@ ANCHOR_ID_RE = re.compile(r'data-anchor-id["\s:=]+["\'][0-9a-f]{8}')
 _HAS_TOOLCHAIN = (
     _storage_mod._RUNTIME_ROOT / "node_modules"
 ).exists() and shutil.which("npx") is not None
-_skip_no_toolchain = pytest.mark.skipif(
+_skipif_no_toolchain = pytest.mark.skipif(
     not _HAS_TOOLCHAIN,
     reason="prototype-runtime/node_modules or npx absent (dev env not provisioned)",
 )
+
+
+def _skip_no_toolchain(func):
+    """Guard a scenario smoke that runs a REAL vite build (see the matching helper
+    in test_design_agent_storage.py). Applies the `real_build` marker so CI runs
+    these CPU-heavy builds in an isolated sequential step (un-starved → no SIGKILL
+    flake), plus the toolchain skipif for Python-only dev envs."""
+    return pytest.mark.real_build(_skipif_no_toolchain(func))
 
 # SQLite-compatible DDL for the P1-06 prototypes tables (mirrors
 # test_design_agent_routes.py — the fake exercises SQL semantics, not PG DDL).
@@ -273,6 +281,17 @@ async def _login(env):
         transport=transport, base_url="http://testserver", headers=_bearer_header()
     ) as client:
         yield client
+
+
+@pytest.fixture
+def generous_vite_timeout(monkeypatch):
+    """600s headroom for the REAL `vite build` the generation bg-task runs, so a
+    slow-but-valid build finishes on a contended CI runner instead of being
+    SIGKILLed at the prod cap (180s). Pairs with the 600s generation poll below.
+    Prod default untouched; durable fix is a larger runner."""
+    monkeypatch.setattr(
+        _storage_mod.settings, "design_agent_vite_build_timeout_seconds", 600, raising=False
+    )
 
 
 async def _poll_until(client, prototype_id: int, *, terminal: set[str], timeout_s: float):
@@ -642,7 +661,7 @@ def test_llm_telemetry_unchanged():
 
 @pytest.mark.integration
 @_skip_no_toolchain
-async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
+async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog, generous_vite_timeout):
     """The load-bearing P1 gate: POST → poll → ready + bundle_url, and the served
     bundle carries data-anchor-id (AD4 closure through a real `vite build`)."""
     monkeypatch.setattr(
@@ -678,7 +697,7 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
 
             # ── Step 2: Poll GET until ready (real build runs in the bg task).
             row = await _poll_until(
-                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=600
             )
 
     assert row is not None, "generation did not reach a terminal status within 60s"
@@ -730,7 +749,7 @@ async def test_scenario_a_smoke(env, monkeypatch, tmp_path, caplog):
 
 @pytest.mark.integration
 @_skip_no_toolchain
-async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
+async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog, generous_vite_timeout):
     """Scenario B (P5-10 AC2): a website URL + NO Figma. The P5-01 extractor is
     mocked (no live browser in CI), but the run still flows through the real
     generate route → `infer_scenario_from_inputs` → real `vite build`, proving
@@ -786,7 +805,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
             prototype_id = body["prototype_id"]
 
             row = await _poll_until(
-                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=600
             )
 
     assert row is not None, "generation did not reach a terminal status within 60s"
@@ -832,7 +851,7 @@ async def test_scenario_b_smoke(env, monkeypatch, tmp_path, caplog):
 
 @pytest.mark.integration
 @_skip_no_toolchain
-async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
+async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog, generous_vite_timeout):
     """Scenario 0 (P5-10 AC3): no Figma, no website URL, no manual design — the
     generic path. `infer_scenario_from_inputs` returns {'0'}; the run still
     reaches ready with an anchor-id bundle and all three source columns NULL."""
@@ -860,7 +879,7 @@ async def test_scenario_0_smoke(env, monkeypatch, tmp_path, caplog):
             prototype_id = body["prototype_id"]
 
             row = await _poll_until(
-                client, prototype_id, terminal={"ready", "failed"}, timeout_s=60
+                client, prototype_id, terminal={"ready", "failed"}, timeout_s=600
             )
 
     assert row is not None, "generation did not reach a terminal status within 60s"

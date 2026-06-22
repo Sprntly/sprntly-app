@@ -29,6 +29,17 @@ from app.deps.ownership import require_owned_brief
 
 logger = logging.getLogger(__name__)
 
+
+def _assert_run_owned(run_id: str, company_id: str) -> list[dict]:
+    """Fetch a multi-agent run's docs and assert the caller's company owns them
+    (via the run's brief → dataset → company chain). Returns the docs so callers
+    reuse them. An empty list (unknown run / still initializing) is allowed —
+    there's nothing to leak. 404 on a foreign tenant (no existence disclosure)."""
+    docs = get_docs_by_run(run_id)
+    if docs:
+        require_owned_brief(docs[0]["brief_id"], company_id)
+    return docs
+
 router = APIRouter(prefix="/v1/multi-agent", tags=["multi-agent"])
 
 # Strong refs to in-flight background tasks.
@@ -108,16 +119,17 @@ def get_status(
       - "ready": all docs generated successfully
       - "partial": some docs failed, others ready
     """
-    result = get_run_status(run_id)
-    if not result or not result.get("docs"):
-        # Check if it's a standard-mode run (no multi_agent_docs rows)
-        # or still initializing
+    # Tenant guard: verify the caller's company owns this run before returning
+    # any status. No docs yet (standard-mode / still initializing) → nothing to
+    # leak, return the generating placeholder.
+    docs = _assert_run_owned(run_id, company.company_id)
+    if not docs:
         return {
             "run_id": run_id,
             "status": "generating",
             "docs": {},
         }
-    return result
+    return get_run_status(run_id)
 
 
 @router.get("/{run_id}/docs")
@@ -130,7 +142,8 @@ def get_all_docs(
     Returns full payload_md for each doc. Use the per-doc GET endpoint
     for individual docs.
     """
-    docs = get_docs_by_run(run_id)
+    # Tenant guard: only return docs (full payload_md) for a run the caller owns.
+    docs = _assert_run_owned(run_id, company.company_id)
     return {
         "run_id": run_id,
         "docs": [
@@ -157,4 +170,8 @@ def get_single_doc(
     doc = get_doc(doc_id)
     if not doc:
         raise HTTPException(404, "Document not found")
+    # Tenant guard: doc_id is a sequential integer (trivially enumerable), and
+    # multi_agent_docs has no company_id — so bind via the doc's brief and 404
+    # if the caller's company doesn't own it (no existence disclosure).
+    require_owned_brief(doc["brief_id"], company.company_id)
     return doc

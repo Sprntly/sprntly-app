@@ -448,15 +448,43 @@ export type AnalyzeWebsiteResponse = {
   business_context_version: number | null
 }
 
+/** POST /v1/onboarding/analyze-website is fire-and-forget: it returns a job_id
+ *  immediately and the analysis keeps running server-side (blur/remount-safe).
+ *  The client polls onboardingApi.analyzeWebsiteStatus(job_id) until the status
+ *  leaves 'generating'. */
+export type AnalyzeWebsiteStartResponse = {
+  job_id: number
+  status: "generating" | "ready" | "error"
+}
+
+/** GET /v1/onboarding/analyze-website/{job_id} status + result. Once
+ *  status === 'ready' the `result` field carries the SAME AnalyzeWebsiteResponse
+ *  dict the old synchronous POST returned, so setWebsiteAnalysis(result) is
+ *  unchanged. `result` is null while generating / on error. */
+export type AnalyzeWebsiteStatusResponse = {
+  status: "generating" | "ready" | "error"
+  result: AnalyzeWebsiteResponse | null
+  error: string | null
+}
+
 export const onboardingApi = {
   /**
-   * Analyze a product website to infer industry / business type / stage and
-   * draft a business-context blurb + suggested metrics. Best-effort: the
-   * backend always answers 200, signalling failure via `ok: false`. Company
-   * is taken from the JWT (Depends(require_company)) — no slug needed.
+   * Kick off a website analysis to infer industry / business type / stage and
+   * draft a business-context blurb + suggested metrics. Fire-and-forget: returns
+   * a job_id immediately and the analysis runs server-side; poll
+   * analyzeWebsiteStatus(job_id) until status !== 'generating'. Company is taken
+   * from the JWT (Depends(require_company)) — no slug needed.
    */
   analyzeWebsite: (url: string) =>
-    api.post<AnalyzeWebsiteResponse>("/v1/onboarding/analyze-website", { url }),
+    api.post<AnalyzeWebsiteStartResponse>(
+      "/v1/onboarding/analyze-website",
+      { url },
+    ),
+  /** Read the status + result of a website-analysis job. */
+  analyzeWebsiteStatus: (jobId: number) =>
+    api.get<AnalyzeWebsiteStatusResponse>(
+      `/v1/onboarding/analyze-website/${jobId}`,
+    ),
 }
 
 export const companiesApi = {

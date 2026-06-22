@@ -29,11 +29,22 @@ import shutil
 
 import pytest
 
+import app.design_agent.storage as storage
 from app.design_agent.autofixer_data import SHADCN_REGISTRY
 from app.design_agent.prompts import SHADCN_COMPONENT_INVENTORY
 from app.design_agent.storage import _RUNTIME_ROOT, vite_build
 
 _UI_DIR = _RUNTIME_ROOT / "src" / "components" / "ui"
+
+
+@pytest.fixture
+def generous_vite_timeout(monkeypatch):
+    """600s headroom so a slow-but-valid real `vite build` finishes on a contended
+    CI runner (prod default 180s untouched). See test_design_agent_storage for the
+    rationale; durable fix is a larger runner."""
+    monkeypatch.setattr(
+        storage.settings, "design_agent_vite_build_timeout_seconds", 600, raising=False
+    )
 
 # PascalCase → kebab is mechanical except where an acronym is fully capitalised.
 _KEBAB_OVERRIDES = {"InputOTP": "input-otp"}
@@ -103,15 +114,23 @@ def test_prompt_inventory_subset_of_registry():
 # ─── Layer 2: REAL build (integration; skipped without node) ─────────────────
 
 _NODE_OK = shutil.which("npx") is not None and (_RUNTIME_ROOT / "node_modules").exists()
-_skip_no_node = pytest.mark.skipif(
+_skipif_no_node = pytest.mark.skipif(
     not _NODE_OK,
     reason="needs npx + prototype-runtime/node_modules (real vite build)",
 )
 
 
+def _skip_no_node(func):
+    """Guard a real-`vite build` registry/prototype test. Applies the `real_build`
+    marker so CI runs these in an isolated sequential step (no 3,200-test storm
+    starving the build → no SIGKILL flake), plus the toolchain skipif for
+    Python-only dev envs. See test_design_agent_storage.py for the rationale."""
+    return pytest.mark.real_build(_skipif_no_node(func))
+
+
 @pytest.mark.integration
 @_skip_no_node
-async def test_real_build_every_registry_component_resolves():
+async def test_real_build_every_registry_component_resolves(generous_vite_timeout):
     """REAL vite build of an App that imports EVERY allow-listed component.
 
     Proves every component the autofixer permits actually resolves + compiles —
@@ -137,7 +156,7 @@ async def test_real_build_every_registry_component_resolves():
 
 @pytest.mark.integration
 @_skip_no_node
-async def test_real_build_representative_prototype():
+async def test_real_build_representative_prototype(generous_vite_timeout):
     """REAL vite build of a representative generated prototype shape: multiple
     `@/components/ui/*` named imports + lucide-react + `cn` from @/lib/utils,
     matching what a real scaffold generation emits."""
