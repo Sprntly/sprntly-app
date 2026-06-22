@@ -83,6 +83,13 @@ export type ConnectorsSettingsViewProps = {
   /** Fired when a category's upload strip receives one or more files. */
   onUpload: (categoryKey: string, files: FileList) => void
   /**
+   * True while a manual upload is in flight (files are being converted +
+   * persisted server-side). Drives the upload control's "Uploading…" busy
+   * state so the click produces immediate, visible feedback during the
+   * multi-second conversion instead of appearing to do nothing.
+   */
+  uploading?: boolean
+  /**
    * All files uploaded to the active company. The backend stores uploads at
    * the company level with no per-category attribution, so this is a single
    * company-wide list rendered once (not filtered per category).
@@ -98,6 +105,7 @@ export function ConnectorsSettingsView({
   onConnect,
   onConfigure,
   onUpload,
+  uploading = false,
   files,
 }: ConnectorsSettingsViewProps) {
   // Flat list for now — with only a handful of live connectors, category
@@ -187,14 +195,24 @@ export function ConnectorsSettingsView({
           )
         })}
 
-        <label className="set-conn-upload" title="Upload files">
-          <i className="ti ti-cloud-upload" aria-hidden />
-          Upload files
+        <label
+          className={`set-conn-upload${uploading ? " is-uploading" : ""}`}
+          title={uploading ? "Uploading…" : "Upload files"}
+          aria-busy={uploading}
+        >
+          <i
+            className={`ti ${uploading ? "ti-loader-2 ti-spin" : "ti-cloud-upload"}`}
+            aria-hidden
+          />
+          {uploading ? "Uploading…" : "Upload files"}
           <span className="muted">{UPLOAD_ACCEPT_HINT}</span>
           <input
             type="file"
             multiple
             accept={UPLOAD_EXTENSIONS.join(",")}
+            // Block re-selection while a previous batch is still ingesting so
+            // the user can't fire overlapping uploads mid-flight.
+            disabled={uploading}
             style={{ display: "none" }}
             onChange={(e) => {
               if (e.target.files && e.target.files.length > 0) {
@@ -250,6 +268,7 @@ export function ConnectorsSettings() {
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [files, setFiles] = useState<SourceFile[]>([])
   const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [configuringProviderId, setConfiguringProviderId] = useState<
     string | null
@@ -409,6 +428,7 @@ export function ConnectorsSettings() {
     async (categoryKey: string, picked: FileList) => {
       const list = Array.from(picked)
       if (list.length === 0) return
+      setUploading(true)
       try {
         const r = await companiesApi.uploadFiles(activeCompany, list)
         // Refresh the company-wide uploaded-files list so the new file shows
@@ -437,6 +457,8 @@ export function ConnectorsSettings() {
         }
         const msg = e instanceof Error ? e.message : String(e)
         showToast("Upload failed", msg)
+      } finally {
+        setUploading(false)
       }
     },
     [activeCompany, reloadFiles, showToast],
@@ -457,6 +479,7 @@ export function ConnectorsSettings() {
         onConnect={onConnect}
         onConfigure={onConfigure}
         onUpload={onUpload}
+        uploading={uploading}
         files={files}
       />
       <ConfigureConnectorDrawer

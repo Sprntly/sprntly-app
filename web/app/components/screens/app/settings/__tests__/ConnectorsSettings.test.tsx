@@ -150,6 +150,27 @@ describe("ConnectorsSettingsView — single upload control", () => {
     const html = render()
     expect(html).toContain(`accept="${UPLOAD_EXTENSIONS.join(",")}"`)
   })
+
+  it("shows the idle 'Upload files' label and an enabled input by default", () => {
+    const html = render()
+    expect(html).toContain("Upload files")
+    expect(html).toContain("ti-cloud-upload")
+    // Idle: no busy markers, input is selectable.
+    expect(html).not.toContain("Uploading…")
+    expect(html).not.toContain("is-uploading")
+    expect(html).not.toMatch(/<input[^>]*disabled/)
+  })
+
+  it("shows an in-flight busy state (spinner + 'Uploading…') and disables the input while uploading", () => {
+    const html = render({ uploading: true })
+    expect(html).toContain("Uploading…")
+    // Spinner icon swaps in; busy class + aria-busy drive the visible state.
+    expect(html).toContain("ti-spin")
+    expect(html).toContain("is-uploading")
+    expect(html).toMatch(/aria-busy="true"/)
+    // The file input is blocked so overlapping uploads can't be fired mid-flight.
+    expect(html).toMatch(/<input[^>]*disabled/)
+  })
 })
 
 describe("ConnectorsSettingsView — uploaded files list (FIX #1)", () => {
