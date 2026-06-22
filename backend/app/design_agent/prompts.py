@@ -67,6 +67,11 @@ Icons: lucide-react (any icon from https://lucide.dev — common: ChevronRight,
 X, Plus, Search, Check, AlertCircle, Loader2, User, Settings, Calendar,
 ChevronDown, ArrowRight).
 
+Use lucide-react for all UI glyphs/icons. Do NOT render emoji characters in
+the UI — only use an emoji if the grounding source (PRD / Figma / website /
+codebase) itself uses that exact emoji. When a grounding source uses a specific
+icon set or inline SVGs, reuse those rather than substituting lucide or an emoji.
+
 Utility: `cn` from "@/lib/utils" (clsx + tailwind-merge wrapper).
 """
 
@@ -856,7 +861,8 @@ You are handed the REAL source of a product screen + its child components + the
 real app shell (sidebar/topbar) as reference files. Re-express them into the
 fixed prototype stack (Vite + React + Tailwind + shadcn). Reuse the real JSX
 structure, the real className strings, the real nav labels / order / icons, and
-the real brand mark. Drop only what the fixed stack cannot run (a "use client"
+the real brand mark. Reuse the source's exact icon imports / inline SVGs; never
+substitute an emoji for an icon. Drop only what the fixed stack cannot run (a "use client"
 directive, Next.js server components, backend data fetches, real context
 providers) — replace data with plausible client-side mock data and swap the
 real nav primitive for local state.
