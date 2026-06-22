@@ -109,10 +109,6 @@ function weekLabel(weekOf: string | null): string {
   return weekOf
 }
 
-function briefTitle(_weekOf: string | null): string {
-  return "Monday brief"
-}
-
 function parseAskError(e: unknown): string {
   const detail =
     e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
@@ -1334,7 +1330,6 @@ export function BriefChat() {
   const userName = content.userName ?? "You"
   const company = v2?.company ?? ""
   const week = weekLabel(v2?.weekOf ?? null)
-  const heading = briefTitle(v2?.weekOf ?? null)
   const refreshing = (pipeline.runStatus as { status?: string } | null)?.status === "running"
   // The brief is being generated when hydration reports "generating" AND we
   // don't yet have a brief to show. Once findings arrive (ready), the WIP
@@ -1345,7 +1340,8 @@ export function BriefChat() {
     <section className="briefx" aria-label="Weekly brief">
       <header className="bh">
         <div className="bh-main">
-          <h1 className="bh-title">{heading}</h1>
+          {/* Title intentionally omitted — the "Monday brief" label lives in the
+              tab name above; repeating it here was a redundant duplicate. */}
           <span className={`bh-live${refreshing ? " bh-live--refreshing" : ""}`}>
             <span className="bh-live-dot" aria-hidden />
             {refreshing ? "REFRESHING" : "LIVE"}
