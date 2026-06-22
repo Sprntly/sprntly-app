@@ -1,10 +1,12 @@
 /**
  * Settings → Connectors pane (commit D).
  *
- * Renders the 8-category × 29-connector grid from CONNECTOR_CATALOG per
- * sprntly_Design-3 (Sprntly.html lines 2266-2333). Connection state
- * (Active vs Off) and the per-row "Configure"/"Connect" action come from
- * `connectorsApi.list()`.
+ * Renders the connector grid grouped by the 8 CONNECTOR_CATALOG categories.
+ * Only connectors with a working integration (OAuth / API key) are shown
+ * (`connectableCatalog`) — "Coming soon" connectors are hidden so we don't
+ * surface things the user can't use, and any category left with no connectors
+ * is dropped. Connection state (Active vs Off) and the per-row
+ * "Configure"/"Connect" action come from `connectorsApi.list()`.
  *
  * The exported View component is pure (no hooks, no IO) and unit-tested
  * via renderToStaticMarkup per the design-agent test convention. The
@@ -20,6 +22,7 @@ import { useNavigation } from "../../../../context/NavigationContext"
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_IDS_WITH_OAUTH,
+  connectableCatalog,
 } from "../../../../lib/connectorsCatalog"
 import {
   companiesApi,
@@ -310,6 +313,14 @@ export function ConnectorsSettings() {
     connectionByProvider.set(c.provider, c)
   }
 
+  // Settings shows only connectors with a working integration (OAuth / API
+  // key), plus any provider that already has a live connection — so we never
+  // surface "Coming soon" rows the user can't act on. Categories left with no
+  // connectors are dropped entirely.
+  const displayedCategories = connectableCatalog(
+    new Set(connectionByProvider.keys()),
+  )
+
   const onConnect = useCallback(
     async (providerId: string) => {
       // Find the catalog row so we know which auth flow to take.
@@ -417,7 +428,7 @@ export function ConnectorsSettings() {
   return (
     <>
       <ConnectorsSettingsView
-        categories={CONNECTOR_CATALOG}
+        categories={displayedCategories}
         connectionByProvider={connectionByProvider}
         loading={loading}
         loadError={loadError}

@@ -7,7 +7,10 @@ import { describe, expect, it } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import { ConnectorsSettingsView } from "../ConnectorsSettings"
-import { CONNECTOR_CATALOG } from "../../../../../lib/connectorsCatalog"
+import {
+  CONNECTOR_CATALOG,
+  connectableCatalog,
+} from "../../../../../lib/connectorsCatalog"
 import {
   UPLOAD_ACCEPT_HINT,
   UPLOAD_EXTENSIONS,
@@ -202,5 +205,34 @@ describe("ConnectorsSettingsView — uploaded files list (FIX #1)", () => {
     // One shared list, not one per category.
     const lists = html.match(/class="src-list"/g) ?? []
     expect(lists.length).toBe(1)
+  })
+})
+
+describe("ConnectorsSettingsView — Settings tab uses the connectable-only catalog", () => {
+  it("renders no 'Coming soon' rows when given connectableCatalog()", () => {
+    const html = render({ categories: connectableCatalog() })
+    expect(html).not.toContain("Coming soon")
+    expect(html).not.toMatch(/<button[^>]*disabled/)
+  })
+
+  it("shows the wired connectors and hides the 'Coming soon' ones", () => {
+    const html = render({ categories: connectableCatalog() })
+    // Wired (kept):
+    for (const name of ["Slack", "GitHub", "Figma", "ClickUp", "Google Docs", "HubSpot", "Fireflies"]) {
+      expect(html).toContain(name)
+    }
+    // Coming soon (removed):
+    for (const name of ["Mixpanel", "Amplitude", "Sentry", "Linear", "Stripe", "MS Teams"]) {
+      expect(html).not.toContain(name)
+    }
+  })
+
+  it("drops empty categories (Analytics, Monitoring) and keeps upload strips for the 6 that remain", () => {
+    const html = render({ categories: connectableCatalog() })
+    expect(html).not.toContain("Analytics")
+    expect(html).not.toContain("Monitoring")
+    // 6 categories remain (PM, Voice, Revenue, Code, Design, Comms), each with
+    // its own upload strip.
+    expect((html.match(/set-conn-upload/g) ?? []).length).toBe(6)
   })
 })

@@ -9,7 +9,7 @@
  *
  * Connection state is fetched separately from `GET /v1/connectors`.
  */
-import type { ConnectorCategoryRow } from "../types/content"
+import type { ConnectorCategoryRow, ConnectorItemRow } from "../types/content"
 import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 
 export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
@@ -144,3 +144,31 @@ export const CONNECTOR_IDS_CONNECTABLE = new Set<string>(
     .filter((i) => i.oauth || i.authType === "apikey")
     .map((i) => i.id),
 )
+
+/** True iff this connector has a working integration the user can actually
+ *  use today (OAuth or API key). Everything else is "Coming soon". */
+export function isConnectableConnector(item: ConnectorItemRow): boolean {
+  return Boolean(item.oauth) || item.authType === "apikey"
+}
+
+/**
+ * The catalog as shown in Settings → Connectors: drop "Coming soon" connectors
+ * (no working integration) so we don't surface things the user can't use, and
+ * drop any category that ends up with no connectors so we don't show an empty
+ * section. (Uploads aren't lost — they're stored company-wide, and every
+ * remaining category still has its file-upload strip.)
+ *
+ * Providers in `alsoKeepIds` — e.g. any with a live connection — are never
+ * hidden even if not yet OAuth/API-key wired; a category kept alive by such a
+ * provider is therefore retained too.
+ */
+export function connectableCatalog(
+  alsoKeepIds: ReadonlySet<string> = new Set(),
+): ConnectorCategoryRow[] {
+  return CONNECTOR_CATALOG.map((cat) => ({
+    ...cat,
+    items: cat.items.filter(
+      (i) => isConnectableConnector(i) || alsoKeepIds.has(i.id),
+    ),
+  })).filter((cat) => cat.items.length > 0)
+}
