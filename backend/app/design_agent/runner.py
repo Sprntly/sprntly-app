@@ -391,6 +391,15 @@ def _render_palette_css(palette: dict) -> str:
     # Border and input: same blend logic at 0x22/255 ≈ 0.133 opacity
     border_hex = _blend(fg, bg, 0x22 / 255)
 
+    # Status (semantic) colours: token-driven from the design system, defaulting to
+    # the SemanticColors model defaults when the caller (e.g. the legacy Figma palette
+    # path) does not supply them. The error default #dc2626 converts to "0 72% 51%",
+    # so --destructive stays byte-identical for any caller without a captured palette.
+    semantic = palette.get("semantic") or {}
+    error_hex = semantic.get("error") or "#dc2626"
+    warning_hex = semantic.get("warning") or "#d97706"
+    success_hex = semantic.get("success") or "#16a34a"
+
     # Convert every colour to HSL channel triplets (no hsl() wrapper, no #)
     bg_h = _hex_to_hsl_channels(bg)
     fg_h = _hex_to_hsl_channels(fg)
@@ -400,6 +409,9 @@ def _render_palette_css(palette: dict) -> str:
     muted_bg_h = _hex_to_hsl_channels(muted_bg)
     muted_fg_h = _hex_to_hsl_channels(muted_fg_hex)
     border_h = _hex_to_hsl_channels(border_hex)
+    error_h = _hex_to_hsl_channels(error_hex)
+    warning_h = _hex_to_hsl_channels(warning_hex)
+    success_h = _hex_to_hsl_channels(success_hex)
 
     return f"""{font_import}@tailwind base;
 @tailwind components;
@@ -423,8 +435,11 @@ def _render_palette_css(palette: dict) -> str:
     --muted-foreground: {muted_fg_h};
     --accent: {primary_h};
     --accent-foreground: {primary_fg_h};
-    --destructive: 0 72% 51%;
+    --destructive: {error_h};
     --destructive-foreground: 0 0% 100%;
+    --error: {error_h};
+    --warning: {warning_h};
+    --success: {success_h};
     --border: {border_h};
     --input: {border_h};
     --ring: {primary_h};
@@ -476,6 +491,13 @@ def _render_design_system_css(ds: "DesignSystem") -> str:
         "swatches": [colors.background, colors.surface, colors.muted],
         "font_family": heading_family,
         "font_weights": ds.tokens.fonts.weights,
+        # Status colours flow through the same palette seam so the renderer emits
+        # --warning/--error/--success/--destructive from the captured design system.
+        "semantic": {
+            "success": colors.semantic.success,
+            "error": colors.semantic.error,
+            "warning": colors.semantic.warning,
+        },
     }
     return _render_palette_css(palette)
 
@@ -1340,12 +1362,23 @@ async def generate_prototype(
     if _should_pre_seed(design_system):
         try:
             virtual_fs["src/index.css"] = _render_design_system_css(design_system)
+            from app.design_agent.design_system.models import SemanticColors
+            _sem = design_system.tokens.colors.semantic
+            _sem_defaults = SemanticColors()
+            _semantic_verdict = (
+                "default"
+                if _sem == _sem_defaults
+                else (
+                    f"warning={_sem.warning},error={_sem.error},success={_sem.success}"
+                )
+            )
             logger.info(
-                "design_agent.design_system_pre_seeded prototype_id=%s provider=%s bg=%s accent=%s is_dark=%s",
+                "design_agent.design_system_pre_seeded prototype_id=%s provider=%s bg=%s accent=%s is_dark=%s semantic=%s",
                 prototype_id, provider,
                 design_system.tokens.colors.background,
                 design_system.tokens.colors.accent,
                 design_system.tokens.is_dark,
+                _semantic_verdict,
             )
             # Seed primitive component stubs so the agent has a starting point
             # that already matches the brand's tokens. GitHub source: read the

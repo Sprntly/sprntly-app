@@ -34,7 +34,11 @@ from __future__ import annotations
 # is appended to DESIGN_AGENT_RECREATE_DISCIPLINE. This changes which handlers the
 # agent emits, so it is template-invalidating: old prototypes must regenerate
 # under the new discipline.
-DESIGN_AGENT_TEMPLATE_VERSION = 6
+# v7 (semantic palette capture): the pre-seeded index.css now emits token-driven
+# --destructive/--error/--warning/--success from the extracted design system's
+# status colours (previously --destructive was hardcoded and warning/success were
+# absent). This changes the seeded CSS, so cached prototypes must regenerate.
+DESIGN_AGENT_TEMPLATE_VERSION = 7
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the
