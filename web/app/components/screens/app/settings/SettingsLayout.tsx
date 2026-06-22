@@ -17,6 +17,7 @@ export type SettingsSectionId =
   | "profile"
   | "comms-brief"
   | "product-category"
+  | "business-context"
   | "team"
   | "connectors"
   | "billing"
@@ -53,6 +54,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     groupLabel: "Workspace",
     items: [
       { id: "product-category", label: "Product & Category", available: true },
+      { id: "business-context", label: "Business Context", available: true },
       { id: "team", label: "Team & roles", available: true },
     ],
   },
