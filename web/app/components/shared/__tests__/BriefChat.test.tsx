@@ -512,6 +512,26 @@ describe("BriefChat composer — 'generate a prototype' navigation", () => {
   })
 })
 
+// ── Brief header: no duplicate "Monday brief" title ───────────────────────────
+// The "Monday brief" label lives in the chat tab name above the brief. Repeating
+// it as the header <h1> directly below the tab was a redundant duplicate, so the
+// header no longer renders a standalone title — only the LIVE/REFRESHING badge,
+// the week, and the company line remain.
+describe("BriefChat header — no duplicate brief title", () => {
+  it("renders no .bh-title element (the tab name is the single source of the label)", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    const header = document.querySelector("header.bh") as HTMLElement | null
+    expect(header).not.toBeNull()
+    // The redundant title is gone…
+    expect(header!.querySelector(".bh-title")).toBeNull()
+    // …but the live badge and week/company context still render.
+    expect(header!.querySelector(".bh-live")).not.toBeNull()
+    expect(within(header!).getByText(/Acme Health/)).not.toBeNull()
+  })
+})
+
 // ── Broken preview thumbnail removed ──────────────────────────────────────────
 // The right-rail prototype-preview thumbnail was removed: the design-agent
 // screenshot capture photographed the bundle's raw HTML source (served as
