@@ -30,7 +30,7 @@ from tests._company_helpers import company_client
 
 
 EXPECTED_SCOPES = [
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.file",
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
@@ -68,6 +68,15 @@ def google_env(isolated_settings, monkeypatch):
 
 def test_drive_scopes_contains_all_four():
     assert google_oauth.DRIVE_SCOPES == EXPECTED_SCOPES
+
+
+def test_drive_scope_is_drive_file_not_readonly():
+    """The Picker re-platform uses the narrow drive.file scope, never the old
+    full-Drive drive.readonly grant."""
+    assert google_oauth.DRIVE_FILE_SCOPE == "https://www.googleapis.com/auth/drive.file"
+    assert google_oauth.DRIVE_FILE_SCOPE in google_oauth.DRIVE_SCOPES
+    assert not any("drive.readonly" in s for s in google_oauth.DRIVE_SCOPES)
+    assert not hasattr(google_oauth, "DRIVE_READONLY_SCOPE")
 
 
 def test_build_flow_requests_all_four_scopes(google_env):
@@ -162,7 +171,7 @@ def test_scope_change_superset_does_not_raise(google_env):
                 "openid",
                 "https://www.googleapis.com/auth/userinfo.email",
                 "https://www.googleapis.com/auth/userinfo.profile",
-                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/drive.file",
             ],
         }
         return flow.oauth2session.token

@@ -1,4 +1,13 @@
-"""Sync files from a Google Drive folder into a dataset corpus."""
+"""Sync explicitly-picked Google Drive files into a dataset corpus.
+
+Under the ``drive.file`` OAuth scope this app can only see files the user
+explicitly picks via the Google Picker — there is no Drive-wide listing or
+folder browsing. The frontend Picker POSTs the picked file IDs (see
+``routes/connectors.py`` ``POST /v1/connectors/google-drive/files``) which we
+store in the connection config under ``config["files"]`` as a list of
+``{"id": "...", "name": "..."}`` entries. ``sync_google_drive`` iterates those
+IDs, fetches each file's metadata, downloads/exports it, and ingests it.
+"""
 from __future__ import annotations
 
 import io
@@ -23,7 +32,7 @@ from app.ingest import SUPPORTED_SUFFIXES, UnsupportedFileType
 logger = logging.getLogger(__name__)
 
 MAX_SYNC_BYTES = 20 * 1024 * 1024
-_FOLDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{8,}$")
+_FILE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{8,}$")
 
 GOOGLE_FOLDER = "application/vnd.google-apps.folder"
 GOOGLE_DOC = "application/vnd.google-apps.document"
@@ -45,7 +54,6 @@ _NATIVE_SUFFIXES = {s.lower() for s in SUPPORTED_SUFFIXES}
 @dataclass
 class SyncResult:
     dataset: str
-    folder_id: str
     synced: list[dict] = field(default_factory=list)
     skipped: list[dict] = field(default_factory=list)
     errors: list[dict] = field(default_factory=list)
@@ -53,7 +61,6 @@ class SyncResult:
     def to_dict(self) -> dict:
         return {
             "dataset": self.dataset,
-            "folder_id": self.folder_id,
             "synced": self.synced,
             "skipped": self.skipped,
             "errors": self.errors,
@@ -90,22 +97,25 @@ def drive_http_error_message(err: HttpError) -> str:
     return f"Google Drive API error: {msg}"
 
 
-def parse_folder_id(value: str) -> str:
-    """Accept a raw folder ID or a drive.google.com folder URL."""
-    raw = (value or "").strip()
-    if not raw:
-        raise SyncConfigError("folder_id is required")
-    m = re.search(r"/folders/([a-zA-Z0-9_-]+)", raw)
-    if m:
-        raw = m.group(1)
-    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", raw)
-    if m:
-        raw = m.group(1)
-    if not _FOLDER_ID_RE.match(raw):
-        raise SyncConfigError(
-            "folder_id must be a Drive folder ID or a folder URL from Google Drive"
-        )
-    return raw
+def normalize_picked_files(files: list[dict] | None) -> list[dict]:
+    """Validate + dedupe the picked-file list the Picker frontend sends.
+
+    Each entry must carry an ``id``; ``name`` is optional (used to name the
+    ingested doc — falls back to the live Drive metadata name at sync time).
+    Returns a clean ``[{"id": str, "name": str|None}, ...]`` list (last write
+    wins per id). Raises SyncConfigError on a malformed id."""
+    out: dict[str, dict] = {}
+    for entry in files or []:
+        if not isinstance(entry, dict):
+            raise SyncConfigError("each picked file must be an object with an id")
+        fid = (entry.get("id") or "").strip()
+        if not fid:
+            raise SyncConfigError("each picked file must have an id")
+        if not _FILE_ID_RE.match(fid):
+            raise SyncConfigError(f"invalid Drive file id: {fid!r}")
+        name = entry.get("name")
+        out[fid] = {"id": fid, "name": (name.strip() if isinstance(name, str) and name.strip() else None)}
+    return list(out.values())
 
 
 def load_config(row: dict) -> dict:
@@ -156,107 +166,15 @@ def build_drive_service(row: dict) -> Resource:
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def browse_folders(company_id: str, parent_id: str | None = None) -> dict:
-    """List child folders under parent_id (default: user's Drive root)."""
-    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
-    if not row:
-        raise SyncConfigError("Google Drive is not connected")
-
-    pid = (parent_id or "root").strip() or "root"
-    if pid != "root":
-        parse_folder_id(pid)  # validate format
-
-    service = build_drive_service(row)
-    current_name = "My Drive"
-    parent_meta = None
-
-    if pid != "root":
-        try:
-            meta = (
-                service.files()
-                .get(fileId=pid, fields="id, name, parents")
-                .execute()
-            )
-            current_name = meta.get("name") or pid
-            parents = meta.get("parents") or []
-            if parents:
-                try:
-                    p = (
-                        service.files()
-                        .get(fileId=parents[0], fields="id, name")
-                        .execute()
-                    )
-                    parent_meta = {"id": p["id"], "name": p.get("name") or parents[0]}
-                except HttpError:
-                    parent_meta = {"id": parents[0], "name": "My Drive"}
-            else:
-                parent_meta = {"id": "root", "name": "My Drive"}
-        except HttpError as e:
-            raise SyncConfigError(drive_http_error_message(e)) from e
-
-    try:
-        children = _list_child_folders(service, pid)
-    except HttpError as e:
-        raise SyncConfigError(drive_http_error_message(e)) from e
-
-    return {
-        "current": {"id": pid, "name": current_name},
-        "parent": parent_meta,
-        "folders": children,
-    }
-
-
-def _list_child_folders(service: Resource, parent_id: str) -> list[dict]:
-    folders: list[dict] = []
-    page_token = None
-    q = (
-        f"'{parent_id}' in parents and trashed = false "
-        f"and mimeType = '{GOOGLE_FOLDER}'"
+def get_file_metadata(service: Resource, file_id: str) -> dict:
+    """Fetch the metadata fields download_file_content needs for one picked
+    file. Under drive.file this succeeds only for files the user picked /
+    granted this app access to."""
+    return (
+        service.files()
+        .get(fileId=file_id, fields="id, name, mimeType, modifiedTime, size")
+        .execute()
     )
-    while True:
-        resp = (
-            service.files()
-            .list(
-                q=q,
-                fields="nextPageToken, files(id, name)",
-                orderBy="name",
-                pageSize=100,
-                pageToken=page_token,
-                spaces="drive",
-            )
-            .execute()
-        )
-        for f in resp.get("files") or []:
-            folders.append({"id": f["id"], "name": f.get("name") or "Untitled"})
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-    return folders
-
-
-def list_folder_files(service: Resource, folder_id: str) -> list[dict]:
-    files: list[dict] = []
-    page_token = None
-    q = (
-        f"'{folder_id}' in parents and trashed = false "
-        f"and mimeType != '{GOOGLE_FOLDER}'"
-    )
-    while True:
-        resp = (
-            service.files()
-            .list(
-                q=q,
-                fields="nextPageToken, files(id, name, mimeType, modifiedTime, size)",
-                pageSize=100,
-                pageToken=page_token,
-            )
-            .execute()
-        )
-        files.extend(resp.get("files") or [])
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-    return files
 
 
 def _download_bytes(request) -> bytes:
@@ -298,8 +216,13 @@ def sync_google_drive(
     *,
     company_id: str,
     dataset: str | None = None,
-    folder_id: str | None = None,
+    files: list[dict] | None = None,
 ) -> SyncResult:
+    """Download + ingest the explicitly-picked Drive files stored in the
+    connection config (``config["files"]``). Pass ``files`` to overwrite the
+    stored picked-file list first (used by the save-picked-files endpoint);
+    otherwise the existing config is used. An empty picked-file list is a
+    graceful no-op — not an error."""
     row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise SyncConfigError("Google Drive is not connected")
@@ -313,32 +236,51 @@ def sync_google_drive(
     if not db.dataset_exists(slug):
         raise SyncConfigError(f"Dataset {slug!r} does not exist")
 
-    fid = folder_id or config.get("folder_id")
-    if not fid:
-        raise SyncConfigError(
-            "folder_id is not configured — set it via POST /v1/connectors/google-drive/config"
-        )
-    fid = parse_folder_id(fid)
-
-    if folder_id or dataset:
-        merge_config(row, {"folder_id": fid, "dataset": slug})
+    if files is not None or dataset:
+        patch: dict = {"dataset": slug}
+        if files is not None:
+            patch["files"] = normalize_picked_files(files)
+        merge_config(row, patch)
         row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER) or row
+        config = load_config(row)
 
-    config = load_config(row)
+    picked = normalize_picked_files(config.get("files"))
+    result = SyncResult(dataset=slug)
+
+    # No picked files yet (fresh connect, or the Picker hasn't run) — no-op.
+    if not picked:
+        db.update_connection_sync(
+            company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=None
+        )
+        return result
+
     mtime_map: dict[str, str] = dict(config.get("file_mtime") or {})
 
-    result = SyncResult(dataset=slug, folder_id=fid)
     try:
         service = build_drive_service(row)
-        files = list_folder_files(service, fid)
     except HttpError as e:
         msg = f"Drive API error: {e}"
-        db.update_connection_sync(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=msg)
+        db.update_connection_sync(
+            company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, last_sync_error=msg
+        )
         raise SyncConfigError(msg) from e
 
-    for meta in files:
-        file_id = meta["id"]
-        name = meta.get("name") or file_id
+    for entry in picked:
+        file_id = entry["id"]
+        picked_name = entry.get("name") or file_id
+
+        try:
+            meta = get_file_metadata(service, file_id)
+        except HttpError as e:
+            result.errors.append(
+                {"name": picked_name, "error": drive_http_error_message(e)}
+            )
+            continue
+        except Exception as e:
+            result.errors.append({"name": picked_name, "error": str(e)})
+            continue
+
+        name = meta.get("name") or picked_name
         modified = meta.get("modifiedTime") or ""
         if mtime_map.get(file_id) == modified:
             result.skipped.append({"name": name, "reason": "unchanged"})
@@ -387,7 +329,7 @@ def sync_google_drive(
             }
         )
 
-    merge_config(row, {"file_mtime": mtime_map, "folder_id": fid, "dataset": slug})
+    merge_config(row, {"file_mtime": mtime_map, "dataset": slug})
     err = None
     if result.errors:
         err = f"{len(result.errors)} file(s) failed"
