@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest"
 import {
   buildKpiTreePayload,
+  buildKpiTreePayloadFromPicks,
   canSaveKpiTree,
+  canSavePickedMetrics,
   MAX_PRIMARY_METRICS,
+  REQUIRED_METRIC_PICKS,
   type SupportingMetric,
 } from "../onboarding/kpiTreeApi"
 
@@ -67,5 +70,57 @@ describe("canSaveKpiTree", () => {
     expect(canSaveKpiTree("NS", [])).toBe(false)
     expect(canSaveKpiTree("NS", [m("  ")])).toBe(false)
     expect(canSaveKpiTree("NS", [m("a")])).toBe(true)
+  })
+})
+
+describe("canSavePickedMetrics — onboarding pick-exactly-3", () => {
+  it("the constant is 3", () => {
+    expect(REQUIRED_METRIC_PICKS).toBe(3)
+  })
+
+  it("is satisfiable ONLY with exactly 3 named picks", () => {
+    expect(canSavePickedMetrics([])).toBe(false)
+    expect(canSavePickedMetrics([m("a"), m("b")])).toBe(false)
+    expect(canSavePickedMetrics([m("a"), m("b"), m("c")])).toBe(true)
+    // a 4th pick over-fills → not satisfiable
+    expect(canSavePickedMetrics([m("a"), m("b"), m("c"), m("d")])).toBe(false)
+    // blanks don't count toward the 3
+    expect(canSavePickedMetrics([m("a"), m("  "), m("b")])).toBe(false)
+  })
+})
+
+describe("buildKpiTreePayloadFromPicks", () => {
+  it("sends all 3 picks; north_star is a placeholder = the FIRST pick (server infers the real one)", () => {
+    const tree = buildKpiTreePayloadFromPicks([
+      m("Weekly active users", "WAU."),
+      m("Day-30 retention"),
+      m("Incremental revenue"),
+    ])
+    // north_star = first pick, NOT deduped out of primary_metrics
+    expect(tree.north_star).toEqual({ metric: "Weekly active users", description: "WAU." })
+    const all = [...tree.primary_metrics, ...tree.secondary_signals].map((x) => x.metric)
+    expect(all).toEqual([
+      "Weekly active users",
+      "Day-30 retention",
+      "Incremental revenue",
+    ])
+  })
+
+  it("trims + dedupes (case-insensitive) and drops blanks, preserving order", () => {
+    const tree = buildKpiTreePayloadFromPicks([
+      m("  Retention  ", "  keep  "),
+      m("retention"), // dup
+      m("  "), // blank
+      m("Activation"),
+    ])
+    const all = [...tree.primary_metrics, ...tree.secondary_signals].map((x) => x.metric)
+    expect(all).toEqual(["Retention", "Activation"])
+    expect(tree.primary_metrics[0]).toEqual({ metric: "Retention", description: "keep" })
+  })
+
+  it("emits an empty north_star for an empty pick list (no crash)", () => {
+    const tree = buildKpiTreePayloadFromPicks([])
+    expect(tree.north_star).toEqual({ metric: "", description: "" })
+    expect(tree.primary_metrics).toEqual([])
   })
 })

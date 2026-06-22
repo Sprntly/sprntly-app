@@ -6,7 +6,6 @@ import {
   BusinessInfo,
   Metrics,
   Connectors,
-  Coworkers,
   FirstBrief,
 } from "../../../components/screens/onboarding"
 import {
@@ -22,8 +21,7 @@ import {
  *      [analyzing]   → Analyzing     (its own /onboarding/analyzing route, NOT here)
  *   2. metrics       → Metrics       (the metrics-tree page)
  *   3. connectors    → Connectors
- *   4. coworkers     → Coworkers
- *   5. first-brief   → FirstBrief
+ *   4. first-brief   → FirstBrief
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
  * `onboarding_step` is the 1-based index into both). The analyzing interstitial
@@ -36,7 +34,6 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   { slug: "business-info", Component: BusinessInfo },
   { slug: "metrics", Component: Metrics },
   { slug: "connectors", Component: Connectors },
-  { slug: "coworkers", Component: Coworkers },
   { slug: "first-brief", Component: FirstBrief },
 ]
 

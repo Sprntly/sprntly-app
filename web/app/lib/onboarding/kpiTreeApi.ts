@@ -81,6 +81,52 @@ export function canSaveKpiTree(
   return supporting.some((s) => s.name.trim().length > 0)
 }
 
+/** Exactly this many metrics are picked on the onboarding metrics step. */
+export const REQUIRED_METRIC_PICKS = 3
+
+/** The onboarding metrics step is satisfiable iff EXACTLY 3 metrics are picked. */
+export function canSavePickedMetrics(picked: SupportingMetric[]): boolean {
+  const named = picked.filter((m) => m.name.trim().length > 0)
+  return named.length === REQUIRED_METRIC_PICKS
+}
+
+/**
+ * Build the backend KPI-tree payload from the onboarding pick-3 selection.
+ *
+ * The user no longer designates a North Star — it is inferred SERVER-SIDE from
+ * the three picks. The backend KPI-tree schema still REQUIRES a non-empty
+ * `north_star.metric`, so until that inference ships we set north_star to the
+ * FIRST pick as a placeholder anchor and send all three picks as
+ * primary_metrics. (Backend follow-up: derive north_star from the three picks
+ * and ignore/recompute this placeholder.)
+ */
+export function buildKpiTreePayloadFromPicks(
+  picked: SupportingMetric[],
+): KpiTreePayload {
+  // Trim + drop blanks + dedupe by name (case-insensitive), preserving order.
+  const seen = new Set<string>()
+  const entries: KpiMetricEntry[] = []
+  for (const m of picked) {
+    const metric = m.name.trim()
+    if (!metric) continue
+    const key = metric.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    entries.push({ metric, description: m.description.trim() })
+  }
+  // All three picks are real KPIs: the placeholder north_star is ALSO one of
+  // primary_metrics (no dedupe-out), so server-side inference can promote any
+  // of the three without losing a metric.
+  return {
+    north_star: entries[0] ?? { metric: "", description: "" },
+    primary_metrics: entries.slice(0, MAX_PRIMARY_METRICS),
+    secondary_signals: entries.slice(
+      MAX_PRIMARY_METRICS,
+      MAX_PRIMARY_METRICS + MAX_SECONDARY_SIGNALS,
+    ),
+  }
+}
+
 export const kpiTreeApi = {
   /** Current tree, or null if onboarding step 05 hasn't been completed (404). */
   get: () =>

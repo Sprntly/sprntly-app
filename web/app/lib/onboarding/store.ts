@@ -56,8 +56,9 @@ function rowToCompany(
         ? (row.notification_settings as Record<string, unknown>)
         : {},
     design_source: parseDesignSourcePreference(row.design_source),
-    // Clamp the persisted step into the new 5-step range so existing users mid
-    // the old 7-step flow (step 6/7) resume on a valid step instead of crashing.
+    // Clamp the persisted step into the current step range so existing users
+    // mid an older, longer flow (e.g. the removed coworkers step) resume on a
+    // valid step instead of crashing.
     onboarding_step: clampStep(Number(row.onboarding_step) || 1),
     onboarding_completed_at: (row.onboarding_completed_at as string | null) ?? null,
   }
