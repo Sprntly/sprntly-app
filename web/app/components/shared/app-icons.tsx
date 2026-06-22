@@ -162,6 +162,15 @@ export function IconListBullet({ size = 16 }: { size?: number }) {
   )
 }
 
+/** Circular-arrow reload — manual "refresh preview" affordance. */
+export function IconRefresh({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M21 12a9 9 0 1 1-2.64-6.36M21 4v5h-5" {...stroke} />
+    </svg>
+  )
+}
+
 // UX-EXPLORE (throwaway — REVERT): control-bar + sidebar-collapse icons for the
 // reworked post-generation canvas. Same inline-stroke style as the set above.
 export function IconFullscreen({ size = 16 }: { size?: number }) {

@@ -37,6 +37,9 @@ import { PrototypeViewer, type Platform } from "./PrototypeViewer"
 // surface, mounted in the LEFT sidebar near the composer when the iterate run
 // returns a `pending_question` (see the launcher's original conditional mount).
 import { ClarifyingQuestionSurface } from "./ClarifyingQuestionSurface"
+// the structured clarifying-question CARD (badge + radio options + skip/continue)
+// shown inline in the iterate activity stream, replacing the old InlineClarifyAnswer.
+import { ClarifyingQuestionCard } from "./ClarifyingQuestionCard"
 // the live agent-flow activity stream
 // (the user request → working steps → done/question/error transcript) shown in
 // the LEFT panel while/after an iterate runs.
@@ -54,7 +57,6 @@ import { usePinMarking } from "./usePinMarking"
 // exists and re-mints ONCE (bounded) on a later asset 401. The public
 // `/p/<token>` viewer does NOT use this surface, so it is untouched.
 import { useViewGrant } from "./useViewGrant"
-import type { PendingQuestion } from "../../lib/api"
 import {
   IconMessage,
   IconClose,
@@ -67,6 +69,7 @@ import {
   IconPin,
   IconCopy,
   IconUndo,
+  IconRefresh,
 } from "../shared/app-icons"
 // subtle breadcrumb at the top of the
 // canvas ("PRDs / {PRD title} / Design"). Clicking a crumb closes the canvas and
@@ -202,9 +205,18 @@ export type PostGenerationResultProps = {
   /** answer the clarifying question →
    *  continues the iterate via the shared runner. */
   onAnswerQuestion?: (answer: string) => void | Promise<void>
+  /** skip the clarifying question →
+   *  dismisses it without iterating (no preview reload). */
+  onSkipQuestion?: () => void | Promise<void>
   /** bumped on each completed iterate
    *  to force the center iframe to reload the rebuilt bundle (cache-bust). */
   bundleReloadNonce?: number
+  /** Manual "Refresh preview" trigger for the signed-in editor control bar.
+   *  Reuses the same reload signal as a completed iterate (the parent bumps
+   *  `bundleReloadNonce`), so it cascades to the iframe remount + view-grant
+   *  re-mint with no extra machinery. Absent on the public/fullscreen paths →
+   *  the Refresh button is not rendered there. */
+  onRefreshBundle?: () => void
   /** Called when Mark Complete or Resume fires so the parent can merge the new
    *  `is_complete` value into its own copy of the record without a round-trip.
    *  Optional — existing callers that omit it keep type-checking. */
@@ -321,11 +333,16 @@ export type PostGenerationResultViewProps = {
   iterateRunning?: boolean
   iteratePendingQuestion?: import("../../lib/api").PendingQuestion | null
   onAnswerQuestion?: (answer: string) => void | Promise<void>
+  onSkipQuestion?: () => void | Promise<void>
   /** pin Apply → immediate iterate. */
   onPinIterate?: (instruction: string, appliedCommentId?: number | null) => void
   /** cache-bust nonce → forces the
    *  iframe to reload the rebuilt bundle on each completed iterate. */
   bundleReloadNonce?: number
+  /** Manual "Refresh preview" trigger, threaded down to DaControlBar. Reuses the
+   *  parent's `bundleReloadNonce` bump (no new reload/poll loop). Absent on the
+   *  public/fullscreen paths → the Refresh button is not rendered. */
+  onRefreshBundle?: () => void
   /** element-anchored computed positions for pins that have a `resolvedAnchorId`.
    *  Keyed by pin.n; when present overrides the static xPct/yPct so pins track
    *  the DOM element they were placed on across scroll and resize events. */
@@ -597,6 +614,7 @@ export function DaControlBar({
   onShared,
   platform,
   onPlatformChange,
+  onRefreshBundle,
   commentsOpen,
   onToggleComments,
   markMode,
@@ -616,6 +634,11 @@ export function DaControlBar({
   onShared?: (token: string | null) => void
   platform: Platform
   onPlatformChange?: (platform: Platform) => void
+  /** Manual "Refresh preview" trigger. When provided (signed-in editor only) a
+   *  Refresh button renders to the right of the Desktop/Mobile toggle and calls
+   *  this; the parent reuses the `bundleReloadNonce` bump so it cascades to the
+   *  iframe remount + grant re-mint. Absent (public/fullscreen) → no button. */
+  onRefreshBundle?: () => void
   commentsOpen: boolean
   onToggleComments?: () => void
   /** mark-and-comment tool state. */
@@ -679,6 +702,24 @@ export function DaControlBar({
             Mobile
           </button>
         </div>
+        {/* Manual refresh — sits to the RIGHT of the Desktop/Mobile toggle.
+            Rendered only when `onRefreshBundle` is provided (signed-in editor);
+            the public viewer + fullscreen don't pass it, so no dead button. It
+            reuses the parent's existing reload signal (the `bundleReloadNonce`
+            bump), cascading to the iframe remount + view-grant re-mint with no
+            second reload/poll loop. Reuses the `.da-ctl-icon--square` styling. */}
+        {onRefreshBundle && (
+          <button
+            type="button"
+            className="da-ctl-icon da-ctl-icon--square da-ctl-refresh"
+            data-testid="da-refresh-preview"
+            title="Refresh preview"
+            aria-label="Refresh preview"
+            onClick={() => onRefreshBundle()}
+          >
+            <IconRefresh size={15} />
+          </button>
+        )}
       </div>
 
       {/* RIGHT cluster — compact icon/button tools. */}
@@ -811,90 +852,6 @@ export function DaControlBar({
   )
 }
 
-/**
- * the INLINE clarifying-answer surface
- * for the left-panel flow. When the shared iterate runner pauses on a
- * `pending_question`, this renders RIGHT IN THE ACTIVITY STREAM (not as a
- * detached surface): the question is already shown as an agent message above; this
- * is the answer affordance (choice buttons when the question carries `choices`,
- * else a free-text box). Answering routes a continuation iterate via the runner
- * (onAnswer → useIterateRun.answerQuestion). Local input state only → a leaf
- * client component (the file is already "use client").
- */
-function friendlyChoiceLabel(choice: string): string {
-  return choice.replace(/\s*\([^)]{1,50}\)\s*$/, '').trim() || choice
-}
-
-function InlineClarifyAnswer({
-  question,
-  busy,
-  onAnswer,
-}: {
-  question: PendingQuestion
-  busy: boolean
-  onAnswer: (answer: string) => void | Promise<void>
-}) {
-  const [answer, setAnswer] = useState("")
-  const choices = question.choices ?? null
-  const hasChoices = !!choices && choices.length > 0
-  return (
-    <div
-      className="da-activity-answer"
-      data-testid="da-activity-answer"
-      role="region"
-      aria-label="Answer the Design Agent"
-    >
-      {question.context && (
-        <p className="da-activity-answer-context">{question.context}</p>
-      )}
-      {hasChoices ? (
-        <div className="da-activity-answer-choices">
-          {choices!.map((choice, i) => (
-            <button
-              key={`${i}-${choice}`}
-              type="button"
-              className="da-activity-choice-btn"
-              data-testid="da-activity-answer-choice"
-              disabled={busy}
-              onClick={() => void onAnswer(choice)}
-            >
-              {friendlyChoiceLabel(choice)}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <form
-          className="da-activity-answer-form"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (!answer.trim()) return
-            void onAnswer(answer)
-            setAnswer("")
-          }}
-        >
-          <textarea
-            className="da-activity-answer-input"
-            data-testid="da-activity-answer-input"
-            value={answer}
-            placeholder="Answer the Design Agent…"
-            onChange={(e) => setAnswer(e.target.value)}
-          />
-          <div className="da-activity-answer-actions">
-            <button
-              type="submit"
-              className="btn btn-accent"
-              data-testid="da-activity-answer-submit"
-              disabled={busy || !answer.trim()}
-            >
-              Submit
-            </button>
-          </div>
-        </form>
-      )}
-    </div>
-  )
-}
-
 function FullscreenOverlay({
   bundleUrl,
   isComplete,
@@ -958,12 +915,14 @@ function ActivityPanel({
   iterateRunning,
   iteratePendingQuestion,
   onAnswerQuestion,
+  onSkipQuestion,
   userName,
 }: {
   iterateActivity: import("./useIterateRun").ActivityEvent[]
   iterateRunning: boolean
   iteratePendingQuestion: import("../../lib/api").PendingQuestion | null
   onAnswerQuestion?: (answer: string) => void | Promise<void>
+  onSkipQuestion?: () => void | Promise<void>
   userName?: string | null
 }) {
   const activityEndRef = useRef<HTMLDivElement>(null)
@@ -978,10 +937,11 @@ function ActivityPanel({
         userName={userName}
       />
       {iteratePendingQuestion && onAnswerQuestion && (
-        <InlineClarifyAnswer
+        <ClarifyingQuestionCard
           question={iteratePendingQuestion}
           busy={iterateRunning}
           onAnswer={onAnswerQuestion}
+          onSkip={onSkipQuestion ?? (() => {})}
         />
       )}
       <div ref={activityEndRef} />
@@ -1019,6 +979,7 @@ export function PostGenerationResultView({
   onToggleComments,
   platform = "desktop",
   onPlatformChange,
+  onRefreshBundle,
   markMode = false,
   onToggleMark,
   onStageClick,
@@ -1034,6 +995,7 @@ export function PostGenerationResultView({
   iterateRunning = false,
   iteratePendingQuestion = null,
   onAnswerQuestion,
+  onSkipQuestion,
   onPinIterate,
   bundleReloadNonce = 0,
   computedPinPositions = {},
@@ -1103,6 +1065,11 @@ export function PostGenerationResultView({
       platform={platform}
       onPlatformChange={onPlatformChange}
       hideToggle
+      // Edge-to-edge signed-in editor preview: suppress the cosmetic browser-frame
+      // decoration (traffic lights + URL bar). The toggle is already lifted into
+      // the top control bar (`hideToggle`), so the iframe sits flush. The public
+      // viewer + fullscreen overlay leave this unset and keep the full chrome.
+      hideChrome
       onAssetError={onBundleAssetError}
       onBundleLoad={onBundleLoad}
     />
@@ -1122,6 +1089,7 @@ export function PostGenerationResultView({
       onShared={onShared}
       platform={platform}
       onPlatformChange={onPlatformChange}
+      onRefreshBundle={onRefreshBundle}
       commentsOpen={commentsOpen}
       onToggleComments={onToggleComments}
       markMode={markMode}
@@ -1205,6 +1173,7 @@ export function PostGenerationResultView({
                 iterateRunning={iterateRunning}
                 iteratePendingQuestion={iteratePendingQuestion}
                 onAnswerQuestion={onAnswerQuestion}
+                onSkipQuestion={onSkipQuestion}
                 userName={userName}
               />
             )}
@@ -1259,7 +1228,8 @@ export function PostGenerationResultView({
               aria-live="polite"
               data-testid="da-bundle-loading"
             >
-              <span className="da-spinner" aria-hidden="true" /> Loading preview…
+              <span className="da-spinner da-bundle-loading-spinner" aria-hidden="true" />
+              <span className="da-bundle-loading-label">Applying changes…</span>
             </div>
           )}
           {/* View-grant failure (initial mint failed, or the bounded re-mint was
@@ -1395,7 +1365,9 @@ export function PostGenerationResult({
   // is intentionally not destructured/used directly here.
   iteratePendingQuestion,
   onAnswerQuestion,
+  onSkipQuestion,
   bundleReloadNonce,
+  onRefreshBundle,
   onStateChange,
   defaultFullscreen,
   onFullscreenChange,
@@ -1552,8 +1524,10 @@ export function PostGenerationResult({
       iterateRunning={iterateRunning}
       iteratePendingQuestion={iteratePendingQuestion}
       onAnswerQuestion={onAnswerQuestion}
+      onSkipQuestion={onSkipQuestion}
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
+      onRefreshBundle={onRefreshBundle}
       computedPinPositions={pin.computedPinPositions}
       leftPanelRef={leftPanelRef}
       hideBreadcrumb={hideBreadcrumb}

@@ -48,6 +48,7 @@
 import { useState } from "react"
 import {
   designAgentApi,
+  normalizeChoice,
   type IterateResponse,
   type PendingQuestion,
   type PrototypeRecord,
@@ -281,7 +282,7 @@ export function ClarifyingQuestionSurface({
     <ClarifyingQuestionSurfaceView
       question={pq.question}
       context={pq.context ?? null}
-      choices={pq.choices ?? null}
+      choices={pq.choices ? pq.choices.map((c) => normalizeChoice(c).label) : null}
       answer={answer}
       busy={busy}
       error={error}

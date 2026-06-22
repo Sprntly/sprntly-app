@@ -902,10 +902,22 @@ export const prdApi = {
  *  prototype is in `awaiting_clarification` (`status` stays `ready` — the
  *  question is a sidecar, NOT a status enum value). `choices` present → answer
  *  by picking a button; absent → free-text answer. */
+export type PendingQuestionChoice = { label: string; description?: string | null }
 export type PendingQuestion = {
   question: string
-  choices?: string[]
+  /** Each choice is `{label, description?}`. Legacy rows may still ship plain
+   *  `string[]`; consumers normalize a bare string to `{label}` (graceful). */
+  choices?: Array<PendingQuestionChoice | string>
   context?: string
+}
+
+/** Normalize a `PendingQuestion.choices` entry (object or legacy string) into the
+ *  object shape. A bare string becomes `{label}` with no description (graceful
+ *  degrade for old in-flight rows). */
+export function normalizeChoice(
+  choice: PendingQuestionChoice | string,
+): PendingQuestionChoice {
+  return typeof choice === "string" ? { label: choice } : choice
 }
 
 /** Full prototype row returned by GET /v1/design-agent/{id}. */
@@ -1027,6 +1039,11 @@ export const designAgentApi = {
   /** Fetch a prototype row by id. bundle_url is filled when status === 'ready'. */
   get: (prototypeId: number) =>
     api.get<PrototypeRecord>(`/v1/design-agent/${prototypeId}`),
+  /** Clear the prototype's pending clarifying question ("Skip this change").
+   *  POSTs the dismiss endpoint; backend clears `pending_question`. Returns the
+   *  `{ok}` body. Same `api` helper as the other authed mutations. */
+  dismissQuestion: (prototypeId: number) =>
+    api.post<{ ok: boolean }>(`/v1/design-agent/${prototypeId}/dismiss-question`),
   delete: (prototypeId: number) =>
     api.delete<void>(`/v1/design-agent/${prototypeId}`),
   /**

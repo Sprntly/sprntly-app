@@ -1340,6 +1340,12 @@
   padding: 5px 12px;
   font-size: 12px;
 }
+/* Manual refresh — sits to the RIGHT of the Desktop/Mobile toggle in the left
+   cluster (which has no `gap`), so it needs an explicit left margin. Reuses the
+   square `.da-ctl-icon--square` look; only the spacing is added here. */
+.design-agent-surface .da-ctl-refresh {
+  margin-left: 8px;
+}
 /* Tool icon-buttons (comments toggle, Share, Actions, Fullscreen) — David's
    `.pct-icon`, mapped to neutral tokens. ~30px tall, hover bg, active `.on`. */
 .design-agent-surface .da-ctl-icon {
@@ -2692,6 +2698,227 @@
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
+   "FOCUS" STATUS MODEL.
+   The wall of step rows is replaced by ONE derived status region under the
+   user bubble: a single live line (spinner + the latest step text, shimmering
+   and updated in place), a frozen "waiting" line while a clarifying question is
+   pending, or a single terminal chip (done / skipped / error). App tokens only;
+   reuses the existing `.da-activity-spinner` + `.da-activity-done-icon`.
+   ─────────────────────────────────────────────────────────────────────────── */
+/* the one updating line (mockup `.liveline`). */
+.design-agent-surface .da-activity-live {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  min-height: 44px;
+}
+.design-agent-surface .da-activity-live-text {
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* ink/forest shimmer sweep — app tokens, never David's raw hex. */
+.design-agent-surface .da-activity-shim {
+  background: linear-gradient(90deg, var(--ink-2) 0%, var(--ink-3) 40%, var(--ink) 60%, var(--ink-2) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: da-activity-shim 2s linear infinite;
+}
+@keyframes da-activity-shim {
+  to { background-position: -200% 0; }
+}
+/* terminal chip row (done / skipped / error). */
+.design-agent-surface .da-activity-terminal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* skipped: neutral/grey ✕ in a circle + muted text. */
+.design-agent-surface .da-activity-terminal--skipped .da-activity-terminal-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--ink-3);
+}
+.design-agent-surface .da-activity-terminal--skipped .da-activity-terminal-text {
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+/* frozen "waiting for your answer" line — muted, small, no spinner. */
+.design-agent-surface .da-activity-waiting {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   CLARIFYING-QUESTION CARD.
+   Structured replacement for the bare InlineClarifyAnswer surface: a badge +
+   question + radio options (label + optional muted description) + a write-your-
+   own row + a Skip/Continue footer. Renders inline in the iterate activity
+   stream. Forest-green tokens only.
+   ─────────────────────────────────────────────────────────────────────────── */
+.design-agent-surface .da-qcard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: var(--radius-sm, 12px);
+  padding: 14px;
+}
+.design-agent-surface .da-qcard-badge {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 5px;
+}
+.design-agent-surface .da-qcard-context {
+  margin: 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.design-agent-surface .da-qcard-question {
+  margin: 2px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.45;
+}
+.design-agent-surface .da-qcard-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.design-agent-surface .da-qcard-opt:hover {
+  border-color: var(--line-strong);
+}
+.design-agent-surface .da-qcard-opt--sel {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.design-agent-surface .da-qcard-opt:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.design-agent-surface .da-qcard-radio {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 2px solid var(--ink-3);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+}
+.design-agent-surface .da-qcard-opt--sel .da-qcard-radio {
+  border-color: var(--accent);
+}
+.design-agent-surface .da-qcard-opt--sel .da-qcard-radio::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.design-agent-surface .da-qcard-opt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.design-agent-surface .da-qcard-opt-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.design-agent-surface .da-qcard-opt-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.design-agent-surface .da-qcard-own-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 10px);
+  padding: 9px 11px;
+  font-size: 12.5px;
+  margin-top: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.design-agent-surface .da-qcard-own-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.design-agent-surface .da-qcard-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.design-agent-surface .da-qcard-spacer {
+  flex: 1;
+}
+.design-agent-surface .da-qcard-skip {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 7px 11px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+.design-agent-surface .da-qcard-skip:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+.design-agent-surface .da-qcard-skip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.design-agent-surface .da-qcard-continue {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.design-agent-surface .da-qcard-continue:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
    COMMENT-CLARIFY DIALOG.
    The "Confirm change" dialog that intercepts the Apply flow — shows the
    comment being applied, the LLM-generated clarifying question, and a
@@ -3092,19 +3319,46 @@
 
 /* Bundle-readiness loading overlay — covers the center stage iframe while the
    bundle is briefly 404ing through the proxy, so the raw error body is never
-   seen. Absolute fill of the position:relative .da-stage, centered spinner + a
-   neutral label. Surface background + muted text only (no new palette). */
+   seen. Absolute fill of the position:relative .da-stage. Restyled to the
+   Focus scrim, a soft translucent scrim + a larger centered ring
+   spinner stacked above the label, off the EXISTING `bundleNotReady` flip — no
+   new driver. The overlay mounts/unmounts entirely on `bundleNotReady`; the
+   `da-bundle-fade` keyframe is a one-shot reveal that fires on mount (cleared
+   by itself), NOT a new state machine. Token-only (no new palette). */
 .design-agent-surface .da-bundle-loading {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  background: var(--surface);
+  gap: 12px;
+  /* Soft translucent scrim over the iframe (not a hard opaque block), so the
+     swapping preview stays faintly visible — matches the mockup .refresh-ov. */
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(3px);
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
+  z-index: 5;
+  /* One-shot mount reveal — fires once when the overlay appears off the
+     existing notReady flip, then self-clears. No JS timer/poll backs it. */
+  animation: da-bundle-fade 0.25s ease;
 }
+/* Larger centered ring spinner — reuses the shared `da-spin` animation via the
+   .da-spinner base (do NOT fork a new spinner). The bare <span> gets its ring
+   here, sized up from the inline-icon usage to read as a centered loader. */
+.design-agent-surface .da-bundle-loading-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  margin-top: 0;
+}
+.design-agent-surface .da-bundle-loading-label {
+  letter-spacing: 0.01em;
+}
+@keyframes da-bundle-fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* ── Pre-gen screen picker — Suggested + alternatives layout ────────────────
  * Styles the screen-disambiguation picker shown before a generation run when

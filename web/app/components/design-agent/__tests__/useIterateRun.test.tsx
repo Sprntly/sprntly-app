@@ -57,9 +57,12 @@ function makeApi(get: ReturnType<typeof vi.fn>) {
     status: "generating",
     queue_position: 0,
   })
-  return { iterate, get } as unknown as Pick<
+  const dismissQuestion = vi
+    .fn<(id: number) => Promise<{ ok: boolean }>>()
+    .mockResolvedValue({ ok: true })
+  return { iterate, get, dismissQuestion } as unknown as Pick<
     typeof designAgentApi,
-    "iterate" | "get"
+    "iterate" | "get" | "dismissQuestion"
   >
 }
 
@@ -433,7 +436,7 @@ describe("useIterateRun — answerQuestion", () => {
     const onComplete = vi.fn()
     const api = { iterate, get } as unknown as Pick<
       typeof designAgentApi,
-      "iterate" | "get"
+      "iterate" | "get" | "dismissQuestion"
     >
 
     const { result } = renderHook(() =>
@@ -489,7 +492,7 @@ describe("useIterateRun — answerQuestion", () => {
     const onComplete = vi.fn()
     const api = { iterate, get } as unknown as Pick<
       typeof designAgentApi,
-      "iterate" | "get"
+      "iterate" | "get" | "dismissQuestion"
     >
 
     const { result } = renderHook(() =>

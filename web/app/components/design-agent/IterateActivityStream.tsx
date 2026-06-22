@@ -74,6 +74,32 @@ export function IterateActivityStream({
   }, [])
 
   if (activity.length === 0) return null
+
+  // ─── Derive the "Focus" view from the array in a single backward scan ───
+  // The thread is no longer a row-per-event wall. We compute, from the same
+  // ActivityEvent[], exactly three derived values and render ONE status region:
+  //   • the user request bubble (first `user` event, at most one per run),
+  //   • the terminal event (last done/skipped/error) — wins over everything,
+  //   • the latest `step` text for the single live line, and whether a
+  //     `question` is pending (a question with no terminal after it).
+  const userEvent = activity.find((e) => e.kind === "user")
+  let terminal: ActivityEvent | null = null
+  let latestStep: Extract<ActivityEvent, { kind: "step" }> | null = null
+  let pendingQuestion = false
+  for (let i = activity.length - 1; i >= 0; i--) {
+    const e = activity[i]
+    if (!terminal && (e.kind === "done" || e.kind === "skipped" || e.kind === "error")) {
+      terminal = e
+    }
+    if (!latestStep && e.kind === "step") {
+      latestStep = e
+    }
+  }
+  // A question is "pending" only when no terminal event followed it.
+  if (!terminal && activity.some((e) => e.kind === "question")) {
+    pendingQuestion = true
+  }
+
   return (
     <div
       className="da-activity"
@@ -82,82 +108,76 @@ export function IterateActivityStream({
       aria-live="polite"
       aria-label="Design Agent activity"
     >
-      {activity.map((e) => {
-        const label = turnLabel(e.kind, e.createdAt, userName, now)
-        switch (e.kind) {
-          case "user":
-            return (
-              <div
-                key={e.id}
-                className="proto-msg proto-msg--user"
-                data-testid="da-activity-user"
+      {userEvent && (
+        <div
+          className="proto-msg proto-msg--user"
+          data-testid="da-activity-user"
+        >
+          <p className="da-activity-agent-label">
+            {turnLabel(userEvent.kind, userEvent.createdAt, userName, now)}
+          </p>
+          <p className="proto-msg-body">{stripAgentContext(userEvent.text)}</p>
+        </div>
+      )}
+
+      {/* Exactly ONE status region below the user bubble. Precedence:
+          terminal chip → frozen "waiting" line → single live line. */}
+      {terminal ? (
+        terminal.kind === "done" ? (
+          <div
+            className="da-activity-terminal da-activity-terminal--done proto-msg proto-msg--agent"
+            data-testid="da-activity-done"
+          >
+            <p className="da-activity-agent-label">
+              {turnLabel(terminal.kind, terminal.createdAt, userName, now)}
+            </p>
+            <p className="proto-msg-body da-activity-done-body">
+              <span className="da-activity-done-icon" aria-hidden="true">✓</span>
+              <span>{terminal.text}</span>
+            </p>
+          </div>
+        ) : terminal.kind === "skipped" ? (
+          <div
+            className="da-activity-terminal da-activity-terminal--skipped"
+            data-testid="da-activity-skipped"
+          >
+            <span className="da-activity-terminal-icon" aria-hidden="true">
+              <svg
+                width="11"
+                height="11"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+                aria-hidden="true"
               >
-                <p className="da-activity-agent-label">{label}</p>
-                <p className="proto-msg-body">{stripAgentContext(e.text)}</p>
-              </div>
-            )
-          case "step":
-            return (
-              <div
-                key={e.id}
-                className={`da-activity-step${e.state === "done" ? " is-done" : " is-active"}`}
-                data-testid="da-activity-step"
-                data-state={e.state}
-              >
-                <span className="da-activity-step-icon" aria-hidden="true">
-                  {e.state === "done" ? (
-                    "✓"
-                  ) : (
-                    <span className="da-activity-spinner" />
-                  )}
-                </span>
-                <span className="da-activity-step-text">{e.text}</span>
-              </div>
-            )
-          case "question":
-            return (
-              <div
-                key={e.id}
-                className="proto-msg proto-msg--agent da-activity-question"
-                data-testid="da-activity-question"
-              >
-                <p className="da-activity-agent-label">{label}</p>
-                <p className="proto-msg-body">{e.question}</p>
-              </div>
-            )
-          case "done":
-            return (
-              <div
-                key={e.id}
-                className="proto-msg proto-msg--agent"
-                data-testid="da-activity-done"
-              >
-                <p className="da-activity-agent-label">{label}</p>
-                <p className="proto-msg-body da-activity-done-body">
-                  <span className="da-activity-done-icon" aria-hidden="true">✓</span>
-                  <span>{e.text}</span>
-                </p>
-              </div>
-            )
-          case "error":
-            return (
-              <div
-                key={e.id}
-                className="da-activity-error error"
-                data-testid="da-activity-error"
-                role="alert"
-              >
-                {e.text}
-              </div>
-            )
-          default:
-            return null
-        }
-      })}
-      {running && (
-        <p className="da-activity-running" data-testid="da-activity-running">
-          Working…
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </span>
+            <span className="da-activity-terminal-text">{terminal.text}</span>
+          </div>
+        ) : (
+          <div
+            className="da-activity-terminal da-activity-terminal--error da-activity-error error"
+            data-testid="da-activity-error"
+            role="alert"
+          >
+            {terminal.text}
+          </div>
+        )
+      ) : pendingQuestion ? (
+        <p className="da-activity-waiting" data-testid="da-activity-waiting">
+          Waiting for your answer…
         </p>
+      ) : (
+        <div className="da-activity-live" data-testid="da-activity-live">
+          <span className="da-activity-spinner" />
+          <span className="da-activity-live-text">
+            <span className="da-activity-shim">
+              {latestStep ? latestStep.text : "Working…"}
+            </span>
+          </span>
+        </div>
       )}
     </div>
   )

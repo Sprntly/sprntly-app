@@ -42,8 +42,10 @@ from app.design_agent.tools import (
     ToolContext,
     all_tools,
     dispatch,
+    normalize_choices,
     tools_for_mode,
 )
+from app.design_agent.prompts import DESIGN_AGENT_ITERATE_SYSTEM
 
 from tests.conftest import _TEST_COMPANY_ID
 from tests._fake_anthropic import _FakeStream
@@ -154,6 +156,54 @@ def _run(coro):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Option normalizer — back-compat (legacy strings) + object form + graceful
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_normalize_choices_legacy_strings():
+    # A: a list of plain strings (legacy / forward-compat) normalizes to objects
+    # with description=None — back-compat preserved, nothing dropped.
+    assert normalize_choices(["a", "b"]) == [
+        {"label": "a", "description": None},
+        {"label": "b", "description": None},
+    ]
+
+
+def test_normalize_choices_object_form_with_and_without_description():
+    # A: object form preserves descriptions; a missing description -> None
+    # (graceful — the option is never dropped and never raises).
+    assert normalize_choices([
+        {"label": "a", "description": "d"},
+        {"label": "b"},
+    ]) == [
+        {"label": "a", "description": "d"},
+        {"label": "b", "description": None},
+    ]
+
+
+def test_normalize_choices_empty_description_round_trips_as_none():
+    # A: an empty-string description must round-trip cleanly (rendered label-only),
+    # not error and not drop the option.
+    assert normalize_choices([{"label": "a", "description": ""}]) == [
+        {"label": "a", "description": None},
+    ]
+
+
+def test_normalize_choices_none_passes_through():
+    # A free-text question (no choices) stays None.
+    assert normalize_choices(None) is None
+
+
+def test_iterate_prompt_mentions_option_description_instruction():
+    # A: cheap guard that the load-bearing prompt change is present — the iterate
+    # system prompt instructs the agent to give each option a `description`.
+    assert "description" in DESIGN_AGENT_ITERATE_SYSTEM
+    assert "clarifying_question" in DESIGN_AGENT_ITERATE_SYSTEM
+    # The instruction is in the choices guidance, not just the tool name.
+    assert "label" in DESIGN_AGENT_ITERATE_SYSTEM
+
+
 def test_clarifying_question_is_sentinel():
     # AC1: clarifying_question is in SENTINEL_TOOLS with category="sentinel".
     names = [t.name for t in SENTINEL_TOOLS]
@@ -218,7 +268,8 @@ def test_agent_loop_breaks_on_clarifying_question(monkeypatch):
 
 
 def test_pending_question_payload_captured(monkeypatch):
-    # AC4: pending_question carries {question, choices, context}.
+    # AC4: pending_question carries {question, choices, context}. Legacy plain-string
+    # choices normalize to the {label, description?} shape (description -> None).
     _install_client(monkeypatch, [
         _msg("tool_use", [_tool_use("t1", "clarifying_question", {
             "question": "Submit or modal?",
@@ -229,9 +280,54 @@ def test_pending_question_payload_captured(monkeypatch):
     result = _run(agent_loop(_system(), _user(), _ctx()))
     assert result.pending_question == {
         "question": "Submit or modal?",
-        "choices": ["Submit", "Open modal"],
+        "choices": [
+            {"label": "Submit", "description": None},
+            {"label": "Open modal", "description": None},
+        ],
         "context": "The PRD does not say what the CTA does.",
     }
+
+
+def test_pending_question_persists_options_with_descriptions(monkeypatch):
+    # A: object-form choices with descriptions round-trip onto pending_question as
+    # the normalized {label, description} list — the description is preserved.
+    _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "clarifying_question", {
+            "question": "How should the CTA behave?",
+            "choices": [
+                {"label": "Submit", "description": "Post the form and show a success state."},
+                {"label": "Open modal", "description": "Open a confirmation dialog first."},
+            ],
+            "context": "The PRD does not say what the CTA does.",
+        })]),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.pending_question["choices"] == [
+        {"label": "Submit", "description": "Post the form and show a success state."},
+        {"label": "Open modal", "description": "Open a confirmation dialog first."},
+    ]
+
+
+def test_pending_question_mixed_choices_missing_description_round_trips(monkeypatch):
+    # A: a mix of object-with-description, object-without-description, and a bare
+    # string all normalize; a missing description round-trips as None (graceful,
+    # never dropped).
+    _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "clarifying_question", {
+            "question": "Q?",
+            "choices": [
+                {"label": "A", "description": "does A"},
+                {"label": "B"},
+                "C",
+            ],
+        })]),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.pending_question["choices"] == [
+        {"label": "A", "description": "does A"},
+        {"label": "B", "description": None},
+        {"label": "C", "description": None},
+    ]
 
 
 def test_pending_question_optional_fields_default_none(monkeypatch):
@@ -298,7 +394,11 @@ def test_dispatch_clarifying_question_routes_to_executor():
     }, _ctx()))
     assert res["_sentinel"] == "clarifying_question"
     assert res["question"] == "Q?"
-    assert res["choices"] == ["a", "b"]
+    # The executor normalizes legacy plain-string choices to {label, description?}.
+    assert res["choices"] == [
+        {"label": "a", "description": None},
+        {"label": "b", "description": None},
+    ]
     assert res["context"] == "ctx"
 
 
@@ -866,3 +966,98 @@ def test_prototypes_callsites_unchanged_plus_new_helper():
     for prior in ("def complete_prototype(", "def fail_prototype(",
                   "def set_pending_question(", "def advance_current_checkpoint("):
         assert prior in src
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# B — POST /{prototype_id}/dismiss-question: the real "Skip this change"
+#
+# Truly clears the row's pending_question server-side. Guards mirror the other
+# authed mutating DA routes: require_same_origin (CSRF/Origin) + require_company
+# (tenant gate), workspace-filtered clear.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_dismiss_question_clears_pending_question(env, client):
+    # B non-vacuity: seed a prototype WITH pending_question set, POST dismiss →
+    # the row's pending_question is NULL afterward (proven cleared, not a no-op).
+    pid = _seed_ready_route(env)
+    env.proto.set_pending_question(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        question={"question": "Submit or open a modal?",
+                  "choices": [{"label": "Submit", "description": "post the form"}]},
+    )
+    # Precondition: it really is set before we dismiss (else the test is vacuous).
+    before = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert before["pending_question"] is not None
+
+    resp = client.post(f"/v1/design-agent/{pid}/dismiss-question")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True}
+
+    after = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert after["pending_question"] is None   # proven cleared
+
+
+def test_dismiss_question_logs_state_transition(env, client, caplog):
+    # B: emits an identifier-only state-transition INFO log (no question text).
+    pid = _seed_ready_route(env)
+    secret = "SECRET_DISMISS_PRODUCT_DETAIL"
+    env.proto.set_pending_question(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        question={"question": secret},
+    )
+    with caplog.at_level(logging.INFO):
+        resp = client.post(f"/v1/design-agent/{pid}/dismiss-question")
+    assert resp.status_code == 200, resp.text
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert f"prototype_question_dismissed prototype_id={pid}" in blob
+    assert secret not in blob   # never the question text
+
+
+def test_dismiss_question_idempotent_no_open_question(env, client):
+    # B: dismissing a prototype with no open question is a clean 200 no-op.
+    pid = _seed_ready_route(env)
+    resp = client.post(f"/v1/design-agent/{pid}/dismiss-question")
+    assert resp.status_code == 200, resp.text
+    assert env.proto.get_prototype(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID)["pending_question"] is None
+
+
+def test_dismiss_question_cross_workspace_denied(env, client):
+    # B: a prototype seeded under a FOREIGN workspace is invisible to the company
+    # caller — 404 (cross-tenant invisibility), and its question is NOT cleared.
+    foreign_pid = env.proto.start_prototype(
+        prd_id=9, workspace_id="demo", template_version=1,
+    )
+    env.proto.set_pending_question(
+        prototype_id=foreign_pid, workspace_id="demo",
+        question={"question": "FOREIGN_Q"},
+    )
+    resp = client.post(f"/v1/design-agent/{foreign_pid}/dismiss-question")
+    assert resp.status_code == 404, resp.text
+    # The foreign row's question must be untouched (the clear never reached it).
+    row = env.proto.get_prototype(prototype_id=foreign_pid, workspace_id="demo")
+    assert row["pending_question"] == {"question": "FOREIGN_Q"}
+
+
+def test_dismiss_question_404_for_unknown_id(env, client):
+    assert client.post("/v1/design-agent/999999/dismiss-question").status_code == 404
+
+
+def test_dismiss_question_requires_origin(env, monkeypatch):
+    # B: the require_same_origin CSRF gate fires — a request whose Origin is NOT in
+    # the allow-list is rejected (403) before the handler runs. Mirrors the shared
+    # origin-deny pattern used for the other mutating DA routes.
+    pid = _seed_ready_route(env)
+    env.proto.set_pending_question(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, question={"question": "Q?"},
+    )
+    bad = TestClient(env.main.app)
+    resp = bad.post(
+        f"/v1/design-agent/{pid}/dismiss-question",
+        headers={"Origin": "https://evil.example.com"},
+    )
+    assert resp.status_code == 403, resp.text
+    # The CSRF rejection must NOT have cleared the question.
+    assert env.proto.get_prototype(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID)["pending_question"] is not None

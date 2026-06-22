@@ -1,7 +1,8 @@
-// Rendering tests for IterateActivityStream — each event kind, the running
-// trailing indicator, and the null-on-empty guard.
+// Rendering tests for IterateActivityStream — the "Focus" model: ONE live status
+// line (latest step, updated in place) + a single terminal chip, the user bubble,
+// and the pending-question "waiting" state.
 // Uses renderToStaticMarkup (the repo convention for pure presentational
-// components with no hooks/I/O).
+// components; the 30s ticker effect does not run under SSR).
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
@@ -26,143 +27,221 @@ function makeEvent<T extends Omit<ActivityEvent, "id" | "createdAt">>(
   return { ...e, id: ++_id, createdAt } as T & { id: number; createdAt: number }
 }
 
+const render = (activity: ActivityEvent[], extra: { running?: boolean; userName?: string | null } = {}) =>
+  renderToStaticMarkup(
+    React.createElement(IterateActivityStream, {
+      activity,
+      running: extra.running ?? false,
+      ...(extra.userName !== undefined ? { userName: extra.userName } : {}),
+    }),
+  )
+
+/** Count non-overlapping occurrences of a substring. */
+function count(haystack: string, needle: string): number {
+  let n = 0
+  let i = haystack.indexOf(needle)
+  while (i !== -1) {
+    n += 1
+    i = haystack.indexOf(needle, i + needle.length)
+  }
+  return n
+}
+
 // ---------------------------------------------------------------------------
 // Null / empty
 // ---------------------------------------------------------------------------
 
 describe("IterateActivityStream — empty list", () => {
   it("test_empty_activity_renders_null: returns null when activity is empty", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, { activity: [], running: false }),
-    )
-    expect(html).toBe("")
+    expect(render([])).toBe("")
   })
 })
 
 // ---------------------------------------------------------------------------
-// Individual event kinds
+// THE NON-VACUITY CENTERPIECE: single-line collapse (not a wall)
 // ---------------------------------------------------------------------------
 
-describe("IterateActivityStream — event kinds", () => {
-  it("test_user_event_renders_bubble: a user event renders da-activity-user testid", () => {
-    const event = makeEvent({ kind: "user" as const, text: "make the hero blue" })
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: false,
-      }),
-    )
+describe("IterateActivityStream — single live line (collapse the step wall)", () => {
+  it("test_multiple_steps_collapse_to_one_live_line_reflecting_the_latest: a run with N step events renders exactly ONE live-status node showing only the LATEST step's text — NOT a multi-row list", () => {
+    // Four step events, exactly the cosmetic script the old WALL rendered as
+    // four stacked rows. The Focus model must show ONE line = the LATEST.
+    const activity: ActivityEvent[] = [
+      makeEvent({ kind: "user" as const, text: "add confetti" }),
+      makeEvent({ kind: "step" as const, text: "Reading the change request", state: "done" as const }),
+      makeEvent({ kind: "step" as const, text: "Analyzing the prototype", state: "done" as const }),
+      makeEvent({ kind: "step" as const, text: "Applying the change", state: "done" as const }),
+      makeEvent({ kind: "step" as const, text: "Rebuilding", state: "active" as const }),
+    ]
+    const html = render(activity, { running: true })
+
+    // EXACTLY ONE live-status node — proves the collapse (the old wall rendered
+    // one `da-activity-step` row per event = four nodes here).
+    expect(count(html, 'data-testid="da-activity-live"')).toBe(1)
+
+    // It reflects the LATEST step only…
+    expect(html).toContain("Rebuilding")
+    // …and NOT the earlier steps (no per-step history / no wall).
+    expect(html).not.toContain("Reading the change request")
+    expect(html).not.toContain("Analyzing the prototype")
+    expect(html).not.toContain("Applying the change")
+
+    // Non-vacuity guard against a regression to the old wall: the per-step row
+    // testid must be gone entirely.
+    expect(html).not.toContain('data-testid="da-activity-step"')
+
+    // The live line reuses the existing spinner + the shimmer text span.
+    expect(html).toContain("da-activity-spinner")
+    expect(html).toContain("da-activity-shim")
+  })
+
+  it("test_single_step_renders_one_live_line: a single step renders one live line with its text", () => {
+    const html = render([
+      makeEvent({ kind: "user" as const, text: "x" }),
+      makeEvent({ kind: "step" as const, text: "Analyzing the prototype", state: "active" as const }),
+    ])
+    expect(count(html, 'data-testid="da-activity-live"')).toBe(1)
+    expect(html).toContain("Analyzing the prototype")
+  })
+
+  it("test_live_line_fallback_when_no_step_yet: a running thread with only a user event shows one live line with the Working… fallback", () => {
+    const html = render([makeEvent({ kind: "user" as const, text: "x" })], { running: true })
+    expect(count(html, 'data-testid="da-activity-live"')).toBe(1)
+    expect(html).toContain("Working…")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// User request bubble (kept)
+// ---------------------------------------------------------------------------
+
+describe("IterateActivityStream — user request bubble", () => {
+  it("test_user_event_renders_bubble: the user request renders the da-activity-user bubble + text", () => {
+    const html = render([makeEvent({ kind: "user" as const, text: "make the hero blue" })], {
+      running: true,
+    })
     expect(html).toContain('data-testid="da-activity-user"')
     expect(html).toContain("make the hero blue")
   })
 
-  it("test_step_active_renders_spinner: a step with state=active renders da-activity-spinner", () => {
-    const event = makeEvent({
-      kind: "step" as const,
-      text: "Analyzing",
-      state: "active" as const,
-    })
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: false,
-      }),
+  it("test_user_bubble_still_renders_alongside_live_line: the user bubble + the live line coexist", () => {
+    const html = render(
+      [
+        makeEvent({ kind: "user" as const, text: "make the hero blue" }),
+        makeEvent({ kind: "step" as const, text: "Rebuilding", state: "active" as const }),
+      ],
+      { running: true },
     )
-    expect(html).toContain('data-state="active"')
-    expect(html).toContain("da-activity-spinner")
+    expect(html).toContain('data-testid="da-activity-user"')
+    expect(html).toContain('data-testid="da-activity-live"')
   })
 
-  it("test_step_done_renders_check: a step with state=done renders the check mark", () => {
-    const event = makeEvent({
-      kind: "step" as const,
-      text: "Reading",
-      state: "done" as const,
+  it("test_user_turn_renders_author_label: the user bubble carries the user-name label", () => {
+    const FIVE_MIN_AGO = 1_700_000_000_000 - 5 * 60 * 1000
+    const html = render([makeEvent({ kind: "user" as const, text: "x" }, FIVE_MIN_AGO)], {
+      userName: "Ada Lovelace",
+      running: true,
     })
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: false,
-      }),
-    )
-    expect(html).toContain('data-state="done"')
-    expect(html).toContain("✓")
-  })
-
-  it("test_question_event_renders_agent-asks-label: a question event renders da-activity-question and the agent-asks label", () => {
-    const event = makeEvent({
-      kind: "question" as const,
-      question: "Which color scheme?",
-    })
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: false,
-      }),
-    )
-    expect(html).toContain('data-testid="da-activity-question"')
-    // The question turn now carries the unified author label ("Design Agent · {ago}")
-    // rather than the old static "Design Agent asks" heading.
-    expect(html).toContain("Design Agent")
     expect(html).toContain('class="da-activity-agent-label"')
-    expect(html).toContain("Which color scheme?")
+    expect(html).toContain("Ada Lovelace")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Terminal chips — exactly one node each, NOT appended to a wall
+// ---------------------------------------------------------------------------
+
+describe("IterateActivityStream — terminal chips", () => {
+  it("test_done_renders_one_terminal_done_chip_with_summary: done → the done chip with the summary, no live line", () => {
+    const html = render([
+      makeEvent({ kind: "user" as const, text: "add confetti" }),
+      makeEvent({ kind: "step" as const, text: "Rebuilding", state: "done" as const }),
+      makeEvent({
+        kind: "done" as const,
+        text: "Added a confetti burst to the Continue button.",
+      }),
+    ])
+    expect(count(html, 'data-testid="da-activity-done"')).toBe(1)
+    expect(html).toContain("Added a confetti burst to the Continue button.")
+    // Reuses the existing done-icon (no duplicate icon class introduced).
+    expect(html).toContain("da-activity-done-icon")
+    // The done chip REPLACES the live line — no spinner/live node remains.
+    expect(html).not.toContain('data-testid="da-activity-live"')
+    expect(html).not.toContain('data-testid="da-activity-step"')
   })
 
-  it("test_done_event_renders_done-icon: a done event renders da-activity-done", () => {
-    const event = makeEvent({ kind: "done" as const, text: "Change applied" })
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: false,
+  it("test_skipped_renders_one_skip_chip: skipped → a single neutral skip chip with the skip text", () => {
+    const html = render([
+      makeEvent({ kind: "user" as const, text: "x" }),
+      makeEvent({
+        kind: "skipped" as const,
+        text: "Change skipped — prototype left unchanged",
       }),
-    )
-    expect(html).toContain('data-testid="da-activity-done"')
-    expect(html).toContain("Change applied")
+    ])
+    expect(count(html, 'data-testid="da-activity-skipped"')).toBe(1)
+    expect(html).toContain("Change skipped — prototype left unchanged")
+    expect(html).toContain("da-activity-terminal--skipped")
+    // No live line after a terminal.
+    expect(html).not.toContain('data-testid="da-activity-live"')
   })
 
-  it("test_error_event_renders-error: an error event renders da-activity-error with role=alert", () => {
-    const event = makeEvent({ kind: "error" as const, text: "Something went wrong" })
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: false,
-      }),
-    )
-    expect(html).toContain('data-testid="da-activity-error"')
+  it("test_error_renders_one_error_chip_with_alert: error → a single error chip with role=alert", () => {
+    const html = render([
+      makeEvent({ kind: "user" as const, text: "x" }),
+      makeEvent({ kind: "error" as const, text: "Something went wrong" }),
+    ])
+    expect(count(html, 'data-testid="da-activity-error"')).toBe(1)
     expect(html).toContain('role="alert"')
     expect(html).toContain("Something went wrong")
+    expect(html).not.toContain('data-testid="da-activity-live"')
+  })
+
+  it("test_terminal_wins_over_steps: a terminal after several steps shows the chip, not the steps", () => {
+    const html = render([
+      makeEvent({ kind: "user" as const, text: "x" }),
+      makeEvent({ kind: "step" as const, text: "Reading", state: "done" as const }),
+      makeEvent({ kind: "step" as const, text: "Applying", state: "done" as const }),
+      makeEvent({ kind: "done" as const, text: "All set." }),
+    ])
+    expect(html).toContain('data-testid="da-activity-done"')
+    expect(html).not.toContain("Reading")
+    expect(html).not.toContain("Applying")
+    expect(html).not.toContain('data-testid="da-activity-live"')
   })
 })
 
 // ---------------------------------------------------------------------------
-// Running indicator
+// Pending question → frozen "waiting" line (card mounts separately in the host)
 // ---------------------------------------------------------------------------
 
-describe("IterateActivityStream — running trailing indicator", () => {
-  it("test_running_trailing_indicator_shown_when_running_true: running=true shows da-activity-running", () => {
-    const event = makeEvent({ kind: "user" as const, text: "hi" })
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: true,
-      }),
-    )
-    expect(html).toContain('data-testid="da-activity-running"')
+describe("IterateActivityStream — pending question waiting state", () => {
+  it("test_pending_question_renders_waiting_line_no_spinner: a question with no terminal after it shows the waiting line, not a spinner", () => {
+    const html = render([
+      makeEvent({ kind: "user" as const, text: "make it pop" }),
+      makeEvent({ kind: "step" as const, text: "Analyzing", state: "done" as const }),
+      makeEvent({ kind: "question" as const, question: "Which accent — coral or green?" }),
+    ])
+    expect(html).toContain('data-testid="da-activity-waiting"')
+    expect(html).toContain("Waiting for your answer…")
+    // Frozen: no live spinner line while waiting.
+    expect(html).not.toContain('data-testid="da-activity-live"')
+    // The user bubble still renders.
+    expect(html).toContain('data-testid="da-activity-user"')
   })
 
-  it("test_no_running_indicator_when_false: running=false hides da-activity-running", () => {
-    const event = makeEvent({ kind: "user" as const, text: "hi" })
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: false,
-      }),
-    )
-    expect(html).not.toContain('data-testid="da-activity-running"')
+  it("test_answered_question_then_terminal_shows_chip_not_waiting: once a terminal follows the question, the chip wins over the waiting line", () => {
+    const html = render([
+      makeEvent({ kind: "user" as const, text: "make it pop" }),
+      makeEvent({ kind: "question" as const, question: "Which accent?" }),
+      makeEvent({ kind: "step" as const, text: "Applying", state: "done" as const }),
+      makeEvent({ kind: "done" as const, text: "Bumped the accent to green." }),
+    ])
+    expect(html).toContain('data-testid="da-activity-done"')
+    expect(html).not.toContain('data-testid="da-activity-waiting"')
   })
 })
 
 // ---------------------------------------------------------------------------
-// Author + relative-timestamp labels (the named-turn conversation thread)
+// Author + relative-timestamp labels (the named-turn helper — unchanged)
 // ---------------------------------------------------------------------------
 
 describe("IterateActivityStream — named turns (author + relative timestamp)", () => {
@@ -171,9 +250,7 @@ describe("IterateActivityStream — named turns (author + relative timestamp)", 
   const FIVE_MIN_AGO = NOW - 5 * 60 * 1000
 
   it("turnLabel: a user turn is labelled '{userName} · {ago}'", () => {
-    expect(turnLabel("user", FIVE_MIN_AGO, "Ada Lovelace", NOW)).toBe(
-      "Ada Lovelace · 5m",
-    )
+    expect(turnLabel("user", FIVE_MIN_AGO, "Ada Lovelace", NOW)).toBe("Ada Lovelace · 5m")
   })
 
   it("turnLabel: a user turn falls back to 'You' when userName is null", () => {
@@ -188,48 +265,12 @@ describe("IterateActivityStream — named turns (author + relative timestamp)", 
     expect(turnLabel("user", undefined, "Ada", NOW)).toBe("Ada")
   })
 
-  it("test_user_turn_renders_author_label: a user turn renders the user-name label", () => {
-    const event = makeEvent({ kind: "user" as const, text: "make it blue" }, FIVE_MIN_AGO)
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: false,
-        userName: "Ada Lovelace",
-      }),
-    )
-    expect(html).toContain('class="da-activity-agent-label"')
-    expect(html).toContain("Ada Lovelace")
-  })
-
-  it("test_agent_turn_renders_design_agent_label: an agent (done) turn renders the 'Design Agent' label", () => {
-    const event = makeEvent({ kind: "done" as const, text: "Made the hero blue." }, FIVE_MIN_AGO)
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, {
-        activity: [event],
-        running: false,
-        userName: "Ada",
-      }),
-    )
+  it("test_done_turn_renders_design_agent_label: the done chip carries the 'Design Agent' label", () => {
+    const html = render([
+      makeEvent({ kind: "done" as const, text: "Made the hero blue." }, FIVE_MIN_AGO),
+    ])
     expect(html).toContain('class="da-activity-agent-label"')
     expect(html).toContain("Design Agent")
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Done turn shows the agent's summary
-// ---------------------------------------------------------------------------
-
-describe("IterateActivityStream — done turn summary", () => {
-  it("test_done_turn_renders_summary_text: the done turn renders whatever summary text it carries", () => {
-    const event = makeEvent({
-      kind: "done" as const,
-      text: "Swapped the hero background to brand blue and tightened the spacing.",
-    })
-    const html = renderToStaticMarkup(
-      React.createElement(IterateActivityStream, { activity: [event], running: false }),
-    )
-    expect(html).toContain('data-testid="da-activity-done"')
-    expect(html).toContain("Swapped the hero background to brand blue")
   })
 })
 
