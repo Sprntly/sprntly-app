@@ -227,11 +227,12 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     }
   })
 
-  it("still renders all 8 category headers + upload strips (uploads preserved when empty)", () => {
+  it("drops empty categories (Analytics, Monitoring) and keeps upload strips for the 6 that remain", () => {
     const html = render({ categories: connectableCatalog() })
-    expect(html).toContain("Analytics")
-    expect(html).toContain("Monitoring &amp; Reliability")
-    // Upload strip is present for every category (8 of them).
-    expect((html.match(/set-conn-upload/g) ?? []).length).toBe(8)
+    expect(html).not.toContain("Analytics")
+    expect(html).not.toContain("Monitoring")
+    // 6 categories remain (PM, Voice, Revenue, Code, Design, Comms), each with
+    // its own upload strip.
+    expect((html.match(/set-conn-upload/g) ?? []).length).toBe(6)
   })
 })

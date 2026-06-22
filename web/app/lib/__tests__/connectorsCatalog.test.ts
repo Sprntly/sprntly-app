@@ -176,9 +176,14 @@ describe("Google Docs uses the existing google_drive OAuth backend", () => {
 })
 
 describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
-  it("keeps all 8 categories in the same order even when some end up empty", () => {
+  it("keeps only the categories that still have a wired connector, in order", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
-      ...EXPECTED_CATEGORIES,
+      "Project Management",
+      "Customer Voice & Support",
+      "Revenue",
+      "Code",
+      "Design",
+      "Communication",
     ])
   })
 
@@ -200,11 +205,12 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     )
   })
 
-  it("drops every 'Coming soon' connector (Analytics + Monitoring become empty)", () => {
+  it("drops categories that end up with no connectors (Analytics, Monitoring)", () => {
+    const titles = connectableCatalog().map((c) => c.title)
+    expect(titles).not.toContain("Analytics")
+    expect(titles).not.toContain("Monitoring & Reliability")
     const byTitle = (t: string) =>
       connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
-    expect(byTitle("Analytics")).toEqual([])
-    expect(byTitle("Monitoring & Reliability")).toEqual([])
     expect(byTitle("Project Management")).toEqual(["clickup", "google_drive"])
     expect(byTitle("Code")).toEqual(["github"])
     expect(byTitle("Communication")).toEqual(["slack"])

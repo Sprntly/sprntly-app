@@ -4,9 +4,9 @@
  * Renders the connector grid grouped by the 8 CONNECTOR_CATALOG categories.
  * Only connectors with a working integration (OAuth / API key) are shown
  * (`connectableCatalog`) — "Coming soon" connectors are hidden so we don't
- * surface things the user can't use; categories are kept even when empty so
- * their file-upload strip remains. Connection state (Active vs Off) and the
- * per-row "Configure"/"Connect" action come from `connectorsApi.list()`.
+ * surface things the user can't use, and any category left with no connectors
+ * is dropped. Connection state (Active vs Off) and the per-row
+ * "Configure"/"Connect" action come from `connectorsApi.list()`.
  *
  * The exported View component is pure (no hooks, no IO) and unit-tested
  * via renderToStaticMarkup per the design-agent test convention. The
@@ -315,8 +315,8 @@ export function ConnectorsSettings() {
 
   // Settings shows only connectors with a working integration (OAuth / API
   // key), plus any provider that already has a live connection — so we never
-  // surface "Coming soon" rows the user can't act on. Categories (and their
-  // upload strips) are preserved even when they end up empty.
+  // surface "Coming soon" rows the user can't act on. Categories left with no
+  // connectors are dropped entirely.
   const displayedCategories = connectableCatalog(
     new Set(connectionByProvider.keys()),
   )

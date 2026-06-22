@@ -153,12 +153,14 @@ export function isConnectableConnector(item: ConnectorItemRow): boolean {
 
 /**
  * The catalog as shown in Settings → Connectors: drop "Coming soon" connectors
- * (no working integration) so we don't surface things the user can't use.
+ * (no working integration) so we don't surface things the user can't use, and
+ * drop any category that ends up with no connectors so we don't show an empty
+ * section. (Uploads aren't lost — they're stored company-wide, and every
+ * remaining category still has its file-upload strip.)
  *
- * Categories are preserved even when they end up with no connectors, so each
- * category's file-upload strip stays available (uploads are how a user with no
- * connector feeds that category). Providers in `alsoKeepIds` — e.g. any with a
- * live connection — are never hidden even if not yet OAuth/API-key wired.
+ * Providers in `alsoKeepIds` — e.g. any with a live connection — are never
+ * hidden even if not yet OAuth/API-key wired; a category kept alive by such a
+ * provider is therefore retained too.
  */
 export function connectableCatalog(
   alsoKeepIds: ReadonlySet<string> = new Set(),
@@ -168,5 +170,5 @@ export function connectableCatalog(
     items: cat.items.filter(
       (i) => isConnectableConnector(i) || alsoKeepIds.has(i.id),
     ),
-  }))
+  })).filter((cat) => cat.items.length > 0)
 }
