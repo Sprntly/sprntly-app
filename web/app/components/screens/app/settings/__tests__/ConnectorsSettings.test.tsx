@@ -127,9 +127,9 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
 
   it("uses inline brand-color background on the logo box for letter-only connectors", () => {
     const html = render()
-    // Coming-soon connectors have no logoDomain → brand-color box + letter.
+    // Connectors without a bundled SVG → brand-color box + letter.
     expect(html).toContain("background:#7856FF") // Mixpanel
-    expect(html).toContain("background:#1A6CFF") // Amplitude
+    expect(html).toContain("background:#FF6E6E") // Heap
   })
 })
 
@@ -229,20 +229,23 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(1)
   })
 
-  it("renders each connector's real brand logo (by domain) via the favicon service", () => {
+  it("renders each connector's real brand logo from a locally bundled SVG", () => {
     const html = render({ categories: connectableCatalog() })
-    for (const domain of [
-      "slack.com",
-      "github.com",
-      "figma.com",
-      "hubspot.com",
-      "clickup.com",
-      "docs.google.com",
-      "fireflies.ai",
+    // 6 of the 7 wired connectors have an official bundled SVG mark.
+    for (const id of [
+      "slack",
+      "github",
+      "figma",
+      "hubspot",
+      "clickup",
+      "google_drive",
     ]) {
-      expect(html).toContain(`s2/favicons?domain=${domain}`)
+      expect(html).toContain(`src="/connectors/${id}.svg"`)
     }
-    // All 7 wired connectors now have a real logo.
-    expect((html.match(/s2\/favicons\?domain=/g) ?? []).length).toBe(7)
+    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(6)
+    // No runtime favicon fetch remains.
+    expect(html).not.toContain("s2/favicons")
+    // Fireflies has no bundled SVG, so it keeps its letter glyph (no <img>).
+    expect(html).not.toContain("/connectors/fireflies.svg")
   })
 })

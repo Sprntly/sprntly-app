@@ -3870,6 +3870,22 @@
     flex: 1 1 auto;
   }
 
+  /* Connector brand-logo tile shown next to the title in the connect modal. */
+  .conn-modal-logo {
+    flex: 0 0 auto;
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 15px;
+    color: #fff;
+    margin-top: 2px;
+  }
+
   .modal-badge {
     display: inline-flex;
     align-items: center;
