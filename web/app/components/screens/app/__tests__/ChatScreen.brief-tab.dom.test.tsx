@@ -19,7 +19,7 @@
 //      brief tab stays present (never removed).
 //   4. Clicking the brief tab from a chat tab switches back to the brief surface.
 import * as React from "react"
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -51,8 +51,19 @@ vi.mock("../../../../lib/api", () => {
     ApiError,
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
+    conversationsApi: { create: vi.fn(), addTurn: vi.fn() },
   }
 })
+
+// Send path's network call — mocked so a first-message send stays off the
+// network and resolves immediately (used by the first-send dedup test below).
+vi.mock("../../../../lib/runAskGeneration", () => ({
+  runAskGeneration: vi.fn(async () => ({
+    answer: "ok", sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+  })),
+  resumeAskGeneration: vi.fn(),
+  getPendingAsk: vi.fn(() => null),
+}))
 
 vi.mock("../../../../lib/usePipelineStatus", () => ({
   usePipelineStatus: () => ({
@@ -102,7 +113,7 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 
 import { NavigationProvider } from "../../../../context/NavigationContext"
 import { ContentProvider } from "../../../../context/ContentContext"
-import { ChatScreen } from "../ChatScreen"
+import { ChatScreen, NEW_CHAT_TITLE } from "../ChatScreen"
 
 function renderScreen() {
   return render(
@@ -150,15 +161,69 @@ describe("ChatScreen — pinned brief tab", () => {
     expect(screen.getByLabelText("Weekly brief")).toBeTruthy()
   })
 
-  it("'+' opens the chat landing; the brief tab stays present", () => {
+  it("'+' opens a VISIBLE active 'New chat' tab chip (landing), brief tab stays", () => {
     renderScreen()
     act(() => {
       fireEvent.click(tabBar().getByTitle("New chat"))
     })
     // Chat landing composer is now showing…
     expect(screen.getByText(/Welcome back/i)).toBeTruthy()
+    // …and a real "New chat" tab chip appeared in the strip (the bug fix: the
+    // user must SEE they're on a new tab and be able to switch back), not a
+    // tab-less landing.
+    expect(tabBar().getByText(NEW_CHAT_TITLE)).toBeTruthy()
     // …and the pinned brief tab is still there (never removed).
     expect(tabBar().getByText("Monday brief")).toBeTruthy()
+  })
+
+  it("'+' renders the new tab as ACTIVE and lets the user switch back to it", () => {
+    renderScreen()
+    act(() => {
+      fireEvent.click(tabBar().getByTitle("New chat"))
+    })
+    // Switch to the brief tab, then back to the visible "New chat" chip — proving
+    // the chip is a real, selectable tab (not a transient landing).
+    act(() => {
+      fireEvent.click(tabBar().getByText("Monday brief"))
+    })
+    expect(screen.queryByText(/Welcome back/i)).toBeNull()
+    act(() => {
+      fireEvent.click(tabBar().getByText(NEW_CHAT_TITLE))
+    })
+    expect(screen.getByText(/Welcome back/i)).toBeTruthy()
+  })
+
+  it("'+' clicked twice reuses the empty 'New chat' tab (no duplicate chips)", () => {
+    renderScreen()
+    act(() => { fireEvent.click(tabBar().getByTitle("New chat")) })
+    act(() => { fireEvent.click(tabBar().getByTitle("New chat")) })
+    // Only ONE "New chat" chip — the second click reused the empty tab.
+    expect(tabBar().getAllByText(NEW_CHAT_TITLE)).toHaveLength(1)
+  })
+
+  it("first message renames the 'New chat' tab in place (no duplicate tab)", async () => {
+    renderScreen()
+    act(() => { fireEvent.click(tabBar().getByTitle("New chat")) })
+    // One "New chat" chip is present and we're on the landing composer.
+    expect(tabBar().getByText(NEW_CHAT_TITLE)).toBeTruthy()
+
+    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "what is our churn" } })
+    })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: "Enter" })
+    })
+
+    // The placeholder tab was RENAMED to the query (not a second tab spawned).
+    await waitFor(() => {
+      expect(tabBar().getByText(/what is our churn/i)).toBeTruthy()
+    })
+    // The "New chat" placeholder title is gone (renamed in place)…
+    expect(tabBar().queryByText(NEW_CHAT_TITLE)).toBeNull()
+    // …and there is exactly ONE chat-tab close button (one chat tab, no dupe).
+    expect(tabBar().getAllByTitle("Close tab")).toHaveLength(1)
   })
 
   it("clicking the brief tab returns to the brief surface", () => {
@@ -183,6 +248,8 @@ describe("ChatScreen — pinned brief tab", () => {
     // The chat landing composer is showing — NOT the brief surface.
     expect(screen.getByText(/Welcome back/i)).toBeTruthy()
     expect(screen.queryByLabelText("Weekly brief")).toBeNull()
+    // …it lands on the SAME visible "New chat" tab chip the "+" produces…
+    expect(tabBar().getByText(NEW_CHAT_TITLE)).toBeTruthy()
     // …the pinned brief tab is still present (never removed)…
     expect(tabBar().getByText("Monday brief")).toBeTruthy()
     // …and the one-shot param was stripped so a refresh won't re-trigger.
