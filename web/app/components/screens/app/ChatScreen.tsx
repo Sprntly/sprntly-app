@@ -61,6 +61,12 @@ type ChatTab = {
 // of the chat landing/thread). It is also the default active tab on first load.
 const BRIEF_TAB_ID = "brief"
 
+// Placeholder title for a freshly-opened "+" tab before the user sends their
+// first message. The tab is visible+active in the strip immediately (so the user
+// can see they're on a new tab and switch back), and gets its real title from the
+// first message on send (see submitAsk's first-send rename).
+export const NEW_CHAT_TITLE = "New chat"
+
 type HomeChipItem = { kind: "home" | "starter"; card: ChatHomeCard }
 
 function buildHomeChips(home: ChatHomeCard[], starterList: ChatHomeCard[]): HomeChipItem[] {
@@ -680,9 +686,14 @@ export function ChatScreen() {
         targetTabId = openTab(title, [{ id, query }])
       } else {
         targetTabId = activeTabId
-        setTabs((prev) => prev.map((t) =>
-          t.id !== targetTabId ? t : { ...t, thread: [...t.thread, { id, query }] }
-        ))
+        const newTitle = query.length > 40 ? `${query.slice(0, 37)}…` : query
+        setTabs((prev) => prev.map((t) => {
+          if (t.id !== targetTabId) return t
+          // First message in a placeholder "New chat" tab → give it the real
+          // title from the query (rename in place; do NOT spawn a second tab).
+          const title = t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? newTitle : t.title
+          return { ...t, title, thread: [...t.thread, { id, query }] }
+        }))
       }
       pushPendingConversation(id, query, targetTabId)
       setActiveConv(0)
@@ -862,9 +873,30 @@ export function ChatScreen() {
   }
 
   const startNewThread = useCallback(() => {
-    // Remove any empty tabs (no messages) to keep things clean
-    setTabs((prev) => prev.filter((t) => t.thread.length > 0))
-    setActiveTabId(null)
+    // "+" behaves like a real new browser tab: it must create a VISIBLE, ACTIVE
+    // tab chip in the strip (so the user sees they're on a new tab and can switch
+    // back) — not a tab-less landing. Reuse-or-create: if an empty "New chat" tab
+    // already exists (no messages), just activate it rather than piling up
+    // duplicates. We still prune OTHER empty tabs (keep the strip clean) but never
+    // the one the user is about to sit on.
+    let targetId: string | null = null
+    setTabs((prev) => {
+      const existingEmpty = prev.find((t) => t.thread.length === 0 && t.title === NEW_CHAT_TITLE)
+      if (existingEmpty) {
+        targetId = existingEmpty.id
+        // Drop any OTHER empty tabs, keep the one we're reusing.
+        return prev.filter((t) => t.thread.length > 0 || t.id === existingEmpty.id)
+      }
+      const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      targetId = id
+      // Prune other empty tabs, then append the fresh "New chat" tab.
+      const kept = prev.filter((t) => t.thread.length > 0)
+      return [...kept, {
+        id, title: NEW_CHAT_TITLE, thread: [], dbConvId: null, briefMeta: null,
+        prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+      }]
+    })
+    setActiveTabId(targetId)
     setDraft("")
     setActiveConv(null)
     // No shared conv-id to reset — each tab tracks its own dbConvId.
