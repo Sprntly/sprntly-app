@@ -10,7 +10,7 @@ import {
   validateProductWebsite,
   normalizeProductWebsite,
 } from "../../../lib/onboarding/product-helpers"
-import { STAGES, TECH_STACK_OPTIONS } from "../../../lib/onboarding/types"
+import { TECH_STACK_OPTIONS } from "../../../lib/onboarding/types"
 import {
   createWorkspace,
   updateWorkspace,
@@ -23,8 +23,9 @@ const DRAFT_KEY = "business-info"
 /**
  * Onboarding step 01 — "Company" page (v4 .onb-* design).
  *
- * Collects the company name, primary product name, product website, stage,
- * team size and tech stack. It NO LONGER fires the website analysis in the
+ * Collects the company name, primary product name, product website and tech
+ * stack. Company stage and team size are NO LONGER collected here — that
+ * context is captured later via business context. It NO LONGER fires the website analysis in the
  * background. Instead, on Continue it persists the workspace and then
  * navigates to the blocking `/onboarding/analyzing` interstitial, which awaits
  * the analysis before forwarding to the metrics step. This keeps the analysis
@@ -43,8 +44,6 @@ export function BusinessInfo() {
   const [companyName, setCompanyName] = useState((draft?.companyName as string) ?? "")
   const [productName, setProductName] = useState((draft?.productName as string) ?? "")
   const [productWebsite, setProductWebsite] = useState((draft?.productWebsite as string) ?? "")
-  const [stage, setStage] = useState((draft?.stage as string) ?? "Growth")
-  const [teamSize, setTeamSize] = useState((draft?.teamSize as string) ?? "")
   const [techStack, setTechStack] = useState<string[]>((draft?.techStack as string[]) ?? [])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -56,19 +55,17 @@ export function BusinessInfo() {
     setCompanyName(workspace.display_name)
     setProductName(workspace.product?.name ?? workspace.display_name)
     setProductWebsite(workspace.product?.website ?? "")
-    setStage(workspace.stage ?? "Growth")
-    if (workspace.team_size) setTeamSize(String(workspace.team_size))
     setTechStack(workspace.tech_stack ?? [])
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Save draft on visibility change (tab switch / minimize) — not on every keystroke
   useEffect(() => {
     const onHide = () => {
-      if (document.hidden) saveDraft(DRAFT_KEY, { companyName, productName, productWebsite, stage, teamSize, techStack })
+      if (document.hidden) saveDraft(DRAFT_KEY, { companyName, productName, productWebsite, techStack })
     }
     document.addEventListener("visibilitychange", onHide)
     return () => document.removeEventListener("visibilitychange", onHide)
-  }, [companyName, productName, productWebsite, stage, teamSize, techStack])
+  }, [companyName, productName, productWebsite, techStack])
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(
     () => [
@@ -101,15 +98,11 @@ export function BusinessInfo() {
         companyName,
         productName,
         productWebsite: website,
-        stage,
-        teamSize: teamSize ? Number(teamSize) : null,
         techStack,
       }
       if (workspace) {
         const updated = await updateWorkspace(workspace.id, {
           display_name: companyPayload.companyName.trim(),
-          stage: companyPayload.stage,
-          team_size: companyPayload.teamSize,
           tech_stack: companyPayload.techStack,
           // Next numbered step is the metrics page (route 2). The interstitial
           // is unnumbered, so we never persist its route as a resume target.
@@ -224,38 +217,6 @@ export function BusinessInfo() {
         </div>
 
         <div className="onb-section" style={{ marginTop: 22 }}>
-          <div className="onb-section-h">Stage</div>
-          <div className="onb-chip-row">
-            {STAGES.map((s) => (
-              <button
-                key={s}
-                type="button"
-                className={`onb-chip ${stage === s ? "sel" : ""}`}
-                aria-pressed={stage === s}
-                onClick={() => setStage(s)}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="onb-section">
-          <div className="onb-section-h">
-            Team size <span className="opt">optional</span>
-          </div>
-          <input
-            type="number"
-            className="inp"
-            min={1}
-            value={teamSize}
-            onChange={(e) => setTeamSize(e.target.value)}
-            placeholder="Total headcount"
-            style={{ maxWidth: 220 }}
-          />
-        </div>
-
-        <div className="onb-section">
           <div className="onb-section-h">
             Tech stack <span className="opt">optional</span>
           </div>

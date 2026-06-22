@@ -23,7 +23,7 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
     businessType: "Marketplace",
     northStar: "",
     northStarDescription: "",
-    northStarHints: ["Net revenue retention", "Activated accounts"],
+    northStarHints: ["Incremental revenue", "Activated accounts"],
     supporting: [],
     customMetric: "",
     customDescription: "",
@@ -71,7 +71,9 @@ describe("MetricsSetupView — selected metrics render as tree targets", () => {
     // targets live inside the metric-tree (source → targets), not a separate block
     expect(html).toContain("metric-tree")
     expect(html).toContain('class="mt-targets mt-targets-cards"')
-    expect(html).toContain('class="mt-target"')
+    // a selected goal carries the green selected state (`.sel`, aria-selected)
+    expect(html).toContain('class="mt-target sel"')
+    expect(html).toContain('aria-selected="true"')
     expect(html).toContain('data-metric="Reconciled volume"')
     // name + editable description textarea
     expect(html).toContain("Reconciled volume")
@@ -87,7 +89,7 @@ describe("MetricsSetupView — selected metrics render as tree targets", () => {
   it("shows a targets empty state (not the bottom cards) when nothing is selected", () => {
     const html = render({ supporting: [] })
     expect(html).toContain("mt-targets-empty")
-    expect(html).not.toContain('class="mt-target"')
+    expect(html).not.toContain('class="mt-target sel"')
     expect(html).toContain("0</strong> supporting metrics selected")
   })
 })
@@ -120,6 +122,11 @@ describe("MetricsSetupView — editable industry / business-type dropdowns", () 
     expect(html).not.toMatch(/<select[^>]*disabled/)
     expect(html).toContain("predicted from your website")
   })
+
+  it("offers Gaming / Entertainment as an industry option", () => {
+    const html = render()
+    expect(html).toContain("Gaming / Entertainment")
+  })
 })
 
 describe("MetricsSetupView — North Star", () => {
@@ -127,7 +134,9 @@ describe("MetricsSetupView — North Star", () => {
     const html = render()
     expect(html).toContain("your North Star")
     expect(html).toContain("Common for Fintech")
-    expect(html).toContain("Net revenue retention")
+    // metric renamed: "Net revenue retention" → "Incremental revenue"
+    expect(html).toContain("Incremental revenue")
+    expect(html).not.toContain("Net revenue retention")
   })
 
   it("surfaces a North Star validation error", () => {
