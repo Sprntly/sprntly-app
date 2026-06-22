@@ -245,12 +245,12 @@ export interface ConnectorItemRow {
   /** Hex brand color for the logo box background (e.g. "#7856FF"). */
   logoColor?: string
   /**
-   * Simple Icons slug for the brand glyph (https://simpleicons.org), rendered
-   * white on the brand-color box. When set, the connector shows its real logo
-   * instead of the single-letter `logoText`; if the icon fails to load the UI
-   * falls back to `logoText`. Omit for connectors with no Simple Icons entry.
+   * Brand domain (e.g. "slack.com") used to fetch the connector's real
+   * full-color logo via the favicon service. When set, the connector shows
+   * its actual logo on a white tile; if the image fails to load the UI falls
+   * back to the single-letter `logoText` glyph.
    */
-  logoSlug?: string
+  logoDomain?: string
   /** True if a working OAuth backend exists for this connector. */
   oauth?: boolean
   /**

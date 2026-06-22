@@ -5,7 +5,8 @@
  * returns once the connector count grows). Only connectors with a working
  * integration (OAuth / API key) are shown (`connectableCatalog`) — "Coming
  * soon" connectors are hidden so we don't surface things the user can't use.
- * Each row shows the brand logo (Simple Icons, falling back to a letter).
+ * Each row shows the connector's real brand logo (fetched by domain via the
+ * favicon service), falling back to a single-letter glyph if it can't load.
  * Connection state (Active vs Off) and the per-row "Configure"/"Connect"
  * action come from `connectorsApi.list()`.
  *
@@ -124,14 +125,23 @@ export function ConnectorsSettingsView({
             <div key={item.id} className="set-conn-row">
               <div
                 className="logo"
-                style={{ background: item.logoColor ?? "#444", position: "relative" }}
+                style={
+                  item.logoDomain
+                    ? {
+                        background: "#fff",
+                        border: "1px solid #E5E7EB",
+                        color: item.logoColor ?? "#444",
+                        position: "relative",
+                      }
+                    : { background: item.logoColor ?? "#444", position: "relative" }
+                }
               >
-                {/* Letter is the fallback; the brand glyph overlays it and is
-                    hidden on load error (e.g. unknown slug / blocked CDN). */}
+                {/* Letter is the fallback; the real brand logo overlays it and
+                    is hidden if the image fails to load. */}
                 <span>{item.logoText ?? item.logo}</span>
-                {item.logoSlug ? (
+                {item.logoDomain ? (
                   <img
-                    src={`https://cdn.simpleicons.org/${item.logoSlug}/white`}
+                    src={`https://www.google.com/s2/favicons?domain=${item.logoDomain}&sz=128`}
                     alt=""
                     aria-hidden
                     loading="lazy"
@@ -139,8 +149,8 @@ export function ConnectorsSettingsView({
                       position: "absolute",
                       inset: 0,
                       margin: "auto",
-                      width: "60%",
-                      height: "60%",
+                      width: "70%",
+                      height: "70%",
                       objectFit: "contain",
                     }}
                     onError={(e) => {
