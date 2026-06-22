@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from "next/navigation"
 import { AppLayout } from "./AppLayout"
 import { ProfileSettings } from "./settings/ProfileSettings"
 import { WorkspaceSettings } from "./settings/WorkspaceSettings"
+import { BusinessContextSettings } from "./settings/BusinessContextSettings"
 import { StrategicSettings } from "./settings/StrategicSettings"
 import { FeatureFlagsSettings } from "./settings/FeatureFlagsSettings"
 import { NotificationsSettings } from "./settings/NotificationsSettings"
@@ -28,6 +29,8 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
     // tweaks (matching the design's layouts) are separate slices.
     case "product-category":
       return <WorkspaceSettings />
+    case "business-context":
+      return <BusinessContextSettings />
     case "comms-brief":
       return <NotificationsSettings />
     case "billing":

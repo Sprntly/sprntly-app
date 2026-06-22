@@ -526,6 +526,149 @@ export const companiesApi = {
     ),
 }
 
+// ---- business context -------------------------------------------------------
+//
+// The company's structured, provenance-tracked "lens" (8 layers). Mirrors
+// backend/app/business_context.py: every leaf is wrapped in a provenance
+// envelope (value + src + conf + as_of + evidence). Stored in
+// companies.business_context (JSONB). The doc tolerates partials — only
+// identity is guaranteed present, and its leaves may still be unknown.
+
+/** Per-leaf provenance envelope. `value` is whatever the leaf holds
+ *  (string | string[] | boolean | null). */
+export type BcSrc = "given" | "user" | "inferred" | "web" | "unknown"
+export type BcConf = "high" | "med" | "low" | null
+export type BcLeaf<T = unknown> = {
+  value: T
+  src: BcSrc
+  conf: BcConf
+  as_of: string | null
+  evidence: string | null
+}
+
+export type BcIdentity = {
+  legal_name: BcLeaf
+  also_known_as: BcLeaf
+  website: BcLeaf
+  one_liner: BcLeaf
+  industry: BcLeaf
+  sub_vertical: BcLeaf
+  company_size: BcLeaf
+  stage: BcLeaf
+  hq_geography: BcLeaf
+  markets_served: BcLeaf
+}
+
+export type BcBusinessModel = {
+  model_type: BcLeaf
+  revenue_model: BcLeaf
+  pricing_model: BcLeaf
+  who_pays: BcLeaf
+  who_uses: BcLeaf
+  monetization_unit: BcLeaf
+  unit_economics_shape: BcLeaf
+  good_outcome: BcLeaf
+}
+
+export type BcSegment = {
+  name: BcLeaf
+  description: BcLeaf
+  jtbd: BcLeaf
+  is_buyer: BcLeaf
+  is_user: BcLeaf
+  is_champion: BcLeaf
+  relative_size: BcLeaf
+}
+
+export type BcUsersSegments = {
+  segments: BcSegment[]
+  primary_segment: BcLeaf
+}
+
+export type BcProductValue = {
+  what_it_does: BcLeaf
+  core_value_moments: BcLeaf
+  activation_definition: BcLeaf
+  key_features: BcLeaf
+  platforms: BcLeaf
+}
+
+export type BcMarketCompetition = {
+  category: BcLeaf
+  main_alternatives: BcLeaf
+  positioning_angle: BcLeaf
+}
+
+export type BcGoalsStrategy = {
+  stated_goal: BcLeaf
+  north_star: BcLeaf
+  current_priorities: BcLeaf
+  known_constraints: BcLeaf
+}
+
+export type BcVocabTerm = {
+  term: BcLeaf
+  their_meaning: BcLeaf
+  sprntly_default: BcLeaf
+  note: BcLeaf
+}
+
+export type BcVocabulary = {
+  terms: BcVocabTerm[]
+}
+
+export type BcSourceRef = { url: string | null; as_of: string | null }
+
+export type BcDocMeta = {
+  created: BcLeaf
+  last_refreshed: BcLeaf
+  refresh_trigger: BcLeaf
+  overall_confidence: BcLeaf
+  sources: BcSourceRef[]
+}
+
+/** The full 8-layer document (+ version). Mirrors the pydantic
+ *  `BusinessContext` model. */
+export type BusinessContextDoc = {
+  identity: BcIdentity
+  business_model: BcBusinessModel
+  users_segments: BcUsersSegments
+  product_value: BcProductValue
+  market_competition: BcMarketCompetition
+  goals_strategy: BcGoalsStrategy
+  vocabulary: BcVocabulary
+  meta: BcDocMeta
+  version: number
+}
+
+export const businessContextApi = {
+  /**
+   * GET the current business-context doc (any member). Returns `null` when
+   * the backend answers 404 — i.e. the doc hasn't been generated yet
+   * (onboarding incomplete / never refreshed). Other errors propagate.
+   */
+  get: async (): Promise<BusinessContextDoc | null> => {
+    try {
+      return await api.get<BusinessContextDoc>("/v1/company/business-context")
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null
+      throw e
+    }
+  },
+  /** PUT human edits (admin-only). Known leaves are stamped src="user"
+   *  server-side. Returns the new version. */
+  update: (doc: BusinessContextDoc) =>
+    api.put<{ ok: true; version: number }>(
+      "/v1/company/business-context",
+      doc,
+    ),
+  /** POST refresh — re-runs the Business Context agent (admin-only). */
+  refresh: () =>
+    api.post<{ ok: true; [k: string]: unknown }>(
+      "/v1/company/business-context/refresh",
+    ),
+}
+
 // ---- sources ----------------------------------------------------------------
 
 export type SourceFile = {
