@@ -138,20 +138,9 @@ export function ArtifactFooterActions({
       className="artifact-foot-actions"
       role="group"
       aria-label="Artifact actions"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "14px 0 4px",
-        marginTop: 8,
-        borderTop: "1px solid var(--line)",
-      }}
     >
-      <span
-        className="artifact-foot-lbl"
-        style={{ flex: 1, fontSize: 12, color: "var(--ink-2)", lineHeight: 1.4 }}
-      >
-        <strong style={{ color: "var(--ink)", fontWeight: 500 }}>{label.lead}</strong>
+      <span className="artifact-foot-lbl">
+        <strong>{label.lead}</strong>
         {" — "}
         {label.rest}
       </span>
@@ -159,24 +148,10 @@ export function ArtifactFooterActions({
         <button
           key={a.key}
           type="button"
-          // Design: `.chip` (ghost) + `.chip.b` (primary). The first/most-forward
-          // sibling is the primary action.
+          // Design: `.chip` (ghost) + `.chip.b` (brand-primary). The
+          // first/most-forward sibling is the primary action.
           className={i === 0 ? "artifact-foot-chip is-primary" : "artifact-foot-chip"}
           onClick={a.onClick}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            fontSize: 12.5,
-            padding: "7px 14px",
-            borderRadius: 30,
-            cursor: "pointer",
-            whiteSpace: "nowrap",
-            border:
-              i === 0 ? "1px solid var(--accent)" : "1px solid var(--line-strong)",
-            background: i === 0 ? "var(--accent)" : "var(--surface-2)",
-            color: i === 0 ? "#fff" : "var(--ink-2)",
-          }}
         >
           {a.icon}
           {a.label}

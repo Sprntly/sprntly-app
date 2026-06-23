@@ -250,36 +250,18 @@ export function EvidenceScreen() {
             )}
           </div>
 
-          {/* Title */}
-          <h1 style={{
-            fontSize: 22,
-            fontWeight: 700,
-            color: "var(--ink, #1A1A17)",
-            lineHeight: 1.35,
-            margin: "0 0 20px",
-          }}>
+          {/* Title — design `.art-h` serif headline */}
+          <h1 className="art-h">
             {evidence.title}
           </h1>
 
-          {/* AI summary box */}
+          {/* AI summary box — design `.art-ai-sum` */}
           {detail?.summary && (
-            <div style={summaryBoxStyle}>
-              <div style={{
-                fontSize: 10,
-                fontWeight: 700,
-                textTransform: "uppercase",
-                letterSpacing: "0.06em",
-                color: "var(--accent, #179463)",
-                marginBottom: 6,
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-              }}>
+            <div className="art-ai-sum">
+              <div className="art-ai-sum-h">
                 <IconSparkles size={14} /> AI Summary
               </div>
-              <div style={{ fontSize: 12.5, color: "#4a554f", lineHeight: 1.55 }}>
-                {detail.summary}
-              </div>
+              <div>{detail.summary}</div>
             </div>
           )}
 

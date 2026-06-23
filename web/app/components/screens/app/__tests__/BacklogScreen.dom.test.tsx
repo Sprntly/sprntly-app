@@ -116,6 +116,30 @@ describe("BacklogScreen — Proposed tab", () => {
     expect(screen.queryByText("First-Handoff Wizard to lift Day-30 activation")).toBeNull()
     expect(screen.queryByText("Co-authoring nudge to amplify the viral loop")).toBeNull()
   })
+
+  it("opens the restyled idea-detail panel (design .rbd-*) on row click", async () => {
+    // Visual restyle (#475): selecting a backlog idea opens the right-hand
+    // detail pane, now styled via the `.bl-detail` / serif `.bl-detail-title`
+    // classes. Assert the pane + its design hooks render with the idea's data.
+    listMock.mockResolvedValue({
+      items: [item({ id: "a", theme_id: "t4", title: "Rank-4 idea", rank: 4 })],
+      count: 1,
+    })
+
+    const { container } = render(<BacklogScreen />)
+    await waitFor(() => expect(screen.getByText("Rank-4 idea")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Rank-4 idea"))
+    })
+
+    const detail = container.querySelector(".bl-detail")
+    expect(detail).toBeTruthy()
+    expect(detail!.querySelector(".bl-detail-title")?.textContent).toBe("Rank-4 idea")
+    // Brand rank pill + the three next-step CTAs are present.
+    expect(detail!.querySelector(".bl-detail-rank")?.textContent).toBe("#4")
+    expect(detail!.querySelectorAll(".bl-detail-btn").length).toBe(3)
+  })
 })
 
 describe("BacklogScreen — Completed tab", () => {
