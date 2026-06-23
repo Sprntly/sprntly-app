@@ -518,8 +518,9 @@ describe("BriefChat composer — 'generate a prototype' navigation", () => {
 // ── Brief header: no duplicate "Monday brief" title ───────────────────────────
 // The "Monday brief" label lives in the chat tab name above the brief. Repeating
 // it as the header <h1> directly below the tab was a redundant duplicate, so the
-// header no longer renders a standalone title — only the LIVE/REFRESHING badge,
-// the week, and the company line remain.
+// header no longer renders a standalone title — only the week and company line
+// remain. The LIVE/REFRESHING status badge was also removed: a static
+// "REFRESHING" pill was confusing and carried no real signal.
 describe("BriefChat header — no duplicate brief title", () => {
   it("renders no .bh-title element (the tab name is the single source of the label)", async () => {
     await act(async () => {
@@ -529,8 +530,9 @@ describe("BriefChat header — no duplicate brief title", () => {
     expect(header).not.toBeNull()
     // The redundant title is gone…
     expect(header!.querySelector(".bh-title")).toBeNull()
-    // …but the live badge and week/company context still render.
-    expect(header!.querySelector(".bh-live")).not.toBeNull()
+    // …and the LIVE/REFRESHING status badge is gone too…
+    expect(header!.querySelector(".bh-live")).toBeNull()
+    // …but the week/company context still renders.
     expect(within(header!).getByText(/Acme Health/)).not.toBeNull()
   })
 })

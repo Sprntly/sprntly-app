@@ -616,7 +616,9 @@ export function BriefChat() {
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const { workspace } = useWorkspace()
-  const pipeline = usePipelineStatus(activeCompany)
+  // Keep the pipeline-status poll mounted (other surfaces rely on its side
+  // effects); the brief header no longer reads its result directly.
+  usePipelineStatus(activeCompany)
 
   const [turns, setTurns] = useState<ChatTurn[]>([])
   const [draft, setDraft] = useState("")
@@ -1340,7 +1342,6 @@ export function BriefChat() {
   const userName = content.userName ?? "You"
   const company = v2?.company ?? ""
   const week = weekLabel(v2?.weekOf ?? null)
-  const refreshing = (pipeline.runStatus as { status?: string } | null)?.status === "running"
   // The brief is being generated when hydration reports "generating" AND we
   // don't yet have a brief to show. Once findings arrive (ready), the WIP
   // indicator is replaced by the real brief. The failed state never trips this.
@@ -1352,13 +1353,8 @@ export function BriefChat() {
         <div className="bh-main">
           {/* Title intentionally omitted — the "Monday brief" label lives in the
               tab name above; repeating it here was a redundant duplicate. */}
-          <span className={`bh-live${refreshing ? " bh-live--refreshing" : ""}`}>
-            <span className="bh-live-dot" aria-hidden />
-            {refreshing ? "REFRESHING" : "LIVE"}
-          </span>
-          {week ? <span className="bh-sep">·</span> : null}
           {week ? <span className="bh-week">{week}</span> : null}
-          {company ? <span className="bh-sep">·</span> : null}
+          {week && company ? <span className="bh-sep">·</span> : null}
           {company ? <span className="bh-company">{company}</span> : null}
         </div>
         <div className="bh-actions">
