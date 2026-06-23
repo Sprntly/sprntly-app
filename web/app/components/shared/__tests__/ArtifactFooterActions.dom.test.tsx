@@ -104,6 +104,20 @@ describe("ArtifactFooterActions — per-view chip set", () => {
     render(<ArtifactFooterActions current="evidence" />)
     expect(screen.getByText(/Evidence ready/i)).toBeTruthy()
   })
+
+  it("carries the design footer/chip classes — primary chip is .is-primary", () => {
+    // Visual restyle (#475): styling lives in CSS classes (design `.art-foot` +
+    // `.chip` / `.chip.b`). Assert the contract the stylesheet keys off so a
+    // future regression that drops the classes is caught.
+    content = { prd: { prd_id: 7, title: "PRD" }, evidence: { title: "Ev" } }
+    const { container } = render(<ArtifactFooterActions current="evidence" />)
+    expect(container.querySelector(".artifact-foot-actions")).toBeTruthy()
+    const chips = container.querySelectorAll(".artifact-foot-chip")
+    expect(chips.length).toBe(3)
+    // Only the first (most-forward) sibling is the brand-primary chip.
+    expect(container.querySelectorAll(".artifact-foot-chip.is-primary").length).toBe(1)
+    expect(chips[0].classList.contains("is-primary")).toBe(true)
+  })
 })
 
 describe("ArtifactFooterActions — View vs Generate semantics", () => {

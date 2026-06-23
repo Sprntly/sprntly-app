@@ -771,60 +771,33 @@ export function BacklogScreen() {
 
           {/* ── Right panel: idea detail + PRD generation ── */}
           {selectedIdea && (
-            <aside style={{
-              width: 420, flexShrink: 0, borderLeft: "1px solid var(--line, #E8E6E0)",
-              background: "var(--surface, #fff)", display: "flex", flexDirection: "column",
-              overflow: "hidden",
-            }}>
+            <aside className="bl-detail">
               {/* Header */}
-              <div style={{
-                padding: "14px 18px", borderBottom: "1px solid var(--line, #E8E6E0)",
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-              }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>
-                  #{selectedIdea.rank} · {selectedIdea.type}
-                </span>
-                <button type="button" onClick={() => setSelectedIdea(null)}
-                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "var(--ink-3)", padding: 0, lineHeight: 1 }}>×</button>
+              <div className="bl-detail-top">
+                <span className="bl-detail-kicker">{selectedIdea.type}</span>
+                <span className="bl-detail-rank">#{selectedIdea.rank}</span>
+                <button type="button" className="bl-detail-close" onClick={() => setSelectedIdea(null)} aria-label="Close">×</button>
               </div>
 
               {/* Body */}
-              <div style={{ flex: 1, overflowY: "auto", padding: "16px 18px" }}>
-                <h2 style={{ fontSize: 17, fontWeight: 600, color: "var(--ink)", margin: "0 0 6px", lineHeight: 1.35 }}>
-                  {selectedIdea.title}
-                </h2>
-                <p style={{ fontSize: 13, color: "var(--ink-3)", margin: "0 0 16px" }}>
-                  {selectedIdea.sub}
-                </p>
+              <div className="bl-detail-body">
+                <h2 className="bl-detail-title">{selectedIdea.title}</h2>
+                <p className="bl-detail-sub">{selectedIdea.sub}</p>
 
                 {/* Impact */}
-                <div style={{
-                  padding: "10px 14px", borderRadius: 8, background: "var(--accent-muted, #DBF1E7)",
-                  marginBottom: 16, fontSize: 13,
-                }}>
-                  <strong style={{ color: "var(--accent, #179463)" }}>Impact:</strong>{" "}
+                <div className="bl-detail-impact">
+                  <strong>Impact:</strong>{" "}
                   <span style={{ color: "var(--ink)" }}>{selectedIdea.impact}</span>
                 </div>
 
                 {/* Chat thread */}
-                <div style={{
-                  fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em",
-                  color: "var(--ink-3)", marginBottom: 10,
-                }}>
-                  Chat thread
-                </div>
-                <div style={{
-                  padding: "12px 14px", borderRadius: 8, border: "1px solid var(--line, #E8E6E0)",
-                  background: "var(--surface-2, #F4F1EA)", marginBottom: 16, fontSize: 13, color: "var(--ink-2)",
-                }}>
-                  <div style={{ marginBottom: 8, fontWeight: 500, color: "var(--ink)" }}>You</div>
+                <div className="bl-detail-label">Chat thread</div>
+                <div className="bl-detail-msg bl-detail-msg--you">
+                  <div className="bl-detail-msg-from">You</div>
                   <div>Tell me more about &ldquo;{selectedIdea.title}&rdquo; — what&apos;s the problem, who&apos;s affected, and what would a solution look like?</div>
                 </div>
-                <div style={{
-                  padding: "12px 14px", borderRadius: 8, border: "1px solid var(--accent, #179463)",
-                  background: "#fff", marginBottom: 16, fontSize: 13, color: "var(--ink)",
-                }}>
-                  <div style={{ marginBottom: 8, fontWeight: 500, color: "var(--accent)" }}>Sprntly</div>
+                <div className="bl-detail-msg bl-detail-msg--ai">
+                  <div className="bl-detail-msg-from">Sprntly</div>
                   <div style={{ lineHeight: 1.55 }}>
                     <strong>{selectedIdea.title}</strong> — {selectedIdea.sub}. This idea has an estimated impact of <strong>{selectedIdea.impact}</strong>.
                     Based on the data, I recommend generating a PRD to scope this properly before moving to implementation.
@@ -832,14 +805,9 @@ export function BacklogScreen() {
                 </div>
 
                 {/* Actions */}
-                <div style={{
-                  fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em",
-                  color: "var(--ink-3)", marginBottom: 10,
-                }}>
-                  Next steps
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <button type="button" onClick={() => {
+                <div className="bl-detail-label">Next steps</div>
+                <div className="bl-detail-actions">
+                  <button type="button" className="bl-detail-btn bl-detail-btn--primary" onClick={() => {
                     // Navigate to chat with a PRD generation prompt
                     localStorage.setItem("sprntly_resume_conv", JSON.stringify({
                       dbId: 0, title: selectedIdea.title,
@@ -848,15 +816,11 @@ export function BacklogScreen() {
                       ],
                     }))
                     window.location.href = "/"
-                  }} style={{
-                    fontSize: 13, padding: "10px 16px", borderRadius: 8,
-                    background: "var(--accent, #179463)", color: "#fff", border: "none",
-                    cursor: "pointer", fontWeight: 600, display: "flex", alignItems: "center", gap: 6,
                   }}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                     Generate PRD
                   </button>
-                  <button type="button" onClick={() => {
+                  <button type="button" className="bl-detail-btn bl-detail-btn--ghost" onClick={() => {
                     localStorage.setItem("sprntly_resume_conv", JSON.stringify({
                       dbId: 0, title: selectedIdea.title,
                       turns: [
@@ -864,20 +828,12 @@ export function BacklogScreen() {
                       ],
                     }))
                     window.location.href = "/"
-                  }} style={{
-                    fontSize: 13, padding: "10px 16px", borderRadius: 8,
-                    background: "var(--surface-2, #F4F1EA)", border: "1px solid var(--line, #E8E6E0)",
-                    cursor: "pointer", color: "var(--ink-2)", display: "flex", alignItems: "center", gap: 6,
                   }}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     Continue in chat
                   </button>
-                  <button type="button" onClick={() => {
+                  <button type="button" className="bl-detail-btn bl-detail-btn--ghost" onClick={() => {
                     showToast("Prototype", `Starting prototype generation for "${selectedIdea.title}"…`)
-                  }} style={{
-                    fontSize: 13, padding: "10px 16px", borderRadius: 8,
-                    background: "var(--surface-2, #F4F1EA)", border: "1px solid var(--line, #E8E6E0)",
-                    cursor: "pointer", color: "var(--ink-2)", display: "flex", alignItems: "center", gap: 6,
                   }}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
                     Generate prototype

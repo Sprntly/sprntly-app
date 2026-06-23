@@ -4248,12 +4248,13 @@
     }
   }
 
+  /* Design `.art-top` — 58px header, 22px gutters */
   .cpanel-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 0 16px;
+    padding: 0 22px;
     border-bottom: 1px solid var(--line);
     background: #fff;
     height: 58px;
@@ -14439,12 +14440,13 @@
     border-color: transparent;
   }
 
+  /* Design `.art-h` — serif evidence headline */
   .ev-doc-title {
     font-family: var(--font-serif);
-    font-size: 22px;
-    font-weight: 500;
-    line-height: 1.25;
-    letter-spacing: -0.02em;
+    font-size: 26px;
+    font-weight: 400;
+    line-height: 1.18;
+    letter-spacing: -0.015em;
     color: var(--ink);
     margin: 0 0 6px;
   }
@@ -15653,6 +15655,279 @@
 
   @keyframes bl-spin {
     to { transform: rotate(360deg); }
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     ARTIFACT FOOTER ACTIONS  (design: .art-foot + .chip / .chip.b)
+     Contextual 3-chip footer rendered at the bottom of each rail
+     artifact (PRD / Evidence / Tickets). Visual-only restyle —
+     wiring lives in ArtifactFooterActions.tsx (#472).
+  ═══════════════════════════════════════════════════════════ */
+  .artifact-foot-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 0 4px;
+    margin-top: 8px;
+    border-top: 1px solid var(--line);
+  }
+
+  .artifact-foot-lbl {
+    flex: 1;
+    font-size: 12px;
+    color: var(--ink-2);
+    line-height: 1.4;
+  }
+
+  .artifact-foot-lbl strong {
+    color: var(--ink);
+    font-weight: 500;
+  }
+
+  /* Design `.chip` — outlined ghost pill */
+  .artifact-foot-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12.5px;
+    padding: 7px 14px;
+    border-radius: 30px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface-2);
+    color: var(--ink-2);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+
+  .artifact-foot-chip:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  /* Design `.chip.b` — brand-green primary (the forward step) */
+  .artifact-foot-chip.is-primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .artifact-foot-chip.is-primary:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     ARTIFACT HERO  (design: .art-hero / .art-cat / .art-h /
+     .art-ai-sum)  — shared evidence/detail reading-doc header
+  ═══════════════════════════════════════════════════════════ */
+  .art-hero {
+    margin-bottom: 6px;
+  }
+
+  .art-cat {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--ink-3);
+    margin-bottom: 8px;
+  }
+
+  .art-h {
+    font-family: var(--font-serif);
+    font-size: 26px;
+    font-weight: 400;
+    letter-spacing: -0.015em;
+    line-height: 1.18;
+    color: var(--ink);
+    margin: 0 0 16px;
+  }
+
+  .art-ai-sum {
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-soft);
+    border-radius: var(--radius-sm);
+    padding: 13px 15px;
+    margin-bottom: 20px;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  .art-ai-sum .art-ai-sum-h {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent-ink);
+    margin-bottom: 6px;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     BACKLOG IDEA DETAIL PANEL  (design: .rail-bk-detail / .rbd-*)
+     Right-hand pane shown when a backlog idea is selected.
+  ═══════════════════════════════════════════════════════════ */
+  .bl-detail {
+    width: 420px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--line);
+    background: var(--surface-2);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .bl-detail-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .bl-detail-kicker {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-2);
+  }
+
+  /* Design `.rbd-rank` — brand rank pill */
+  .bl-detail-rank {
+    margin-left: auto;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+    padding: 3px 10px;
+    border-radius: 30px;
+  }
+
+  .bl-detail-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 18px;
+    color: var(--ink-3);
+    padding: 0;
+    line-height: 1;
+  }
+
+  .bl-detail-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px;
+  }
+
+  /* Design `.rbd-title` — serif headline */
+  .bl-detail-title {
+    font-family: var(--font-serif);
+    font-size: 21px;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+    color: var(--ink);
+    margin: 0 0 6px;
+  }
+
+  .bl-detail-sub {
+    font-size: 13px;
+    color: var(--ink-3);
+    margin: 0 0 16px;
+    line-height: 1.5;
+  }
+
+  .bl-detail-impact {
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-soft);
+    margin-bottom: 16px;
+    font-size: 13px;
+  }
+
+  .bl-detail-impact strong {
+    color: var(--accent-ink);
+  }
+
+  .bl-detail-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-3);
+    margin-bottom: 10px;
+  }
+
+  .bl-detail-msg {
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    margin-bottom: 16px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .bl-detail-msg--you {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink-2);
+  }
+
+  .bl-detail-msg--ai {
+    border: 1px solid var(--accent-soft);
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+
+  .bl-detail-msg-from {
+    margin-bottom: 8px;
+    font-weight: 500;
+  }
+
+  .bl-detail-msg--you .bl-detail-msg-from { color: var(--ink); }
+  .bl-detail-msg--ai .bl-detail-msg-from { color: var(--accent-ink); }
+
+  .bl-detail-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .bl-detail-btn {
+    font-size: 13px;
+    padding: 10px 16px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: background 0.12s, border-color 0.12s;
+  }
+
+  .bl-detail-btn--primary {
+    background: var(--accent);
+    color: #fff;
+    border: 1px solid var(--accent);
+    font-weight: 600;
+  }
+
+  .bl-detail-btn--primary:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  .bl-detail-btn--ghost {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    color: var(--ink-2);
+  }
+
+  .bl-detail-btn--ghost:hover {
+    background: var(--surface-3);
+    color: var(--ink);
   }
 
   /* Syncing button state */
