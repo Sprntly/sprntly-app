@@ -12596,35 +12596,59 @@
   }
 
   /* ─── Configure drawer — Test connection block (commit K) ─── */
-  .conn-config-test {
-    margin-bottom: 18px;
-    padding-bottom: 14px;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .conn-config-test-row {
+  /* Auto-checked connection status badge at the top of the Configure drawer
+     (replaces the old manual "Test connection" button). */
+  .conn-config-status {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .conn-config-test-label {
+    gap: 8px;
+    margin-bottom: 18px;
+    padding: 10px 12px;
+    border-radius: 8px;
     font-size: 12.5px;
-    color: #15201b;
-    font-weight: 500;
+    background: #f6f7f6;
   }
 
-  .conn-config-test-ok {
-    margin: 8px 0 0;
-    font-size: 11.5px;
+  .conn-config-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #828d87;
+    flex: none;
+  }
+
+  .conn-config-status-label {
+    font-weight: 600;
+    color: #15201b;
+  }
+
+  .conn-config-status-detail {
+    color: #828d87;
+    overflow-wrap: anywhere;
+  }
+
+  .conn-config-status--connected {
+    background: rgba(23, 148, 99, 0.08);
+  }
+  .conn-config-status--connected .conn-config-status-dot {
+    background: #179463;
+  }
+  .conn-config-status--connected .conn-config-status-label {
     color: #0c6e4a;
   }
 
-  .conn-config-test-err {
-    margin: 8px 0 0;
-    font-size: 11.5px;
+  .conn-config-status--disconnected {
+    background: rgba(193, 56, 56, 0.06);
+  }
+  .conn-config-status--disconnected .conn-config-status-dot {
+    background: var(--danger, #C13838);
+  }
+  .conn-config-status--disconnected .conn-config-status-label {
     color: var(--danger, #C13838);
+  }
+
+  .conn-config-status--checking .conn-config-status-dot {
+    background: #c2c9c4;
   }
 
   /* ============================================================
