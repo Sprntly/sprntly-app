@@ -10,7 +10,11 @@ import {
   validateProductWebsite,
   normalizeProductWebsite,
 } from "../../../lib/onboarding/product-helpers"
-import { TECH_STACK_OPTIONS } from "../../../lib/onboarding/types"
+import {
+  TECH_STACK_OPTIONS,
+  INDUSTRIES,
+  BUSINESS_TYPES,
+} from "../../../lib/onboarding/types"
 import {
   createWorkspace,
   updateWorkspace,
@@ -33,7 +37,6 @@ import {
   FALLBACK_CANDIDATES_BY_INDUSTRY,
   type MetricCandidate,
 } from "./Metrics"
-import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
 
 const DRAFT_KEY = "business-info"
 
