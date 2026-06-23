@@ -26,7 +26,7 @@ export type SignInViewProps = {
 export function SignInView(props: SignInViewProps) {
   const { forgotMode } = props
   return (
-    <AuthShell tag="Sign in">
+    <AuthShell tag="The OS that turns your product into a self-improving recursive AI loop">
       <div className="auth-h">Welcome <em>back.</em></div>
       <div className="auth-sub">Sign in to your workspace to pick up where you left off.</div>
 
