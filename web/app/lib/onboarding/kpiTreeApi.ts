@@ -81,13 +81,20 @@ export function canSaveKpiTree(
   return supporting.some((s) => s.name.trim().length > 0)
 }
 
-/** Exactly this many metrics are picked on the onboarding metrics step. */
-export const REQUIRED_METRIC_PICKS = 3
+/** Onboarding metrics step: pick at least this many metrics (the minimum). */
+export const MIN_METRIC_PICKS = 3
+/**
+ * …and at most this many. 5 maps cleanly onto the KPI-tree schema
+ * (1 North Star + up to 4 primary metrics). The picker enforces the ceiling at
+ * selection time (and warns past it); this is the upper bound for validation.
+ */
+export const MAX_METRIC_PICKS = 5
 
-/** The onboarding metrics step is satisfiable iff EXACTLY 3 metrics are picked. */
+/** The onboarding metrics step is satisfiable iff between MIN and MAX metrics
+ *  (inclusive) are picked. */
 export function canSavePickedMetrics(picked: SupportingMetric[]): boolean {
   const named = picked.filter((m) => m.name.trim().length > 0)
-  return named.length === REQUIRED_METRIC_PICKS
+  return named.length >= MIN_METRIC_PICKS && named.length <= MAX_METRIC_PICKS
 }
 
 /**

@@ -4,8 +4,9 @@ import {
   buildKpiTreePayloadFromPicks,
   canSaveKpiTree,
   canSavePickedMetrics,
+  MAX_METRIC_PICKS,
   MAX_PRIMARY_METRICS,
-  REQUIRED_METRIC_PICKS,
+  MIN_METRIC_PICKS,
   type SupportingMetric,
 } from "../onboarding/kpiTreeApi"
 
@@ -73,18 +74,23 @@ describe("canSaveKpiTree", () => {
   })
 })
 
-describe("canSavePickedMetrics — onboarding pick-exactly-3", () => {
-  it("the constant is 3", () => {
-    expect(REQUIRED_METRIC_PICKS).toBe(3)
+describe("canSavePickedMetrics — onboarding pick 3 to 5", () => {
+  it("min is 3, max is 5", () => {
+    expect(MIN_METRIC_PICKS).toBe(3)
+    expect(MAX_METRIC_PICKS).toBe(5)
   })
 
-  it("is satisfiable ONLY with exactly 3 named picks", () => {
+  it("is satisfiable with between MIN (3) and MAX (5) named picks, inclusive", () => {
     expect(canSavePickedMetrics([])).toBe(false)
-    expect(canSavePickedMetrics([m("a"), m("b")])).toBe(false)
-    expect(canSavePickedMetrics([m("a"), m("b"), m("c")])).toBe(true)
-    // a 4th pick over-fills → not satisfiable
-    expect(canSavePickedMetrics([m("a"), m("b"), m("c"), m("d")])).toBe(false)
-    // blanks don't count toward the 3
+    expect(canSavePickedMetrics([m("a"), m("b")])).toBe(false) // below min
+    expect(canSavePickedMetrics([m("a"), m("b"), m("c")])).toBe(true) // min
+    expect(canSavePickedMetrics([m("a"), m("b"), m("c"), m("d")])).toBe(true)
+    expect(canSavePickedMetrics([m("a"), m("b"), m("c"), m("d"), m("e")])).toBe(true) // max
+    // a 6th pick exceeds the max → not satisfiable
+    expect(
+      canSavePickedMetrics([m("a"), m("b"), m("c"), m("d"), m("e"), m("f")]),
+    ).toBe(false)
+    // blanks don't count toward the minimum
     expect(canSavePickedMetrics([m("a"), m("  "), m("b")])).toBe(false)
   })
 })
