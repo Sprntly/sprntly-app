@@ -55,6 +55,17 @@ def _build_method_prefix(skill: str, skill_module: Optional[str]) -> tuple[str, 
     under a delimited header so the model reads it as the METHOD layer. The
     version suffix (`+<id>@<hash>`) is appended to prompt_version so the
     decision log records the exact method version behind the call.
+
+    The skill's `references/*` docs are appended to the block under
+    `### REFERENCE: <name>` headers. SKILL.md instructs the model to *read*
+    those files at runtime (e.g. "read references/signal-schema.json", "score
+    against references/rubric.md", "compare to references/examples.md"); the app
+    never made them available before, so the skill could not run its full
+    documented workflow. Folding them into this method block — the cacheable
+    prefix — makes the whole skill doc set in-prompt for ~one extra cache write,
+    then a cache read on subsequent calls. `assets/*` (e.g. a render template)
+    are deliberately NOT injected: the app renders from the structured payload,
+    so the template is a downstream view, not a prompt input.
     """
     spec = get_skill(skill)
     header = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n"
@@ -68,6 +79,11 @@ def _build_method_prefix(skill: str, skill_module: Optional[str]) -> tuple[str, 
                 f"available: {sorted(spec.modules)}"
             ) from exc
         block += f"\n\n### MODULE: {skill_module}\n{module_text}"
+    # Reference docs SKILL.md tells the model to read at runtime. Sorted for a
+    # deterministic prefix (cache-key stable). No-op for skills without a
+    # references/ dir, so every other bound skill's prompt is byte-identical.
+    for name in sorted(spec.references):
+        block += f"\n\n### REFERENCE: {name}\n{spec.references[name]}"
     return block + "\n", f"+{spec.id}@{spec.content_hash}"
 
 
@@ -117,12 +133,14 @@ def llm_call(
     """One attributed, telemetered LLM call. See module docstring.
 
     When `skill` is set, the bound skill's method text (its SKILL.md, plus the
-    named `skill_module` if given) is PREPENDED to the cacheable prefix under a
+    named `skill_module` if given, plus the skill's `references/*` docs under
+    "### REFERENCE:" headers) is PREPENDED to the cacheable prefix under a
     "## METHOD (skill: <id> @<hash>)" delimiter — the agent's own `system`
     prompt stays as the agent-specific layer AFTER the method. The method text
-    rides the existing user_cacheable_prefix mechanism (see app.llm) so it is
-    cache-friendly across calls. `prompt_version` is suffixed with
-    `+<skill_id>@<hash>` so the decision log pins the exact method version.
+    (including references) rides the existing user_cacheable_prefix mechanism
+    (see app.llm) so it is cache-friendly across calls. `prompt_version` is
+    suffixed with `+<skill_id>@<hash>` so the decision log pins the exact
+    method version.
     """
     chosen_model = model or DEFAULT_MODEL
     method_block = ""
