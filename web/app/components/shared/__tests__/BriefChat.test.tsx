@@ -515,8 +515,8 @@ describe("BriefChat composer — 'generate a prototype' navigation", () => {
   })
 })
 
-// ── Brief header: no duplicate "Monday brief" title ───────────────────────────
-// The "Monday brief" label lives in the chat tab name above the brief. Repeating
+// ── Brief header: no duplicate "Weekly brief" title ───────────────────────────
+// The "Weekly brief" label lives in the chat tab name above the brief. Repeating
 // it as the header <h1> directly below the tab was a redundant duplicate, so the
 // header no longer renders a standalone title — only the week and company line
 // remain. The LIVE/REFRESHING status badge was also removed: a static
@@ -568,6 +568,36 @@ describe("BriefChat header — fixed agent name 'Spiky'", () => {
     // The brief greeting line is present (the agent greeting copy), confirming
     // the rename didn't disturb the greeting render path.
     expect(document.querySelector(".bc-greeting")).not.toBeNull()
+  })
+})
+
+// ── Persistent PM-agent intro ────────────────────────────────────────────────
+// The brief opens with a persistent, educational PM-agent message that restates
+// what the agent continuously does. It is personalized with the user's FIRST
+// name (the fixture's userName is "Apurva Jain" → "Apurva") and replaces the old
+// redundant "Monday brief · …" secondary header line, which must no longer render.
+describe("BriefChat — persistent PM-agent intro", () => {
+  it("renders the persistent intro personalized with the user's first name", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    const intro = document.querySelector(".bc-intro") as HTMLElement | null
+    expect(intro).not.toBeNull()
+    // Personalized with the FIRST name only (not the full "Apurva Jain").
+    expect(intro!.textContent).toContain("Good day Apurva,")
+    expect(intro!.textContent).toContain(
+      "we continuously monitor how your product is being used",
+    )
+    expect(intro!.textContent).toContain(
+      "give you a weekly digest of the most important things worth working on",
+    )
+  })
+
+  it("no longer renders the redundant 'Monday brief · …' secondary status line", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    expect(screen.queryByText(/Monday brief ·/)).toBeNull()
   })
 })
 

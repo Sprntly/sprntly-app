@@ -55,7 +55,7 @@ type ChatTab = {
   evidenceGenerating: boolean
 }
 
-// The Weekly/Monday Brief is a pinned, non-closable FIRST tab on this surface.
+// The Weekly Brief is a pinned, non-closable FIRST tab on this surface.
 // It is synthesized in the render — never stored in the `tabs` state or
 // localStorage — and is identified by this sentinel id. `activeTabId ===
 // BRIEF_TAB_ID` means the brief tab is active (so we render <BriefChat/> instead
@@ -616,7 +616,7 @@ export function ChatScreen() {
   }, [currentScreen, checkResume])
 
   // The brief is the pinned first tab of this surface. When the route lands on
-  // the brief screen (sidebar "Monday brief" → goTo("brief") → /brief, which
+  // the brief screen (sidebar "Weekly brief" → goTo("brief") → /brief, which
   // also renders ChatScreen), activate the pinned brief tab — even if the surface
   // was already mounted on a chat tab.
   useEffect(() => {
@@ -984,7 +984,7 @@ export function ChatScreen() {
                 userSelect: "none", flexShrink: 0,
               }}
             >
-              <span style={{ lineHeight: "1.3" }}>Monday brief</span>
+              <span style={{ lineHeight: "1.3" }}>Weekly brief</span>
             </div>
             {tabs.map((tab) => {
               const isActive = activeTabId === tab.id

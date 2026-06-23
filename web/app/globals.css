@@ -5308,6 +5308,16 @@
     background-clip: padding-box;
   }
 
+  /* Persistent PM-agent intro — the always-on educational line above the
+     per-week greeting. Rendered every time so the agent's ongoing value is
+     restated; sits where the redundant "Monday brief" header line used to. */
+  .bc-intro {
+    margin: 0 0 12px;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--ink);
+  }
+
   .bc-greeting {
     margin: 0 0 16px;
     font-size: 15px;

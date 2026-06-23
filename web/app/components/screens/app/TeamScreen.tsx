@@ -19,7 +19,7 @@ export function TeamScreen() {
         <div>
           <h1 className="main-title">Team</h1>
           <p className="main-sub">
-            Everyone here gets the Monday brief and can view evidence. Admins can
+            Everyone here gets the Weekly brief and can view evidence. Admins can
             approve PRDs and push to trackers.
           </p>
         </div>
