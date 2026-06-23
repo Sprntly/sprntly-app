@@ -237,7 +237,10 @@ def test_gateway_md_path_folds_method_into_system(isolated_settings, monkeypatch
 
 # ---------- agent bindings ----------
 
-def test_synthesis_binds_prioritize(isolated_settings, monkeypatch):
+def test_synthesis_binds_weekly_brief(isolated_settings, monkeypatch):
+    """The synthesis brief COMPOSITION call binds the `weekly-brief` skill — its
+    METHOD is prepended to the cacheable prefix (re-platformed off `prioritize`,
+    which only ever scored the candidates upstream)."""
     from app import llm
 
     captured: dict = {}
@@ -257,7 +260,7 @@ def test_synthesis_binds_prioritize(isolated_settings, monkeypatch):
     monkeypatch.setattr(synth, "compute_convergence", lambda f, e: [cand])
     monkeypatch.setattr(synth, "load_kpi_tree", lambda e: None)
 
-    spec = get_skill("prioritize")
+    spec = get_skill("weekly-brief")
     with patch.object(synth, "save_brief"), \
          patch.object(synth, "deliver_brief_to_slack", return_value={"delivered": False, "reason": "slack_not_connected"}), \
          patch.object(synth, "log_agent_decision"):
@@ -270,7 +273,7 @@ def test_synthesis_binds_prioritize(isolated_settings, monkeypatch):
             pass
 
     prefix_text = captured["messages"][0]["content"][0]["text"]
-    assert prefix_text.startswith(f"## METHOD (skill: prioritize @{spec.content_hash})")
+    assert prefix_text.startswith(f"## METHOD (skill: weekly-brief @{spec.content_hash})")
 
 
 def test_oncall_binds_incident_runbook(isolated_settings, monkeypatch):

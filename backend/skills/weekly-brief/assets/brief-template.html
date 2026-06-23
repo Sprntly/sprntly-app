@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sprntly · Monday brief</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600;700&family=Inter:wght@400;450;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#15171c; --ink-2:#41444f; --ink-soft:#80838d;
+    --line:#e9e8e4; --paper:#f6f5f1; --card:#ffffff;
+    --green:#1a8a52; --green-dark:#157045; --green-soft:#e6f3ec;
+    --chip:#f4f3ef; --chip-line:#e7e6e1;
+    --sans:'Inter',-apple-system,system-ui,sans-serif;
+    --serif:'Spectral',Georgia,serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5;padding:40px 32px 90px;}
+  .wrap{max-width:960px;margin:0 auto;}
+
+  .brief-head{display:flex;align-items:center;gap:11px;margin-bottom:16px;flex-wrap:wrap;}
+  .agent-ic{width:30px;height:30px;border-radius:50%;background:var(--green-soft);display:flex;align-items:center;justify-content:center;color:var(--green);}
+  .brief-head .nm{font-weight:600;font-size:15px;}
+  .pm-pill{font-size:10.5px;font-weight:600;letter-spacing:.05em;color:var(--green-dark);background:var(--green-soft);padding:3px 9px;border-radius:999px;display:inline-flex;align-items:center;gap:5px;}
+  .brief-head .meta{font-size:13px;color:var(--ink-soft);}
+  .greeting{font-size:16.5px;color:var(--ink-2);line-height:1.6;max-width:86ch;margin-bottom:30px;}
+  .greeting b{color:var(--ink);font-weight:600;}
+
+  .t-reliability{--accent:#c0473c;--accent-soft:#fbece9;}
+  .t-competitive{--accent:#b07a2e;--accent-soft:#f6efe0;}
+  .t-growth{--accent:#1a8a52;--accent-soft:#e7f3ec;}
+  .t-demand{--accent:#5f57a6;--accent-soft:#eeecf7;}
+  .t-engagement{--accent:#3f63a0;--accent-soft:#e9eef7;}
+
+  .tlabel{font-family:var(--sans);font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--accent);display:inline-flex;align-items:center;gap:7px;}
+  .tlabel .d{width:7px;height:7px;border-radius:50%;background:var(--accent);}
+  .tpill{font-family:var(--sans);font-size:11px;letter-spacing:.07em;text-transform:uppercase;font-weight:600;color:var(--accent);background:var(--accent-soft);padding:5px 11px;border-radius:999px;display:inline-flex;align-items:center;gap:7px;}
+  .tpill .d{width:7px;height:7px;border-radius:50%;background:var(--accent);}
+
+  .sources{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+  .src{font-family:var(--sans);font-size:10.5px;color:var(--ink-2);background:var(--chip);border:1px solid var(--chip-line);padding:3px 8px;border-radius:6px;white-space:nowrap;}
+  .src-lead{font-family:var(--sans);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-soft);margin-right:2px;}
+
+  .actions{display:flex;gap:10px;align-items:center;margin-top:18px;}
+  .btn{font-family:var(--sans);font-size:14px;font-weight:600;padding:10px 16px;border-radius:9px;border:1px solid transparent;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px;transition:transform .12s,box-shadow .12s,border-color .12s,background .12s;}
+  .btn:hover{transform:translateY(-1px);}
+  .btn:focus-visible{outline:2px solid var(--green);outline-offset:2px;}
+  .btn-primary{background:var(--green);color:#fff;}
+  .btn-primary:hover{background:var(--green-dark);box-shadow:0 6px 16px -7px rgba(26,138,82,.7);}
+  .btn-ghost{background:transparent;color:var(--green-dark);border-color:var(--line);}
+  .btn-ghost:hover{border-color:var(--green);background:var(--green-soft);}
+  .btn svg{flex-shrink:0;}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;margin-bottom:18px;position:relative;transition:background .2s,border-color .2s;}
+  .head{font-family:var(--serif);font-weight:600;letter-spacing:-.005em;color:var(--ink);padding-right:64px;}
+  .head .k{color:var(--accent);}
+  .body{color:var(--ink-2);max-width:100ch;}
+  .body b{color:var(--ink);font-weight:600;}
+
+  /* top-right controls */
+  .controls{position:absolute;top:20px;right:20px;display:flex;gap:4px;z-index:2;}
+  .ic{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;color:var(--ink-soft);background:transparent;border:none;cursor:pointer;transition:background .12s,color .12s;}
+  .ic:hover{background:var(--chip);color:var(--ink);}
+  .ic:focus-visible{outline:2px solid var(--green);outline-offset:1px;}
+
+  /* dismissed state */
+  .content{transition:opacity .2s,filter .2s;}
+  .card.dismissed .content{opacity:.4;filter:grayscale(.8);pointer-events:none;}
+  .card.dismissed{background:#faf9f6;border-color:#efeee9;}
+  .card.dismissed::before{opacity:.35;}
+  .card.dismissed .controls{display:none;}
+  .dismissed-bar{position:absolute;top:16px;right:18px;display:none;align-items:center;gap:10px;z-index:3;}
+  .card.dismissed .dismissed-bar{display:flex;}
+  .dismissed-bar .lab{font-size:12.5px;color:var(--ink-soft);letter-spacing:.02em;}
+  .dismissed-bar .undo{font-size:13px;font-weight:600;color:var(--green-dark);background:transparent;border:1px solid var(--line);padding:5px 13px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:background .12s,border-color .12s;}
+  .dismissed-bar .undo:hover{background:var(--green-soft);border-color:var(--green);}
+
+  .cA{padding:24px 30px 24px 32px;overflow:hidden;}
+  .cA::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent);transition:opacity .2s;}
+  .cA .tlabel{margin-bottom:12px;}
+  .cA .head{font-size:23px;line-height:1.24;margin-bottom:12px;}
+  .cA .body{font-size:15px;line-height:1.6;}
+  .cA .sources{margin-top:15px;}
+
+  .cB{padding:24px 30px;}
+  .cB .tpill{margin-bottom:14px;}
+  .cB .head{font-size:25px;line-height:1.2;margin-bottom:13px;}
+  .cB .body{font-size:15px;line-height:1.6;}
+  .cB .sources{margin-top:16px;}
+
+  .cC{padding:24px 30px;}
+  .cC .head{font-size:23px;line-height:1.24;margin-bottom:12px;}
+  .cC .body{font-size:15px;line-height:1.6;}
+  .cC .tlabel{margin-bottom:13px;}
+  .cC .setup{font-size:15.5px;color:var(--ink-2);line-height:1.58;margin-bottom:9px;max-width:100ch;}
+  .cC .setup b{color:var(--ink);font-weight:600;}
+  .cC .payoff{font-family:var(--serif);font-weight:600;font-size:25px;line-height:1.2;letter-spacing:-.01em;color:var(--accent);margin-bottom:10px;}
+  .cC .lead{font-size:15px;color:var(--ink-2);line-height:1.58;max-width:100ch;}
+  .cC .sources{margin-top:16px;}
+
+  .cD{padding:22px 30px;}
+  .cD .toprow{display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin-bottom:12px;padding-right:64px;}
+  .cD .toprow .sep{width:1px;height:13px;background:var(--line);}
+  .cD .head{font-size:21px;line-height:1.28;margin-bottom:10px;}
+  .cD .body{font-size:14.5px;line-height:1.58;}
+
+  .cE{padding:24px 30px;}
+  .cE .tlabel{margin-bottom:13px;}
+  .cE .head{font-size:23px;line-height:1.24;margin-bottom:12px;}
+  .cE .head .hl{background:var(--accent-soft);color:var(--accent);padding:0 4px;border-radius:3px;}
+  .cE .body{font-size:15px;line-height:1.6;}
+  .cE .sources{margin-top:15px;}
+
+  @media (max-width:640px){
+    body{padding:26px 14px 70px;}
+    .cB .head,.cC .payoff{font-size:21px;}
+    .cA .head,.cE .head{font-size:20px;}
+    .cD .head{font-size:19px;}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="brief-head">
+    <div class="agent-ic">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>
+    </div>
+    <span class="nm">PM Agent</span>
+    <span class="pm-pill">✦ PM COWORKER</span>
+    <span class="meta">Monday brief · 06:17 AM</span>
+  </div>
+  <div class="greeting">Good day, David — I've scouted everything across your tools, and there's real upside on the table this week: roughly <b>$60M in revenue is within reach</b>. The strongest plays are closing a gap a competitor just opened, capturing <b>$8.4M</b> from accounts already primed to expand, and clearing the friction costing your highest-spend users. Five ranked below; the top three move the most.</div>
+
+  <!-- 1 -->
+  <div class="card cA t-reliability">
+    <div class="controls">
+      <button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button>
+      <button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>Reliability</span>
+      <div class="head">A login bug is failing <span class="k">1 in 6 iOS checkouts</span> — the fix recovers about $2.2M a year.</div>
+      <div class="body">For three weeks, a silent failure at the final checkout step has been crashing the iOS app with no error message, and roughly one in six iOS checkouts now fail there — about <b>$2.2M in lost revenue a year</b>. We've already drafted the fix as a PRD: a retry on the failing call and a clear error state in place of the dead screen. Review and approve it to put the recovery in motion.</div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Sentry</span><span class="src">Analytics</span><span class="src">Billing</span></div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> View PRD</a>
+        <a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4"/><path d="M13 16h6"/></svg> View prototype</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2 -->
+  <div class="card cB t-competitive">
+    <div class="controls">
+      <button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button>
+      <button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <span class="tpill"><span class="d"></span>Competitive</span>
+      <div class="head">A rival's new search has cost 3 deals this quarter — matching it protects ~$1.6M in at-risk renewals.</div>
+      <div class="body">Since Togal shipped natural-language search last month, it's become a deciding factor in three deals you've lost this quarter, with two more renewals raising the same gap — and left alone, it will quietly cap your win rate. We've scoped the answer as a PRD, built around the queries your customers actually run and sized to ship before Q3 renewals. Review and approve it to close the gap.</div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Competitor intel</span><span class="src">Sales calls</span><span class="src">CRM</span></div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> View PRD</a>
+        <a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4"/><path d="M13 16h6"/></svg> View prototype</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3 -->
+  <div class="card cC t-growth">
+    <div class="controls">
+      <button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button>
+      <button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>Growth</span>
+      <div class="head">42 accounts have outgrown their plan — claiming them adds $8.4M in expansion.</div>
+      <div class="body">Forty-two of your Team-plan accounts have quietly pushed past every Enterprise seat and usage limit, and several have already signaled they're ready to move up — that's <b>$8.4M in expansion revenue</b> sitting unclaimed. We've drafted the in-product upgrade flow as a PRD, so the conversation starts itself the moment an account crosses the line. Review and approve it to start capturing it.</div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Billing</span><span class="src">Analytics</span><span class="src">CRM</span></div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> View PRD</a>
+        <a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4"/><path d="M13 16h6"/></svg> View prototype</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4 -->
+  <div class="card cD t-engagement">
+    <div class="controls">
+      <button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button>
+      <button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <div class="toprow">
+        <span class="tlabel"><span class="d"></span>Engagement</span>
+        <span class="sep"></span>
+        <div class="sources"><span class="src">Analytics</span><span class="src">Support</span></div>
+      </div>
+      <div class="head">50% of new users never reach the action that drives retention — guiding them there could lift it ~18%.</div>
+      <div class="body">Nearly half of your new users finish setup but never run their first report — the single action most correlated with retention, where those who reach it stay at 87% against 44% for those who don't. The drop-off is simply that no one points them there. We've drafted a guided first run as a PRD; review and approve it to lift retention from the very top of the funnel.</div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> View PRD</a>
+        <a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4"/><path d="M13 16h6"/></svg> View prototype</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5 -->
+  <div class="card cE t-demand">
+    <div class="controls">
+      <button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button>
+      <button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>Customer demand</span>
+      <div class="head">Your top accounts keep asking for real-time collaboration — building it protects <span class="hl">$50M in renewals</span>.</div>
+      <div class="body">Your highest-paying accounts keep asking for real-time collaboration, and the requests have sharpened now that two competitors have shipped it. With roughly <b>$50M in renewals tied to these accounts</b>, the gap is becoming a reason to look elsewhere. We've scoped the first version as a PRD — review and approve it to answer the request before it hardens into churn.</div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Sales calls</span><span class="src">Support</span><span class="src">Competitor intel</span></div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> View PRD</a>
+        <a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4"/><path d="M13 16h6"/></svg> View prototype</a>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  document.querySelectorAll('.card').forEach(card=>{
+    const dismiss=card.querySelector('.dismiss');
+    const undo=card.querySelector('.undo');
+    if(dismiss) dismiss.addEventListener('click',()=>card.classList.add('dismissed'));
+    if(undo) undo.addEventListener('click',()=>card.classList.remove('dismissed'));
+  });
+</script>
+</body>
+</html>
