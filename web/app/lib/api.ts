@@ -699,6 +699,8 @@ export type ConnectionSummary = {
     dataset?: string
     folder_id?: string
     folder_name?: string
+    // Google Drive — files picked via the Google Picker (drive.file scope)
+    files?: GoogleDrivePickedFile[]
     // Slack
     channel_id?: string
     channel_name?: string
@@ -742,16 +744,21 @@ export type GitHubInstallRepo = {
 
 export type GoogleDriveSyncResult = {
   dataset: string
-  folder_id: string
   synced: { filename: string; md_path: string; md_chars: number }[]
   skipped: { name: string; reason: string }[]
   errors: { name: string; error: string }[]
 }
 
-export type DriveFolderBrowse = {
-  current: { id: string; name: string }
-  parent: { id: string; name: string } | null
-  folders: { id: string; name: string }[]
+/** A file the user picked via the Google Picker (drive.file scope). */
+export type GoogleDrivePickedFile = {
+  id: string
+  name?: string
+}
+
+/** Short-lived, drive.file-scoped access token for the browser Google Picker. */
+export type GoogleDrivePickerToken = {
+  access_token: string
+  expires_in: number
 }
 
 export type SlackChannel = {
@@ -774,23 +781,23 @@ export const connectorsApi = {
     api.delete<{ deleted: true; provider: string }>(
       `/v1/connectors/google-drive`,
     ),
-  browseGoogleDriveFolders: (parentId = "root") =>
-    api.get<DriveFolderBrowse>(
-      `/v1/connectors/google-drive/folders?parent_id=${encodeURIComponent(parentId)}`,
+  /** Mint a short-lived, drive.file-scoped access token for the browser
+   * Google Picker. The Picker widget runs in the user's own browser and
+   * needs an OAuth token to render their Drive. */
+  getGoogleDrivePickerToken: () =>
+    api.get<GoogleDrivePickerToken>(
+      `/v1/connectors/google-drive/picker-token`,
     ),
-  setGoogleDriveConfig: (
-    folderId: string,
-    dataset?: string,
-    folderName?: string,
-  ) =>
-    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
-      `/v1/connectors/google-drive/config`,
-      { folder_id: folderId, folder_name: folderName, dataset },
+  /** Persist the files the user selected in the Google Picker and run a
+   * sync so they land in the corpus. Replaces the whole stored list. */
+  saveGoogleDriveFiles: (body: { files: GoogleDrivePickedFile[] }) =>
+    api.post<GoogleDriveSyncResult>(
+      `/v1/connectors/google-drive/files`,
+      body,
     ),
-  syncGoogleDrive: (dataset?: string, folderId?: string) =>
+  syncGoogleDrive: (dataset?: string) =>
     api.post<GoogleDriveSyncResult>(`/v1/connectors/google-drive/sync`, {
       dataset,
-      folder_id: folderId,
     }),
   /** Full-page navigation — OAuth must not use fetch. */
   googleDriveAuthorizeUrl: (dataset: string) =>
