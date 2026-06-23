@@ -46,9 +46,7 @@ function render(
     onClose: noop,
     onDisconnect: noop,
     isDisconnecting: false,
-    onTestConnection: noop,
-    isTesting: false,
-    testResult: null,
+    status: { kind: "connected", accountLabel: "design@meridian.health" },
   }
   return renderToStaticMarkup(
     React.createElement(ConfigureConnectorDrawerView, { ...defaults, ...override }),
@@ -111,60 +109,57 @@ describe("ConfigureConnectorDrawerView", () => {
           onClose: noop,
           onDisconnect: noop,
           isDisconnecting: false,
-          onTestConnection: noop,
-          isTesting: false,
-          testResult: null,
+          status: { kind: "connected" },
         },
-        React.createElement("div", { "data-testid": "slot-content" }, "drive folder picker"),
+        React.createElement("div", { "data-testid": "slot-content" }, "drive file picker"),
       ),
     )
     expect(html).toContain('data-testid="slot-content"')
-    expect(html).toContain("drive folder picker")
+    expect(html).toContain("drive file picker")
   })
 
-  // ───── Test connection block (commit K) ─────
+  // ───── Auto connection-status badge (replaces the manual "Test connection") ─────
 
-  it("renders a Test connection block with a Test now button", () => {
+  it("no longer renders the manual 'Test connection' / 'Test now' control", () => {
     const html = render()
-    expect(html).toContain("Test connection")
-    expect(html).toContain("Test now")
+    expect(html).not.toContain("Test connection")
+    expect(html).not.toContain("Test now")
   })
 
-  it("disables the test button while a test is in flight ('Testing…')", () => {
-    const html = render({ isTesting: true })
-    expect(html).toContain("Testing…")
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>Testing…<\/button>/)
-  })
-
-  it("shows success line with account label when testResult.kind is 'ok'", () => {
+  it("shows a 'Connected' status badge with the account detail when connected", () => {
     const html = render({
-      testResult: {
-        kind: "ok",
-        accountLabel: "alice@meridian.health",
-        testedAt: "2026-06-02T18:00:00.000Z",
-      },
+      status: { kind: "connected", accountLabel: "alice@meridian.health" },
     })
-    expect(html).toContain("Connection working")
+    expect(html).toContain("Connected")
     expect(html).toContain("alice@meridian.health")
+    expect(html).toMatch(/conn-config-status--connected/)
   })
 
-  it("shows error line when testResult.kind is 'error'", () => {
+  it("shows a 'Disconnected' status badge with the failure message", () => {
     const html = render({
-      testResult: { kind: "error", message: "Token rejected by provider" },
+      status: { kind: "disconnected", message: "Token rejected by provider" },
     })
+    expect(html).toContain("Disconnected")
     expect(html).toContain("Token rejected by provider")
-    expect(html).toMatch(/conn-config-test-err/)
+    expect(html).toMatch(/conn-config-status--disconnected/)
   })
 
-  it("disables Test now when there's no connection (test makes no sense)", () => {
-    const html = render({ connection: null })
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>Test now<\/button>/)
+  it("shows 'Checking…' while the probe is in flight", () => {
+    const html = render({ status: { kind: "checking" } })
+    expect(html).toContain("Checking…")
+    expect(html).toMatch(/conn-config-status--checking/)
   })
 
-  it("renders connection state hint when connection is null but item is non-null", () => {
-    // Edge case: drawer was opened mid-flight; connection load not done yet.
-    const html = render({ connection: null })
+  it("defaults to 'Checking…' when no status has resolved yet (status=null)", () => {
+    const html = render({ status: null })
+    expect(html).toContain("Checking…")
+    expect(html).toMatch(/conn-config-status--checking/)
+  })
+
+  it("still renders the connector when connection is null but item is non-null", () => {
+    // Edge case: drawer opened mid-flight; connection load not done yet.
+    const html = render({ connection: null, status: { kind: "disconnected", message: "Not connected" } })
     expect(html).toContain("Figma")
-    expect(html).toMatch(/Loading|—|No connection/)
+    expect(html).toContain("Disconnected")
   })
 })
