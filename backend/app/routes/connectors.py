@@ -1064,6 +1064,20 @@ def _bind_installation_company(installation_id: int, company_id: str) -> None:
     cross-tenant; the next webhook refresh fills in account details."""
     try:
         existing = db.get_github_installation(installation_id)
+        # Never re-key an installation already bound to a DIFFERENT company.
+        # First-time bind (company_id None/empty) and same-company rebind both
+        # fall through and proceed as before; only a cross-company rebind is a
+        # no-op, so one tenant's callback can't steal another's installation.
+        if (
+            existing
+            and existing.get("company_id")
+            and existing["company_id"] != company_id
+        ):
+            logger.info(
+                "connectors.github_install_rebind_skipped_cross_company installation=%s",
+                installation_id,
+            )
+            return
         if existing:
             db.upsert_github_installation(
                 installation_id=installation_id,
