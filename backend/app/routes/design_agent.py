@@ -76,6 +76,7 @@ from app.db.prototypes import (
     find_existing_prototype,
     find_prototype_by_share_token,
     find_active_prototype_by_prd,
+    find_latest_prototype_by_prd,
     find_ready_prototype_by_prd,
     flag_stale_handoff,
     get_prototype,
@@ -732,6 +733,33 @@ def get_active_by_prd(
     )
     if not row:
         raise HTTPException(status_code=404, detail="No active prototype for this PRD")
+    return row
+
+
+@router.get("/by-prd/{prd_id}/latest")
+def get_latest_by_prd(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> dict[str, Any]:
+    """Return the most-recent prototype for a PRD of ANY status (incl 'failed').
+
+    Failed-state lookup: unlike `/by-prd/{prd_id}/active` (ready-or-generating
+    only), this does NOT status-filter, so a FAILED latest row resolves here
+    instead of returning null and dropping the prototype route to the bare
+    generate CTA. The route calls this only on the none-branch (no ready/
+    generating row) to decide between an error+retry surface and the empty
+    state. Pure read, no generate side-effect. Returns 404 when NO prototype
+    exists for the PRD (frontend swallows 404→null → empty state). Workspace-
+    filtered: a prototype in another workspace returns 404, not 403. Three-
+    segment path, so it can never be shadowed by the single-segment
+    `GET /{prototype_id}`.
+    """
+    _require_feature_enabled()
+    row = find_latest_prototype_by_prd(
+        prd_id=prd_id, workspace_id=company.company_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No prototype for this PRD")
     return row
 
 

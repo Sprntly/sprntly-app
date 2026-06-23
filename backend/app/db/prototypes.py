@@ -334,6 +334,31 @@ def find_active_prototype_by_prd(
     return resp.data[0] if resp.data else None
 
 
+def find_latest_prototype_by_prd(
+    *,
+    prd_id: int,
+    workspace_id: str,
+) -> dict[str, Any] | None:
+    """Most-recent prototype for a PRD of ANY status (incl 'failed'), or None.
+
+    Sibling of find_ready/find_active that does NOT status-filter — backs the
+    failed-state surface so a failed latest row shows an error+retry instead of the
+    bare generate CTA (find_active excludes 'failed'). Read-only, workspace-scoped,
+    newest by id.
+    """
+    c = require_client()
+    resp = (
+        c.table(_TABLE)
+        .select("*")
+        .eq("prd_id", prd_id)
+        .eq("workspace_id", workspace_id)
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
 def create_checkpoint(
     *,
     prototype_id: int,

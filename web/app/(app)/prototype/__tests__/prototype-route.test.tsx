@@ -24,6 +24,7 @@ import {
   prototypeTabState,
   fsParamToFullscreen,
   actionForActiveProto,
+  actionForLatestProto,
   resolvePrdTitle,
   needsTitleFetch,
   initialGenerateRequested,
@@ -197,6 +198,42 @@ describe("prototype route — active-prototype resume decision (actionForActiveP
     ).toEqual({ kind: "none" })
     expect(
       actionForActiveProto({ id: 2, status: "invalidated" } as PrototypeRecord),
+    ).toEqual({ kind: "none" })
+  })
+})
+
+describe("prototype route — failed-latest decision (actionForLatestProto)", () => {
+  it("flags a failed latest row → error+retry surface (the failed-state fix)", () => {
+    const latest = { id: 21, status: "failed", bundle_url: null } as PrototypeRecord
+    expect(actionForLatestProto(latest)).toEqual({ kind: "failed", prototypeId: 21 })
+  })
+
+  it("captures the id only — never the raw error string", () => {
+    const latest = {
+      id: 22,
+      status: "failed",
+      bundle_url: null,
+      error: "ViteBuildError: secret stderr tail",
+    } as PrototypeRecord
+    const result = actionForLatestProto(latest)
+    expect(result).toEqual({ kind: "failed", prototypeId: 22 })
+    // The decision shape carries no error field — the raw string never travels.
+    expect(JSON.stringify(result)).not.toContain("stderr")
+  })
+
+  it("returns none for null (no prototype row at all)", () => {
+    expect(actionForLatestProto(null)).toEqual({ kind: "none" })
+  })
+
+  it("returns none for any non-failed status (ready / generating / invalidated)", () => {
+    expect(
+      actionForLatestProto({ id: 1, status: "ready" } as PrototypeRecord),
+    ).toEqual({ kind: "none" })
+    expect(
+      actionForLatestProto({ id: 2, status: "generating" } as PrototypeRecord),
+    ).toEqual({ kind: "none" })
+    expect(
+      actionForLatestProto({ id: 3, status: "invalidated" } as PrototypeRecord),
     ).toEqual({ kind: "none" })
   })
 })

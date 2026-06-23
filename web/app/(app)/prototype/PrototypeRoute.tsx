@@ -18,6 +18,12 @@
 //                   locate pipeline never fires without user intent; a successful
 //                   generation then reveals the new prototype IN-TAB (no
 //                   navigation to a full-screen overlay).
+//   4. failed     — the PRD's LATEST prototype row is `failed` (cold load onto a
+//                   PRD whose last generation failed) → a concise error + Retry,
+//                   NOT the bare CTA. getActiveByPrd excludes 'failed', so the
+//                   none-branch consults getLatestByPrd to detect it; the failed
+//                   row routes into the same genError surface an in-session
+//                   failure uses. Raw backend error never reaches the DOM.
 //
 // Bare /prototype (no ?prd=) shows an empty state prompting the user to choose a
 // PRD first.
@@ -206,6 +212,29 @@ export function actionForActiveProto(
   }
   if (found && found.status === "generating") {
     return { kind: "resume", prototypeId: found.id }
+  }
+  return { kind: "none" }
+}
+
+/** Pure: decide whether the LATEST prototype row (any status) is a terminal
+ *  FAILURE that should surface an error+retry instead of the bare generate CTA.
+ *  Consulted ONLY on the active-lookup none-branch (no ready/generating row):
+ *  getActiveByPrd excludes 'failed', so a failed latest row otherwise collapses
+ *  to the empty CTA. Returns `failed` (with the row id) only when the latest row
+ *  is `failed`; null / no row / any other status → `none` (the existing empty
+ *  state). The raw `error` string is intentionally NOT captured here — only the
+ *  id travels; the failed UI renders curated copy, never the backend error.
+ *  Extracted + exported so the failed decision is unit-testable without a DOM
+ *  (the repo's vitest env is `node`, no jsdom). */
+export type LatestProtoAction =
+  | { kind: "failed"; prototypeId: number }
+  | { kind: "none" }
+
+export function actionForLatestProto(
+  latest: PrototypeRecord | null,
+): LatestProtoAction {
+  if (latest && latest.status === "failed") {
+    return { kind: "failed", prototypeId: latest.id }
   }
   return { kind: "none" }
 }
@@ -546,7 +575,30 @@ export function PrototypeRoute() {
             if (cancelled) return
             handleGenDone(result)
           })
+          return
         }
+        // action.kind === "none": no ready/generating row. getActiveByPrd
+        // EXCLUDES 'failed', so a FAILED latest row reaches here looking like
+        // "never generated" → the bare generate CTA. Consult getLatestByPrd
+        // (any status) to distinguish a failed latest row from a true no-row
+        // PRD. A failed row routes into the EXISTING genError failed surface
+        // (curated copy + Retry); the raw `error` string is never captured.
+        // Any other case (no row / non-failed latest) leaves genError null →
+        // the existing empty state. Swallows its own 404→null.
+        designAgentApi
+          .getLatestByPrd(prdId)
+          .then((latest) => {
+            if (cancelled) return
+            const latestAction = actionForLatestProto(latest)
+            if (latestAction.kind === "failed") {
+              // A generic marker — NOT the raw backend error. reasonCopy maps it
+              // to a curated line; the raw `error` never reaches the DOM.
+              setGenError("Generation failed")
+            }
+          })
+          .catch(() => {
+            /* degrade — leave genError null → the existing empty state. */
+          })
       })
       .catch(() => {
         if (!cancelled) setProto(null)
@@ -711,16 +763,20 @@ export function PrototypeRoute() {
     )
   }
 
-  // Generation FAILED (terminal { ok: false } / no-result) → a loud, persistent
-  // error + Retry. Sits ABOVE the resolving / empty / generate branches so a
-  // failed run NEVER silently collapses to the bare empty/PRD state. Reuses the
-  // EXISTING GenerationErrorBanner (the same component + reasonCopy mapping the
+  // Generation FAILED → a loud, persistent error + Retry. Sits ABOVE the
+  // resolving / empty / generate branches so a failed run NEVER silently
+  // collapses to the bare empty/PRD state. Reuses the EXISTING
+  // GenerationErrorBanner (the same component + reasonCopy mapping the
   // DesignAgentLauncher uses): the raw backend message is mapped to curated copy
   // (raw error never hits the DOM), and Retry re-opens the generate
   // panel via the existing kickoff path. A "Back to brief" affordance gives a
   // deliberate exit (mirrors locate's Switch-source: a user choice, not a silent
-  // collapse). genError is set only on the failure branch of handleGenDone, so the
-  // success path never reaches here.
+  // collapse). genError is set in TWO places, both reaching this same surface:
+  //   (1) the failure branch of handleGenDone (an in-session { ok: false } run);
+  //   (2) the resolve effect's none-branch, when getLatestByPrd reports the
+  //       latest row is `failed` (a COLD load onto a PRD whose last generation
+  //       failed — getActiveByPrd excludes 'failed' so it returned null).
+  // Both pass a generic marker mapped by reasonCopy, never the raw row error.
   if (genError) {
     return (
       <AppLayout>

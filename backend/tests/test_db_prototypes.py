@@ -283,6 +283,51 @@ def test_fail_prototype_truncates_error_at_500_chars(proto):
     assert len(row["error"]) == 500
 
 
+# ─── find_latest_prototype_by_prd — failed-state surface ───────────────────
+
+
+def test_find_latest_by_prd_returns_failed(proto):
+    # A FAILED latest row is invisible to find_ready (ready-only) AND find_active
+    # (ready-or-generating), so both return None — which is exactly why the
+    # prototype route collapses to the bare generate CTA. find_latest does NOT
+    # status-filter, so it surfaces the failed row, backing the error+retry fix.
+    # Seed an older invalidated row first so "most-recent of ANY status" is
+    # genuinely exercised (the failed row must win by id).
+    old = proto.start_prototype(prd_id=88, workspace_id="app", template_version=1)
+    proto.complete_prototype(prototype_id=old, workspace_id="app", bundle_url="https://x")
+    proto.invalidate_stale_prototypes(current_version=2, variant="v1")
+    failed = proto.start_prototype(prd_id=88, workspace_id="app", template_version=2)
+    proto.fail_prototype(
+        prototype_id=failed, workspace_id="app", error="ViteBuildError: boom"
+    )
+
+    latest = proto.find_latest_prototype_by_prd(prd_id=88, workspace_id="app")
+    assert latest is not None
+    assert latest["id"] == failed
+    assert latest["status"] == "failed"
+
+    # The siblings the route already calls return None for the same PRD — the gap
+    # this fix closes.
+    assert proto.find_ready_prototype_by_prd(prd_id=88, workspace_id="app") is None
+    assert proto.find_active_prototype_by_prd(prd_id=88, workspace_id="app") is None
+
+
+def test_find_latest_by_prd_returns_none_when_no_row(proto):
+    assert proto.find_latest_prototype_by_prd(prd_id=999, workspace_id="app") is None
+
+
+def test_find_latest_by_prd_is_workspace_scoped(proto):
+    # A failed row in a FOREIGN workspace must not leak into another workspace's
+    # lookup (matches the workspace scoping of find_ready / find_active).
+    failed = proto.start_prototype(prd_id=89, workspace_id="other", template_version=1)
+    proto.fail_prototype(prototype_id=failed, workspace_id="other", error="boom")
+    assert proto.find_latest_prototype_by_prd(prd_id=89, workspace_id="app") is None
+    assert (
+        proto.find_latest_prototype_by_prd(prd_id=89, workspace_id="other")["id"]
+        == failed
+    )
+
+
 # ─── Invalidation ──────────────────────────────────────────────────────────
 
 

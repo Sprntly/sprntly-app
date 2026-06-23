@@ -1242,6 +1242,21 @@ export const designAgentApi = {
       return null
     }
   },
+  /** Failed-state lookup: the most-recent prototype for a PRD of ANY status
+   *  (incl 'failed'), or null. Unlike getActiveByPrd (ready-or-generating only),
+   *  this surfaces a FAILED latest row so the prototype route shows an
+   *  error+retry surface instead of the bare generate CTA. The route calls it
+   *  only on the none-branch (no ready/generating row). Swallows 404→null like
+   *  getActiveByPrd. */
+  getLatestByPrd: async (prdId: number): Promise<PrototypeRecord | null> => {
+    try {
+      return await api.get<PrototypeRecord>(
+        `/v1/design-agent/by-prd/${encodeURIComponent(String(prdId))}/latest`,
+      )
+    } catch {
+      return null
+    }
+  },
   /** Mark a prototype complete. Empty body. */
   complete: (prototypeId: number) =>
     api.post<{

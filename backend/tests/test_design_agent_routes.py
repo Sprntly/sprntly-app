@@ -855,6 +855,67 @@ def test_active_by_prd_three_segment_resolves(env, client):
     assert client.get("/v1/design-agent/by-prd/176/active").status_code == 200
 
 
+# ─── GET /by-prd/{prd_id}/latest — any-status (incl 'failed') lookup ─────────
+
+
+def _seed_failed_prototype(env, *, prd_id: int, workspace_id: str) -> int:
+    """Seed a FAILED prototype row for a PRD; return its id."""
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id=workspace_id, template_version=1
+    )
+    env.proto.fail_prototype(
+        prototype_id=pid, workspace_id=workspace_id, error="ViteBuildError: boom"
+    )
+    return pid
+
+
+def test_latest_by_prd_returns_failed_prototype(env, client):
+    # The latest lookup matches a FAILED row — invisible to both /by-prd (ready
+    # only) and /by-prd/.../active (ready-or-generating) — so the prototype route
+    # can show an error+retry surface instead of the bare generate CTA.
+    pid = _seed_failed_prototype(env, prd_id=270, workspace_id=_TEST_COMPANY_ID)
+    resp = client.get("/v1/design-agent/by-prd/270/latest")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == pid
+    assert body["status"] == "failed"
+    # The same PRD is 404 on the ready-only and active lookups (the gap closed).
+    assert client.get("/v1/design-agent/by-prd/270").status_code == 404
+    assert client.get("/v1/design-agent/by-prd/270/active").status_code == 404
+
+
+def test_latest_by_prd_returns_404_when_none(env, client):
+    # No prototype at all for the PRD → 404 (frontend swallows 404→null → empty).
+    assert client.get("/v1/design-agent/by-prd/271/latest").status_code == 404
+
+
+def test_latest_by_prd_no_generate_side_effect(env, client):
+    # Pure read: a lookup for a PRD with no prototype must NOT insert a row.
+    from tests import _fake_supabase
+
+    assert client.get("/v1/design-agent/by-prd/272/latest").status_code == 404
+    rows = _fake_supabase.get_fake_db().execute(
+        "SELECT id FROM prototypes WHERE prd_id = ? AND workspace_id = ?",
+        (272, _TEST_COMPANY_ID),
+    ).fetchall()
+    assert rows == []
+
+
+def test_latest_by_prd_cross_workspace_returns_404(env, client):
+    # A failed row under a FOREIGN workspace is invisible to the caller → 404,
+    # not 403, not 200: cross-tenant existence is never disclosed.
+    _seed_failed_prototype(env, prd_id=273, workspace_id="demo")
+    assert client.get("/v1/design-agent/by-prd/273/latest").status_code == 404
+
+
+def test_latest_by_prd_returns_404_when_flag_off(env, client, monkeypatch):
+    # Gated by the same feature flag as the rest of the surface.
+    _seed_failed_prototype(env, prd_id=274, workspace_id=_TEST_COMPANY_ID)
+    assert client.get("/v1/design-agent/by-prd/274/latest").status_code == 200
+    monkeypatch.delenv("DESIGN_AGENT_ENABLED", raising=False)
+    assert client.get("/v1/design-agent/by-prd/274/latest").status_code == 404
+
+
 # ─── Connected-repo identifier threaded into generation ─────────────────────
 #
 # The Generate modal lets a user pick one of their connected GitHub repos. That
