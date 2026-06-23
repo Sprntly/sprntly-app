@@ -117,7 +117,8 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
             continue
         try:
             r = extract_document(
-                facade, company_id, doc_name=doc.name, text=doc.text
+                facade, company_id, doc_name=doc.name, text=doc.text,
+                origin="upload",
             )
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]

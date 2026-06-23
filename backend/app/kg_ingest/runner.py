@@ -80,6 +80,7 @@ def sync_provider(
                 text=text,
                 agent=f"ingest:{provider}",
                 source_hint=hint,
+                origin="connector",
             )
             totals["batches"] += 1
             for k in ("signals", "themes", "skipped"):

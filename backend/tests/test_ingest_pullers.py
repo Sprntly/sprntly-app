@@ -122,8 +122,9 @@ def test_runner_batches_and_aggregates(isolated_settings):
 
     facade = GraphFacade()
     seen_docs = []
-    def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None):
-        seen_docs.append((doc_name, len(text), source_hint))
+    def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None,
+                     origin=None):
+        seen_docs.append((doc_name, len(text), source_hint, origin))
         return {"signals": 2, "themes": 1, "skipped": 0}
 
     with patch.object(runner, "extract_document", side_effect=fake_extract):
@@ -133,9 +134,12 @@ def test_runner_batches_and_aggregates(isolated_settings):
     assert out["batches"] >= 2                       # char budget forces split
     assert out["signals"] == out["batches"] * 2
     assert not out["errors"]
-    assert all("clickup-sync-batch-" in d for d, _, _ in seen_docs)
-    assert all(l <= 7000 for _, l, _ in seen_docs)
-    assert all(h and "project_mgmt" in h for _, _, h in seen_docs)
+    assert all("clickup-sync-batch-" in d for d, _, _, _ in seen_docs)
+    assert all(l <= 7000 for _, l, _, _ in seen_docs)
+    assert all(h and "project_mgmt" in h for _, _, h, _ in seen_docs)
+    # Connector syncs stamp origin="connector" so the brief gate never treats
+    # a tenant with live connectors as upload-only.
+    assert all(o == "connector" for _, _, _, o in seen_docs)
 
 
 def test_runner_isolates_batch_errors(isolated_settings):
