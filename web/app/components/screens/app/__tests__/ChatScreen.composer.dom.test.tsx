@@ -246,8 +246,10 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     expect(screen.queryByText(/^Stop$/)).toBeNull()
     // (The brief tab's BriefChat HAS a "Voice" tool button, so this guards that
     // the CHAT composer specifically does not — the brief surface isn't mounted
-    // in the ?new=1 landing state.)
-    expect(screen.queryByLabelText("Weekly brief")).toBeNull()
+    // in the ?new=1 landing state.) Match the BriefChat <section class="briefx">
+    // by class: the sidebar rail item also carries the "Weekly brief" name, so a
+    // getByLabelText would be ambiguous.
+    expect(document.querySelector("section.briefx")).toBeNull()
   })
 })
 

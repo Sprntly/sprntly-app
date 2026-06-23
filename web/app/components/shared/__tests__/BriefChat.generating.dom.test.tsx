@@ -6,7 +6,7 @@
 // once in AppShell) reports kind === "generating" and mirrors it into
 // ContentContext as `content.briefHydration`. BriefChat reads that flag and, as
 // long as there's no brief to show yet, renders a distinct spinner + "Generating
-// your Monday brief…" WIP block IN PLACE OF the empty greeting / finding cards.
+// your Weekly brief…" WIP block IN PLACE OF the empty greeting / finding cards.
 //
 // These tests mount the real BriefChat inside the real Navigation + Content
 // providers and drive `content` through a small harness, proving:
@@ -107,6 +107,30 @@ const READY_BRIEF: BriefV2State = {
   },
   supporting: [],
   sourcesLine: "",
+  insufficientEvidence: false,
+  emptyReason: null,
+}
+
+// An EMPTY brief (no hero/supporting) the backend saved because the KG lacked
+// enough connected-source evidence — `insufficientEvidence` distinguishes it
+// from a brand-new no-data account.
+const INSUFFICIENT_EVIDENCE_BRIEF: BriefV2State = {
+  headline: null,
+  weekOf: null,
+  company: "Asurion",
+  productArea: "",
+  kpiTiles: [],
+  hero: null,
+  supporting: [],
+  sourcesLine: "",
+  insufficientEvidence: true,
+  emptyReason: null,
+}
+
+// A plain EMPTY brief — brand-new account, no data uploaded yet.
+const PLAIN_EMPTY_BRIEF: BriefV2State = {
+  ...INSUFFICIENT_EVIDENCE_BRIEF,
+  insufficientEvidence: false,
 }
 
 // Harness: renders BriefChat plus a hidden button per state we want to set, so
@@ -141,6 +165,23 @@ function Harness() {
       },
       "failed",
     ),
+    React.createElement(
+      "button",
+      {
+        "data-testid": "set-insufficient-evidence",
+        onClick: () =>
+          set({ briefHydration: "ready", briefV2: INSUFFICIENT_EVIDENCE_BRIEF }),
+      },
+      "insufficient-evidence",
+    ),
+    React.createElement(
+      "button",
+      {
+        "data-testid": "set-plain-empty",
+        onClick: () => set({ briefHydration: "ready", briefV2: PLAIN_EMPTY_BRIEF }),
+      },
+      "plain-empty",
+    ),
     React.createElement(BriefChat),
   )
 }
@@ -155,7 +196,7 @@ function mountHarness() {
   )
 }
 
-const WIP_TITLE = "Generating your Monday brief…"
+const WIP_TITLE = "Generating your Weekly brief…"
 const EMPTY_GREETING = "Please add more sources"
 
 afterEach(() => {
@@ -178,8 +219,11 @@ describe("BriefChat — generating / WIP indicator", () => {
     // …it carries the live-region role and the spinner element…
     const status = screen.getByRole("status")
     expect(status.querySelector(".bc-generating-spinner")).not.toBeNull()
-    // …the header status line reflects WIP…
-    expect(screen.getByText(/Monday brief · generating…/)).not.toBeNull()
+    // …the persistent PM-agent intro is shown even while generating (the old
+    // redundant "Monday brief · generating…" status line was removed)…
+    expect(
+      screen.getByText(/we continuously monitor how your product is being used/),
+    ).not.toBeNull()
     // …and the empty "no brief yet" greeting is NOT shown.
     expect(screen.queryByText(new RegExp(EMPTY_GREETING))).toBeNull()
   })
@@ -228,5 +272,32 @@ describe("BriefChat — generating / WIP indicator", () => {
     // …and does NOT render the generating WIP indicator.
     expect(screen.queryByText(WIP_TITLE)).toBeNull()
     expect(document.querySelector(".bc-generating")).toBeNull()
+  })
+
+  it("test_insufficient_evidence_shows_distinct_greeting: an empty brief flagged insufficientEvidence acknowledges the upload", () => {
+    mountHarness()
+    act(() => {
+      fireEvent.click(screen.getByTestId("set-insufficient-evidence"))
+    })
+
+    // The encouraging "we received your data" message is shown…
+    expect(screen.getByText(/We've got your data/)).not.toBeNull()
+    expect(
+      screen.getByText(/there isn't enough connected evidence yet to build your brief/),
+    ).not.toBeNull()
+    // …and the brand-new-empty "add more sources" copy is NOT used.
+    expect(screen.queryByText(new RegExp(EMPTY_GREETING))).toBeNull()
+  })
+
+  it("test_plain_empty_shows_original_greeting: a plain empty brief (no flag) keeps the add-more-sources copy", () => {
+    mountHarness()
+    act(() => {
+      fireEvent.click(screen.getByTestId("set-plain-empty"))
+    })
+
+    // The original brand-new-empty greeting is shown…
+    expect(screen.getByText(new RegExp(EMPTY_GREETING))).not.toBeNull()
+    // …and the insufficient-evidence acknowledgement is NOT.
+    expect(screen.queryByText(/We've got your data/)).toBeNull()
   })
 })

@@ -21,7 +21,13 @@ export function NotificationsSettings() {
     setSlackConnected(Boolean(n.slack_connected))
     setChannel(String(n.slack_channel ?? "#product"))
     setDeliveryTime(String(n.brief_delivery_time ?? "07:00"))
-    setEmailDigest(n.email_digest !== false)
+    // `email_enabled` is the key the backend brief-delivery path actually reads
+    // (app/synthesis/email_delivery.py). It defaults OFF when never set. We
+    // still honor the legacy `email_digest` key for companies saved before this
+    // toggle was wired to the delivery path.
+    setEmailDigest(
+      n.email_enabled != null ? Boolean(n.email_enabled) : n.email_digest === true,
+    )
   }, [workspace])
 
   async function onSave(e: React.FormEvent) {
@@ -36,7 +42,10 @@ export function NotificationsSettings() {
           slack_connected: slackConnected,
           slack_channel: channel,
           brief_delivery_time: deliveryTime,
-          email_digest: emailDigest,
+          // The backend brief-delivery path keys off `email_enabled`; write that
+          // so toggling the digest here actually controls whether brief emails
+          // are sent. (Previously this wrote `email_digest`, which nothing read.)
+          email_enabled: emailDigest,
         },
       })
       await refresh()

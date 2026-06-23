@@ -418,6 +418,130 @@ def test_require_multi_source_false_ignores_breadth_path(facade):
         conv, min_connected_signals=2, require_multi_source=False) is True
 
 
+# ---------- evidence gate: UPLOAD-ONLY relaxation (pure) ----------
+
+def _seed_theme_with_origin(facade, ent, label, specs):
+    """Like _seed_theme_with_signals but each spec carries a provenance origin.
+
+    specs: list of (source_type, kind, age_days, origin) where origin is
+    "upload" | "connector" | None — stamped onto signal.provenance["origin"]
+    exactly as extract_document does at ingest."""
+    from app.graph.types import Entity, Relationship, Signal
+    theme = Entity(enterprise_id=ent, type="theme", canonical_label=label)
+    facade.create_entity(ent, theme)
+    now = datetime.now(timezone.utc)
+    for st, kind, age, origin in specs:
+        prov = {"source": "extractor"}
+        if origin:
+            prov["origin"] = origin
+        sig = Signal(enterprise_id=ent, source_type=st, kind=kind,
+                     content=f"{label} {kind} {age} {origin}",
+                     valid_at=now - timedelta(days=age), provenance=prov)
+        facade.write_signal(ent, sig)
+        facade.write_relationship(ent, Relationship(
+            enterprise_id=ent, type="REQUESTS", source_kind="signal",
+            source_id=sig.id, target_kind="entity", target_id=theme.id))
+    return theme
+
+
+def test_is_upload_only_true_when_only_upload_origin(facade):
+    """A tenant whose signals are ALL upload-origin (no connector) is upload-only."""
+    from app.synthesis.convergence import compute_convergence, is_upload_only
+
+    _seed_theme_with_origin(facade, "ent-up", "thin", [
+        ("customer_voice", "feature_request", 0, "upload"),
+    ])
+    conv = compute_convergence(facade, "ent-up")
+    assert is_upload_only(conv) is True
+
+
+def test_is_upload_only_false_when_any_connector_origin(facade):
+    """One connector-origin signal anywhere ⇒ NOT upload-only, even if uploads exist."""
+    from app.synthesis.convergence import compute_convergence, is_upload_only
+
+    _seed_theme_with_origin(facade, "ent-mix", "a", [
+        ("customer_voice", "feature_request", 0, "upload"),
+        ("project_mgmt", "bug", 0, "connector"),
+    ])
+    conv = compute_convergence(facade, "ent-mix")
+    assert is_upload_only(conv) is False
+
+
+def test_is_upload_only_false_when_no_origin_metadata(facade):
+    """Onboarding-only metadata (no origin stamped) is NOT upload-only — there is
+    no uploaded-doc evidence to surface."""
+    from app.synthesis.convergence import compute_convergence, is_upload_only
+
+    _seed_theme_with_origin(facade, "ent-meta", "ns", [
+        ("pm_manual", "constraint", 0, None),
+        ("agent_inferred", "good_outcome", 0, None),
+    ])
+    conv = compute_convergence(facade, "ent-meta")
+    assert is_upload_only(conv) is False
+
+
+def test_upload_only_thin_single_source_is_sufficient(facade):
+    """THE FIX: an upload-only tenant with one single-source theme but >= 2
+    uploaded-doc signals now CLEARS the gate (was insufficient before)."""
+    from app.synthesis.convergence import (
+        compute_convergence, has_sufficient_evidence)
+
+    _seed_theme_with_origin(facade, "ent-up", "single", [
+        ("customer_voice", "feature_request", 0, "upload"),
+        ("customer_voice", "feature_request", 1, "upload"),
+    ])
+    conv = compute_convergence(facade, "ent-up")
+    # No multi-source theme and only 2 connected signals (< default 3) — the
+    # connected paths fall short; the upload-only path is what makes it pass.
+    assert all(tc.connected_breadth < 2 for tc in conv)
+    assert sum(tc.connected_signal_count for tc in conv) == 2
+    assert has_sufficient_evidence(conv, min_connected_signals=3) is True
+
+
+def test_upload_only_below_min_upload_is_insufficient(facade):
+    """A single uploaded-doc signal (< min_upload_signals=2) is still
+    insufficient — one stray fact shouldn't manufacture a brief."""
+    from app.synthesis.convergence import (
+        compute_convergence, has_sufficient_evidence)
+
+    _seed_theme_with_origin(facade, "ent-up", "thin", [
+        ("customer_voice", "feature_request", 0, "upload"),
+    ])
+    conv = compute_convergence(facade, "ent-up")
+    assert has_sufficient_evidence(conv, min_connected_signals=3) is False
+    # Lowering the upload bar to 1 flips it sufficient (knob works).
+    assert has_sufficient_evidence(
+        conv, min_connected_signals=3, min_upload_signals=1) is True
+
+
+def test_connected_tenant_gate_unchanged_by_upload_path(facade):
+    """REGRESSION GUARD: a tenant that HAS a connector source is never routed
+    through the upload-only relaxation. A connector-origin tenant whose evidence
+    is thin (1 connected signal, no upload origin) stays INSUFFICIENT exactly as
+    before, even though uploaded signals coexist on another theme."""
+    from app.synthesis.convergence import (
+        compute_convergence, has_sufficient_evidence, is_upload_only)
+
+    _seed_theme_with_origin(facade, "ent-conn", "live", [
+        ("communication", "feature_request", 0, "connector"),
+    ])
+    _seed_theme_with_origin(facade, "ent-conn", "uploaded", [
+        ("customer_voice", "feature_request", 0, "upload"),
+        ("customer_voice", "feature_request", 1, "upload"),
+    ])
+    conv = compute_convergence(facade, "ent-conn")
+    # Presence of a connector signal disqualifies the upload-only fast-path…
+    assert is_upload_only(conv) is False
+    # …so the gate evaluates purely on connected evidence: 3 connected signals
+    # total here meets the default bar (this asserts the connected path is the
+    # ONLY thing deciding it — unchanged from pre-feature behavior).
+    assert sum(tc.connected_signal_count for tc in conv) == 3
+    assert has_sufficient_evidence(conv, min_connected_signals=3) is True
+    # Raise the connected bar above the connected count: with the upload path
+    # NOT applicable, it must go insufficient (proves no upload leakage).
+    assert has_sufficient_evidence(conv, min_connected_signals=4) is False
+
+
 # ---------- evidence gate: run_synthesis wiring ----------
 
 def test_run_synthesis_thin_kg_saves_empty_brief(facade, isolated_settings):
@@ -480,6 +604,62 @@ def test_run_synthesis_rich_kg_generates_normal_brief(facade, isolated_settings)
     assert len(brief["insights"]) == 1
     assert "_insufficient_evidence" not in brief
     assert facade.query_entities("ent-A", type="hypothesis")
+
+
+def test_run_synthesis_upload_only_thin_kg_generates_brief(facade, isolated_settings):
+    """THE FIX, end to end: an UPLOAD-ONLY tenant (no connectors) with a thin
+    single-source theme built from >= 2 uploaded-doc signals now PRODUCES a real
+    brief — the judge runs and an insight is persisted — where before the gate
+    short-circuited to an empty brief."""
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_origin(facade, "ent-up", "Onboarding drop-off", [
+        ("customer_voice", "feature_request", 0, "upload"),
+        ("customer_voice", "feature_request", 1, "upload"),
+    ])
+    ranked = {**_RANKED, "insights": [
+        {**_RANKED["insights"][0], "theme_id": theme.id}]}
+
+    judge_calls: list = []
+
+    def _spy_llm(**kw):
+        judge_calls.append(kw)
+        return _llm_result(ranked)
+
+    with patch.object(synth, "llm_call", side_effect=_spy_llm):
+        brief = synth.run_synthesis(facade, "ent-up", dataset_slug="acme")
+
+    assert judge_calls, "judge should run for an upload-only tenant with uploads"
+    assert len(brief["insights"]) == 1
+    assert "_insufficient_evidence" not in brief
+    assert facade.query_entities("ent-up", type="hypothesis")
+
+
+def test_run_synthesis_empty_origin_metadata_still_saves_empty_brief(
+        facade, isolated_settings):
+    """A truly-empty-of-real-evidence KG (only onboarding metadata, NO uploaded
+    docs and NO connectors) still saves the EMPTY brief — the upload-only path
+    does NOT fire because there is no upload-origin signal to surface."""
+    from app.synthesis import agent as synth
+
+    _seed_theme_with_origin(facade, "ent-meta", "north-star", [
+        ("pm_manual", "constraint", 0, None),
+        ("agent_inferred", "good_outcome", 0, None),
+    ])
+
+    judge_calls: list = []
+
+    def _spy_llm(**kw):
+        judge_calls.append(kw)
+        return _llm_result(_RANKED)
+
+    with patch.object(synth, "llm_call", side_effect=_spy_llm):
+        brief = synth.run_synthesis(facade, "ent-meta", dataset_slug="acme")
+
+    assert judge_calls == []
+    assert brief["insights"] == []
+    assert brief["_insufficient_evidence"] is True
+    assert facade.query_entities("ent-meta", type="hypothesis") == []
 
 
 # ---------- chart_hints parity (BUG 1) ----------

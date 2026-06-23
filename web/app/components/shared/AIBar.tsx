@@ -13,6 +13,7 @@ import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
 import { IconSendUp, IconSparkle } from "./app-icons"
+import { AGENT_NAME } from "../../lib/agent"
 import {
   AI_PANEL_COLLAPSED_WIDTH,
   AI_PANEL_WIDTH_MAX,
@@ -457,7 +458,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                 <div>
                   <div className="ai-bar-agent-label">
                     <IconSparkle size={14} />
-                    <span>PM Agent</span>
+                    <span>{AGENT_NAME}</span>
                     <span className="ai-bar-agent-badge">PM AGENT</span>
                     <span className="ai-bar-agent-status">{agentWorking ? "generating PRD…" : "thinking…"}</span>
                   </div>
@@ -469,7 +470,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                 <div className="ai-bar-agent-reply">
                   <div className="ai-bar-agent-label">
                     <IconSparkle size={14} />
-                    <span>PM Agent</span>
+                    <span>{AGENT_NAME}</span>
                     <span className="ai-bar-agent-badge">PM AGENT</span>
                     <span className="ai-bar-agent-status">PRD draft ready</span>
                   </div>
@@ -633,7 +634,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                     <div>
                       <div className="ai-bar-agent-label">
                         <IconSparkle size={14} />
-                        <span>PM Agent</span>
+                        <span>{AGENT_NAME}</span>
                         <span className="ai-bar-agent-badge">PM AGENT</span>
                         <span className="ai-bar-agent-status">{agentWorking ? "generating PRD…" : "thinking…"}</span>
                       </div>
@@ -645,7 +646,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                     <div className="ai-bar-agent-reply">
                       <div className="ai-bar-agent-label">
                         <IconSparkle size={14} />
-                        <span>PM Agent</span>
+                        <span>{AGENT_NAME}</span>
                         <span className="ai-bar-agent-badge">PM AGENT</span>
                         <span className="ai-bar-agent-status">PRD draft ready</span>
                       </div>

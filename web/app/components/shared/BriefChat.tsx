@@ -13,6 +13,7 @@ import { runPrdGeneration, loadPrdById, loadLatestPrd } from "../../lib/runPrdGe
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
+import { AGENT_NAME } from "../../lib/agent"
 import type {
   BriefV2CompactFinding,
   BriefV2HeroFinding,
@@ -83,9 +84,27 @@ const isPrototypeCommand = (q: string) =>
 const isTicketsCommand = (q: string) =>
   /\b(create|generate|make|draft|break)\b.*\btickets?\b/i.test(q)
 
+// Persistent PM-agent intro shown every time the brief opens. It educates the
+// user on what the agent continuously does for them (so the value is re-stated,
+// not assumed). Personalized with the user's first name when known; the rest of
+// the copy is fixed. This replaces the redundant secondary header line.
+function buildPersistentIntro(firstName: string | null): string {
+  const who = firstName ? ` ${firstName}` : ""
+  return `Good day${who}, we continuously monitor how your product is being used, what customers are asking for, and competitor launches — and give you a weekly digest of the most important things worth working on.`
+}
+
 function buildGreeting(v2: BriefV2State | null, firstName: string | null): string {
   const who = firstName ? `, ${firstName}` : ""
   if (!v2 || (!v2.hero && v2.supporting.length === 0)) {
+    // Distinguish "we received your data but it isn't connected-evidence-rich
+    // enough yet" from a brand-new, no-data account. The backend sets
+    // `insufficientEvidence` on the empty brief in the former case so we can
+    // reassure the user their upload landed instead of telling them to "add a
+    // first source". `_empty_reason` can carry internal jargon, so we only use
+    // it when it's clearly a user-facing sentence; otherwise static copy.
+    if (v2?.insufficientEvidence) {
+      return `We've got your data${who} — but there isn't enough connected evidence yet to build your brief. Connect another source or add richer data, and your brief will fill in.`
+    }
     return `Good day${who} — there isn't enough connected yet to generate a weekly brief. Please add more sources and connect them to us, and your brief will appear here.`
   }
   // Lead with a clean one-line intro and let the finding cards below carry the
@@ -107,10 +126,6 @@ function weekLabel(weekOf: string | null): string {
     return `Week of ${d.toLocaleDateString([], { month: "short", day: "numeric" })}`
   }
   return weekOf
-}
-
-function briefTitle(_weekOf: string | null): string {
-  return "Monday brief"
 }
 
 function parseAskError(e: unknown): string {
@@ -365,6 +380,7 @@ function BriefFindingCard({
   busy,
   generating,
   dismissed,
+  showActions,
   onAsk,
   onGenerateAll,
   onViewPrd,
@@ -377,6 +393,10 @@ function BriefFindingCard({
   busy: boolean
   generating: boolean
   dismissed: boolean
+  // Whether to render the Generate/View PRD + prototype action CTAs. False when
+  // the brief has no real data behind it (insufficient-evidence / empty case) —
+  // those affordances make no sense without findings to act on.
+  showActions: boolean
   onAsk: () => void
   onGenerateAll: () => void
   onViewPrd: () => void
@@ -495,7 +515,10 @@ function BriefFindingCard({
             </div>
           ) : null}
 
-          {/* Action buttons */}
+          {/* Action buttons — hidden entirely when the brief has no real data
+              behind it (insufficient-evidence / empty case): a Generate PRD /
+              prototype affordance makes no sense without findings to act on. */}
+          {showActions ? (
           <div className="fc-actions">
             {(() => {
               const cta = prdCtaState(insightState, generating)
@@ -528,6 +551,7 @@ function BriefFindingCard({
               </button>
             ) : null}
           </div>
+          ) : null}
         </div>
 
         {/* The right-rail prototype preview thumbnail was removed: the design-agent
@@ -590,7 +614,7 @@ function BriefGeneratingState() {
     <div className="bc-generating" role="status" aria-live="polite">
       <span className="bc-generating-spinner" aria-hidden />
       <div className="bc-generating-copy">
-        <p className="bc-generating-title">Generating your Monday brief…</p>
+        <p className="bc-generating-title">Generating your Weekly brief…</p>
         <p className="bc-generating-sub">
           Analyzing your sources — this usually takes a minute.
         </p>
@@ -610,7 +634,9 @@ export function BriefChat() {
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const { workspace } = useWorkspace()
-  const pipeline = usePipelineStatus(activeCompany)
+  // Keep the pipeline-status poll mounted (other surfaces rely on its side
+  // effects); the brief header no longer reads its result directly.
+  usePipelineStatus(activeCompany)
 
   const [turns, setTurns] = useState<ChatTurn[]>([])
   const [draft, setDraft] = useState("")
@@ -671,8 +697,6 @@ export function BriefChat() {
       router.push(prototypePath(genPrdId))
     }
   }, [genPrdId, router])
-
-  const greetTime = useMemo(() => nowTime(), [])
 
   useEffect(() => {
     mountedRef.current = true
@@ -1322,6 +1346,7 @@ export function BriefChat() {
   // ── Derived render data ────────────────────────────────────────────────────
   const v2 = content.briefV2
   const firstName = content.userName ? content.userName.split(/\s+/)[0] : null
+  const persistentIntro = useMemo(() => buildPersistentIntro(firstName), [firstName])
   const greeting = useMemo(() => buildGreeting(v2, firstName), [v2, firstName])
   const findings: Finding[] = useMemo(() => {
     if (!v2) return []
@@ -1330,12 +1355,18 @@ export function BriefChat() {
   // Dismissed cards stay in the list (greyed out via the dismissed prop), so the
   // finding is never removed — only collapsed until restored.
 
+  // Whether the brief has real data behind it. When false — the empty /
+  // insufficient-evidence / placeholder case — we suppress every Generate-PRD
+  // and Generate-Prototype affordance (finding-card CTAs + composer suggestion
+  // chips), leaving only the greeting + "add more sources" guidance. A brief is
+  // "real" when it has at least one finding AND the backend didn't flag it as
+  // insufficient-evidence.
+  const hasRealData = findings.length > 0 && !v2?.insufficientEvidence
+
   const userInitials = content.userInitials ?? (content.userName ? content.userName.slice(0, 2).toUpperCase() : "You")
   const userName = content.userName ?? "You"
   const company = v2?.company ?? ""
   const week = weekLabel(v2?.weekOf ?? null)
-  const heading = briefTitle(v2?.weekOf ?? null)
-  const refreshing = (pipeline.runStatus as { status?: string } | null)?.status === "running"
   // The brief is being generated when hydration reports "generating" AND we
   // don't yet have a brief to show. Once findings arrive (ready), the WIP
   // indicator is replaced by the real brief. The failed state never trips this.
@@ -1345,14 +1376,10 @@ export function BriefChat() {
     <section className="briefx" aria-label="Weekly brief">
       <header className="bh">
         <div className="bh-main">
-          <h1 className="bh-title">{heading}</h1>
-          <span className={`bh-live${refreshing ? " bh-live--refreshing" : ""}`}>
-            <span className="bh-live-dot" aria-hidden />
-            {refreshing ? "REFRESHING" : "LIVE"}
-          </span>
-          {week ? <span className="bh-sep">·</span> : null}
+          {/* Title intentionally omitted — the "Weekly brief" label lives in the
+              tab name above; repeating it here was a redundant duplicate. */}
           {week ? <span className="bh-week">{week}</span> : null}
-          {company ? <span className="bh-sep">·</span> : null}
+          {week && company ? <span className="bh-sep">·</span> : null}
           {company ? <span className="bh-company">{company}</span> : null}
         </div>
         <div className="bh-actions">
@@ -1385,16 +1412,17 @@ export function BriefChat() {
                 <span className="bc-agent-mark">
                   <IconSparkle size={14} />
                 </span>
-                <span className="bc-agent-name">PM Agent</span>
+                <span className="bc-agent-name">{AGENT_NAME}</span>
                 <span className="bc-agent-badge">
                   <IconSparkle size={10} />
                   PM COWORKER
                 </span>
-                <span className="bc-agent-status">
-                  Monday brief · {generatingBrief ? "generating…" : greetTime}
-                </span>
               </div>
               <div className="bc-agent-body">
+                {/* Persistent educational intro — shown every time, even while the
+                    brief is generating or empty — so the agent's ongoing value is
+                    always restated. Replaces the redundant "Monday brief" line. */}
+                <p className="bc-intro">{persistentIntro}</p>
                 {generatingBrief ? (
                   <BriefGeneratingState />
                 ) : (
@@ -1415,6 +1443,7 @@ export function BriefChat() {
                           busy={busy}
                           generating={cardBusyKey === f.detailKey}
                           dismissed={!!f.detailKey && dismissed.has(f.detailKey)}
+                          showActions={hasRealData}
                           onAsk={() => cardAsk(f)}
                           onGenerateAll={() => cardGenerateAll(f)}
                           onViewPrd={() => cardViewPrd(f)}
@@ -1459,8 +1488,10 @@ export function BriefChat() {
 
         <div className="bc-dock">
           {/* "Create ticket" only makes sense against an open PRD — gate the chip
-              stack on the PRD rail being open so it isn't a hanging button. */}
-          {findings.length > 0 && contentPanelTab === "prd" ? (
+              stack on the PRD rail being open so it isn't a hanging button. Also
+              suppressed when the brief has no real data (insufficient-evidence /
+              empty case): no findings to drive a PRD/prototype flow. */}
+          {hasRealData && contentPanelTab === "prd" ? (
             <div className="bc-suggest">
               <div className="bc-suggest-list">
                 {suggestions.map((s) => (
@@ -1577,7 +1608,7 @@ function AgentTurn({
   onAction: (a: AgentAction) => void
   busy: boolean
 }) {
-  const personaName = turn.persona === "pm" ? "PM Agent" : "DS Agent"
+  const personaName = turn.persona === "pm" ? AGENT_NAME : "DS Agent"
   const badge = turn.persona === "pm" ? "PM COWORKER" : "DS COWORKER"
   return (
     <div className="bc-turn">

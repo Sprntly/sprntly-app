@@ -3,12 +3,14 @@
 // Container-level mount test for onboarding page 06 — "Connect your tools."
 // (design-v4 accordion port). Mounts the real container under jsdom with
 // mocked auth/onboarding/router/api/modal and asserts:
-//   - categories render from CONNECTOR_CATALOG (not the design kit's list)
+//   - categories render from wizardCategories() — only SUPPORTED connectors
+//     and non-empty categories (mirrors Settings; unsupported ones hidden)
 //   - sequential unlock: category N+1 is locked until N is done/skipped,
 //     done categories stay re-openable
-//   - live connections render a non-togglable "Live" card
+//   - live connections render a non-togglable "Live" card (and keep an
+//     otherwise-unsupported provider/category visible)
 //   - connectable cards open the connect modal with the right provider
-//   - Continue advances to step 4 and routes to /onboarding/coworkers
+//   - Continue advances to step 4 and routes to /onboarding/first-brief
 //   - "Connect later" marks skipped fields first, then advances
 //   - NO required-Analytics gate: Continue is enabled with zero selections
 //   - the no-workspace redirect happens in an EFFECT, never during render
@@ -53,8 +55,13 @@ vi.mock("../../../connectors/ConnectorConnectModal", () => ({
 }))
 
 import { Connectors } from "../Connectors"
-import { CONNECTOR_CATALOG } from "../../../../lib/connectorsCatalog"
+import { wizardCategories } from "../../../../lib/onboarding/connectorsWizard"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
+
+// What onboarding actually renders: supported connectors only, empty
+// categories dropped. (Analytics has no supported connector today, so the
+// whole category — Mixpanel/PostHog/etc — is hidden.)
+const SHOWN_CATEGORIES = wizardCategories()
 
 function mountLoaded(connections: unknown[] = []) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
@@ -82,29 +89,53 @@ afterEach(() => {
 })
 
 describe("Connectors (container) — design-v4 accordion", () => {
-  it("renders every catalog category as an accordion step, first one open", () => {
+  it("renders every SUPPORTED category as an accordion step, first one open", () => {
     const { container } = mountLoaded()
     expect(screen.getByText(/Connect your/)).not.toBeNull()
     const steps = container.querySelectorAll(".conn-steps .conn-step")
-    expect(steps.length).toBe(CONNECTOR_CATALOG.length)
-    CONNECTOR_CATALOG.forEach((cat, i) => {
+    expect(steps.length).toBe(SHOWN_CATEGORIES.length)
+    SHOWN_CATEGORIES.forEach((cat, i) => {
       expect(steps[i].getAttribute("data-conn")).toBe(cat.key)
     })
-    // first category open ("In progress"), its catalog items in the grid
+    // first category open ("In progress"), its supported items in the grid
     expect(steps[0].classList.contains("open")).toBe(true)
     expect(screen.getByText("In progress")).not.toBeNull()
-    for (const item of CONNECTOR_CATALOG[0].items) {
+    for (const item of SHOWN_CATEGORIES[0].items) {
       expect(screen.getByText(item.name)).not.toBeNull()
     }
   })
 
-  it("renders the catalog connectors, not the design kit's hardcoded list", () => {
-    mountLoaded()
-    // PostHog is catalog-only relative to old hardcoded lists; Segment and
-    // Trello exist only in the design kit and must NOT render.
-    expect(screen.getByText("PostHog")).not.toBeNull()
+  it("hides unsupported connectors and empty categories", () => {
+    const { container } = mountLoaded()
+    // Analytics has no supported connector today → the whole category and all
+    // of its connectors (Mixpanel, PostHog, …) are hidden — no accordion step.
+    expect(container.querySelector('.conn-step[data-conn="analytics"]')).toBeNull()
+    expect(screen.queryByText("Mixpanel")).toBeNull()
+    expect(screen.queryByText("PostHog")).toBeNull()
+    // Communication is still shown (Slack is OAuth-wired) — its accordion step
+    // exists in catalog order …
+    expect(container.querySelector('.conn-step[data-conn="comms"]')).not.toBeNull()
+    // … but MS Teams (coming soon) is dropped from the catalog entirely, so it
+    // never renders in the accordion tree (whether the step is open or not).
+    expect(screen.queryByText("MS Teams")).toBeNull()
+    // Within the OPEN first category we render only supported connectors:
+    // ClickUp (oauth) but not Linear/Jira/Asana (coming soon).
+    expect(screen.getByText("ClickUp")).not.toBeNull()
+    expect(screen.queryByText("Linear")).toBeNull()
+    expect(screen.queryByText("Jira")).toBeNull()
+    expect(screen.queryByText("Asana")).toBeNull()
+    // Design-kit-only names never appear.
     expect(screen.queryByText("Segment")).toBeNull()
     expect(screen.queryByText("Trello")).toBeNull()
+  })
+
+  it("renders Notion + Google Docs under 'Business documentation', not Project Management", () => {
+    const { container } = mountLoaded()
+    const docs = container.querySelector('.conn-step[data-conn="docs"]')
+    expect(docs).not.toBeNull()
+    const pm = container.querySelector('.conn-step[data-conn="pm"]')
+    // Project Management no longer carries the documentation tools.
+    expect(pm?.textContent).not.toMatch(/Notion|Google Docs/)
   })
 
   it("locks later categories until the previous one is done/skipped", () => {
@@ -146,21 +177,10 @@ describe("Connectors (container) — design-v4 accordion", () => {
     expect(steps[0].classList.contains("done")).toBe(true)
   })
 
-  it("toggles a non-connectable card into the planned selection", () => {
-    const { container } = mountLoaded()
-    // Mixpanel (analytics) has no connect backend → pure selection toggle
-    const card = screen.getByText("Mixpanel").closest(".conn") as HTMLElement
-    fireEvent.click(card)
-    expect(card.classList.contains("on")).toBe(true)
-    expect(container.querySelector('[data-testid="connect-modal"]')).toBeNull()
-    fireEvent.click(card)
-    expect(card.classList.contains("on")).toBe(false)
-  })
-
   it("opens the connect modal for a connectable card", () => {
     const { container } = mountLoaded()
-    // unlock Project Management, where ClickUp (oauth: true) lives
-    fireEvent.click(doneNextButton(container))
+    // Project Management is the first shown category; ClickUp (oauth) lives
+    // there and is open by default.
     fireEvent.click(screen.getByText("ClickUp").closest(".conn") as HTMLElement)
     const modal = container.querySelector('[data-testid="connect-modal"]')
     expect(modal).not.toBeNull()
@@ -171,12 +191,16 @@ describe("Connectors (container) — design-v4 accordion", () => {
     ).toBe(false)
   })
 
-  it("shows an active connection as a non-togglable Live card", async () => {
+  it("keeps an otherwise-unsupported provider visible (and non-togglable) when it has a live connection", async () => {
+    // Mixpanel is unsupported (Analytics is hidden), but an ACTIVE connection
+    // keeps it — and its category — visible.
     const { container } = mountLoaded([
       { provider: "mixpanel", status: "active" },
       { provider: "heap", status: "error" },
     ])
     await screen.findByText("Live")
+    // Analytics category is back because Mixpanel is live.
+    expect(screen.getByText("Analytics")).not.toBeNull()
     const card = screen.getByText("Mixpanel").closest(".conn") as HTMLElement
     expect(card.classList.contains("on")).toBe(true)
     expect(card.classList.contains("live")).toBe(true)
@@ -184,17 +208,16 @@ describe("Connectors (container) — design-v4 accordion", () => {
     fireEvent.click(card)
     expect(card.classList.contains("on")).toBe(true)
     expect(container.querySelector('[data-testid="connect-modal"]')).toBeNull()
-    // non-active statuses don't count as live
-    const heap = screen.getByText("Heap").closest(".conn") as HTMLElement
-    expect(heap.classList.contains("live")).toBe(false)
+    // Heap (status "error", unsupported) is not kept — it never renders.
+    expect(screen.queryByText("Heap")).toBeNull()
   })
 
-  it("Continue advances to step 4 and routes to coworkers (no skip marking)", async () => {
+  it("Continue advances to step 4 and routes to first-brief (no skip marking)", async () => {
     mountLoaded()
     fireEvent.click(screen.getByText("Continue").closest("button") as HTMLElement)
     await waitFor(() => {
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/coworkers")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/first-brief")
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
@@ -205,7 +228,7 @@ describe("Connectors (container) — design-v4 accordion", () => {
     await waitFor(() => {
       expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/coworkers")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/first-brief")
     })
   })
 

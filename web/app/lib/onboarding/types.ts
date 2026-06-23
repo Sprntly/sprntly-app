@@ -83,6 +83,7 @@ export const INDUSTRIES = [
   "Healthtech",
   "E-commerce",
   "Developer Tools",
+  "Gaming / Entertainment",
   "Other",
 ] as const
 
@@ -125,21 +126,23 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  *      [analyzing]    → Analyzing     (unnumbered loader — NOT in this list)
  *   2. metrics        → Metrics       (the metrics-tree page)
  *   3. connectors     → Connectors
- *   4. coworkers      → Coworkers
- *   5. first-brief    → FirstBrief
+ *   4. first-brief    → FirstBrief
  *
  * The `analyzing` interstitial is deliberately absent: it is an unnumbered,
  * transient route excluded from the progress dots and the step count.
  *
+ * The agent-naming `coworkers` step was removed: agents are no longer
+ * user-named (one fixed app-wide name), so the step, its route, and its
+ * payload are gone.
+ *
  * `onboarding_step` (the integer DB column) is the 1-based INDEX into this
  * array. Use `slugForStep` / `stepForSlug` to convert, and `clampStep` to keep
- * persisted values (including stale ones from the old 7-step flow) in range.
+ * persisted values (including stale ones from older, longer flows) in range.
  */
 export const ONBOARDING_STEP_SLUGS = [
   "business-info",
   "metrics",
   "connectors",
-  "coworkers",
   "first-brief",
 ] as const
 
@@ -157,9 +160,9 @@ export function isOnboardingStepSlug(slug: string): slug is OnboardingStepSlug {
 
 /**
  * Clamp a persisted 1-based `onboarding_step` into [1, ONBOARDING_STEP_COUNT].
- * Existing users mid-old-flow may carry step=6/7 (the old 7-step order); those
- * land on the last valid step rather than crashing. Non-finite / <1 values
- * clamp up to 1.
+ * Existing users mid an older, longer flow may carry a step index past the end
+ * (e.g. the removed coworkers step, or the old 7-step order); those land on the
+ * last valid step rather than crashing. Non-finite / <1 values clamp up to 1.
  */
 export function clampStep(step: number): number {
   if (!Number.isFinite(step)) return 1

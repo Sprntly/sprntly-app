@@ -6,7 +6,12 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { ConnectorsSettingsView } from "../ConnectorsSettings"
+import {
+  ADMIN_GATE_CONNECT_MESSAGE,
+  ConnectorsSettingsView,
+  connectStartErrorMessage,
+  isAdminGateError,
+} from "../ConnectorsSettings"
 import {
   CONNECTOR_CATALOG,
   connectableCatalog,
@@ -15,7 +20,11 @@ import {
   UPLOAD_ACCEPT_HINT,
   UPLOAD_EXTENSIONS,
 } from "../../../../../lib/sources-helpers"
-import type { ConnectionSummary, SourceFile } from "../../../../../lib/api"
+import {
+  ApiError,
+  type ConnectionSummary,
+  type SourceFile,
+} from "../../../../../lib/api"
 
 function noop() {}
 function noopUpload() {}
@@ -127,9 +136,9 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
 
   it("uses inline brand-color background on the logo box for letter-only connectors", () => {
     const html = render()
-    // Coming-soon connectors have no logoDomain → brand-color box + letter.
+    // Connectors without a bundled SVG → brand-color box + letter.
     expect(html).toContain("background:#7856FF") // Mixpanel
-    expect(html).toContain("background:#1A6CFF") // Amplitude
+    expect(html).toContain("background:#FF6E6E") // Heap
   })
 })
 
@@ -149,6 +158,27 @@ describe("ConnectorsSettingsView — single upload control", () => {
   it("accepts the shared broad extension list", () => {
     const html = render()
     expect(html).toContain(`accept="${UPLOAD_EXTENSIONS.join(",")}"`)
+  })
+
+  it("shows the idle 'Upload files' label and an enabled input by default", () => {
+    const html = render()
+    expect(html).toContain("Upload files")
+    expect(html).toContain("ti-cloud-upload")
+    // Idle: no busy markers, input is selectable.
+    expect(html).not.toContain("Uploading…")
+    expect(html).not.toContain("is-uploading")
+    expect(html).not.toMatch(/<input[^>]*disabled/)
+  })
+
+  it("shows an in-flight busy state (spinner + 'Uploading…') and disables the input while uploading", () => {
+    const html = render({ uploading: true })
+    expect(html).toContain("Uploading…")
+    // Spinner icon swaps in; busy class + aria-busy drive the visible state.
+    expect(html).toContain("ti-spin")
+    expect(html).toContain("is-uploading")
+    expect(html).toMatch(/aria-busy="true"/)
+    // The file input is blocked so overlapping uploads can't be fired mid-flight.
+    expect(html).toMatch(/<input[^>]*disabled/)
   })
 })
 
@@ -208,20 +238,74 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(1)
   })
 
-  it("renders each connector's real brand logo (by domain) via the favicon service", () => {
+  it("renders each connector's real brand logo from a locally bundled SVG", () => {
     const html = render({ categories: connectableCatalog() })
-    for (const domain of [
-      "slack.com",
-      "github.com",
-      "figma.com",
-      "hubspot.com",
-      "clickup.com",
-      "docs.google.com",
-      "fireflies.ai",
+    // 6 of the 7 wired connectors have an official bundled SVG mark.
+    for (const id of [
+      "slack",
+      "github",
+      "figma",
+      "hubspot",
+      "clickup",
+      "google_drive",
     ]) {
-      expect(html).toContain(`s2/favicons?domain=${domain}`)
+      expect(html).toContain(`src="/connectors/${id}.svg"`)
     }
-    // All 7 wired connectors now have a real logo.
-    expect((html.match(/s2\/favicons\?domain=/g) ?? []).length).toBe(7)
+    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(6)
+    // No runtime favicon fetch remains.
+    expect(html).not.toContain("s2/favicons")
+    // Fireflies has no bundled SVG, so it keeps its letter glyph (no <img>).
+    expect(html).not.toContain("/connectors/fireflies.svg")
+  })
+})
+
+describe("ConnectorsSettings — admin-gate connect error mapping", () => {
+  it("detects a 403 ApiError as the admin gate", () => {
+    const err = new ApiError(403, {
+      detail:
+        "Only admins can manage org-wide connectors. " +
+        "Ask your workspace admin to connect this integration.",
+    })
+    expect(isAdminGateError(err)).toBe(true)
+  })
+
+  it("detects the admin-gate by message even without an ApiError status", () => {
+    expect(
+      isAdminGateError(
+        new Error("Only admins can manage org-wide connectors."),
+      ),
+    ).toBe(true)
+  })
+
+  it("does NOT treat unrelated failures as the admin gate", () => {
+    expect(isAdminGateError(new ApiError(500, "boom"))).toBe(false)
+    expect(isAdminGateError(new Error("network down"))).toBe(false)
+  })
+
+  it("maps the admin gate to the friendly message (not the raw 'Could not start' string)", () => {
+    const err = new ApiError(403, {
+      detail: "Only admins can manage org-wide connectors.",
+    })
+    const msg = connectStartErrorMessage("google_drive", err)
+    expect(msg).toBe(ADMIN_GATE_CONNECT_MESSAGE)
+    expect(msg).not.toContain("Could not start")
+    expect(msg).not.toContain("google_drive")
+  })
+
+  it("keeps the diagnostic message for non-admin-gate failures", () => {
+    const msg = connectStartErrorMessage("figma", new Error("timeout"))
+    expect(msg).toBe("Could not start figma connect: timeout")
+  })
+
+  it("renders the friendly admin message in the pane's error alert (DOM)", () => {
+    const html = render({ loadError: ADMIN_GATE_CONNECT_MESSAGE })
+    expect(html).toContain(
+      "Only a workspace admin can connect org-wide sources like Google Drive",
+    )
+    expect(html).toContain("Ask an admin to set this up")
+    // The raw diagnostic string must NOT leak through.
+    expect(html).not.toContain("Could not start google_drive connect")
+    // It surfaces in the alert region for accessibility.
+    expect(html).toContain('role="alert"')
   })
 })

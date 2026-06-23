@@ -29,6 +29,7 @@ import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.h
 import { GenerateModal } from "../../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../../design-agent/GenerationLoadingScreen"
 import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
+import { AGENT_NAME } from "../../../lib/agent"
 
 type ThreadTurn = {
   id: string
@@ -54,12 +55,18 @@ type ChatTab = {
   evidenceGenerating: boolean
 }
 
-// The Weekly/Monday Brief is a pinned, non-closable FIRST tab on this surface.
+// The Weekly Brief is a pinned, non-closable FIRST tab on this surface.
 // It is synthesized in the render — never stored in the `tabs` state or
 // localStorage — and is identified by this sentinel id. `activeTabId ===
 // BRIEF_TAB_ID` means the brief tab is active (so we render <BriefChat/> instead
 // of the chat landing/thread). It is also the default active tab on first load.
 const BRIEF_TAB_ID = "brief"
+
+// Placeholder title for a freshly-opened "+" tab before the user sends their
+// first message. The tab is visible+active in the strip immediately (so the user
+// can see they're on a new tab and switch back), and gets its real title from the
+// first message on send (see submitAsk's first-send rename).
+export const NEW_CHAT_TITLE = "New chat"
 
 type HomeChipItem = { kind: "home" | "starter"; card: ChatHomeCard }
 
@@ -75,6 +82,16 @@ function buildHomeChips(home: ChatHomeCard[], starterList: ChatHomeCard[]): Home
   }
   return out
 }
+
+// Concrete "what can I do here?" suggestions for the chat landing/empty state.
+// These steer a user who opens a fresh chat (or would otherwise send a vague
+// "hey") toward real PM actions. Clicking one sends it as an ask — this is a
+// pure UI nudge; it does NOT change the agent's backend response logic.
+const WELCOME_SUGGESTIONS: { label: string; prompt: string }[] = [
+  { label: "Help me prioritize projects", prompt: "Help me prioritize our current projects." },
+  { label: "Analyze feedback", prompt: "Analyze our recent user feedback and surface the top themes." },
+  { label: "Generate a PRD", prompt: "Generate a PRD for our top product opportunity." },
+]
 
 const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
   { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View weekly brief", desc: "", target: "brief" } },
@@ -599,7 +616,7 @@ export function ChatScreen() {
   }, [currentScreen, checkResume])
 
   // The brief is the pinned first tab of this surface. When the route lands on
-  // the brief screen (sidebar "Monday brief" → goTo("brief") → /brief, which
+  // the brief screen (sidebar "Weekly brief" → goTo("brief") → /brief, which
   // also renders ChatScreen), activate the pinned brief tab — even if the surface
   // was already mounted on a chat tab.
   useEffect(() => {
@@ -680,9 +697,14 @@ export function ChatScreen() {
         targetTabId = openTab(title, [{ id, query }])
       } else {
         targetTabId = activeTabId
-        setTabs((prev) => prev.map((t) =>
-          t.id !== targetTabId ? t : { ...t, thread: [...t.thread, { id, query }] }
-        ))
+        const newTitle = query.length > 40 ? `${query.slice(0, 37)}…` : query
+        setTabs((prev) => prev.map((t) => {
+          if (t.id !== targetTabId) return t
+          // First message in a placeholder "New chat" tab → give it the real
+          // title from the query (rename in place; do NOT spawn a second tab).
+          const title = t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? newTitle : t.title
+          return { ...t, title, thread: [...t.thread, { id, query }] }
+        }))
       }
       pushPendingConversation(id, query, targetTabId)
       setActiveConv(0)
@@ -862,9 +884,30 @@ export function ChatScreen() {
   }
 
   const startNewThread = useCallback(() => {
-    // Remove any empty tabs (no messages) to keep things clean
-    setTabs((prev) => prev.filter((t) => t.thread.length > 0))
-    setActiveTabId(null)
+    // "+" behaves like a real new browser tab: it must create a VISIBLE, ACTIVE
+    // tab chip in the strip (so the user sees they're on a new tab and can switch
+    // back) — not a tab-less landing. Reuse-or-create: if an empty "New chat" tab
+    // already exists (no messages), just activate it rather than piling up
+    // duplicates. We still prune OTHER empty tabs (keep the strip clean) but never
+    // the one the user is about to sit on.
+    let targetId: string | null = null
+    setTabs((prev) => {
+      const existingEmpty = prev.find((t) => t.thread.length === 0 && t.title === NEW_CHAT_TITLE)
+      if (existingEmpty) {
+        targetId = existingEmpty.id
+        // Drop any OTHER empty tabs, keep the one we're reusing.
+        return prev.filter((t) => t.thread.length > 0 || t.id === existingEmpty.id)
+      }
+      const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      targetId = id
+      // Prune other empty tabs, then append the fresh "New chat" tab.
+      const kept = prev.filter((t) => t.thread.length > 0)
+      return [...kept, {
+        id, title: NEW_CHAT_TITLE, thread: [], dbConvId: null, briefMeta: null,
+        prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+      }]
+    })
+    setActiveTabId(targetId)
     setDraft("")
     setActiveConv(null)
     // No shared conv-id to reset — each tab tracks its own dbConvId.
@@ -941,7 +984,7 @@ export function ChatScreen() {
                 userSelect: "none", flexShrink: 0,
               }}
             >
-              <span style={{ lineHeight: "1.3" }}>Monday brief</span>
+              <span style={{ lineHeight: "1.3" }}>Weekly brief</span>
             </div>
             {tabs.map((tab) => {
               const isActive = activeTabId === tab.id
@@ -1014,7 +1057,30 @@ export function ChatScreen() {
                       <h1 className="chat-greeting-title">
                         Welcome back, <em>{name}</em>.
                       </h1>
-                      <p className="chat-greeting-sub">Let&apos;s build something awesome.</p>
+                      <p className="chat-greeting-sub">
+                        Welcome to Sprntly — not sure where to start? Try one of these:
+                      </p>
+                      <div
+                        className="chat-welcome-suggestions"
+                        data-testid="chat-welcome-suggestions"
+                        role="list"
+                        aria-label="Suggested things to ask"
+                      >
+                        {WELCOME_SUGGESTIONS.map((s) => (
+                          <button
+                            key={s.label}
+                            type="button"
+                            className="chat-welcome-suggestion"
+                            role="listitem"
+                            onClick={() => handleStarterChip(s.prompt)}
+                          >
+                            <span className="chat-welcome-suggestion-icon" aria-hidden>
+                              <IconSparkle size={13} />
+                            </span>
+                            {s.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
                     <div className="home-landing-composer">
@@ -1136,7 +1202,7 @@ export function ChatScreen() {
                             <span className="bc-agent-mark">
                               <IconSparkle size={14} />
                             </span>
-                            <span className="bc-agent-name">PM Agent</span>
+                            <span className="bc-agent-name">{AGENT_NAME}</span>
                             <span className="bc-agent-badge">
                               <IconSparkle size={10} />
                               PM COWORKER

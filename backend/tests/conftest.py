@@ -309,6 +309,20 @@ CREATE TABLE company_members (
 CREATE INDEX company_members_user_id_idx    ON company_members (user_id);
 CREATE INDEX company_members_company_id_idx ON company_members (company_id);
 
+-- In-app feedback / feature-request submissions (mirrors
+-- 20260622130000_feedback.sql). Read/written by app.db.feedback via the route.
+CREATE TABLE feedback (
+    id          TEXT PRIMARY KEY,
+    company_id  TEXT REFERENCES companies (id) ON DELETE SET NULL,
+    user_id     TEXT,
+    user_email  TEXT,
+    type        TEXT NOT NULL DEFAULT 'other'
+                  CHECK (type IN ('bug', 'feature_request', 'connector_request', 'other')),
+    message     TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX feedback_company_idx ON feedback (company_id, created_at DESC);
+
 CREATE TABLE connections (
     id                   TEXT PRIMARY KEY,
     company_id           TEXT NOT NULL

@@ -8,75 +8,112 @@ import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
-import { InfoCircle, Plus, Sparkles, Trash } from "../../auth/icons"
+import { Check, InfoCircle, Plus, Sparkles } from "../../auth/icons"
 import {
-  buildKpiTreePayload,
-  canSaveKpiTree,
+  buildKpiTreePayloadFromPicks,
+  canSavePickedMetrics,
   kpiTreeApi,
-  MAX_PRIMARY_METRICS,
-  MAX_SECONDARY_SIGNALS,
-  type SupportingMetric,
+  REQUIRED_METRIC_PICKS,
 } from "../../../lib/onboarding/kpiTreeApi"
 
 /**
- * Onboarding metrics page (route /onboarding/metrics in the new flow). Restyled
- * to the v4 `.metric-tree` design.
+ * Onboarding metrics page (route /onboarding/metrics).
  *
- * The website-analysis `suggested_metrics` are PRE-SEEDED on load (all of them
- * seed `supporting` once, via a ref guard mirroring the industry/business
- * touched-guards). The seeded supporting metrics live INSIDE the metric-tree as
- * `.mt-targets` branching off the North-Star `.mt-source` — each target shows
- * the metric name, an editable description, and a delete control. The user can
- * also add their own {metric, description} via `.metric-other` ("write your
- * own"), and re-add any deleted metric the same way. Industry + business_type
- * show as
- * ALWAYS-editable dropdowns (pre-filled from the analysis; the user can
- * override anytime, guarded by a `touched` flag). On save we persist the
- * confirmed industry/business_type to the company and the supporting metrics to
- * the KPI tree (PUT /v1/company/kpi-tree).
+ * REDESIGN (product-approved): the explicit North-Star + supporting-metric
+ * split is GONE. The user now picks EXACTLY 3 metrics from a FLAT list of
+ * candidates — the North Star is inferred SERVER-SIDE from the three (we never
+ * ask). Each candidate is a `{ name, description }` card; selected cards carry
+ * the green `.sel` selected state (`aria-selected="true"`). The user can also
+ * write their own candidate (it lands selected if there's still room).
  *
- * The analysis is now produced by the BLOCKING `/onboarding/analyzing`
- * interstitial that precedes this page, so by the time we render the result is
- * already on context (or null → graceful manual fallback).
+ * Candidates are seeded once from (in priority order):
+ *   1. a KPI tree already saved on the workspace (its metrics become the pool,
+ *      the first 3 pre-selected), else
+ *   2. the website-analysis `suggested_metrics`, else
+ *   3. business-type defaults (e.g. SaaS — product-curated) merged with a small
+ *      industry-tailored fallback pool.
+ * Up to 3 of the seeded candidates are pre-selected; the user adjusts to land
+ * on exactly 3, which is what "Continue" requires.
+ *
+ * Industry + business_type stay as ALWAYS-editable dropdowns (pre-filled from
+ * the analysis, overridable). On save we persist the confirmed
+ * industry/business_type to the company and the 3 picks to the KPI tree
+ * (PUT /v1/company/kpi-tree) — north_star is a placeholder until server-side
+ * inference ships (see kpiTreeApi.buildKpiTreePayloadFromPicks).
  */
 
-const MAX_SUPPORTING = MAX_PRIMARY_METRICS + MAX_SECONDARY_SIGNALS
+export type MetricCandidate = {
+  name: string
+  description: string
+}
 
-// Fallback North Star suggestions, tailored loosely by industry, shown when
-// the website analysis didn't return suggested metrics.
-const NORTH_STAR_SUGGESTIONS: Record<string, string[]> = {
+// Industry-tailored fallback candidate pool, used to round out the flat list
+// when the website analysis returned no suggestions.
+const FALLBACK_CANDIDATES_BY_INDUSTRY: Record<string, string[]> = {
   Healthtech: [
-    "Day-30 active clinicians per deployment",
     "Weekly active clinicians",
-    "Net revenue retention",
+    "Day-30 active clinicians per deployment",
+    "Incremental revenue",
+    "Activation rate",
   ],
-  "B2B SaaS": ["Net revenue retention", "Weekly active teams", "Activation rate"],
-  B2C: ["Day-30 retention", "DAU/MAU ratio", "Conversion rate"],
-  Fintech: ["Transaction volume", "Net revenue retention", "Activated accounts"],
-  default: ["Weekly active users", "Day-30 retention", "Net revenue retention"],
+  "B2B SaaS": [
+    "Incremental revenue",
+    "Weekly active teams",
+    "Activation rate",
+    "Conversion rate",
+  ],
+  B2C: ["Day-30 retention", "DAU/MAU ratio", "Conversion rate", "Weekly active users"],
+  Fintech: [
+    "Transaction volume",
+    "Incremental revenue",
+    "Activated accounts",
+    "Conversion rate",
+  ],
+  default: [
+    "Weekly active users",
+    "Day-30 retention",
+    "Incremental revenue",
+    "Conversion rate",
+  ],
+}
+
+// Default candidate metrics by business type, used when the website analysis
+// returned no suggestions. SaaS defaults are product-curated.
+const DEFAULT_METRICS_BY_BUSINESS_TYPE: Record<string, string[]> = {
+  SaaS: ["Incremental revenue", "Number of new subscribers", "Conversion rate"],
+}
+
+/** Merge name lists into a deduped (case-insensitive) candidate pool. */
+function mergeCandidates(...lists: MetricCandidate[][]): MetricCandidate[] {
+  const seen = new Set<string>()
+  const out: MetricCandidate[] = []
+  for (const list of lists) {
+    for (const c of list) {
+      const name = c.name.trim()
+      if (!name) continue
+      const key = name.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ name, description: c.description })
+    }
+  }
+  return out
 }
 
 export type MetricsSetupViewProps = {
   industry: string
   businessType: string
-  northStar: string
-  northStarDescription: string
-  northStarHints: string[]
-  /** Supporting metrics (pre-seeded from the website analysis and/or added by hand). */
-  supporting: SupportingMetric[]
+  /** The full flat list of candidate metrics shown as toggleable cards. */
+  candidates: MetricCandidate[]
+  /** Names (lowercased keys handled by caller) of the currently-selected picks. */
+  selected: string[]
   customMetric: string
-  customDescription: string
   errors: Record<string, string | undefined>
   error: string | null
   onChangeIndustry: (value: string) => void
   onChangeBusinessType: (value: string) => void
-  onChangeNorthStar: (value: string) => void
-  onChangeNorthStarDescription: (value: string) => void
-  onPickNorthStar: (value: string) => void
-  onChangeSupportingDescription: (metric: string, description: string) => void
-  onRemoveSupporting: (metric: string) => void
+  onToggle: (name: string) => void
   onChangeCustomMetric: (value: string) => void
-  onChangeCustomDescription: (value: string) => void
   onAddCustom: () => void
 }
 
@@ -87,25 +124,21 @@ export type MetricsSetupViewProps = {
 export function MetricsSetupView({
   industry,
   businessType,
-  northStar,
-  northStarDescription,
-  northStarHints,
-  supporting,
+  candidates,
+  selected,
   customMetric,
-  customDescription,
   errors,
   error,
   onChangeIndustry,
   onChangeBusinessType,
-  onChangeNorthStar,
-  onChangeNorthStarDescription,
-  onPickNorthStar,
-  onChangeSupportingDescription,
-  onRemoveSupporting,
+  onToggle,
   onChangeCustomMetric,
-  onChangeCustomDescription,
   onAddCustom,
 }: MetricsSetupViewProps) {
+  const selectedSet = new Set(selected.map((s) => s.toLowerCase()))
+  const selectedCount = selected.length
+  const atLimit = selectedCount >= REQUIRED_METRIC_PICKS
+
   return (
     <>
       {error && <div className="onb-form-error">{error}</div>}
@@ -144,94 +177,50 @@ export function MetricsSetupView({
         </div>
       </div>
 
-      <div className="onb-section" data-field="northStar">
+      <div className="onb-section" data-field="metrics">
         <div className="onb-section-h">
-          Primary metric <span className="opt">— your North Star, required</span>
-        </div>
-        <input
-          className={`inp ${errors.northStar ? "has-error" : ""}`}
-          value={northStar}
-          onChange={(e) => onChangeNorthStar(e.target.value)}
-          placeholder="The one metric that best captures product value"
-        />
-        {errors.northStar && <p className="onb-field-error">{errors.northStar}</p>}
-        <div className="metric-other-l" style={{ marginTop: 12 }}>
-          Common for {industry || "your stage"}
-        </div>
-        <div className="onb-chip-row">
-          {northStarHints.map((h) => (
-            <button
-              key={h}
-              type="button"
-              className="onb-chip"
-              onClick={() => onPickNorthStar(h)}
-            >
-              {h}
-            </button>
-          ))}
-        </div>
-        <textarea
-          className="inp"
-          style={{ marginTop: 12 }}
-          value={northStarDescription}
-          onChange={(e) => onChangeNorthStarDescription(e.target.value)}
-          placeholder="Describe what this metric means and why it matters (context for goal-fit scoring)"
-          rows={2}
-          maxLength={400}
-        />
-      </div>
-
-      <div className="onb-section">
-        <div className="onb-section-h">
-          Supporting metrics <span className="opt">— pick what fits, or write your own</span>
+          Pick your {REQUIRED_METRIC_PICKS} success metrics{" "}
+          <span className="opt">— the ones that best capture product value</span>
         </div>
 
-        <div className="metric-tree">
-          <div className="mt-source">
-            <div className="mt-source-dot" />
-            <div className="mt-source-lbl">Primary leads to…</div>
-          </div>
+        {errors.metrics && <p className="onb-field-error">{errors.metrics}</p>}
 
-          {/* Selected supporting metrics ARE the tree targets: name + editable
-              description + delete, branching off the North-Star source. */}
-          {supporting.length > 0 ? (
-            <div className="mt-targets mt-targets-cards" id="supportingMetrics">
-              {supporting.map((m, i) => (
-                <div
-                  key={m.name}
-                  className="mt-target"
-                  data-metric={m.name}
-                  style={{ ["--d" as string]: `${0.05 * (i + 1)}s` }}
+        <div className="metric-pick" id="metricCandidates">
+          {candidates.length > 0 ? (
+            candidates.map((c, i) => {
+              const isSel = selectedSet.has(c.name.toLowerCase())
+              // A non-selected card is disabled once we've hit the pick limit;
+              // selected cards always stay clickable so they can be toggled off.
+              const disabled = !isSel && atLimit
+              return (
+                <button
+                  type="button"
+                  key={c.name}
+                  className={`mt-target metric-card ${isSel ? "sel" : ""}`}
+                  data-metric={c.name}
+                  aria-pressed={isSel}
+                  aria-selected={isSel}
+                  disabled={disabled}
+                  onClick={() => onToggle(c.name)}
+                  style={{ ["--d" as string]: `${0.04 * (i + 1)}s` }}
                 >
-                  <button
-                    type="button"
-                    className="mt-target-del"
-                    aria-label={`Remove ${m.name}`}
-                    onClick={() => onRemoveSupporting(m.name)}
-                  >
-                    <Trash style={{ width: 14, height: 14 }} aria-hidden />
-                  </button>
-                  <div className="mt-target-name">
-                    <span className="mt-ic" aria-hidden>
+                  <span className="mt-ic" aria-hidden>
+                    {isSel ? (
+                      <Check style={{ width: 13, height: 13 }} />
+                    ) : (
                       <Sparkles style={{ width: 12, height: 12 }} />
-                    </span>
-                    {m.name}
-                  </div>
-                  <textarea
-                    className="inp"
-                    value={m.description}
-                    onChange={(e) => onChangeSupportingDescription(m.name, e.target.value)}
-                    placeholder="Describe what this metric means and why it matters"
-                    rows={2}
-                    maxLength={400}
-                    aria-label={`Description for ${m.name}`}
-                  />
-                </div>
-              ))}
-            </div>
+                    )}
+                  </span>
+                  <span className="mt-target-name">{c.name}</span>
+                  {c.description && (
+                    <span className="metric-card-desc">{c.description}</span>
+                  )}
+                </button>
+              )
+            })
           ) : (
             <p className="mt-targets-empty">
-              No supporting metrics yet — add your own below.
+              No candidate metrics yet — add your own below.
             </p>
           )}
         </div>
@@ -257,21 +246,11 @@ export function MetricsSetupView({
               type="button"
               className="btn btn-secondary"
               onClick={onAddCustom}
-              disabled={!customMetric.trim() || supporting.length >= MAX_SUPPORTING}
+              disabled={!customMetric.trim() || atLimit}
             >
               <Plus style={{ width: 13, height: 13 }} aria-hidden /> Add
             </button>
           </div>
-          <textarea
-            className="inp"
-            style={{ marginTop: 10 }}
-            value={customDescription}
-            onChange={(e) => onChangeCustomDescription(e.target.value)}
-            placeholder="Describe what this metric means and why it matters (optional)"
-            rows={2}
-            maxLength={400}
-            aria-label="Custom metric description"
-          />
         </div>
 
         <div className="metric-count">
@@ -279,8 +258,13 @@ export function MetricsSetupView({
             <InfoCircle style={{ width: 13, height: 13 }} />
           </span>
           <span>
-            <strong>{supporting.length}</strong> supporting metric
-            {supporting.length === 1 ? "" : "s"} selected
+            <strong>{selectedCount}</strong> of {REQUIRED_METRIC_PICKS} metrics
+            selected
+            {selectedCount === REQUIRED_METRIC_PICKS
+              ? " — ready"
+              : selectedCount < REQUIRED_METRIC_PICKS
+                ? ` — pick ${REQUIRED_METRIC_PICKS - selectedCount} more`
+                : ""}
           </span>
         </div>
       </div>
@@ -295,31 +279,33 @@ export function Metrics() {
   const mdraft = loadDraft(DRAFT_KEY)
   const [industry, setIndustry] = useState<string>((mdraft?.industry as string) ?? INDUSTRIES[0])
   const [businessType, setBusinessType] = useState<string>((mdraft?.businessType as string) ?? BUSINESS_TYPES[0])
-  const [northStar, setNorthStar] = useState((mdraft?.northStar as string) ?? "")
-  const [northStarDescription, setNorthStarDescription] = useState((mdraft?.northStarDescription as string) ?? "")
-  const [supporting, setSupporting] = useState<SupportingMetric[]>((mdraft?.supporting as SupportingMetric[]) ?? [])
+  const [candidates, setCandidates] = useState<MetricCandidate[]>(
+    (mdraft?.candidates as MetricCandidate[]) ?? [],
+  )
+  const [selected, setSelected] = useState<string[]>((mdraft?.selected as string[]) ?? [])
   const [customMetric, setCustomMetric] = useState("")
-  const [customDescription, setCustomDescription] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Save draft on tab switch only
   useEffect(() => {
     const onHide = () => {
-      if (document.hidden) saveDraft(DRAFT_KEY, { industry, businessType, northStar, northStarDescription, supporting })
+      if (document.hidden)
+        saveDraft(DRAFT_KEY, { industry, businessType, candidates, selected })
     }
     document.addEventListener("visibilitychange", onHide)
     return () => document.removeEventListener("visibilitychange", onHide)
-  }, [industry, businessType, northStar, northStarDescription, supporting])
+  }, [industry, businessType, candidates, selected])
+
   // Once the user touches the industry/business-type dropdowns we stop
   // overwriting their choice when a late analysis result arrives.
   const [industryTouched, setIndustryTouched] = useState(false)
   const [businessTypeTouched, setBusinessTypeTouched] = useState(false)
-  // The supporting-metrics list is seeded exactly once — either from a KPI tree
-  // already saved on the workspace, or (failing that) from the website-analysis
-  // suggestions (all pre-selected). After the first seed this ref stays true so
-  // a late re-render never re-adds a metric the user has since edited/deleted.
-  const supportingSeeded = useRef(false)
+  // The candidate pool is seeded exactly once — from a saved KPI tree, else the
+  // website-analysis suggestions, else business-type / industry defaults. After
+  // the first seed this ref stays true so a late re-render never clobbers the
+  // user's edits/selections.
+  const candidatesSeeded = useRef(false)
 
   // Seed industry / business type from the saved company first, then from the
   // website analysis (which may arrive later) — but never clobber a value the
@@ -347,76 +333,107 @@ export function Metrics() {
     }
   }, [workspace?.business_type, websiteAnalysis?.business_type, businessTypeTouched])
 
-  // Hydrate any KPI tree already saved on the workspace.
+  // Hydrate from a KPI tree already saved on the workspace: its metrics become
+  // the candidate pool, the first 3 pre-selected. Marks the pool as seeded so
+  // the suggestion seed below won't run.
   useEffect(() => {
     if (!workspace) return
+    if (candidatesSeeded.current) return
     const tree = workspace.kpi_tree
-    if (tree.north_star) setNorthStar(tree.north_star)
-    if (tree.north_star_description) setNorthStarDescription(tree.north_star_description)
-    if (tree.metrics.length) {
-      // A previously-saved tree is the source of truth — adopt it and mark the
-      // supporting list as seeded so the suggestion seed below won't run.
-      supportingSeeded.current = true
-      setSupporting(
-        tree.metrics
-          .filter((m) => m.name)
-          .map((m) => ({ name: m.name, description: m.description ?? "" })),
+    const named = tree.metrics.filter((m) => m.name.trim().length > 0)
+    if (named.length) {
+      candidatesSeeded.current = true
+      const pool = mergeCandidates(
+        named.map((m) => ({ name: m.name, description: m.description ?? "" })),
       )
+      setCandidates(pool)
+      setSelected(pool.slice(0, REQUIRED_METRIC_PICKS).map((c) => c.name))
     }
   }, [workspace])
 
   const suggestedMetrics = websiteAnalysis?.suggested_metrics ?? []
 
-  // Pre-select ALL website-analysis suggestions on load: the user starts with
-  // every suggested metric already in their supporting list. Guarded by
-  // `supportingSeeded` (mirrors the industry/business-type touched-guards) so it
-  // runs at most once and never clobbers the user's later edits/deletions — and
-  // skipped entirely if a saved KPI tree already hydrated the list above. With
-  // no suggestions the list stays empty and the tree shows its empty state.
+  // Seed the candidate pool from the analysis suggestions (else business-type /
+  // industry defaults). Guarded by `candidatesSeeded` so it runs at most once
+  // and never clobbers the user's later edits — and skipped entirely if a saved
+  // KPI tree already hydrated the pool above. Up to 3 candidates are
+  // pre-selected; the user adjusts to land on exactly 3.
   useEffect(() => {
-    if (supportingSeeded.current) return
-    if (suggestedMetrics.length === 0) return
-    supportingSeeded.current = true
-    setSupporting(
-      suggestedMetrics
-        .filter((m) => m.metric)
-        .slice(0, MAX_SUPPORTING)
-        .map((m) => ({ name: m.metric, description: m.description ?? "" })),
-    )
-  }, [suggestedMetrics])
-  const northStarHints =
-    NORTH_STAR_SUGGESTIONS[industry] ?? NORTH_STAR_SUGGESTIONS.default
+    if (candidatesSeeded.current) return
+
+    const resolvedBusinessType =
+      workspace?.business_type || websiteAnalysis?.business_type || businessType
+    const resolvedIndustry = workspace?.industry || websiteAnalysis?.industry || industry
+
+    const fromAnalysis: MetricCandidate[] = suggestedMetrics
+      .filter((m) => m.metric)
+      .map((m) => ({ name: m.metric, description: m.description ?? "" }))
+    const fromBizDefaults: MetricCandidate[] = (
+      DEFAULT_METRICS_BY_BUSINESS_TYPE[resolvedBusinessType] ?? []
+    ).map((name) => ({ name, description: "" }))
+    const fromIndustryFallback: MetricCandidate[] = (
+      FALLBACK_CANDIDATES_BY_INDUSTRY[resolvedIndustry] ??
+      FALLBACK_CANDIDATES_BY_INDUSTRY.default
+    ).map((name) => ({ name, description: "" }))
+
+    // Always offer a pool (analysis + curated defaults + industry fallback) so
+    // the user has more than 3 candidates to choose between.
+    const pool = mergeCandidates(fromAnalysis, fromBizDefaults, fromIndustryFallback)
+    if (pool.length === 0) return
+    candidatesSeeded.current = true
+    setCandidates(pool)
+    setSelected(pool.slice(0, REQUIRED_METRIC_PICKS).map((c) => c.name))
+  }, [
+    suggestedMetrics,
+    businessType,
+    industry,
+    workspace?.business_type,
+    workspace?.industry,
+    websiteAnalysis?.business_type,
+    websiteAnalysis?.industry,
+  ])
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(
     () => [
       {
-        key: "northStar",
-        valid: canSaveKpiTree(northStar, supporting),
-        message: "Set a North Star metric to anchor your KPI tree.",
+        key: "metrics",
+        valid: canSavePickedMetrics(selectedAsMetrics(candidates, selected)),
+        message: `Pick exactly ${REQUIRED_METRIC_PICKS} metrics to continue.`,
       },
     ],
   )
 
-  function changeSupportingDescription(metric: string, description: string) {
-    setSupporting((prev) =>
-      prev.map((m) => (m.name === metric ? { ...m, description } : m)),
-    )
+  // Toggle a candidate in/out of the selection. Selecting is blocked once 3 are
+  // already picked; deselecting always works.
+  function toggle(name: string) {
+    setSelected((prev) => {
+      const key = name.toLowerCase()
+      if (prev.some((s) => s.toLowerCase() === key)) {
+        return prev.filter((s) => s.toLowerCase() !== key)
+      }
+      if (prev.length >= REQUIRED_METRIC_PICKS) return prev
+      clearError("metrics")
+      return [...prev, name]
+    })
   }
 
-  // Remove a supporting metric from the tree. A removed metric can always be
-  // re-added by hand via "write your own". The `.metric-count` stays in sync
-  // since it reads `supporting.length`.
-  function removeSupporting(metric: string) {
-    setSupporting((prev) => prev.filter((m) => m.name !== metric))
-  }
-
+  // Add a custom candidate; it lands selected if there's still room (< 3).
   function addCustom() {
     const m = customMetric.trim()
-    if (!m || supporting.some((s) => s.name === m) || supporting.length >= MAX_SUPPORTING)
-      return
-    setSupporting((prev) => [...prev, { name: m, description: customDescription.trim() }])
+    if (!m) return
+    const key = m.toLowerCase()
+    setCandidates((prev) =>
+      prev.some((c) => c.name.toLowerCase() === key)
+        ? prev
+        : [...prev, { name: m, description: "" }],
+    )
+    setSelected((prev) =>
+      prev.some((s) => s.toLowerCase() === key) || prev.length >= REQUIRED_METRIC_PICKS
+        ? prev
+        : [...prev, m],
+    )
+    clearError("metrics")
     setCustomMetric("")
-    setCustomDescription("")
   }
 
   async function persist() {
@@ -430,9 +447,10 @@ export function Metrics() {
         industry,
         business_type: businessType,
       })
-      // 2) Selected + custom metrics → KPI tree (canonical config entity).
+      // 2) The 3 picks → KPI tree. North Star is inferred server-side; we send
+      //    a placeholder north_star (the first pick) until that ships.
       await kpiTreeApi.put(
-        buildKpiTreePayload(northStar, northStarDescription, supporting),
+        buildKpiTreePayloadFromPicks(selectedAsMetrics(candidates, selected)),
       )
       clearDraft(DRAFT_KEY)
       // Next numbered step is connectors (index 3 in ONBOARDING_STEP_SLUGS).
@@ -457,6 +475,8 @@ export function Metrics() {
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
+  const ready = selected.length === REQUIRED_METRIC_PICKS
+
   return (
     <OnboardingChrome
       step={2}
@@ -466,11 +486,11 @@ export function Metrics() {
           Set your success <em>metrics.</em>
         </>
       }
-      subtitle="Success metrics anchor the whole workspace. We've drafted a starting set and predicted your business from your website — edit or remove what doesn't fit, add your own, and set the North Star they all ladder up to."
+      subtitle={`Success metrics anchor the whole workspace. Pick the ${REQUIRED_METRIC_PICKS} that best capture product value — we've predicted your business and drafted a starting set from your website. Sprntly figures out which one is your North Star.`}
       footerMeta={
-        northStar
-          ? `North Star + ${supporting.length} supporting metric${supporting.length === 1 ? "" : "s"} captured`
-          : "Set a North Star to continue"
+        ready
+          ? `${REQUIRED_METRIC_PICKS} metrics selected — ready to continue`
+          : `Pick ${REQUIRED_METRIC_PICKS - selected.length} more to continue`
       }
       onBack={() => router.push("/onboarding/business-info")}
       onContinue={persist}
@@ -481,12 +501,9 @@ export function Metrics() {
         <MetricsSetupView
           industry={industry}
           businessType={businessType}
-          northStar={northStar}
-          northStarDescription={northStarDescription}
-          northStarHints={northStarHints}
-          supporting={supporting}
+          candidates={candidates}
+          selected={selected}
           customMetric={customMetric}
-          customDescription={customDescription}
           errors={errors}
           error={error}
           onChangeIndustry={(value) => {
@@ -497,22 +514,23 @@ export function Metrics() {
             setBusinessTypeTouched(true)
             setBusinessType(value)
           }}
-          onChangeNorthStar={(value) => {
-            setNorthStar(value)
-            clearError("northStar")
-          }}
-          onChangeNorthStarDescription={setNorthStarDescription}
-          onPickNorthStar={(value) => {
-            setNorthStar(value)
-            clearError("northStar")
-          }}
-          onChangeSupportingDescription={changeSupportingDescription}
-          onRemoveSupporting={removeSupporting}
+          onToggle={toggle}
           onChangeCustomMetric={setCustomMetric}
-          onChangeCustomDescription={setCustomDescription}
           onAddCustom={addCustom}
         />
       </div>
     </OnboardingChrome>
+  )
+}
+
+/** Resolve the selected names to {name, description} pairs from the pool. A
+ *  selected name not in the pool (defensive) still maps to a bare entry. */
+function selectedAsMetrics(
+  candidates: MetricCandidate[],
+  selected: string[],
+): MetricCandidate[] {
+  const byKey = new Map(candidates.map((c) => [c.name.toLowerCase(), c]))
+  return selected.map(
+    (name) => byKey.get(name.toLowerCase()) ?? { name, description: "" },
   )
 }

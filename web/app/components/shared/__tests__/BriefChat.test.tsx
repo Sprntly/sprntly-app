@@ -118,6 +118,7 @@ import type {
 import { BriefChat, prdCtaState } from "../BriefChat"
 import { runMultiAgentGeneration } from "../../../lib/runMultiAgentGeneration"
 import { prototypePath } from "../../../lib/routes"
+import { AGENT_NAME } from "../../../lib/agent"
 
 describe("prdCtaState — smart View/Generate PRD button", () => {
   it("offers 'View PRD' when a PRD already exists for the insight", () => {
@@ -201,6 +202,8 @@ const BRIEF: BriefV2State = {
   hero: HERO,
   supporting: [SUPPORTING],
   sourcesLine: "Zendesk · Amplitude",
+  insufficientEvidence: false,
+  emptyReason: null,
 }
 
 // Injects the fixture brief into ContentContext on mount so BriefChat renders it.
@@ -509,6 +512,92 @@ describe("BriefChat composer — 'generate a prototype' navigation", () => {
     expect(pushSpy).toHaveBeenCalledWith(prototypePath(515))
     expect(pushSpy).toHaveBeenCalledWith("/prototype?prd=515")
     expect(pushSpy).not.toHaveBeenCalledWith("/prototype")
+  })
+})
+
+// ── Brief header: no duplicate "Weekly brief" title ───────────────────────────
+// The "Weekly brief" label lives in the chat tab name above the brief. Repeating
+// it as the header <h1> directly below the tab was a redundant duplicate, so the
+// header no longer renders a standalone title — only the week and company line
+// remain. The LIVE/REFRESHING status badge was also removed: a static
+// "REFRESHING" pill was confusing and carried no real signal.
+describe("BriefChat header — no duplicate brief title", () => {
+  it("renders no .bh-title element (the tab name is the single source of the label)", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    const header = document.querySelector("header.bh") as HTMLElement | null
+    expect(header).not.toBeNull()
+    // The redundant title is gone…
+    expect(header!.querySelector(".bh-title")).toBeNull()
+    // …and the LIVE/REFRESHING status badge is gone too…
+    expect(header!.querySelector(".bh-live")).toBeNull()
+    // …but the week/company context still renders.
+    expect(within(header!).getByText(/Acme Health/)).not.toBeNull()
+  })
+})
+
+// ── Fixed agent name "Spiky" ──────────────────────────────────────────────────
+// The PM agent is no longer user-named: there is ONE fixed display name, "Spiky",
+// sourced from the AGENT_NAME constant. The brief/chat header must render that
+// name (next to the sparkle mark) — never the old hardcoded "PM Agent". The
+// "PM COWORKER" pill is a *role* badge and is intentionally unaffected.
+describe("BriefChat header — fixed agent name 'Spiky'", () => {
+  it("renders the agent display name as 'Spiky' (not 'PM Agent')", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    // The brief's agent head carries the agent's NAME + role badge.
+    const head = document.querySelector(".bc-agent-head") as HTMLElement | null
+    expect(head).not.toBeNull()
+    // The agent's NAME (the .bc-agent-name span) reads "Spiky".
+    const name = head!.querySelector(".bc-agent-name") as HTMLElement | null
+    expect(name).not.toBeNull()
+    expect(name!.textContent).toBe(AGENT_NAME)
+    expect(name!.textContent).toBe("Spiky")
+    // The old hardcoded name is gone everywhere.
+    expect(screen.queryByText("PM Agent")).toBeNull()
+    // The role pill ("PM COWORKER") is unaffected.
+    expect(within(head!).getByText("PM COWORKER")).not.toBeNull()
+  })
+
+  it("greeting still renders below the Spiky header", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    // The brief greeting line is present (the agent greeting copy), confirming
+    // the rename didn't disturb the greeting render path.
+    expect(document.querySelector(".bc-greeting")).not.toBeNull()
+  })
+})
+
+// ── Persistent PM-agent intro ────────────────────────────────────────────────
+// The brief opens with a persistent, educational PM-agent message that restates
+// what the agent continuously does. It is personalized with the user's FIRST
+// name (the fixture's userName is "Apurva Jain" → "Apurva") and replaces the old
+// redundant "Monday brief · …" secondary header line, which must no longer render.
+describe("BriefChat — persistent PM-agent intro", () => {
+  it("renders the persistent intro personalized with the user's first name", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    const intro = document.querySelector(".bc-intro") as HTMLElement | null
+    expect(intro).not.toBeNull()
+    // Personalized with the FIRST name only (not the full "Apurva Jain").
+    expect(intro!.textContent).toContain("Good day Apurva,")
+    expect(intro!.textContent).toContain(
+      "we continuously monitor how your product is being used",
+    )
+    expect(intro!.textContent).toContain(
+      "give you a weekly digest of the most important things worth working on",
+    )
+  })
+
+  it("no longer renders the redundant 'Monday brief · …' secondary status line", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    expect(screen.queryByText(/Monday brief ·/)).toBeNull()
   })
 })
 

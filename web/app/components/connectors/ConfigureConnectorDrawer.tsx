@@ -28,8 +28,9 @@ import {
 } from "../../lib/api"
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
+import { ConnectorLogo } from "./ConnectorLogo"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
-import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
+import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
 
 // ─────────────────────── Slack Sync Button ─────────────────────
@@ -257,12 +258,7 @@ export function ConfigureConnectorDrawerView({
       >
         <div className="drawer-head">
           <h2 className="drawer-title">
-            <span
-              className="drawer-icon"
-              style={{ background: item.logoColor ?? undefined }}
-            >
-              {item.logoText ?? item.logo}
-            </span>
+            <ConnectorLogo item={item} className="drawer-icon" />
             {item.name}
           </h2>
           <button
@@ -468,11 +464,10 @@ export function ConfigureConnectorDrawer({
   let slot: React.ReactNode = null
   if (providerId === "google_drive") {
     slot = (
-      <GoogleDriveFolderPicker
+      <GoogleDrivePicker
         dataset={activeCompany}
-        selectedFolderId={connection?.config?.folder_id}
-        selectedFolderName={connection?.config?.folder_name}
-        onSelected={onDisconnected /* reuse the reload callback */}
+        savedFiles={connection?.config?.files}
+        onSaved={onDisconnected /* reuse the reload callback */}
       />
     )
   } else if (providerId === "hubspot") {

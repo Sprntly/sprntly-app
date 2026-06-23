@@ -72,8 +72,20 @@ def extract_document(
     text: str,
     agent: str = "extractor",
     source_hint: str | None = None,
+    origin: str | None = None,
 ) -> dict:
-    """Extract one document into the KG. Returns {signals, themes, skipped}."""
+    """Extract one document into the KG. Returns {signals, themes, skipped}.
+
+    ``origin`` records HOW this document reached us, stamped onto each extracted
+    signal's provenance as ``provenance["origin"]``. The two values the brief
+    evidence gate cares about are:
+      - ``"upload"``    — a PM-uploaded corpus document (manual upload).
+      - ``"connector"`` — a live connector sync (Slack/HubSpot/GitHub/…).
+    Left ``None`` for everything else (research/market/competitor enrichment),
+    which the gate treats as neither upload nor connector. The gate uses this to
+    detect an UPLOAD-ONLY tenant (no connector-origin signals anywhere) so it can
+    surface a brief from a single uploaded file instead of an empty one — see
+    convergence.has_sufficient_evidence."""
     cfg = resolve_config(enterprise_id)
     tau_high = cfg["resolution"]["tau_high"]
 
@@ -133,7 +145,8 @@ def extract_document(
             embedding=vec,
             confidence=float(item.get("confidence", 0.8)),
             provenance={"source": "extractor", "doc": doc_name,
-                        "prompt_version": PROMPT_VERSION},
+                        "prompt_version": PROMPT_VERSION,
+                        **({"origin": origin} if origin else {})},
         )
         try:
             facade.write_signal(enterprise_id, signal)

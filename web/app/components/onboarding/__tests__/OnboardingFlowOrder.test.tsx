@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 //
 // Integrity tests for the semantic-slug onboarding flow:
-//   business-info → [analyzing] → metrics → connectors → coworkers → first-brief
+//   business-info → [analyzing] → metrics → connectors → first-brief
+// (the agent-naming `coworkers` step was removed)
 //
 // Asserts the slug→screen map renders the right component per numbered step (in
 // the right order, no gaps), that an unknown slug falls back to the first step,
@@ -23,7 +24,6 @@ vi.mock("../../screens/onboarding", () => ({
   BusinessInfo: () => React.createElement("div", { "data-screen": "business-info" }),
   Metrics: () => React.createElement("div", { "data-screen": "metrics" }),
   Connectors: () => React.createElement("div", { "data-screen": "connectors" }),
-  Coworkers: () => React.createElement("div", { "data-screen": "coworkers" }),
   FirstBrief: () => React.createElement("div", { "data-screen": "first-brief" }),
   Analyzing: () => React.createElement("div", { "data-screen": "analyzing" }),
 }))
@@ -47,13 +47,12 @@ const EXPECTED_ORDER = [
   "business-info",
   "metrics",
   "connectors",
-  "coworkers",
   "first-brief",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 5 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(5)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 4 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(4)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
@@ -88,8 +87,8 @@ describe("onboarding flow order — slug → screen", () => {
     )
   })
 
-  it("does not expose the dropped strategic/business-context pages as steps", () => {
-    for (const slug of ["strategic-context", "business-context", "optimizing"]) {
+  it("does not expose the dropped strategic/business-context/coworkers pages as steps", () => {
+    for (const slug of ["strategic-context", "business-context", "optimizing", "coworkers"]) {
       const { container, unmount } = render(
         React.createElement(OnboardingStep, { slug }),
       )

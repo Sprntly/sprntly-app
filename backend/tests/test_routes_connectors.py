@@ -304,3 +304,56 @@ def test_save_files_rejects_bad_file_id(google_env, monkeypatch):
     )
     assert r.status_code == 400
     assert "invalid Drive file id" in r.text
+
+
+# ─── GET /google-drive/picker-token — browser-side Picker access token ────────
+
+
+def test_picker_token_returns_refreshed_access_token(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme"}')
+
+    from datetime import datetime, timedelta, timezone
+
+    import app.routes.connectors as routes_mod
+
+    # Monkeypatch the refresh helper (the creds layer) so no network/Google
+    # token exchange happens — return creds with a token + a future expiry.
+    # google-auth stores expiry as a naive UTC datetime, so mirror that here.
+    fake_creds = MagicMock()
+    fake_creds.token = "ya29.fresh-access-token"
+    fake_creds.expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
+        seconds=1800
+    )
+
+    with patch.object(routes_mod, "_refresh_credentials", return_value=fake_creds):
+        r = ctx.client.get("/v1/connectors/google-drive/picker-token")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["access_token"] == "ya29.fresh-access-token"
+    # ~1800s remaining (allow a small clock-drift window), never the fallback.
+    assert 1700 <= body["expires_in"] <= 1800
+
+
+def test_picker_token_falls_back_when_no_expiry(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _seed_drive_connection(ctx.company_id, config_json='{"dataset":"acme"}')
+
+    import app.routes.connectors as routes_mod
+
+    fake_creds = MagicMock()
+    fake_creds.token = "ya29.fresh-access-token"
+    fake_creds.expiry = None
+
+    with patch.object(routes_mod, "_refresh_credentials", return_value=fake_creds):
+        r = ctx.client.get("/v1/connectors/google-drive/picker-token")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["expires_in"] == 3000
+
+
+def test_picker_token_not_connected_returns_404(google_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.get("/v1/connectors/google-drive/picker-token")
+    assert r.status_code == 404

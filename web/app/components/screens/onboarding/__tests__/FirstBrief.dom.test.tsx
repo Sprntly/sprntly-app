@@ -98,7 +98,7 @@ async function mountLoaded(ctxOver: Record<string, unknown> = {}) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   onboardingMock.mockReturnValue(
     makeOnboardingCtx({
-      workspace: makeWorkspace({ onboarding_step: 5 }),
+      workspace: makeWorkspace({ onboarding_step: 4 }),
       ...ctxOver,
     }),
   )
@@ -129,9 +129,9 @@ describe("FirstBrief (container) — first brief", () => {
     expect(container.querySelector(".onb-h")?.textContent).toBe(
       "Setting up your workspace.",
     )
-    // OnboardingChrome shell, first-brief = numbered step 5 (last dot).
+    // OnboardingChrome shell, first-brief = numbered step 4 (last dot).
     expect(container.querySelector(".onb-shell")).not.toBeNull()
-    expect(container.querySelector(".onb-dots")?.getAttribute("data-step")).toBe("5")
+    expect(container.querySelector(".onb-dots")?.getAttribute("data-step")).toBe("4")
     // Old InterviewLayout shell + KPI preview + brief preview are gone.
     expect(container.querySelector(".interview-shell")).toBeNull()
     expect(container.querySelector(".ob-brief-preview")).toBeNull()
@@ -147,7 +147,7 @@ describe("FirstBrief (container) — first brief", () => {
       "Analyzing your sources",
     )
     expect(container.querySelector(".gen-stage.pending")?.textContent).toContain(
-      "Composing your first Monday Brief",
+      "Composing your first Weekly Brief",
     )
 
     // Continue is the disabled brief handoff; footer narrates generation.
@@ -209,8 +209,12 @@ describe("FirstBrief (container) — first brief", () => {
     expect(screen.getByText("network down")).not.toBeNull()
     // Ready handoff tile still renders (metadata only, no brief content).
     expect(container.querySelector(".gen-ready")?.textContent).toContain(
-      "Your Monday Brief is waiting",
+      "Your Weekly Brief is waiting",
     )
+    // And it tells the user about the recurring Monday-9am brief cadence.
+    const cadence = container.querySelector(".gen-ready .brief-cadence")?.textContent ?? ""
+    expect(cadence).toContain("every Monday at 9:00 AM")
+    expect(cadence).toMatch(/your timezone:|your local time/)
 
     // The footer button is the manual fallback and is enabled.
     const btn = continueButton("Open your Brief")
@@ -268,7 +272,7 @@ describe("FirstBrief (container) — first brief", () => {
     expect(routerMock.replace).toHaveBeenCalledWith("/")
   })
 
-  it("Back routes to the coworkers step", async () => {
+  it("Back routes to the connectors step", async () => {
     ensureMock.mockReturnValue(new Promise(() => {}))
     await mountLoaded()
     const back = Array.from(document.querySelectorAll("button")).find((b) =>
@@ -276,7 +280,7 @@ describe("FirstBrief (container) — first brief", () => {
     )
     expect(back).toBeTruthy()
     fireEvent.click(back as HTMLButtonElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/coworkers")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

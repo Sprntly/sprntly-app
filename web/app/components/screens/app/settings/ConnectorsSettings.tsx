@@ -5,8 +5,9 @@
  * returns once the connector count grows). Only connectors with a working
  * integration (OAuth / API key) are shown (`connectableCatalog`) — "Coming
  * soon" connectors are hidden so we don't surface things the user can't use.
- * Each row shows the connector's real brand logo (fetched by domain via the
- * favicon service), falling back to a single-letter glyph if it can't load.
+ * Each row shows the connector's real brand logo (a locally bundled SVG via
+ * the shared ConnectorLogo), falling back to a single-letter glyph if it
+ * can't load.
  * Connection state (Active vs Off) and the per-row "Configure"/"Connect"
  * action come from `connectorsApi.list()`.
  *
@@ -27,6 +28,7 @@ import {
   connectableCatalog,
 } from "../../../../lib/connectorsCatalog"
 import {
+  ApiError,
   companiesApi,
   connectorsApi,
   sourcesApi,
@@ -52,6 +54,7 @@ import { openOauthTab } from "../../../../lib/connectorsOauth"
 import { useConnectorConnectedSignal } from "../../../../lib/useConnectorConnectedSignal"
 import { ApiKeyPromptModal } from "../../../connectors/ApiKeyPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
+import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
 
 /**
  * Per-connector help text shown in the API-key modal. Keep it short and
@@ -61,6 +64,39 @@ import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnector
 const APIKEY_HELP: Record<string, string> = {
   fireflies:
     "Get your key from fireflies.ai → Settings → Integrations → Fireflies API.",
+}
+
+/**
+ * Friendly message shown when a non-admin tries to connect an org-wide
+ * source (Google Docs/Drive, GitHub, etc.). The backend correctly returns
+ * 403 with "Only admins can manage org-wide connectors" — surfacing that as
+ * the raw "Could not start <provider> connect: …" string looks like a bug.
+ * Map the admin gate to a clear, actionable line and fall back to the raw
+ * (already-readable) error for everything else.
+ */
+export const ADMIN_GATE_CONNECT_MESSAGE =
+  "Only a workspace admin can connect org-wide sources like Google Drive. " +
+  "Ask an admin to set this up."
+
+/** True when an error is the org-connector admin gate (403 + its message). */
+export function isAdminGateError(err: unknown): boolean {
+  if (err instanceof ApiError && err.status === 403) return true
+  const msg = err instanceof Error ? err.message : String(err)
+  return msg.toLowerCase().includes("only admins can manage org-wide connectors")
+}
+
+/**
+ * Message to show when starting an OAuth connect fails. Admin-gate failures
+ * get the clear, friendly line; all other errors keep the diagnostic
+ * "Could not start <provider> connect: <reason>" form.
+ */
+export function connectStartErrorMessage(
+  providerId: string,
+  err: unknown,
+): string {
+  if (isAdminGateError(err)) return ADMIN_GATE_CONNECT_MESSAGE
+  const msg = err instanceof Error ? err.message : String(err)
+  return `Could not start ${providerId} connect: ${msg}`
 }
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -83,6 +119,13 @@ export type ConnectorsSettingsViewProps = {
   /** Fired when a category's upload strip receives one or more files. */
   onUpload: (categoryKey: string, files: FileList) => void
   /**
+   * True while a manual upload is in flight (files are being converted +
+   * persisted server-side). Drives the upload control's "Uploading…" busy
+   * state so the click produces immediate, visible feedback during the
+   * multi-second conversion instead of appearing to do nothing.
+   */
+  uploading?: boolean
+  /**
    * All files uploaded to the active company. The backend stores uploads at
    * the company level with no per-category attribution, so this is a single
    * company-wide list rendered once (not filtered per category).
@@ -98,6 +141,7 @@ export function ConnectorsSettingsView({
   onConnect,
   onConfigure,
   onUpload,
+  uploading = false,
   files,
 }: ConnectorsSettingsViewProps) {
   // Flat list for now — with only a handful of live connectors, category
@@ -123,42 +167,7 @@ export function ConnectorsSettingsView({
           const state = getConnectorRowState(item, conn)
           return (
             <div key={item.id} className="set-conn-row">
-              <div
-                className="logo"
-                style={
-                  item.logoDomain
-                    ? {
-                        background: "#fff",
-                        border: "1px solid #E5E7EB",
-                        color: item.logoColor ?? "#444",
-                        position: "relative",
-                      }
-                    : { background: item.logoColor ?? "#444", position: "relative" }
-                }
-              >
-                {/* Letter is the fallback; the real brand logo overlays it and
-                    is hidden if the image fails to load. */}
-                <span>{item.logoText ?? item.logo}</span>
-                {item.logoDomain ? (
-                  <img
-                    src={`https://www.google.com/s2/favicons?domain=${item.logoDomain}&sz=128`}
-                    alt=""
-                    aria-hidden
-                    loading="lazy"
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      margin: "auto",
-                      width: "70%",
-                      height: "70%",
-                      objectFit: "contain",
-                    }}
-                    onError={(e) => {
-                      e.currentTarget.style.display = "none"
-                    }}
-                  />
-                ) : null}
-              </div>
+              <ConnectorLogo item={item} className="logo" />
               <div className="nm">
                 <div className="t">{item.name}</div>
                 <div className="s">{state.statsString}</div>
@@ -187,14 +196,24 @@ export function ConnectorsSettingsView({
           )
         })}
 
-        <label className="set-conn-upload" title="Upload files">
-          <i className="ti ti-cloud-upload" aria-hidden />
-          Upload files
+        <label
+          className={`set-conn-upload${uploading ? " is-uploading" : ""}`}
+          title={uploading ? "Uploading…" : "Upload files"}
+          aria-busy={uploading}
+        >
+          <i
+            className={`ti ${uploading ? "ti-loader-2 ti-spin" : "ti-cloud-upload"}`}
+            aria-hidden
+          />
+          {uploading ? "Uploading…" : "Upload files"}
           <span className="muted">{UPLOAD_ACCEPT_HINT}</span>
           <input
             type="file"
             multiple
             accept={UPLOAD_EXTENSIONS.join(",")}
+            // Block re-selection while a previous batch is still ingesting so
+            // the user can't fire overlapping uploads mid-flight.
+            disabled={uploading}
             style={{ display: "none" }}
             onChange={(e) => {
               if (e.target.files && e.target.files.length > 0) {
@@ -250,6 +269,7 @@ export function ConnectorsSettings() {
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [files, setFiles] = useState<SourceFile[]>([])
   const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [configuringProviderId, setConfiguringProviderId] = useState<
     string | null
@@ -379,8 +399,10 @@ export function ConnectorsSettings() {
       } catch (e) {
         oauthTab.abort()
         oauthInFlight.current = false
-        const msg = e instanceof Error ? e.message : String(e)
-        setLoadError(`Could not start ${providerId} connect: ${msg}`)
+        // Non-admins hit a 403 admin gate for org-wide connectors (e.g.
+        // Google Drive). Surface a clear, friendly explanation instead of
+        // the raw "Could not start … connect" diagnostic.
+        setLoadError(connectStartErrorMessage(providerId, e))
       }
     },
     [activeCompany],
@@ -409,6 +431,7 @@ export function ConnectorsSettings() {
     async (categoryKey: string, picked: FileList) => {
       const list = Array.from(picked)
       if (list.length === 0) return
+      setUploading(true)
       try {
         const r = await companiesApi.uploadFiles(activeCompany, list)
         // Refresh the company-wide uploaded-files list so the new file shows
@@ -437,6 +460,8 @@ export function ConnectorsSettings() {
         }
         const msg = e instanceof Error ? e.message : String(e)
         showToast("Upload failed", msg)
+      } finally {
+        setUploading(false)
       }
     },
     [activeCompany, reloadFiles, showToast],
@@ -457,6 +482,7 @@ export function ConnectorsSettings() {
         onConnect={onConnect}
         onConfigure={onConfigure}
         onUpload={onUpload}
+        uploading={uploading}
         files={files}
       />
       <ConfigureConnectorDrawer

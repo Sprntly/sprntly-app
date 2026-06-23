@@ -2076,6 +2076,41 @@
     font-weight: 600;
   }
 
+  .chat-welcome-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin: 14px auto 0;
+    max-width: 560px;
+  }
+
+  .chat-welcome-suggestion {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 14px;
+    border: 1px solid #12201a17;
+    border-radius: 999px;
+    background: #fff;
+    color: #15201b;
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: all .14s;
+  }
+
+  .chat-welcome-suggestion:hover {
+    border-color: #9bdcc1;
+    background: #edf8f2;
+  }
+
+  .chat-welcome-suggestion-icon {
+    display: inline-flex;
+    color: var(--accent);
+  }
+
   .chat-home-composer {
     display: flex;
     flex-direction: column;
@@ -3835,6 +3870,22 @@
     flex: 1 1 auto;
   }
 
+  /* Connector brand-logo tile shown next to the title in the connect modal. */
+  .conn-modal-logo {
+    flex: 0 0 auto;
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 15px;
+    color: #fff;
+    margin-top: 2px;
+  }
+
   .modal-badge {
     display: inline-flex;
     align-items: center;
@@ -5182,37 +5233,6 @@
     color: var(--ink);
   }
 
-  .bh-live {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    color: var(--accent-ink);
-    background: var(--accent-soft);
-    border: 1px solid var(--accent-alpha-22);
-    padding: 2px 8px 2px 7px;
-    border-radius: 999px;
-  }
-
-  .bh-live-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-
-  .bh-live--refreshing {
-    color: var(--ink-3);
-    background: var(--surface-3);
-    border-color: var(--line);
-  }
-
-  .bh-live--refreshing .bh-live-dot {
-    background: var(--ink-3);
-  }
-
   .bh-sep {
     color: var(--ink-4);
     font-size: 13px;
@@ -5286,6 +5306,16 @@
   .bc-scroll::-webkit-scrollbar-thumb:hover {
     background: rgba(18, 32, 26, 0.28);
     background-clip: padding-box;
+  }
+
+  /* Persistent PM-agent intro — the always-on educational line above the
+     per-week greeting. Rendered every time so the agent's ongoing value is
+     restated; sits where the redundant "Monday brief" header line used to. */
+  .bc-intro {
+    margin: 0 0 12px;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--ink);
   }
 
   .bc-greeting {
@@ -12374,6 +12404,26 @@
     color: #aab2ac;
   }
 
+  /* Busy state while a manual upload converts + persists server-side. Gives
+     the click immediate, visible feedback (spinner + "Uploading…") instead of
+     appearing inert during the multi-second ingest. */
+  .set-conn-upload.is-uploading {
+    cursor: progress;
+    border-color: #b8e0cc;
+    background: #eaf6f0;
+    color: #0c6e4a;
+  }
+
+  .set-conn-upload .ti-spin {
+    animation: set-conn-upload-spin 0.8s linear infinite;
+  }
+
+  @keyframes set-conn-upload-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   /* ─── Settings sidebar group header (commit B chrome) ─── */
 
   .settings-nav-group {
@@ -13294,6 +13344,9 @@
     background: var(--accent);
     color: #fff;
     border-color: var(--accent);
+    /* Bolder than the .btn base (500) — the primary onboarding action should
+       read clearly, not light. */
+    font-weight: 700;
   }
 
   .onb-shell .btn-brand:hover {
@@ -13325,6 +13378,8 @@
     background: transparent;
     color: var(--ink-2);
     padding: 10px 14px;
+    /* Skip links were reading too light — bolden them. */
+    font-weight: 600;
   }
 
   .onb-shell .btn-ghost:hover {
@@ -13539,6 +13594,18 @@
     animation: mtTargetIn 0.3s ease both;
   }
 
+  /* A selected goal/metric reads with a clear green selected state. Removing
+     it (the delete control) toggles it back off. */
+  .mt-target.sel {
+    border-color: var(--accent-2);
+    background: var(--accent-muted);
+    box-shadow: 0 0 0 1px var(--accent-2);
+  }
+
+  .mt-target.sel .mt-target-name {
+    color: var(--accent-ink);
+  }
+
   @keyframes mtTargetIn {
     from {
       opacity: 0;
@@ -13603,6 +13670,54 @@
     color: var(--ink-3);
     font-size: 12px;
     padding: 8px 0;
+  }
+
+  /* Pick-exactly-3 candidate list: a flat column of toggleable metric cards.
+     Each card reuses .mt-target for the green selected state (.sel). */
+  .metric-pick {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 12px;
+  }
+
+  .metric-card {
+    width: 100%;
+    text-align: left;
+    padding: 12px 14px;
+    cursor: pointer;
+    transition:
+      border-color 0.12s,
+      background 0.12s,
+      box-shadow 0.12s;
+  }
+
+  .metric-card:hover:not(:disabled):not(.sel) {
+    border-color: var(--accent-2);
+    background: var(--surface-1, rgba(0, 0, 0, 0.02));
+  }
+
+  .metric-card .mt-target-name {
+    margin-bottom: 0;
+  }
+
+  .metric-card.sel .mt-target-name .mt-ic {
+    color: var(--accent-ink);
+  }
+
+  .metric-card-desc {
+    display: block;
+    margin-top: 6px;
+    margin-left: 18px;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--ink-3);
+    line-height: 1.45;
+  }
+
+  .metric-card:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
 
   /* Analyzing interstitial (blocking loader). */
@@ -13895,6 +14010,8 @@
     border: 0;
     padding: 0;
     font: inherit;
+    /* Bolden the skip affordance — it was reading too light. */
+    font-weight: 600;
     color: var(--accent-ink);
     cursor: pointer;
     text-decoration: underline;
@@ -14126,6 +14243,11 @@
     color: var(--ink-2);
     margin-top: 2px;
     line-height: 1.45;
+  }
+
+  /* Recurring weekly-brief cadence note, set off from the line above it. */
+  .onb-card .gen-ready .s.brief-cadence {
+    margin-top: 8px;
   }
 
   /* Workspace summary strip (replaces the old KPI-tree right pane). */

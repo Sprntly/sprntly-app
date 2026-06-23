@@ -1,12 +1,12 @@
 // View tests for the onboarding metrics page — "Set your success metrics" (the
-// single consolidated metrics page). renderToStaticMarkup pattern (node-env, no
+// REDESIGNED pick-exactly-3 page). renderToStaticMarkup pattern (node-env, no
 // jsdom, no hooks): the stateful container wires hooks, while MetricsSetupView
 // is pure and renders to static markup directly.
 //
-// NOTE: the suggestion-CHIP row was removed in the semantic-routes refactor.
-// Metrics are now pre-seeded directly as tree-target cards (edit + delete) and
-// re-added via "write your own"; there are no selectable suggestion chips, so
-// these tests assert there is NO chip surface.
+// The redesign DROPS the explicit North-Star input and the supporting-metric
+// split. Instead it shows a FLAT list of candidate metric cards; the user picks
+// exactly 3, and selected cards carry the green `.sel` selected state. The
+// North Star is inferred server-side, so there is NO north-star input here.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
@@ -21,23 +21,20 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
   const defaults: MetricsSetupViewProps = {
     industry: "Fintech",
     businessType: "Marketplace",
-    northStar: "",
-    northStarDescription: "",
-    northStarHints: ["Net revenue retention", "Activated accounts"],
-    supporting: [],
+    candidates: [
+      { name: "Reconciled volume", description: "Weekly total." },
+      { name: "Active connected accounts", description: "Live syncs." },
+      { name: "Incremental revenue", description: "" },
+      { name: "Conversion rate", description: "" },
+    ],
+    selected: [],
     customMetric: "",
-    customDescription: "",
     errors: {},
     error: null,
     onChangeIndustry: noop,
     onChangeBusinessType: noop,
-    onChangeNorthStar: noop,
-    onChangeNorthStarDescription: noop,
-    onPickNorthStar: noop,
-    onChangeSupportingDescription: noop,
-    onRemoveSupporting: noop,
+    onToggle: noop,
     onChangeCustomMetric: noop,
-    onChangeCustomDescription: noop,
     onAddCustom: noop,
   }
   return renderToStaticMarkup(
@@ -45,60 +42,93 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
   )
 }
 
-describe("MetricsSetupView — NO suggestion chips", () => {
-  it("renders no selectable suggestion-chip surface", () => {
-    const html = render({
-      supporting: [{ name: "Reconciled volume", description: "Weekly total." }],
-    })
-    // The chip row + its toggle affordance are gone entirely.
-    expect(html).not.toContain("mt-suggested")
-    expect(html).not.toContain("aria-pressed")
-    expect(html).not.toContain('id="suggestedMetrics"')
-  })
-
-  it("shows an add-your-own prompt when nothing is seeded yet", () => {
-    const html = render({ supporting: [] })
-    expect(html).toContain("No supporting metrics yet")
-    expect(html).toContain("Or write your own")
-  })
-})
-
-describe("MetricsSetupView — selected metrics render as tree targets", () => {
-  it("renders each selected supporting metric as a tree target with name, editable description, and a delete control", () => {
-    const html = render({
-      supporting: [{ name: "Reconciled volume", description: "Weekly total." }],
-    })
-    // targets live inside the metric-tree (source → targets), not a separate block
-    expect(html).toContain("metric-tree")
-    expect(html).toContain('class="mt-targets mt-targets-cards"')
-    expect(html).toContain('class="mt-target"')
-    expect(html).toContain('data-metric="Reconciled volume"')
-    // name + editable description textarea
-    expect(html).toContain("Reconciled volume")
-    expect(html).toContain('aria-label="Description for Reconciled volume"')
-    expect(html).toContain("Weekly total.")
-    // delete control
-    expect(html).toContain('aria-label="Remove Reconciled volume"')
-    expect(html).toMatch(/<button[^>]*type="button"[^>]*aria-label="Remove Reconciled volume"/)
-    // the old separate bottom cards section is gone
-    expect(html).not.toContain("metric-desc-block")
-  })
-
-  it("shows a targets empty state (not the bottom cards) when nothing is selected", () => {
-    const html = render({ supporting: [] })
-    expect(html).toContain("mt-targets-empty")
-    expect(html).not.toContain('class="mt-target"')
-    expect(html).toContain("0</strong> supporting metrics selected")
-  })
-})
-
-describe("MetricsSetupView — add your own (metric-other)", () => {
-  it("renders the custom metric name + description inputs and an Add button", () => {
+describe("MetricsSetupView — NO explicit North Star / supporting split", () => {
+  it("renders no north-star input and no supporting-metric section", () => {
     const html = render()
-    expect(html).toContain("metric-other")
+    // The dedicated North Star input + its hint chips are gone.
+    expect(html).not.toContain("your North Star")
+    expect(html).not.toContain("Common for")
+    expect(html).not.toContain("The one metric that best captures product value")
+    // The old "Supporting metrics" section + tree source are gone.
+    expect(html).not.toContain("Supporting metrics")
+    expect(html).not.toContain("mt-source")
+    expect(html).not.toContain("Primary leads to")
+  })
+
+  it("prompts to pick exactly 3 metrics", () => {
+    const html = render()
+    expect(html).toContain("Pick your 3 success metrics")
+  })
+})
+
+describe("MetricsSetupView — flat candidate list with green selected state", () => {
+  it("renders every candidate as a toggleable card", () => {
+    const html = render()
+    expect(html).toContain('id="metricCandidates"')
+    expect(html).toContain('data-metric="Reconciled volume"')
+    expect(html).toContain('data-metric="Conversion rate"')
+    // candidate descriptions surface when present
+    expect(html).toContain("Weekly total.")
+  })
+
+  it("marks selected cards with the green .sel selected state", () => {
+    const html = render({
+      selected: ["Reconciled volume", "Incremental revenue"],
+    })
+    // selected cards carry .sel + aria-selected/aria-pressed true
+    expect(html).toMatch(
+      /<button[^>]*class="mt-target metric-card sel"[^>]*data-metric="Reconciled volume"/,
+    )
+    expect(html).toContain('aria-selected="true"')
+    expect(html).toContain('aria-pressed="true"')
+    // an unselected candidate is NOT marked selected
+    expect(html).toMatch(
+      /<button[^>]*class="mt-target metric-card "[^>]*data-metric="Conversion rate"/,
+    )
+  })
+
+  it("disables unselected cards once 3 are already picked (but not the selected ones)", () => {
+    const html = render({
+      selected: ["Reconciled volume", "Active connected accounts", "Incremental revenue"],
+    })
+    // the 4th, unselected candidate is disabled
+    expect(html).toMatch(
+      /<button[^>]*data-metric="Conversion rate"[^>]*disabled/,
+    )
+    // a selected card stays enabled (toggle-off must remain possible)
+    expect(html).not.toMatch(
+      /<button[^>]*data-metric="Reconciled volume"[^>]*disabled/,
+    )
+  })
+})
+
+describe("MetricsSetupView — the pick counter", () => {
+  it("shows N of 3 with a 'pick more' nudge below 3", () => {
+    expect(render({ selected: [] })).toContain("0</strong> of 3 metric")
+    expect(render({ selected: ["Reconciled volume"] })).toContain("pick 2 more")
+  })
+
+  it("shows a ready state at exactly 3", () => {
+    const html = render({
+      selected: ["Reconciled volume", "Active connected accounts", "Incremental revenue"],
+    })
+    expect(html).toContain("3</strong> of 3 metric")
+    expect(html).toContain("ready")
+  })
+
+  it("surfaces the pick-exactly-3 validation error", () => {
+    const html = render({
+      errors: { metrics: "Pick exactly 3 metrics to continue." },
+    })
+    expect(html).toContain("Pick exactly 3 metrics to continue.")
+  })
+})
+
+describe("MetricsSetupView — add your own + dropdowns", () => {
+  it("renders the custom metric input and an Add button", () => {
+    const html = render()
     expect(html).toContain("Or write your own")
     expect(html).toContain('aria-label="Custom metric name"')
-    expect(html).toContain('aria-label="Custom metric description"')
     expect(html).toContain("Add</button>")
   })
 
@@ -106,44 +136,15 @@ describe("MetricsSetupView — add your own (metric-other)", () => {
     const html = render({ customMetric: "" })
     expect(html).toMatch(/<button[^>]*disabled/)
   })
-})
 
-describe("MetricsSetupView — editable industry / business-type dropdowns", () => {
-  it("renders BOTH as <select> dropdowns pre-filled with the predicted values", () => {
+  it("renders editable, pre-filled industry / business-type dropdowns", () => {
     const html = render({ industry: "Fintech", businessType: "Marketplace" })
     expect(html).toContain('aria-label="Industry"')
     expect(html).toContain('aria-label="Business type"')
-    // pre-filled selection surfaces as the selected option
     expect(html).toMatch(/<option[^>]*selected[^>]*>Fintech<\/option>/)
     expect(html).toMatch(/<option[^>]*selected[^>]*>Marketplace<\/option>/)
-    // and they're editable (not disabled / not read-only text)
     expect(html).not.toMatch(/<select[^>]*disabled/)
-    expect(html).toContain("predicted from your website")
-  })
-})
-
-describe("MetricsSetupView — North Star", () => {
-  it("renders the required North Star input with industry-tailored hints", () => {
-    const html = render()
-    expect(html).toContain("your North Star")
-    expect(html).toContain("Common for Fintech")
-    expect(html).toContain("Net revenue retention")
-  })
-
-  it("surfaces a North Star validation error", () => {
-    const html = render({
-      errors: { northStar: "Set a North Star metric to anchor your KPI tree." },
-    })
-    expect(html).toContain("Set a North Star metric to anchor your KPI tree.")
-    expect(html).toContain("has-error")
-  })
-
-  it("renders a description textarea for each selected supporting metric", () => {
-    const html = render({
-      supporting: [{ name: "Reconciled volume", description: "Weekly total." }],
-    })
-    expect(html).toContain('data-metric="Reconciled volume"')
-    expect(html).toContain("Weekly total.")
+    expect(html).toContain("Gaming / Entertainment")
   })
 
   it("renders an error banner when error is set", () => {

@@ -301,21 +301,33 @@ def run_synthesis(
     # we save + return an empty brief (a valid outcome, distinct from the
     # totally-empty-KG case above which still raises). Runs BEFORE de-dup: if
     # there isn't enough real evidence there's nothing worth de-duping.
+    #
+    # UPLOAD-ONLY tenants are an explicit exception: a PM who has uploaded a file
+    # but connected no live sources still gets a brief from those uploaded-doc
+    # signals (>= brief.min_upload_signals of them), because for that tenant the
+    # uploaded file IS their data. The gate detects upload-only purely from
+    # signal provenance (zero connector-origin signals); a tenant that DOES have
+    # connected sources never takes this path, so connected-tenant gate behavior
+    # is unchanged. See convergence.has_sufficient_evidence / is_upload_only.
     min_connected = int(config_get(
         "brief.min_connected_signals", enterprise_id, default=3))
     require_multi_source = bool(config_get(
         "brief.require_multi_source", enterprise_id, default=True))
+    min_upload = int(config_get(
+        "brief.min_upload_signals", enterprise_id, default=2))
     if not has_sufficient_evidence(
         convergence,
         min_connected_signals=min_connected,
         require_multi_source=require_multi_source,
+        min_upload_signals=min_upload,
     ):
         return _save_empty_brief(
             enterprise_id, dataset_slug,
             reason=(
-                "Not enough connected-source evidence yet "
-                f"(need a multi-source theme or >= {min_connected} connected "
-                "signals; only onboarding/profile metadata present)."
+                "Not enough evidence yet "
+                f"(need a multi-source theme, >= {min_connected} connected "
+                f"signals, or >= {min_upload} uploaded-doc signals; "
+                "only onboarding/profile metadata present)."
             ),
         )
 

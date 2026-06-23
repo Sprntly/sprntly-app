@@ -30,7 +30,7 @@ import { Check, FileText } from "../../auth/icons"
  * Phase → stage mapping (monotonic; stages only ever advance):
  *   1 "Workspace context saved"        active while preparing + seeding
  *   2 "Analyzing your sources"         active once seeding completes
- *   3 "Composing your first Monday Brief"
+ *   3 "Composing your first Weekly Brief"
  *                                      active once the poller first reports
  *                                      status "generating"
  *
@@ -57,7 +57,7 @@ const STAGES = [
     pendingIcon: null,
   },
   {
-    label: "Composing your first Monday Brief",
+    label: "Composing your first Weekly Brief",
     sub: "Lands on your Brief page when ready",
     pendingIcon: FileText,
   },
@@ -213,24 +213,36 @@ export function FirstBrief() {
       ? "Your workspace is live and your coworkers have finished their first pass."
       : phase.kind === "failed"
         ? "Your workspace is set up. The first Brief needs a bit more data — you can still enter Sprntly now and it will land on your Brief page once sources come in."
-        : "Your coworkers are reading everything you shared and composing your first Monday Brief. It'll be waiting on your Brief page — this usually takes one to two minutes."
+        : "Your coworkers are reading everything you shared and composing your first Weekly Brief. It'll be waiting on your Brief page — this usually takes one to two minutes."
 
   const footerMeta =
     phase.kind === "ready"
-      ? "Workspace ready · 5 of 5 steps complete"
+      ? "Workspace ready · 4 of 4 steps complete"
       : phase.kind === "failed"
         ? "You can enrich the next Brief from Sources once inside"
         : "Generating… your Brief opens as soon as it's ready"
 
   const findings = phase.kind === "ready" ? phase.brief.insights.length : 0
 
+  // The weekly brief is sent Monday 09:00 in the company's local timezone
+  // (backend: brief_schedule.should_run_weekly_brief / resolve_timezone). We
+  // don't capture a timezone in onboarding, so surface the user's browser
+  // timezone when the runtime exposes one and fall back to "your local time".
+  const localTimezone =
+    typeof Intl !== "undefined"
+      ? Intl.DateTimeFormat().resolvedOptions().timeZone || null
+      : null
+  const briefCadenceCopy = localTimezone
+    ? `From now on, Sprntly sends you a fresh Brief of what's happening and the new insights it found every Monday at 9:00 AM (your timezone: ${localTimezone}).`
+    : "From now on, Sprntly sends you a fresh Brief of what's happening and the new insights it found every Monday at 9:00 AM your local time."
+
   return (
     <OnboardingChrome
-      step={5}
+      step={4}
       title={title}
       subtitle={subtitle}
       footerMeta={footerMeta}
-      onBack={() => router.push("/onboarding/coworkers")}
+      onBack={() => router.push("/onboarding/connectors")}
       onContinue={() => void finish(phase.kind === "failed" ? "/" : "/brief")}
       continueLabel={phase.kind === "failed" ? "Enter Sprntly anyway" : "Open your Brief"}
       continueDisabled={generating}
@@ -272,11 +284,12 @@ export function FirstBrief() {
             <Check style={{ width: 17, height: 17 }} />
           </div>
           <div>
-            <div className="t">Your Monday Brief is waiting</div>
+            <div className="t">Your Weekly Brief is waiting</div>
             <div className="s">
               {findings > 0 ? `${findings} findings, ranked against your KPI tree — open` : "Open"}{" "}
               it to see what your coworkers found, and ask follow-ups in the thread.
             </div>
+            <div className="s brief-cadence">{briefCadenceCopy}</div>
           </div>
         </div>
       )}

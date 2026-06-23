@@ -3,7 +3,6 @@ export type ScreenId =
   | "ob-business-info"
   | "ob-metrics"
   | "ob-connectors"
-  | "ob-coworkers"
   | "ob-first-brief"
   // Unnumbered loader interstitial — its own route, excluded from the numbered
   // ONBOARDING_SCREENS list and the progress dots.
@@ -31,7 +30,6 @@ export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-business-info",
   "ob-metrics",
   "ob-connectors",
-  "ob-coworkers",
   "ob-first-brief",
 ]
 
@@ -56,16 +54,15 @@ export const APP_SCREENS: ScreenId[] = [
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-business-info": "Setup · Step 1 of 5",
-  "ob-metrics": "Setup · Step 2 of 5",
-  "ob-connectors": "Setup · Step 3 of 5",
-  "ob-coworkers": "Setup · Step 4 of 5",
-  "ob-first-brief": "Setup · Step 5 of 5",
+  "ob-business-info": "Setup · Step 1 of 4",
+  "ob-metrics": "Setup · Step 2 of 4",
+  "ob-connectors": "Setup · Step 3 of 4",
+  "ob-first-brief": "Setup · Step 4 of 4",
   // Unnumbered loader — no step counter.
   "ob-analyzing": "Setup",
   chat: "Home",
   chats: "All chats",
-  brief: "Monday brief",
+  brief: "Weekly brief",
   detail: "Evidence",
   ondemand: "Home",
   past: "Past briefs",

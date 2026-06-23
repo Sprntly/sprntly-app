@@ -174,6 +174,15 @@ export type Brief = {
   week_label: string
   summary_headline: string
   insights: Insight[]
+  /** Backend evidence-gate flag: set when the brief was saved EMPTY because the
+   *  KG lacked enough connected-source evidence (vs. a brand-new account with no
+   *  data at all). Lets the UI tell "we got your upload, but need more connected
+   *  evidence" apart from "add your first source". Older/normal briefs omit it. */
+  _insufficient_evidence?: boolean
+  /** Human-readable reason that accompanies `_insufficient_evidence` (set by the
+   *  backend). Optional and may carry internal phrasing — the UI prefers its own
+   *  static copy unless this is clearly user-friendly. */
+  _empty_reason?: string
 }
 
 export type BriefStatus = {
@@ -517,6 +526,149 @@ export const companiesApi = {
     ),
 }
 
+// ---- business context -------------------------------------------------------
+//
+// The company's structured, provenance-tracked "lens" (8 layers). Mirrors
+// backend/app/business_context.py: every leaf is wrapped in a provenance
+// envelope (value + src + conf + as_of + evidence). Stored in
+// companies.business_context (JSONB). The doc tolerates partials — only
+// identity is guaranteed present, and its leaves may still be unknown.
+
+/** Per-leaf provenance envelope. `value` is whatever the leaf holds
+ *  (string | string[] | boolean | null). */
+export type BcSrc = "given" | "user" | "inferred" | "web" | "unknown"
+export type BcConf = "high" | "med" | "low" | null
+export type BcLeaf<T = unknown> = {
+  value: T
+  src: BcSrc
+  conf: BcConf
+  as_of: string | null
+  evidence: string | null
+}
+
+export type BcIdentity = {
+  legal_name: BcLeaf
+  also_known_as: BcLeaf
+  website: BcLeaf
+  one_liner: BcLeaf
+  industry: BcLeaf
+  sub_vertical: BcLeaf
+  company_size: BcLeaf
+  stage: BcLeaf
+  hq_geography: BcLeaf
+  markets_served: BcLeaf
+}
+
+export type BcBusinessModel = {
+  model_type: BcLeaf
+  revenue_model: BcLeaf
+  pricing_model: BcLeaf
+  who_pays: BcLeaf
+  who_uses: BcLeaf
+  monetization_unit: BcLeaf
+  unit_economics_shape: BcLeaf
+  good_outcome: BcLeaf
+}
+
+export type BcSegment = {
+  name: BcLeaf
+  description: BcLeaf
+  jtbd: BcLeaf
+  is_buyer: BcLeaf
+  is_user: BcLeaf
+  is_champion: BcLeaf
+  relative_size: BcLeaf
+}
+
+export type BcUsersSegments = {
+  segments: BcSegment[]
+  primary_segment: BcLeaf
+}
+
+export type BcProductValue = {
+  what_it_does: BcLeaf
+  core_value_moments: BcLeaf
+  activation_definition: BcLeaf
+  key_features: BcLeaf
+  platforms: BcLeaf
+}
+
+export type BcMarketCompetition = {
+  category: BcLeaf
+  main_alternatives: BcLeaf
+  positioning_angle: BcLeaf
+}
+
+export type BcGoalsStrategy = {
+  stated_goal: BcLeaf
+  north_star: BcLeaf
+  current_priorities: BcLeaf
+  known_constraints: BcLeaf
+}
+
+export type BcVocabTerm = {
+  term: BcLeaf
+  their_meaning: BcLeaf
+  sprntly_default: BcLeaf
+  note: BcLeaf
+}
+
+export type BcVocabulary = {
+  terms: BcVocabTerm[]
+}
+
+export type BcSourceRef = { url: string | null; as_of: string | null }
+
+export type BcDocMeta = {
+  created: BcLeaf
+  last_refreshed: BcLeaf
+  refresh_trigger: BcLeaf
+  overall_confidence: BcLeaf
+  sources: BcSourceRef[]
+}
+
+/** The full 8-layer document (+ version). Mirrors the pydantic
+ *  `BusinessContext` model. */
+export type BusinessContextDoc = {
+  identity: BcIdentity
+  business_model: BcBusinessModel
+  users_segments: BcUsersSegments
+  product_value: BcProductValue
+  market_competition: BcMarketCompetition
+  goals_strategy: BcGoalsStrategy
+  vocabulary: BcVocabulary
+  meta: BcDocMeta
+  version: number
+}
+
+export const businessContextApi = {
+  /**
+   * GET the current business-context doc (any member). Returns `null` when
+   * the backend answers 404 — i.e. the doc hasn't been generated yet
+   * (onboarding incomplete / never refreshed). Other errors propagate.
+   */
+  get: async (): Promise<BusinessContextDoc | null> => {
+    try {
+      return await api.get<BusinessContextDoc>("/v1/company/business-context")
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null
+      throw e
+    }
+  },
+  /** PUT human edits (admin-only). Known leaves are stamped src="user"
+   *  server-side. Returns the new version. */
+  update: (doc: BusinessContextDoc) =>
+    api.put<{ ok: true; version: number }>(
+      "/v1/company/business-context",
+      doc,
+    ),
+  /** POST refresh — re-runs the Business Context agent (admin-only). */
+  refresh: () =>
+    api.post<{ ok: true; [k: string]: unknown }>(
+      "/v1/company/business-context/refresh",
+    ),
+}
+
 // ---- sources ----------------------------------------------------------------
 
 export type SourceFile = {
@@ -547,6 +699,8 @@ export type ConnectionSummary = {
     dataset?: string
     folder_id?: string
     folder_name?: string
+    // Google Drive — files picked via the Google Picker (drive.file scope)
+    files?: GoogleDrivePickedFile[]
     // Slack
     channel_id?: string
     channel_name?: string
@@ -590,16 +744,21 @@ export type GitHubInstallRepo = {
 
 export type GoogleDriveSyncResult = {
   dataset: string
-  folder_id: string
   synced: { filename: string; md_path: string; md_chars: number }[]
   skipped: { name: string; reason: string }[]
   errors: { name: string; error: string }[]
 }
 
-export type DriveFolderBrowse = {
-  current: { id: string; name: string }
-  parent: { id: string; name: string } | null
-  folders: { id: string; name: string }[]
+/** A file the user picked via the Google Picker (drive.file scope). */
+export type GoogleDrivePickedFile = {
+  id: string
+  name?: string
+}
+
+/** Short-lived, drive.file-scoped access token for the browser Google Picker. */
+export type GoogleDrivePickerToken = {
+  access_token: string
+  expires_in: number
 }
 
 export type SlackChannel = {
@@ -622,23 +781,23 @@ export const connectorsApi = {
     api.delete<{ deleted: true; provider: string }>(
       `/v1/connectors/google-drive`,
     ),
-  browseGoogleDriveFolders: (parentId = "root") =>
-    api.get<DriveFolderBrowse>(
-      `/v1/connectors/google-drive/folders?parent_id=${encodeURIComponent(parentId)}`,
+  /** Mint a short-lived, drive.file-scoped access token for the browser
+   * Google Picker. The Picker widget runs in the user's own browser and
+   * needs an OAuth token to render their Drive. */
+  getGoogleDrivePickerToken: () =>
+    api.get<GoogleDrivePickerToken>(
+      `/v1/connectors/google-drive/picker-token`,
     ),
-  setGoogleDriveConfig: (
-    folderId: string,
-    dataset?: string,
-    folderName?: string,
-  ) =>
-    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
-      `/v1/connectors/google-drive/config`,
-      { folder_id: folderId, folder_name: folderName, dataset },
+  /** Persist the files the user selected in the Google Picker and run a
+   * sync so they land in the corpus. Replaces the whole stored list. */
+  saveGoogleDriveFiles: (body: { files: GoogleDrivePickedFile[] }) =>
+    api.post<GoogleDriveSyncResult>(
+      `/v1/connectors/google-drive/files`,
+      body,
     ),
-  syncGoogleDrive: (dataset?: string, folderId?: string) =>
+  syncGoogleDrive: (dataset?: string) =>
     api.post<GoogleDriveSyncResult>(`/v1/connectors/google-drive/sync`, {
       dataset,
-      folder_id: folderId,
     }),
   /** Full-page navigation — OAuth must not use fetch. */
   googleDriveAuthorizeUrl: (dataset: string) =>
@@ -1511,6 +1670,24 @@ export type TeamMemberRecord = {
 export const teamApi = {
   /** Fetch all company members enriched with profile data. */
   list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
+}
+
+// ── Feedback / feature-request (June 20 #13 + #A) ──
+// Users submit a short message + an optional type from the left nav. The
+// backend stores it and emails it to the team. type defaults to "other".
+
+export type FeedbackType = "bug" | "feature_request" | "connector_request" | "other"
+
+export type FeedbackResult = {
+  id: string
+  type: FeedbackType
+  email_sent: boolean
+}
+
+export const feedbackApi = {
+  /** Submit in-app feedback / a feature or connector request. */
+  submit: (body: { message: string; type?: FeedbackType }) =>
+    api.post<FeedbackResult>("/v1/feedback", body),
 }
 
 // ── Conversations (chat history persistence) ──

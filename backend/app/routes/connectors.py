@@ -62,6 +62,7 @@ from app.connectors import (
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
+    _refresh_credentials,
     normalize_picked_files,
     sync_google_drive,
 )
@@ -626,6 +627,60 @@ def google_drive_sync(
 
     _auto_enable_drive_input_source(company.company_id, payload.dataset)
     return result.to_dict()
+
+
+@router.get("/google-drive/picker-token")
+def google_drive_picker_token(
+    company: CompanyContext = Depends(require_company),
+):
+    """Mint a short-lived Drive access token for the browser-side Google Picker.
+
+    The Google Picker JS widget needs an OAuth access token to render the
+    user's own Drive in their browser. We hold the user's Fernet-encrypted
+    refresh token (``drive.file`` scope only), so we refresh it server-side
+    here — reusing the same refresh helper the sync uses, never duplicating
+    that logic — and hand back ONLY the resulting access token. This is the
+    intended least-privilege Picker pattern: the token is ``drive.file``-scoped
+    (it can read/write only files the user explicitly picks, never the whole
+    Drive), it is returned solely to the authenticated owner of the connection
+    over HTTPS, and it expires within the hour. So exposing this narrow token
+    to the owner's own browser grants them nothing they couldn't already do
+    with their own Google account.
+
+    Returns ``{"access_token", "expires_in"}`` (seconds until expiry). 404 if
+    Drive isn't connected — matching how the other Drive routes signal that.
+    """
+    _require_admin_for_org_connector(company, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    row = db.get_connection(company.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Google Drive is not connected")
+
+    try:
+        creds = _refresh_credentials(row)
+    except SyncConfigError as e:
+        # Refresh helper raises SyncConfigError when the session is expired
+        # with no refresh token — surface as 409 "reconnect needed", mirroring
+        # the sync's 400-on-config-error handling but distinguishing the
+        # "must reconnect" state for the Picker UI.
+        raise HTTPException(409, str(e)) from e
+
+    if not creds.token:
+        raise HTTPException(409, "Google Drive session is invalid — reconnect.")
+
+    # creds.expiry is a naive UTC datetime (google-auth convention). Compute
+    # seconds-until-expiry; fall back to ~3000s (a hair under Google's hour)
+    # when expiry is missing so the browser refreshes well before it lapses.
+    expires_in = 3000
+    expiry = getattr(creds, "expiry", None)
+    if expiry is not None:
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        remaining = int((expiry - now).total_seconds())
+        if remaining > 0:
+            expires_in = remaining
+
+    return {"access_token": creds.token, "expires_in": expires_in}
 
 
 @router.delete("/google-drive")

@@ -10,6 +10,7 @@ import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboardin
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedSignal"
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
+import { ConnectorLogo } from "../../connectors/ConnectorLogo"
 import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
 import { Check } from "../../auth/icons"
 import {
@@ -41,6 +42,7 @@ import {
 const CATEGORY_DESCRIPTIONS: Record<string, string> = {
   analytics: "Product behaviour & cohort data — powers your brief",
   pm: "Roadmap, sprints, capacity",
+  docs: "Specs, docs & wikis — product context the agent can read",
   voice: "Tickets, transcripts, NPS, CSAT",
   revenue: "Billing & subscription data — ties work to revenue",
   code: "Repos & PRs — so the agent reads real code and ships fixes",
@@ -120,6 +122,15 @@ const CATEGORY_ICONS: Record<string, (props: SVGProps<SVGSVGElement>) => ReactEl
       <path d="M14 15v2a1 1 0 0 1-1 1H6l-3 3V11a1 1 0 0 1 1-1h2" />
     </svg>
   ),
+  docs: (p) => (
+    <svg {...iconProps(p)}>
+      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+      <path d="M9 9h1" />
+      <path d="M9 13h6" />
+      <path d="M9 17h6" />
+    </svg>
+  ),
   default: (p) => (
     <svg {...iconProps(p)}>
       <path d="M9 7V3" />
@@ -148,7 +159,6 @@ export function Connectors() {
   const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
-  const categories = useMemo(() => wizardCategories(), [])
   // Accordion state: which categories are done/skipped + which is expanded.
   const [doneCats, setDoneCats] = useState<Set<number>>(new Set())
   const [openCat, setOpenCat] = useState<number | null>(0)
@@ -157,6 +167,10 @@ export function Connectors() {
   const [modalProvider, setModalProvider] = useState<string | null>(null)
   const [planned, setPlanned] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
+
+  // Show only supported connectors / non-empty categories (see
+  // wizardCategories), but never hide a provider with a live connection.
+  const categories = useMemo(() => wizardCategories(connected), [connected])
 
   useEffect(() => {
     if (!workspace?.id) return
@@ -237,10 +251,10 @@ export function Connectors() {
     setSaving(true)
     try {
       if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
-      // Next numbered step is coworkers (index 4 in ONBOARDING_STEP_SLUGS).
+      // Next numbered step is first-brief (index 4 in ONBOARDING_STEP_SLUGS).
       const updated = await advanceOnboardingStep(workspace.id, 4)
       setWorkspace(updated)
-      router.push("/onboarding/coworkers")
+      router.push("/onboarding/first-brief")
     } finally {
       setSaving(false)
     }
@@ -349,13 +363,7 @@ export function Connectors() {
                           aria-pressed={sel}
                           aria-disabled={live || undefined}
                         >
-                          <span
-                            className="conn-logo"
-                            style={{ background: item.logoColor ?? "var(--ink)" }}
-                            aria-hidden
-                          >
-                            {item.logoText ?? item.name.charAt(0)}
-                          </span>
+                          <ConnectorLogo item={item} className="conn-logo" />
                           <span className="conn-name">{item.name}</span>
                           {live && <span className="conn-live">Live</span>}
                           <span className="check" aria-hidden>

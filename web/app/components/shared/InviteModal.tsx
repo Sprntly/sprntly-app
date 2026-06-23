@@ -49,7 +49,7 @@ export function InviteModal() {
           <div className="modal-badge">Invite</div>
           <h2 className="modal-title">Invite teammates to Sprntly</h2>
           <p className="modal-sub">
-            Everyone gets the Monday brief. Admins can approve PRDs and push to
+            Everyone gets the Weekly brief. Admins can approve PRDs and push to
             Claude Code or your tracker.
           </p>
         </div>

@@ -72,6 +72,44 @@ describe("BusinessInfo (container) — Company page", () => {
     expect(container.querySelector('input[type="url"]')).not.toBeNull()
   })
 
+  it("no longer renders the Stage or Team size steps", () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
+
+    const { container } = render(React.createElement(BusinessInfo))
+    expect(container.textContent).not.toContain("Stage")
+    expect(container.textContent).not.toContain("Team size")
+    // the Seed/Growth/Scale stage chips are gone
+    expect(container.textContent).not.toContain("Growth")
+    // no headcount number input remains
+    expect(container.querySelector('input[type="number"]')).toBeNull()
+    // tech-stack chips still render (untouched)
+    expect(container.querySelector(".onb-chip")).not.toBeNull()
+  })
+
+  it("does NOT send stage/team_size in the create payload (dropped cleanly)", async () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    createWorkspaceMock.mockResolvedValue(makeWorkspace())
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
+
+    render(React.createElement(BusinessInfo))
+    const inputs = document.querySelectorAll("input.inp")
+    fireEvent.change(inputs[0], { target: { value: "Acme" } })
+    fireEvent.change(inputs[1], { target: { value: "Acme App" } })
+
+    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /continue/i.test(b.textContent ?? ""),
+    ) as HTMLButtonElement
+    await act(async () => {
+      continueBtn.click()
+    })
+
+    expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
+    const payload = createWorkspaceMock.mock.calls[0][0] as Record<string, unknown>
+    expect("stage" in payload).toBe(false)
+    expect("teamSize" in payload).toBe(false)
+  })
+
   it("Continue persists the workspace then navigates to the analyzing interstitial (no background analysis)", async () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     createWorkspaceMock.mockResolvedValue(makeWorkspace())

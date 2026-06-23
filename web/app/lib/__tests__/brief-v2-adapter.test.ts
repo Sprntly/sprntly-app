@@ -85,6 +85,23 @@ describe("briefToBriefV2State", () => {
     expect(out.company).toBe("Asurion")
   })
 
+  it("threads _insufficient_evidence / _empty_reason onto the empty state", () => {
+    const brief = {
+      ...makeBrief([]),
+      _insufficient_evidence: true,
+      _empty_reason: "Only 1 connected source",
+    }
+    const out = briefToBriefV2State(brief)
+    expect(out.insufficientEvidence).toBe(true)
+    expect(out.emptyReason).toBe("Only 1 connected source")
+  })
+
+  it("defaults the evidence-gate fields to false/null for a normal brief", () => {
+    const out = briefToBriefV2State(makeBrief([makeInsight({ tag: "something_broken" })]))
+    expect(out.insufficientEvidence).toBe(false)
+    expect(out.emptyReason).toBeNull()
+  })
+
   it("picks the LLM-flagged is_headline insight as the hero", () => {
     const insights = [
       makeInsight({ tag: "something_broken", title: "Broken A", confidence: 0.9 }),

@@ -29,9 +29,10 @@ import {
 } from "../../lib/api"
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
+import { ConnectorLogo } from "./ConnectorLogo"
 import { openOauthTab } from "../../lib/connectorsOauth"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
-import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
+import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -112,6 +113,7 @@ export function ConnectorConnectModalView({
     >
       <div className="modal modal-md" role="dialog" aria-label={`Connect ${item.name}`}>
         <div className="modal-head">
+          <ConnectorLogo item={item} className="conn-modal-logo" />
           <h2 className="modal-title">
             {isConnected ? `${item.name} connected` : `Connect ${item.name}`}
           </h2>
@@ -446,11 +448,10 @@ export function ConnectorConnectModal({
   if (connection != null) {
     if (providerId === "google_drive") {
       slot = (
-        <GoogleDriveFolderPicker
+        <GoogleDrivePicker
           dataset={activeCompany}
-          selectedFolderId={connection.config?.folder_id}
-          selectedFolderName={connection.config?.folder_name}
-          onSelected={onConnected}
+          savedFiles={connection.config?.files}
+          onSaved={onConnected}
         />
       )
     } else if (providerId === "slack") {
