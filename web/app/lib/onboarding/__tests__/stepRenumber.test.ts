@@ -1,7 +1,9 @@
 // Slug-routing integrity for the semantic-routes onboarding flow. The flow is
-// now 4 numbered steps keyed by slug (business-info → metrics → connectors →
-// first-brief) plus an unnumbered `analyzing` loader. The agent-naming
-// `coworkers` step was removed. These guard the total step count, the
+// the product-approved 5-step redesign (business-info → connectors →
+// business-context → strategy → workspace) plus an unnumbered `analyzing`
+// loader. The earlier `metrics` and `first-brief` routes were folded in
+// (metrics → business-info; brief generation → workspace); the agent-naming
+// `coworkers` step stays removed. These guard the total step count, the
 // slug↔screen mapping (no gaps, dropped pages gone), and that the loader is
 // excluded from the numbered screen list / progress dots.
 import { describe, expect, it } from "vitest"
@@ -15,18 +17,24 @@ import { screenIdFromPathname, SCREEN_PATH } from "../../routes"
 import { ONBOARDING_SCREENS } from "../../../types"
 
 describe("onboarding slug routing", () => {
-  it("has exactly 4 numbered steps in flow order (coworkers removed)", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(4)
-    expect(ONBOARDING_SCREENS).toHaveLength(4)
+  it("has exactly 5 numbered steps in flow order (redesign)", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(5)
+    expect(ONBOARDING_SCREENS).toHaveLength(5)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
       "business-info",
-      "metrics",
       "connectors",
-      "first-brief",
+      "business-context",
+      "strategy",
+      "workspace",
     ])
-    // The agent-naming step is gone from the sequence and the screen list.
+    // The agent-naming step is gone, and the trimmed standalone routes are
+    // folded into the redesign steps.
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("coworkers")
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("metrics")
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("first-brief")
     expect(ONBOARDING_SCREENS).not.toContain("ob-coworkers")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-metrics")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-first-brief")
   })
 
   it("maps each /onboarding/<slug> to ob-<slug> with no gaps", () => {
@@ -39,12 +47,14 @@ describe("onboarding slug routing", () => {
   })
 
   it("no longer routes the dropped numeric / removed-page paths to a real screen", () => {
-    // The old numeric routes and the removed strategic/business-context pages
-    // are gone; unknown onboarding paths fall through to chat.
+    // The old numeric routes and the folded-in standalone pages are gone;
+    // unknown onboarding paths fall through to chat.
     expect(screenIdFromPathname("/onboarding/1")).toBe("chat")
     expect(screenIdFromPathname("/onboarding/7")).toBe("chat")
     expect(screenIdFromPathname("/onboarding/strategic-context")).toBe("chat")
-    expect(screenIdFromPathname("/onboarding/business-context")).toBe("chat")
+    // metrics + first-brief are no longer standalone numbered routes.
+    expect(screenIdFromPathname("/onboarding/metrics")).toBe("chat")
+    expect(screenIdFromPathname("/onboarding/first-brief")).toBe("chat")
     // The removed agent-naming step no longer resolves to a real screen.
     expect(screenIdFromPathname("/onboarding/coworkers")).toBe("chat")
   })

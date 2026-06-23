@@ -231,7 +231,7 @@ describe("Metrics (container) — pick 3 to 5", () => {
     // north_star is a placeholder = the first pick (server infers the real one)
     expect(payload.north_star.metric).toBe(picks[0])
 
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 2)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
