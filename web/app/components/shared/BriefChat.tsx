@@ -380,6 +380,7 @@ function BriefFindingCard({
   busy,
   generating,
   dismissed,
+  showActions,
   onAsk,
   onGenerateAll,
   onViewPrd,
@@ -392,6 +393,10 @@ function BriefFindingCard({
   busy: boolean
   generating: boolean
   dismissed: boolean
+  // Whether to render the Generate/View PRD + prototype action CTAs. False when
+  // the brief has no real data behind it (insufficient-evidence / empty case) —
+  // those affordances make no sense without findings to act on.
+  showActions: boolean
   onAsk: () => void
   onGenerateAll: () => void
   onViewPrd: () => void
@@ -510,7 +515,10 @@ function BriefFindingCard({
             </div>
           ) : null}
 
-          {/* Action buttons */}
+          {/* Action buttons — hidden entirely when the brief has no real data
+              behind it (insufficient-evidence / empty case): a Generate PRD /
+              prototype affordance makes no sense without findings to act on. */}
+          {showActions ? (
           <div className="fc-actions">
             {(() => {
               const cta = prdCtaState(insightState, generating)
@@ -543,6 +551,7 @@ function BriefFindingCard({
               </button>
             ) : null}
           </div>
+          ) : null}
         </div>
 
         {/* The right-rail prototype preview thumbnail was removed: the design-agent
@@ -1346,6 +1355,14 @@ export function BriefChat() {
   // Dismissed cards stay in the list (greyed out via the dismissed prop), so the
   // finding is never removed — only collapsed until restored.
 
+  // Whether the brief has real data behind it. When false — the empty /
+  // insufficient-evidence / placeholder case — we suppress every Generate-PRD
+  // and Generate-Prototype affordance (finding-card CTAs + composer suggestion
+  // chips), leaving only the greeting + "add more sources" guidance. A brief is
+  // "real" when it has at least one finding AND the backend didn't flag it as
+  // insufficient-evidence.
+  const hasRealData = findings.length > 0 && !v2?.insufficientEvidence
+
   const userInitials = content.userInitials ?? (content.userName ? content.userName.slice(0, 2).toUpperCase() : "You")
   const userName = content.userName ?? "You"
   const company = v2?.company ?? ""
@@ -1426,6 +1443,7 @@ export function BriefChat() {
                           busy={busy}
                           generating={cardBusyKey === f.detailKey}
                           dismissed={!!f.detailKey && dismissed.has(f.detailKey)}
+                          showActions={hasRealData}
                           onAsk={() => cardAsk(f)}
                           onGenerateAll={() => cardGenerateAll(f)}
                           onViewPrd={() => cardViewPrd(f)}
@@ -1470,8 +1488,10 @@ export function BriefChat() {
 
         <div className="bc-dock">
           {/* "Create ticket" only makes sense against an open PRD — gate the chip
-              stack on the PRD rail being open so it isn't a hanging button. */}
-          {findings.length > 0 && contentPanelTab === "prd" ? (
+              stack on the PRD rail being open so it isn't a hanging button. Also
+              suppressed when the brief has no real data (insufficient-evidence /
+              empty case): no findings to drive a PRD/prototype flow. */}
+          {hasRealData && contentPanelTab === "prd" ? (
             <div className="bc-suggest">
               <div className="bc-suggest-list">
                 {suggestions.map((s) => (
