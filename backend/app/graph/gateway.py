@@ -82,8 +82,9 @@ def _build_method_prefix(skill: str, skill_module: Optional[str]) -> tuple[str, 
     # Reference docs SKILL.md tells the model to read at runtime. Sorted for a
     # deterministic prefix (cache-key stable). No-op for skills without a
     # references/ dir, so every other bound skill's prompt is byte-identical.
-    for name in sorted(spec.references):
-        block += f"\n\n### REFERENCE: {name}\n{spec.references[name]}"
+    references = getattr(spec, "references", {}) or {}
+    for name in sorted(references):
+        block += f"\n\n### REFERENCE: {name}\n{references[name]}"
     return block + "\n", f"+{spec.id}@{spec.content_hash}"
 
 
