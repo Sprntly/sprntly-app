@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 //
-// Container-level mount test for the onboarding Company page (step 01, v4
-// .onb-* design). After the page-05 restructure this page:
-//   - renders the new .onb-card design (no metric fields live here),
+// Container-level mount test for the onboarding step 01 — "Tell us about your
+// product" (design scene onb1). The 5-step redesign COMBINES product + metrics
+// onto this one screen:
+//   - renders the new .onb-card design WITH the pick-3 metric picker inline,
 //   - NO LONGER fires the website analysis in the background, and
-//   - on Continue persists the workspace then navigates to the BLOCKING
-//     /onboarding/analyzing interstitial (which runs the analysis).
+//   - on Continue persists the workspace + KPI-tree picks then navigates to the
+//     BLOCKING /onboarding/analyzing interstitial (which runs the analysis).
 // Mounts the real container under jsdom with mocked auth/onboarding/router/store.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
@@ -22,6 +23,7 @@ const createWorkspaceMock = vi.fn()
 const updateWorkspaceMock = vi.fn()
 const upsertPrimaryProductMock = vi.fn()
 const analyzeWebsiteMock = vi.fn()
+const kpiTreePutMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
@@ -37,6 +39,15 @@ vi.mock("../../../../lib/onboarding/store", () => ({
 vi.mock("../../../../lib/api", () => ({
   onboardingApi: { analyzeWebsite: (...a: unknown[]) => analyzeWebsiteMock(...a) },
 }))
+vi.mock("../../../../lib/onboarding/kpiTreeApi", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../../../lib/onboarding/kpiTreeApi")
+  >("../../../../lib/onboarding/kpiTreeApi")
+  return {
+    ...actual,
+    kpiTreeApi: { get: vi.fn(), put: (...a: unknown[]) => kpiTreePutMock(...a) },
+  }
+})
 
 import { BusinessInfo } from "../BusinessInfo"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
@@ -46,28 +57,26 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("BusinessInfo (container) — Company page", () => {
-  it("renders the new .onb-card design and the company heading", () => {
+describe("BusinessInfo (container) — Product + metrics page", () => {
+  it("renders the new .onb-card design and the product heading", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     const { container } = render(React.createElement(BusinessInfo))
     expect(container.querySelector(".onb-card")).not.toBeNull()
     expect(container.querySelector(".onb-shell")).not.toBeNull()
-    expect(screen.getByText(/get to know your/i)).not.toBeNull()
+    expect(screen.getByText(/tell us about your/i)).not.toBeNull()
   })
 
-  it("renders NO metric fields on the company page", () => {
+  it("renders the pick-3 metric picker inline (combined onto this screen)", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     const { container } = render(React.createElement(BusinessInfo))
-    // The metric tree and North-Star/supporting-metric UI live on the metrics
-    // step, NOT here.
-    expect(container.querySelector(".metric-tree")).toBeNull()
-    expect(container.querySelector(".metric-other")).toBeNull()
-    expect(container.textContent).not.toContain("North Star")
-    expect(container.textContent).not.toContain("Supporting metrics")
+    // The pick-3 metric cards + "write your own" row now live here (onb1).
+    expect(container.querySelector(".metric-pick")).not.toBeNull()
+    expect(container.querySelector(".metric-other")).not.toBeNull()
+    expect(container.querySelector(".metric-card")).not.toBeNull()
     // Inference-seed website input is still present.
     expect(container.querySelector('input[type="url"]')).not.toBeNull()
   })
@@ -77,10 +86,7 @@ describe("BusinessInfo (container) — Company page", () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     const { container } = render(React.createElement(BusinessInfo))
-    expect(container.textContent).not.toContain("Stage")
     expect(container.textContent).not.toContain("Team size")
-    // the Seed/Growth/Scale stage chips are gone
-    expect(container.textContent).not.toContain("Growth")
     // no headcount number input remains
     expect(container.querySelector('input[type="number"]')).toBeNull()
     // tech-stack chips still render (untouched)
@@ -90,6 +96,7 @@ describe("BusinessInfo (container) — Company page", () => {
   it("does NOT send stage/team_size in the create payload (dropped cleanly)", async () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     createWorkspaceMock.mockResolvedValue(makeWorkspace())
+    kpiTreePutMock.mockResolvedValue({ ok: true, version: 1 })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     render(React.createElement(BusinessInfo))
@@ -110,9 +117,10 @@ describe("BusinessInfo (container) — Company page", () => {
     expect("teamSize" in payload).toBe(false)
   })
 
-  it("Continue persists the workspace then navigates to the analyzing interstitial (no background analysis)", async () => {
+  it("Continue persists the workspace + KPI picks then navigates to the analyzing interstitial (no background analysis)", async () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     createWorkspaceMock.mockResolvedValue(makeWorkspace())
+    kpiTreePutMock.mockResolvedValue({ ok: true, version: 1 })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     render(React.createElement(BusinessInfo))
@@ -134,6 +142,8 @@ describe("BusinessInfo (container) — Company page", () => {
     })
 
     expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
+    // The 3 seeded metric picks are persisted to the KPI tree on this screen.
+    expect(kpiTreePutMock).toHaveBeenCalledTimes(1)
     // Analysis is NOT fired from this page anymore — the interstitial owns it.
     expect(analyzeWebsiteMock).not.toHaveBeenCalled()
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/analyzing")

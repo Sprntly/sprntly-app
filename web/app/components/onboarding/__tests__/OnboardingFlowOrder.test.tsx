@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 //
-// Integrity tests for the semantic-slug onboarding flow:
-//   business-info → [analyzing] → metrics → connectors → first-brief
-// (the agent-naming `coworkers` step was removed)
+// Integrity tests for the semantic-slug onboarding flow (5-step redesign):
+//   business-info → [analyzing] → connectors → business-context → strategy → workspace
+// (the agent-naming `coworkers` step stays removed; the old metrics + first-brief
+//  routes were folded into business-info + workspace)
 //
 // Asserts the slug→screen map renders the right component per numbered step (in
 // the right order, no gaps), that an unknown slug falls back to the first step,
@@ -22,9 +23,10 @@ vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 // without dragging in their hooks/contexts.
 vi.mock("../../screens/onboarding", () => ({
   BusinessInfo: () => React.createElement("div", { "data-screen": "business-info" }),
-  Metrics: () => React.createElement("div", { "data-screen": "metrics" }),
   Connectors: () => React.createElement("div", { "data-screen": "connectors" }),
-  FirstBrief: () => React.createElement("div", { "data-screen": "first-brief" }),
+  BusinessContext: () => React.createElement("div", { "data-screen": "business-context" }),
+  Strategy: () => React.createElement("div", { "data-screen": "strategy" }),
+  Workspace: () => React.createElement("div", { "data-screen": "workspace" }),
   Analyzing: () => React.createElement("div", { "data-screen": "analyzing" }),
 }))
 
@@ -45,22 +47,23 @@ afterEach(() => {
 // renders the screen with the same data-screen marker).
 const EXPECTED_ORDER = [
   "business-info",
-  "metrics",
   "connectors",
-  "first-brief",
+  "business-context",
+  "strategy",
+  "workspace",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 4 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(4)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 5 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(5)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
-  it("renders the metrics page at the 'metrics' slug (right after the loader)", () => {
+  it("renders the connectors page at the 'connectors' slug (right after the loader)", () => {
     const { container } = render(
-      React.createElement(OnboardingStep, { slug: "metrics" }),
+      React.createElement(OnboardingStep, { slug: "connectors" }),
     )
-    expect(container.querySelector('[data-screen="metrics"]')).not.toBeNull()
+    expect(container.querySelector('[data-screen="connectors"]')).not.toBeNull()
   })
 
   it("maps every numbered slug to the expected screen, in order, with no gaps", () => {
@@ -87,8 +90,10 @@ describe("onboarding flow order — slug → screen", () => {
     )
   })
 
-  it("does not expose the dropped strategic/business-context/coworkers pages as steps", () => {
-    for (const slug of ["strategic-context", "business-context", "optimizing", "coworkers"]) {
+  it("does not expose the dropped strategic/metrics/first-brief/coworkers pages as steps", () => {
+    // business-context + strategy are now REAL numbered steps (re-added in the
+    // redesign); metrics + first-brief were folded in and are no longer routes.
+    for (const slug of ["strategic-context", "metrics", "first-brief", "optimizing", "coworkers"]) {
       const { container, unmount } = render(
         React.createElement(OnboardingStep, { slug }),
       )

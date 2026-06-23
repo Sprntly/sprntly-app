@@ -48,9 +48,10 @@ export function prdIdFromPrototypeSearch(raw: string | null): number | null {
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-business-info": "/onboarding/business-info",
-  "ob-metrics": "/onboarding/metrics",
   "ob-connectors": "/onboarding/connectors",
-  "ob-first-brief": "/onboarding/first-brief",
+  "ob-business-context": "/onboarding/business-context",
+  "ob-strategy": "/onboarding/strategy",
+  "ob-workspace": "/onboarding/workspace",
   "ob-analyzing": `/onboarding/${ONBOARDING_ANALYZING_SLUG}`,
   chat: "/",
   chats: "/chats",

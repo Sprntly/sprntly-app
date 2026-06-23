@@ -4,9 +4,10 @@ import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import {
   BusinessInfo,
-  Metrics,
   Connectors,
-  FirstBrief,
+  BusinessContext,
+  Strategy,
+  Workspace,
 } from "../../../components/screens/onboarding"
 import {
   ONBOARDING_STEP_SLUGS,
@@ -15,13 +16,14 @@ import {
 
 /**
  * The ordered onboarding step list — the single source of truth pairing each
- * semantic slug with its screen component, in flow order:
+ * semantic slug with its screen component, in flow order (5-step redesign):
  *
- *   1. business-info → BusinessInfo  (company + product + website)
- *      [analyzing]   → Analyzing     (its own /onboarding/analyzing route, NOT here)
- *   2. metrics       → Metrics       (the metrics-tree page)
- *   3. connectors    → Connectors
- *   4. first-brief   → FirstBrief
+ *   1. business-info     → BusinessInfo    (onb1: product + pick-3 metrics)
+ *      [analyzing]       → Analyzing       (its own /onboarding/analyzing route, NOT here)
+ *   2. connectors        → Connectors      (onb4: connect your tools)
+ *   3. business-context  → BusinessContext (onbctx: auto-drafted, editable)
+ *   4. strategy          → Strategy        (onbstrat: priorities + roadmap doc)
+ *   5. workspace         → Workspace       (onbws: name + invite; completes onboarding)
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
  * `onboarding_step` is the 1-based index into both). The analyzing interstitial
@@ -32,9 +34,10 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   Component: React.ComponentType
 }> = [
   { slug: "business-info", Component: BusinessInfo },
-  { slug: "metrics", Component: Metrics },
   { slug: "connectors", Component: Connectors },
-  { slug: "first-brief", Component: FirstBrief },
+  { slug: "business-context", Component: BusinessContext },
+  { slug: "strategy", Component: Strategy },
+  { slug: "workspace", Component: Workspace },
 ]
 
 // Dev-time guard: the route map and the slug source of truth must agree in

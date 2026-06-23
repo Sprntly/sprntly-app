@@ -251,10 +251,10 @@ export function Connectors() {
     setSaving(true)
     try {
       if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
-      // Next numbered step is first-brief (index 4 in ONBOARDING_STEP_SLUGS).
-      const updated = await advanceOnboardingStep(workspace.id, 4)
+      // Next numbered step is business-context (index 3 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 3)
       setWorkspace(updated)
-      router.push("/onboarding/first-brief")
+      router.push("/onboarding/business-context")
     } finally {
       setSaving(false)
     }
@@ -276,7 +276,7 @@ export function Connectors() {
 
   return (
     <OnboardingChrome
-      step={3}
+      step={2}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -298,7 +298,7 @@ export function Connectors() {
           </button>
         </>
       }
-      onBack={() => router.push("/onboarding/metrics")}
+      onBack={() => router.push("/onboarding/business-info")}
       onContinue={() => go(false)}
       continueDisabled={saving}
       loading={saving}

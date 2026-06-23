@@ -14,8 +14,9 @@ import {
  *
  * This is a TRANSIENT, UNNUMBERED route (`/onboarding/analyzing`): it is not in
  * ONBOARDING_SCREENS, it is not back-navigable, and it is excluded from the
- * progress-dot count (it renders no dots). It sits between the business-info
- * page (step 1) and the metrics page (`/onboarding/metrics`).
+ * progress-dot count (it renders no dots). It sits between the combined
+ * product+metrics page (step 1, business-info) and the connectors page
+ * (`/onboarding/connectors`, step 2).
  *
  * BLUR/REMOUNT-SAFE (mirrors the chat Ask flow):
  *   - POST /v1/onboarding/analyze-website is fire-and-forget — it returns a
@@ -51,7 +52,7 @@ export function Analyzing() {
   function forward() {
     if (forwardedRef.current) return
     forwardedRef.current = true
-    router.replace("/onboarding/metrics")
+    router.replace("/onboarding/connectors")
   }
 
   // No workspace to anchor the flow → bounce back to the first step (in an

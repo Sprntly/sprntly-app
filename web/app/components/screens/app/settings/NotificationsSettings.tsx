@@ -62,7 +62,7 @@ export function NotificationsSettings() {
     return (
       <SettingsSection title="Notifications" sub="Complete onboarding first.">
         <p className="settings-placeholder">
-          <a href="/onboarding/first-brief">Set notifications →</a>
+          <a href="/onboarding/workspace">Set notifications →</a>
         </p>
       </SettingsSection>
     )
