@@ -35,11 +35,6 @@ def _list_feedback(company_id: str) -> list[dict]:
 
 
 def test_feedback_stores_and_emails(isolated_settings, monkeypatch):
-    # Configure a recipient + key so the email path is exercised.
-    from app.config import settings as cfg
-    monkeypatch.setattr(cfg, "resend_api_key", "re_test_key", raising=False)
-    monkeypatch.setattr(cfg, "feedback_alert_email", "team@sprntly.ai", raising=False)
-
     sent: list[dict] = []
 
     def _fake_send(api_key, *, to, subject, html_body, text_body):
@@ -50,6 +45,15 @@ def test_feedback_stores_and_emails(isolated_settings, monkeypatch):
     )
 
     ctx = company_client(monkeypatch)
+
+    # Configure a recipient + key so the email path is exercised. company_client
+    # reloads app.config (new settings singleton) and app.main, but NOT
+    # app.routes.feedback — so the route keeps its ORIGINAL `settings` reference.
+    # Patch that exact object (not the current app.config.settings, which the
+    # route no longer points at), else the route reads an unconfigured one.
+    import app.routes.feedback as fb
+    monkeypatch.setattr(fb.settings, "resend_api_key", "re_test_key", raising=False)
+    monkeypatch.setattr(fb.settings, "feedback_alert_email", "team@sprntly.ai", raising=False)
     r = ctx.client.post(
         "/v1/feedback",
         json={"message": "Please add a Notion connector", "type": "connector_request"},

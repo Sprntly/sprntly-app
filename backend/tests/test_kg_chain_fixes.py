@@ -92,7 +92,7 @@ def patch_skill(monkeypatch):
     without needing on-disk skill assets."""
     spec = SimpleNamespace(
         id="prd-author", content_hash="abc123",
-        method="METHOD BODY", modules={}, templates={},
+        method="METHOD BODY", modules={}, templates={}, references={},
     )
     import app.graph.gateway as gw
     monkeypatch.setattr(gw, "get_skill", lambda name: spec)
