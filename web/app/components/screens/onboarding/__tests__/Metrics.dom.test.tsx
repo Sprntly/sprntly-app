@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 //
-// Container-level mount test for the onboarding metrics page — the consolidated
-// success-metrics page. Asserts: analysis-suggested metrics are PRE-SEEDED as
-// tree-target cards (no selectable suggestion chips), add-your-own works, the
-// industry/business-type dropdowns are pre-filled from analysis yet editable,
-// and Save persists the confirmed industry/business-type to the company AND the
-// metrics to the KPI tree. Plus the redirect-in-effect safety.
+// Container-level mount test for the REDESIGNED onboarding metrics page — the
+// pick-exactly-3 success-metrics page. Asserts: a flat candidate pool is seeded
+// from the website analysis (with up to 3 pre-selected), selecting/deselecting
+// toggles the green `.sel` state, the page enforces EXACTLY 3 picks to advance
+// (it no longer blocks on a separate North Star / supporting-metric split),
+// add-your-own works, the industry/business-type dropdowns are pre-filled yet
+// editable, and Save persists industry/business-type to the company AND the 3
+// picks to the KPI tree. Plus the redirect-in-effect safety.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -44,162 +46,260 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("Metrics (container) — consolidated metrics", () => {
-  it("pre-seeds analysis-suggested metrics as tree-target cards, with NO suggestion chips", () => {
+// An analysis that returns FIVE suggestions, so there's a real pool to pick 3
+// from (the default fixture returns only 2).
+function makeFiveAnalysis() {
+  return makeAnalysis({
+    suggested_metrics: [
+      { metric: "Reconciled volume", description: "Total $ reconciled / week." },
+      { metric: "Active connected accounts", description: "Accounts with a live sync." },
+      { metric: "Incremental revenue", description: "New revenue / week." },
+      { metric: "Conversion rate", description: "Signup → paid." },
+      { metric: "Weekly active teams", description: "Teams active this week." },
+    ],
+  })
+}
+
+function selectedCards(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll(".metric-card.sel")).map(
+    (c) => c.getAttribute("data-metric") ?? "",
+  )
+}
+
+function continueBtn(): HTMLButtonElement {
+  return Array.from(document.querySelectorAll("button")).find((b) =>
+    /continue/i.test(b.textContent ?? ""),
+  ) as HTMLButtonElement
+}
+
+function cardByName(container: HTMLElement, name: string): HTMLButtonElement {
+  return container.querySelector(
+    `.metric-card[data-metric="${name}"]`,
+  ) as HTMLButtonElement
+}
+
+describe("Metrics (container) — pick exactly 3", () => {
+  it("seeds a flat candidate pool from the analysis with exactly 3 pre-selected", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         workspace: makeWorkspace({ onboarding_step: 2 }),
-        websiteAnalysis: makeAnalysis(),
+        websiteAnalysis: makeFiveAnalysis(),
       }),
     )
     const { container } = render(React.createElement(Metrics))
     expect(screen.getByText(/Set your success/i)).not.toBeNull()
-    // seeded as tree-target cards (edit + delete), inside the metric-tree
-    expect(container.querySelector(".metric-tree")).not.toBeNull()
-    expect(
-      container.querySelector('.mt-target[data-metric="Reconciled volume"]'),
-    ).not.toBeNull()
-    expect(container.querySelectorAll(".mt-target").length).toBe(2)
-    // the selectable suggestion-chip surface is gone entirely
-    expect(container.querySelector(".mt-suggested")).toBeNull()
-    expect(container.querySelector("#suggestedMetrics")).toBeNull()
-    expect(container.querySelector("[aria-pressed]")).toBeNull()
-  })
-
-  it("pre-seeds ALL suggested metrics into the supporting list on load (rendered as tree targets)", () => {
-    const analysis = makeAnalysis()
-    onboardingMock.mockReturnValue(
-      makeOnboardingCtx({
-        workspace: makeWorkspace({ onboarding_step: 2 }),
-        websiteAnalysis: analysis,
-      }),
+    // The 5 analysis suggestions all become toggleable cards (the pool may be
+    // rounded out with curated/industry fallbacks, so it's at least 5).
+    const cardNames = Array.from(container.querySelectorAll(".metric-card")).map(
+      (c) => c.getAttribute("data-metric"),
     )
-    const { container } = render(React.createElement(Metrics))
-    const n = analysis.suggested_metrics.length
-    // every suggestion is now a tree target...
-    const targets = container.querySelectorAll(".mt-target")
-    expect(targets.length).toBe(n)
-    // count reflects N
+    expect(container.querySelectorAll(".metric-card").length).toBeGreaterThanOrEqual(5)
+    for (const m of [
+      "Reconciled volume",
+      "Active connected accounts",
+      "Incremental revenue",
+      "Conversion rate",
+      "Weekly active teams",
+    ]) {
+      expect(cardNames).toContain(m)
+    }
+    // exactly 3 are pre-selected (green .sel state)
+    expect(selectedCards(container).length).toBe(3)
+    // the count reflects 3 of 3
     const count = container.querySelector(".metric-count") as HTMLElement
-    expect(count.textContent).toContain(`${n} supporting metric`)
-    // targets live in the tree, not a separate bottom block
-    expect(container.querySelector(".metric-desc-block")).toBeNull()
-    expect(container.querySelector(".metric-tree .mt-targets-cards")).not.toBeNull()
+    expect(count.textContent).toContain("3")
+    expect(count.textContent).toContain("of 3")
+    // there is NO separate North Star input and NO supporting-metric tree
+    expect(
+      document.querySelector(
+        'input[placeholder="The one metric that best captures product value"]',
+      ),
+    ).toBeNull()
+    expect(container.querySelector(".mt-source")).toBeNull()
   })
 
-  it("seeding does NOT clobber a user deletion on re-render", () => {
-    const ctx = makeOnboardingCtx({
-      workspace: makeWorkspace({ onboarding_step: 2 }),
-      websiteAnalysis: makeAnalysis(),
-    })
-    onboardingMock.mockReturnValue(ctx)
-    const { container, rerender } = render(React.createElement(Metrics))
-    const n = (ctx.websiteAnalysis as unknown as ReturnType<typeof makeAnalysis>).suggested_metrics.length
-
-    // delete the first target
-    const del = container.querySelector(".mt-target .mt-target-del") as HTMLButtonElement
-    fireEvent.click(del)
-    expect(container.querySelectorAll(".mt-target").length).toBe(n - 1)
-
-    // a re-render (same analysis) must not re-seed the deleted metric back in
-    rerender(React.createElement(Metrics))
-    expect(container.querySelectorAll(".mt-target").length).toBe(n - 1)
-  })
-
-  it("delete removes a metric and decrements the count; it can be re-added via 'write your own'", () => {
+  it("enforces exactly 3: selecting a 4th is blocked, deselect frees a slot", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         workspace: makeWorkspace({ onboarding_step: 2 }),
-        websiteAnalysis: makeAnalysis(),
+        websiteAnalysis: makeFiveAnalysis(),
       }),
     )
     const { container } = render(React.createElement(Metrics))
-    const count = () => (container.querySelector(".metric-count") as HTMLElement).textContent ?? ""
-    expect(count()).toContain("2 supporting metric")
+    expect(selectedCards(container).length).toBe(3)
 
-    // delete "Reconciled volume"
-    const del = container.querySelector(
-      '.mt-target[data-metric="Reconciled volume"] .mt-target-del',
-    ) as HTMLButtonElement
-    fireEvent.click(del)
-    expect(count()).toContain("1 supporting metric")
-    expect(
-      container.querySelector('.mt-target[data-metric="Reconciled volume"]'),
-    ).toBeNull()
+    // the 3 pre-selected are the first three; try selecting a 4th (Conversion rate)
+    const fourth = cardByName(container, "Conversion rate")
+    // it's disabled at the limit, but clicking still must not select it
+    fireEvent.click(fourth)
+    expect(selectedCards(container)).not.toContain("Conversion rate")
+    expect(selectedCards(container).length).toBe(3)
 
-    // re-add it by hand via the "write your own" input (no suggestion chips)
-    const customInput = container.querySelector(
-      '[aria-label="Custom metric name"]',
-    ) as HTMLInputElement
-    fireEvent.change(customInput, { target: { value: "Reconciled volume" } })
-    const addBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent?.includes("Add"),
-    ) as HTMLButtonElement
-    fireEvent.click(addBtn)
-    expect(count()).toContain("2 supporting metric")
-    expect(
-      container.querySelector('.mt-target[data-metric="Reconciled volume"]'),
-    ).not.toBeNull()
+    // deselect one of the picked → a slot frees up
+    const picked = selectedCards(container)[0]
+    fireEvent.click(cardByName(container, picked))
+    expect(selectedCards(container).length).toBe(2)
+
+    // now the 4th can be selected
+    fireEvent.click(cardByName(container, "Conversion rate"))
+    expect(selectedCards(container)).toContain("Conversion rate")
+    expect(selectedCards(container).length).toBe(3)
   })
 
-  it("custom add then delete works, and deleting to empty shows the targets empty state", () => {
+  it("BLOCKS Continue when fewer than 3 are picked, with a pick-exactly-3 error (no supporting-metric blocker)", async () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        // no suggestions + a business type without curated defaults → start empty
-        workspace: makeWorkspace({ onboarding_step: 2, business_type: "Consumer" }),
-        websiteAnalysis: makeAnalysis({ business_type: "Consumer", suggested_metrics: [] }),
+        workspace: makeWorkspace({ onboarding_step: 2 }),
+        websiteAnalysis: makeFiveAnalysis(),
       }),
     )
     const { container } = render(React.createElement(Metrics))
-    expect(container.querySelector(".mt-targets-empty")).not.toBeNull()
 
-    // add a custom metric → it appears as a tree target
+    // drop to 2 picks
+    const picked = selectedCards(container)[0]
+    fireEvent.click(cardByName(container, picked))
+    expect(selectedCards(container).length).toBe(2)
+
+    await act(async () => {
+      continueBtn().click()
+    })
+
+    // nothing persisted, no advance, no navigation
+    expect(updateWorkspaceMock).not.toHaveBeenCalled()
+    expect(kpiPutMock).not.toHaveBeenCalled()
+    expect(advanceStepMock).not.toHaveBeenCalled()
+    expect(routerMock.push).not.toHaveBeenCalled()
+    // a pick-exactly-3 error shows (the old "Set a North Star" blocker is gone)
+    expect(screen.getByText(/Pick exactly 3 metrics to continue\./)).not.toBeNull()
+    // No North Star INPUT exists anymore (the metric is inferred server-side).
+    expect(
+      document.querySelector(
+        'input[placeholder="The one metric that best captures product value"]',
+      ),
+    ).toBeNull()
+  })
+
+  it("advances on exactly 3 picks, persisting the 3 to the KPI tree (north_star inferred server-side → placeholder = first pick)", async () => {
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
+    advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
+    kpiPutMock.mockResolvedValue({ ok: true, version: 2 })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: null }),
+        websiteAnalysis: makeFiveAnalysis(),
+      }),
+    )
+    const { container } = render(React.createElement(Metrics))
+    const picks = selectedCards(container)
+    expect(picks.length).toBe(3)
+
+    await act(async () => {
+      continueBtn().click()
+    })
+
+    // industry/business-type confirmed to the company (from analysis)
+    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
+      industry: "Fintech",
+      business_type: "Marketplace",
+    })
+    // the 3 picks → KPI tree
+    expect(kpiPutMock).toHaveBeenCalledTimes(1)
+    const payload = kpiPutMock.mock.calls[0][0] as {
+      north_star: { metric: string }
+      primary_metrics: { metric: string }[]
+      secondary_signals: { metric: string }[]
+    }
+    const persisted = [
+      ...payload.primary_metrics,
+      ...payload.secondary_signals,
+    ].map((m) => m.metric)
+    // all three picks are persisted (none dropped)
+    expect(persisted.sort()).toEqual([...picks].sort())
+    expect(persisted.length).toBe(3)
+    // north_star is a placeholder = the first pick (server infers the real one)
+    expect(payload.north_star.metric).toBe(picks[0])
+
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+  })
+
+  it("seeds the SaaS curated defaults when the analysis returned no suggestions", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 2, business_type: "SaaS", industry: "B2B SaaS" }),
+        websiteAnalysis: makeAnalysis({ business_type: "SaaS", industry: "B2B SaaS", suggested_metrics: [] }),
+      }),
+    )
+    const { container } = render(React.createElement(Metrics))
+    const names = Array.from(container.querySelectorAll(".metric-card")).map(
+      (c) => c.getAttribute("data-metric"),
+    )
+    // The SaaS curated defaults lead the pool (rename: Incremental revenue).
+    expect(names.slice(0, 3)).toEqual([
+      "Incremental revenue",
+      "Number of new subscribers",
+      "Conversion rate",
+    ])
+    expect(names).toContain("Incremental revenue")
+    expect(names).not.toContain("Net revenue retention")
+    // 3 pre-selected
+    expect(container.querySelectorAll(".metric-card.sel").length).toBe(3)
+  })
+
+  it("lets the user add a custom candidate, which lands selected if there's room", () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 2 }),
+        websiteAnalysis: makeFiveAnalysis(),
+      }),
+    )
+    const { container } = render(React.createElement(Metrics))
+    // drop to 2 picks so the custom add has room to auto-select
+    fireEvent.click(cardByName(container, selectedCards(container)[0]))
+    expect(selectedCards(container).length).toBe(2)
+
     const nameInput = document.querySelector(
       'input[aria-label="Custom metric name"]',
     ) as HTMLInputElement
     fireEvent.change(nameInput, { target: { value: "Gross margin" } })
     const addBtn = Array.from(document.querySelectorAll("button")).find(
-      (b) => (b.textContent ?? "").trim() === "Add",
+      (b) => (b.textContent ?? "").trim().includes("Add"),
     ) as HTMLButtonElement
     fireEvent.click(addBtn)
-    expect(
-      container.querySelector('.mt-target[data-metric="Gross margin"]'),
-    ).not.toBeNull()
 
-    // delete it → back to the empty state
-    const del = container.querySelector(
-      '.mt-target[data-metric="Gross margin"] .mt-target-del',
-    ) as HTMLButtonElement
-    fireEvent.click(del)
-    expect(container.querySelector(".mt-target")).toBeNull()
-    expect(container.querySelector(".mt-targets-empty")).not.toBeNull()
+    // appears as a card AND is selected (back to 3)
+    expect(cardByName(container, "Gross margin")).not.toBeNull()
+    expect(selectedCards(container)).toContain("Gross margin")
+    expect(selectedCards(container).length).toBe(3)
   })
 
-  it("editing a target's description updates it", () => {
+  it("hydrates the candidate pool from a saved KPI tree (first 3 pre-selected)", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        workspace: makeWorkspace({ onboarding_step: 2 }),
-        websiteAnalysis: makeAnalysis(),
+        workspace: makeWorkspace({
+          onboarding_step: 2,
+          kpi_tree: {
+            north_star: "Weekly active users",
+            north_star_description: "",
+            metrics: [
+              { name: "Weekly active users", description: "WAU." },
+              { name: "Day-30 retention", description: "" },
+              { name: "Conversion rate", description: "" },
+              { name: "Incremental revenue", description: "" },
+            ],
+          },
+        }),
+        websiteAnalysis: null,
       }),
     )
     const { container } = render(React.createElement(Metrics))
-    const ta = container.querySelector(
-      'textarea[aria-label="Description for Reconciled volume"]',
-    ) as HTMLTextAreaElement
-    fireEvent.change(ta, { target: { value: "Edited description." } })
-    expect(
-      (
-        container.querySelector(
-          'textarea[aria-label="Description for Reconciled volume"]',
-        ) as HTMLTextAreaElement
-      ).value,
-    ).toBe("Edited description.")
+    expect(container.querySelectorAll(".metric-card").length).toBe(4)
+    expect(selectedCards(container).length).toBe(3)
   })
 
   it("pre-fills industry/business-type dropdowns from analysis yet keeps them editable", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
-        // workspace carries no industry yet → comes from analysis
         workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: null }),
         websiteAnalysis: makeAnalysis({ industry: "Fintech", business_type: "Marketplace" }),
       }),
@@ -214,158 +314,10 @@ describe("Metrics (container) — consolidated metrics", () => {
     expect(industrySel.value).toBe("Fintech")
     expect(bizSel.value).toBe("Marketplace")
     expect(industrySel.disabled).toBe(false)
-    // user can override
     fireEvent.change(industrySel, { target: { value: "Healthtech" } })
     expect(
       (document.querySelector('select[aria-label="Industry"]') as HTMLSelectElement).value,
     ).toBe("Healthtech")
-  })
-
-  it("adds a custom metric via Add your own (appended as a new tree target)", () => {
-    onboardingMock.mockReturnValue(
-      makeOnboardingCtx({
-        // no suggestions + a business type without curated defaults → start empty
-        workspace: makeWorkspace({ onboarding_step: 2, business_type: "Consumer" }),
-        websiteAnalysis: makeAnalysis({ business_type: "Consumer", suggested_metrics: [] }),
-      }),
-    )
-    const { container } = render(React.createElement(Metrics))
-    const nameInput = document.querySelector(
-      'input[aria-label="Custom metric name"]',
-    ) as HTMLInputElement
-    fireEvent.change(nameInput, { target: { value: "Gross margin" } })
-    const addBtn = Array.from(document.querySelectorAll("button")).find(
-      (b) => (b.textContent ?? "").trim() === "Add",
-    ) as HTMLButtonElement
-    fireEvent.click(addBtn)
-    // count text is split across a <strong> node: "1" + " supporting metric selected"
-    const count = document.querySelector(".metric-count") as HTMLElement
-    expect(count.textContent).toContain("1 supporting metric selected")
-    // appears immediately as a tree target
-    expect(
-      container.querySelector('.mt-target[data-metric="Gross margin"]'),
-    ).not.toBeNull()
-  })
-
-  it("persists confirmed industry/business-type to the company AND metrics to the KPI tree on save, then advances to step 3", async () => {
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
-    advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
-    kpiPutMock.mockResolvedValue({ ok: true, version: 2 })
-    onboardingMock.mockReturnValue(
-      makeOnboardingCtx({
-        workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: null }),
-        websiteAnalysis: makeAnalysis({ industry: "Fintech", business_type: "Marketplace" }),
-      }),
-    )
-    const { container } = render(React.createElement(Metrics))
-
-    // North Star is required to save.
-    const ns = document.querySelector(
-      'input[placeholder="The one metric that best captures product value"]',
-    ) as HTMLInputElement
-    fireEvent.change(ns, { target: { value: "Incremental revenue" } })
-
-    // The 2 suggested metrics are pre-seeded; delete one so we persist exactly
-    // the post-edit set (the remaining "Active connected accounts").
-    const del = container.querySelector(
-      '.mt-target[data-metric="Reconciled volume"] .mt-target-del',
-    ) as HTMLButtonElement
-    fireEvent.click(del)
-
-    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /continue/i.test(b.textContent ?? ""),
-    ) as HTMLButtonElement
-    await act(async () => {
-      continueBtn.click()
-    })
-
-    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
-      industry: "Fintech",
-      business_type: "Marketplace",
-    })
-    expect(kpiPutMock).toHaveBeenCalledTimes(1)
-    // persists EXACTLY the post-edit supporting set (the deleted one is gone).
-    const payload = kpiPutMock.mock.calls[0][0] as {
-      primary_metrics: { metric: string }[]
-      secondary_signals: { metric: string }[]
-    }
-    const persistedNames = [...payload.primary_metrics, ...payload.secondary_signals].map(
-      (m) => m.metric,
-    )
-    expect(persistedNames).toEqual(["Active connected accounts"])
-    // New flow: metrics page advances to the optimizing-for step (route 3).
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
-  })
-
-  it("works on the graceful-degrade path (analysis ok:false → manual entry)", () => {
-    onboardingMock.mockReturnValue(
-      makeOnboardingCtx({
-        // business_type Consumer (no curated defaults) so the empty manual
-        // fallback shows; the SaaS-default seeding only applies to SaaS.
-        workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: "Consumer" }),
-        websiteAnalysis: makeAnalysis({
-          ok: false,
-          reason: "blocked_url",
-          industry: null,
-          business_type: "Consumer",
-          business_context: "",
-          suggested_metrics: [],
-        }),
-      }),
-    )
-    render(React.createElement(Metrics))
-    // no suggestions → manual fallback prompt, dropdowns still present + editable
-    expect(screen.getByText(/No supporting metrics yet/)).not.toBeNull()
-    const industrySel = document.querySelector(
-      'select[aria-label="Industry"]',
-    ) as HTMLSelectElement
-    expect(industrySel).not.toBeNull()
-    expect(industrySel.disabled).toBe(false)
-  })
-
-  it("renders each seeded goal with a green selected state (.sel) that can be toggled off", () => {
-    onboardingMock.mockReturnValue(
-      makeOnboardingCtx({
-        workspace: makeWorkspace({ onboarding_step: 2 }),
-        websiteAnalysis: makeAnalysis(),
-      }),
-    )
-    const { container } = render(React.createElement(Metrics))
-    const targets = container.querySelectorAll(".mt-target")
-    expect(targets.length).toBe(2)
-    // every selected goal carries the green selected state
-    targets.forEach((t) => {
-      expect(t.classList.contains("sel")).toBe(true)
-      expect(t.getAttribute("aria-selected")).toBe("true")
-    })
-    // toggling off (delete) removes the selected item
-    const del = container.querySelector(
-      '.mt-target[data-metric="Reconciled volume"] .mt-target-del',
-    ) as HTMLButtonElement
-    fireEvent.click(del)
-    expect(
-      container.querySelector('.mt-target[data-metric="Reconciled volume"]'),
-    ).toBeNull()
-  })
-
-  it("seeds the SaaS default metrics when the analysis returned no suggestions", () => {
-    onboardingMock.mockReturnValue(
-      makeOnboardingCtx({
-        // business_type SaaS, no saved kpi_tree metrics
-        workspace: makeWorkspace({ onboarding_step: 2, business_type: "SaaS" }),
-        websiteAnalysis: makeAnalysis({ business_type: "SaaS", suggested_metrics: [] }),
-      }),
-    )
-    const { container } = render(React.createElement(Metrics))
-    const names = Array.from(container.querySelectorAll(".mt-target")).map(
-      (t) => t.getAttribute("data-metric"),
-    )
-    expect(names).toEqual([
-      "Incremental revenue",
-      "Number of new subscribers",
-      "Conversion rate",
-    ])
   })
 
   it("shows the loading shell while the workspace is loading", () => {

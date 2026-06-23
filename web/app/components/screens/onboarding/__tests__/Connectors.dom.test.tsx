@@ -10,7 +10,7 @@
 //   - live connections render a non-togglable "Live" card (and keep an
 //     otherwise-unsupported provider/category visible)
 //   - connectable cards open the connect modal with the right provider
-//   - Continue advances to step 4 and routes to /onboarding/coworkers
+//   - Continue advances to step 4 and routes to /onboarding/first-brief
 //   - "Connect later" marks skipped fields first, then advances
 //   - NO required-Analytics gate: Continue is enabled with zero selections
 //   - the no-workspace redirect happens in an EFFECT, never during render
@@ -212,12 +212,12 @@ describe("Connectors (container) — design-v4 accordion", () => {
     expect(screen.queryByText("Heap")).toBeNull()
   })
 
-  it("Continue advances to step 4 and routes to coworkers (no skip marking)", async () => {
+  it("Continue advances to step 4 and routes to first-brief (no skip marking)", async () => {
     mountLoaded()
     fireEvent.click(screen.getByText("Continue").closest("button") as HTMLElement)
     await waitFor(() => {
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/coworkers")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/first-brief")
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
@@ -228,7 +228,7 @@ describe("Connectors (container) — design-v4 accordion", () => {
     await waitFor(() => {
       expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/coworkers")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/first-brief")
     })
   })
 

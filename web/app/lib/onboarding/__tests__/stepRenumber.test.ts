@@ -1,8 +1,9 @@
 // Slug-routing integrity for the semantic-routes onboarding flow. The flow is
-// now 5 numbered steps keyed by slug (business-info → metrics → connectors →
-// coworkers → first-brief) plus an unnumbered `analyzing` loader. These guard
-// the total step count, the slug↔screen mapping (no gaps, dropped pages gone),
-// and that the loader is excluded from the numbered screen list / progress dots.
+// now 4 numbered steps keyed by slug (business-info → metrics → connectors →
+// first-brief) plus an unnumbered `analyzing` loader. The agent-naming
+// `coworkers` step was removed. These guard the total step count, the
+// slug↔screen mapping (no gaps, dropped pages gone), and that the loader is
+// excluded from the numbered screen list / progress dots.
 import { describe, expect, it } from "vitest"
 
 import {
@@ -14,16 +15,18 @@ import { screenIdFromPathname, SCREEN_PATH } from "../../routes"
 import { ONBOARDING_SCREENS } from "../../../types"
 
 describe("onboarding slug routing", () => {
-  it("has exactly 5 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(5)
-    expect(ONBOARDING_SCREENS).toHaveLength(5)
+  it("has exactly 4 numbered steps in flow order (coworkers removed)", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(4)
+    expect(ONBOARDING_SCREENS).toHaveLength(4)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
       "business-info",
       "metrics",
       "connectors",
-      "coworkers",
       "first-brief",
     ])
+    // The agent-naming step is gone from the sequence and the screen list.
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("coworkers")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-coworkers")
   })
 
   it("maps each /onboarding/<slug> to ob-<slug> with no gaps", () => {
@@ -42,6 +45,8 @@ describe("onboarding slug routing", () => {
     expect(screenIdFromPathname("/onboarding/7")).toBe("chat")
     expect(screenIdFromPathname("/onboarding/strategic-context")).toBe("chat")
     expect(screenIdFromPathname("/onboarding/business-context")).toBe("chat")
+    // The removed agent-naming step no longer resolves to a real screen.
+    expect(screenIdFromPathname("/onboarding/coworkers")).toBe("chat")
   })
 
   it("the analyzing interstitial is NOT a numbered onboarding step", () => {

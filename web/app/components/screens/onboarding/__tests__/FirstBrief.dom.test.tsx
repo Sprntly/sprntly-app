@@ -98,7 +98,7 @@ async function mountLoaded(ctxOver: Record<string, unknown> = {}) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   onboardingMock.mockReturnValue(
     makeOnboardingCtx({
-      workspace: makeWorkspace({ onboarding_step: 5 }),
+      workspace: makeWorkspace({ onboarding_step: 4 }),
       ...ctxOver,
     }),
   )
@@ -129,9 +129,9 @@ describe("FirstBrief (container) — first brief", () => {
     expect(container.querySelector(".onb-h")?.textContent).toBe(
       "Setting up your workspace.",
     )
-    // OnboardingChrome shell, first-brief = numbered step 5 (last dot).
+    // OnboardingChrome shell, first-brief = numbered step 4 (last dot).
     expect(container.querySelector(".onb-shell")).not.toBeNull()
-    expect(container.querySelector(".onb-dots")?.getAttribute("data-step")).toBe("5")
+    expect(container.querySelector(".onb-dots")?.getAttribute("data-step")).toBe("4")
     // Old InterviewLayout shell + KPI preview + brief preview are gone.
     expect(container.querySelector(".interview-shell")).toBeNull()
     expect(container.querySelector(".ob-brief-preview")).toBeNull()
@@ -272,7 +272,7 @@ describe("FirstBrief (container) — first brief", () => {
     expect(routerMock.replace).toHaveBeenCalledWith("/")
   })
 
-  it("Back routes to the coworkers step", async () => {
+  it("Back routes to the connectors step", async () => {
     ensureMock.mockReturnValue(new Promise(() => {}))
     await mountLoaded()
     const back = Array.from(document.querySelectorAll("button")).find((b) =>
@@ -280,7 +280,7 @@ describe("FirstBrief (container) — first brief", () => {
     )
     expect(back).toBeTruthy()
     fireEvent.click(back as HTMLButtonElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/coworkers")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

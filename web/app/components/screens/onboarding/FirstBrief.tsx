@@ -217,7 +217,7 @@ export function FirstBrief() {
 
   const footerMeta =
     phase.kind === "ready"
-      ? "Workspace ready · 5 of 5 steps complete"
+      ? "Workspace ready · 4 of 4 steps complete"
       : phase.kind === "failed"
         ? "You can enrich the next Brief from Sources once inside"
         : "Generating… your Brief opens as soon as it's ready"
@@ -238,11 +238,11 @@ export function FirstBrief() {
 
   return (
     <OnboardingChrome
-      step={5}
+      step={4}
       title={title}
       subtitle={subtitle}
       footerMeta={footerMeta}
-      onBack={() => router.push("/onboarding/coworkers")}
+      onBack={() => router.push("/onboarding/connectors")}
       onContinue={() => void finish(phase.kind === "failed" ? "/" : "/brief")}
       continueLabel={phase.kind === "failed" ? "Enter Sprntly anyway" : "Open your Brief"}
       continueDisabled={generating}

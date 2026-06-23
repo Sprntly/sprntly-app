@@ -1,8 +1,8 @@
 // Node-env SSR render assertion (no jsdom) — same View pattern as the
 // connector/PRD component tests. InterviewLayout is purely presentational
 // (props only, no hooks), so it renders to static markup directly. It is
-// the shared v4 onboarding shell for the connectors / coworkers / first-brief
-// steps (a 5-step flow).
+// the shared v4 onboarding shell. The numbered flow is 4 steps; the dot count
+// tracks ONBOARDING_STEP_COUNT.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
@@ -15,10 +15,10 @@ const noop = () => {}
 
 function render(override: Partial<React.ComponentProps<typeof InterviewLayout>> = {}): string {
   const defaults: React.ComponentProps<typeof InterviewLayout> = {
-    step: 5,
+    step: 4,
     eyebrow: "Saved",
-    title: "Introducing your AI coworkers. Give them a name.",
-    agentMessage: "Three specialists plus an Admin join your workspace.",
+    title: "Set up your workspace.",
+    agentMessage: "A few quick steps to get your first brief.",
     children: React.createElement("div", null, "form body"),
     rightPane: React.createElement("div", null, "preview"),
   }
@@ -30,20 +30,20 @@ function render(override: Partial<React.ComponentProps<typeof InterviewLayout>> 
 describe("InterviewLayout (v4 onboarding shell)", () => {
   it("renders the title, agent message, and right pane", () => {
     const html = render()
-    expect(html).toContain("Introducing your AI coworkers")
-    expect(html).toContain("Three specialists plus an Admin")
+    expect(html).toContain("Set up your workspace")
+    expect(html).toContain("A few quick steps")
     expect(html).toContain("preview")
   })
 
-  it("shows the step progress label and a 5-dot indicator", () => {
-    const html = render({ step: 5 })
-    expect(html).toContain("Step 5 of 5")
+  it("shows the step progress label and a 4-dot indicator", () => {
+    const html = render({ step: 4 })
+    expect(html).toContain("Step 4 of 4")
     // one dot element per step (match the className attribute, not CSS rules)
-    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(5)
+    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(4)
   })
 
   it("marks done/active dots relative to the current step", () => {
-    const html = render({ step: 4 })
+    const html = render({ step: 3 })
     expect(html).toContain("interview-dot done") // steps before current
     expect(html).toContain("interview-dot  active") // current step
   })

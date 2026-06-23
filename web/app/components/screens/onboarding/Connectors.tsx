@@ -251,10 +251,10 @@ export function Connectors() {
     setSaving(true)
     try {
       if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
-      // Next numbered step is coworkers (index 4 in ONBOARDING_STEP_SLUGS).
+      // Next numbered step is first-brief (index 4 in ONBOARDING_STEP_SLUGS).
       const updated = await advanceOnboardingStep(workspace.id, 4)
       setWorkspace(updated)
-      router.push("/onboarding/coworkers")
+      router.push("/onboarding/first-brief")
     } finally {
       setSaving(false)
     }
