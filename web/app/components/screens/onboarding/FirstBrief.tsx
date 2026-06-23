@@ -224,17 +224,17 @@ export function FirstBrief() {
 
   const findings = phase.kind === "ready" ? phase.brief.insights.length : 0
 
-  // The weekly brief is sent Monday 09:00 in the company's local timezone
-  // (backend: brief_schedule.should_run_weekly_brief / resolve_timezone). We
-  // don't capture a timezone in onboarding, so surface the user's browser
-  // timezone when the runtime exposes one and fall back to "your local time".
+  // The weekly brief is sent Monday 06:00 in the company owner's timezone
+  // (backend: brief_schedule.should_run_weekly_brief / resolve_user_timezone),
+  // which we capture from the browser at signup. Surface that browser timezone
+  // when the runtime exposes one and fall back to "your local time".
   const localTimezone =
     typeof Intl !== "undefined"
       ? Intl.DateTimeFormat().resolvedOptions().timeZone || null
       : null
   const briefCadenceCopy = localTimezone
-    ? `From now on, Sprntly sends you a fresh Brief of what's happening and the new insights it found every Monday at 9:00 AM (your timezone: ${localTimezone}).`
-    : "From now on, Sprntly sends you a fresh Brief of what's happening and the new insights it found every Monday at 9:00 AM your local time."
+    ? `From now on, Sprntly sends you a fresh Brief of what's happening and the new insights it found every Monday at 6:00 AM (your timezone: ${localTimezone}).`
+    : "From now on, Sprntly sends you a fresh Brief of what's happening and the new insights it found every Monday at 6:00 AM your local time."
 
   return (
     <OnboardingChrome

@@ -1,7 +1,7 @@
 """Timezone-aware schedule logic for the weekly brief (v0 checklist 2.4).
 
-The weekly brief should generate automatically **Monday 09:00 in each company's
-configured timezone**. The scheduler historically fired the whole pipeline every
+The weekly brief should generate automatically **Monday 06:00 in the company
+owner's timezone**. The scheduler historically fired the whole pipeline every
 ``PIPELINE_INTERVAL_HOURS`` (~6h) regardless of day/time/timezone, so a company
 in Sydney and a company in Los Angeles got identical, wall-clock-blind cadences.
 
@@ -12,11 +12,13 @@ waiting until Monday, and makes DST correctness verifiable by simply feeding in
 the right instants. ``app.scheduler`` is the thin impure shell that ticks a
 clock and drives these functions per company.
 
-Timezone resolution: the per-company ``companies.notification_settings`` JSONB
-carries an optional ``timezone`` IANA name (e.g. ``"America/New_York"``). When
-absent, malformed, or unknown, we fall back to :data:`DEFAULT_TIMEZONE` (UTC) so
-a misconfigured tenant still gets a (deterministic) Monday-09:00 brief rather
-than silently never running.
+Timezone resolution: each user carries an optional ``profiles.timezone`` IANA
+name (e.g. ``"America/New_York"``), captured at signup from the browser and
+editable in settings. The brief is company-scoped, so the scheduler resolves the
+timezone of the company **owner** via :func:`resolve_user_timezone`. When the
+owner's timezone is absent, malformed, or unknown, we fall back to
+:data:`DEFAULT_TIMEZONE` (UTC) so a misconfigured tenant still gets a
+(deterministic) Monday-06:00 brief rather than silently never running.
 """
 from __future__ import annotations
 
@@ -27,40 +29,36 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 logger = logging.getLogger(__name__)
 
 # Sensible default when a company hasn't configured a timezone. UTC is the safe,
-# DST-free choice — every company still gets a deterministic Monday-09:00 brief.
+# DST-free choice — every company still gets a deterministic Monday-06:00 brief.
 DEFAULT_TIMEZONE = "UTC"
 
-# The brief fires Monday at 09:00 local time. Monday is weekday() == 0.
+# The brief fires Monday at 06:00 local time. Monday is weekday() == 0.
 BRIEF_WEEKDAY = 0  # Monday
-BRIEF_HOUR = 9
+BRIEF_HOUR = 6
 BRIEF_MINUTE = 0
 
 # How wide a window after the nominal fire time still counts as "due". The
 # scheduler ticks on an interval (not exactly at :00), and a tick can be a little
 # late under load, so a company is "due" if local now is within this window after
-# Monday 09:00 AND the brief hasn't already run this week. Kept comfortably wider
+# Monday 06:00 AND the brief hasn't already run this week. Kept comfortably wider
 # than the scheduler tick so a brief is never missed, while the once-per-week
 # guard (last_run) prevents a second run inside the same window.
 DUE_WINDOW = timedelta(hours=1)
 
 
-def resolve_timezone(notification_settings: dict | None) -> ZoneInfo:
-    """Resolve a company's :class:`ZoneInfo` from its ``notification_settings``.
+def resolve_user_timezone(name: str | None) -> ZoneInfo:
+    """Resolve a :class:`ZoneInfo` from a raw IANA timezone name.
 
-    Reads the optional ``timezone`` IANA name. Falls back to
-    :data:`DEFAULT_TIMEZONE` when the settings are missing, the field is absent
-    or non-string, or the name isn't a known zone (so a typo can't wedge a
-    tenant's brief). The fallback is logged at WARNING for the unknown-zone case
-    since that's a likely misconfiguration worth surfacing.
+    This is the per-user entry point: the scheduler passes the company owner's
+    ``profiles.timezone`` string straight in. Falls back to
+    :data:`DEFAULT_TIMEZONE` when the name is missing, blank, non-string, or
+    isn't a known zone (so a typo can't wedge a tenant's brief). The unknown-zone
+    case is logged at WARNING since that's a likely misconfiguration worth
+    surfacing.
     """
-    name = None
-    if isinstance(notification_settings, dict):
-        raw = notification_settings.get("timezone")
-        if isinstance(raw, str) and raw.strip():
-            name = raw.strip()
-
-    if name is None:
+    if not isinstance(name, str) or not name.strip():
         return ZoneInfo(DEFAULT_TIMEZONE)
+    name = name.strip()
 
     try:
         return ZoneInfo(name)
@@ -70,6 +68,20 @@ def resolve_timezone(notification_settings: dict | None) -> ZoneInfo:
             name, DEFAULT_TIMEZONE,
         )
         return ZoneInfo(DEFAULT_TIMEZONE)
+
+
+def resolve_timezone(notification_settings: dict | None) -> ZoneInfo:
+    """Resolve a :class:`ZoneInfo` from a company's ``notification_settings``.
+
+    Legacy company-level resolver, kept for back-compat. Reads the optional
+    ``timezone`` IANA name out of the JSONB and delegates to
+    :func:`resolve_user_timezone`. New callers should resolve from the owner's
+    ``profiles.timezone`` instead.
+    """
+    raw = None
+    if isinstance(notification_settings, dict):
+        raw = notification_settings.get("timezone")
+    return resolve_user_timezone(raw if isinstance(raw, str) else None)
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -85,12 +97,12 @@ def _as_utc(dt: datetime) -> datetime:
 
 
 def previous_fire_time(now: datetime, tz: ZoneInfo) -> datetime:
-    """The most recent Monday-09:00-local fire instant at or before ``now``.
+    """The most recent Monday-06:00-local fire instant at or before ``now``.
 
-    Returned as an aware UTC datetime. DST-correct: 09:00 *local* is resolved in
+    Returned as an aware UTC datetime. DST-correct: 06:00 *local* is resolved in
     ``tz`` first, then converted to UTC, so the UTC offset tracks whatever rule
     is in effect on that Monday (e.g. America/New_York is UTC-5 in winter, UTC-4
-    in summer — the same 09:00 local maps to different UTC instants).
+    in summer — the same 06:00 local maps to different UTC instants).
     """
     now_utc = _as_utc(now)
     local_now = now_utc.astimezone(tz)
@@ -103,8 +115,8 @@ def previous_fire_time(now: datetime, tz: ZoneInfo) -> datetime:
         this_week_monday.date(), time(BRIEF_HOUR, BRIEF_MINUTE), tzinfo=tz
     )
 
-    # If we're earlier in the week than this Monday's 09:00 (e.g. it's Monday
-    # 08:00, or the local clock landed before the nominal time), the most recent
+    # If we're earlier in the week than this Monday's 06:00 (e.g. it's Monday
+    # 05:00, or the local clock landed before the nominal time), the most recent
     # fire was last Monday.
     if fire_local > local_now:
         fire_local -= timedelta(days=7)
@@ -112,9 +124,9 @@ def previous_fire_time(now: datetime, tz: ZoneInfo) -> datetime:
 
 
 def next_fire_time(after: datetime, tz: ZoneInfo) -> datetime:
-    """The next Monday-09:00-local fire instant strictly after ``after``.
+    """The next Monday-06:00-local fire instant strictly after ``after``.
 
-    Aware UTC datetime, DST-correct (09:00 local is resolved in ``tz`` then
+    Aware UTC datetime, DST-correct (06:00 local is resolved in ``tz`` then
     converted). Useful for "when will this company's brief next run?" surfaces
     and as the inverse of :func:`previous_fire_time` in tests.
     """
@@ -150,7 +162,7 @@ def should_run_weekly_brief(
 
     A brief is due when BOTH hold:
 
-      1. ``now`` is within ``window`` after the most recent Monday-09:00-local
+      1. ``now`` is within ``window`` after the most recent Monday-06:00-local
          fire instant (i.e. we're inside the firing window for *this* week's
          brief), and
       2. the brief hasn't already run for this week's fire instant

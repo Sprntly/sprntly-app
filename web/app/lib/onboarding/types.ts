@@ -70,6 +70,9 @@ export type UserProfile = {
   first_name: string | null
   last_name: string | null
   role: string | null
+  /** IANA timezone (e.g. "America/New_York"); drives the weekly brief send time.
+   *  null until captured at signup or set in settings → backend falls back to UTC. */
+  timezone: string | null
   onboarding_step: number
   onboarding_completed_at: string | null
   skipped_fields: string[]

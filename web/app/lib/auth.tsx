@@ -48,6 +48,21 @@ export type SignUpInput = {
   lastName: string
   /** v4 page 03 "about you" — optional self-reported role. */
   role?: string
+  /** IANA timezone (e.g. "America/New_York"). Optional override; when absent we
+   *  auto-detect from the browser so the weekly brief fires Monday 06:00 local. */
+  timezone?: string
+}
+
+/** Best-effort IANA timezone of the current browser (e.g. "America/New_York").
+ *  Returns undefined if the environment can't report one — the backend then
+ *  falls back to UTC. */
+export function detectBrowserTimezone(): string | undefined {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return tz && tz.trim() ? tz.trim() : undefined
+  } catch {
+    return undefined
+  }
 }
 
 type AuthCtx = AuthState & {
@@ -135,6 +150,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signUpWithPassword = useCallback(
     async (input: SignUpInput): Promise<SignUpResult> => {
       const supabase = getSupabase()
+      const timezone = input.timezone?.trim() || detectBrowserTimezone()
       const { data, error } = await supabase.auth.signUp({
         email: normalizeEmail(input.email),
         password: input.password,
@@ -144,6 +160,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             first_name: input.firstName.trim(),
             last_name: input.lastName.trim(),
             ...(input.role?.trim() ? { role: input.role.trim() } : {}),
+            ...(timezone ? { timezone } : {}),
           },
         },
       })

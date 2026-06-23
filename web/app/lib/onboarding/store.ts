@@ -71,6 +71,7 @@ function rowToProfile(row: Record<string, unknown>): UserProfile {
     first_name: (row.first_name as string | null) ?? null,
     last_name: (row.last_name as string | null) ?? null,
     role: (row.role as string | null) ?? null,
+    timezone: (row.timezone as string | null) ?? null,
     onboarding_step: Number(row.onboarding_step) || 0,
     onboarding_completed_at: (row.onboarding_completed_at as string | null) ?? null,
     skipped_fields: Array.isArray(row.skipped_fields) ? (row.skipped_fields as string[]) : [],
@@ -82,7 +83,7 @@ export async function fetchUserProfile(userId: string): Promise<UserProfile | nu
   const { data, error } = await supabase
     .from("profiles")
     .select(
-      "id, email, first_name, last_name, role, onboarding_step, onboarding_completed_at, skipped_fields",
+      "id, email, first_name, last_name, role, timezone, onboarding_step, onboarding_completed_at, skipped_fields",
     )
     .eq("id", userId)
     .maybeSingle()
@@ -96,6 +97,8 @@ export async function updateUserProfile(
     first_name: string
     last_name: string
     role: string | null
+    /** IANA timezone; omit to leave unchanged, pass null to clear. */
+    timezone?: string | null
   },
 ): Promise<UserProfile> {
   const supabase = getSupabase()
@@ -110,11 +113,14 @@ export async function updateUserProfile(
       last_name: last,
       full_name: full_name || null,
       role: patch.role?.trim() || null,
+      ...(patch.timezone !== undefined
+        ? { timezone: patch.timezone?.trim() || null }
+        : {}),
       updated_at: new Date().toISOString(),
     })
     .eq("id", userId)
     .select(
-      "id, email, first_name, last_name, role, onboarding_step, onboarding_completed_at, skipped_fields",
+      "id, email, first_name, last_name, role, timezone, onboarding_step, onboarding_completed_at, skipped_fields",
     )
     .single()
 
@@ -373,6 +379,24 @@ export async function completeOnboarding(companyId: string, userId: string) {
     .from("profiles")
     .update({ onboarding_step: ONBOARDING_STEP_COUNT, onboarding_completed_at: now })
     .eq("id", userId)
+
+  // Backfill the brief-delivery timezone from the browser if we never captured
+  // one (Google signups carry no timezone in their OAuth metadata, unlike email
+  // signups which set it via supabase.auth.signUp). The `.is(null)` guard means
+  // we only fill the gap — an explicitly-captured/edited timezone is never
+  // clobbered. Best-effort: a failure here must not block entering the app.
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone?.trim()
+    if (tz) {
+      await supabase
+        .from("profiles")
+        .update({ timezone: tz })
+        .eq("id", userId)
+        .is("timezone", null)
+    }
+  } catch {
+    /* no Intl / transient write error — leave timezone null → backend UTC */
+  }
 }
 
 export async function sendWorkspaceInvites(
