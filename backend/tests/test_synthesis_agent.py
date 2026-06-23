@@ -1066,7 +1066,7 @@ def test_no_tree_path_factors_neutral_no_classification(facade, isolated_setting
 # The gateway appends `+<skill_id>@<hash>` to prompt_version when a skill binds;
 # the decision log MUST record that returned value so the §4d audit row pins the
 # exact method/skill version behind the ranking call.
-_SKILL_PINNED_VERSION = "synthesis-brief-v1+prioritize@deadbeef"
+_SKILL_PINNED_VERSION = "synthesis-brief-v4+weekly-brief@deadbeef"
 
 
 def _ranked_for(theme_id):
@@ -1113,7 +1113,7 @@ def test_rank_decision_log_pins_gateway_returned_prompt_version(
     rank = _run_synthesis_with_pinned_gateway(facade, isolated_settings)
     assert rank["prompt_version"] == _SKILL_PINNED_VERSION
     assert rank["prompt_version"] != synth.PROMPT_VERSION
-    assert "+prioritize@deadbeef" in rank["prompt_version"]
+    assert "+weekly-brief@deadbeef" in rank["prompt_version"]
 
 
 def test_rank_decision_log_factors_prompt_version_pins_skill_hash(
@@ -1122,13 +1122,13 @@ def test_rank_decision_log_factors_prompt_version_pins_skill_hash(
     version, so the audit JSON itself records the bound skill."""
     rank = _run_synthesis_with_pinned_gateway(facade, isolated_settings)
     assert rank["factors"]["prompt_version"] == _SKILL_PINNED_VERSION
-    assert "+prioritize@deadbeef" in rank["factors"]["prompt_version"]
+    assert "+weekly-brief@deadbeef" in rank["factors"]["prompt_version"]
 
 
 def test_rank_decision_log_prompt_version_matches_result(facade, isolated_settings):
     """Top-level and factors prompt_version agree — both pin the same returned
     version (no split-brain between the row and its factors blob)."""
-    custom = "synthesis-brief-v1+prioritize@cafef00d"
+    custom = "synthesis-brief-v4+weekly-brief@cafef00d"
     rank = _run_synthesis_with_pinned_gateway(
         facade, isolated_settings, returned_version=custom)
     assert rank["prompt_version"] == custom
@@ -1232,3 +1232,276 @@ def test_unchanged_prior_finding_is_suppressed_from_next_brief(facade, isolated_
     # Alpha changed → still a candidate; Beta unchanged → suppressed.
     assert "Alpha" in captured["input"]
     assert "Beta" not in captured["input"]
+
+
+# ---------- weekly-brief skill binding (composition runs THROUGH the skill) ----
+
+# The skill's native output the model emits alongside the structured insights:
+# a greeting + cards (skills/weekly-brief/references/signal-schema.json `brief`).
+def _ranked_with_skill_cards(theme_id):
+    """A judge payload that carries BOTH the structured insight AND the
+    weekly-brief skill's native greeting + card for that theme."""
+    return {
+        **_RANKED,
+        "insights": [{**_RANKED["insights"][0], "theme_id": theme_id}],
+        "greeting": ("Good day, Acme — there's roughly $1.4M within reach this "
+                     "week; the strongest play closes the SSO gap blocking deals."),
+        "cards": [{
+            "type": "growth",
+            "accent": "#1a8a52",
+            "title": "SSO gaps are blocking $1.4M in deals — closing them recovers that ARR.",
+            "body": ("An SSO gap has stalled enterprise deals worth $1.4M. We've "
+                     "drafted the fix as a PRD — review and approve to unblock the "
+                     "pipeline."),
+            "sources": ["revenue", "customer_voice"],
+            "ctas": [{"label": "Draft PRD", "style": "primary"},
+                     {"label": "Generate prototype", "style": "ghost"}],
+            "signal_id": theme_id,
+        }],
+    }
+
+
+def test_run_synthesis_composes_via_weekly_brief_skill(facade, isolated_settings):
+    """run_synthesis binds the COMPOSITION call to the `weekly-brief` skill:
+    the llm_call carries skill='weekly-brief', and the input it composes from is
+    the skill's brief_request (the candidates mapped into the signal schema)."""
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+
+    captured: dict = {}
+
+    def _spy(**kw):
+        captured.update(kw)
+        return _llm_result(_ranked_with_skill_cards(theme.id))
+
+    with patch.object(synth, "llm_call", side_effect=_spy):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    # The composition call is bound to the weekly-brief skill (the gateway then
+    # prepends its METHOD + pins +weekly-brief@<hash> on prompt_version).
+    assert captured["skill"] == "weekly-brief"
+    assert captured["purpose"] == "compose_weekly_brief"
+    # The model is handed the skill's brief_request (signals + context), not just
+    # the raw candidate dump.
+    assert "BRIEF_REQUEST" in captured["input"]
+    assert "signals:" in captured["input"]
+    assert f"id: {theme.id}" in captured["input"]
+
+
+def test_run_synthesis_persists_skill_greeting_and_cards(facade, isolated_settings):
+    """The persisted brief carries the skill's greeting + cards ADDITIVELY, and
+    the cards' phrasing is reconciled onto the UI-contract insights (title), so
+    the existing brief render keeps every field it reads while gaining the
+    skill's voice."""
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+
+    with patch.object(synth, "llm_call",
+                      return_value=_llm_result(_ranked_with_skill_cards(theme.id))):
+        brief = synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    # Skill output persisted alongside the UI contract.
+    assert brief["_composed_by_skill"] == "weekly-brief"
+    assert brief["greeting"].startswith("Good day, Acme")
+    assert len(brief["_brief_cards"]) == 1
+    assert brief["_brief_cards"][0]["signal_id"] == theme.id
+
+    # UI contract intact: insight still has tag/subtitle/recommendation/metrics/
+    # chart_hints/convergence the frontend reads; the card's pain-then-value title
+    # was layered on; the `_card` is threaded for the skill's HTML render.
+    ins = brief["insights"][0]
+    assert ins["tag"] == "something_broken"            # UI render bucket preserved
+    assert "blocking $1.4M in deals" in ins["title"]    # skill's title applied
+    assert ins["subtitle"] and ins["recommendation"]
+    assert ins["metrics"] and ins["chart_hints"] and ins["convergence"]
+    assert ins["_card"]["type"] == "growth"
+    assert ins["_card"]["accent"] == "#1a8a52"
+
+    # The DB row (what /current serves) carries the same.
+    rows = isolated_settings["supabase"].table("briefs").select("*") \
+        .eq("dataset", "acme").execute().data
+    saved = rows[0]["payload"]
+    assert saved["greeting"].startswith("Good day, Acme")
+    assert saved["insights"][0]["title"] == ins["title"]
+
+
+def test_run_synthesis_numbers_only_from_input_signals(facade, isolated_settings):
+    """The brief_request handed to the skill exposes ONLY the figures the pipeline
+    computed (revenue at stake), so the skill phrases existing numbers and is
+    never asked to invent one — the skill's core 'numbers are inputs' rule."""
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+
+    captured: dict = {}
+
+    def _spy(**kw):
+        captured.update(kw)
+        return _llm_result(_ranked_with_skill_cards(theme.id))
+
+    with patch.object(synth, "llm_call", side_effect=_spy):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    text = captured["input"]
+    # The only revenue figure available to phrase is the computed $1.4M.
+    assert "$1.4M" in text
+    # The skill is told the numbers are inputs (the anti-fabrication instruction
+    # rides in the system prompt + the brief_request preamble).
+    assert "INPUT" in text
+    sysl = synth._SYSTEM.lower()
+    assert "phrase" in sysl and "never recompute or invent" in sysl
+
+
+def test_run_synthesis_gate_empty_brief_skips_skill(facade, isolated_settings):
+    """The evidence GATE stays UPSTREAM of the skill: a thin KG short-circuits to
+    an empty brief and the skill composition call never runs (the skill is never
+    forced to invent a brief from insufficient evidence)."""
+    from app.synthesis import agent as synth
+
+    _seed_theme_with_signals(facade, "ent-A", "thin", [
+        ("communication", "feature_request", {}, 0),
+    ])
+
+    calls: list = []
+
+    def _spy(**kw):
+        calls.append(kw)
+        return _llm_result(_RANKED)
+
+    with patch.object(synth, "llm_call", side_effect=_spy):
+        brief = synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    assert calls == []                          # skill composition never invoked
+    assert brief["insights"] == []
+    assert brief["_insufficient_evidence"] is True
+    # No skill-card scaffolding on an empty brief.
+    assert brief.get("_brief_cards", []) == [] or "_brief_cards" not in brief
+
+
+def test_brief_schema_declares_skill_brief_output():
+    """The judge schema must request the weekly-brief skill's native output
+    (greeting + cards) so the model emits it, matching the skill's `brief`
+    schema (skills/weekly-brief/references/signal-schema.json)."""
+    from app.synthesis import agent as synth
+
+    props = synth._BRIEF_SCHEMA["properties"]
+    assert "greeting" in props
+    assert "cards" in props
+    card = props["cards"]["items"]
+    assert {"type", "title", "body", "sources", "signal_id"} <= set(card["properties"])
+    assert "signal_id" in card["required"]
+
+
+# ---------- weekly_brief_skill mapper (pure) ----------
+
+def _conv(theme_id, label, *, revenue=0.0, breadth=1, signals=1, weight=0.8,
+          competitor=0, source_types=None, evidence=None):
+    from app.synthesis.convergence import ThemeConvergence
+    tc = ThemeConvergence(theme_id=theme_id, theme_label=label)
+    tc.revenue_at_stake_usd = revenue
+    tc.signal_count = signals
+    tc.effective_weight = weight
+    tc.competitor_pressure = competitor
+    tc.source_types = set(source_types or {"revenue"})
+    tc.evidence = evidence or [
+        {"source_type": "revenue", "kind": "deal_blocker", "content": "x"}]
+    return tc
+
+
+def test_mapper_to_signal_payload_carries_inputs_only():
+    from app.synthesis.weekly_brief_skill import to_signal_payload
+
+    cands = [_conv("t1", "SSO gap", revenue=1400000, breadth=2, signals=3,
+                   source_types={"revenue", "customer_voice"})]
+    text = to_signal_payload(cands, recipient="Acme", company_scale="~$1.4M")
+    assert "recipient: Acme" in text
+    assert "id: t1" in text
+    assert "$1.4M" in text                       # computed figure phrased, not invented
+    assert "type: growth" in text                # revenue → growth hint
+    assert "company_scale: ~$1.4M" in text
+
+
+def test_mapper_no_revenue_yields_null_amount():
+    """A candidate with no revenue figure surfaces value.amount: null so the skill
+    uses a qualitative value clause and invents no number (SKILL.md edge case)."""
+    from app.synthesis.weekly_brief_skill import to_signal_payload
+
+    cands = [_conv("t2", "Activation gap", revenue=0.0, breadth=1, signals=2)]
+    text = to_signal_payload(cands, recipient="Acme", company_scale=None)
+    assert "amount: null" in text
+    assert "company_scale: (unknown" in text
+
+
+def test_mapper_competitor_pressure_is_competitive_type():
+    from app.synthesis.weekly_brief_skill import to_signal_payload
+
+    cands = [_conv("t3", "Rival launch", competitor=2, source_types={"customer_voice"})]
+    text = to_signal_payload(cands, recipient="Acme", company_scale=None)
+    assert "type: competitive" in text
+    assert "urgency: high" in text               # competitor pressure → high urgency
+
+
+def test_mapper_cards_to_insights_layers_card_onto_insight():
+    from app.synthesis.weekly_brief_skill import cards_to_insights
+
+    insights = [{"theme_id": "t1", "title": "old title", "subtitle": "s",
+                 "recommendation": "r", "metrics": [], "chart_hints": [],
+                 "convergence": [], "confidence": 0.8}]
+    cards = [{"type": "retention", "accent": "#b23b52",
+              "title": "Churn is up 18% — protect the at-risk cohort.",
+              "body": "b", "sources": ["customer_voice"],
+              "ctas": [{"label": "Draft PRD", "style": "primary"}],
+              "signal_id": "t1"}]
+    out = cards_to_insights(cards, insights)
+    assert out[0]["title"].startswith("Churn is up 18%")   # card title applied
+    assert out[0]["tag"] == "something_broken"             # retention → broken
+    assert out[0]["_card"]["type"] == "retention"
+    # original render fields untouched
+    assert out[0]["subtitle"] == "s" and out[0]["recommendation"] == "r"
+    # inputs not mutated
+    assert insights[0]["title"] == "old title"
+
+
+def test_mapper_cards_to_insights_unmatched_insight_unchanged():
+    from app.synthesis.weekly_brief_skill import cards_to_insights
+
+    insights = [{"theme_id": "t9", "title": "keep", "tag": "something_new"}]
+    cards = [{"type": "growth", "title": "x", "body": "b", "sources": [],
+              "signal_id": "other"}]
+    out = cards_to_insights(cards, insights)
+    assert out[0]["title"] == "keep"
+    assert "_card" not in out[0]
+
+
+def test_skill_is_installed_and_loadable():
+    """The weekly-brief skill is vendored under backend/skills/ and loads with a
+    content hash + the expected frontmatter name."""
+    from app.skills.loader import get_skill, list_skills
+
+    assert "weekly-brief" in list_skills()
+    spec = get_skill("weekly-brief")
+    assert spec.id == "weekly-brief"
+    assert spec.content_hash
+    assert "weekly" in spec.description.lower() or "brief" in spec.description.lower()
+
+
+def test_skill_registered_non_routable_in_catalog():
+    """weekly-brief is installed + categorized but NOT offered to the Q&A router
+    (it's the synthesis agent's brief composer, bound by name)."""
+    from app.skills.catalog import NON_ROUTABLE, build_manifest
+
+    assert "weekly-brief" in NON_ROUTABLE
+    entry = next(e for e in build_manifest() if e["id"] == "weekly-brief")
+    assert entry["routable"] is False
+    assert entry["category"]

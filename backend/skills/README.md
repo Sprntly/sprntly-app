@@ -30,6 +30,7 @@ Category prefixes from upstream (e.g. `03-prioritization-and-planning/`) are
 | incident-runbook | 05-delivery-and-execution | — |
 | business-context | 02-strategy-and-positioning | templates/ (incl. business-context-schema.yaml) |
 | fact-check | 01-discovery-and-research | templates/ |
+| weekly-brief | 06-stakeholder-and-communication | references/, assets/ (brief composer bound by `app/synthesis/agent.py`) |
 
 Each loaded skill carries a `content_hash` (first 12 hex of the sha256 over all
 its files), recorded in the decision log via `prompt_version` so the exact

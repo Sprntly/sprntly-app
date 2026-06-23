@@ -1,8 +1,11 @@
 """Loader for the vendored PM Agent Skills (prompt-layer method specs).
 
 Each skill lives at `backend/skills/<id>/` with a required `SKILL.md` (the
-*method* the agent follows) plus optional `modules/`, `templates/`, and
-`scripts/` directories. `get_skill(skill_id)` reads a skill off disk once,
+*method* the agent follows) plus optional `modules/`, `templates/`,
+`references/`, `assets/`, and `scripts/` directories. `references/` holds the
+docs SKILL.md tells the model to read at runtime (schemas, rubrics, examples) —
+the gateway folds these into the cacheable METHOD prefix so the skill's full
+workflow is actually in-prompt. `get_skill(skill_id)` reads a skill off disk once,
 hashes all of its files into a short `content_hash`, and caches the result in
 process. The hash is recorded by the gateway in `prompt_version` so every
 decision is traceable to the exact method version behind it.
@@ -29,7 +32,17 @@ class SkillSpec:
 
     `content_hash` is the first 12 hex chars of the sha256 over every file in
     the skill directory (path + bytes), so any edit to the method, a module, a
-    template, or a script changes the hash.
+    template, a reference, an asset, or a script changes the hash.
+
+    `references` are the skill's `references/*` docs (schemas, rubrics, golden
+    examples) that SKILL.md instructs the model to *read at runtime* ("read
+    references/signal-schema.json", "score against references/rubric.md"). The
+    gateway injects them into the cacheable METHOD prefix so the skill can run
+    its full documented workflow, not just the SKILL.md summary. `assets` are
+    the skill's `assets/*` files (e.g. a render template) — loaded for
+    completeness/fingerprinting but NOT injected into the prompt: the app renders
+    from the structured brief payload, so the template is a downstream view, not
+    a prompt input.
 
     `description` is the one-line summary from the SKILL.md frontmatter — what
     the router classifies against. `has_scripts` is True when the skill bundles
@@ -40,6 +53,8 @@ class SkillSpec:
     method: str                                   # SKILL.md text
     modules: dict[str, str] = field(default_factory=dict)    # name -> text
     templates: dict[str, str] = field(default_factory=dict)  # name -> text
+    references: dict[str, str] = field(default_factory=dict)  # name -> text
+    assets: dict[str, str] = field(default_factory=dict)      # name -> text
     content_hash: str = ""
     description: str = ""
     has_scripts: bool = False
@@ -119,6 +134,8 @@ def get_skill(skill_id: str) -> SkillSpec:
         method=method,
         modules=_read_subdir(skill_dir, "modules"),
         templates=_read_subdir(skill_dir, "templates"),
+        references=_read_subdir(skill_dir, "references"),
+        assets=_read_subdir(skill_dir, "assets"),
         content_hash=_content_hash(skill_dir),
         description=fm.get("description", ""),
         has_scripts=has_scripts,

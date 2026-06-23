@@ -78,10 +78,18 @@ SKILL_CATEGORY: dict[str, str] = {
     "stakeholder-update": "Stakeholder & Communication",
     "third-party-feedback": "Stakeholder & Communication",
     "fact-check": "Verification",
+    "weekly-brief": "Stakeholder & Communication",
 }
 
 # Skills the Q&A router must never select (still installed + callable by name).
-NON_ROUTABLE: frozenset[str] = frozenset({"business-context", "fact-check"})
+#   - business-context is an ingestion/onboarding process, not a chat answer.
+#   - fact-check is an internal verification pass over other outputs.
+#   - weekly-brief is the synthesis-agent's brief composer (bound by name from
+#     app/synthesis/agent.py); it composes the weekly brief from already-computed
+#     signals, it is not something the Q&A router should pick for a chat turn.
+NON_ROUTABLE: frozenset[str] = frozenset(
+    {"business-context", "fact-check", "weekly-brief"}
+)
 
 # Expensive skills that trip the confirm gate on large scope (see qa_agent).
 COST_GATED: frozenset[str] = frozenset({"competitive-intelligence-review"})
