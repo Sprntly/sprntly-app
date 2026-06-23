@@ -12366,6 +12366,17 @@
     color: #828d87;
   }
 
+  /* Health probe found this active connector's token no longer valid. */
+  .set-conn-row .st.down {
+    background: #fbe4e4;
+    color: #a4262c;
+    border-color: #e6b3b3;
+  }
+
+  .set-conn-row .nm .s.is-disconnected {
+    color: #a4262c;
+  }
+
   .set-conn-row .ac {
     font-size: 11.5px;
     color: var(--accent);
