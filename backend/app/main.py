@@ -46,6 +46,7 @@ from app.routes import (
     datasets as datasets_routes,
     design_agent,
     design_agent_bundle,
+    feedback,
     ingest,
     metrics,
     multi_agent,
@@ -286,6 +287,7 @@ app.include_router(tickets.router)
 app.include_router(conversations.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
+app.include_router(feedback.router)
 
 # Serve prototype bundles in dev (filesystem fallback when no Supabase Storage bucket).
 _proto_dir = Path(settings.storage_dir)

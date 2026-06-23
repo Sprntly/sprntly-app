@@ -1672,6 +1672,24 @@ export const teamApi = {
   list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
 }
 
+// ── Feedback / feature-request (June 20 #13 + #A) ──
+// Users submit a short message + an optional type from the left nav. The
+// backend stores it and emails it to the team. type defaults to "other".
+
+export type FeedbackType = "bug" | "feature_request" | "connector_request" | "other"
+
+export type FeedbackResult = {
+  id: string
+  type: FeedbackType
+  email_sent: boolean
+}
+
+export const feedbackApi = {
+  /** Submit in-app feedback / a feature or connector request. */
+  submit: (body: { message: string; type?: FeedbackType }) =>
+    api.post<FeedbackResult>("/v1/feedback", body),
+}
+
 // ── Conversations (chat history persistence) ──
 
 export type ConversationRecord = {

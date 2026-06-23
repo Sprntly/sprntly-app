@@ -199,6 +199,14 @@ class Settings(BaseSettings):
     # Where to email the alert on failure (empty => log-only / no email).
     signin_monitor_alert_email: str = ""
 
+    # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
+    # short message + type (bug / feature / connector request) from the left
+    # nav; we store it in the `feedback` table and email it to the team via
+    # Resend. Recipient resolution: FEEDBACK_ALERT_EMAIL wins; if unset we fall
+    # back to SIGNIN_MONITOR_ALERT_EMAIL (the existing team/ops alert address).
+    # Both empty ⇒ storage still happens, email is a clean no-op (logged).
+    feedback_alert_email: str = ""
+
     # Which engine produces the weekly brief.
     #   "synthesis" (default) — KG-driven: seed-if-empty → run_synthesis over the
     #                           knowledge graph (kg_signal/kg_entity) → save_brief.
