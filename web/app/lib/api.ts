@@ -741,6 +741,11 @@ export type ConnectionSummary = {
   }
   last_sync_at: string | null
   last_sync_error: string | null
+  // Token-health set by the scheduled connector health monitor (and the on-open
+  // test). "connected" | "disconnected"; null/undefined = never checked.
+  health?: string | null
+  last_health_error?: string | null
+  last_health_check_at?: string | null
   created_at: string
   updated_at: string
 }

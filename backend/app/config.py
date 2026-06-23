@@ -199,6 +199,18 @@ class Settings(BaseSettings):
     # Where to email the alert on failure (empty => log-only / no email).
     signin_monitor_alert_email: str = ""
 
+    # Scheduled connector health monitor (app/connector_health.py). Re-validates
+    # every active connector's stored OAuth/API token on an interval and persists
+    # the result, so the connectors UI surfaces a dead connector proactively and
+    # we email a healthy→disconnected transition alert. min_recheck throttles the
+    # sweep against the on-open test so the two don't double-probe the same row.
+    connector_health_enabled: bool = True
+    connector_health_interval_minutes: int = 60
+    connector_health_min_recheck_minutes: int = 50
+    # Single admin alert address. Empty => fall back to signin_monitor_alert_email;
+    # both empty => log-only / no email.
+    connector_health_alert_email: str = ""
+
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left
     # nav; we store it in the `feedback` table and email it to the team via
