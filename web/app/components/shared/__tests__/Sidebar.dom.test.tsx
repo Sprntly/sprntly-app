@@ -62,3 +62,38 @@ describe("Sidebar — New chat wiring", () => {
     expect(goToNewChat).not.toHaveBeenCalled()
   })
 })
+
+// ── Shell restyle: every nav affordance is preserved ──────────────────────────
+// The visual restyle of the rail must NOT drop any nav entry. This guards the
+// full set — especially the Feedback action that sits next to sign-out — so a
+// future CSS/markup change can't silently remove one.
+describe("Sidebar — nav affordances preserved after restyle", () => {
+  it("renders New chat, Weekly brief, All chats, Backlog, Sources, Settings, Feedback + Sign out", () => {
+    render(React.createElement(Sidebar))
+    for (const label of [
+      "New chat",
+      "Weekly brief",
+      "All chats",
+      "Backlog Projects",
+      "Sources",
+      "Settings",
+      "Feedback",
+      "Sign out",
+    ]) {
+      expect(screen.getByLabelText(label)).toBeTruthy()
+    }
+  })
+
+  it("Feedback opens the feedback modal (not a nav)", () => {
+    render(React.createElement(Sidebar))
+    fireEvent.click(screen.getByLabelText("Feedback"))
+    // Feedback is a modal trigger, not a screen nav.
+    expect(goTo).not.toHaveBeenCalled()
+    expect(goToNewChat).not.toHaveBeenCalled()
+  })
+
+  it("renders the brand mark with its accent dot", () => {
+    const { container } = render(React.createElement(Sidebar))
+    expect(container.querySelector(".sb-rail-logo-dot")).toBeTruthy()
+  })
+})

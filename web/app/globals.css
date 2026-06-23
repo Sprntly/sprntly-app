@@ -167,12 +167,13 @@
     box-sizing: border-box;
   }
 
+  /* New design content header title: lighter weight, tighter size (chat-top). */
   .app-main-chrome-title {
     margin: 0;
     font-family: var(--font-display);
-    font-weight: 600;
-    font-size: 15px;
-    letter-spacing: -0.02em;
+    font-weight: 500;
+    font-size: 14.5px;
+    letter-spacing: -0.005em;
     color: var(--ink);
     line-height: 1.2;
   }
@@ -1353,7 +1354,8 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 12px 0 8px;
+    /* New design: nav rail vertical padding 14px (was 12px/8px). */
+    padding: 14px 0;
     gap: 0;
   }
 
@@ -1370,23 +1372,29 @@
     box-sizing: border-box;
   }
 
+  /* New design nav-brand: 36px / radius 9px, serif wordmark mark at 18px. */
   .sb-rail-logo {
     width: 36px;
     height: 36px;
-    border-radius: 7px;
-    background: #f6f7f6;
-    color: #15201b;
+    border-radius: 9px;
+    background: var(--surface);
+    color: var(--ink);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
-    font-weight: 700;
-    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 400;
+    font-family: var(--font-serif);
     flex-shrink: 0;
   }
 
   .sb-rail-logo-text {
     letter-spacing: -0.02em;
+  }
+
+  /* New design nav-brand accent dot. */
+  .sb-rail-logo-dot {
+    color: var(--accent);
   }
 
   .sb-rail-expand {
@@ -1411,10 +1419,11 @@
     opacity: 1;
   }
 
+  /* New design nav-new: 38px / radius 9px. */
   .sb-rail-new {
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
     background: var(--accent);
     color: #fff;
     border: none;
@@ -1422,13 +1431,13 @@
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    margin-bottom: 16px;
+    margin-bottom: 14px;
     flex-shrink: 0;
-    transition: all .2s;
+    transition: background .15s;
   }
 
   .sb-rail-new:hover {
-    background: #0E6E49;
+    background: var(--accent-hover);
   }
 
   .sb-rail-new svg {
@@ -1444,10 +1453,11 @@
     width: 100%;
   }
 
+  /* New design nav-item: 42px / radius 9px. */
   .sb-rail-item {
-    width: 40px;
-    height: 40px;
-    border-radius: 8px;
+    width: 42px;
+    height: 42px;
+    border-radius: 9px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1455,17 +1465,18 @@
     border: none;
     color: var(--nav-text);
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background 0.12s, color 0.12s;
     position: relative;
   }
 
+  /* New design nav-tip: sits 54px from rail edge, tinted with --ink. */
   .nav-tooltip {
     position: absolute;
-    left: 50px;
+    left: 54px;
     top: 50%;
     transform: translate(0px, -50%);
-    background: #15201B;
-    color: #fff;
+    background: var(--ink);
+    color: var(--nav-text-hover);
     font-size: 11.5px;
     padding: 6px 10px;
     border-radius: 6px;
@@ -1473,7 +1484,8 @@
     white-space: nowrap;
     opacity: 0;
     pointer-events: none;
-    transition: all 0.3s;
+    z-index: 10;
+    transition: opacity 0.12s, transform 0.12s;
   }
 
   .nav-tooltip:before {
@@ -1484,7 +1496,7 @@
     transform: translateY(-50%) rotate(45deg);
     width: 6px;
     height: 6px;
-    background: #15201B;
+    background: var(--ink);
   }
 
   .sb-rail-item:hover .nav-tooltip {
@@ -1502,17 +1514,19 @@
     color: var(--nav-text-hover);
   }
 
-  /* 
+  /* New design active affordance: a green bar pinned to the rail's left edge.
+     Rail is 60px with a 42px item centered → 9px gutter each side; -9px lands
+     the bar flush against the rail edge. */
   .sb-rail-item.active::before {
     content: '';
     position: absolute;
-    left: 0;
-    top: 4px;
-    bottom: 4px;
+    left: -9px;
+    top: 10px;
+    bottom: 10px;
     width: 3px;
     background: var(--accent);
-    border-radius: 0 3px 3px 0;
-  } */
+    border-radius: 3px;
+  }
 
   .sb-rail-item svg {
     width: 18px;
@@ -1541,7 +1555,7 @@
   .divider-nav {
     width: 26px;
     height: 1px;
-    background: #1C4E3F;
+    background: var(--nav-2);
     margin: 4px 0;
   }
 
@@ -1554,13 +1568,14 @@
     width: 100%;
   }
 
+  /* New design av-nav: 32px, soft brand fill with a light brand border. */
   .sb-rail-avatar {
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
     border-radius: 50%;
     background: var(--accent-soft);
-    color: var(--accent);
-    border: 2px solid var(--accent);
+    color: var(--accent-ink);
+    border: 1px solid var(--accent-2);
     font-size: 11px;
     font-weight: 600;
     display: flex;

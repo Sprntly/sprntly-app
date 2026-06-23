@@ -82,7 +82,10 @@ export function Sidebar(_props: SidebarProps = {}) {
           onClick={() => goTo("chat")}
           style={{ cursor: "pointer" }}
         >
-          <span className="sb-rail-logo-text">{companyInitial}</span>
+          <span className="sb-rail-logo-text">
+            {companyInitial}
+            <span className="sb-rail-logo-dot">.</span>
+          </span>
         </div>
       </div>
 
