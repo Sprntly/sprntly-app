@@ -93,6 +93,7 @@ def patch_skill(monkeypatch):
     spec = SimpleNamespace(
         id="prd-author", content_hash="abc123",
         method="METHOD BODY", modules={}, templates={},
+        references={}, assets={},
     )
     import app.graph.gateway as gw
     monkeypatch.setattr(gw, "get_skill", lambda name: spec)

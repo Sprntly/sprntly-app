@@ -22,8 +22,8 @@ import logging
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, field_validator
 
+from app import config
 from app.auth import CompanyContext, require_company
-from app.config import settings
 from app.db.feedback import FEEDBACK_TYPES, record_feedback
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ class FeedbackIn(BaseModel):
 def _resolve_recipient() -> str:
     """Team address for feedback email. FEEDBACK_ALERT_EMAIL wins; else fall
     back to the existing ops alert address. Empty ⇒ no email."""
+    settings = config.settings
     return (settings.feedback_alert_email or settings.signin_monitor_alert_email or "").strip()
 
 
@@ -69,12 +70,12 @@ def _email_feedback(*, type_label: str, message: str, company_id: str,
                     user_email: str | None) -> bool:
     """Best-effort: email the submission to the team. Returns True iff sent.
     Never raises — a failed/disabled send never breaks the submission."""
-    api_key = settings.resend_api_key
+    api_key = config.settings.resend_api_key
     to = _resolve_recipient()
     if not api_key or not to:
         logger.info("feedback email skipped (no RESEND_API_KEY / recipient); stored only")
         return False
-    from app.synthesis.email_delivery import _send_via_resend
+    from app.synthesis import email_delivery
 
     who = user_email or "unknown user"
     subject = f"[Sprntly feedback] {type_label} from {who}"
@@ -91,8 +92,8 @@ def _email_feedback(*, type_label: str, message: str, company_id: str,
         f"<hr/><p style='white-space:pre-wrap'>{message}</p>"
     )
     try:
-        _send_via_resend(api_key, to=to, subject=subject,
-                         html_body=html_body, text_body=text)
+        email_delivery._send_via_resend(api_key, to=to, subject=subject,
+                                         html_body=html_body, text_body=text)
         logger.info("feedback email sent to %s", to)
         return True
     except Exception:  # noqa: BLE001 — email never breaks the submission
