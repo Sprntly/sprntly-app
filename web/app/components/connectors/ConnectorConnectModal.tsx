@@ -31,7 +31,7 @@ import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { openOauthTab } from "../../lib/connectorsOauth"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
-import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
+import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -446,11 +446,10 @@ export function ConnectorConnectModal({
   if (connection != null) {
     if (providerId === "google_drive") {
       slot = (
-        <GoogleDriveFolderPicker
+        <GoogleDrivePicker
           dataset={activeCompany}
-          selectedFolderId={connection.config?.folder_id}
-          selectedFolderName={connection.config?.folder_name}
-          onSelected={onConnected}
+          savedFiles={connection.config?.files}
+          onSaved={onConnected}
         />
       )
     } else if (providerId === "slack") {

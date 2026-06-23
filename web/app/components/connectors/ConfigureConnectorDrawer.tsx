@@ -29,7 +29,7 @@ import {
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
-import { GoogleDriveFolderPicker } from "./GoogleDriveFolderPicker"
+import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
 
 // ─────────────────────── Slack Sync Button ─────────────────────
@@ -468,11 +468,10 @@ export function ConfigureConnectorDrawer({
   let slot: React.ReactNode = null
   if (providerId === "google_drive") {
     slot = (
-      <GoogleDriveFolderPicker
+      <GoogleDrivePicker
         dataset={activeCompany}
-        selectedFolderId={connection?.config?.folder_id}
-        selectedFolderName={connection?.config?.folder_name}
-        onSelected={onDisconnected /* reuse the reload callback */}
+        savedFiles={connection?.config?.files}
+        onSaved={onDisconnected /* reuse the reload callback */}
       />
     )
   } else if (providerId === "hubspot") {
