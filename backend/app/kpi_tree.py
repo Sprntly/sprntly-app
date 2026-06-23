@@ -109,6 +109,94 @@ class KpiTree(BaseModel):
         return "\n".join(lines)
 
 
+class SelectedMetric(BaseModel):
+    """One metric the PM picked on the onboarding metrics page."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    metric: str
+    description: str = ""
+
+
+class MetricSelection(BaseModel):
+    """The PM's metric picks; the backend infers the North Star from them.
+
+    The onboarding metrics page no longer asks the PM to name a North Star.
+    It shows a flat list of generated metrics, the PM picks a handful (the UI
+    asks for 3–5), and we infer which of those is the North Star here on the
+    server. At least one metric is required so a North Star can be chosen; the
+    upper bound keeps the inferred tree within the KPI-tree schema (1 North
+    Star + up to 4 primaries).
+    """
+
+    metrics: list[SelectedMetric] = Field(min_length=1, max_length=5)
+
+
+# Priority tiers for North-Star inference, strongest first. A metric whose name
+# matches an earlier tier outranks one matching a later tier; within a tier the
+# PM's own ordering breaks ties. These keywords favour durable outcome metrics
+# (retention/revenue) over activity/vanity counts — the usual North-Star advice.
+_NORTH_STAR_KEYWORD_TIERS: tuple[tuple[str, ...], ...] = (
+    ("retention", "retained", "nrr", "net revenue", "churn", "ltv", "lifetime"),
+    ("revenue", "arr", "mrr", "bookings", "gmv", "transaction volume", "reconciled volume"),
+    ("active", "engagement", "engaged", "dau", "wau", "mau", "weekly active", "daily active"),
+    ("activation", "activated", "aha", "onboarded", "time-to-value", "conversion"),
+)
+
+
+def infer_north_star(metrics: list[SelectedMetric]) -> int:
+    """Pick the index of the metric that best serves as the North Star.
+
+    Scores each metric by the strongest keyword tier its name matches (tier 0 =
+    best). The lowest-tier (strongest) match wins; ties fall back to the PM's
+    own ordering, and a list with no keyword matches at all yields index 0 (the
+    PM's first pick). Deterministic — no model call — so it is cheap and easy to
+    test, and can be swapped for a classifier later behind the same signature.
+    """
+    best_index = 0
+    best_tier = len(_NORTH_STAR_KEYWORD_TIERS)  # worse than any real tier
+    for i, m in enumerate(metrics):
+        name = (m.metric or "").lower()
+        for tier, keywords in enumerate(_NORTH_STAR_KEYWORD_TIERS):
+            if any(kw in name for kw in keywords):
+                if tier < best_tier:
+                    best_tier = tier
+                    best_index = i
+                break
+    return best_index
+
+
+def build_tree_from_selection(metrics: list[SelectedMetric]) -> KpiTree:
+    """Build a KPI tree from the PM's picks, inferring the North Star server-side.
+
+    The inferred North Star becomes `north_star`; the remaining picks (in their
+    original order) become `primary_metrics` (capped at the schema's 4). We never
+    emit `secondary_signals` from onboarding — that distinction is no longer part
+    of the picker. Each metric's name is trimmed; blanks are dropped upstream by
+    validation, but we defensively skip empties here too.
+    """
+    cleaned = [
+        SelectedMetric(metric=m.metric.strip(), description=(m.description or "").strip())
+        for m in metrics
+        if m.metric and m.metric.strip()
+    ]
+    if not cleaned:
+        # Should be unreachable (MetricSelection requires ≥1), but keep the tree
+        # valid rather than raising if every name was whitespace.
+        return KpiTree(north_star=NorthStar(metric="North Star"))
+
+    ns_index = infer_north_star(cleaned)
+    north_star = cleaned[ns_index]
+    rest = [m for i, m in enumerate(cleaned) if i != ns_index]
+    return KpiTree(
+        north_star=NorthStar(metric=north_star.metric, description=north_star.description),
+        primary_metrics=[
+            PrimaryMetric(metric=m.metric, description=m.description) for m in rest[:4]
+        ],
+        secondary_signals=[],
+    )
+
+
 def load_kpi_tree(enterprise_id: str) -> Optional[KpiTree]:
     """Read the company's KPI tree; None if unset/empty/invalid."""
     r = (

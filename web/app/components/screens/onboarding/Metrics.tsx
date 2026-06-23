@@ -10,7 +10,7 @@ import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFor
 import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
 import { Check, InfoCircle, Plus, Sparkles } from "../../auth/icons"
 import {
-  buildKpiTreePayloadFromPicks,
+  buildSelectionPayload,
   canSavePickedMetrics,
   kpiTreeApi,
   MAX_METRIC_PICKS,
@@ -39,9 +39,9 @@ import {
  *
  * Industry + business_type stay as ALWAYS-editable dropdowns (pre-filled from
  * the analysis, overridable). On save we persist the confirmed
- * industry/business_type to the company and the 3 picks to the KPI tree
- * (PUT /v1/company/kpi-tree) — north_star is a placeholder until server-side
- * inference ships (see kpiTreeApi.buildKpiTreePayloadFromPicks).
+ * industry/business_type to the company and the picks to the KPI tree
+ * (PUT /v1/company/kpi-tree/from-selection) — the server infers which pick is
+ * the North Star (see kpiTreeApi.buildSelectionPayload / putFromSelection).
  */
 
 export type MetricCandidate = {
@@ -492,10 +492,10 @@ export function Metrics() {
         industry,
         business_type: businessType,
       })
-      // 2) The 3 picks → KPI tree. North Star is inferred server-side; we send
-      //    a placeholder north_star (the first pick) until that ships.
-      await kpiTreeApi.put(
-        buildKpiTreePayloadFromPicks(selectedAsMetrics(candidates, selected)),
+      // 2) The picks → KPI tree. We send just the selected metrics; the server
+      //    infers which one is the North Star and persists the tree.
+      await kpiTreeApi.putFromSelection(
+        buildSelectionPayload(selectedAsMetrics(candidates, selected)),
       )
       clearDraft(DRAFT_KEY)
       // Next numbered step is connectors (index 2 in ONBOARDING_STEP_SLUGS).

@@ -22,7 +22,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.auth import CompanyContext, require_company
 from app.coworkers import CoworkerNames, load_coworker_names, save_coworker_names
-from app.kpi_tree import KpiTree, load_kpi_tree, save_kpi_tree
+from app.kpi_tree import (
+    KpiTree,
+    MetricSelection,
+    build_tree_from_selection,
+    load_kpi_tree,
+    save_kpi_tree,
+)
 from app.roadmap_doc import load_roadmap_doc, save_roadmap_doc
 from app.routes.team import _require_admin
 
@@ -47,6 +53,20 @@ def put_kpi_tree(tree: KpiTree, company: CompanyContext = Depends(require_compan
     _require_admin(company)
     saved = save_kpi_tree(company.company_id, tree)
     return {"ok": True, "version": saved.version}
+
+
+@router.put("/kpi-tree/from-selection")
+def put_kpi_tree_from_selection(
+    selection: MetricSelection, company: CompanyContext = Depends(require_company)
+):
+    """Onboarding metrics page: persist the PM's metric picks, inferring the
+    North Star server-side. The client sends the metrics the PM selected (the UI
+    asks for 3–5); we choose which is the North Star and store the KPI tree.
+    Returns the inferred North Star so the client can reflect it."""
+    _require_admin(company)
+    tree = build_tree_from_selection(selection.metrics)
+    saved = save_kpi_tree(company.company_id, tree)
+    return {"ok": True, "version": saved.version, "north_star": saved.north_star.metric}
 
 
 @router.get("/coworkers")

@@ -22,7 +22,7 @@ import {
 } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import {
-  buildKpiTreePayloadFromPicks,
+  buildSelectionPayload,
   canSavePickedMetrics,
   kpiTreeApi,
   MAX_METRIC_PICKS,
@@ -296,11 +296,11 @@ export function BusinessInfo() {
         ws = created
         setWorkspace(created)
       }
-      // Persist the 3–5 picks to the KPI tree. North star is inferred
-      // server-side; we send the first pick as a placeholder anchor.
+      // Persist the 3–5 picks to the KPI tree; the server infers which pick is
+      // the North Star (PUT /v1/company/kpi-tree/from-selection).
       const picks: SupportingMetric[] = selectedAsMetrics(candidates, selected)
       if (canSavePickedMetrics(picks)) {
-        await kpiTreeApi.put(buildKpiTreePayloadFromPicks(picks))
+        await kpiTreeApi.putFromSelection(buildSelectionPayload(picks))
       }
       clearDraft(DRAFT_KEY)
       if (andContinue) {

@@ -6,7 +6,15 @@ from unittest.mock import patch
 
 import pytest
 
-from app.kpi_tree import KpiTree, NorthStar, PrimaryMetric, SecondarySignal
+from app.kpi_tree import (
+    KpiTree,
+    NorthStar,
+    PrimaryMetric,
+    SecondarySignal,
+    SelectedMetric,
+    build_tree_from_selection,
+    infer_north_star,
+)
 
 
 def _tree(**kw):
@@ -217,3 +225,69 @@ def test_synthesis_works_without_tree(isolated_settings, monkeypatch):
         cost_usd=0, latency_ms=1, stop_reason="end_turn"))
     brief = synth.run_synthesis(facade, "ent-B", dataset_slug="b")
     assert brief["insights"]   # no tree → still generates
+
+
+# ─────────────── North-Star inference from onboarding picks ───────────────
+
+def _sel(name, desc=""):
+    return SelectedMetric(metric=name, description=desc)
+
+
+def test_infer_north_star_promotes_retention_over_activity_and_activation():
+    metrics = [_sel("Weekly active users"), _sel("Activation rate"), _sel("Net revenue retention")]
+    # retention (tier 0) beats activity (tier 2) + activation (tier 3), even
+    # though it's the PM's LAST pick.
+    assert infer_north_star(metrics) == 2
+
+
+def test_infer_north_star_revenue_when_no_retention():
+    metrics = [_sel("Weekly active users"), _sel("Incremental revenue"), _sel("Conversion rate")]
+    # revenue (tier 1) beats activity (tier 2) + conversion/activation (tier 3).
+    assert infer_north_star(metrics) == 1
+
+
+def test_infer_north_star_ties_break_on_pm_order():
+    # two retention-tier metrics → the earlier pick wins.
+    metrics = [_sel("Churn rate"), _sel("Net revenue retention")]
+    assert infer_north_star(metrics) == 0
+
+
+def test_infer_north_star_no_keyword_match_returns_first_pick():
+    metrics = [_sel("Frobnication index"), _sel("Widget count")]
+    assert infer_north_star(metrics) == 0
+
+
+def test_build_tree_from_selection_promotes_inferred_north_star():
+    tree = build_tree_from_selection([
+        _sel("Weekly active users", "WAU."),
+        _sel("Activation rate"),
+        _sel("Net revenue retention", "NRR."),
+    ])
+    assert tree.north_star.metric == "Net revenue retention"
+    assert tree.north_star.description == "NRR."
+    # the rest stay in the PM's order as primaries; the NS is not duplicated.
+    assert [m.metric for m in tree.primary_metrics] == ["Weekly active users", "Activation rate"]
+    assert tree.secondary_signals == []
+
+
+def test_build_tree_from_selection_five_picks_is_ns_plus_four_primary():
+    tree = build_tree_from_selection([
+        _sel("Net revenue retention"),  # NS (retention tier)
+        _sel("Signups"), _sel("Activation rate"), _sel("Referrals"), _sel("Support tickets"),
+    ])
+    assert tree.north_star.metric == "Net revenue retention"
+    assert [m.metric for m in tree.primary_metrics] == [
+        "Signups", "Activation rate", "Referrals", "Support tickets",
+    ]
+    assert tree.secondary_signals == []
+
+
+def test_build_tree_from_selection_trims_and_drops_blanks():
+    tree = build_tree_from_selection([
+        _sel("  Retention  ", "  keep  "),
+        _sel("   "),  # blank → dropped
+        _sel("Signups"),
+    ])
+    assert tree.north_star.metric == "Retention"
+    assert tree.north_star.description == "keep"
+    assert [m.metric for m in tree.primary_metrics] == ["Signups"]
