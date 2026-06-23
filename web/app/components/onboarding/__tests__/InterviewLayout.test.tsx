@@ -35,11 +35,11 @@ describe("InterviewLayout (v4 onboarding shell)", () => {
     expect(html).toContain("preview")
   })
 
-  it("shows the step progress label and a 4-dot indicator", () => {
+  it("shows the step progress label and a 5-dot indicator", () => {
     const html = render({ step: 4 })
-    expect(html).toContain("Step 4 of 4")
+    expect(html).toContain("Step 4 of 5")
     // one dot element per step (match the className attribute, not CSS rules)
-    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(4)
+    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(5)
   })
 
   it("marks done/active dots relative to the current step", () => {
