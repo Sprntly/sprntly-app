@@ -129,7 +129,7 @@ export function SignUpStep2View(props: SignUpStep2ViewProps) {
       <div className="welcome-banner">
         <span className="wb-icon" aria-hidden>✓</span>
         <div>
-          <div className="t">Almost there</div>
+          <div className="t">Account created</div>
           <div className="s">{props.email} · ready in seconds</div>
         </div>
       </div>

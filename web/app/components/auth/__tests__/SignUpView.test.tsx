@@ -87,6 +87,7 @@ describe("SignUpStep2View (v4 page 03 — about you)", () => {
   it("renders the account-created welcome banner with the email", () => {
     const html = renderStep2()
     expect(html).toContain("welcome-banner")
+    expect(html).toContain("Account created")
     expect(html).toContain("sarah@meridian.health")
   })
 
