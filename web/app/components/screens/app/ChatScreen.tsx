@@ -29,6 +29,7 @@ import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.h
 import { GenerateModal } from "../../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../../design-agent/GenerationLoadingScreen"
 import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
+import { AGENT_NAME } from "../../../lib/agent"
 
 type ThreadTurn = {
   id: string
@@ -1201,7 +1202,7 @@ export function ChatScreen() {
                             <span className="bc-agent-mark">
                               <IconSparkle size={14} />
                             </span>
-                            <span className="bc-agent-name">PM Agent</span>
+                            <span className="bc-agent-name">{AGENT_NAME}</span>
                             <span className="bc-agent-badge">
                               <IconSparkle size={10} />
                               PM COWORKER
