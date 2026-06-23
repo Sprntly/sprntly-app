@@ -10,6 +10,7 @@ import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboardin
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedSignal"
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
+import { ConnectorLogo } from "../../connectors/ConnectorLogo"
 import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
 import { Check } from "../../auth/icons"
 import {
@@ -362,13 +363,7 @@ export function Connectors() {
                           aria-pressed={sel}
                           aria-disabled={live || undefined}
                         >
-                          <span
-                            className="conn-logo"
-                            style={{ background: item.logoColor ?? "var(--ink)" }}
-                            aria-hidden
-                          >
-                            {item.logoText ?? item.name.charAt(0)}
-                          </span>
+                          <ConnectorLogo item={item} className="conn-logo" />
                           <span className="conn-name">{item.name}</span>
                           {live && <span className="conn-live">Live</span>}
                           <span className="check" aria-hidden>
