@@ -669,6 +669,38 @@ export const businessContextApi = {
     ),
 }
 
+// ---- roadmap doc (onboarding strategy step) ---------------------------------
+
+export type RoadmapDocUploadResponse = {
+  ok: true
+  /** Server-assigned doc id / filename, if the endpoint returns one. */
+  id?: string
+  filename?: string
+  [k: string]: unknown
+}
+
+/**
+ * Roadmap-doc upload for the onboarding strategy step (design scene onbstrat).
+ *
+ * STUB / ASSUMED ENDPOINT — `POST /v1/company/roadmap-doc` does NOT exist in
+ * the backend yet (see backend follow-ups in the redesign PR). The strategy
+ * onboarding step calls this so the upload affordance is fully wired UI-side;
+ * a failure (incl. 404 / 405 from the missing route) is caught at the call site
+ * and surfaced as a soft "we'll wire this later" notice — it NEVER blocks the
+ * step. Remove the stub guard once the backend ships the endpoint.
+ *
+ * TODO(backend): implement `POST /v1/company/roadmap-doc` (multipart `file`)
+ * that stores the roadmap doc against the company for the roadmap agent to
+ * pressure-test, then drop the soft-fail handling in Strategy.tsx.
+ */
+export const roadmapDocApi = {
+  upload: (file: File) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    return api.post<RoadmapDocUploadResponse>("/v1/company/roadmap-doc", form)
+  },
+}
+
 // ---- sources ----------------------------------------------------------------
 
 export type SourceFile = {

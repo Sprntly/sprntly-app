@@ -70,7 +70,7 @@ describe("non-prototype routes unchanged (no nav regression)", () => {
     ["/team", "team"],
     ["/sources", "sources"],
     ["/onboarding/business-info", "ob-business-info"],
-    ["/onboarding/first-brief", "ob-first-brief"],
+    ["/onboarding/workspace", "ob-workspace"],
     // connectors standalone route removed in commit A — still falls through.
     ["/connectors", "chat"],
     // unknown paths still fall through to chat.
