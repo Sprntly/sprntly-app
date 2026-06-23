@@ -120,20 +120,30 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
 
 /**
  * The semantic slugs of the numbered onboarding steps, in flow order. This is
- * the single source of truth for the onboarding route order:
+ * the single source of truth for the onboarding route order. The flow follows
+ * the product-approved 5-step redesign (design scenes onb1/onb4/onbctx/
+ * onbstrat/onbws):
  *
- *   1. business-info  → BusinessInfo  (company + product + website)
- *      [analyzing]    → Analyzing     (unnumbered loader — NOT in this list)
- *   2. metrics        → Metrics       (the metrics-tree page)
- *   3. connectors     → Connectors
- *   4. first-brief    → FirstBrief
+ *   1. business-info     → BusinessInfo     (onb1: company + product + website
+ *                                            + pick-3 success metrics, combined)
+ *      [analyzing]       → Analyzing        (unnumbered loader — NOT in this list)
+ *   2. connectors        → Connectors        (onb4: connect your tools)
+ *   3. business-context  → BusinessContext   (onbctx: auto-drafted, editable —
+ *                                            reuses the #450 Business Context
+ *                                            model + /v1/company/business-context)
+ *   4. strategy          → Strategy          (onbstrat: priorities + roadmap-doc
+ *                                            upload)
+ *   5. workspace         → Workspace         (onbws: workspace name + invite;
+ *                                            completes onboarding + kicks the
+ *                                            first brief)
  *
  * The `analyzing` interstitial is deliberately absent: it is an unnumbered,
  * transient route excluded from the progress dots and the step count.
  *
- * The agent-naming `coworkers` step was removed: agents are no longer
- * user-named (one fixed app-wide name), so the step, its route, and its
- * payload are gone.
+ * The earlier 4-step flow merged product + metrics into TWO routes
+ * (business-info → metrics); the redesign combines them into onb1, and re-adds
+ * the previously-trimmed business-context + strategy steps. The agent-naming
+ * `coworkers` step stays removed.
  *
  * `onboarding_step` (the integer DB column) is the 1-based INDEX into this
  * array. Use `slugForStep` / `stepForSlug` to convert, and `clampStep` to keep
@@ -141,9 +151,10 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  */
 export const ONBOARDING_STEP_SLUGS = [
   "business-info",
-  "metrics",
   "connectors",
-  "first-brief",
+  "business-context",
+  "strategy",
+  "workspace",
 ] as const
 
 export type OnboardingStepSlug = (typeof ONBOARDING_STEP_SLUGS)[number]

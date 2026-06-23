@@ -51,7 +51,7 @@ export type MetricCandidate = {
 
 // Industry-tailored fallback candidate pool, used to round out the flat list
 // when the website analysis returned no suggestions.
-const FALLBACK_CANDIDATES_BY_INDUSTRY: Record<string, string[]> = {
+export const FALLBACK_CANDIDATES_BY_INDUSTRY: Record<string, string[]> = {
   Healthtech: [
     "Weekly active clinicians",
     "Day-30 active clinicians per deployment",
@@ -81,12 +81,12 @@ const FALLBACK_CANDIDATES_BY_INDUSTRY: Record<string, string[]> = {
 
 // Default candidate metrics by business type, used when the website analysis
 // returned no suggestions. SaaS defaults are product-curated.
-const DEFAULT_METRICS_BY_BUSINESS_TYPE: Record<string, string[]> = {
+export const DEFAULT_METRICS_BY_BUSINESS_TYPE: Record<string, string[]> = {
   SaaS: ["Incremental revenue", "Number of new subscribers", "Conversion rate"],
 }
 
 /** Merge name lists into a deduped (case-insensitive) candidate pool. */
-function mergeCandidates(...lists: MetricCandidate[][]): MetricCandidate[] {
+export function mergeCandidates(...lists: MetricCandidate[][]): MetricCandidate[] {
   const seen = new Set<string>()
   const out: MetricCandidate[] = []
   for (const list of lists) {
@@ -498,8 +498,8 @@ export function Metrics() {
         buildKpiTreePayloadFromPicks(selectedAsMetrics(candidates, selected)),
       )
       clearDraft(DRAFT_KEY)
-      // Next numbered step is connectors (index 3 in ONBOARDING_STEP_SLUGS).
-      const updated = await advanceOnboardingStep(workspace.id, 3)
+      // Next numbered step is connectors (index 2 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 2)
       const product = updated.product ?? workspace.product
       setWorkspace({ ...updated, product })
       router.push("/onboarding/connectors")
@@ -571,7 +571,7 @@ export function Metrics() {
 
 /** Resolve the selected names to {name, description} pairs from the pool. A
  *  selected name not in the pool (defensive) still maps to a bare entry. */
-function selectedAsMetrics(
+export function selectedAsMetrics(
   candidates: MetricCandidate[],
   selected: string[],
 ): MetricCandidate[] {

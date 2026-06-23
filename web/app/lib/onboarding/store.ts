@@ -304,10 +304,10 @@ export function serializeKpiTree(tree: KpiTree): Record<string, unknown> {
   }
 }
 
-// `nextStep` defaults to connectors (index 3 — the step after metrics, index 2),
-// but every caller currently passes the current step explicitly to avoid moving
-// the resume marker during a Settings edit.
-export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 3) {
+// `nextStep` defaults to connectors (index 2 — the step after the combined
+// product+metrics step, index 1), but every caller currently passes the current
+// step explicitly to avoid moving the resume marker during a Settings edit.
+export async function saveKpiTree(companyId: string, tree: KpiTree, nextStep = 2) {
   return updateWorkspace(companyId, {
     kpi_tree: serializeKpiTree(tree),
     onboarding_step: clampStep(nextStep),
