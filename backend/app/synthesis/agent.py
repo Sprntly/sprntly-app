@@ -20,6 +20,7 @@ from app.db.briefs import save_brief
 from app.db.finding_state import get_finding_states, upsert_finding_state
 from app.business_context import load_business_context
 from app.kpi_tree import load_kpi_tree
+from app.roadmap_doc import load_roadmap_doc
 from app.graph.config_layers import config_get
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
@@ -475,6 +476,29 @@ def run_synthesis(
                 "goals). Read candidates through it:\n" + rendered + "\n\n"
             )
 
+    # HIGH-WEIGHT PRIORITIES — the company's uploaded roadmap (onboarding strategy
+    # step). When present it is the PM's own stated plan for the half/quarter, so
+    # the brief should RANK and JUSTIFY findings against it: lead with how each
+    # finding aligns with (or threatens) a stated roadmap bet, and name the
+    # specific bet/goal it touches (e.g. "aligns with your Q3 'self-serve
+    # onboarding' bet"). Additive context only — it never fabricates evidence and
+    # the upstream evidence gate is unchanged; it shapes phrasing/justification of
+    # already-gated candidates, like the KPI-tree strategic block above.
+    roadmap_block = ""
+    roadmap = load_roadmap_doc(enterprise_id)
+    if roadmap is not None:
+        rendered_roadmap = roadmap.render_for_prompt()
+        if rendered_roadmap:
+            roadmap_block = (
+                "ROADMAP — the company's CURRENT ROADMAP / stated priorities (their "
+                "own plan; treat as HIGH-PRIORITY context). Rank and justify "
+                "findings against it: for each, say how it aligns with — or "
+                "threatens — a stated bet, naming the specific roadmap goal it "
+                "touches. Do NOT invent alignment that the evidence does not "
+                "support; if a finding is off-roadmap, say so plainly.\n"
+                + rendered_roadmap + "\n\n"
+            )
+
     # Compose the brief THROUGH the weekly-brief skill: the candidates (already
     # gated, de-duped and goal-scored above) are mapped into the skill's `signal`
     # schema and handed to the LLM bound to that skill (skill=_SKILL prepends its
@@ -489,7 +513,7 @@ def run_synthesis(
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="compose_weekly_brief",
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
-        input=(strategic + bizctx_block + skill_request
+        input=(strategic + roadmap_block + bizctx_block + skill_request
                + "\n\nCANDIDATE EVIDENCE (for the structured render fields):\n"
                + _candidates_payload(cands)),
         json_schema=_BRIEF_SCHEMA,
