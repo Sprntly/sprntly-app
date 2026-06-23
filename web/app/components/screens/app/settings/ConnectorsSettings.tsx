@@ -28,6 +28,7 @@ import {
   connectableCatalog,
 } from "../../../../lib/connectorsCatalog"
 import {
+  ApiError,
   companiesApi,
   connectorsApi,
   sourcesApi,
@@ -63,6 +64,39 @@ import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
 const APIKEY_HELP: Record<string, string> = {
   fireflies:
     "Get your key from fireflies.ai → Settings → Integrations → Fireflies API.",
+}
+
+/**
+ * Friendly message shown when a non-admin tries to connect an org-wide
+ * source (Google Docs/Drive, GitHub, etc.). The backend correctly returns
+ * 403 with "Only admins can manage org-wide connectors" — surfacing that as
+ * the raw "Could not start <provider> connect: …" string looks like a bug.
+ * Map the admin gate to a clear, actionable line and fall back to the raw
+ * (already-readable) error for everything else.
+ */
+export const ADMIN_GATE_CONNECT_MESSAGE =
+  "Only a workspace admin can connect org-wide sources like Google Drive. " +
+  "Ask an admin to set this up."
+
+/** True when an error is the org-connector admin gate (403 + its message). */
+export function isAdminGateError(err: unknown): boolean {
+  if (err instanceof ApiError && err.status === 403) return true
+  const msg = err instanceof Error ? err.message : String(err)
+  return msg.toLowerCase().includes("only admins can manage org-wide connectors")
+}
+
+/**
+ * Message to show when starting an OAuth connect fails. Admin-gate failures
+ * get the clear, friendly line; all other errors keep the diagnostic
+ * "Could not start <provider> connect: <reason>" form.
+ */
+export function connectStartErrorMessage(
+  providerId: string,
+  err: unknown,
+): string {
+  if (isAdminGateError(err)) return ADMIN_GATE_CONNECT_MESSAGE
+  const msg = err instanceof Error ? err.message : String(err)
+  return `Could not start ${providerId} connect: ${msg}`
 }
 
 // ─────────────────────────── Pure View ───────────────────────────
@@ -365,8 +399,10 @@ export function ConnectorsSettings() {
       } catch (e) {
         oauthTab.abort()
         oauthInFlight.current = false
-        const msg = e instanceof Error ? e.message : String(e)
-        setLoadError(`Could not start ${providerId} connect: ${msg}`)
+        // Non-admins hit a 403 admin gate for org-wide connectors (e.g.
+        // Google Drive). Surface a clear, friendly explanation instead of
+        // the raw "Could not start … connect" diagnostic.
+        setLoadError(connectStartErrorMessage(providerId, e))
       }
     },
     [activeCompany],
