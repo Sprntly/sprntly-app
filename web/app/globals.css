@@ -13692,7 +13692,7 @@
       box-shadow 0.12s;
   }
 
-  .metric-card:hover:not(:disabled):not(.sel) {
+  .metric-card:hover:not(:disabled):not(.at-limit):not(.sel) {
     border-color: var(--accent-2);
     background: var(--surface-1, rgba(0, 0, 0, 0.02));
   }
@@ -13715,7 +13715,11 @@
     line-height: 1.45;
   }
 
-  .metric-card:disabled {
+  /* `.at-limit` = an unselected card once the 5-metric max is reached. It stays
+     clickable (so the click can surface the "up to 5" warning) but reads as
+     unavailable, matching the old hard-disabled look. */
+  .metric-card:disabled,
+  .metric-card.at-limit {
     opacity: 0.45;
     cursor: not-allowed;
   }
