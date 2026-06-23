@@ -2,7 +2,7 @@
 //
 // ChatScreen brief-tab DOM tests.
 //
-// The Weekly/Monday Brief is the pinned, non-closable FIRST tab of the unified
+// The Weekly Brief is the pinned, non-closable FIRST tab of the unified
 // home surface (ChatScreen). It is synthesized in the render — never stored in
 // the `tabs` state/localStorage — and is the DEFAULT active tab on first load.
 // Selecting it renders <BriefChat/> in place of the chat landing/thread; the "+"
@@ -12,7 +12,7 @@
 // providers, mocking only the network/router/heavy-context boundaries the screen
 // touches on mount (the same boundary-mock convention as BriefChat.*.dom.test).
 // They assert the integration, not a re-implementation:
-//   1. The pinned "Monday brief" tab renders FIRST and has NO close (×) button.
+//   1. The pinned "Weekly brief" tab renders FIRST and has NO close (×) button.
 //   2. First load (empty localStorage) → the brief surface renders (BriefChat's
 //      greeting), NOT the chat landing ("Welcome back").
 //   3. Clicking "+" (New chat) switches to the chat landing composer, and the
@@ -137,14 +137,21 @@ afterEach(() => {
 })
 
 // Queries are scoped to the chat surface's own tab bar (AppLayout's sidebar also
-// has "Monday brief" / "New chat" affordances, so global queries are ambiguous).
+// has "Weekly brief" / "New chat" affordances, so global queries are ambiguous).
 const tabBar = () => within(screen.getByTestId("chat-tab-bar"))
 
+// The BriefChat surface is a <section class="briefx" aria-label="Weekly brief">.
+// Both the sidebar rail item AND that section now carry the "Weekly brief"
+// accessible name, so a global getByLabelText is ambiguous — match the section
+// by its distinctive class instead. Returns null when the brief surface is not
+// rendered (e.g. a chat tab is active).
+const briefSection = () => document.querySelector("section.briefx")
+
 describe("ChatScreen — pinned brief tab", () => {
-  it("renders the 'Monday brief' tab first, with no close button", () => {
+  it("renders the 'Weekly brief' tab first, with no close button", () => {
     renderScreen()
     const bar = screen.getByTestId("chat-tab-bar")
-    const briefTab = within(bar).getByText("Monday brief")
+    const briefTab = within(bar).getByText("Weekly brief")
     expect(briefTab).toBeTruthy()
     // The pinned brief tab is the FIRST child of the tab bar.
     expect(bar.firstElementChild?.contains(briefTab)).toBe(true)
@@ -157,8 +164,9 @@ describe("ChatScreen — pinned brief tab", () => {
     // BriefChat's greeting renders ("Good day … here's this week's brief" or the
     // no-sources variant), and the chat landing's "Welcome back" must be absent.
     expect(screen.queryByText(/Welcome back/i)).toBeNull()
-    // BriefChat's root <section aria-label="Weekly brief"> is on screen.
-    expect(screen.getByLabelText("Weekly brief")).toBeTruthy()
+    // BriefChat's root <section class="briefx" aria-label="Weekly brief"> is on
+    // screen (scoped by class — the sidebar shares the "Weekly brief" name).
+    expect(briefSection()).not.toBeNull()
   })
 
   it("'+' opens a VISIBLE active 'New chat' tab chip (landing), brief tab stays", () => {
@@ -173,7 +181,7 @@ describe("ChatScreen — pinned brief tab", () => {
     // tab-less landing.
     expect(tabBar().getByText(NEW_CHAT_TITLE)).toBeTruthy()
     // …and the pinned brief tab is still there (never removed).
-    expect(tabBar().getByText("Monday brief")).toBeTruthy()
+    expect(tabBar().getByText("Weekly brief")).toBeTruthy()
   })
 
   it("'+' renders the new tab as ACTIVE and lets the user switch back to it", () => {
@@ -184,7 +192,7 @@ describe("ChatScreen — pinned brief tab", () => {
     // Switch to the brief tab, then back to the visible "New chat" chip — proving
     // the chip is a real, selectable tab (not a transient landing).
     act(() => {
-      fireEvent.click(tabBar().getByText("Monday brief"))
+      fireEvent.click(tabBar().getByText("Weekly brief"))
     })
     expect(screen.queryByText(/Welcome back/i)).toBeNull()
     act(() => {
@@ -233,7 +241,7 @@ describe("ChatScreen — pinned brief tab", () => {
     })
     expect(screen.getByText(/Welcome back/i)).toBeTruthy()
     act(() => {
-      fireEvent.click(tabBar().getByText("Monday brief"))
+      fireEvent.click(tabBar().getByText("Weekly brief"))
     })
     expect(screen.queryByText(/Welcome back/i)).toBeNull()
   })
@@ -247,11 +255,11 @@ describe("ChatScreen — pinned brief tab", () => {
     renderScreen()
     // The chat landing composer is showing — NOT the brief surface.
     expect(screen.getByText(/Welcome back/i)).toBeTruthy()
-    expect(screen.queryByLabelText("Weekly brief")).toBeNull()
+    expect(briefSection()).toBeNull()
     // …it lands on the SAME visible "New chat" tab chip the "+" produces…
     expect(tabBar().getByText(NEW_CHAT_TITLE)).toBeTruthy()
     // …the pinned brief tab is still present (never removed)…
-    expect(tabBar().getByText("Monday brief")).toBeTruthy()
+    expect(tabBar().getByText("Weekly brief")).toBeTruthy()
     // …and the one-shot param was stripped so a refresh won't re-trigger.
     expect(replaceSpy).toHaveBeenCalledWith("/")
   })
@@ -328,9 +336,9 @@ describe("ChatScreen — brief tab gaps (B5–B8)", () => {
 
     // Switch to the synthesized brief tab → BriefChat shows, chat thread hidden.
     act(() => {
-      fireEvent.click(tabBar().getByText("Monday brief"))
+      fireEvent.click(tabBar().getByText("Weekly brief"))
     })
-    expect(screen.getByLabelText("Weekly brief")).toBeTruthy()
+    expect(briefSection()).not.toBeNull()
     expect(screen.queryByText("persisted question")).toBeNull()
 
     // Switch back to the chat tab → its thread is intact (not clobbered).
@@ -351,9 +359,9 @@ describe("ChatScreen — brief tab gaps (B5–B8)", () => {
       fireEvent.click(tabBar().getByText("Persisted chat"))
     })
     expect(screen.getByText("persisted question")).toBeTruthy()
-    expect(screen.queryByLabelText("Weekly brief")).toBeNull()
+    expect(briefSection()).toBeNull()
 
-    // Route lands on /brief (sidebar "Monday brief" → goTo("brief")). The
+    // Route lands on /brief (sidebar "Weekly brief" → goTo("brief")). The
     // currentScreen effect must switch the surface to the pinned brief tab.
     act(() => {
       pathname = "/brief"
@@ -365,7 +373,7 @@ describe("ChatScreen — brief tab gaps (B5–B8)", () => {
         ),
       )
     })
-    expect(screen.getByLabelText("Weekly brief")).toBeTruthy()
+    expect(briefSection()).not.toBeNull()
     expect(screen.queryByText("persisted question")).toBeNull()
   })
 

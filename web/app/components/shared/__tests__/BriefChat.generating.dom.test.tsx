@@ -6,7 +6,7 @@
 // once in AppShell) reports kind === "generating" and mirrors it into
 // ContentContext as `content.briefHydration`. BriefChat reads that flag and, as
 // long as there's no brief to show yet, renders a distinct spinner + "Generating
-// your Monday brief…" WIP block IN PLACE OF the empty greeting / finding cards.
+// your Weekly brief…" WIP block IN PLACE OF the empty greeting / finding cards.
 //
 // These tests mount the real BriefChat inside the real Navigation + Content
 // providers and drive `content` through a small harness, proving:
@@ -196,7 +196,7 @@ function mountHarness() {
   )
 }
 
-const WIP_TITLE = "Generating your Monday brief…"
+const WIP_TITLE = "Generating your Weekly brief…"
 const EMPTY_GREETING = "Please add more sources"
 
 afterEach(() => {
@@ -219,8 +219,11 @@ describe("BriefChat — generating / WIP indicator", () => {
     // …it carries the live-region role and the spinner element…
     const status = screen.getByRole("status")
     expect(status.querySelector(".bc-generating-spinner")).not.toBeNull()
-    // …the header status line reflects WIP…
-    expect(screen.getByText(/Monday brief · generating…/)).not.toBeNull()
+    // …the persistent PM-agent intro is shown even while generating (the old
+    // redundant "Monday brief · generating…" status line was removed)…
+    expect(
+      screen.getByText(/we continuously monitor how your product is being used/),
+    ).not.toBeNull()
     // …and the empty "no brief yet" greeting is NOT shown.
     expect(screen.queryByText(new RegExp(EMPTY_GREETING))).toBeNull()
   })

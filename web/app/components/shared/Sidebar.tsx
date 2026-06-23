@@ -102,7 +102,7 @@ export function Sidebar(_props: SidebarProps = {}) {
 
       {/* Main nav icons */}
       <div className="sb-rail-nav">
-        <RailItem screen="brief" icon={<IconMessageCircle size={18} />} label="Monday brief" />
+        <RailItem screen="brief" icon={<IconMessageCircle size={18} />} label="Weekly brief" />
         <RailItem screen="chats" icon={<IconHistory size={18} />} label="All chats" />
         <RailItem screen="backlog" icon={<IconBulb size={18} />} label="Backlog Projects" />
         {/* <RailItem screen="prototype" icon={<IconPrompt size={18} />} label="Prototype" /> */}

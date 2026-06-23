@@ -84,6 +84,15 @@ const isPrototypeCommand = (q: string) =>
 const isTicketsCommand = (q: string) =>
   /\b(create|generate|make|draft|break)\b.*\btickets?\b/i.test(q)
 
+// Persistent PM-agent intro shown every time the brief opens. It educates the
+// user on what the agent continuously does for them (so the value is re-stated,
+// not assumed). Personalized with the user's first name when known; the rest of
+// the copy is fixed. This replaces the redundant secondary header line.
+function buildPersistentIntro(firstName: string | null): string {
+  const who = firstName ? ` ${firstName}` : ""
+  return `Good day${who}, we continuously monitor how your product is being used, what customers are asking for, and competitor launches — and give you a weekly digest of the most important things worth working on.`
+}
+
 function buildGreeting(v2: BriefV2State | null, firstName: string | null): string {
   const who = firstName ? `, ${firstName}` : ""
   if (!v2 || (!v2.hero && v2.supporting.length === 0)) {
@@ -596,7 +605,7 @@ function BriefGeneratingState() {
     <div className="bc-generating" role="status" aria-live="polite">
       <span className="bc-generating-spinner" aria-hidden />
       <div className="bc-generating-copy">
-        <p className="bc-generating-title">Generating your Monday brief…</p>
+        <p className="bc-generating-title">Generating your Weekly brief…</p>
         <p className="bc-generating-sub">
           Analyzing your sources — this usually takes a minute.
         </p>
@@ -679,8 +688,6 @@ export function BriefChat() {
       router.push(prototypePath(genPrdId))
     }
   }, [genPrdId, router])
-
-  const greetTime = useMemo(() => nowTime(), [])
 
   useEffect(() => {
     mountedRef.current = true
@@ -1330,6 +1337,7 @@ export function BriefChat() {
   // ── Derived render data ────────────────────────────────────────────────────
   const v2 = content.briefV2
   const firstName = content.userName ? content.userName.split(/\s+/)[0] : null
+  const persistentIntro = useMemo(() => buildPersistentIntro(firstName), [firstName])
   const greeting = useMemo(() => buildGreeting(v2, firstName), [v2, firstName])
   const findings: Finding[] = useMemo(() => {
     if (!v2) return []
@@ -1351,7 +1359,7 @@ export function BriefChat() {
     <section className="briefx" aria-label="Weekly brief">
       <header className="bh">
         <div className="bh-main">
-          {/* Title intentionally omitted — the "Monday brief" label lives in the
+          {/* Title intentionally omitted — the "Weekly brief" label lives in the
               tab name above; repeating it here was a redundant duplicate. */}
           {week ? <span className="bh-week">{week}</span> : null}
           {week && company ? <span className="bh-sep">·</span> : null}
@@ -1392,11 +1400,12 @@ export function BriefChat() {
                   <IconSparkle size={10} />
                   PM COWORKER
                 </span>
-                <span className="bc-agent-status">
-                  Monday brief · {generatingBrief ? "generating…" : greetTime}
-                </span>
               </div>
               <div className="bc-agent-body">
+                {/* Persistent educational intro — shown every time, even while the
+                    brief is generating or empty — so the agent's ongoing value is
+                    always restated. Replaces the redundant "Monday brief" line. */}
+                <p className="bc-intro">{persistentIntro}</p>
                 {generatingBrief ? (
                   <BriefGeneratingState />
                 ) : (

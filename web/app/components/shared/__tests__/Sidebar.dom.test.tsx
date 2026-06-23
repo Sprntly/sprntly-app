@@ -3,10 +3,10 @@
 // Sidebar nav-wiring DOM tests.
 //
 // After the brief/chat unification, the home surface (`/`, ChatScreen) defaults
-// to the pinned Monday-brief tab on a fresh load. So the sidebar "New chat" `+`
+// to the pinned Weekly-brief tab on a fresh load. So the sidebar "New chat" `+`
 // must NOT use the plain goTo("chat") nav (that would land on the brief) — it
 // uses goToNewChat() (→ `/?new=1`, consumed by ChatScreen to start a fresh chat).
-// The "Monday brief" and "All chats" rail items keep their plain goTo() nav.
+// The "Weekly brief" and "All chats" rail items keep their plain goTo() nav.
 //
 // These tests mount the REAL Sidebar, mocking only the context boundaries it
 // reads, and assert the click→nav wiring (not a re-implementation).
@@ -52,9 +52,9 @@ describe("Sidebar — New chat wiring", () => {
     expect(goTo).not.toHaveBeenCalledWith("chat")
   })
 
-  it("'Monday brief' and 'All chats' rail items keep their plain goTo() nav", () => {
+  it("'Weekly brief' and 'All chats' rail items keep their plain goTo() nav", () => {
     render(React.createElement(Sidebar))
-    fireEvent.click(screen.getByLabelText("Monday brief"))
+    fireEvent.click(screen.getByLabelText("Weekly brief"))
     expect(goTo).toHaveBeenCalledWith("brief")
     fireEvent.click(screen.getByLabelText("All chats"))
     expect(goTo).toHaveBeenCalledWith("chats")
