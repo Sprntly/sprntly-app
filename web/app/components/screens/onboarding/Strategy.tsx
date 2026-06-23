@@ -18,12 +18,14 @@ const DRAFT_KEY = "strategy"
  * correctly:
  *   - a free-text "current priorities" field (persisted to companies.okrs, the
  *     existing strategic-context slot), and
- *   - a ROADMAP-DOC upload affordance that posts to `POST /v1/company/roadmap-doc`.
+ *   - a ROADMAP-DOC upload that posts to `POST /v1/company/roadmap-doc`, which
+ *     stores the doc + its extracted text against the company. The stored
+ *     roadmap feeds the weekly brief as a high-weight priorities signal and
+ *     renders read-only as the `roadmapdoc` artifact view.
  *
- * ROADMAP-DOC STATUS: the backend endpoint does not exist yet (see
- * roadmapDocApi). The upload is fully wired UI-side; a failure (incl. the route
- * being missing) is caught and shown as a soft "we'll load this in later"
- * notice and NEVER blocks the step. The step is also skippable.
+ * On a successful upload the step shows the design's "uploaded" confirmation
+ * state. A failure (e.g. a transient network error) is caught and shown as a
+ * non-blocking notice — the upload is optional and the whole step is skippable.
  */
 export function Strategy() {
   const { workspace, loading } = useOnboarding()
@@ -32,6 +34,7 @@ export function Strategy() {
   const [priorities, setPriorities] = useState<string>((draft?.priorities as string) ?? "")
   const [roadmapFileName, setRoadmapFileName] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [uploaded, setUploaded] = useState(false)
   const [uploadNotice, setUploadNotice] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -59,16 +62,19 @@ export function Strategy() {
   async function onPickRoadmap(file: File | null) {
     if (!file) return
     setUploadNotice(null)
+    setUploaded(false)
     setRoadmapFileName(file.name)
     setUploading(true)
     try {
-      // TODO(backend): POST /v1/company/roadmap-doc is an assumed endpoint that
-      // may not exist yet — soft-fail so the step never blocks (see roadmapDocApi).
       await roadmapDocApi.upload(file)
-      setUploadNotice(`Uploaded "${file.name}" — we'll pressure-test it against your data.`)
+      setUploaded(true)
+      setUploadNotice(`Your roadmap · uploaded just now — we'll pressure-test it against your data.`)
     } catch {
+      // The upload is optional and the step is skippable; a transient failure
+      // surfaces a non-blocking notice rather than halting onboarding.
+      setUploaded(false)
       setUploadNotice(
-        `Saved "${file.name}" to upload once roadmap import is enabled — this won't block setup.`,
+        `Couldn't upload "${file.name}" just now — you can re-try here or add it later in Settings. This won't block setup.`,
       )
     } finally {
       setUploading(false)
@@ -152,13 +158,14 @@ export function Strategy() {
         </div>
         <button
           type="button"
-          className={`onb-up onb-up-wide ${roadmapFileName ? "has-file" : ""}`}
+          className={`onb-up onb-up-wide ${uploaded ? "has-file" : ""}`}
           onClick={() => fileRef.current?.click()}
           disabled={uploading}
           data-field="roadmap-doc"
+          data-uploaded={uploaded ? "true" : undefined}
         >
           <span className="onb-up-ic" aria-hidden>
-            {roadmapFileName ? (
+            {uploaded ? (
               <Check style={{ width: 16, height: 16 }} />
             ) : (
               <FileText style={{ width: 16, height: 16 }} />
@@ -166,15 +173,18 @@ export function Strategy() {
           </span>
           <span className="onb-up-b">
             <span className="onb-up-t">
-              {roadmapFileName
-                ? roadmapFileName
-                : uploading
-                  ? "Uploading…"
-                  : "Upload your current roadmap"}
+              {uploading
+                ? "Uploading…"
+                : uploaded && roadmapFileName
+                  ? roadmapFileName
+                  : roadmapFileName
+                    ? roadmapFileName
+                    : "Upload your current roadmap"}
             </span>
             <span className="onb-up-s">
-              Spreadsheet, deck, or doc — Sprntly loads it in and pressure-tests it
-              against your data.
+              {uploaded
+                ? "Loaded in — we'll pressure-test it against your data."
+                : "Spreadsheet, deck, or doc — Sprntly loads it in and pressure-tests it against your data."}
             </span>
           </span>
         </button>

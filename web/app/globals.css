@@ -15935,3 +15935,52 @@
     opacity: 0.6;
     cursor: default;
   }
+/* ── Roadmap Doc artifact view (`data-art-view="roadmapdoc"`) ─────────────────
+   A clean, read-only "word-doc" render of the company's uploaded roadmap.
+   Ported from the design's `rmdoc-*` rules; design tokens mapped to the app's
+   globals: --text3 → --muted, --amber-l/b/d → --warn-soft/--warn-border/--warn,
+   --bg2/--border/--ff/--r-sm already exist. */
+.rmdoc { padding: 6px 2px; }
+.rmdoc-cap {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 8px;
+}
+.rmdoc-h {
+  font-family: var(--ff); font-size: 24px; letter-spacing: -.015em;
+  color: var(--text); margin-bottom: 8px;
+}
+.rmdoc-strategy {
+  font-size: 13px; line-height: 1.6; color: var(--text2);
+  padding-bottom: 14px; border-bottom: 1px solid var(--border); margin-bottom: 14px;
+}
+.rmdoc-summary {
+  font-size: 13.5px; line-height: 1.7; color: var(--text);
+  padding-bottom: 16px; border-bottom: 1px solid var(--border);
+  margin-bottom: 18px; outline: none;
+}
+.rmdoc-summary strong { font-weight: 600; }
+.rmdoc-init { margin-bottom: 16px; }
+.rmdoc-init-h {
+  display: flex; align-items: center; gap: 9px; font-family: var(--ff);
+  font-size: 15px; letter-spacing: -.01em; color: var(--text); margin-bottom: 8px;
+}
+.rmdoc-row {
+  display: flex; align-items: center; gap: 10px; padding: 9px 11px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r-sm); margin-bottom: 5px;
+}
+.rmdoc-rt { flex: 1; font-size: 13px; color: var(--text); }
+.rmdoc-row.flag { border-color: var(--warn-border); background: var(--warn-soft); }
+.rmdoc-flagtag { font-size: 10.5px; font-weight: 600; color: var(--warn); }
+.rmdoc-foot {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  margin-top: 4px;
+}
+.rmdoc-foot .lbl { flex: 1; font-size: 11.5px; color: var(--muted); }
+
+/* Roadmap doc = clean word-doc: no artifact tabs / share / default footer CTAs
+   (the view is standalone, not part of the PRD/Evidence/Tickets flow). */
+.art-col[data-art-view="roadmapdoc"] .art-tabs,
+.art-col[data-art-view="roadmapdoc"] .share-pill {
+  display: none !important;
+}
