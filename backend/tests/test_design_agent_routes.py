@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import json
 import logging
 import time
 from pathlib import Path
@@ -155,18 +154,6 @@ def _stub_generate(monkeypatch, routes_mod, *, status="complete", iters=1, raise
 
     monkeypatch.setattr(routes_mod, "generate_prototype", _fake)
     return calls
-
-
-def _seed_github_connection(env, *, token: str = "gho_company") -> None:
-    from app.connectors.tokens import encrypt_token_json
-
-    env.db.upsert_connection(
-        company_id=_TEST_COMPANY_ID,
-        provider="github",
-        token_encrypted=encrypt_token_json(json.dumps({"access_token": token})),
-        scopes="read:user user:email",
-        account_label="@company-user",
-    )
 
 
 # ─── Creation (AC #1) ─────────────────────────────────────────────────────
@@ -874,15 +861,12 @@ def _scaffold_user_text(calls: list[dict]) -> str:
 
 def test_generate_accepts_github_repo(env, client, monkeypatch):
     # A request carrying a repo identifier succeeds with the unchanged response
-    # shape — the field is additive and optional.
+    # shape — the field is additive and optional. When the company has an App
+    # installation covering the repo owner, that installation id is snapshotted
+    # on the prototype row. Resolution is company-scoped: it needs no personal
+    # OAuth connection (the connector is company-shared).
     _stub_generate(monkeypatch, env.routes)
     _seed_prd(env.db)
-    _seed_github_connection(env)
-    monkeypatch.setattr(
-        env.routes.github_app,
-        "fetch_user_repos",
-        lambda token, per_page=100: [{"full_name": "org/repo"}],
-    )
     env.db.upsert_github_installation(
         installation_id=12345,
         account_id=99,
@@ -905,9 +889,13 @@ def test_generate_accepts_github_repo(env, client, monkeypatch):
     assert persisted["github_installation_id"] == 12345
 
 
-def test_generate_does_not_persist_installation_without_company_github_connection(
+def test_generate_resolves_installation_without_oauth_connection(
     env, client, monkeypatch
 ):
+    # The connector is company-shared and resolution goes through the company's
+    # App installations, NOT the connecting user's personal OAuth token — so a
+    # company member with no personal OAuth connection still grounds against the
+    # company's installation (and grounding survives OAuth-token expiry).
     _stub_generate(monkeypatch, env.routes)
     _seed_prd(env.db)
     env.db.upsert_github_installation(
@@ -917,6 +905,7 @@ def test_generate_does_not_persist_installation_without_company_github_connectio
         account_type="Organization",
         company_id=_TEST_COMPANY_ID,
     )
+    # No _seed_github_connection — there is no personal OAuth token.
     resp = client.post(
         "/v1/design-agent/generate",
         json={"prd_id": 1, "github_repo": "org/repo"},
@@ -926,26 +915,22 @@ def test_generate_does_not_persist_installation_without_company_github_connectio
         prototype_id=resp.json()["prototype_id"],
         workspace_id=_TEST_COMPANY_ID,
     )
-    assert persisted["github_installation_id"] is None
+    assert persisted["github_installation_id"] == 12345
 
 
-def test_generate_does_not_persist_installation_for_inaccessible_repo(
+def test_generate_does_not_persist_installation_for_another_company(
     env, client, monkeypatch
 ):
+    # An installation owned by a DIFFERENT company never resolves for this
+    # company — the resolver is company-scoped — so the id stays null.
     _stub_generate(monkeypatch, env.routes)
     _seed_prd(env.db)
-    _seed_github_connection(env)
-    monkeypatch.setattr(
-        env.routes.github_app,
-        "fetch_user_repos",
-        lambda token, per_page=100: [{"full_name": "org/other-repo"}],
-    )
     env.db.upsert_github_installation(
         installation_id=12345,
         account_id=99,
         account_login="org",
         account_type="Organization",
-        company_id=_TEST_COMPANY_ID,
+        company_id="some-other-company-" + "deadbeef",
     )
     resp = client.post(
         "/v1/design-agent/generate",
@@ -962,14 +947,10 @@ def test_generate_does_not_persist_installation_for_inaccessible_repo(
 def test_generate_leaves_github_installation_null_when_repo_owner_not_installed(
     env, client, monkeypatch
 ):
+    # The company's only installation covers a different account login than the
+    # repo owner, so no installation covers "org/repo" and the id stays null.
     _stub_generate(monkeypatch, env.routes)
     _seed_prd(env.db)
-    _seed_github_connection(env)
-    monkeypatch.setattr(
-        env.routes.github_app,
-        "fetch_user_repos",
-        lambda token, per_page=100: [{"full_name": "org/repo"}],
-    )
     env.db.upsert_github_installation(
         installation_id=12345,
         account_id=99,

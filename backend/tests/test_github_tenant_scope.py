@@ -601,3 +601,92 @@ def test_sync_to_corpus_route_foreign_installation_id_404s(
         json={"dataset": "acme", "installation_id": 99},
     )
     assert r.status_code == 404
+
+
+# ─────────────── design-agent grounding: company-scoped resolve ───────────────
+#
+# The Design Agent resolves a repo's GitHub App installation id from the
+# COMPANY's installations, not the connecting user's personal OAuth token. The
+# connector is company-shared, so grounding must resolve for any member as long
+# as the company has an installation covering the repo's owner — and must keep
+# working after the personal OAuth token expires (~8h) or for members who never
+# personally connected.
+
+
+def test_resolve_installation_without_user_token(github_env):
+    """Core regression: no OAuth connection row exists at all, yet a company
+    installation covering the repo owner still resolves. (Old code short-
+    circuited to None at the personal-token gate because there was no token.)"""
+    from app.routes.design_agent import _resolve_github_installation_id_for_repo
+
+    company_a = uuid.uuid4().hex
+    _seed_install(installation_id=1, company_id=company_a, login="acme")
+    # No seed_connection — there is no OAuth token for this company.
+    assert (
+        _resolve_github_installation_id_for_repo(company_a, "acme/widgets") == 1
+    )
+
+
+def test_resolve_installation_for_non_connecting_member(github_env):
+    """The resolver is company-keyed, not user-keyed: it takes a company_id and
+    resolves the install with no per-user state, so a member who never
+    personally connected the GitHub App still grounds against the company's
+    installation."""
+    from app.routes.design_agent import _resolve_github_installation_id_for_repo
+
+    company_a = uuid.uuid4().hex
+    _seed_install(installation_id=7, company_id=company_a, login="acme")
+    assert (
+        _resolve_github_installation_id_for_repo(company_a, "acme/widgets") == 7
+    )
+
+
+def test_resolve_picks_installation_covering_repo(github_env):
+    """With multiple company installs, the resolver matches on the repo owner
+    (account_login) and returns the covering install; an unrelated owner → None."""
+    from app.routes.design_agent import _resolve_github_installation_id_for_repo
+
+    company_a = uuid.uuid4().hex
+    _seed_install(installation_id=10, company_id=company_a, login="acme")
+    _seed_install(installation_id=20, company_id=company_a, login="globex")
+
+    assert _resolve_github_installation_id_for_repo(company_a, "globex/thing") == 20
+    assert _resolve_github_installation_id_for_repo(company_a, "acme/thing") == 10
+    assert _resolve_github_installation_id_for_repo(company_a, "nomatch/x") is None
+
+
+def test_no_installation_returns_none_graceful(github_env):
+    """No installation covering the repo owner → None, no exception. A None
+    repo_full_name also resolves to None."""
+    from app.routes.design_agent import _resolve_github_installation_id_for_repo
+
+    company_a = uuid.uuid4().hex
+    _seed_install(installation_id=5, company_id=company_a, login="acme")
+
+    assert _resolve_github_installation_id_for_repo(company_a, "ghost/repo") is None
+    assert _resolve_github_installation_id_for_repo(company_a, None) is None
+
+
+def test_bind_installation_company_does_not_steal(github_env):
+    """The post-install bind never re-keys an installation already bound to a
+    different company (no steal), stays idempotent for the same company, and
+    still binds a previously-unbound installation."""
+    from app import db
+    import app.routes.connectors as conn_route
+
+    company_a = uuid.uuid4().hex
+    company_b = uuid.uuid4().hex
+
+    # (a) Bound to A, then a cross-company bind to B → stays A.
+    _seed_install(installation_id=100, company_id=company_a, login="acme")
+    conn_route._bind_installation_company(100, company_b)
+    assert db.get_github_installation(100)["company_id"] == company_a
+
+    # (b) Re-bind to A → idempotent, still A.
+    conn_route._bind_installation_company(100, company_a)
+    assert db.get_github_installation(100)["company_id"] == company_a
+
+    # (c) Unbound install (company_id None) → binds to the calling company.
+    _seed_install(installation_id=101, company_id=None, login="globex")
+    conn_route._bind_installation_company(101, company_b)
+    assert db.get_github_installation(101)["company_id"] == company_b

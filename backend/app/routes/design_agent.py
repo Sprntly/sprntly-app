@@ -50,15 +50,12 @@ from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company, require_company_from_query  # company-scoped auth dep
 from app.config import settings
-from app.connectors import github_app
-from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
 from app.db.companies import slug_for_company_id
-from app.db.connections import get_connection
 from app.db.design_agent_jobs import (  # Tier 2 opt-in worker queue
     enqueue_job,
     worker_heartbeat_fresh,
@@ -313,31 +310,16 @@ def _resolve_github_installation_id_for_repo(
 ) -> int | None:
     """Best-effort company-scoped repo full_name -> GitHub App installation id.
 
-    The repo full_name is chosen through the company's GitHub OAuth connection.
-    We verify that connection and confirm the repo appears in the connected
-    user's accessible repos before consulting the account-scoped installation
-    table. Any auth/token/API failure degrades to no codebase installation
-    snapshot rather than trusting a global installation row.
+    Resolves through the COMPANY's GitHub App installations, not the connecting
+    user's personal OAuth token: GitHub is a company-shared connector, so any
+    member's grounding must resolve as long as the company has an installation
+    covering the repo. The installation token (minted from the App JWT, no 8h
+    OAuth clock) is what every downstream repo-byte read already uses, so this
+    keeps grounding alive for non-connecting members and after the connector's
+    personal OAuth token expires. No covering installation -> None, and
+    generation proceeds with no codebase grounding exactly as before.
     """
     if not repo_full_name:
-        return None
-    row = get_connection(company_id, github_app.GITHUB_PROVIDER)
-    if not row:
-        return None
-    try:
-        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
-    except (KeyError, TokenEncryptionError, json.JSONDecodeError, TypeError):
-        logger.info("design_agent.github_connection_unreadable")
-        return None
-    access_token = token_json.get("access_token")
-    if not access_token:
-        return None
-    try:
-        repos = github_app.fetch_user_repos(access_token, per_page=100)
-    except Exception:
-        logger.info("design_agent.github_repo_access_check_failed")
-        return None
-    if not any(r.get("full_name") == repo_full_name for r in repos):
         return None
     try:
         install = find_github_installation_for_repo(repo_full_name, company_id)
