@@ -51,6 +51,14 @@ class ThemeConvergence:
     # (see CONNECTED_SOURCE_TYPES) — the real-evidence subset used by the
     # sufficiency gate. <= signal_count.
     connected_signal_count: int = 0
+    # Provenance-origin counts (provenance["origin"], stamped at ingest by
+    # extract_document). `upload` = PM-uploaded corpus doc; `connector` = a live
+    # connector sync. Drive the UPLOAD-ONLY relaxation in the sufficiency gate:
+    # when a tenant has zero connector-origin signals across all themes, the gate
+    # treats its uploaded-doc evidence as good enough for a (single-source) brief
+    # instead of an empty one. Both <= signal_count.
+    upload_signal_count: int = 0
+    connector_signal_count: int = 0
 
     @property
     def breadth(self) -> int:
@@ -115,6 +123,11 @@ def compute_convergence(
             tc.source_types.add(sig.source_type)
             if sig.source_type in CONNECTED_SOURCE_TYPES:
                 tc.connected_signal_count += 1
+            origin = (sig.provenance or {}).get("origin")
+            if origin == "upload":
+                tc.upload_signal_count += 1
+            elif origin == "connector":
+                tc.connector_signal_count += 1
             tc.effective_weight += w
             rev = sig.properties.get("revenue_at_risk_usd") or sig.properties.get("revenue_usd") or 0
             try:
@@ -147,26 +160,57 @@ def compute_convergence(
     return out
 
 
+def is_upload_only(convergence: list[ThemeConvergence]) -> bool:
+    """Is this tenant's evidence UPLOAD-ONLY — i.e. derived solely from
+    PM-uploaded corpus documents, with no live connector sources?
+
+    True iff (a) at least one signal across all themes carries the ``upload``
+    provenance origin (so there IS uploaded-doc evidence), AND (b) NO signal
+    carries the ``connector`` origin (no live connector sync has contributed).
+    The origin is stamped at ingest by extract_document; legacy / onboarding /
+    research signals carry no origin and count as neither — so a tenant with
+    only onboarding metadata is NOT upload-only (it has no upload-origin signal),
+    and a tenant with any connector evidence is NOT upload-only. This is the
+    narrowest provenance condition that distinguishes the upload-only case
+    without touching connected-tenant behavior.
+    """
+    saw_upload = saw_connector = False
+    for tc in convergence:
+        if tc.connector_signal_count:
+            saw_connector = True
+        if tc.upload_signal_count:
+            saw_upload = True
+    return saw_upload and not saw_connector
+
+
 def has_sufficient_evidence(
     convergence: list[ThemeConvergence],
     *,
     min_connected_signals: int = 3,
     require_multi_source: bool = True,
+    min_upload_signals: int = 2,
 ) -> bool:
-    """Is there enough REAL connected-source evidence to justify a brief?
+    """Is there enough REAL evidence to justify a brief?
 
-    Pure + unit-testable. Returns True (generate a brief) when EITHER:
+    Pure + unit-testable. Returns True (generate a brief) when ANY of:
 
       - a theme shows multi-source convergence across CONNECTED sources
         (connected_breadth >= 2) — independent connected sources agreeing is
         the strongest possible signal that there is something real to say; OR
       - the total count of distinct connected-source signals across all themes
-        is >= ``min_connected_signals`` (default 3).
+        is >= ``min_connected_signals`` (default 3); OR
+      - the tenant is UPLOAD-ONLY (see is_upload_only) and has accumulated at
+        least ``min_upload_signals`` (default 2) uploaded-doc signals. This is
+        the loosened path for the single-uploaded-file case: a PM who uploads a
+        file but has connected no live sources should still get a brief from
+        those uploaded signals instead of a blank one. It fires ONLY when there
+        are zero connector-origin signals, so a tenant that DOES have connected
+        sources never reaches it and its gate behavior is unchanged.
 
     Otherwise the only evidence is onboarding / business-context / agent-inferred
-    metadata (pm_manual, agent_inferred, verbal_claim) or a single thin source,
-    so we return False and the caller emits an EMPTY brief rather than
-    fabricating low-value findings from profile metadata.
+    metadata (pm_manual, agent_inferred, verbal_claim) or a single thin source
+    with no uploaded docs, so we return False and the caller emits an EMPTY brief
+    rather than fabricating low-value findings from profile metadata.
 
     ``require_multi_source`` lets a deployment drop the breadth>=2 fast-path and
     rely purely on the connected-signal count (default keeps the breadth path).
@@ -176,4 +220,12 @@ def has_sufficient_evidence(
     ):
         return True
     total_connected = sum(tc.connected_signal_count for tc in convergence)
-    return total_connected >= min_connected_signals
+    if total_connected >= min_connected_signals:
+        return True
+    # UPLOAD-ONLY relaxation — narrowly scoped: only when there are NO connector
+    # sources at all. Connected-tenant behavior above is fully evaluated first
+    # and is never affected by this branch.
+    if is_upload_only(convergence):
+        total_upload = sum(tc.upload_signal_count for tc in convergence)
+        return total_upload >= min_upload_signals
+    return False
