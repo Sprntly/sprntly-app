@@ -717,38 +717,11 @@ describe("auto-skip locate failure surfaces the error state, never blank", () =>
     expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
   })
 
-  it("SWITCH SOURCE from the unmapped-resolve phase also reaches the config form, never blank", async () => {
-    // The unmapped path's "Switch source" (data-testid="unmapped-switch-source")
-    // sets flowPhase back to "config" the same way the error path does. With a
-    // healthy github preference still set it would also hit the render-null guard
-    // and blank. Drive the auto-skip → unmapped → Switch source path and assert
-    // the config form renders.
-    mockLocateResolves(
-      makeLocate({ unmapped: true, chosen: [], decision: "ranked_confirm", commit_sha: "" }),
-    )
-
-    const { container } = renderAutoSkip()
-
-    // Auto-skip located but came back unmapped → the unmapped-resolve phase.
-    await waitFor(() =>
-      expect(
-        container.querySelector('[data-testid="unmapped-resolve"]'),
-      ).toBeTruthy(),
-    )
-    // No auto-generation at unmapped.
-    expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
-
-    const switchSource = container.querySelector<HTMLButtonElement>(
-      '[data-testid="unmapped-switch-source"]',
-    )
-    expect(switchSource).toBeTruthy()
-    act(() => switchSource!.click())
-
-    // Never blank: the modal stays mounted and the config form renders.
-    expect(container.querySelector("#modal-generate")).not.toBeNull()
-    expect(container.querySelector('[data-testid="generate-btn"]')).not.toBeNull()
-    expect(container.querySelector('[data-testid="unmapped-resolve"]')).toBeNull()
-  })
+  // NOTE: the unmapped-resolve panel's "Switch source" affordance was removed in
+  // the steer-first recovery polish (close the modal to swap source). The
+  // render-null guard it used to exercise is still covered by the error-phase
+  // "locate-error-switch-source" test above, so the prior unmapped switch-source
+  // test was dropped rather than repointed at a button that no longer exists.
 
   it("PRE-AUTO-SKIP suppression preserved: a healthy github preference still shows NO config flash on first mount", () => {
     // The switch-source gate must not re-introduce the original config flash. On first

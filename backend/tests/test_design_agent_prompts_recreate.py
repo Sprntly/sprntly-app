@@ -20,10 +20,12 @@ from app.design_agent.codebase_map.recreate import (
     LocatedScreen,
     RecreateSources,
     render_recreate_task_block,
+    render_shell_task_block,
 )
 from app.design_agent.codebase_map.types import (
     LogoAsset,
     MapResult,
+    NavItem,
     ScreenNode,
     ShellModel,
 )
@@ -147,13 +149,13 @@ def test_discipline_length_within_bounds():
 
 def test_template_version_bumped_to_5():
     """DESIGN_AGENT_TEMPLATE_VERSION must be 5 after the recreate-discipline bump."""
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 6
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 7
     assert isinstance(DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
 def test_scaffold_sync_green_at_new_version():
     """The version-coupled scaffold-sync contract: version is an int equal to 5."""
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 6
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 7
 
 
 # ─── AC7: existing system prompts unchanged (append-only) ────────────────────
@@ -236,6 +238,65 @@ def test_recreate_block_includes_discipline_with_brand_carry():
     assert "Brand logo" in block
     assert "RE-EXPRESS" in block, "discipline missing when brand_carry is present"
     assert "recognizable" in block.lower()
+
+
+# ─── shell task block: real nav labels listed when provided ──────────────────
+
+def test_shell_task_block_lists_nav_labels_when_provided():
+    """When nav_items with labels are passed, the rendered block lists each
+    label in order so the model reproduces the real icon-rail."""
+    sources = _make_sources()
+    nav = [
+        NavItem(label="Weekly brief", order=0),
+        NavItem(label="All chats", order=1),
+        NavItem(label="Backlog Projects", order=2),
+    ]
+    block = render_shell_task_block(sources, nav_items=nav)
+    assert "REAL NAV ITEMS" in block
+    for label in ("Weekly brief", "All chats", "Backlog Projects"):
+        assert label in block
+    # order preserved
+    assert block.index("Weekly brief") < block.index("All chats") < block.index(
+        "Backlog Projects"
+    )
+
+
+def test_shell_task_block_omits_nav_line_when_no_items():
+    """No nav_items (None or empty) → no nav-list line, no error."""
+    sources = _make_sources()
+    assert "REAL NAV ITEMS" not in render_shell_task_block(sources)
+    assert "REAL NAV ITEMS" not in render_shell_task_block(
+        sources, nav_items=[]
+    )
+    # blank-label items contribute nothing
+    assert "REAL NAV ITEMS" not in render_shell_task_block(
+        sources, nav_items=[NavItem(label="", order=0)]
+    )
+
+
+def test_shell_task_block_instructs_dependency_free_rebuild():
+    """The block must tell the model to REBUILD the shell in the scaffold's
+    primitives (lucide-react + shadcn) and NOT import the app's own modules —
+    the real shell can't be reproduced verbatim in the scaffold."""
+    sources = _make_sources()
+    nav = [
+        NavItem(label="Weekly brief", order=0),
+        NavItem(label="All chats", order=1),
+    ]
+    block = render_shell_task_block(sources, nav_items=nav)
+    # Rebuild + do-not-import instruction.
+    assert "REBUILD" in block
+    assert "Do NOT import" in block
+    # Scaffold primitives named.
+    assert "lucide-react" in block
+    assert "shadcn" in block
+    # Real labels still present alongside the rebuild instruction.
+    assert "Weekly brief" in block
+    assert "All chats" in block
+    # The rebuild instruction is present even with no nav items.
+    bare = render_shell_task_block(sources)
+    assert "REBUILD" in bare
+    assert "lucide-react" in bare
 
 
 # ─── AC10: no new prohibited tokens in appended region ───────────────────────

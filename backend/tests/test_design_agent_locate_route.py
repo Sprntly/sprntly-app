@@ -260,6 +260,123 @@ def test_locate_ranked_confirm_response(client, env, monkeypatch):
     assert body["unmapped"] is False
 
 
+# ── steerable re-search: optional `hint` threading ───────────────────────────
+#
+# These exercise TWO seams independently:
+#   1. endpoint → _run_locate_bg : the POST body's hint is trimmed (blank→None)
+#      and forwarded as the hint kwarg. Captured by patching _run_locate_bg.
+#   2. _run_locate_bg → locate_screen : the bg task forwards its hint kwarg into
+#      the locate call. Driven directly (the _post_and_poll harness reconstructs
+#      the bg call itself, so it cannot cover seam 1).
+
+
+def _capture_run_locate_bg(routes_mod):
+    """Patch _run_locate_bg to record the kwargs the endpoint hands it, without
+    running the pipeline. Returns the captured dict (populated after the POST)."""
+    captured: dict = {}
+
+    async def _spy(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    return patch.object(routes_mod, "_run_locate_bg", new=_spy), captured
+
+
+def test_endpoint_forwards_hint_to_bg_task(client, env, monkeypatch):
+    """A `hint` in the POST body is forwarded to _run_locate_bg verbatim."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    patcher, captured = _capture_run_locate_bg(env.routes)
+
+    with patcher:
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo", "hint": "the settings page"},
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert captured.get("hint") == "the settings page"
+
+
+def test_endpoint_forwards_none_when_hint_absent(client, env, monkeypatch):
+    """No hint in the body → _run_locate_bg receives hint=None (unsteered)."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    patcher, captured = _capture_run_locate_bg(env.routes)
+
+    with patcher:
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo"},
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert captured.get("hint") is None
+
+
+def test_endpoint_trims_blank_hint_to_none(client, env, monkeypatch):
+    """A whitespace-only hint is trimmed to None before the bg task sees it."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    patcher, captured = _capture_run_locate_bg(env.routes)
+
+    with patcher:
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo", "hint": "   "},
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert captured.get("hint") is None
+
+
+def test_overlong_hint_rejected_by_request_validation(client, env, monkeypatch):
+    """LocateRequest caps hint length; an over-long hint is a 422, not silently
+    truncated at the route (the prompt layer caps defensively below that)."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    resp = client.post(
+        "/v1/design-agent/locate",
+        json={"prd_id": 1, "github_repo": "org/repo", "hint": "x" * 301},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_bg_task_forwards_hint_to_locate_screen(client, env, monkeypatch):
+    """_run_locate_bg forwards its hint kwarg into the locate_screen call."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    fake_map, fake_locate = _make_map_result(confidence=90)
+    captured: dict = {}
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        if func.__name__ == "build_map":
+            return fake_map
+        if func.__name__ == "locate_screen":
+            captured["hint"] = kwargs.get("hint", "__absent__")
+        return fake_locate
+
+    with patch("asyncio.to_thread", new=_fake_to_thread):
+        env.routes._locate_jobs["jobX"] = {
+            "status": "running",
+            "workspace_id": _TEST_COMPANY_ID,
+            "created_at": 0.0,
+        }
+        asyncio.run(
+            env.routes._run_locate_bg(
+                job_id="jobX",
+                workspace_id=_TEST_COMPANY_ID,
+                github_repo="org/repo",
+                ref=None,
+                prd_text="login PRD",
+                installation_id=42,
+                hint="the settings page",
+            )
+        )
+
+    assert captured.get("hint") == "the settings page"
+
+
 # ── degradation / errors ─────────────────────────────────────────────────────
 
 

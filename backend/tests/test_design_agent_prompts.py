@@ -51,7 +51,7 @@ def test_template_version_is_current():
     # axis appended to the recreate discipline (changes which handlers the agent
     # emits → template-invalidating). Each invalidates cached prototypes so they
     # regenerate.
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 6
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 7
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
@@ -249,7 +249,7 @@ def test_inert_affordance_default_documented_as_pending():
 
 def test_recreate_discipline_append_only_and_version_line():
     # The change is template-invalidating → version bumped to 6, owned here.
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 6
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 7
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
     # Append-only: the pre-existing discipline halves are all still present.
     assert "RE-EXPRESS, DON'T PARAPHRASE." in DISCIPLINE

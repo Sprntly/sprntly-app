@@ -75,7 +75,7 @@ def test_manual_edit_system_renders_shadcn_inventory():
 
 def test_template_version_is_5():
     # Bumped to 5 by the recreate-discipline append (codebase-context wave).
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 6
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 7
 
 
 def test_manual_edit_system_prompt_prefers_tailwind_class_swap():

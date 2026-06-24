@@ -20,6 +20,7 @@ from app.design_agent.codebase_map.locate import (
     LocateCandidate,
     LocateResult,
     _COMPACT_MAP_CHAR_CAP,
+    _MAX_HINT_CHARS,
     _MAX_RATIONALE_CHARS,
     _MODEL,
     compact_map,
@@ -487,6 +488,86 @@ def test_model_is_sonnet_4_6():
 
 
 # ---------------------------------------------------------------------------
+# Steerable re-search — optional user `hint`
+# ---------------------------------------------------------------------------
+
+
+def _user_turn_text(fake: FakeClient) -> str:
+    """The single user-turn content string from the first recorded call."""
+    messages = fake.calls[0]["messages"]
+    assert len(messages) == 1
+    return messages[0]["content"]
+
+
+def test_absent_hint_user_turn_is_byte_for_byte_today():
+    """No hint → the user turn is exactly `PRD:\\n{prd}` — the load-bearing
+    invariant that a plain locate is unchanged by this feature."""
+    m = _map_with_nodes("/team")
+    fake = FakeClient([_make_response(_happy_payload())])
+
+    locate_screen("team management PRD", m, client=fake)
+
+    assert _user_turn_text(fake) == "PRD:\nteam management PRD"
+
+
+def test_hint_threads_into_user_turn():
+    """A hint appends a `User direction:` steer line below the PRD anchor; the
+    PRD anchor itself is untouched (steer is appended, never prepended)."""
+    m = _map_with_nodes("/team", "/settings/members")
+    fake = FakeClient([_make_response(_happy_payload("/settings/members"))])
+
+    locate_screen("team PRD", m, client=fake, hint="the settings page")
+
+    turn = _user_turn_text(fake)
+    # PRD anchor unchanged and still leads the turn.
+    assert turn.startswith("PRD:\nteam PRD")
+    # The steer is present, verbatim, after the PRD.
+    assert "User direction: the settings page" in turn
+    assert "Re-rank the screen candidates toward this direction." in turn
+
+
+def test_blank_hint_treated_as_absent():
+    """A whitespace-only hint is unsteered — identical to no hint at all."""
+    m = _map_with_nodes("/team")
+    fake = FakeClient([_make_response(_happy_payload())])
+
+    locate_screen("team PRD", m, client=fake, hint="   ")
+
+    assert _user_turn_text(fake) == "PRD:\nteam PRD"
+
+
+def test_hint_is_capped_at_max_chars():
+    """An over-long hint is truncated to _MAX_HINT_CHARS before the prompt."""
+    m = _map_with_nodes("/team")
+    fake = FakeClient([_make_response(_happy_payload())])
+    long_hint = "x" * (_MAX_HINT_CHARS + 50)
+
+    locate_screen("team PRD", m, client=fake, hint=long_hint)
+
+    turn = _user_turn_text(fake)
+    # The injected run of x's is exactly the cap length — not the original.
+    injected = "x" * _MAX_HINT_CHARS
+    assert f"User direction: {injected}\n" in turn
+    assert "x" * (_MAX_HINT_CHARS + 1) not in turn
+
+
+def test_hint_does_not_touch_cached_system_prefix():
+    """The steer rides only the volatile user turn; the cached system+map
+    prefix is byte-for-byte identical with and without a hint, so a steered
+    re-search is a prefix cache hit."""
+    m = _map_with_nodes("/team", "/settings/members")
+    fake_plain = FakeClient([_make_response(_happy_payload())])
+    fake_steered = FakeClient([_make_response(_happy_payload())])
+
+    locate_screen("team PRD", m, client=fake_plain)
+    locate_screen("team PRD", m, client=fake_steered, hint="the settings page")
+
+    assert fake_plain.calls[0]["system"] == fake_steered.calls[0]["system"]
+    # And the user turns genuinely differ (the steer landed somewhere).
+    assert _user_turn_text(fake_plain) != _user_turn_text(fake_steered)
+
+
+# ---------------------------------------------------------------------------
 # Prompt content (property tests)
 # ---------------------------------------------------------------------------
 
@@ -895,4 +976,4 @@ def test_no_prohibited_tokens_in_source():
 
 def test_template_version_at_current():
     """DESIGN_AGENT_TEMPLATE_VERSION is 5 after the recreate-discipline bump."""
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 6
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 7

@@ -382,22 +382,30 @@ def _component_paths(m: MapResult, names: list[str]) -> set[str]:
     return {by_name[name] for name in names if name in by_name}
 
 
-def _app_root_prefix(located: LocatedScreen) -> str:
-    """Derive the app-package prefix in front of the conventional source root.
+def _app_root_prefix_from_file(file: str) -> str:
+    """Derive the app-package prefix from a single repo-relative file path.
 
     The shell/theme candidates are repo-root-relative (``app/``, ``src/``,
     ``pages/``). In a monorepo the app lives under a package dir (e.g.
     ``web/app/(app)/sources/page.tsx``), so those bare candidates never match.
     This returns everything BEFORE the first of ``app/``/``src/``/``pages/`` in
-    the located screen's file path (``"web/"`` for the example; ``""`` for a
-    repo-root app or when no marker is found).
+    the path (``"web/"`` for the example; ``""`` for a repo-root app or when no
+    marker is found).
     """
-    file = located.node.file or ""
     for marker in ("app/", "src/", "pages/"):
         idx = file.find(marker)
         if idx != -1:
             return file[:idx]
     return ""
+
+
+def _app_root_prefix(located: LocatedScreen) -> str:
+    """Derive the app-package prefix in front of the conventional source root
+    from the located screen's file path. Thin wrapper over
+    ``_app_root_prefix_from_file`` — behaviour is byte-identical to the prior
+    inline scan for the located path.
+    """
+    return _app_root_prefix_from_file(located.node.file or "")
 
 
 def _shell_paths(_m: MapResult, prefix: str = "") -> set[str]:
@@ -689,6 +697,122 @@ def _discover_shell_path_via_layout(
                     return c
             return cands[0]
     return ""
+
+
+def _shell_theme_push_paths(map_result: MapResult, app_prefix: str = "") -> list[str]:
+    """The repo-level, screen-INDEPENDENT must-read paths: the carried real shell
+    file, the conventional theme + shell candidates, and the forced globals.css
+    keys (prefix-aware).
+
+    Ordered deterministically so both ``read_located_sources`` (Tier-1) and
+    ``read_shell_sources`` (Tier-2) push the SAME shell/theme/globals subset in
+    the SAME order. The located reader prepends its screen-coupled paths in front
+    of this list, so factoring it out here keeps Tier-1's must-read order
+    byte-identical while letting the shell-only reader reuse it verbatim.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _push(path: str) -> None:
+        if path and path not in seen:
+            out.append(path)
+            seen.add(path)
+
+    # The real shell file (when the map recorded one) is read directly — the
+    # actual nav, not a guessed candidate.
+    carried_shell = map_result.shell.shell_file_path or ""
+    if carried_shell:
+        _push(carried_shell)
+    for path in sorted(_theme_paths(map_result, app_prefix)):
+        _push(path)
+    for path in sorted(_shell_paths(map_result, app_prefix)):
+        _push(path)
+    # Force-include globals.css (prefix-aware) so the theme bridge always has the
+    # real CSS to inline when it exists — guaranteed, not best-effort.
+    for key in _CSS_GLOBALS_KEYS:
+        if app_prefix:
+            _push(app_prefix + key)
+        _push(key)
+    return out
+
+
+def read_shell_sources(
+    map_result: MapResult,
+    installation_id: int,
+    app_prefix: str = "",
+) -> "RecreateSources | None":
+    """Read the shell + theme + globals bytes for a repo, with NO located screen.
+
+    The Tier-2 (shell-grounded fallback) counterpart to ``read_located_sources``:
+    when no screen was located, the app shell (nav/header/sidebar/layout) plus the
+    theme tokens are still repo-level and re-expressible. This does ONE bounded
+    ``read_repo`` over the shell/theme/globals candidate set (no located node, no
+    composed children, no re-export follow-up, no layout-graph discovery), then
+    returns a ``RecreateSources`` with the screen fields empty.
+
+    Returns ``None`` when ``read_repo`` returns ``None`` (no installation, SHA
+    resolution failed, empty tree) or when no shell body was readable — the
+    caller degrades to the design-system-only pre-seed (Tier-3) in that case.
+    """
+    # No located screen here, so the app-package prefix can't come from a screen
+    # path. Derive it from the carried shell file so a monorepo's prefixed theme/
+    # globals/shell candidates (e.g. ``web/app/globals.css``) resolve instead of
+    # looking at the repo root and missing everything but the carried shell.
+    if not app_prefix:
+        app_prefix = _app_root_prefix_from_file(map_result.shell.shell_file_path or "")
+
+    extra = _shell_theme_push_paths(map_result, app_prefix)
+    if not extra:
+        return None
+
+    snapshot = read_repo(
+        installation_id,
+        map_result.repo,
+        map_result.commit_sha,
+        extra_paths=extra,
+        frontend_root=app_prefix,
+    )
+    if snapshot is None:
+        return None
+
+    requested = set(extra)
+    files = {p: snapshot.files[p] for p in requested if p in snapshot.files}
+
+    # Resolve which shell body actually landed: the carried real path wins, then
+    # the conventional candidate keys (prefix-aware). No body ⇒ no shell to ground
+    # the fallback on, so degrade to Tier-3.
+    carried_shell = map_result.shell.shell_file_path or ""
+    if carried_shell and files.get(carried_shell):
+        shell_path = carried_shell
+    else:
+        if app_prefix:
+            cand_keys = tuple(app_prefix + c for c in SHELL_CANDIDATES) + SHELL_CANDIDATES
+        else:
+            cand_keys = SHELL_CANDIDATES
+        shell_path = next((k for k in cand_keys if files.get(k)), "")
+    if not shell_path:
+        logger.info(
+            "design_agent.shell_source_unreadable repo=%s",
+            map_result.repo,
+        )
+        return None
+
+    logger.info(
+        "design_agent.shell_source repo=%s shell_real=%s n_files=%d",
+        map_result.repo,
+        str(bool(carried_shell and files.get(carried_shell))).lower(),
+        len(files),
+    )
+
+    return RecreateSources(
+        repo=map_result.repo,
+        commit_sha=map_result.commit_sha,
+        files=files,
+        screen_path="",
+        also_screen_paths=(),
+        app_root_prefix=app_prefix,
+        shell_file_path=shell_path,
+    )
 
 
 def read_located_sources(
@@ -1231,6 +1355,83 @@ def render_recreate_task_block(
         "Real source you must re-express (view these reference files):\n"
         + "\n".join(ref_lines)
         + "\nApply the requirements change ON TOP of the re-expressed screen."
+    )
+    if brand_carry and brand_carry.shell_render_ref:
+        block += (
+            f"\nBrand logo ({brand_carry.render_kind}): {brand_carry.shell_render_ref}"
+        )
+    block += f"\n\n{DESIGN_AGENT_RECREATE_DISCIPLINE.strip()}"
+    return block
+
+
+def render_shell_task_block(
+    sources: RecreateSources,
+    brand_carry: BrandAssetCarry | None = None,
+    nav_items: "list | None" = None,
+) -> str:
+    """Render the user-message task block for the shell-grounded fallback.
+
+    No screen was located, so there is no single real screen to reproduce — but
+    the app shell (nav/header/sidebar/layout) + theme tokens ARE real and were
+    injected as ``__reference__/<path>`` files. This block tells the model to
+    render the PRD's screens INSIDE that shell, matching the app's chrome, so the
+    prototype reads as part of the real product rather than a blank-canvas page.
+
+    Distinct from ``render_recreate_task_block``: there is NO structural-parity
+    contract and NO specific screen to reproduce. The model builds the PRD's
+    content fresh, but seats it in the real shell and uses the real theme.
+
+    When ``brand_carry`` is provided, the shell logo render reference is appended
+    so the agent knows the exact markup to reproduce.
+
+    When ``nav_items`` is provided and non-empty, the real nav labels (in order)
+    are listed explicitly so the model reproduces the actual icon-rail instead of
+    inventing a generic one.
+    """
+    ref_paths = sorted(sources.files.keys())
+    ref_lines = [f"  - __reference__/{p}" for p in ref_paths] or [
+        "  (no reference files resolved)"
+    ]
+    nav_labels: list[str] = []
+    for item in nav_items or []:
+        label = (getattr(item, "label", "") or "").strip()
+        if label:
+            nav_labels.append(label)
+    block = (
+        "APP SHELL (from the connected codebase)\n"
+        "No single product screen was located for this PRD, but the real app "
+        "shell (sidebar/topbar/header/layout) and theme are available.\n"
+        f"Real shell + theme from {sources.repo}@{sources.commit_sha}.\n"
+        "Reference files you must view and re-use:\n"
+        + "\n".join(ref_lines)
+        + "\nRender the PRD's screens INSIDE this shell so the prototype looks "
+        "like a page of the real product: match the shell's LAYOUT / SHAPE (a "
+        "left icon-rail, a top nav, etc.), reproduce the real nav labels and "
+        "order, and re-use the real brand mark. Build the PRD's own content fresh "
+        "INSIDE the shell's content area — this is NOT a faithful single-screen "
+        "recreate, there is no specific screen to reproduce and no "
+        "structural-parity contract. Drop only what the fixed stack cannot run "
+        "(a \"use client\" directive, server components, backend data fetches), "
+        "replacing data with plausible client-side mock data."
+    )
+    if nav_labels:
+        block += (
+            "\n\nREAL NAV ITEMS — reproduce these as the app's sidebar/topbar, in "
+            "this EXACT order and with these EXACT labels:\n"
+            + "\n".join(f"  {i + 1}. {label}" for i, label in enumerate(nav_labels))
+        )
+    block += (
+        "\n\nREBUILD the shell using ONLY the scaffold's primitives — lucide-react "
+        "icons + shadcn/ui components. Do NOT import the app's own modules "
+        "(contexts like useNavigation / useWorkspace, @tabler/icons-react, local "
+        "icon files, app-specific components); they do not exist in this scaffold. "
+        "The real shell component file (if listed above) is REFERENCE ONLY — read "
+        "it to learn the layout and nav labels, but do NOT import or copy its "
+        "imports. Match the shell's layout / shape and the real nav labels / "
+        "order, but implement it fresh in the scaffold's stack: pick lucide-react "
+        "icons as reasonable stand-ins for the originals — the labels, order, and "
+        "layout are what matter, not byte-identical icons. Keep the real theme "
+        "tokens / globals and brand mark as provided; do not regress them."
     )
     if brand_carry and brand_carry.shell_render_ref:
         block += (

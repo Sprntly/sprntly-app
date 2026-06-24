@@ -30,6 +30,10 @@ _LOCATE_MAX_TOKENS = 1024
 # Clamp free-text rationale fields after parsing.
 _MAX_RATIONALE_CHARS = 300
 
+# Cap a user-supplied steer ("search again" direction) before it enters the
+# prompt. Defensive only — the route layer trims/caps first; this is the floor.
+_MAX_HINT_CHARS = 300
+
 # Guard against pathologically large repos blowing the stable prefix.
 _COMPACT_MAP_CHAR_CAP = 8000
 
@@ -103,6 +107,7 @@ def locate_screen(
     prd_text: str,
     map_result: "MapResult",
     *,
+    hint: Optional[str] = None,
     client=None,
 ) -> LocateResult:
     """Map a PRD to ranked screen candidates via a single LLM call.
@@ -116,6 +121,13 @@ def locate_screen(
         The PRD text to locate a target screen for.
     map_result:
         The codebase map containing the set of valid screen nodes.
+    hint:
+        An optional user-supplied direction ("search again" steer, e.g. "the
+        settings page"). When present and non-blank it is appended to the
+        volatile user turn as a `User direction:` line so candidates re-rank
+        toward the steer. The cached system+map prefix is untouched, so a steered
+        re-search is a cache hit on the prefix. Empty/blank/None ⇒ the user turn
+        is byte-for-byte today's `PRD:\\n{prd_text}` and behaviour is unchanged.
     client:
         An Anthropic client (or any compatible object). When None, the cached
         design-agent client is used. Injecting a fake here enables unit-testing
@@ -156,7 +168,20 @@ def locate_screen(
                 "cache_control": {"type": "ephemeral", "ttl": "1h"},
             },
         ]
-        messages = [{"role": "user", "content": f"PRD:\n{prd_text}"}]
+        # The user turn carries the PRD and — when the PM re-searched with a
+        # direction — an explicit steer line. The steer is appended (never
+        # prepended) so the PRD anchor is unchanged and an empty/blank hint
+        # yields the exact same content string as before.
+        user_turn = f"PRD:\n{prd_text}"
+        steer = (hint or "").strip()
+        if steer:
+            steer = steer[:_MAX_HINT_CHARS]
+            user_turn = (
+                f"{user_turn}\n\n"
+                f"User direction: {steer}\n"
+                "Re-rank the screen candidates toward this direction."
+            )
+        messages = [{"role": "user", "content": user_turn}]
 
         resp = client.messages.create(
             model=_MODEL,

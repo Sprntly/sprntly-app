@@ -1200,6 +1200,44 @@
   flex-shrink: 0;
 }
 
+/* Steer + re-search row on the no-match panel (FIX: steerable re-search).
+ * Layout-only — the input reuses the global `.input` look; the button reuses
+ * the global `.btn`. The input grows, the button holds its size. */
+.design-agent-surface.modal .locate-steer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 12px 0;
+}
+.design-agent-surface.modal .locate-steer .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.design-agent-surface.modal .locate-steer .btn {
+  flex-shrink: 0;
+}
+
+/* "Generate from the PRD anyway" — de-emphasized fallback rendered as a text
+ * link, not a button (the recovery ladder leads with the accent "Search again").
+ * Kept as a <button> element for the action semantics; styled flat. */
+.design-agent-surface.modal .locate-generate-row {
+  margin-top: 12px;
+}
+.design-agent-surface.modal .locate-generate-link {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.design-agent-surface.modal .locate-generate-link:hover {
+  color: var(--ink);
+}
+
 /* ── Shared radio-group / radio-pill (SourceTypePills) — unscoped / global ──
  * The modal-scoped rules above bind `.radio-group` / `.radio-pill` under the
  * compound `.design-agent-surface.modal`, so they only matched the generate

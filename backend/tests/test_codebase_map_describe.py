@@ -520,7 +520,7 @@ def test_describe_prompt_append_only():
     assert "hosts_chrome_level_features" in DESCRIBE_SYSTEM
 
     # The index-side prompt does NOT bump the recreate-template version.
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 6
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 7
 
     # Existing exports remain importable (append did not disturb them) and the
     # module byte-compiles — no existing importer breaks.
