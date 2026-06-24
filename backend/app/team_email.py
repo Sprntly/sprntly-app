@@ -40,18 +40,67 @@ def _invite_redirect_url() -> str:
     return f"{base}/auth/callback"
 
 
-def send_invite_email(email: str) -> bool:
-    """Send a Supabase magic-link invite email. Returns True iff the
-    Admin API call succeeded. Catches every exception so the caller
-    never has to wrap it — the workspace_invites row is the source of
-    truth either way."""
+# send_invite_email outcomes.
+SENT = "sent"  # new user — Supabase invite (magic link) sent
+SENT_EXISTING = "sent_existing"  # existing user — magic-link sign-in email sent
+FAILED = "failed"  # nothing could be sent (see logs)
+
+
+def _is_already_registered(exc: Exception) -> bool:
+    """True when invite_user_by_email failed because the email already has a
+    Supabase auth account. Supabase 422s these with "A user with this email
+    address has already been registered" — invite_user_by_email only creates
+    *new* users, so existing ones need a different path (a magic-link sign-in)."""
+    msg = str(exc).lower()
+    return "already" in msg and "registered" in msg
+
+
+def _send_existing_user_magic_link(client, email: str, redirect: str) -> str:
+    """Send a magic-link sign-in email to an already-registered user so they
+    can accept a workspace invite. Signing in lands them on /auth/callback,
+    where the post-login auto-accept hook converts their pending
+    workspace_invites row into a company_members row — same end state as the
+    new-user invite flow, just without creating a duplicate account."""
+    try:
+        client.auth.sign_in_with_otp(
+            {
+                "email": email,
+                "options": {
+                    "email_redirect_to": redirect,
+                    # They already exist; don't (re)create an auth user.
+                    "should_create_user": False,
+                },
+            }
+        )
+        logger.info(
+            "Invite for existing user %s: sent magic-link sign-in email "
+            "(invite auto-accepts on login).",
+            email,
+        )
+        return SENT_EXISTING
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning(
+            "Magic-link sign-in email failed for existing user %s: %s "
+            "(redirect_to=%s). Check Supabase Auth settings: email rate "
+            "limits, redirect URLs allow-list, SMTP config.",
+            email, exc, redirect,
+        )
+        return FAILED
+
+
+def send_invite_email(email: str) -> str:
+    """Email an invitee so they can join the workspace. Returns one of
+    SENT (new user, Supabase invite sent), SENT_EXISTING (the email already
+    had an account, so a magic-link sign-in email was sent instead), or
+    FAILED (see logs). Catches every exception so the caller never has to
+    wrap it — the workspace_invites row is the source of truth either way."""
     # Resolve at call time so test monkeypatches on `app.db.client` win.
     client = db_client_mod.supabase_client()
     if client is None:
         logger.warning(
             "send_invite_email skipped: supabase client not configured"
         )
-        return False
+        return FAILED
 
     redirect = _invite_redirect_url()
     try:
@@ -59,10 +108,15 @@ def send_invite_email(email: str) -> bool:
             email,
             {"redirect_to": redirect},
         )
-        return True
+        return SENT
     except Exception as exc:  # noqa: BLE001 — best-effort
-        # Surface the exact Supabase error so operators can fix config.
-        # Common causes:
+        # invite_user_by_email only works for NEW emails; an already-registered
+        # user 422s. That's not a delivery failure — fall back to a magic-link
+        # sign-in email, which reaches the same auto-accept end state.
+        if _is_already_registered(exc):
+            return _send_existing_user_magic_link(client, email, redirect)
+        # Genuine failure. Surface the exact Supabase error so operators can
+        # fix config. Common causes:
         #   - Free-tier rate limit (3 emails/hour)
         #   - redirect_to not in Supabase "Redirect URLs" (Auth > URL Config)
         #   - SMTP not configured in Supabase project
@@ -72,4 +126,4 @@ def send_invite_email(email: str) -> bool:
             "email rate limits, redirect URLs allow-list, SMTP config.",
             email, exc, redirect,
         )
-        return False
+        return FAILED

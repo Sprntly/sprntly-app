@@ -33,6 +33,8 @@ def _install_fake_admin(monkeypatch):
     admin_mock.invite_user_by_email = MagicMock(
         return_value=SimpleNamespace(user=SimpleNamespace(id="auth-user-id"))
     )
+    # Magic-link sign-in fallback for already-registered invitees.
+    otp_mock = MagicMock(return_value=SimpleNamespace())
 
     # `app.db.client.supabase_client` is patched by the isolated_settings
     # fixture to return a FakeSupabaseClient. Wrap it so its `.auth.admin`
@@ -42,8 +44,22 @@ def _install_fake_admin(monkeypatch):
     from app.db import client as db_client_mod
 
     fake_db_client = db_client_mod.supabase_client()
-    fake_db_client.auth = SimpleNamespace(admin=admin_mock)
+    fake_db_client.auth = SimpleNamespace(
+        admin=admin_mock, sign_in_with_otp=otp_mock
+    )
     return admin_mock
+
+
+def _otp_mock():
+    """The sign_in_with_otp mock installed by _install_fake_admin."""
+    from app.db import client as db_client_mod
+
+    return db_client_mod.supabase_client().auth.sign_in_with_otp
+
+
+_ALREADY_REGISTERED = (
+    "A user with this email address has already been registered"
+)
 
 
 # ─────────────────────── invite POST sends email ───────────────────────
@@ -166,3 +182,65 @@ def test_resend_email_sent_false_when_admin_fails(isolated_settings, monkeypatch
     r = ctx.client.post(f"/v1/team/invites/{iid}/resend")
     assert r.status_code == 200
     assert r.json().get("email_sent") is False
+
+
+# ──────────────── existing-user invitee (already registered) ────────────────
+
+
+def test_invite_existing_user_sends_magic_link(isolated_settings, monkeypatch):
+    """If the invitee already has a Supabase account, invite_user_by_email
+    422s ("already registered"). We must fall back to a magic-link sign-in
+    email — NOT report a send failure. Response: email_sent=true (an email
+    DID go out) + existing_user=true."""
+    ctx = company_client(monkeypatch)
+    admin_mock = _install_fake_admin(monkeypatch)
+    admin_mock.invite_user_by_email.side_effect = Exception(_ALREADY_REGISTERED)
+
+    r = ctx.client.post(
+        "/v1/team/invites", json={"email": "existing@co.com", "role": "member"}
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body.get("email_sent") is True
+    assert body.get("existing_user") is True
+
+    # The magic-link sign-in email was sent to the right address, redirecting
+    # back to our auth callback so the post-login auto-accept hook can run.
+    otp = _otp_mock()
+    otp.assert_called_once()
+    (payload,), _ = otp.call_args
+    assert payload["email"] == "existing@co.com"
+    opts = payload["options"]
+    assert opts["email_redirect_to"].startswith("http")
+    assert opts["should_create_user"] is False
+
+
+def test_existing_user_magic_link_failure_is_email_sent_false(
+    isolated_settings, monkeypatch
+):
+    """If BOTH the invite and the magic-link fallback fail, the invite row
+    still persists and email_sent=false (genuine delivery failure)."""
+    ctx = company_client(monkeypatch)
+    admin_mock = _install_fake_admin(monkeypatch)
+    admin_mock.invite_user_by_email.side_effect = Exception(_ALREADY_REGISTERED)
+    _otp_mock().side_effect = Exception("supabase email rate limit")
+
+    r = ctx.client.post(
+        "/v1/team/invites", json={"email": "existing2@co.com", "role": "member"}
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body.get("email_sent") is False
+    assert body.get("existing_user") is not True
+
+
+def test_existing_user_unit_returns_sent_existing(isolated_settings, monkeypatch):
+    """Unit-level: send_invite_email returns SENT_EXISTING for an already-
+    registered email when the magic-link send succeeds."""
+    company_client(monkeypatch)  # wires the fake supabase client
+    admin_mock = _install_fake_admin(monkeypatch)
+    admin_mock.invite_user_by_email.side_effect = Exception(_ALREADY_REGISTERED)
+
+    from app import team_email
+
+    assert team_email.send_invite_email("dup@co.com") == team_email.SENT_EXISTING
