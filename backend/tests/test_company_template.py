@@ -105,6 +105,32 @@ def test_list_empty_when_none(isolated_settings):
     assert ct.list_company_templates("co-missing") == []
 
 
+def test_list_fails_open_when_table_missing(isolated_settings):
+    """The company_template migration deploys independently of this code, so on
+    an environment where the table does not yet exist the read RAISES. The
+    fetch path must fail open — return [] — so PRD generation never breaks."""
+
+    class _MissingTableDB:
+        def table(self, _name):
+            return self
+
+        def select(self, *_a, **_k):
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            raise RuntimeError(
+                'relation "company_template" does not exist'
+            )
+
+    ct = _wire(_MissingTableDB())
+    # Both the low-level fetch and the prompt renderer must no-op cleanly.
+    assert ct.list_company_templates("co-x") == []
+    assert ct.render_templates_for_prompt("co-x") == ""
+
+
 # ---------- render_for_prompt ----------
 
 def test_render_for_prompt_truncates():

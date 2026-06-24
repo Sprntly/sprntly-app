@@ -24,6 +24,9 @@ export type ScreenId =
   // in-tab here at `/prototype?prd=<id>`; the PRD context rides as a query param.
   | "prototype"
   | "backlog"
+  // Top-level "what good looks like" surface: the company's gold-standard PRD
+  // examples. Design data-view="templates", bookmark icon.
+  | "templates"
 
 // The NUMBERED onboarding screens, in flow order. `ob-analyzing` is deliberately
 // absent — it is the unnumbered loader, not a counted step.
@@ -52,6 +55,7 @@ export const APP_SCREENS: ScreenId[] = [
   "tickets",
   "prototype",
   "backlog",
+  "templates",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
@@ -77,6 +81,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   tickets: "Project Management",
   prototype: "Prototype",
   backlog: "Backlog Projects",
+  templates: "Templates",
 }
 
 export function getMainChromeTitle(screen: ScreenId): string {

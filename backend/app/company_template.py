@@ -135,7 +135,20 @@ def list_company_templates(
     )
     if type is not None:
         q = q.eq("type", type)
-    r = q.execute()
+    try:
+        r = q.execute()
+    except Exception:  # noqa: BLE001 — fail open
+        # The `company_template` table may not exist yet on a given environment
+        # (its migration deploys independently of this code). A missing table —
+        # or any transient read error — must degrade to "no templates" rather
+        # than raising, so PRD generation and the templates UI never break when
+        # the table is absent or empty.
+        logger.warning(
+            "company_template read failed for %s; treating as no templates",
+            company_id,
+            exc_info=True,
+        )
+        return []
     rows = r.data or []
     out: list[CompanyTemplate] = []
     for raw in rows:
@@ -153,15 +166,25 @@ def list_company_templates(
 
 def delete_company_template(company_id: str, template_id: str) -> bool:
     """Delete one template owned by the company. Returns True if a row was
-    removed. The company_id scope guards against deleting another tenant's row."""
-    r = (
-        require_client().table("company_template")
-        .delete()
+    removed. The company_id scope guards against deleting another tenant's row.
+
+    Existence is checked first (a scoped select) so the result is reliable
+    regardless of whether the backend echoes deleted rows — PostgREST's delete
+    `data` representation is not depended on."""
+    client = require_client()
+    existing = (
+        client.table("company_template")
+        .select("id")
         .eq("company_id", company_id)
         .eq("id", template_id)
         .execute()
     )
-    return bool(r.data)
+    if not existing.data:
+        return False
+    client.table("company_template").delete().eq("company_id", company_id).eq(
+        "id", template_id
+    ).execute()
+    return True
 
 
 def render_templates_for_prompt(

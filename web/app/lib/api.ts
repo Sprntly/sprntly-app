@@ -716,6 +716,54 @@ export const roadmapDocApi = {
   },
 }
 
+// ---- templates ("what good looks like") -------------------------------------
+//
+// The company's uploaded gold-standard PRD examples. Sibling of the roadmap doc
+// above, but MANY per company: each is its own listed, individually-deletable
+// row. The extracted text is fed to the prd-author skill as a FORMAT/STYLE
+// EXEMPLAR so generated PRDs match the team's structure & voice. Mirrors
+// backend/app/company_template.py + the /v1/company/templates routes.
+
+/** One stored gold-standard template, as the list view reads it. Never carries
+ *  the raw file bytes — only metadata + the extracted-char count. */
+export type CompanyTemplate = {
+  id: string
+  label: string | null
+  type: string
+  filename: string
+  content_type: string | null
+  /** Characters extracted from the upload (the text fed to prd-author). */
+  extracted_chars: number
+  uploaded_at: string | null
+}
+
+export type TemplateUploadResponse = { ok: true } & CompanyTemplate
+
+export const templatesApi = {
+  /** All gold-standard templates for the company, newest first. Optionally
+   *  filtered by `type` (defaults to all). */
+  list: (type?: string) => {
+    const qs = type ? `?type=${encodeURIComponent(type)}` : ""
+    return api
+      .get<{ templates: CompanyTemplate[] }>(`/v1/company/templates${qs}`)
+      .then((r) => r.templates)
+  },
+  /** Upload a gold-standard PRD example (multipart). Optional `label` names it
+   *  in the list; `type` defaults to "prd" server-side. */
+  upload: (file: File, opts?: { label?: string; type?: string }) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    if (opts?.label) form.append("label", opts.label)
+    if (opts?.type) form.append("type", opts.type)
+    return api.post<TemplateUploadResponse>("/v1/company/templates", form)
+  },
+  /** Remove one template by id. */
+  remove: (id: string) =>
+    api.delete<{ ok: true; id: string }>(
+      `/v1/company/templates/${encodeURIComponent(id)}`,
+    ),
+}
+
 // ---- sources ----------------------------------------------------------------
 
 export type SourceFile = {
