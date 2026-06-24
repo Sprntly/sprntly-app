@@ -1427,7 +1427,13 @@ export function BriefChat() {
                   <BriefGeneratingState />
                 ) : (
                 <>
-                <p className="bc-greeting">{greeting}</p>
+                {/* Only greet in the empty state ("not enough connected yet…").
+                    When findings exist the persistent PM intro above already
+                    welcomes the user, so a second "here's this week's brief"
+                    greeting just reads as a duplicate. */}
+                {findings.length === 0 ? (
+                  <p className="bc-greeting">{greeting}</p>
+                ) : null}
                 {findings.length > 0 ? (
                   <div className="fc-stack">
                     {findings.map((f) => {

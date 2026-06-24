@@ -561,13 +561,39 @@ describe("BriefChat header — fixed agent name 'Spiky'", () => {
     expect(within(head!).getByText("PM COWORKER")).not.toBeNull()
   })
 
-  it("greeting still renders below the Spiky header", async () => {
+  it("does NOT render the redundant brief greeting when findings exist", async () => {
     await act(async () => {
       renderBrief()
     })
-    // The brief greeting line is present (the agent greeting copy), confirming
-    // the rename didn't disturb the greeting render path.
-    expect(document.querySelector(".bc-greeting")).not.toBeNull()
+    // A brief is present, so the persistent PM intro above already welcomes the
+    // user. The second "here's this week's brief / I spotted N things" greeting
+    // is dropped as a duplicate.
+    expect(document.querySelector(".bc-greeting")).toBeNull()
+    expect(screen.queryByText(/here's this week's brief/i)).toBeNull()
+  })
+
+  it("still shows the empty-state greeting when there are no findings", async () => {
+    await act(async () => {
+      render(
+        React.createElement(
+          NavigationProvider,
+          null,
+          React.createElement(
+            ContentProvider,
+            null,
+            React.createElement(InjectBrief, {
+              brief: { ...BRIEF, hero: null, supporting: [] },
+            }),
+            React.createElement(BriefChat),
+          ),
+        ),
+      )
+    })
+    // No findings → the greeting line must remain, carrying the
+    // "not enough connected yet" empty-state message.
+    const greeting = document.querySelector(".bc-greeting") as HTMLElement | null
+    expect(greeting).not.toBeNull()
+    expect(greeting!.textContent).toMatch(/there isn't enough connected yet/i)
   })
 })
 
