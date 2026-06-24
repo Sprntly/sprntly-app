@@ -54,6 +54,7 @@ import asyncio
 import json
 import logging
 
+from app.company_template import render_templates_for_prompt
 from app.config import settings
 from app.corpus import load_corpus
 from app.db import complete_prd_2part, get_brief_by_id
@@ -134,7 +135,7 @@ BRIEF INSIGHT (the problem to turn into a PRD):
 {insight_json}
 
 {evidence}
-
+{exemplars}
 TEMPLATE (the full two-part structure — produce ONLY your assigned part of it):
 {template}
 """
@@ -251,12 +252,29 @@ def _build_context(brief_id: int, insight_index: int) -> dict:
     # calls receive the full template and emit only their assigned half.
     template = get_skill(_SKILL).templates["prd-template.md"]
     title = insight.get("title") or f"Insight #{insight_index + 1}"
+    # FORMAT/STYLE EXEMPLARS — the company's uploaded gold-standard PRD examples
+    # ("what good looks like"). Additive context ONLY: when the company has
+    # uploaded templates, their extracted text is folded into BOTH part-calls so
+    # the model MATCHES the house structure & voice. No templates (or no company
+    # for the slug) ⇒ empty string ⇒ a clean no-op (the prompt is unchanged from
+    # before). Best-effort: a read error must never break PRD generation.
+    exemplars = ""
+    if company_id:
+        try:
+            exemplars = render_templates_for_prompt(company_id)
+        except Exception:  # noqa: BLE001 — exemplars are best-effort context
+            logger.exception(
+                "PRD format exemplars lookup failed for company=%s — skipping",
+                company_id,
+            )
+            exemplars = ""
     return {
         "company_id": company_id,
         "dataset": dataset,
         "evidence": evidence,
         "trail": trail,
         "template": template,
+        "exemplars": exemplars,
         "insight": insight,
         "title": title,
     }
@@ -269,10 +287,15 @@ def _call_part(ctx: dict, *, purpose: str, directive: str, background: bool = Fa
     the model to one half via `directive`. Keeps `skill=_SKILL` so the METHOD
     and its `+prd-author@<hash>` version pin are preserved on every call.
     """
+    # Exemplars (the company's gold-standard PRD format references) slot in
+    # between the evidence and the template when present; empty string ⇒ no-op.
+    exemplars = ctx.get("exemplars") or ""
+    exemplars_block = f"\n{exemplars}\n" if exemplars else ""
     user = _USER_TEMPLATE.format(
         part_directive=directive,
         insight_json=json.dumps(ctx["insight"], indent=2),
         evidence=ctx["evidence"],
+        exemplars=exemplars_block,
         template=ctx["template"],
     )
     return llm_call(
