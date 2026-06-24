@@ -165,6 +165,13 @@ function baseFinding(detailKey: string, title: string, chart: BriefV2InlineChart
     actionLabel: "FIX",
     tagType: "fix" as const,
     tagLabel: "FIX NOW",
+    skillType: "reliability" as const,
+    skillAccent: "#c0473c",
+    skillLabel: "Reliability",
+    ctas: [
+      { label: "View PRD", style: "primary" },
+      { label: "View prototype", style: "ghost" },
+    ],
     category: "RETENTION",
     priority: "P0",
     confidence: 0.82,

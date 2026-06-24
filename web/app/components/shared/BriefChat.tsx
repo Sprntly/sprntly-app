@@ -412,8 +412,10 @@ function BriefFindingCard({
   } | null
 }) {
   const accent = finding.actionAccent
-  const category = finding.category || finding.actionLabel
-  const priority = finding.priority || "P0"
+  // Weekly-brief skill design: the card accent is the finding type's canonical
+  // hex (derived from type, set as a CSS var the pill / left bar / PRD button
+  // read), and the category pill shows the type name only (no P0/P1).
+  const accentStyle = { ["--card-accent"]: finding.skillAccent } as React.CSSProperties
   const statTiles = finding.statTiles || []
   // Real chart from the insight payload (chart_hints → BriefV2InlineChart). When
   // the insight ships no chart_hints, derive a data-driven bar chart from the
@@ -428,6 +430,7 @@ function BriefFindingCard({
     return (
       <article
         className={`fc fc--${accent} fc--dismissed`}
+        style={accentStyle}
         role="button"
         tabIndex={0}
         title="Dismissed · click to restore"
@@ -461,12 +464,12 @@ function BriefFindingCard({
   }
 
   return (
-    <article className={`fc fc--${accent}`}>
-      {/* Top row: category · priority badge + icons */}
+    <article className={`fc fc--${accent} fc--skill`} style={accentStyle}>
+      {/* Top row: type pill (skill taxonomy — type name only) + icons */}
       <div className="fc-top">
-        <span className={`fc-pill fc-pill--${accent}`}>
+        <span className="fc-pill fc-pill--skill">
           <span className="fc-dot" aria-hidden />
-          {category} · {priority}
+          {finding.skillLabel}
         </span>
         <div className="fc-top-right">
           <button type="button" className="fc-iconbtn" title="Ask about this finding" aria-label="Ask about this finding" onClick={onAsk}>
@@ -525,7 +528,7 @@ function BriefFindingCard({
               return (
                 <button
                   type="button"
-                  className={`fc-btn-prd fc-btn-prd--${accent}`}
+                  className="fc-btn-prd fc-btn-prd--skill"
                   onClick={cta.isView ? onViewPrd : onGenerateAll}
                   // View is a cheap read — allowed while another job is busy;
                   // Generate is gated on `busy` as before.
@@ -547,7 +550,7 @@ function BriefFindingCard({
             {finding.prototypeable ? (
               <button type="button" className="fc-btn-secondary" onClick={onPreview}>
                 <IconTerminalPrompt size={13} />
-                View prototype
+                {finding.ctas.find((c) => /prototype/i.test(c.label))?.label || "View prototype"}
               </button>
             ) : null}
           </div>

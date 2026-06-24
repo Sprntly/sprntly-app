@@ -13,6 +13,7 @@ import type {
 } from "../types/content"
 import type { Brief, ChartHint, ConvergenceItem, Insight } from "./api"
 import { briefToBriefV2State, companyLabel } from "./brief-v2-adapter"
+import { accentForInsight, labelForInsight, resolveSkillType } from "./brief-skill-taxonomy"
 
 type TagMeta = {
   tagType: BriefTagType
@@ -309,6 +310,12 @@ function findingFromInsight(insight: Insight, rank: number): BriefFindingRow {
     detailKey: detailKeyFor(meta.tagType, rank),
     actionAccent: meta.actionAccent,
     actionLabel: meta.actionLabel,
+    skillType: resolveSkillType(insight),
+    skillAccent: accentForInsight(insight),
+    skillLabel: labelForInsight(insight),
+    ctas: Array.isArray(insight._card?.ctas)
+      ? insight._card!.ctas.map((c) => ({ label: String(c.label), style: String(c.style) }))
+      : [],
     metricHighlight: metricHighlightFor(insight, meta.actionAccent),
     signalLine: signalLineFromInsight(insight),
     secondaryCtaLabel: meta.secondaryCtaLabel,

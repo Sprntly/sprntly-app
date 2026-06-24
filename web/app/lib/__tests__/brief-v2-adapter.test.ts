@@ -5,6 +5,9 @@ import { briefToBriefV2State, companyLabel } from "../brief-v2-adapter"
 function makeInsight(overrides: Partial<Insight> & { tag: Insight["tag"] }): Insight {
   return {
     tag: overrides.tag,
+    type: overrides.type,
+    accent: overrides.accent,
+    _card: overrides._card,
     title: overrides.title ?? "title",
     subtitle: overrides.subtitle ?? "subtitle",
     metrics: overrides.metrics ?? [
@@ -292,5 +295,43 @@ describe("briefToBriefV2State — card body (bodyFor)", () => {
     expect(
       bodyOf({ subtitle: "", recommendation: "", headline: "", title: "Just a title" }),
     ).toBe("Just a title")
+  })
+})
+
+describe("briefToBriefV2State — weekly-brief skill taxonomy", () => {
+  it("maps each card's skill type/label and derives accent from TYPE (not the card's accent)", () => {
+    // _card.accent is deliberately the wrong (retention rose) hex for a
+    // competitive card — the adapter must derive the ochre from the type.
+    const state = briefToBriefV2State(
+      makeBrief([
+        makeInsight({
+          tag: "something_broken",
+          title: "Rival shipped NL search — 3 deals lost",
+          _card: {
+            type: "competitive",
+            accent: "#b23b52",
+            ctas: [
+              { label: "Draft PRD", style: "primary" },
+              { label: "Generate prototype", style: "ghost" },
+            ],
+          },
+        }),
+        makeInsight({ tag: "something_new", title: "Second finding" }),
+      ]),
+    )
+    const hero = state.hero!
+    expect(hero.skillType).toBe("competitive")
+    expect(hero.skillLabel).toBe("Competitive")
+    expect(hero.skillAccent).toBe("#b07a2e") // ochre from type, NOT the rose accent
+    expect(hero.skillAccent).not.toBe("#b23b52")
+    expect(hero.ctas.map((c) => c.label)).toEqual(["Draft PRD", "Generate prototype"])
+  })
+
+  it("falls back to a tag-derived type/accent for legacy briefs with no _card", () => {
+    const state = briefToBriefV2State(makeBrief([makeInsight({ tag: "something_better" })]))
+    const hero = state.hero!
+    expect(hero.skillType).toBe("growth")
+    expect(hero.skillAccent).toBe("#1a8a52")
+    expect(hero.ctas).toEqual([]) // no skill card → caller falls back to default CTAs
   })
 })

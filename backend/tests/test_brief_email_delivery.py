@@ -65,6 +65,116 @@ def test_render_handles_no_insights(isolated_settings):
     assert "No insights this week." in html_body
 
 
+# ── skill-card rendering (the rebuilt design) ─────────────────────────────────
+def test_render_card_derives_accent_from_type(isolated_settings):
+    """A competitive card renders the ochre #b07a2e accent DERIVED FROM THE TYPE
+    — even when `_card.accent` carries a wrong/mismatched hex (real briefs had
+    type="competitive" with the retention rose accent)."""
+    from app.synthesis.email_delivery import render_brief_email
+
+    brief = {
+        "summary_headline": "Headline",
+        "week_label": "Week of June 8, 2026",
+        "insights": [{
+            "theme_id": "t1",
+            "tag": "something_new",
+            "title": "fallback title",
+            "_card": {
+                "type": "competitive",
+                "accent": "#b23b52",  # WRONG — retention rose, must be ignored
+                "title": "A rival shipped search — match it to protect renewals",
+                "body": "Since Togal shipped natural-language search...",
+                "sources": ["Competitor intel", "Sales calls", "CRM"],
+                "ctas": [{"label": "Draft PRD", "style": "primary"},
+                         {"label": "Generate prototype", "style": "ghost"}],
+                "signal_id": "t1",
+            },
+        }],
+    }
+    _subject, html_body, text_body = render_brief_email(brief)
+
+    # Type label (capitalized) renders.
+    assert "Competitive" in html_body
+    assert "Competitive" in text_body
+    # Accent DERIVED from type wins over the wrong card.accent.
+    assert "#b07a2e" in html_body
+    assert "#b23b52" not in html_body
+    # Card title (the skill's signature line) + body + source chips render.
+    assert "A rival shipped search" in html_body
+    assert "Since Togal shipped" in html_body
+    assert "Competitor intel" in html_body
+    assert "From" in html_body
+
+
+def test_render_card_ctas(isolated_settings):
+    from app.synthesis.email_delivery import render_brief_email
+
+    brief = {
+        "summary_headline": "H",
+        "week_label": "W",
+        "insights": [{
+            "theme_id": "t1",
+            "_card": {
+                "type": "growth",
+                "title": "42 accounts have outgrown their plan",
+                "body": "Forty-two Team-plan accounts...",
+                "sources": ["Billing"],
+                "ctas": [{"label": "Draft PRD", "style": "primary"},
+                         {"label": "Generate prototype", "style": "ghost"}],
+                "signal_id": "t1",
+            },
+        }],
+    }
+    _subject, html_body, _text = render_brief_email(brief)
+    assert "Draft PRD" in html_body
+    assert "Generate prototype" in html_body
+    # Growth accent derived from type.
+    assert "#1a8a52" in html_body
+
+
+def test_render_card_default_ctas_when_missing(isolated_settings):
+    from app.synthesis.email_delivery import render_brief_email
+
+    brief = {
+        "summary_headline": "H", "week_label": "W",
+        "insights": [{"theme_id": "t1", "_card": {
+            "type": "demand", "title": "T", "body": "B", "sources": [],
+            "signal_id": "t1"}}],  # no ctas
+    }
+    _subject, html_body, _text = render_brief_email(brief)
+    assert "View PRD" in html_body
+    assert "View prototype" in html_body
+
+
+def test_render_prefers_greeting_over_headline(isolated_settings):
+    from app.synthesis.email_delivery import render_brief_email
+
+    brief = {
+        "greeting": "Good day, David — there's real upside this week.",
+        "summary_headline": "Fallback headline",
+        "week_label": "W", "insights": [],
+    }
+    _subject, html_body, text_body = render_brief_email(brief)
+    assert "Good day, David" in html_body
+    assert "Good day, David" in text_body
+    # Subject still uses the headline.
+    assert "Fallback headline" in _subject
+
+
+def test_render_legacy_brief_no_card_still_renders(isolated_settings):
+    """A legacy brief whose insights carry no `_card` degrades gracefully:
+    subject + headline + titles + tag labels still render."""
+    from app.synthesis.email_delivery import render_brief_email
+
+    subject, html_body, text_body = render_brief_email(_BRIEF)
+    assert "Offline sync is the week's dominant risk" in subject
+    assert "Offline sync is the week" in html_body  # headline (escaped apostrophe)
+    assert "Offline sync failures 2.5x MoM" in html_body  # legacy title
+    assert "SSO blocks $218k of pipeline" in html_body
+    # Legacy tag labels still surface.
+    assert "FIX" in html_body and "BUILD" in html_body
+
+
 # ── delivery: enabled + per-recipient routing ────────────────────────────────
 def _enable(monkeypatch, recipients=None, members=None):
     from app.synthesis import email_delivery as ed
