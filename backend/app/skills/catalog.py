@@ -30,6 +30,7 @@ SKILL_CATEGORY: dict[str, str] = {
     "assumption-risk-map": "Discovery & Research",
     "business-context": "Discovery & Research",
     "continuous-discovery": "Discovery & Research",
+    "evidence-brief": "Discovery & Research",
     "interview-guide": "Discovery & Research",
     "interview-synthesis": "Discovery & Research",
     "jobs-to-be-done": "Discovery & Research",
@@ -87,8 +88,11 @@ SKILL_CATEGORY: dict[str, str] = {
 #   - weekly-brief is the synthesis-agent's brief composer (bound by name from
 #     app/synthesis/agent.py); it composes the weekly brief from already-computed
 #     signals, it is not something the Q&A router should pick for a chat turn.
+#   - evidence-brief is the Evidence Page method, bound by name from
+#     app/evidence_kg.py; it synthesizes a single brief insight's KG signal
+#     trail into the provenance doc, not a chat answer.
 NON_ROUTABLE: frozenset[str] = frozenset(
-    {"business-context", "fact-check", "weekly-brief"}
+    {"business-context", "fact-check", "weekly-brief", "evidence-brief"}
 )
 
 # Expensive skills that trip the confirm gate on large scope (see qa_agent).

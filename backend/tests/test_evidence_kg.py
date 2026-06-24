@@ -313,6 +313,35 @@ def test_build_feeds_signals_to_llm_and_logs_refs(facade, isolated_settings,
     assert set(meta["kg_refs"]) == {s.id for s in signals} | {hyp.id, theme.id}
 
 
+def test_build_binds_evidence_brief_skill(facade, isolated_settings, monkeypatch):
+    """Evidence generation runs through the vendored `evidence-brief` skill:
+    the gateway llm_call is invoked with skill="evidence-brief" so its SKILL.md
+    METHOD (converge ≥2 signals → wedge → best-chart-per-finding → honesty
+    pass) is prepended. The Sprntly `:::block` output contract is unchanged."""
+    from app import evidence_kg
+
+    _seed_template(isolated_settings["data_dir"])
+    theme, _hyp, _signals = _seed_theme_hypothesis(facade)
+
+    captured = {}
+
+    def fake_llm(**kw):
+        captured.update(kw)
+        return _llm_result(":::hero\n{}\n:::\n")
+
+    monkeypatch.setattr(evidence_kg, "llm_call", fake_llm)
+    insight = {"title": "SSO gap blocks $1.4M in deals", "theme_id": theme.id}
+    evidence_kg.build_evidence_kg(facade, "ent-A", insight)
+
+    assert captured["skill"] == "evidence-brief"
+    # The skill is real + installed + non-routable (bound by name, not chat).
+    from app.skills.catalog import NON_ROUTABLE
+    from app.skills.loader import get_skill
+
+    assert "evidence-brief" in NON_ROUTABLE
+    assert get_skill("evidence-brief").method.strip()  # SKILL.md present
+
+
 def test_build_decision_log_carries_kg_refs(facade, isolated_settings,
                                             monkeypatch):
     from app import evidence_kg

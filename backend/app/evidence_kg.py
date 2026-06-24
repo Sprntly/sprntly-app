@@ -202,6 +202,11 @@ def build_evidence_kg(
         prompt_version=EVIDENCE_KG_PROMPT_VERSION,
         system=EVIDENCE_KG_SYSTEM,
         input=user,
+        # Bind the evidence-brief skill: its SKILL.md becomes the METHOD layer
+        # (converge ≥2 signals → wedge → best-chart-per-finding → honesty pass).
+        # The Sprntly `:::block` template + system prompt still govern the OUTPUT
+        # format (see EVIDENCE_KG_SYSTEM overrides 1 & 2).
+        skill="evidence-brief",
     )
     md = result.output if isinstance(result.output, str) else str(result.output)
 

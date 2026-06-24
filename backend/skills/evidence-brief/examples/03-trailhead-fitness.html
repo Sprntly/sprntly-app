@@ -1,0 +1,98 @@
+<meta charset="utf-8">
+<style>
+  :root{--ink:#191b24;--paper:#fbfaf6;--muted:#6c7180;--hair:#e4e1d7;--problem:#dd4b32;--problem-soft:#f6d6cd;--opp:#0f9d77;--opp-soft:#d3efe5;--grid:#ece9e0;--bar-neutral:#cfccc2;--warn:#b3791c;--serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;--sans:-apple-system,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;--mono:"SF Mono","Roboto Mono",ui-monospace,Menlo,Consolas,monospace}
+  *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:820px;margin:0 auto;padding:48px 28px 56px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+  h1{font-family:var(--serif);font-weight:600;font-size:33px;line-height:1.13;letter-spacing:-.01em;margin:0 0 8px}
+  .deck{font-family:var(--serif);font-size:18px;font-style:italic;color:#4a4d57;margin:0 0 4px;line-height:1.4}
+  .meta{font-family:var(--mono);font-size:11.5px;color:var(--muted);border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);padding:9px 0;margin:18px 0 0}
+  .demo{font-family:var(--mono);font-size:10.5px;color:var(--problem);letter-spacing:.04em;margin:8px 0 0}
+  .context{font-size:15px;color:#3a3d47;margin:22px 0 0}
+  .tldr{background:#fff;border:1px solid var(--hair);border-left:3px solid var(--warn);padding:18px 20px;margin:22px 0 0;font-size:15px}
+  .tldr h4{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:0 0 9px}.tldr p{margin:0}
+  .opp-top{display:flex;gap:14px;align-items:flex-start;background:#fbf3e2;border:1px solid #ecd9b0;border-radius:5px;padding:15px 18px;margin:14px 0 0}
+  .opp-top .tag{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--warn);background:#fff;border:1px solid #ecd9b0;border-radius:3px;padding:4px 7px;white-space:nowrap;margin-top:2px}
+  .opp-top p{margin:0;font-size:15px;font-family:var(--serif)}.opp-top b{color:#8a5a00}
+  section{margin:38px 0 0}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.1em;margin:0 0 6px;color:var(--problem)}.kicker.o{color:var(--opp)}.kicker.w{color:var(--warn)}
+  h2{font-family:var(--serif);font-weight:600;font-size:21px;line-height:1.22;margin:0 0 8px;letter-spacing:-.01em}
+  p{font-size:14.5px;margin:0 0 12px}
+  figure{margin:18px 0 4px;background:#fff;border:1px solid var(--hair);border-radius:4px;padding:18px 16px 12px}
+  figcaption{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:9px}
+  svg{width:100%;height:auto;display:block}
+  .ax{font-family:var(--mono);font-size:11px;fill:var(--muted)}.vlabel{font-family:var(--mono);font-size:12px;fill:var(--ink);font-weight:600}.blabel{font-family:var(--sans);font-size:12px;fill:var(--ink)}
+  .hyp{background:var(--ink);color:#f3f1ea;border-radius:5px;padding:26px;margin:16px 0 0}
+  .hyp h4{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#a9a395;margin:0 0 12px}
+  .hyp .stmt{font-family:var(--serif);font-size:19px;line-height:1.5;margin:0}.hyp .stmt .b{color:#5ed3aa;font-weight:600}.hyp .stmt .v{color:#f3c98b;font-weight:600}.hyp .stmt .x{color:#f29d8b;font-weight:600}
+  .hyp .test{font-size:13px;color:#cfcabc;margin:16px 0 0;border-top:1px solid #34363f;padding-top:14px}.hyp .test b{color:#f3f1ea}
+  .handoff{display:inline-flex;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:#5ed3aa;margin:14px 0 0}
+  .note{font-family:var(--mono);font-size:11.5px;color:var(--warn);background:#fbf3e2;border:1px solid #ecd9b0;border-radius:4px;padding:11px 14px;margin:14px 0 0;letter-spacing:.01em}
+</style>
+<div class="wrap">
+  <p class="eyebrow">Evidence Brief · Data Science → Trailhead product team</p>
+  <h1>Social Challenges: A Retention Lever Worth Testing, Not Betting On</h1>
+  <p class="deck">Participants retain better — but the customer signal is split, so the honest move is a guarded experiment.</p>
+  <p class="meta">Author: [Author name], Data Science &nbsp;·&nbsp; 2026-06-23 &nbsp;·&nbsp; Status: Draft &nbsp;·&nbsp; Pairs with → "Social Challenges v2" PRD</p>
+  <p class="demo">Example brief — Trailhead is a hypothetical company; all figures illustrative.</p>
+
+  <div class="tldr"><h4>TL;DR</h4><p>Users who join social challenges are more active week over week — a real, positive relationship in the data. But the voice of the customer is genuinely split: a sizable group finds social features motivating, and a comparable group finds them stressful. I only have two signals and they partially disagree, so I'm not calling this a bet. I'm calling it a well-guarded test.</p></div>
+  <div class="opp-top"><span class="tag">CANDIDATE</span><p>Social challenges <b>may</b> lift retention — but only if we can capture the motivated users without alienating the social-averse. Test before investing.</p></div>
+  <p class="context"><b>Context.</b> Trailhead is a consumer fitness app; the goal this informs is weekly active retention. Some users opt into group "challenges." I looked at whether challenges drive retention strongly enough to invest behind — and whether customers actually want more of them.</p>
+
+  <section>
+    <p class="kicker">SIGNAL 1 — DATA</p>
+    <h2>More challenge participation, more active days.</h2>
+    <p>Plotting challenge participation against weekly active days shows a clear positive relationship. It's correlational and likely self-selecting — already-motivated users may simply do both — but the slope is real.</p>
+    <figure>
+      <svg viewBox="0 0 720 280" role="img" aria-label="Scatter: challenge participation vs weekly active days">
+        <g class="ax"><line x1="60" y1="240" x2="680" y2="240" stroke="#d9d6cc"/><line x1="60" y1="40" x2="60" y2="240" stroke="#d9d6cc"/>
+          <text x="52" y="244" text-anchor="end">0</text><text x="52" y="145" text-anchor="end">3.5</text><text x="52" y="46" text-anchor="end">7 days</text>
+          <text x="370" y="268" text-anchor="middle">Challenges joined per month →</text></g>
+        <!-- trend line -->
+        <line x1="80" y1="210" x2="640" y2="70" stroke="var(--opp)" stroke-width="2" stroke-dasharray="5 4"/>
+        <!-- points -->
+        <g fill="var(--ink)" opacity="0.62">
+          <circle cx="95" cy="208" r="5"/><circle cx="130" cy="196" r="5"/><circle cx="170" cy="200" r="5"/><circle cx="210" cy="178" r="5"/>
+          <circle cx="255" cy="168" r="5"/><circle cx="300" cy="150" r="5"/><circle cx="350" cy="158" r="5"/><circle cx="400" cy="128" r="5"/>
+          <circle cx="450" cy="118" r="5"/><circle cx="510" cy="96" r="5"/><circle cx="560" cy="104" r="5"/><circle cx="620" cy="74" r="5"/>
+        </g>
+        <text x="600" y="58" class="vlabel" fill="var(--opp)" style="font-size:11px">positive slope</text>
+      </svg>
+      <figcaption>Each dot = a user cohort bucket · relationship is correlational, likely self-selected</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="kicker">SIGNAL 2 — VOICE OF CUSTOMER</p>
+    <h2>But customers are split on whether they want it.</h2>
+    <p>Theme-coding feedback on social features, sentiment is genuinely divided — not a clear mandate. A real cluster finds challenges motivating; a nearly-as-large cluster finds them stress-inducing and wants to opt out. This is the signal that keeps me from over-claiming.</p>
+    <figure>
+      <svg viewBox="0 0 720 130" role="img" aria-label="Sentiment on social features">
+        <rect x="60" y="40" width="288" height="40" fill="var(--opp)"/>
+        <rect x="348" y="40" width="158" height="40" fill="var(--bar-neutral)"/>
+        <rect x="506" y="40" width="174" height="40" fill="var(--problem)"/>
+        <g fill="#fff" font-family="var(--mono)" font-size="12" font-weight="600"><text x="74" y="65">Positive 44%</text><text x="362" y="65">Neutral 24%</text><text x="520" y="65">Negative 32%</text></g>
+        <text x="60" y="106" class="ax">"Love the competition / accountability"</text>
+        <text x="680" y="106" text-anchor="end" class="ax" fill="var(--problem)">"Stressful — let me opt out"</text>
+      </svg>
+      <figcaption>Sentiment on social features, theme-coded from reviews + in-app feedback</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="kicker w">CONVERGENCE — HONESTLY, IT'S WEAK</p>
+    <h2>Two signals, and they only half-agree.</h2>
+    <p>I want to be straight about the strength of this case. The data points one way; the customer voice points both ways. There's no competitive, sales, or market signal to triangulate against. That isn't convergence — it's one supportive signal and one mixed one. That's exactly why the recommendation is a test with a strong guardrail, not a roadmap commitment.</p>
+    <div class="note">CONFIDENCE: LOW–MODERATE · 2 signals, partially conflicting · no competitive/sales/market read · do not over-invest before a test.</div>
+  </section>
+
+  <section>
+    <p class="kicker o">THE BET TO TEST — GUARDED</p>
+    <div class="hyp"><h4>Value-driven hypothesis (low-confidence)</h4>
+      <p class="stmt">We believe that <span class="b">making social challenges easier to join — and easy to ignore</span> will help motivated users <span class="x">stay active more weeks</span>, driving <span class="v">higher weekly active retention</span> — <em>without</em> pushing the social-averse away.</p>
+      <p class="test"><b>Behavior change:</b> more challenge participation among opt-in users. <b>Business value:</b> weekly active retention. <b>Test:</b> small randomized experiment with an explicit opt-out; <b>guardrail (critical):</b> retention &amp; churn among users who decline social — if it drops, the feature is net-negative regardless of the lift. Pre-register both thresholds.</p>
+      <div class="handoff">→ FEEDS THE PRD &nbsp; "Social Challenges v2" — only if the test clears the guardrail</div>
+    </div>
+  </section>
+</div>

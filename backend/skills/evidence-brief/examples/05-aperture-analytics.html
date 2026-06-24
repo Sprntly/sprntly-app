@@ -1,0 +1,130 @@
+<meta charset="utf-8">
+<style>
+  :root{--ink:#191b24;--paper:#fbfaf6;--muted:#6c7180;--hair:#e4e1d7;--problem:#dd4b32;--problem-soft:#f6d6cd;--opp:#0f9d77;--opp-soft:#d3efe5;--grid:#ece9e0;--bar-neutral:#cfccc2;--blue:#3a6ea5;--serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;--sans:-apple-system,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;--mono:"SF Mono","Roboto Mono",ui-monospace,Menlo,Consolas,monospace}
+  *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:820px;margin:0 auto;padding:48px 28px 56px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+  h1{font-family:var(--serif);font-weight:600;font-size:34px;line-height:1.12;letter-spacing:-.01em;margin:0 0 8px}
+  .deck{font-family:var(--serif);font-size:18px;font-style:italic;color:#4a4d57;margin:0 0 4px;line-height:1.4}
+  .meta{font-family:var(--mono);font-size:11.5px;color:var(--muted);border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);padding:9px 0;margin:18px 0 0}
+  .demo{font-family:var(--mono);font-size:10.5px;color:var(--problem);letter-spacing:.04em;margin:8px 0 0}
+  .context{font-size:15px;color:#3a3d47;margin:22px 0 0}
+  .tldr{background:#fff;border:1px solid var(--hair);border-left:3px solid var(--ink);padding:18px 20px;margin:22px 0 0;font-size:15px}
+  .tldr h4{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:0 0 9px}.tldr p{margin:0}
+  .opp-top{display:flex;gap:14px;align-items:flex-start;background:var(--opp-soft);border:1px solid #a9ddca;border-radius:5px;padding:15px 18px;margin:14px 0 0}
+  .opp-top .tag{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--opp);background:#fff;border:1px solid #a9ddca;border-radius:3px;padding:4px 7px;white-space:nowrap;margin-top:2px}
+  .opp-top p{margin:0;font-size:15px;font-family:var(--serif)}.opp-top b{color:#0b6f54}
+  section{margin:38px 0 0}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.1em;margin:0 0 6px;color:var(--blue)}.kicker.o{color:var(--opp)}.kicker.p{color:var(--problem)}.kicker.n{color:var(--muted)}
+  h2{font-family:var(--serif);font-weight:600;font-size:21px;line-height:1.22;margin:0 0 8px;letter-spacing:-.01em}
+  p{font-size:14.5px;margin:0 0 12px}
+  figure{margin:18px 0 4px;background:#fff;border:1px solid var(--hair);border-radius:4px;padding:18px 16px 12px}
+  figcaption{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:9px}
+  svg{width:100%;height:auto;display:block}
+  .ax{font-family:var(--mono);font-size:11px;fill:var(--muted)}.vlabel{font-family:var(--mono);font-size:12px;fill:var(--ink);font-weight:600}.blabel{font-family:var(--sans);font-size:12px;fill:var(--ink)}
+  table{width:100%;border-collapse:collapse;margin:16px 0 0;font-size:13.5px}
+  th,td{text-align:center;padding:9px 6px;border-bottom:1px solid var(--hair)}
+  th{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:400}
+  td:first-child,th:first-child{text-align:left;font-size:13px}.yes{color:var(--opp);font-weight:700}.no{color:var(--problem);font-weight:700}.us{font-weight:700}
+  .extract{background:var(--problem-soft);border-radius:4px;padding:13px 16px;margin:14px 0 0;font-size:14px}.extract b{color:#a3331f}
+  .voc{display:grid;gap:12px;margin:18px 0 0}
+  .hyp{background:var(--ink);color:#f3f1ea;border-radius:5px;padding:26px;margin:16px 0 0}
+  .hyp h4{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#a9a395;margin:0 0 12px}
+  .hyp .stmt{font-family:var(--serif);font-size:19px;line-height:1.5;margin:0}.hyp .stmt .b{color:#5ed3aa;font-weight:600}.hyp .stmt .v{color:#f3c98b;font-weight:600}.hyp .stmt .x{color:#f29d8b;font-weight:600}
+  .hyp .test{font-size:13px;color:#cfcabc;margin:16px 0 0;border-top:1px solid #34363f;padding-top:14px}.hyp .test b{color:#f3f1ea}
+  .handoff{display:inline-flex;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:#5ed3aa;margin:14px 0 0}
+</style>
+<div class="wrap">
+  <p class="eyebrow">Evidence Brief · Data Science → Aperture product team</p>
+  <h1>Natural-Language Analytics Is Now Table Stakes</h1>
+  <p class="deck">The market moved, competitors shipped, power users are asking — and our leading indicators are bending.</p>
+  <p class="meta">Author: [Author name], Data Science &nbsp;·&nbsp; 2026-06-23 &nbsp;·&nbsp; Status: Draft &nbsp;·&nbsp; Pairs with → "Ask Aperture" PRD</p>
+  <p class="demo">Example brief — Aperture is a hypothetical company; all figures illustrative.</p>
+
+  <div class="tldr"><h4>TL;DR</h4><p>Within a year, asking a dashboard a question in plain English has gone from rare to expected: most of our category now ships it, we don't, power users are requesting it by name, and the early warning sign is here — query volume from our most valuable users has flattened. This one is market-led: the window is about keeping pace, not discovering a need.</p></div>
+  <div class="opp-top"><span class="tag">OPPORTUNITY</span><p>Ship <b>natural-language querying</b> so analysts get answers without building a chart — the capability the market has made a default expectation.</p></div>
+  <p class="context"><b>Context.</b> Aperture is a B2B analytics platform; the goal this informs is net revenue retention and expansion. Customers build dashboards to answer questions. I looked at whether the way people expect to get answers is shifting under us.</p>
+
+  <section>
+    <p class="kicker">SIGNAL — MARKET</p>
+    <h2>The category adopted NL query in under a year.</h2>
+    <p>Tracking the share of comparable analytics products offering natural-language querying, adoption went from a novelty to the majority in twelve months. When a capability crosses this kind of threshold, it stops being a differentiator and starts being a requirement.</p>
+    <figure>
+      <svg viewBox="0 0 720 200" role="img" aria-label="Category adoption of NL query over time">
+        <g class="ax"><line x1="56" y1="160" x2="700" y2="160" stroke="#d9d6cc"/><text x="48" y="164" text-anchor="end">0</text><text x="48" y="98" text-anchor="end">40%</text><text x="48" y="36" text-anchor="end">80%</text><line x1="56" y1="98" x2="700" y2="98" stroke="var(--grid)"/><line x1="56" y1="36" x2="700" y2="36" stroke="var(--grid)"/></g>
+        <!-- 10->70 over 7 steps ; scale 80 over 124 (160->36) ; y=160-(v/80)*124 -->
+        <polygon points="56,144.5 163,138 270,121 377,98 484,75 591,60 700,51.5 700,160 56,160" fill="var(--blue)" opacity="0.1"/>
+        <polyline fill="none" stroke="var(--blue)" stroke-width="2.6" points="56,144.5 163,138 270,121 377,98 484,75 591,60 700,51.5"/>
+        <circle cx="56" cy="144.5" r="3.5" fill="var(--blue)"/><circle cx="700" cy="51.5" r="4.5" fill="var(--blue)"/>
+        <text x="56" y="136" class="vlabel" fill="var(--blue)" style="font-size:11px">10%</text>
+        <text x="700" y="44" text-anchor="end" class="vlabel" fill="var(--blue)" style="font-size:11px">70%</text>
+        <g class="ax" text-anchor="middle"><text x="56" y="180">12 mo ago</text><text x="700" y="180">now</text></g>
+      </svg>
+      <figcaption>Share of category competitors offering natural-language query</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="kicker p">SIGNAL — COMPETITIVE</p>
+    <h2>We're the one without it.</h2>
+    <p>The teardown is stark: the headline capability is now standard, and we're the gap in the set. This isn't an opening we found — it's a deficit the market created.</p>
+    <table>
+      <thead><tr><th>Capability</th><th>Aperture</th><th>Comp A</th><th>Comp B</th><th>Comp C</th></tr></thead>
+      <tbody>
+        <tr><td>Natural-language query</td><td class="us no">✗</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+        <tr><td>Auto-generated summaries</td><td class="us no">✗</td><td class="yes">✓</td><td class="no">✗</td><td class="yes">✓</td></tr>
+        <tr><td>Dashboards / charting (our strength)</td><td class="us yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+      </tbody>
+    </table>
+    <div class="extract"><b>What I extract:</b> our charting depth no longer differentiates — everyone has it. The new basis of competition is getting an answer without building anything, and we're absent from it.</div>
+  </section>
+
+  <section>
+    <p class="kicker n">SIGNALS — CUSTOMER &amp; LEADING INDICATOR</p>
+    <h2>Power users are asking, and their usage is bending.</h2>
+    <p>Two corroborating reads. Feature requests now name natural-language query at the top. And the early warning indicator is already here: weekly query volume from our highest-value accounts has flattened after years of growth — the kind of plateau that precedes churn in this segment.</p>
+    <figure>
+      <svg viewBox="0 0 720 180" role="img" aria-label="Top feature requests">
+        <g class="blabel" text-anchor="end"><text x="238" y="30">Natural-language query</text><text x="238" y="70">Auto summaries</text><text x="238" y="110">Faster load</text><text x="238" y="150">Export options</text></g>
+        <rect x="250" y="16" width="410" height="22" fill="var(--blue)"/>
+        <rect x="250" y="56" width="270" height="22" fill="var(--bar-neutral)"/>
+        <rect x="250" y="96" width="190" height="22" fill="var(--bar-neutral)"/>
+        <rect x="250" y="136" width="120" height="22" fill="var(--bar-neutral)"/>
+        <g class="vlabel"><text x="668" y="33" fill="var(--blue)">41%</text><text x="528" y="73">27%</text><text x="448" y="113">19%</text><text x="378" y="153">13%</text></g>
+      </svg>
+      <figcaption>Share of enterprise feature requests, trailing quarter</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="kicker o">THE CONVERGENCE</p>
+    <h2>Four signals, market-led.</h2>
+    <p>Unlike a typical opportunity that starts in our own data, this one starts outside and shows up inside last. Market, competitive, and customer-request signals all point the same way, and our own leading indicator is the confirmation that it's reaching us. The agreement is strong; the read is "keep pace," and the clock is the market's, not ours.</p>
+    <figure>
+      <svg viewBox="0 0 720 300" role="img" aria-label="Four signals converging">
+        <g fill="none" stroke="#c8c4ba" stroke-width="1.4"><path d="M360,48 C440,48 470,130 506,150"/><path d="M360,112 C440,112 470,140 506,156"/><path d="M360,184 C440,184 470,170 506,162"/><path d="M360,248 C440,248 470,200 506,168"/></g>
+        <g>
+          <text x="8" y="40" class="ax" fill="var(--blue)" style="letter-spacing:.08em">MARKET</text><text x="8" y="58" class="blabel">NL query went 10%→70% of the category in a year</text><circle cx="360" cy="48" r="3" fill="var(--blue)"/>
+          <text x="8" y="104" class="ax" fill="var(--problem)" style="letter-spacing:.08em">COMPETITIVE</text><text x="8" y="122" class="blabel">All 3 top rivals ship it; we don't</text><circle cx="360" cy="112" r="3" fill="var(--problem)"/>
+          <text x="8" y="176" class="ax" fill="var(--blue)" style="letter-spacing:.08em">VOICE OF CUSTOMER</text><text x="8" y="194" class="blabel">#1 enterprise feature request</text><circle cx="360" cy="184" r="3" fill="var(--blue)"/>
+          <text x="8" y="240" class="ax" fill="var(--problem)" style="letter-spacing:.08em">DATA (LEADING)</text><text x="8" y="258" class="blabel">High-value query volume flattening — pre-churn signal</text><circle cx="360" cy="248" r="3" fill="var(--problem)"/>
+        </g>
+        <rect x="508" y="106" width="206" height="104" rx="8" fill="var(--opp-soft)" stroke="var(--opp)" stroke-width="1.5"/>
+        <text x="611" y="134" text-anchor="middle" class="ax" fill="var(--opp)" style="letter-spacing:.12em">THE OPPORTUNITY</text>
+        <text x="611" y="160" text-anchor="middle" class="vlabel" fill="#0b6f54" style="font-size:14px">Natural-language</text>
+        <text x="611" y="179" text-anchor="middle" class="vlabel" fill="#0b6f54" style="font-size:14px">query (ask, don't</text>
+        <text x="611" y="198" text-anchor="middle" class="vlabel" fill="#0b6f54" style="font-size:14px">build)</text>
+      </svg>
+      <figcaption>Four independently-gathered signals, market-led</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="kicker o">THE BET TO TEST</p>
+    <div class="hyp"><h4>Value-driven hypothesis</h4>
+      <p class="stmt">We believe that by <span class="b">letting users ask questions in natural language</span>, analysts will <span class="x">get answers without building a chart and self-serve far more</span>, which will drive <span class="v">retained and expanded accounts (NRR)</span>.</p>
+      <p class="test"><b>Behavior change:</b> more questions answered without a manual dashboard build; query volume re-grows. <b>Business value:</b> retention + expansion (NRR). <b>Test:</b> ship to a beta of high-value accounts; primary metric query/self-serve rate and seat expansion; guardrail: answer accuracy &amp; trust (a wrong answer is worse than none).</p>
+      <div class="handoff">→ FEEDS THE PRD &nbsp; "Ask Aperture" — grounded in this evidence</div>
+    </div>
+  </section>
+</div>
