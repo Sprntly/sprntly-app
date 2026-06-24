@@ -36,6 +36,8 @@ SKILL_CATEGORY: dict[str, str] = {
     "interview-guide": "Discovery & Research",
     "interview-synthesis": "Discovery & Research",
     "jobs-to-be-done": "Discovery & Research",
+    "journey-map": "Discovery & Research",
+    "opportunity-tree": "Discovery & Research",
     "persona-segment": "Discovery & Research",
     "problem-framing": "Discovery & Research",
     "survey-design": "Discovery & Research",

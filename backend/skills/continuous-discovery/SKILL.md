@@ -41,6 +41,10 @@ An OST (outcome → opportunities → sub-opportunities → solutions → experi
 - [ ] Riskiest-assumption experiments are named.
 - [ ] The cadence is realistic for the team's capacity.
 
+
+## Absorbed from the field (added capability)
+**Mode + multi-perspective ideation (added):** explicitly run in NEW-product vs EXISTING-product mode (they need different questions), and when ideating, generate from multiple lenses — PM, designer, engineer — so ideas aren't single-viewpoint. Discovery stays evidence-first; for new products, lean on lean-startup pretotype tests where there's no usage data yet.
+
 ## Known gaps / limitations
 - An OST is only as good as the research feeding it; with no customer contact it produces a hypothesis tree, not a validated one — label it as such.
 - Doesn't run the interviews; pairs with `interview-guide` + `interview-synthesis`.
