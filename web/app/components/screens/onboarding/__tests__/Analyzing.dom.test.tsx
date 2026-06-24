@@ -2,7 +2,7 @@
 //
 // Container-level mount test for the "Gathering information about your business"
 // interstitial. This is the SENSITIVE part of the onboarding flow: it must kick
-// off the website analysis, advance to the metrics page on a ready result, and —
+// off the website analysis, advance to the connectors step on a ready result, and —
 // critically — STILL advance on error / ok:false / timeout / no result so the
 // user is never trapped on the loader.
 //
@@ -90,7 +90,7 @@ describe("Analyzing (interstitial)", () => {
     expect(runWebsiteAnalysisMock.mock.calls[0][2]).toBe("ws-1")
   })
 
-  it("on a ready result: stashes the analysis and advances to the metrics page", async () => {
+  it("on a ready result: stashes the analysis and advances to the connectors step", async () => {
     const analysis = makeAnalysis()
     runWebsiteAnalysisMock.mockResolvedValue({ result: analysis })
     const setWebsiteAnalysis = vi.fn()
@@ -99,7 +99,7 @@ describe("Analyzing (interstitial)", () => {
       render(React.createElement(Analyzing))
     })
     expect(setWebsiteAnalysis).toHaveBeenCalledWith(analysis)
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
   it("on result:null (error / timeout): forwards WITHOUT stashing (manual fallback)", async () => {
@@ -110,7 +110,7 @@ describe("Analyzing (interstitial)", () => {
       render(React.createElement(Analyzing))
     })
     expect(setWebsiteAnalysis).not.toHaveBeenCalled()
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
   it("re-attaches to a persisted pending job on mount (resume, no re-POST)", async () => {
@@ -125,7 +125,7 @@ describe("Analyzing (interstitial)", () => {
     expect(resumeWebsiteAnalysisMock).toHaveBeenCalledTimes(1)
     expect(resumeWebsiteAnalysisMock.mock.calls[0][0]).toBe(321)
     expect(runWebsiteAnalysisMock).not.toHaveBeenCalled()
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
   it("advances exactly ONCE on a ready result", async () => {
@@ -135,12 +135,12 @@ describe("Analyzing (interstitial)", () => {
       render(React.createElement(Analyzing))
     })
     const toMetrics = routerMock.replace.mock.calls.filter(
-      (c) => c[0] === "/onboarding/metrics",
+      (c) => c[0] === "/onboarding/connectors",
     )
     expect(toMetrics).toHaveLength(1)
   })
 
-  it("with NO website: skips analysis and advances straight to metrics", async () => {
+  it("with NO website: skips analysis and advances straight to connectors", async () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         workspace: makeWorkspace({ product: null }),
@@ -151,7 +151,7 @@ describe("Analyzing (interstitial)", () => {
     })
     expect(runWebsiteAnalysisMock).not.toHaveBeenCalled()
     expect(resumeWebsiteAnalysisMock).not.toHaveBeenCalled()
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/metrics")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
   it("with NO workspace: redirects back to step 1 from an effect (never during render)", () => {

@@ -669,6 +669,101 @@ export const businessContextApi = {
     ),
 }
 
+// ---- roadmap doc (onboarding strategy step) ---------------------------------
+
+export type RoadmapDocUploadResponse = {
+  ok: true
+  filename: string
+  /** Number of characters extracted from the upload. */
+  extracted_chars: number
+  version: number
+  [k: string]: unknown
+}
+
+/** The stored roadmap, as the `roadmapdoc` artifact view reads it. */
+export type RoadmapDoc = {
+  filename: string
+  content_type: string | null
+  /** Markdown text extracted from the upload — what the read-only view renders. */
+  extracted_text: string
+  uploaded_at: string | null
+  version: number
+}
+
+/**
+ * Roadmap-doc API for the onboarding strategy step (design scene onbstrat) +
+ * the read-only `roadmapdoc` artifact view.
+ *
+ * `upload` POSTs the multipart file to `POST /v1/company/roadmap-doc`, which
+ * stores the doc + its extracted text against the company so the weekly brief
+ * can pressure-test findings against the roadmap. `get` reads the stored
+ * roadmap (404 → null) for the artifact view.
+ */
+export const roadmapDocApi = {
+  upload: (file: File) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    return api.post<RoadmapDocUploadResponse>("/v1/company/roadmap-doc", form)
+  },
+  /** Fetch the stored roadmap; resolves to null when none uploaded yet (404). */
+  get: async (): Promise<RoadmapDoc | null> => {
+    try {
+      return await api.get<RoadmapDoc>("/v1/company/roadmap-doc")
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null
+      throw e
+    }
+  },
+}
+
+// ---- templates ("what good looks like") -------------------------------------
+//
+// The company's uploaded gold-standard PRD examples. Sibling of the roadmap doc
+// above, but MANY per company: each is its own listed, individually-deletable
+// row. The extracted text is fed to the prd-author skill as a FORMAT/STYLE
+// EXEMPLAR so generated PRDs match the team's structure & voice. Mirrors
+// backend/app/company_template.py + the /v1/company/templates routes.
+
+/** One stored gold-standard template, as the list view reads it. Never carries
+ *  the raw file bytes — only metadata + the extracted-char count. */
+export type CompanyTemplate = {
+  id: string
+  label: string | null
+  type: string
+  filename: string
+  content_type: string | null
+  /** Characters extracted from the upload (the text fed to prd-author). */
+  extracted_chars: number
+  uploaded_at: string | null
+}
+
+export type TemplateUploadResponse = { ok: true } & CompanyTemplate
+
+export const templatesApi = {
+  /** All gold-standard templates for the company, newest first. Optionally
+   *  filtered by `type` (defaults to all). */
+  list: (type?: string) => {
+    const qs = type ? `?type=${encodeURIComponent(type)}` : ""
+    return api
+      .get<{ templates: CompanyTemplate[] }>(`/v1/company/templates${qs}`)
+      .then((r) => r.templates)
+  },
+  /** Upload a gold-standard PRD example (multipart). Optional `label` names it
+   *  in the list; `type` defaults to "prd" server-side. */
+  upload: (file: File, opts?: { label?: string; type?: string }) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    if (opts?.label) form.append("label", opts.label)
+    if (opts?.type) form.append("type", opts.type)
+    return api.post<TemplateUploadResponse>("/v1/company/templates", form)
+  },
+  /** Remove one template by id. */
+  remove: (id: string) =>
+    api.delete<{ ok: true; id: string }>(
+      `/v1/company/templates/${encodeURIComponent(id)}`,
+    ),
+}
+
 // ---- sources ----------------------------------------------------------------
 
 export type SourceFile = {
@@ -709,6 +804,11 @@ export type ConnectionSummary = {
   }
   last_sync_at: string | null
   last_sync_error: string | null
+  // Token-health set by the scheduled connector health monitor (and the on-open
+  // test). "connected" | "disconnected"; null/undefined = never checked.
+  health?: string | null
+  last_health_error?: string | null
+  last_health_check_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -1460,8 +1560,15 @@ export const designAgentApi = {
    *  `locateJob(job_id)`. Inline failures still surface on the POST itself —
    *  notably 404 (feature off / PRD not owned / cross-workspace) — so callers
    *  must catch the POST as well as the poll. Use `locateJob` to drive the loop. */
-  locate: (body: { prd_id: number; github_repo: string; ref?: string | null }) =>
-    api.post<LocateJobHandle>("/v1/design-agent/locate", body),
+  locate: (body: {
+    prd_id: number
+    github_repo: string
+    ref?: string | null
+    /** Optional "search again" steer — a free-text direction (e.g. "the
+     *  settings page") that re-ranks locate toward the surface the PM means.
+     *  Omitted/blank = today's unsteered locate. */
+    hint?: string | null
+  }) => api.post<LocateJobHandle>("/v1/design-agent/locate", body),
   /** Poll a locate job by id. Returns the job status; when `status` is
    *  "done" the existing `LocateResponse` rides in `result`, and when "error"
    *  the failure reason rides in `error`. A 404 from this endpoint means the

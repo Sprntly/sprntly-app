@@ -315,6 +315,38 @@ async def test_build_map_exception_logs_wire_failed_and_falls_back(env, monkeypa
     assert any("recreate_wire_failed" in m for m in msgs)
 
 
+async def test_run_generation_bg_passes_shell_map_on_no_node(env, monkeypatch):
+    """The no-node github path (a pinned commit_sha but no chosen screen, or a
+    chosen screen that matches no node) still builds the map and threads it into
+    generate_prototype as shell_map, with located_screen None — so the shell-
+    grounded fallback (Tier-2) can fire."""
+    gen_kwargs = _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    fake_map = _make_map(route="/team", commit_sha="shaABC")
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: fake_map,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    # No chosen screen at all, but a pinned commit_sha is present.
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42,
+        design_source="github",
+        chosen_screen_route=None, chosen_screen_id=None, map_commit_sha="shaABC",
+    )
+
+    assert len(gen_kwargs) == 1
+    assert gen_kwargs[0]["located_screen"] is None
+    assert gen_kwargs[0]["shell_map"] is fake_map
+
+
 async def test_figma_mode_skips_build_map_and_located_none(env, monkeypatch):
     """AC4: figma source ignores chosen_screen_route + map_commit_sha, never
     calls build_map, and generate_prototype receives located_screen=None."""

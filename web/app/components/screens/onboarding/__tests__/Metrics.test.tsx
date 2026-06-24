@@ -31,6 +31,7 @@ function render(override: Partial<MetricsSetupViewProps> = {}): string {
     customMetric: "",
     errors: {},
     error: null,
+    limitWarning: null,
     onChangeIndustry: noop,
     onChangeBusinessType: noop,
     onToggle: noop,
@@ -55,9 +56,10 @@ describe("MetricsSetupView — NO explicit North Star / supporting split", () =>
     expect(html).not.toContain("Primary leads to")
   })
 
-  it("prompts to pick exactly 3 metrics", () => {
+  it("prompts to pick 3 to 5 metrics", () => {
     const html = render()
-    expect(html).toContain("Pick your 3 success metrics")
+    expect(html).toContain("Pick your success metrics")
+    expect(html).toContain("choose 3 to 5")
   })
 })
 
@@ -87,40 +89,74 @@ describe("MetricsSetupView — flat candidate list with green selected state", (
     )
   })
 
-  it("disables unselected cards once 3 are already picked (but not the selected ones)", () => {
+  it("aria-disables (but never hard-disables) unselected cards once the max (5) is picked", () => {
+    const html = render({
+      candidates: [
+        { name: "M1", description: "" },
+        { name: "M2", description: "" },
+        { name: "M3", description: "" },
+        { name: "M4", description: "" },
+        { name: "M5", description: "" },
+        { name: "M6", description: "" },
+      ],
+      selected: ["M1", "M2", "M3", "M4", "M5"],
+    })
+    // The 6th, unselected card is aria-disabled (hint) but stays clickable so a
+    // click can surface the "up to 5" warning — i.e. NOT hard-`disabled=""`.
+    expect(html).toMatch(/<button[^>]*data-metric="M6"[^>]*aria-disabled="true"/)
+    expect(html).not.toMatch(/<button[^>]*data-metric="M6"[^>]*disabled=""/)
+    // A selected card is not aria-disabled (toggle-off must stay obvious).
+    expect(html).toMatch(/<button[^>]*data-metric="M1"[^>]*aria-disabled="false"/)
+  })
+
+  it("does NOT disable unselected cards below the max (only 3 of 5 picked)", () => {
     const html = render({
       selected: ["Reconciled volume", "Active connected accounts", "Incremental revenue"],
     })
-    // the 4th, unselected candidate is disabled
-    expect(html).toMatch(
-      /<button[^>]*data-metric="Conversion rate"[^>]*disabled/,
-    )
-    // a selected card stays enabled (toggle-off must remain possible)
-    expect(html).not.toMatch(
-      /<button[^>]*data-metric="Reconciled volume"[^>]*disabled/,
-    )
+    expect(html).toMatch(/<button[^>]*data-metric="Conversion rate"[^>]*aria-disabled="false"/)
   })
 })
 
 describe("MetricsSetupView — the pick counter", () => {
-  it("shows N of 3 with a 'pick more' nudge below 3", () => {
-    expect(render({ selected: [] })).toContain("0</strong> of 3 metric")
+  it("shows the selected count with a 'pick more' nudge below the min (3)", () => {
+    expect(render({ selected: [] })).toContain("0</strong> selected")
+    expect(render({ selected: [] })).toContain("pick 3 more")
     expect(render({ selected: ["Reconciled volume"] })).toContain("pick 2 more")
   })
 
-  it("shows a ready state at exactly 3", () => {
-    const html = render({
+  it("shows a ready state from the min (3) up to the max (5)", () => {
+    const three = render({
       selected: ["Reconciled volume", "Active connected accounts", "Incremental revenue"],
     })
-    expect(html).toContain("3</strong> of 3 metric")
-    expect(html).toContain("ready")
+    expect(three).toContain("3</strong> selected")
+    expect(three).toContain("ready")
+    expect(three).toContain("add up to 2 more")
+
+    const five = render({
+      candidates: [
+        { name: "M1", description: "" },
+        { name: "M2", description: "" },
+        { name: "M3", description: "" },
+        { name: "M4", description: "" },
+        { name: "M5", description: "" },
+      ],
+      selected: ["M1", "M2", "M3", "M4", "M5"],
+    })
+    expect(five).toContain("5</strong> selected")
+    expect(five).toContain("max 5")
   })
 
-  it("surfaces the pick-exactly-3 validation error", () => {
+  it("surfaces the pick-at-least-3 validation error", () => {
     const html = render({
-      errors: { metrics: "Pick exactly 3 metrics to continue." },
+      errors: { metrics: "Pick at least 3 metrics to continue." },
     })
-    expect(html).toContain("Pick exactly 3 metrics to continue.")
+    expect(html).toContain("Pick at least 3 metrics to continue.")
+  })
+
+  it("shows the transient 'up to 5' warning when limitWarning is set", () => {
+    const html = render({ limitWarning: "You can pick up to 5 metrics — deselect one to swap." })
+    expect(html).toContain("up to 5 metrics")
+    expect(html).toContain('role="alert"')
   })
 })
 
@@ -133,8 +169,9 @@ describe("MetricsSetupView — add your own + dropdowns", () => {
   })
 
   it("disables Add when the custom name is empty", () => {
-    const html = render({ customMetric: "" })
-    expect(html).toMatch(/<button[^>]*disabled/)
+    // Boolean `disabled=""` (the Add button) — distinct from cards' aria-disabled.
+    expect(render({ customMetric: "" })).toContain('disabled=""')
+    expect(render({ customMetric: "Net new logos" })).not.toContain('disabled=""')
   })
 
   it("renders editable, pre-filled industry / business-type dropdowns", () => {

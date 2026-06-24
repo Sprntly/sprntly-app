@@ -38,6 +38,10 @@ Behavioral segmentation + jobs-based personas + evidence/confidence labeling (pr
 - [ ] An anti-persona is included.
 - [ ] Each persona yields a concrete product implication.
 
+
+## Absorbed from the field (added capability)
+**ICP mode (added):** on request, produce a sharp Ideal Customer Profile (firmographics/demographics · observable behaviors · the job-to-be-done · must-have needs · disqualifiers) distinct from a broad persona — the tight 'who we sell to first' used by GTM and `beachhead-market`, not a general user portrait.
+
 ## Known gaps / limitations
 - Personas drift from reality over time; they need refresh against data.
 - Low-confidence personas are hypotheses; treating them as fact is the main risk — hence mandatory confidence tags.

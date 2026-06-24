@@ -218,6 +218,53 @@ def update_connection_sync(
     )
 
 
+def set_connection_health(
+    connection_id: str,
+    *,
+    health: str,
+    error: str | None,
+    checked_at: str,
+) -> None:
+    """Persist the result of a token-health probe onto a single connection row
+    (by primary key). Updates the three health columns added in migration
+    20260623120000_connection_health.sql.
+
+    `health` is 'connected' | 'disconnected'; `error` is the provider/probe
+    detail on an unhealthy check (None when healthy); `checked_at` is the ISO
+    timestamp the probe ran. Keyed by `id` rather than (company_id, provider)
+    so the global health sweep can update any tenant's row directly."""
+    c = require_client()
+    (
+        c.table("connections")
+        .update(
+            {
+                "health": health,
+                "last_health_error": error,
+                "last_health_check_at": checked_at,
+                "updated_at": utc_now(),
+            }
+        )
+        .eq("id", connection_id)
+        .execute()
+    )
+
+
+def list_all_active_connections() -> list[dict]:
+    """Every active connection ACROSS ALL companies — the scheduled connector
+    health monitor iterates globally, not per tenant. Returns rows in the legacy
+    shape (with `config_json`). Slack rows are included; the monitor probes them
+    the same way the per-user test does."""
+    c = require_client()
+    resp = (
+        c.table("connections")
+        .select("*")
+        .eq("status", "active")
+        .order("provider", desc=False)
+        .execute()
+    )
+    return [_to_legacy_shape(r) for r in (resp.data or [])]
+
+
 # ─────────────────────────── Slack: per-user ───────────────────────────
 #
 # Slack is the one connector that is personal to each user rather than

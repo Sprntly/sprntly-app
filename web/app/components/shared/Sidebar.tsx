@@ -7,7 +7,7 @@ import { useAuth } from "../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark } from "@tabler/icons-react"
 import { FeedbackModal } from "./FeedbackModal"
 
 interface SidebarProps {
@@ -82,7 +82,10 @@ export function Sidebar(_props: SidebarProps = {}) {
           onClick={() => goTo("chat")}
           style={{ cursor: "pointer" }}
         >
-          <span className="sb-rail-logo-text">{companyInitial}</span>
+          <span className="sb-rail-logo-text">
+            {companyInitial}
+            <span className="sb-rail-logo-dot">.</span>
+          </span>
         </div>
       </div>
 
@@ -105,6 +108,7 @@ export function Sidebar(_props: SidebarProps = {}) {
         <RailItem screen="brief" icon={<IconMessageCircle size={18} />} label="Weekly brief" />
         <RailItem screen="chats" icon={<IconHistory size={18} />} label="All chats" />
         <RailItem screen="backlog" icon={<IconBulb size={18} />} label="Backlog Projects" />
+        <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates · what good looks like" />
         {/* <RailItem screen="prototype" icon={<IconPrompt size={18} />} label="Prototype" /> */}
         {/* <RailItem screen="tickets" icon={<IconLayoutKanban size={18} />} label="Project Management" /> */}
       </div>

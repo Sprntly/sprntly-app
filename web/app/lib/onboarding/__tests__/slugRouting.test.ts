@@ -28,11 +28,9 @@ describe("clampStep — out-of-range persisted indices", () => {
     }
   })
 
-  it("clamps stale longer-flow steps (5, 6, 7) down to the last valid step", () => {
-    // Existing users mid an older, longer flow (e.g. step 5 = the removed
-    // coworkers step, or the old 7-step order) must NOT crash — they land on
-    // the last valid new step.
-    expect(clampStep(5)).toBe(ONBOARDING_STEP_COUNT)
+  it("clamps stale longer-flow steps down to the last valid step", () => {
+    // Existing users mid an older, longer flow (e.g. the old 7-step order) must
+    // NOT crash — they land on the last valid new step (now 5).
     expect(clampStep(6)).toBe(ONBOARDING_STEP_COUNT)
     expect(clampStep(7)).toBe(ONBOARDING_STEP_COUNT)
     expect(clampStep(99)).toBe(ONBOARDING_STEP_COUNT)
@@ -54,15 +52,16 @@ describe("clampStep — out-of-range persisted indices", () => {
 describe("slugForStep — resume index → slug (clamped)", () => {
   it("maps each in-range index to its ordered slug", () => {
     expect(slugForStep(1)).toBe("business-info")
-    expect(slugForStep(2)).toBe("metrics")
-    expect(slugForStep(3)).toBe("connectors")
-    expect(slugForStep(4)).toBe("first-brief")
+    expect(slugForStep(2)).toBe("connectors")
+    expect(slugForStep(3)).toBe("business-context")
+    expect(slugForStep(4)).toBe("strategy")
+    expect(slugForStep(5)).toBe("workspace")
   })
 
   it("maps a stale out-of-range index to the LAST step (no crash)", () => {
-    // Step 5 was the removed coworkers step; it now clamps to the last step.
-    expect(slugForStep(5)).toBe("first-brief")
-    expect(slugForStep(7)).toBe("first-brief")
+    // Indices past the end (older/longer flows) clamp to the last step.
+    expect(slugForStep(6)).toBe("workspace")
+    expect(slugForStep(7)).toBe("workspace")
     expect(slugForStep(0)).toBe("business-info")
   })
 })
@@ -82,13 +81,16 @@ describe("stepForSlug — slug → 1-based index", () => {
 })
 
 describe("isOnboardingStepSlug", () => {
-  it("accepts the 4 numbered slugs and rejects analyzing / coworkers / unknown", () => {
+  it("accepts the 5 numbered slugs and rejects analyzing / removed / unknown", () => {
     for (const slug of ONBOARDING_STEP_SLUGS) {
       expect(isOnboardingStepSlug(slug)).toBe(true)
     }
     expect(isOnboardingStepSlug(ONBOARDING_ANALYZING_SLUG)).toBe(false)
-    // The removed agent-naming step is no longer a numbered slug.
+    // The removed agent-naming step + folded-in standalone routes are no longer
+    // numbered slugs.
     expect(isOnboardingStepSlug("coworkers")).toBe(false)
+    expect(isOnboardingStepSlug("metrics")).toBe(false)
+    expect(isOnboardingStepSlug("first-brief")).toBe(false)
     expect(isOnboardingStepSlug("does-not-exist")).toBe(false)
   })
 })

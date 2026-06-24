@@ -19,7 +19,7 @@
  */
 "use client"
 
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import {
   ApiError,
   apiErrorMessage,
@@ -185,9 +185,13 @@ function HubSpotSyncButton({
 
 // ─────────────────────────── Pure View ───────────────────────────
 
-export type TestConnectionResult =
-  | { kind: "ok"; accountLabel: string; testedAt: string }
-  | { kind: "error"; message: string }
+/** Live connection status, checked automatically when the drawer opens.
+ * `checking` while the health probe is in flight; `connected` once it
+ * succeeds; `disconnected` if there's no connection or the probe fails. */
+export type ConnectionStatus =
+  | { kind: "checking" }
+  | { kind: "connected"; accountLabel?: string }
+  | { kind: "disconnected"; message?: string }
 
 export type ConfigureConnectorDrawerViewProps = {
   open: boolean
@@ -200,13 +204,35 @@ export type ConfigureConnectorDrawerViewProps = {
   isDisconnecting: boolean
   /** Optional inline error from the disconnect call. */
   disconnectError?: string | null
-  /** Fires the "Test connection" check (commit K). */
-  onTestConnection: () => void
-  isTesting: boolean
-  /** Latest test result, or null if not tested in this session. */
-  testResult: TestConnectionResult | null
-  /** Connector-specific config slot (Drive folder picker, etc). */
+  /** Auto-checked connection status (null before the first probe resolves). */
+  status: ConnectionStatus | null
+  /** Connector-specific config slot (Drive file picker, etc). */
   children?: React.ReactNode
+}
+
+function StatusPill({ status }: { status: ConnectionStatus | null }) {
+  // No probe yet (drawer just opened) reads as "checking" — never a flash of
+  // "Disconnected" for a connection that's actually fine.
+  const kind = status?.kind ?? "checking"
+  const label =
+    kind === "connected"
+      ? "Connected"
+      : kind === "disconnected"
+        ? "Disconnected"
+        : "Checking…"
+  const detail =
+    status?.kind === "connected"
+      ? status.accountLabel
+      : status?.kind === "disconnected"
+        ? status.message
+        : undefined
+  return (
+    <div className={`conn-config-status conn-config-status--${kind}`} role="status">
+      <span className="conn-config-status-dot" aria-hidden />
+      <span className="conn-config-status-label">{label}</span>
+      {detail ? <span className="conn-config-status-detail">{detail}</span> : null}
+    </div>
+  )
 }
 
 function formatConnectedSince(isoLike: string | null | undefined): string {
@@ -231,9 +257,7 @@ export function ConfigureConnectorDrawerView({
   onDisconnect,
   isDisconnecting,
   disconnectError,
-  onTestConnection,
-  isTesting,
-  testResult,
+  status,
   children,
 }: ConfigureConnectorDrawerViewProps) {
   if (!item) return null
@@ -272,6 +296,8 @@ export function ConfigureConnectorDrawerView({
         </div>
 
         <div className="drawer-body">
+          <StatusPill status={status} />
+
           <section className="conn-config-meta">
             <div className="conn-config-meta-row">
               <span className="conn-config-meta-k">Account</span>
@@ -285,39 +311,6 @@ export function ConfigureConnectorDrawerView({
               <span className="conn-config-meta-k">Connected since</span>
               <span className="conn-config-meta-v">{connectedSince}</span>
             </div>
-          </section>
-
-          <section className="conn-config-test">
-            <div className="conn-config-test-row">
-              <div className="conn-config-test-label">Test connection</div>
-              <button
-                type="button"
-                className="btn btn-sm"
-                disabled={isTesting || !hasConnection}
-                onClick={onTestConnection}
-              >
-                {isTesting ? "Testing…" : "Test now"}
-              </button>
-            </div>
-            {testResult ? (
-              <p
-                className={
-                  testResult.kind === "ok"
-                    ? "conn-config-test-ok"
-                    : "conn-config-test-err"
-                }
-                role={testResult.kind === "error" ? "alert" : undefined}
-              >
-                {testResult.kind === "ok" ? (
-                  <>
-                    ✓ Connection working — {testResult.accountLabel || "verified"} ·{" "}
-                    {formatConnectedSince(testResult.testedAt)}
-                  </>
-                ) : (
-                  <>✗ {testResult.message}</>
-                )}
-              </p>
-            ) : null}
           </section>
 
           {children ? (
@@ -401,41 +394,49 @@ export function ConfigureConnectorDrawer({
 }: ConfigureConnectorDrawerProps) {
   const [isDisconnecting, setIsDisconnecting] = useState(false)
   const [disconnectError, setDisconnectError] = useState<string | null>(null)
-  const [isTesting, setIsTesting] = useState(false)
-  const [testResult, setTestResult] = useState<TestConnectionResult | null>(null)
+  const [status, setStatus] = useState<ConnectionStatus | null>(null)
 
   const item = providerId ? lookupItem(providerId) : null
   const open = providerId != null && item != null
+  const connectionId = connection?.id ?? null
 
-  // Reset test result when the user opens a different connector's drawer.
-  // Otherwise stale "✓ Working" copy from one connector bleeds into another.
-  if (testResult != null && providerId == null) {
-    setTestResult(null)
-  }
-
-  const handleTest = useCallback(async () => {
-    if (!providerId) return
-    setIsTesting(true)
-    setTestResult(null)
-    try {
-      const r = await connectorsApi.testConnection(providerId)
-      setTestResult({
-        kind: "ok",
-        accountLabel: r.account_label || "",
-        testedAt: r.tested_at,
-      })
-    } catch (e) {
-      const msg =
-        e instanceof ApiError
-          ? apiErrorMessage(e.status, e.body)
-          : e instanceof Error
-            ? e.message
-            : String(e)
-      setTestResult({ kind: "error", message: msg })
-    } finally {
-      setIsTesting(false)
+  // Auto-probe the connection whenever the drawer opens on a connector (or the
+  // resolved connection changes). Replaces the old manual "Test connection"
+  // button — the status badge at the top now reflects a live health check with
+  // no click. No connection row → immediately "disconnected"; otherwise show
+  // "checking" while the probe runs, then connected/disconnected by its result.
+  useEffect(() => {
+    if (!providerId) {
+      setStatus(null)
+      return
     }
-  }, [providerId])
+    if (!connectionId) {
+      setStatus({ kind: "disconnected", message: "Not connected" })
+      return
+    }
+    let cancelled = false
+    setStatus({ kind: "checking" })
+    void (async () => {
+      try {
+        const r = await connectorsApi.testConnection(providerId)
+        if (!cancelled) {
+          setStatus({ kind: "connected", accountLabel: r.account_label || undefined })
+        }
+      } catch (e) {
+        if (cancelled) return
+        const msg =
+          e instanceof ApiError
+            ? apiErrorMessage(e.status, e.body)
+            : e instanceof Error
+              ? e.message
+              : String(e)
+        setStatus({ kind: "disconnected", message: msg })
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [providerId, connectionId])
 
   const handleDisconnect = useCallback(async () => {
     if (!providerId) return
@@ -504,9 +505,7 @@ export function ConfigureConnectorDrawer({
       onDisconnect={() => void handleDisconnect()}
       isDisconnecting={isDisconnecting}
       disconnectError={disconnectError}
-      onTestConnection={() => void handleTest()}
-      isTesting={isTesting}
-      testResult={testResult}
+      status={status}
     >
       {slot}
     </ConfigureConnectorDrawerView>

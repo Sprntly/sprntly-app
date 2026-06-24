@@ -92,6 +92,40 @@ def test_kpi_tree_put_200_when_owner(isolated_settings, monkeypatch):
     assert r.status_code == 200, r.text
 
 
+# ───────────── PUT /v1/company/kpi-tree/from-selection (write) ─────────────
+
+# The onboarding metrics step posts the PM's 3–5 picks; the server infers the
+# North Star. Same admin-only gate as the plain kpi-tree write.
+_SELECTION_BODY = {
+    "metrics": [
+        {"metric": "Weekly active users", "description": "WAU."},
+        {"metric": "Net revenue retention", "description": ""},
+        {"metric": "Activation rate", "description": ""},
+    ]
+}
+
+
+def test_kpi_tree_from_selection_403_when_member(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _set_role(company_id=ctx.company_id, user_id=ctx.user_id, role="member")
+    r = ctx.client.put("/v1/company/kpi-tree/from-selection", json=_SELECTION_BODY)
+    assert r.status_code == 403, r.text
+
+
+def test_kpi_tree_from_selection_200_infers_north_star_when_admin(
+    isolated_settings, monkeypatch
+):
+    ctx = company_client(monkeypatch)
+    _set_role(company_id=ctx.company_id, user_id=ctx.user_id, role="admin")
+    r = ctx.client.put("/v1/company/kpi-tree/from-selection", json=_SELECTION_BODY)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    # Retention outranks activity + activation → it's promoted to the North Star,
+    # even though it wasn't the PM's first pick.
+    assert body["north_star"] == "Net revenue retention"
+
+
 # ─────────────────────── PUT /v1/company/coworkers (write) ───────────────────────
 
 

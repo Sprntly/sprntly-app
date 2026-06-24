@@ -11,6 +11,9 @@ name: Deploy backend to api.sprntly.ai
 # applied by hand, which silently drifted and broke a feature (multi_agent_docs
 # / ticket / drip tables were missing). The migration history was baselined
 # (all existing migrations marked applied) so `db push` only applies NEW ones.
+#
+# Full docs (how to set the SUPABASE_DB_URL secret, the standalone
+# scripts/apply_migrations.py runner, and the backfill): supabase/MIGRATIONS.md
 
 on:
   push:

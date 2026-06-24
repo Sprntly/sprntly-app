@@ -10,18 +10,20 @@ import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFor
 import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
 import { Check, InfoCircle, Plus, Sparkles } from "../../auth/icons"
 import {
-  buildKpiTreePayloadFromPicks,
+  buildSelectionPayload,
   canSavePickedMetrics,
   kpiTreeApi,
-  REQUIRED_METRIC_PICKS,
+  MAX_METRIC_PICKS,
+  MIN_METRIC_PICKS,
 } from "../../../lib/onboarding/kpiTreeApi"
 
 /**
  * Onboarding metrics page (route /onboarding/metrics).
  *
  * REDESIGN (product-approved): the explicit North-Star + supporting-metric
- * split is GONE. The user now picks EXACTLY 3 metrics from a FLAT list of
- * candidates — the North Star is inferred SERVER-SIDE from the three (we never
+ * split is GONE. The user now picks 3 to 5 metrics (3 minimum, 5 max — a 6th
+ * pick is refused with a brief warning) from a FLAT list of candidates — the
+ * North Star is inferred SERVER-SIDE from the picks (we never
  * ask). Each candidate is a `{ name, description }` card; selected cards carry
  * the green `.sel` selected state (`aria-selected="true"`). The user can also
  * write their own candidate (it lands selected if there's still room).
@@ -33,13 +35,13 @@ import {
  *   3. business-type defaults (e.g. SaaS — product-curated) merged with a small
  *      industry-tailored fallback pool.
  * Up to 3 of the seeded candidates are pre-selected; the user adjusts to land
- * on exactly 3, which is what "Continue" requires.
+ * on 3–5, which is what "Continue" requires (at least 3).
  *
  * Industry + business_type stay as ALWAYS-editable dropdowns (pre-filled from
  * the analysis, overridable). On save we persist the confirmed
- * industry/business_type to the company and the 3 picks to the KPI tree
- * (PUT /v1/company/kpi-tree) — north_star is a placeholder until server-side
- * inference ships (see kpiTreeApi.buildKpiTreePayloadFromPicks).
+ * industry/business_type to the company and the picks to the KPI tree
+ * (PUT /v1/company/kpi-tree/from-selection) — the server infers which pick is
+ * the North Star (see kpiTreeApi.buildSelectionPayload / putFromSelection).
  */
 
 export type MetricCandidate = {
@@ -49,7 +51,7 @@ export type MetricCandidate = {
 
 // Industry-tailored fallback candidate pool, used to round out the flat list
 // when the website analysis returned no suggestions.
-const FALLBACK_CANDIDATES_BY_INDUSTRY: Record<string, string[]> = {
+export const FALLBACK_CANDIDATES_BY_INDUSTRY: Record<string, string[]> = {
   Healthtech: [
     "Weekly active clinicians",
     "Day-30 active clinicians per deployment",
@@ -79,12 +81,12 @@ const FALLBACK_CANDIDATES_BY_INDUSTRY: Record<string, string[]> = {
 
 // Default candidate metrics by business type, used when the website analysis
 // returned no suggestions. SaaS defaults are product-curated.
-const DEFAULT_METRICS_BY_BUSINESS_TYPE: Record<string, string[]> = {
+export const DEFAULT_METRICS_BY_BUSINESS_TYPE: Record<string, string[]> = {
   SaaS: ["Incremental revenue", "Number of new subscribers", "Conversion rate"],
 }
 
 /** Merge name lists into a deduped (case-insensitive) candidate pool. */
-function mergeCandidates(...lists: MetricCandidate[][]): MetricCandidate[] {
+export function mergeCandidates(...lists: MetricCandidate[][]): MetricCandidate[] {
   const seen = new Set<string>()
   const out: MetricCandidate[] = []
   for (const list of lists) {
@@ -110,6 +112,8 @@ export type MetricsSetupViewProps = {
   customMetric: string
   errors: Record<string, string | undefined>
   error: string | null
+  /** Transient notice shown when the user tries to pick past the max. */
+  limitWarning: string | null
   onChangeIndustry: (value: string) => void
   onChangeBusinessType: (value: string) => void
   onToggle: (name: string) => void
@@ -129,6 +133,7 @@ export function MetricsSetupView({
   customMetric,
   errors,
   error,
+  limitWarning,
   onChangeIndustry,
   onChangeBusinessType,
   onToggle,
@@ -137,7 +142,7 @@ export function MetricsSetupView({
 }: MetricsSetupViewProps) {
   const selectedSet = new Set(selected.map((s) => s.toLowerCase()))
   const selectedCount = selected.length
-  const atLimit = selectedCount >= REQUIRED_METRIC_PICKS
+  const atLimit = selectedCount >= MAX_METRIC_PICKS
 
   return (
     <>
@@ -179,8 +184,11 @@ export function MetricsSetupView({
 
       <div className="onb-section" data-field="metrics">
         <div className="onb-section-h">
-          Pick your {REQUIRED_METRIC_PICKS} success metrics{" "}
-          <span className="opt">— the ones that best capture product value</span>
+          Pick your success metrics{" "}
+          <span className="opt">
+            — choose {MIN_METRIC_PICKS} to {MAX_METRIC_PICKS} that best capture
+            product value
+          </span>
         </div>
 
         {errors.metrics && <p className="onb-field-error">{errors.metrics}</p>}
@@ -189,18 +197,20 @@ export function MetricsSetupView({
           {candidates.length > 0 ? (
             candidates.map((c, i) => {
               const isSel = selectedSet.has(c.name.toLowerCase())
-              // A non-selected card is disabled once we've hit the pick limit;
-              // selected cards always stay clickable so they can be toggled off.
-              const disabled = !isSel && atLimit
+              // Cards stay clickable even at the max: clicking an unselected one
+              // at the limit surfaces the "up to N metrics" warning (handled in
+              // the container) instead of doing nothing. aria-disabled hints the
+              // unavailable state without blocking the click.
+              const atMaxUnselected = !isSel && atLimit
               return (
                 <button
                   type="button"
                   key={c.name}
-                  className={`mt-target metric-card ${isSel ? "sel" : ""}`}
+                  className={`mt-target metric-card ${isSel ? "sel" : ""}${atMaxUnselected ? " at-limit" : ""}`}
                   data-metric={c.name}
                   aria-pressed={isSel}
                   aria-selected={isSel}
-                  disabled={disabled}
+                  aria-disabled={atMaxUnselected}
                   onClick={() => onToggle(c.name)}
                   style={{ ["--d" as string]: `${0.04 * (i + 1)}s` }}
                 >
@@ -246,25 +256,31 @@ export function MetricsSetupView({
               type="button"
               className="btn btn-secondary"
               onClick={onAddCustom}
-              disabled={!customMetric.trim() || atLimit}
+              disabled={!customMetric.trim()}
             >
               <Plus style={{ width: 13, height: 13 }} aria-hidden /> Add
             </button>
           </div>
         </div>
 
+        {limitWarning && (
+          <p className="onb-field-error" role="alert" aria-live="polite">
+            {limitWarning}
+          </p>
+        )}
+
         <div className="metric-count">
           <span className="mt-ic" aria-hidden>
             <InfoCircle style={{ width: 13, height: 13 }} />
           </span>
           <span>
-            <strong>{selectedCount}</strong> of {REQUIRED_METRIC_PICKS} metrics
-            selected
-            {selectedCount === REQUIRED_METRIC_PICKS
-              ? " — ready"
-              : selectedCount < REQUIRED_METRIC_PICKS
-                ? ` — pick ${REQUIRED_METRIC_PICKS - selectedCount} more`
-                : ""}
+            <strong>{selectedCount}</strong> selected
+            {" — "}
+            {selectedCount < MIN_METRIC_PICKS
+              ? `pick ${MIN_METRIC_PICKS - selectedCount} more (${MIN_METRIC_PICKS}–${MAX_METRIC_PICKS})`
+              : selectedCount < MAX_METRIC_PICKS
+                ? `ready (add up to ${MAX_METRIC_PICKS - selectedCount} more)`
+                : `ready (max ${MAX_METRIC_PICKS})`}
           </span>
         </div>
       </div>
@@ -286,6 +302,22 @@ export function Metrics() {
   const [customMetric, setCustomMetric] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Transient "you've hit the max" notice, flashed when the user tries to pick
+  // past MAX_METRIC_PICKS. The nonce re-arms the auto-dismiss timer on repeated
+  // attempts even when the message text is unchanged.
+  const [limitWarning, setLimitWarning] = useState<string | null>(null)
+  const [limitNonce, setLimitNonce] = useState(0)
+  function flashLimitWarning() {
+    setLimitWarning(
+      `You can pick up to ${MAX_METRIC_PICKS} metrics — deselect one to swap.`,
+    )
+    setLimitNonce((n) => n + 1)
+  }
+  useEffect(() => {
+    if (!limitWarning) return
+    const t = setTimeout(() => setLimitWarning(null), 3500)
+    return () => clearTimeout(t)
+  }, [limitWarning, limitNonce])
 
   // Save draft on tab switch only
   useEffect(() => {
@@ -347,7 +379,7 @@ export function Metrics() {
         named.map((m) => ({ name: m.name, description: m.description ?? "" })),
       )
       setCandidates(pool)
-      setSelected(pool.slice(0, REQUIRED_METRIC_PICKS).map((c) => c.name))
+      setSelected(pool.slice(0, MIN_METRIC_PICKS).map((c) => c.name))
     }
   }, [workspace])
 
@@ -357,7 +389,7 @@ export function Metrics() {
   // industry defaults). Guarded by `candidatesSeeded` so it runs at most once
   // and never clobbers the user's later edits — and skipped entirely if a saved
   // KPI tree already hydrated the pool above. Up to 3 candidates are
-  // pre-selected; the user adjusts to land on exactly 3.
+  // pre-selected; the user adjusts to land on 3–5.
   useEffect(() => {
     if (candidatesSeeded.current) return
 
@@ -382,7 +414,7 @@ export function Metrics() {
     if (pool.length === 0) return
     candidatesSeeded.current = true
     setCandidates(pool)
-    setSelected(pool.slice(0, REQUIRED_METRIC_PICKS).map((c) => c.name))
+    setSelected(pool.slice(0, MIN_METRIC_PICKS).map((c) => c.name))
   }, [
     suggestedMetrics,
     businessType,
@@ -398,26 +430,33 @@ export function Metrics() {
       {
         key: "metrics",
         valid: canSavePickedMetrics(selectedAsMetrics(candidates, selected)),
-        message: `Pick exactly ${REQUIRED_METRIC_PICKS} metrics to continue.`,
+        message: `Pick at least ${MIN_METRIC_PICKS} metrics to continue.`,
       },
     ],
   )
 
-  // Toggle a candidate in/out of the selection. Selecting is blocked once 3 are
-  // already picked; deselecting always works.
+  // Toggle a candidate in/out of the selection. Deselecting always works;
+  // selecting is allowed up to MAX_METRIC_PICKS, beyond which we flash the
+  // "up to N" warning instead of adding.
   function toggle(name: string) {
+    const key = name.toLowerCase()
+    const isSelected = selected.some((s) => s.toLowerCase() === key)
+    if (!isSelected && selected.length >= MAX_METRIC_PICKS) {
+      flashLimitWarning()
+      return
+    }
     setSelected((prev) => {
-      const key = name.toLowerCase()
       if (prev.some((s) => s.toLowerCase() === key)) {
         return prev.filter((s) => s.toLowerCase() !== key)
       }
-      if (prev.length >= REQUIRED_METRIC_PICKS) return prev
+      if (prev.length >= MAX_METRIC_PICKS) return prev
       clearError("metrics")
       return [...prev, name]
     })
   }
 
-  // Add a custom candidate; it lands selected if there's still room (< 3).
+  // Add a custom candidate; it lands selected if there's still room. At the max
+  // we keep the candidate in the pool but flash the warning rather than select.
   function addCustom() {
     const m = customMetric.trim()
     if (!m) return
@@ -427,8 +466,14 @@ export function Metrics() {
         ? prev
         : [...prev, { name: m, description: "" }],
     )
+    const alreadySelected = selected.some((s) => s.toLowerCase() === key)
+    if (!alreadySelected && selected.length >= MAX_METRIC_PICKS) {
+      flashLimitWarning()
+      setCustomMetric("")
+      return
+    }
     setSelected((prev) =>
-      prev.some((s) => s.toLowerCase() === key) || prev.length >= REQUIRED_METRIC_PICKS
+      prev.some((s) => s.toLowerCase() === key) || prev.length >= MAX_METRIC_PICKS
         ? prev
         : [...prev, m],
     )
@@ -447,14 +492,14 @@ export function Metrics() {
         industry,
         business_type: businessType,
       })
-      // 2) The 3 picks → KPI tree. North Star is inferred server-side; we send
-      //    a placeholder north_star (the first pick) until that ships.
-      await kpiTreeApi.put(
-        buildKpiTreePayloadFromPicks(selectedAsMetrics(candidates, selected)),
+      // 2) The picks → KPI tree. We send just the selected metrics; the server
+      //    infers which one is the North Star and persists the tree.
+      await kpiTreeApi.putFromSelection(
+        buildSelectionPayload(selectedAsMetrics(candidates, selected)),
       )
       clearDraft(DRAFT_KEY)
-      // Next numbered step is connectors (index 3 in ONBOARDING_STEP_SLUGS).
-      const updated = await advanceOnboardingStep(workspace.id, 3)
+      // Next numbered step is connectors (index 2 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 2)
       const product = updated.product ?? workspace.product
       setWorkspace({ ...updated, product })
       router.push("/onboarding/connectors")
@@ -475,7 +520,7 @@ export function Metrics() {
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
-  const ready = selected.length === REQUIRED_METRIC_PICKS
+  const ready = selected.length >= MIN_METRIC_PICKS
 
   return (
     <OnboardingChrome
@@ -486,11 +531,11 @@ export function Metrics() {
           Set your success <em>metrics.</em>
         </>
       }
-      subtitle={`Success metrics anchor the whole workspace. Pick the ${REQUIRED_METRIC_PICKS} that best capture product value — we've predicted your business and drafted a starting set from your website. Sprntly figures out which one is your North Star.`}
+      subtitle={`Success metrics anchor the whole workspace. Pick ${MIN_METRIC_PICKS} to ${MAX_METRIC_PICKS} that best capture product value — we've predicted your business and drafted a starting set from your website. Sprntly figures out which one is your North Star.`}
       footerMeta={
         ready
-          ? `${REQUIRED_METRIC_PICKS} metrics selected — ready to continue`
-          : `Pick ${REQUIRED_METRIC_PICKS - selected.length} more to continue`
+          ? `${selected.length} metrics selected — ready to continue`
+          : `Pick ${MIN_METRIC_PICKS - selected.length} more to continue`
       }
       onBack={() => router.push("/onboarding/business-info")}
       onContinue={persist}
@@ -506,6 +551,7 @@ export function Metrics() {
           customMetric={customMetric}
           errors={errors}
           error={error}
+          limitWarning={limitWarning}
           onChangeIndustry={(value) => {
             setIndustryTouched(true)
             setIndustry(value)
@@ -525,7 +571,7 @@ export function Metrics() {
 
 /** Resolve the selected names to {name, description} pairs from the pool. A
  *  selected name not in the pool (defensive) still maps to a bare entry. */
-function selectedAsMetrics(
+export function selectedAsMetrics(
   candidates: MetricCandidate[],
   selected: string[],
 ): MetricCandidate[] {

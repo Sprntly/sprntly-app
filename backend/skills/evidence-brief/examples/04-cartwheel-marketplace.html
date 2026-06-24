@@ -1,0 +1,101 @@
+<meta charset="utf-8">
+<style>
+  :root{--ink:#191b24;--paper:#fbfaf6;--muted:#6c7180;--hair:#e4e1d7;--problem:#dd4b32;--problem-soft:#f6d6cd;--opp:#0f9d77;--opp-soft:#d3efe5;--grid:#ece9e0;--bar-neutral:#cfccc2;--warn:#b3791c;--serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;--sans:-apple-system,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;--mono:"SF Mono","Roboto Mono",ui-monospace,Menlo,Consolas,monospace}
+  *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:820px;margin:0 auto;padding:48px 28px 56px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+  h1{font-family:var(--serif);font-weight:600;font-size:34px;line-height:1.12;letter-spacing:-.01em;margin:0 0 8px}
+  .deck{font-family:var(--serif);font-size:18px;font-style:italic;color:#4a4d57;margin:0 0 4px;line-height:1.4}
+  .meta{font-family:var(--mono);font-size:11.5px;color:var(--muted);border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);padding:9px 0;margin:18px 0 0}
+  .demo{font-family:var(--mono);font-size:10.5px;color:var(--problem);letter-spacing:.04em;margin:8px 0 0}
+  .context{font-size:15px;color:#3a3d47;margin:22px 0 0}
+  .tldr{background:#fff;border:1px solid var(--hair);border-left:3px solid var(--ink);padding:18px 20px;margin:22px 0 0;font-size:15px}
+  .tldr h4{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:0 0 9px}.tldr p{margin:0}
+  .opp-top{display:flex;gap:14px;align-items:flex-start;background:var(--opp-soft);border:1px solid #a9ddca;border-radius:5px;padding:15px 18px;margin:14px 0 0}
+  .opp-top .tag{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--opp);background:#fff;border:1px solid #a9ddca;border-radius:3px;padding:4px 7px;white-space:nowrap;margin-top:2px}
+  .opp-top p{margin:0;font-size:15px;font-family:var(--serif)}.opp-top b{color:#0b6f54}
+  section{margin:38px 0 0}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.1em;margin:0 0 6px;color:var(--problem)}.kicker.o{color:var(--opp)}.kicker.w{color:var(--warn)}
+  h2{font-family:var(--serif);font-weight:600;font-size:21px;line-height:1.22;margin:0 0 8px;letter-spacing:-.01em}
+  p{font-size:14.5px;margin:0 0 12px}
+  figure{margin:18px 0 4px;background:#fff;border:1px solid var(--hair);border-radius:4px;padding:18px 16px 12px}
+  figcaption{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:9px}
+  svg{width:100%;height:auto;display:block}
+  .ax{font-family:var(--mono);font-size:11px;fill:var(--muted)}.vlabel{font-family:var(--mono);font-size:12px;fill:var(--ink);font-weight:600}.blabel{font-family:var(--sans);font-size:12px;fill:var(--ink)}
+  .hyp{background:var(--ink);color:#f3f1ea;border-radius:5px;padding:26px;margin:16px 0 0}
+  .hyp h4{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#a9a395;margin:0 0 12px}
+  .hyp .stmt{font-family:var(--serif);font-size:19px;line-height:1.5;margin:0}.hyp .stmt .b{color:#5ed3aa;font-weight:600}.hyp .stmt .v{color:#f3c98b;font-weight:600}.hyp .stmt .x{color:#f29d8b;font-weight:600}
+  .hyp .test{font-size:13px;color:#cfcabc;margin:16px 0 0;border-top:1px solid #34363f;padding-top:14px}.hyp .test b{color:#f3f1ea}
+  .handoff{display:inline-flex;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:#5ed3aa;margin:14px 0 0}
+  .note{font-family:var(--mono);font-size:11.5px;color:var(--warn);background:#fbf3e2;border:1px solid #ecd9b0;border-radius:4px;padding:11px 14px;margin:14px 0 0;letter-spacing:.01em}
+</style>
+<div class="wrap">
+  <p class="eyebrow">Evidence Brief · Data Science → Cartwheel product team</p>
+  <h1>More Photos, More Sales: The Listing-Quality Opportunity</h1>
+  <p class="deck">Listings with three or more photos convert 2.4× — and almost half our sellers add only one.</p>
+  <p class="meta">Author: [Author name], Data Science &nbsp;·&nbsp; 2026-06-23 &nbsp;·&nbsp; Status: Draft &nbsp;·&nbsp; Pairs with → "Guided Listing" PRD</p>
+  <p class="demo">Example brief — Cartwheel is a hypothetical company; all figures illustrative.</p>
+
+  <div class="tldr"><h4>TL;DR</h4><p>Conversion climbs sharply with the number of listing photos, leveling off around three. Yet nearly half of all listings have just one photo — so a large share of our inventory is under-converting for a fixable reason. This is a single, strong data signal; I don't have customer or competitive corroboration, so I'm presenting it as a one-signal finding worth validating, not a sure thing.</p></div>
+  <div class="opp-top"><span class="tag">OPPORTUNITY</span><p>Get more sellers to <b>three good photos at listing time</b> — the cheapest visible lever on conversion in the dataset.</p></div>
+  <p class="context"><b>Context.</b> Cartwheel is a consumer resale marketplace; the goal this informs is gross merchandise value (GMV). Sellers create listings with photos and a description. I looked at what, in a listing, most moves the odds of a sale.</p>
+
+  <section>
+    <p class="kicker">THE SIGNAL</p>
+    <h2>Conversion rises with photos, then plateaus at three.</h2>
+    <p>Bucketing listings by photo count, conversion more than triples from one photo to three, then flattens. Three is the point of diminishing returns — a clear, actionable target.</p>
+    <figure>
+      <svg viewBox="0 0 720 250" role="img" aria-label="Conversion rate by photo count">
+        <g class="ax"><line x1="60" y1="210" x2="680" y2="210" stroke="#d9d6cc"/><text x="52" y="214" text-anchor="end">0</text><text x="52" y="120" text-anchor="end">2.5%</text><text x="52" y="34" text-anchor="end">5%</text><line x1="60" y1="120" x2="680" y2="120" stroke="var(--grid)"/><line x1="60" y1="34" x2="680" y2="34" stroke="var(--grid)"/></g>
+        <!-- values 1.1,1.8,2.9,4.3,4.6 ; scale 5 over 176 (210->34) ; h=(v/5)*176 -->
+        <g fill="var(--bar-neutral)">
+          <rect x="90" y="171.3" width="80" height="38.7"/>
+          <rect x="210" y="146.6" width="80" height="63.4"/>
+        </g>
+        <rect x="330" y="107.9" width="80" height="102.1" fill="var(--bar-neutral)"/>
+        <rect x="450" y="58.6" width="80" height="151.4" fill="var(--opp)"/>
+        <rect x="570" y="48" width="80" height="162" fill="var(--opp)"/>
+        <g class="vlabel"><text x="130" y="163" text-anchor="middle">1.1%</text><text x="250" y="138" text-anchor="middle">1.8%</text><text x="370" y="100" text-anchor="middle">2.9%</text><text x="490" y="50" text-anchor="middle" fill="var(--opp)">4.3%</text><text x="610" y="40" text-anchor="middle" fill="var(--opp)">4.6%</text></g>
+        <g class="ax" text-anchor="middle"><text x="130" y="228">0 photos</text><text x="250" y="228">1</text><text x="370" y="228">2</text><text x="490" y="228" fill="var(--opp)">3</text><text x="610" y="228" fill="var(--opp)">4+</text></g>
+      </svg>
+      <figcaption>Listing conversion rate by photo count · correlational</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="kicker">THE GAP</p>
+    <h2>Most sellers stop at one.</h2>
+    <p>The distribution shows where the opportunity sits: nearly half of listings have a single photo, far below the point where conversion takes off. The gap between where sellers are and where conversion peaks is the addressable upside.</p>
+    <figure>
+      <svg viewBox="0 0 720 240" role="img" aria-label="Distribution of photos per listing">
+        <g class="ax"><line x1="60" y1="200" x2="680" y2="200" stroke="#d9d6cc"/><text x="52" y="204" text-anchor="end">0</text><text x="52" y="115" text-anchor="end">25%</text><text x="52" y="34" text-anchor="end">50%</text><line x1="60" y1="115" x2="680" y2="115" stroke="var(--grid)"/><line x1="60" y1="34" x2="680" y2="34" stroke="var(--grid)"/></g>
+        <!-- dist 12,48,22,11,7 ; scale 50 over 166 ; h=(v/50)*166 -->
+        <rect x="90" y="160.2" width="80" height="39.8" fill="var(--bar-neutral)"/>
+        <rect x="210" y="40.6" width="80" height="159.4" fill="var(--problem)"/>
+        <rect x="330" y="126.96" width="80" height="73.04" fill="var(--bar-neutral)"/>
+        <rect x="450" y="163.5" width="80" height="36.5" fill="var(--bar-neutral)"/>
+        <rect x="570" y="176.76" width="80" height="23.24" fill="var(--bar-neutral)"/>
+        <g class="vlabel"><text x="130" y="152" text-anchor="middle">12%</text><text x="250" y="32" text-anchor="middle" fill="var(--problem)">48%</text><text x="370" y="119" text-anchor="middle">22%</text><text x="490" y="155" text-anchor="middle">11%</text><text x="610" y="169" text-anchor="middle">7%</text></g>
+        <g class="ax" text-anchor="middle"><text x="130" y="220">0 photos</text><text x="250" y="220" fill="var(--problem)">1</text><text x="370" y="220">2</text><text x="490" y="220">3</text><text x="610" y="220">4+</text></g>
+        <text x="370" y="236" text-anchor="middle" class="ax">Share of current listings by photo count</text>
+      </svg>
+      <figcaption>Distribution of photos per listing · the bulge at "1" is the opportunity</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="kicker w">CONVERGENCE — NOT YET</p>
+    <h2>One signal, named as one signal.</h2>
+    <p>This rests entirely on product data. I don't have voice-of-customer (we don't survey sellers at listing time) or a competitive read on listing flows, so there's nothing to triangulate against yet. The effect is strong and consistent, but a single correlational signal can hide a confound — for instance, more-engaged sellers may both add photos and price better. I'd want a controlled test before treating it as causal.</p>
+    <div class="note">CONFIDENCE: MODERATE · 1 signal (data only) · no VoC / competitive / market · validate causality with a test.</div>
+  </section>
+
+  <section>
+    <p class="kicker o">THE BET TO TEST</p>
+    <div class="hyp"><h4>Value-driven hypothesis</h4>
+      <p class="stmt">We believe that by <span class="b">guiding sellers to add three photos during listing creation</span>, more listings will <span class="x">reach the photo count where conversion takes off</span>, which will drive <span class="v">higher listing conversion and GMV</span>.</p>
+      <p class="test"><b>Behavior change:</b> median photos per new listing rises toward 3. <b>Business value:</b> conversion → GMV. <b>Test:</b> randomized prompt/assist at listing creation; primary metric listing conversion; guardrail: listing completion rate (don't add friction that suppresses listings). Confirms or kills the causal read.</p>
+      <div class="handoff">→ FEEDS THE PRD &nbsp; "Guided Listing" — grounded in this evidence</div>
+    </div>
+  </section>
+</div>

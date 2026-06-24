@@ -81,50 +81,55 @@ export function canSaveKpiTree(
   return supporting.some((s) => s.name.trim().length > 0)
 }
 
-/** Exactly this many metrics are picked on the onboarding metrics step. */
-export const REQUIRED_METRIC_PICKS = 3
+/** Onboarding metrics step: pick at least this many metrics (the minimum). */
+export const MIN_METRIC_PICKS = 3
+/**
+ * …and at most this many. 5 maps cleanly onto the KPI-tree schema
+ * (1 North Star + up to 4 primary metrics). The picker enforces the ceiling at
+ * selection time (and warns past it); this is the upper bound for validation.
+ */
+export const MAX_METRIC_PICKS = 5
 
-/** The onboarding metrics step is satisfiable iff EXACTLY 3 metrics are picked. */
+/** The onboarding metrics step is satisfiable iff between MIN and MAX metrics
+ *  (inclusive) are picked. */
 export function canSavePickedMetrics(picked: SupportingMetric[]): boolean {
   const named = picked.filter((m) => m.name.trim().length > 0)
-  return named.length === REQUIRED_METRIC_PICKS
+  return named.length >= MIN_METRIC_PICKS && named.length <= MAX_METRIC_PICKS
+}
+
+/** Request body for the metric-selection endpoint. */
+export type MetricSelectionPayload = {
+  metrics: KpiMetricEntry[]
+}
+
+/** Response from the metric-selection endpoint (echoes the inferred North Star). */
+export type MetricSelectionResult = {
+  ok: true
+  version: number
+  north_star: string
 }
 
 /**
- * Build the backend KPI-tree payload from the onboarding pick-3 selection.
- *
- * The user no longer designates a North Star — it is inferred SERVER-SIDE from
- * the three picks. The backend KPI-tree schema still REQUIRES a non-empty
- * `north_star.metric`, so until that inference ships we set north_star to the
- * FIRST pick as a placeholder anchor and send all three picks as
- * primary_metrics. (Backend follow-up: derive north_star from the three picks
- * and ignore/recompute this placeholder.)
+ * Build the selection payload from the onboarding picks. Trims names +
+ * descriptions, drops blanks, and de-dupes by name (case-insensitive) so the
+ * backend gets a clean set. The server picks which of the 3–5 metrics is the
+ * North Star (PUT /v1/company/kpi-tree/from-selection) — the client no longer
+ * designates one or send a placeholder.
  */
-export function buildKpiTreePayloadFromPicks(
+export function buildSelectionPayload(
   picked: SupportingMetric[],
-): KpiTreePayload {
-  // Trim + drop blanks + dedupe by name (case-insensitive), preserving order.
+): MetricSelectionPayload {
   const seen = new Set<string>()
-  const entries: KpiMetricEntry[] = []
+  const metrics: KpiMetricEntry[] = []
   for (const m of picked) {
     const metric = m.name.trim()
     if (!metric) continue
     const key = metric.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
-    entries.push({ metric, description: m.description.trim() })
+    metrics.push({ metric, description: m.description.trim() })
   }
-  // All three picks are real KPIs: the placeholder north_star is ALSO one of
-  // primary_metrics (no dedupe-out), so server-side inference can promote any
-  // of the three without losing a metric.
-  return {
-    north_star: entries[0] ?? { metric: "", description: "" },
-    primary_metrics: entries.slice(0, MAX_PRIMARY_METRICS),
-    secondary_signals: entries.slice(
-      MAX_PRIMARY_METRICS,
-      MAX_PRIMARY_METRICS + MAX_SECONDARY_SIGNALS,
-    ),
-  }
+  return { metrics }
 }
 
 export const kpiTreeApi = {
@@ -133,6 +138,14 @@ export const kpiTreeApi = {
     api
       .get<KpiTreePayload>("/v1/company/kpi-tree")
       .catch(() => null as KpiTreePayload | null),
+  /** Settings KPI editor: persist a fully-specified tree (explicit North Star). */
   put: (tree: KpiTreePayload) =>
     api.put<{ ok: true; version: number }>("/v1/company/kpi-tree", tree),
+  /** Onboarding metrics step: send the PM's picks; the server infers the
+   *  North Star and persists the tree. */
+  putFromSelection: (payload: MetricSelectionPayload) =>
+    api.put<MetricSelectionResult>(
+      "/v1/company/kpi-tree/from-selection",
+      payload,
+    ),
 }

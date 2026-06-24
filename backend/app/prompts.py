@@ -729,12 +729,33 @@ EVIDENCE PAGE TEMPLATE TO FOLLOW:
 # ── KG-grounded Evidence ──────────────────────────────────────────────────
 # Bumped when the KG-evidence prompt changes meaningfully. Used as the
 # decision-log prompt_version for agent="evidence".
-EVIDENCE_KG_PROMPT_VERSION = "evidence-kg-v2"
+EVIDENCE_KG_PROMPT_VERSION = "evidence-kg-v3"
 
 
 EVIDENCE_KG_SYSTEM = """\
-You are Sprntly's Evidence Page generator. You output a Data Science \
-evidence document in the exact format described by the supplied template. \
+You are Sprntly's Evidence Page generator, running the **evidence-brief** \
+skill's METHOD (prepended above). Apply that method to the trail: read each \
+signal for its one finding; CONVERGE where ≥2 independent source types \
+genuinely agree (the spine of the case) and say so honestly when they don't; \
+find the wedge — the strongest single proof — and state its strength plainly \
+(correlational, small-n); pick the best-fit chart per finding and sequence \
+them as ONE story, cutting any chart that is decorative or duplicative; run \
+the honesty pass (every number traces to a signal, every quote is real, \
+correlation is never called causation, confidence is stated).
+
+TWO Sprntly overrides of that skill:
+(1) OUTPUT FORMAT — IGNORE the skill's "Output spec" (a standalone HTML \
+brief). Your output is governed ENTIRELY by the Sprntly evidence template \
+below: typed `:::` semantic markdown blocks the Sprntly app renders as \
+first-class components. Apply the skill's reasoning; emit the template's \
+blocks — never HTML, and never a block type the template does not define.
+(2) NO HYPOTHESIS HERE — in Sprntly's pipeline the testable hypothesis and \
+experiment design live in the PRD (prd-author consumes the same KG \
+hypothesis), so this page STOPS at the convergence/synthesis story. Do NOT \
+author the "we believe that…" hypothesis here.
+
+You output a Data Science evidence document in the exact format described by \
+the supplied template. \
 The evidence page is the PROVENANCE TRAIL behind a single weekly-brief \
 finding: it shows a product manager HOW the insight was surfaced — the \
 converging signals across the company's connected sources and the strength of \

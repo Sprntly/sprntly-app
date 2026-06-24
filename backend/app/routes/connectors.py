@@ -150,6 +150,11 @@ def _public_connection(row: dict) -> dict:
         "config": config,
         "last_sync_at": row.get("last_sync_at"),
         "last_sync_error": row.get("last_sync_error"),
+        # Token-health, set by the scheduled connector health monitor (and the
+        # on-open test). health: 'connected' | 'disconnected' | null (unchecked).
+        "health": row.get("health"),
+        "last_health_error": row.get("last_health_error"),
+        "last_health_check_at": row.get("last_health_check_at"),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
@@ -406,6 +411,8 @@ def test_connection(
     """
     from datetime import datetime, timezone
 
+    from app.connector_probe import ProbeError, probe_connection
+
     # Slack is per-user: validate THIS user's own connection, never a
     # company-shared one. Every other provider stays company-scoped.
     if provider == slack_oauth.SLACK_PROVIDER:
@@ -415,68 +422,29 @@ def test_connection(
     if not row:
         raise HTTPException(404, f"{provider!r} is not connected")
 
+    # The per-provider validation lives in app.connector_probe so this on-open
+    # check and the scheduled health monitor share ONE implementation. Re-raise
+    # its failures as the HTTP status codes this route has always returned.
     try:
-        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
-    except (TokenEncryptionError, json.JSONDecodeError) as e:
-        raise HTTPException(500, "Stored token unreadable") from e
+        healthy, detail = probe_connection(provider, row)
+    except ProbeError as e:
+        if e.reason == "unreadable":
+            raise HTTPException(500, "Stored token unreadable") from e
+        if e.reason == "unsupported":
+            raise HTTPException(
+                404, f"Test connection not supported for provider {provider!r}"
+            ) from e
+        # "rejected" — e.g. Drive token refresh failed.
+        raise HTTPException(400, str(e)) from e
 
-    user_obj: dict = {}
-
-    if provider == google_oauth.GOOGLE_DRIVE_PROVIDER:
-        # Drive: prove the token chain is healthy by attempting refresh.
-        try:
-            creds = google_oauth.credentials_from_token_json(
-                json.dumps(token_json)
-            )
-            if creds.expired and creds.refresh_token:
-                creds.refresh(GoogleAuthRequest())
-            user_obj = {
-                "email": row.get("google_email") or row.get("account_label") or "",
-            }
-        except Exception as e:
-            raise HTTPException(400, f"Google Drive token rejected: {e}") from e
-    elif provider == figma_oauth.FIGMA_PROVIDER:
-        access_token = token_json.get("access_token") or ""
-        user_obj = figma_oauth.fetch_me(access_token) or {}
-    elif provider == github_app.GITHUB_PROVIDER:
-        access_token = token_json.get("access_token") or ""
-        user_obj = github_app.fetch_authenticated_user(access_token) or {}
-    elif provider == clickup_oauth.CLICKUP_PROVIDER:
-        access_token = token_json.get("access_token") or ""
-        user_obj = clickup_oauth.fetch_authenticated_user(access_token) or {}
-    elif provider == hubspot_oauth.HUBSPOT_PROVIDER:
-        access_token = token_json.get("access_token") or ""
-        user_obj = hubspot_oauth.fetch_token_info(access_token) or {}
-    elif provider == slack_oauth.SLACK_PROVIDER:
-        access_token = token_json.get("access_token") or ""
-        # Canonical token-validity check: team.info returns {id, name, domain},
-        # so the account_label below resolves to the Slack workspace name.
-        user_obj = slack_oauth.fetch_team_info(access_token) or {}
-    elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
-        api_key = token_json.get("api_key") or ""
-        user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
-    else:
-        raise HTTPException(
-            404, f"Test connection not supported for provider {provider!r}"
-        )
-
-    if not user_obj:
+    if not healthy:
         raise HTTPException(
             400,
             f"{provider} rejected the stored credential — disconnect and reconnect.",
         )
 
-    label = (
-        user_obj.get("email")
-        or user_obj.get("user")
-        or user_obj.get("username")
-        or user_obj.get("login")
-        or user_obj.get("handle")
-        or user_obj.get("name")
-        or ""
-    )
     tested_at = datetime.now(timezone.utc).isoformat()
-    return {"ok": True, "account_label": str(label), "tested_at": tested_at}
+    return {"ok": True, "account_label": str(detail), "tested_at": tested_at}
 
 
 @router.get("/google-drive/authorize")
@@ -1064,6 +1032,20 @@ def _bind_installation_company(installation_id: int, company_id: str) -> None:
     cross-tenant; the next webhook refresh fills in account details."""
     try:
         existing = db.get_github_installation(installation_id)
+        # Never re-key an installation already bound to a DIFFERENT company.
+        # First-time bind (company_id None/empty) and same-company rebind both
+        # fall through and proceed as before; only a cross-company rebind is a
+        # no-op, so one tenant's callback can't steal another's installation.
+        if (
+            existing
+            and existing.get("company_id")
+            and existing["company_id"] != company_id
+        ):
+            logger.info(
+                "connectors.github_install_rebind_skipped_cross_company installation=%s",
+                installation_id,
+            )
+            return
         if existing:
             db.upsert_github_installation(
                 installation_id=installation_id,

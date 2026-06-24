@@ -24,15 +24,20 @@ from app.skills.loader import get_skill, list_skills
 SKILL_CATEGORY: dict[str, str] = {
     "prd-author": "Documentation & Specification",
     "prd-critique": "Documentation & Specification",
+    "implementation-spec": "Documentation & Specification",
     "product-one-pager": "Documentation & Specification",
     "tech-spec": "Documentation & Specification",
+    "test-scenario-builder": "Documentation & Specification",
     "user-stories": "Documentation & Specification",
     "assumption-risk-map": "Discovery & Research",
     "business-context": "Discovery & Research",
     "continuous-discovery": "Discovery & Research",
+    "evidence-brief": "Discovery & Research",
     "interview-guide": "Discovery & Research",
     "interview-synthesis": "Discovery & Research",
     "jobs-to-be-done": "Discovery & Research",
+    "journey-map": "Discovery & Research",
+    "opportunity-tree": "Discovery & Research",
     "persona-segment": "Discovery & Research",
     "problem-framing": "Discovery & Research",
     "survey-design": "Discovery & Research",
@@ -78,10 +83,21 @@ SKILL_CATEGORY: dict[str, str] = {
     "stakeholder-update": "Stakeholder & Communication",
     "third-party-feedback": "Stakeholder & Communication",
     "fact-check": "Verification",
+    "weekly-brief": "Stakeholder & Communication",
 }
 
 # Skills the Q&A router must never select (still installed + callable by name).
-NON_ROUTABLE: frozenset[str] = frozenset({"business-context", "fact-check"})
+#   - business-context is an ingestion/onboarding process, not a chat answer.
+#   - fact-check is an internal verification pass over other outputs.
+#   - weekly-brief is the synthesis-agent's brief composer (bound by name from
+#     app/synthesis/agent.py); it composes the weekly brief from already-computed
+#     signals, it is not something the Q&A router should pick for a chat turn.
+#   - evidence-brief is the Evidence Page method, bound by name from
+#     app/evidence_kg.py; it synthesizes a single brief insight's KG signal
+#     trail into the provenance doc, not a chat answer.
+NON_ROUTABLE: frozenset[str] = frozenset(
+    {"business-context", "fact-check", "weekly-brief", "evidence-brief"}
+)
 
 # Expensive skills that trip the confirm gate on large scope (see qa_agent).
 COST_GATED: frozenset[str] = frozenset({"competitive-intelligence-review"})

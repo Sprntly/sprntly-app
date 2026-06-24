@@ -34,10 +34,17 @@ from __future__ import annotations
 # is appended to DESIGN_AGENT_RECREATE_DISCIPLINE. This changes which handlers the
 # agent emits, so it is template-invalidating: old prototypes must regenerate
 # under the new discipline.
-# v7 (semantic palette capture): the pre-seeded index.css now emits token-driven
-# --destructive/--error/--warning/--success from the extracted design system's
-# status colours (previously --destructive was hardcoded and warning/success were
-# absent). This changes the seeded CSS, so cached prototypes must regenerate.
+# v7 (two template-invalidating changes land together at this version):
+#   (a) semantic palette capture — the pre-seeded index.css now emits token-driven
+#       --destructive/--error/--warning/--success from the extracted design system's
+#       status colours (previously --destructive was hardcoded and warning/success
+#       were absent). This changes the seeded CSS.
+#   (b) shell-grounded fallback — codebase runs with no located screen now seat the
+#       PRD inside the real app shell + theme via a shell-only task block, instead of
+#       falling straight to the design-system-only pre-seed. This changes the user
+#       prompt + injected reference files for that class of run.
+#   Either change alone invalidates cached prototypes; both ship under v7, so the
+#   version bumps once (6 -> 7), not twice.
 DESIGN_AGENT_TEMPLATE_VERSION = 7
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────

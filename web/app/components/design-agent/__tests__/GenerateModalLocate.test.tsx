@@ -398,12 +398,23 @@ describe("pick carries chosen route into genstart", () => {
 
 describe("unmapped shows resolve, no autostart", () => {
   it("renders the unmapped-resolve UI in the unmapped-resolve phase", () => {
-    const html = renderModal({ _testFlowPhase: "unmapped-resolve" })
+    // The consolidated recovery body renders only with a settled locateResult
+    // (empty-ranked, unmapped → the no-screen-to-anchor case).
+    const html = renderModal({
+      _testFlowPhase: "unmapped-resolve",
+      _testLocateResult: {
+        ...RANKED_CONFIRM,
+        ranked: [],
+        unmapped: true,
+      },
+    })
     expect(html).toContain('data-testid="unmapped-resolve"')
     expect(html).toContain('data-testid="locate-unmapped"')
     expect(html).toContain("couldn")
-    // Switch-source affordance back to config is present.
-    expect(html).toContain('data-testid="unmapped-switch-source"')
+    // Steer-first recovery: "Search again" (accent) is the primary affordance;
+    // switch-source was removed from this panel (close the modal to swap).
+    expect(html).toContain('data-testid="locate-search-again"')
+    expect(html).not.toContain('data-testid="unmapped-switch-source"')
   })
 
   it("offers the ranked fallbacks as a picker when unmapped carries candidates", () => {

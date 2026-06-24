@@ -48,9 +48,10 @@ export function prdIdFromPrototypeSearch(raw: string | null): number | null {
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-business-info": "/onboarding/business-info",
-  "ob-metrics": "/onboarding/metrics",
   "ob-connectors": "/onboarding/connectors",
-  "ob-first-brief": "/onboarding/first-brief",
+  "ob-business-context": "/onboarding/business-context",
+  "ob-strategy": "/onboarding/strategy",
+  "ob-workspace": "/onboarding/workspace",
   "ob-analyzing": `/onboarding/${ONBOARDING_ANALYZING_SLUG}`,
   chat: "/",
   chats: "/chats",
@@ -72,6 +73,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // prompting the user to choose a PRD first.
   prototype: PROTOTYPE_PATH,
   backlog: "/backlog",
+  templates: "/templates",
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -90,6 +92,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   // pathname-based screen derivation ignores — the path is always `/prototype`.
   [PROTOTYPE_PATH]: "prototype",
   "/backlog": "backlog",
+  "/templates": "templates",
 }
 
 // Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).

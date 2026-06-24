@@ -170,10 +170,24 @@ export function ConnectorsSettingsView({
               <ConnectorLogo item={item} className="logo" />
               <div className="nm">
                 <div className="t">{item.name}</div>
-                <div className="s">{state.statsString}</div>
+                <div className={`s${state.disconnected ? " is-disconnected" : ""}`}>
+                  {state.statsString}
+                </div>
               </div>
-              <span className={`st ${state.status === "active" ? "on" : "off"}`}>
-                {state.status === "active" ? "Active" : "Off"}
+              <span
+                className={`st ${
+                  state.disconnected
+                    ? "down"
+                    : state.status === "active"
+                      ? "on"
+                      : "off"
+                }`}
+              >
+                {state.disconnected
+                  ? "Disconnected"
+                  : state.status === "active"
+                    ? "Active"
+                    : "Off"}
               </span>
               <button
                 type="button"

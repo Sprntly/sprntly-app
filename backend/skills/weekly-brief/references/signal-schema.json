@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "signal-brief-composer schemas",
+  "description": "Input `signal` objects come from the analysis layer; the skill emits a `brief`. Numbers in the brief must trace to fields here — the skill phrases, it never computes.",
+
+  "definitions": {
+
+    "signal": {
+      "type": "object",
+      "required": ["id", "type", "pain", "value", "story", "recommended_action", "sources", "confidence", "urgency"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["reliability", "retention", "competitive", "growth", "demand", "engagement", "compliance"],
+          "description": "Closed taxonomy. Drives the accent color and the category tag."
+        },
+        "pain": {
+          "type": "object",
+          "description": "The problem stat that opens the title.",
+          "required": ["metric", "value"],
+          "properties": {
+            "metric": { "type": "string" },
+            "value": { "type": ["string", "number"] },
+            "context": { "type": "string" }
+          }
+        },
+        "value": {
+          "type": "object",
+          "description": "The upside of acting — becomes the second half of the title. amount may be null; if so the title uses a qualitative value and NO number is invented.",
+          "required": ["verb", "basis"],
+          "properties": {
+            "verb": { "type": "string", "enum": ["recover", "protect", "add", "lift", "unlock", "save", "reduce"] },
+            "metric": { "type": "string" },
+            "amount": { "type": ["string", "number", "null"] },
+            "range": { "type": ["string", "null"], "description": "Preferred over false precision for projections, e.g. '~$1.6M' or '+12–18 pts'." },
+            "basis": { "type": "string", "description": "How the figure was derived. Required so the projection is auditable." },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        "story": { "type": "string", "description": "One- to two-sentence cause from the analysis. Must name its own subject (used to keep the body self-contained)." },
+        "recommended_action": { "type": "string", "description": "What the PRD does. The skill never invents scope beyond this." },
+        "prd_ref": { "type": ["string", "null"], "description": "If null, the CTA becomes 'Draft PRD' instead of 'View PRD'." },
+        "prototype_ref": { "type": ["string", "null"], "description": "If null, the CTA becomes 'Generate prototype' instead of 'View prototype'." },
+        "sources": { "type": "array", "items": { "type": "string" }, "description": "Tools/signals that fed this. Render honestly — one source means one chip." },
+        "evidence": { "type": "array", "items": { "type": "string" }, "description": "Concrete datapoints. At least one required to clear the surfacing gate." },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "Below the floor (default 0.6) the signal is suppressed." },
+        "urgency": { "type": "string", "enum": ["low", "medium", "high"] },
+        "reach": {
+          "type": "object",
+          "properties": {
+            "unit": { "type": "string", "enum": ["accounts", "users", "deals"] },
+            "count": { "type": ["integer", "null"] }
+          }
+        },
+        "first_seen": { "type": "string", "format": "date" },
+        "dismissed_before": { "type": "boolean", "default": false }
+      }
+    },
+
+    "brief": {
+      "type": "object",
+      "required": ["recipient", "greeting", "cards"],
+      "properties": {
+        "recipient": { "type": "string" },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "greeting": { "type": "string", "description": "Max 3 lines. Offensive framing. Totals must equal the sum of figures in `cards`." },
+        "totals": {
+          "type": "object",
+          "properties": { "within_reach": { "type": "string" } }
+        },
+        "cards": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 7,
+          "items": {
+            "type": "object",
+            "required": ["type", "accent", "title", "body", "sources", "ctas", "signal_id"],
+            "properties": {
+              "type": { "type": "string", "enum": ["reliability", "retention", "competitive", "growth", "demand", "engagement", "compliance"] },
+              "accent": { "type": "string", "description": "Hex from the taxonomy table; must match the type and the valence." },
+              "title": { "type": "string", "description": "Pain stat + value of acting." },
+              "body": { "type": "string", "description": "Self-contained, max 4 lines, arc = why → worth → review-and-approve." },
+              "sources": { "type": "array", "items": { "type": "string" } },
+              "ctas": {
+                "type": "array",
+                "minItems": 2, "maxItems": 2,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "label": { "type": "string", "enum": ["View PRD", "Draft PRD", "View prototype", "Generate prototype"] },
+                    "style": { "type": "string", "enum": ["primary", "ghost"] }
+                  }
+                }
+              },
+              "signal_id": { "type": "string", "description": "Backlink to the source signal — supports the audit trail." }
+            }
+          }
+        },
+        "suppressed": {
+          "type": "array",
+          "description": "Signals deliberately not shown, with reason. Supports dismissal memory and the audit trail.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "signal_id": { "type": "string" },
+              "reason": { "type": "string", "enum": ["below_confidence_floor", "no_evidence", "duplicate", "stale", "dismissed_unchanged", "below_scale_threshold"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

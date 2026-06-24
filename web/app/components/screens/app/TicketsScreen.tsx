@@ -220,8 +220,8 @@ function KanbanCard({ ticket, onDragStart, onClick, isDone, isSelected }: {
         padding: isSelected ? "13px 15px" : "14px 15px", cursor: "pointer",
         opacity: isDone ? 0.55 : 1, transition: "box-shadow 0.15s, opacity 0.2s, border 0.15s",
       }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.border = "1px solid #9BDcc1" }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.border = "1px solid transparent" }}
+      onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.border = "1px solid var(--accent-2, #9BDCC1)" }}
+      onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.border = "1px solid var(--line, #E8E6E0)" }}
     >
       <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink, #1A1A17)", lineHeight: 1.45, marginBottom: 10 }}>{ticket.title}</div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -261,7 +261,7 @@ function KanbanColumn({ status, tickets, onDragStart, onDrop, onCardClick, selec
           <span style={{ width: 8, height: 8, borderRadius: "50%", background: COL_DOT[status], flexShrink: 0 }} />
           <span style={{ fontSize: "12.5px", fontWeight: 500, color: "var(--ink, #1A1A17)" }}>{status}</span>
         </div>
-        <span style={{ padding: "0px 8px", fontSize: 11, background: "#EEF0EE", color: "var(--ink-4, #82D887)", borderRadius: 30, fontWeight: 400 }}>{tickets.length}</span>
+        <span style={{ padding: "1px 8px", fontSize: 11, background: "var(--surface-3, #EEF0EE)", color: "var(--ink-3, #828D87)", borderRadius: 30, fontWeight: 500 }}>{tickets.length}</span>
       </div>
       <div
         onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
@@ -597,10 +597,9 @@ export function TicketsScreen() {
         <div style={{ flex: 1, overflow: "auto", padding: selected ? "0 16px 0 0" : 0 }}>
           {/* Top bar */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 15, color: "var(--accent, #179463)" }}>📋</span>
-              <span style={{ fontSize: 15, fontWeight: 600, color: "var(--ink, #1A1A17)" }}>Tickets</span>
-              <span style={{ fontSize: 12, color: "var(--ink-4, #828D87)", fontWeight: 400 }}>{total} ticket{total !== 1 ? "s" : ""}</span>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+              <span style={{ fontFamily: "var(--font-serif)", fontSize: 22, fontWeight: 400, letterSpacing: "-0.012em", color: "var(--ink, #15201B)" }}>Tickets</span>
+              <span style={{ fontSize: 12, color: "var(--ink-3, #828D87)", fontWeight: 400 }}>{total} ticket{total !== 1 ? "s" : ""}</span>
 
             </div>
             <div style={{ display: "flex", gap: 8 }}>

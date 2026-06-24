@@ -299,9 +299,10 @@ describe("ambiguous match surfaces the inline picker", () => {
 // ─── unmapped → inline resolve ────────────────────────────────────────────────
 
 describe("unmapped match surfaces the inline resolve", () => {
-  it("unmapped → resolve UI; switch-source returns to the config form", async () => {
+  it("unmapped → steer-first recovery UI (Search again primary, PRD-anyway link, no switch-source)", async () => {
     mockLocateResolves(
-      autoProceed({ unmapped: true, decision: "ranked_confirm", chosen: [] }),
+      // Truly no candidates → the unmapped variant where the PRD-only floor shows.
+      autoProceed({ unmapped: true, decision: "ranked_confirm", chosen: [], ranked: [] }),
     )
     const { container } = render(React.createElement(GenerateModal, manualProps()))
     clickGenerate(container)
@@ -313,14 +314,17 @@ describe("unmapped match surfaces the inline resolve", () => {
     )
     expect(vi.mocked(runGenerateFlow)).not.toHaveBeenCalled()
 
-    // Switch source → back to the config form (a phase change, not a remount).
-    const switchBtn = container.querySelector<HTMLButtonElement>(
-      '[data-testid="unmapped-switch-source"]',
-    )
-    act(() => switchBtn!.click())
-    await waitFor(() =>
-      expect(container.querySelector('[data-testid="generate-btn"]')).toBeTruthy(),
-    )
+    // Steer-first ladder: the primary action is "Search again"; the PRD-anyway
+    // fallback is present (as a de-emphasized link); switch-source was removed.
+    expect(
+      container.querySelector('[data-testid="locate-search-again"]'),
+    ).toBeTruthy()
+    expect(
+      container.querySelector('[data-testid="generate-anyway"]'),
+    ).toBeTruthy()
+    expect(
+      container.querySelector('[data-testid="unmapped-switch-source"]'),
+    ).toBeNull()
   })
 
   it("unmapped → pick a fallback screen fires generation on that screen", async () => {

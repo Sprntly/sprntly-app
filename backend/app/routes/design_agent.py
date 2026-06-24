@@ -50,15 +50,12 @@ from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company, require_company_from_query  # company-scoped auth dep
 from app.config import settings
-from app.connectors import github_app
-from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # public-surface rate limits
     PUBLIC_COMMENT_LIMITER,
     PUBLIC_TOKEN_LIMITER,
 )
 from app.db.companies import slug_for_company_id
-from app.db.connections import get_connection
 from app.db.design_agent_jobs import (  # Tier 2 opt-in worker queue
     enqueue_job,
     worker_heartbeat_fresh,
@@ -314,31 +311,16 @@ def _resolve_github_installation_id_for_repo(
 ) -> int | None:
     """Best-effort company-scoped repo full_name -> GitHub App installation id.
 
-    The repo full_name is chosen through the company's GitHub OAuth connection.
-    We verify that connection and confirm the repo appears in the connected
-    user's accessible repos before consulting the account-scoped installation
-    table. Any auth/token/API failure degrades to no codebase installation
-    snapshot rather than trusting a global installation row.
+    Resolves through the COMPANY's GitHub App installations, not the connecting
+    user's personal OAuth token: GitHub is a company-shared connector, so any
+    member's grounding must resolve as long as the company has an installation
+    covering the repo. The installation token (minted from the App JWT, no 8h
+    OAuth clock) is what every downstream repo-byte read already uses, so this
+    keeps grounding alive for non-connecting members and after the connector's
+    personal OAuth token expires. No covering installation -> None, and
+    generation proceeds with no codebase grounding exactly as before.
     """
     if not repo_full_name:
-        return None
-    row = get_connection(company_id, github_app.GITHUB_PROVIDER)
-    if not row:
-        return None
-    try:
-        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
-    except (KeyError, TokenEncryptionError, json.JSONDecodeError, TypeError):
-        logger.info("design_agent.github_connection_unreadable")
-        return None
-    access_token = token_json.get("access_token")
-    if not access_token:
-        return None
-    try:
-        repos = github_app.fetch_user_repos(access_token, per_page=100)
-    except Exception:
-        logger.info("design_agent.github_repo_access_check_failed")
-        return None
-    if not any(r.get("full_name") == repo_full_name for r in repos):
         return None
     try:
         install = find_github_installation_for_repo(repo_full_name, company_id)
@@ -946,6 +928,11 @@ class LocateRequest(BaseModel):
     prd_id: int = Field(..., gt=0)
     github_repo: str = Field(..., min_length=1)   # connected-repo full_name "org/repo"
     ref: str | None = None                         # branch/sha; None = default branch
+    # Optional user steer for a "search again" re-run: a free-text direction
+    # ("the settings page") that re-ranks locate toward the surface the PM means.
+    # Capped here (the prompt layer caps again defensively); blank/None = today's
+    # unsteered locate, byte-for-byte.
+    hint: str | None = Field(default=None, max_length=300)
 
 
 class LocateCandidateOut(BaseModel):
@@ -1080,6 +1067,7 @@ async def _run_locate_bg(
     ref: str | None,
     prd_text: str,
     installation_id: int | None,
+    hint: str | None = None,
 ) -> None:
     """Run the locate pipeline off the request path and record the terminal
     state in the process-local job store.
@@ -1124,7 +1112,9 @@ async def _run_locate_bg(
             _store("done", result=_unmapped_locate_response(github_repo))
             return
 
-        locate_result = await asyncio.to_thread(locate_screen, prd_text, map_result)
+        locate_result = await asyncio.to_thread(
+            locate_screen, prd_text, map_result, hint=hint
+        )
 
         threshold = threshold_for_repo(github_repo)
         # The gate's spans-routing rescue (attach a cross-cutting would-be-decline
@@ -1212,6 +1202,11 @@ async def locate(
         workspace_id, body.github_repo
     )
 
+    # Trim the optional steer to a clean None when blank so the background task
+    # and the locate prompt take the unsteered path; the model length cap on
+    # LocateRequest.hint already bounds it.
+    hint = (body.hint or "").strip() or None
+
     _sweep_locate_jobs()
     job_id = uuid.uuid4().hex
     _locate_jobs[job_id] = {
@@ -1228,6 +1223,7 @@ async def locate(
             ref=body.ref,
             prd_text=prd_text,
             installation_id=installation_id,
+            hint=hint,
         )
     )
     _inflight_tasks.add(task)
@@ -1462,10 +1458,20 @@ async def _run_generation_bg(
         # to the snapshot the PM confirmed the route against, so the recreate
         # reads the same bytes (and lands a cache hit on the existing key).
         located = None
+        # The repo map for this run, when one was built. Carried into
+        # generate_prototype as shell_map so the shell-grounded fallback (Tier-2)
+        # can seat the PRD inside the real app shell when NO screen was located.
+        # Built once and reused for both the located resolve and the fallback (a
+        # cache hit by repo+commit, so no second crawl).
+        shell_map = None
+        # Build the map whenever a codebase run pins a snapshot — a chosen screen
+        # gives us Tier-1, no chosen screen still gives Tier-2 the shell. Gated on
+        # map_commit_sha so we only read against the snapshot the PM confirmed
+        # against (cache hit), never a fresh HEAD crawl.
         if (
             design_source == "github"
-            and (chosen_screen_id or chosen_screen_route)
             and github_installation_id is not None
+            and map_commit_sha
         ):
             try:
                 from app.design_agent.codebase_map.recreate import LocatedScreen
@@ -1474,27 +1480,30 @@ async def _run_generation_bg(
                     build_map, github_installation_id, github_repo, map_commit_sha
                 )
                 if map_result is not None:
+                    shell_map = map_result
                     # Resolve by stable id first — the app shell (route="") and an
                     # in-page section (empty or shared route) only survive this hop
                     # by id, and id is unique where a route is not. Fall back to the
                     # route match when no id was sent (old client) or it did not
                     # resolve, preserving today's routed-node behaviour exactly.
-                    node = next(
-                        (n for n in map_result.nodes if chosen_screen_id and n.id == chosen_screen_id),
-                        None,
-                    )
-                    if node is None and chosen_screen_route:
+                    node = None
+                    if chosen_screen_id or chosen_screen_route:
                         node = next(
-                            (n for n in map_result.nodes if n.route == chosen_screen_route),
+                            (n for n in map_result.nodes if chosen_screen_id and n.id == chosen_screen_id),
                             None,
                         )
+                        if node is None and chosen_screen_route:
+                            node = next(
+                                (n for n in map_result.nodes if n.route == chosen_screen_route),
+                                None,
+                            )
                     if node is not None:
                         located = LocatedScreen(map_result=map_result, node=node)
                         logger.info(
                             "design_agent.recreate_wired prototype_id=%s repo=%s route=%s sha=%s node_id=%s node_kind=%s",
                             prototype_id, github_repo, chosen_screen_route, map_commit_sha, node.id, node.kind,
                         )
-                else:
+                elif chosen_screen_id or chosen_screen_route:
                     logger.warning(
                         "design_agent.recreate_wire_failed prototype_id=%s repo=%s",
                         prototype_id, github_repo,
@@ -1505,6 +1514,7 @@ async def _run_generation_bg(
                     prototype_id, github_repo,
                 )
                 located = None
+                shell_map = None
 
         # Tier 1: serialise the HEAVY section (LLM recreate loop + vite
         # build + screenshot — the part that pins both cores on the 2-vCPU prod
@@ -1536,6 +1546,10 @@ async def _run_generation_bg(
                 website_sample=website_sample,  # reuse the single extractor run for the pre-seed
                 design_source=design_source,
                 located_screen=located,
+                # Carried for the shell-grounded fallback: when no screen was
+                # located, the runner reads this map's shell + theme and seats the
+                # PRD inside the real app shell. None on every non-codebase run.
+                shell_map=shell_map,
             )
             # Success path: a complete run that emitted files gets built +
             # staged + marked ready. A complete run with no files, or any non-complete

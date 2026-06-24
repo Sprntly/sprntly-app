@@ -58,6 +58,29 @@ describe("getConnectorRowState", () => {
     const s = getConnectorRowState(item({ id: "figma", oauth: true }), broken)
     expect(s.status).toBe("off")
     expect(s.actionLabel).toBe("Connect")
+    expect(s.disconnected).toBe(false)
+  })
+
+  it("flags disconnected when an active connection's health probe failed", () => {
+    const dead = { ...activeConnection("figma"), health: "disconnected" }
+    const s = getConnectorRowState(item({ id: "figma", oauth: true }), dead)
+    // Still configured (active + Configure) but flagged for reconnect.
+    expect(s.status).toBe("active")
+    expect(s.actionLabel).toBe("Configure")
+    expect(s.disconnected).toBe(true)
+    expect(s.statsString).toBe("Disconnected — reconnect")
+  })
+
+  it("does NOT flag disconnected when health is connected or unset", () => {
+    const healthy = { ...activeConnection("figma"), health: "connected" }
+    expect(
+      getConnectorRowState(item({ id: "figma", oauth: true }), healthy).disconnected,
+    ).toBe(false)
+    // health absent (never checked) → not disconnected
+    expect(
+      getConnectorRowState(item({ id: "figma", oauth: true }), activeConnection("figma"))
+        .disconnected,
+    ).toBe(false)
   })
 })
 

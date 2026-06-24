@@ -63,9 +63,12 @@ from app.design_agent.codebase_map.recreate import (
     bridge_theme,
     build_theme_expectations,
     carry_brand_asset,
+    read_shell_sources,
     recreate_pre_seed,
     render_recreate_task_block,
+    render_shell_task_block,
 )
+from app.design_agent.codebase_map.types import MapResult
 from app.design_agent.event_stream import close as _sse_close
 from app.design_agent.event_stream import publish_step
 from app.design_agent.progress import FINISHING_LABEL, friendly_step
@@ -1313,6 +1316,7 @@ async def generate_prototype(
     website_sample: dict | None = None,
     design_source: str | None = None,
     located_screen: LocatedScreen | None = None,
+    shell_map: MapResult | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
     """Public entrypoint: run agent_loop with a fresh ToolContext, emit the
     cost-summary log line, and return `(result, virtual_fs)` for P1-07 + P1-08
@@ -1436,6 +1440,70 @@ async def generate_prototype(
                 prototype_id, type(exc).__name__,
             )
 
+    # Shell-grounded fallback (Tier-2): no screen was located, but for a codebase
+    # run the app shell + theme are still repo-level and re-expressible. Seat the
+    # PRD inside the real shell instead of falling straight to the design-system-
+    # only pre-seed. Gated to the no-located-screen github path with a non-empty
+    # shell. Best-effort: any failure (or no readable shell) falls through to the
+    # token / primitive pre-seed (Tier-3) — never raises.
+    _shell_task_block: str | None = None
+    _shell_sources: RecreateSources | None = None
+    if (
+        located_screen is None
+        and design_source == "github"
+        and shell_map is not None
+        and shell_map.shell is not None
+        and (
+            shell_map.shell.shell_file_path
+            or shell_map.shell.nav_items
+            or shell_map.shell.logo.render_kind != "absent"
+        )
+    ):
+        try:
+            _shell_sources = read_shell_sources(shell_map, github_installation_id)
+            if _shell_sources is not None and _shell_sources.files:
+                # Mirror the located path's reference-file convention: inject each
+                # real body under `__reference__/<path>` so the agent views it via
+                # the `view` tool, and the prefix is stripped before the build-
+                # facing virtual_fs is returned.
+                for path, body in _shell_sources.files.items():
+                    virtual_fs[f"__reference__/{path}"] = body
+                virtual_fs["src/index.css"] = bridge_theme(
+                    virtual_fs.get("src/index.css", ""),
+                    _shell_sources,
+                    prototype_id=prototype_id,
+                )
+                _shell_brand_carry = carry_brand_asset(
+                    shell_map.shell.logo,
+                    _shell_sources,
+                    prototype_id=prototype_id,
+                )
+                virtual_fs.update(_shell_brand_carry.virtual_fs_keys)
+                _theme_expectations = build_theme_expectations(
+                    _shell_sources, _shell_brand_carry,
+                )
+                _shell_task_block = render_shell_task_block(
+                    _shell_sources, _shell_brand_carry,
+                    nav_items=shell_map.shell.nav_items,
+                )
+                logger.info(
+                    "design_agent.shell_pre_seed prototype_id=%s repo=%s sha=%s n_reference_files=%d",
+                    prototype_id,
+                    _shell_sources.repo,
+                    _shell_sources.commit_sha,
+                    len(_shell_sources.files),
+                )
+            else:
+                _shell_sources = None
+        except Exception as exc:
+            _shell_sources = None
+            _shell_task_block = None
+            _theme_expectations = None
+            logger.warning(
+                "design_agent.shell_pre_seed_failed prototype_id=%s error=%s",
+                prototype_id, type(exc).__name__,
+            )
+
     # Inject the design-language guidance into the user prompt so the model's
     # first write is informed by the brand's visual vocabulary. The brief goes
     # ONLY into user_message — never into system_blocks (cached prefix must be
@@ -1474,6 +1542,25 @@ async def generate_prototype(
                 ]
         except Exception:
             pass  # best-effort — generation continues without the recreate block
+
+    # Shell task block: the Tier-2 counterpart to the recreate block above. Same
+    # user-message-only append pattern. Mutually exclusive with the recreate block
+    # (recreate_sources is None whenever a shell block was built, since the shell
+    # path only fires when located_screen is None).
+    if _shell_task_block is not None:
+        try:
+            content = user_message.get("content")
+            if isinstance(content, list):
+                user_message["content"] = list(content) + [
+                    {"type": "text", "text": _shell_task_block}
+                ]
+            elif isinstance(content, str):
+                user_message["content"] = [
+                    {"type": "text", "text": content},
+                    {"type": "text", "text": _shell_task_block},
+                ]
+        except Exception:
+            pass  # best-effort — generation continues without the shell block
 
     ctx = ToolContext(
         prototype_id=prototype_id,

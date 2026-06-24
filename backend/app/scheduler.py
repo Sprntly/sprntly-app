@@ -297,6 +297,24 @@ def start_scheduler() -> None:
             replace_existing=True,
         )
 
+    # Connector health monitor: re-validate every active connector's stored
+    # OAuth/API token on an interval and persist the result, so a dead connector
+    # surfaces in the UI proactively (not just on-open) and we email a
+    # healthy→disconnected transition alert. Opt-in via CONNECTOR_HEALTH_ENABLED.
+    if settings.connector_health_enabled:
+        from app.connector_health import run_connector_health_check
+
+        ch_mins = (
+            getattr(settings, "connector_health_interval_minutes", 60) or 60
+        )
+        _scheduler.add_job(
+            run_connector_health_check,
+            trigger=IntervalTrigger(minutes=ch_mins),
+            id="connector_health_monitor",
+            name=f"Connector token health monitor (every {ch_mins}m)",
+            replace_existing=True,
+        )
+
     _scheduler.start()
     logger.info(
         "Scheduler started: weekly brief tick every %dm "

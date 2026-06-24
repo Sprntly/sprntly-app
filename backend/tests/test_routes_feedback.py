@@ -35,11 +35,6 @@ def _list_feedback(company_id: str) -> list[dict]:
 
 
 def test_feedback_stores_and_emails(isolated_settings, monkeypatch):
-    # Configure a recipient + key so the email path is exercised.
-    from app.config import settings as cfg
-    monkeypatch.setattr(cfg, "resend_api_key", "re_test_key", raising=False)
-    monkeypatch.setattr(cfg, "feedback_alert_email", "team@sprntly.ai", raising=False)
-
     sent: list[dict] = []
 
     def _fake_send(api_key, *, to, subject, html_body, text_body):
@@ -50,6 +45,13 @@ def test_feedback_stores_and_emails(isolated_settings, monkeypatch):
     )
 
     ctx = company_client(monkeypatch)
+    # Configure a recipient + key so the email path is exercised. company_client
+    # reloads app.config inside setup_supabase_auth, so the settings overrides
+    # have to happen AFTER that reload (otherwise they land on a stale object).
+    import app.config as config_mod
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "re_test_key", raising=False)
+    monkeypatch.setattr(config_mod.settings, "feedback_alert_email", "team@sprntly.ai", raising=False)
+
     r = ctx.client.post(
         "/v1/feedback",
         json={"message": "Please add a Notion connector", "type": "connector_request"},
@@ -84,16 +86,18 @@ def test_feedback_defaults_type_other(isolated_settings, monkeypatch):
 
 
 def test_feedback_stores_even_when_email_fails(isolated_settings, monkeypatch):
-    from app.config import settings as cfg
-    monkeypatch.setattr(cfg, "resend_api_key", "re_test_key", raising=False)
-    monkeypatch.setattr(cfg, "feedback_alert_email", "team@sprntly.ai", raising=False)
-
     def _boom(*args, **kwargs):
         raise RuntimeError("resend down")
 
     monkeypatch.setattr("app.synthesis.email_delivery._send_via_resend", _boom)
 
     ctx = company_client(monkeypatch)
+    # Configure AFTER company_client (it reloads app.config); this forces the
+    # send path so we can assert the failure is swallowed and storage survives.
+    import app.config as config_mod
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "re_test_key", raising=False)
+    monkeypatch.setattr(config_mod.settings, "feedback_alert_email", "team@sprntly.ai", raising=False)
+
     r = ctx.client.post("/v1/feedback", json={"message": "Bug: chart is blank", "type": "bug"})
     assert r.status_code == 201, r.text
     assert r.json()["email_sent"] is False

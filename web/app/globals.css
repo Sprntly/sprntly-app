@@ -167,12 +167,13 @@
     box-sizing: border-box;
   }
 
+  /* New design content header title: lighter weight, tighter size (chat-top). */
   .app-main-chrome-title {
     margin: 0;
     font-family: var(--font-display);
-    font-weight: 600;
-    font-size: 15px;
-    letter-spacing: -0.02em;
+    font-weight: 500;
+    font-size: 14.5px;
+    letter-spacing: -0.005em;
     color: var(--ink);
     line-height: 1.2;
   }
@@ -1353,7 +1354,8 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 12px 0 8px;
+    /* New design: nav rail vertical padding 14px (was 12px/8px). */
+    padding: 14px 0;
     gap: 0;
   }
 
@@ -1370,23 +1372,29 @@
     box-sizing: border-box;
   }
 
+  /* New design nav-brand: 36px / radius 9px, serif wordmark mark at 18px. */
   .sb-rail-logo {
     width: 36px;
     height: 36px;
-    border-radius: 7px;
-    background: #f6f7f6;
-    color: #15201b;
+    border-radius: 9px;
+    background: var(--surface);
+    color: var(--ink);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
-    font-weight: 700;
-    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 400;
+    font-family: var(--font-serif);
     flex-shrink: 0;
   }
 
   .sb-rail-logo-text {
     letter-spacing: -0.02em;
+  }
+
+  /* New design nav-brand accent dot. */
+  .sb-rail-logo-dot {
+    color: var(--accent);
   }
 
   .sb-rail-expand {
@@ -1411,10 +1419,11 @@
     opacity: 1;
   }
 
+  /* New design nav-new: 38px / radius 9px. */
   .sb-rail-new {
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
     background: var(--accent);
     color: #fff;
     border: none;
@@ -1422,13 +1431,13 @@
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    margin-bottom: 16px;
+    margin-bottom: 14px;
     flex-shrink: 0;
-    transition: all .2s;
+    transition: background .15s;
   }
 
   .sb-rail-new:hover {
-    background: #0E6E49;
+    background: var(--accent-hover);
   }
 
   .sb-rail-new svg {
@@ -1444,10 +1453,11 @@
     width: 100%;
   }
 
+  /* New design nav-item: 42px / radius 9px. */
   .sb-rail-item {
-    width: 40px;
-    height: 40px;
-    border-radius: 8px;
+    width: 42px;
+    height: 42px;
+    border-radius: 9px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1455,17 +1465,18 @@
     border: none;
     color: var(--nav-text);
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background 0.12s, color 0.12s;
     position: relative;
   }
 
+  /* New design nav-tip: sits 54px from rail edge, tinted with --ink. */
   .nav-tooltip {
     position: absolute;
-    left: 50px;
+    left: 54px;
     top: 50%;
     transform: translate(0px, -50%);
-    background: #15201B;
-    color: #fff;
+    background: var(--ink);
+    color: var(--nav-text-hover);
     font-size: 11.5px;
     padding: 6px 10px;
     border-radius: 6px;
@@ -1473,7 +1484,8 @@
     white-space: nowrap;
     opacity: 0;
     pointer-events: none;
-    transition: all 0.3s;
+    z-index: 10;
+    transition: opacity 0.12s, transform 0.12s;
   }
 
   .nav-tooltip:before {
@@ -1484,7 +1496,7 @@
     transform: translateY(-50%) rotate(45deg);
     width: 6px;
     height: 6px;
-    background: #15201B;
+    background: var(--ink);
   }
 
   .sb-rail-item:hover .nav-tooltip {
@@ -1502,17 +1514,19 @@
     color: var(--nav-text-hover);
   }
 
-  /* 
+  /* New design active affordance: a green bar pinned to the rail's left edge.
+     Rail is 60px with a 42px item centered → 9px gutter each side; -9px lands
+     the bar flush against the rail edge. */
   .sb-rail-item.active::before {
     content: '';
     position: absolute;
-    left: 0;
-    top: 4px;
-    bottom: 4px;
+    left: -9px;
+    top: 10px;
+    bottom: 10px;
     width: 3px;
     background: var(--accent);
-    border-radius: 0 3px 3px 0;
-  } */
+    border-radius: 3px;
+  }
 
   .sb-rail-item svg {
     width: 18px;
@@ -1541,7 +1555,7 @@
   .divider-nav {
     width: 26px;
     height: 1px;
-    background: #1C4E3F;
+    background: var(--nav-2);
     margin: 4px 0;
   }
 
@@ -1554,13 +1568,14 @@
     width: 100%;
   }
 
+  /* New design av-nav: 32px, soft brand fill with a light brand border. */
   .sb-rail-avatar {
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
     border-radius: 50%;
     background: var(--accent-soft);
-    color: var(--accent);
-    border: 2px solid var(--accent);
+    color: var(--accent-ink);
+    border: 1px solid var(--accent-2);
     font-size: 11px;
     font-weight: 600;
     display: flex;
@@ -4233,12 +4248,13 @@
     }
   }
 
+  /* Design `.art-top` — 58px header, 22px gutters */
   .cpanel-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 0 16px;
+    padding: 0 22px;
     border-bottom: 1px solid var(--line);
     background: #fff;
     height: 58px;
@@ -12350,6 +12366,17 @@
     color: #828d87;
   }
 
+  /* Health probe found this active connector's token no longer valid. */
+  .set-conn-row .st.down {
+    background: #fbe4e4;
+    color: #a4262c;
+    border-color: #e6b3b3;
+  }
+
+  .set-conn-row .nm .s.is-disconnected {
+    color: #a4262c;
+  }
+
   .set-conn-row .ac {
     font-size: 11.5px;
     color: var(--accent);
@@ -12596,35 +12623,59 @@
   }
 
   /* ─── Configure drawer — Test connection block (commit K) ─── */
-  .conn-config-test {
-    margin-bottom: 18px;
-    padding-bottom: 14px;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .conn-config-test-row {
+  /* Auto-checked connection status badge at the top of the Configure drawer
+     (replaces the old manual "Test connection" button). */
+  .conn-config-status {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .conn-config-test-label {
+    gap: 8px;
+    margin-bottom: 18px;
+    padding: 10px 12px;
+    border-radius: 8px;
     font-size: 12.5px;
-    color: #15201b;
-    font-weight: 500;
+    background: #f6f7f6;
   }
 
-  .conn-config-test-ok {
-    margin: 8px 0 0;
-    font-size: 11.5px;
+  .conn-config-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #828d87;
+    flex: none;
+  }
+
+  .conn-config-status-label {
+    font-weight: 600;
+    color: #15201b;
+  }
+
+  .conn-config-status-detail {
+    color: #828d87;
+    overflow-wrap: anywhere;
+  }
+
+  .conn-config-status--connected {
+    background: rgba(23, 148, 99, 0.08);
+  }
+  .conn-config-status--connected .conn-config-status-dot {
+    background: #179463;
+  }
+  .conn-config-status--connected .conn-config-status-label {
     color: #0c6e4a;
   }
 
-  .conn-config-test-err {
-    margin: 8px 0 0;
-    font-size: 11.5px;
+  .conn-config-status--disconnected {
+    background: rgba(193, 56, 56, 0.06);
+  }
+  .conn-config-status--disconnected .conn-config-status-dot {
+    background: var(--danger, #C13838);
+  }
+  .conn-config-status--disconnected .conn-config-status-label {
     color: var(--danger, #C13838);
+  }
+
+  .conn-config-status--checking .conn-config-status-dot {
+    background: #c2c9c4;
   }
 
   /* ============================================================
@@ -13692,7 +13743,7 @@
       box-shadow 0.12s;
   }
 
-  .metric-card:hover:not(:disabled):not(.sel) {
+  .metric-card:hover:not(:disabled):not(.at-limit):not(.sel) {
     border-color: var(--accent-2);
     background: var(--surface-1, rgba(0, 0, 0, 0.02));
   }
@@ -13715,7 +13766,11 @@
     line-height: 1.45;
   }
 
-  .metric-card:disabled {
+  /* `.at-limit` = an unselected card once the 5-metric max is reached. It stays
+     clickable (so the click can surface the "up to 5" warning) but reads as
+     unavailable, matching the old hard-disabled look. */
+  .metric-card:disabled,
+  .metric-card.at-limit {
     opacity: 0.45;
     cursor: not-allowed;
   }
@@ -14396,12 +14451,13 @@
     border-color: transparent;
   }
 
+  /* Design `.art-h` — serif evidence headline */
   .ev-doc-title {
     font-family: var(--font-serif);
-    font-size: 22px;
-    font-weight: 500;
-    line-height: 1.25;
-    letter-spacing: -0.02em;
+    font-size: 26px;
+    font-weight: 400;
+    line-height: 1.18;
+    letter-spacing: -0.015em;
     color: var(--ink);
     margin: 0 0 6px;
   }
@@ -15612,8 +15668,526 @@
     to { transform: rotate(360deg); }
   }
 
+  /* ═══════════════════════════════════════════════════════════
+     ARTIFACT FOOTER ACTIONS  (design: .art-foot + .chip / .chip.b)
+     Contextual 3-chip footer rendered at the bottom of each rail
+     artifact (PRD / Evidence / Tickets). Visual-only restyle —
+     wiring lives in ArtifactFooterActions.tsx (#472).
+  ═══════════════════════════════════════════════════════════ */
+  .artifact-foot-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 0 4px;
+    margin-top: 8px;
+    border-top: 1px solid var(--line);
+  }
+
+  .artifact-foot-lbl {
+    flex: 1;
+    font-size: 12px;
+    color: var(--ink-2);
+    line-height: 1.4;
+  }
+
+  .artifact-foot-lbl strong {
+    color: var(--ink);
+    font-weight: 500;
+  }
+
+  /* Design `.chip` — outlined ghost pill */
+  .artifact-foot-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12.5px;
+    padding: 7px 14px;
+    border-radius: 30px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface-2);
+    color: var(--ink-2);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+
+  .artifact-foot-chip:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  /* Design `.chip.b` — brand-green primary (the forward step) */
+  .artifact-foot-chip.is-primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .artifact-foot-chip.is-primary:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     ARTIFACT HERO  (design: .art-hero / .art-cat / .art-h /
+     .art-ai-sum)  — shared evidence/detail reading-doc header
+  ═══════════════════════════════════════════════════════════ */
+  .art-hero {
+    margin-bottom: 6px;
+  }
+
+  .art-cat {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--ink-3);
+    margin-bottom: 8px;
+  }
+
+  .art-h {
+    font-family: var(--font-serif);
+    font-size: 26px;
+    font-weight: 400;
+    letter-spacing: -0.015em;
+    line-height: 1.18;
+    color: var(--ink);
+    margin: 0 0 16px;
+  }
+
+  .art-ai-sum {
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-soft);
+    border-radius: var(--radius-sm);
+    padding: 13px 15px;
+    margin-bottom: 20px;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  .art-ai-sum .art-ai-sum-h {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent-ink);
+    margin-bottom: 6px;
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     BACKLOG IDEA DETAIL PANEL  (design: .rail-bk-detail / .rbd-*)
+     Right-hand pane shown when a backlog idea is selected.
+  ═══════════════════════════════════════════════════════════ */
+  .bl-detail {
+    width: 420px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--line);
+    background: var(--surface-2);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .bl-detail-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .bl-detail-kicker {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-2);
+  }
+
+  /* Design `.rbd-rank` — brand rank pill */
+  .bl-detail-rank {
+    margin-left: auto;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+    padding: 3px 10px;
+    border-radius: 30px;
+  }
+
+  .bl-detail-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 18px;
+    color: var(--ink-3);
+    padding: 0;
+    line-height: 1;
+  }
+
+  .bl-detail-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px;
+  }
+
+  /* Design `.rbd-title` — serif headline */
+  .bl-detail-title {
+    font-family: var(--font-serif);
+    font-size: 21px;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+    color: var(--ink);
+    margin: 0 0 6px;
+  }
+
+  .bl-detail-sub {
+    font-size: 13px;
+    color: var(--ink-3);
+    margin: 0 0 16px;
+    line-height: 1.5;
+  }
+
+  .bl-detail-impact {
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-soft);
+    margin-bottom: 16px;
+    font-size: 13px;
+  }
+
+  .bl-detail-impact strong {
+    color: var(--accent-ink);
+  }
+
+  .bl-detail-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-3);
+    margin-bottom: 10px;
+  }
+
+  .bl-detail-msg {
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    margin-bottom: 16px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .bl-detail-msg--you {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink-2);
+  }
+
+  .bl-detail-msg--ai {
+    border: 1px solid var(--accent-soft);
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+
+  .bl-detail-msg-from {
+    margin-bottom: 8px;
+    font-weight: 500;
+  }
+
+  .bl-detail-msg--you .bl-detail-msg-from { color: var(--ink); }
+  .bl-detail-msg--ai .bl-detail-msg-from { color: var(--accent-ink); }
+
+  .bl-detail-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .bl-detail-btn {
+    font-size: 13px;
+    padding: 10px 16px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: background 0.12s, border-color 0.12s;
+  }
+
+  .bl-detail-btn--primary {
+    background: var(--accent);
+    color: #fff;
+    border: 1px solid var(--accent);
+    font-weight: 600;
+  }
+
+  .bl-detail-btn--primary:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  .bl-detail-btn--ghost {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    color: var(--ink-2);
+  }
+
+  .bl-detail-btn--ghost:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
   /* Syncing button state */
   .bl-btn-sync--loading {
     opacity: 0.6;
     cursor: default;
   }
+/* ── Roadmap Doc artifact view (`data-art-view="roadmapdoc"`) ─────────────────
+   A clean, read-only "word-doc" render of the company's uploaded roadmap.
+   Ported from the design's `rmdoc-*` rules; design tokens mapped to the app's
+   globals: --text3 → --muted, --amber-l/b/d → --warn-soft/--warn-border/--warn,
+   --bg2/--border/--ff/--r-sm already exist. */
+.rmdoc { padding: 6px 2px; }
+.rmdoc-cap {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 8px;
+}
+.rmdoc-h {
+  font-family: var(--ff); font-size: 24px; letter-spacing: -.015em;
+  color: var(--text); margin-bottom: 8px;
+}
+.rmdoc-strategy {
+  font-size: 13px; line-height: 1.6; color: var(--text2);
+  padding-bottom: 14px; border-bottom: 1px solid var(--border); margin-bottom: 14px;
+}
+.rmdoc-summary {
+  font-size: 13.5px; line-height: 1.7; color: var(--text);
+  padding-bottom: 16px; border-bottom: 1px solid var(--border);
+  margin-bottom: 18px; outline: none;
+}
+.rmdoc-summary strong { font-weight: 600; }
+.rmdoc-init { margin-bottom: 16px; }
+.rmdoc-init-h {
+  display: flex; align-items: center; gap: 9px; font-family: var(--ff);
+  font-size: 15px; letter-spacing: -.01em; color: var(--text); margin-bottom: 8px;
+}
+.rmdoc-row {
+  display: flex; align-items: center; gap: 10px; padding: 9px 11px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r-sm); margin-bottom: 5px;
+}
+.rmdoc-rt { flex: 1; font-size: 13px; color: var(--text); }
+.rmdoc-row.flag { border-color: var(--warn-border); background: var(--warn-soft); }
+.rmdoc-flagtag { font-size: 10.5px; font-weight: 600; color: var(--warn); }
+.rmdoc-foot {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  margin-top: 4px;
+}
+.rmdoc-foot .lbl { flex: 1; font-size: 11.5px; color: var(--muted); }
+
+/* Roadmap doc = clean word-doc: no artifact tabs / share / default footer CTAs
+   (the view is standalone, not part of the PRD/Evidence/Tickets flow). */
+.art-col[data-art-view="roadmapdoc"] .art-tabs,
+.art-col[data-art-view="roadmapdoc"] .share-pill {
+  display: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Templates · "what good looks like"  (TemplatesScreen.tsx)
+   The company's gold-standard PRD examples fed to the prd-author skill.
+═══════════════════════════════════════════════════════════════════════════ */
+
+.main--templates {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.tpl-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.tpl-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.tpl-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.tpl-title-icon { color: var(--accent); flex-shrink: 0; }
+
+.tpl-sub {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ink-3);
+  margin-left: 4px;
+}
+
+.tpl-upload { display: inline-flex; align-items: center; gap: 6px; }
+
+.tpl-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.tpl-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent-2);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.tpl-intro-icon { color: var(--accent); flex-shrink: 0; margin-top: 1px; }
+
+.tpl-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.tpl-filter {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.tpl-filter:hover { border-color: var(--line-strong); }
+
+.tpl-filter.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.tpl-msg {
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+}
+.tpl-msg-error { background: #fdeaea; color: #c13838; border: 1px solid #f5b3b3; }
+.tpl-msg-success { background: var(--accent-muted); color: var(--accent-ink); border: 1px solid var(--accent-2); }
+
+.tpl-placeholder { font-size: 13px; color: var(--ink-3); padding: 8px 0; }
+
+.tpl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.tpl-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.tpl-card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+.tpl-type {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  text-transform: none;
+}
+.tpl-type-prd { background: var(--accent-muted); color: var(--accent-ink); }
+.tpl-type-strategy { background: #f0eefb; color: #5b50b8; }
+.tpl-type-leadership { background: #e8f4fc; color: #4a7a9b; }
+.tpl-type-research { background: #fef3e2; color: #b06a10; }
+
+.tpl-gold {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.tpl-card-t { font-size: 14px; font-weight: 600; color: var(--ink); }
+.tpl-card-d { font-size: 12.5px; line-height: 1.45; color: var(--ink-3); flex: 1; }
+
+.tpl-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.tpl-by { font-size: 12px; color: var(--ink-3); }
+
+.tpl-remove {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-3);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 5px;
+}
+.tpl-remove:hover { color: #c13838; background: #fdeaea; }
+.tpl-remove:disabled { opacity: 0.6; cursor: default; }
+
+.tpl-card-add {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 6px;
+  min-height: 150px;
+  border-style: dashed;
+  border-color: var(--line-strong);
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.tpl-card-add:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
+.tpl-card-add:disabled { opacity: 0.6; cursor: default; }
+
+.tpl-add-t { font-size: 13.5px; font-weight: 600; }
+.tpl-add-s { font-size: 12px; color: var(--ink-3); max-width: 220px; }

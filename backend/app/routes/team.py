@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth import CompanyContext, require_company, require_session
+from app import team_email as team_email_mod
 from app.team_email import send_invite_email
 from app.db.team import (
     accept_invite_for_user,
@@ -123,7 +124,12 @@ def get_team_invites(company: CompanyContext = Depends(require_company)):
     }
 
 
-def _public_invite(row: dict, *, email_sent: bool | None = None) -> dict:
+def _public_invite(
+    row: dict,
+    *,
+    email_sent: bool | None = None,
+    existing_user: bool = False,
+) -> dict:
     out = {
         "id": row.get("id"),
         "email": row.get("email"),
@@ -133,7 +139,23 @@ def _public_invite(row: dict, *, email_sent: bool | None = None) -> dict:
     }
     if email_sent is not None:
         out["email_sent"] = email_sent
+    # True when the invitee already had a Sprntly account, so we emailed a
+    # magic-link sign-in instead of a new-user invite. Lets the UI say
+    # "they already have an account — they'll join on next sign-in".
+    if existing_user:
+        out["existing_user"] = True
     return out
+
+
+def _invite_result(row: dict, send_status: str) -> dict:
+    """Map a send_invite_email() status onto the invite response. Both SENT
+    and SENT_EXISTING mean an email went out (email_sent=True); only FAILED
+    surfaces the "email didn't send" warning in the UI."""
+    return _public_invite(
+        row,
+        email_sent=send_status != team_email_mod.FAILED,
+        existing_user=send_status == team_email_mod.SENT_EXISTING,
+    )
 
 
 @router.post("/invites", status_code=status.HTTP_201_CREATED)
@@ -161,12 +183,12 @@ def post_team_invite(
         role=body.role,
         invited_by=company.user_id,
     )
-    # Fire the Supabase magic-link email. Best-effort: if the call fails
-    # we still return 201 so the workspace_invites row stays visible in
-    # the UI, but `email_sent: false` lets the frontend nudge the
-    # inviter to resend or share the link manually.
-    email_sent = send_invite_email(body.email)
-    return _public_invite(row, email_sent=email_sent)
+    # Fire the invite email. Best-effort: if it fails we still return 201 so
+    # the workspace_invites row stays visible in the UI, but `email_sent:
+    # false` lets the frontend nudge the inviter to resend or share the link
+    # manually. Already-registered invitees get a magic-link sign-in instead
+    # (email_sent stays true; `existing_user` flags the different path).
+    return _invite_result(row, send_invite_email(body.email))
 
 
 @router.delete(
@@ -195,9 +217,9 @@ def resend_team_invite(
     if not invite or invite.get("company_id") != company.company_id:
         raise HTTPException(404, "Invite not found")
     updated = touch_invite(invite_id)
-    # Resend = bump created_at + actually fire a new magic-link email.
-    email_sent = send_invite_email(invite["email"])
-    return _public_invite(updated or invite, email_sent=email_sent)
+    # Resend = bump created_at + actually fire a new email (invite for new
+    # users, magic-link sign-in for already-registered ones).
+    return _invite_result(updated or invite, send_invite_email(invite["email"]))
 
 
 # ─────────────────────── Member edit / remove ───────────────────────

@@ -39,6 +39,10 @@ An importance×uncertainty grid (or ranked list), the leap-of-faith assumptions,
 - [ ] Each hypothesis is falsifiable with a numeric threshold.
 - [ ] Tests are the cheapest that could disprove the belief.
 
+
+## Absorbed from the field (added capability)
+**New-product risk lens (added):** for a new/0-to-1 product, widen assumption discovery beyond Value/Usability/Viability/Feasibility to also cover Go-to-Market, Strategy/Market-timing, Team/Execution, and Ethical/Regulatory risk — the categories that sink new products and that an existing-product lens misses. For existing products, the four core risks remain the default.
+
 ## Known gaps / limitations
 - Teams under-rate uncertainty on assumptions they like; the grid mitigates but can't eliminate this bias.
 - Test design here is lightweight; statistically rigorous tests route to `experiment-design`.

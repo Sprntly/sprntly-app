@@ -20,7 +20,7 @@ const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const updateWorkspaceMock = vi.fn()
 const advanceStepMock = vi.fn()
-const kpiPutMock = vi.fn()
+const kpiSelectionMock = vi.fn()
 
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
@@ -34,7 +34,10 @@ vi.mock("../../../../lib/onboarding/kpiTreeApi", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../../lib/onboarding/kpiTreeApi")>()
   return {
     ...actual,
-    kpiTreeApi: { put: (...a: unknown[]) => kpiPutMock(...a) },
+    kpiTreeApi: {
+      put: vi.fn(),
+      putFromSelection: (...a: unknown[]) => kpiSelectionMock(...a),
+    },
   }
 })
 
@@ -78,8 +81,8 @@ function cardByName(container: HTMLElement, name: string): HTMLButtonElement {
   ) as HTMLButtonElement
 }
 
-describe("Metrics (container) — pick exactly 3", () => {
-  it("seeds a flat candidate pool from the analysis with exactly 3 pre-selected", () => {
+describe("Metrics (container) — pick 3 to 5", () => {
+  it("seeds a flat candidate pool from the analysis with 3 pre-selected (the minimum)", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         workspace: makeWorkspace({ onboarding_step: 2 }),
@@ -103,12 +106,12 @@ describe("Metrics (container) — pick exactly 3", () => {
     ]) {
       expect(cardNames).toContain(m)
     }
-    // exactly 3 are pre-selected (green .sel state)
+    // 3 are pre-selected (the minimum), shown in the green .sel state
     expect(selectedCards(container).length).toBe(3)
-    // the count reflects 3 of 3
+    // the count reflects 3 selected and a ready state
     const count = container.querySelector(".metric-count") as HTMLElement
     expect(count.textContent).toContain("3")
-    expect(count.textContent).toContain("of 3")
+    expect(count.textContent).toContain("selected")
     // there is NO separate North Star input and NO supporting-metric tree
     expect(
       document.querySelector(
@@ -118,7 +121,7 @@ describe("Metrics (container) — pick exactly 3", () => {
     expect(container.querySelector(".mt-source")).toBeNull()
   })
 
-  it("enforces exactly 3: selecting a 4th is blocked, deselect frees a slot", () => {
+  it("allows up to 5 picks; a 6th is refused with a max-5 warning; deselecting frees a slot", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         workspace: makeWorkspace({ onboarding_step: 2 }),
@@ -128,25 +131,37 @@ describe("Metrics (container) — pick exactly 3", () => {
     const { container } = render(React.createElement(Metrics))
     expect(selectedCards(container).length).toBe(3)
 
-    // the 3 pre-selected are the first three; try selecting a 4th (Conversion rate)
-    const fourth = cardByName(container, "Conversion rate")
-    // it's disabled at the limit, but clicking still must not select it
-    fireEvent.click(fourth)
-    expect(selectedCards(container)).not.toContain("Conversion rate")
-    expect(selectedCards(container).length).toBe(3)
+    const allNames = () =>
+      Array.from(container.querySelectorAll(".metric-card")).map(
+        (c) => c.getAttribute("data-metric") as string,
+      )
+    const unpicked = () =>
+      allNames().filter((n) => !selectedCards(container).includes(n))
+    // Need ≥3 spare candidates to exercise the 4th, 5th, and (refused) 6th.
+    expect(unpicked().length).toBeGreaterThanOrEqual(3)
 
-    // deselect one of the picked → a slot frees up
-    const picked = selectedCards(container)[0]
-    fireEvent.click(cardByName(container, picked))
-    expect(selectedCards(container).length).toBe(2)
+    // 4th and 5th picks are allowed (max is 5).
+    fireEvent.click(cardByName(container, unpicked()[0]))
+    expect(selectedCards(container).length).toBe(4)
+    fireEvent.click(cardByName(container, unpicked()[0]))
+    expect(selectedCards(container).length).toBe(5)
 
-    // now the 4th can be selected
-    fireEvent.click(cardByName(container, "Conversion rate"))
-    expect(selectedCards(container)).toContain("Conversion rate")
-    expect(selectedCards(container).length).toBe(3)
+    // A 6th is refused: count stays 5 and the "up to 5" warning surfaces.
+    const sixth = unpicked()[0]
+    fireEvent.click(cardByName(container, sixth))
+    expect(selectedCards(container)).not.toContain(sixth)
+    expect(selectedCards(container).length).toBe(5)
+    expect(screen.getByText(/up to 5 metrics/i)).not.toBeNull()
+
+    // Deselect one → a slot frees up and the previously-refused card can be picked.
+    fireEvent.click(cardByName(container, selectedCards(container)[0]))
+    expect(selectedCards(container).length).toBe(4)
+    fireEvent.click(cardByName(container, sixth))
+    expect(selectedCards(container)).toContain(sixth)
+    expect(selectedCards(container).length).toBe(5)
   })
 
-  it("BLOCKS Continue when fewer than 3 are picked, with a pick-exactly-3 error (no supporting-metric blocker)", async () => {
+  it("BLOCKS Continue when fewer than 3 are picked, with a pick-at-least-3 error (no supporting-metric blocker)", async () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         workspace: makeWorkspace({ onboarding_step: 2 }),
@@ -166,11 +181,11 @@ describe("Metrics (container) — pick exactly 3", () => {
 
     // nothing persisted, no advance, no navigation
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
-    expect(kpiPutMock).not.toHaveBeenCalled()
+    expect(kpiSelectionMock).not.toHaveBeenCalled()
     expect(advanceStepMock).not.toHaveBeenCalled()
     expect(routerMock.push).not.toHaveBeenCalled()
-    // a pick-exactly-3 error shows (the old "Set a North Star" blocker is gone)
-    expect(screen.getByText(/Pick exactly 3 metrics to continue\./)).not.toBeNull()
+    // a pick-at-least-3 error shows (the old "Set a North Star" blocker is gone)
+    expect(screen.getByText(/Pick at least 3 metrics to continue\./)).not.toBeNull()
     // No North Star INPUT exists anymore (the metric is inferred server-side).
     expect(
       document.querySelector(
@@ -179,10 +194,10 @@ describe("Metrics (container) — pick exactly 3", () => {
     ).toBeNull()
   })
 
-  it("advances on exactly 3 picks, persisting the 3 to the KPI tree (north_star inferred server-side → placeholder = first pick)", async () => {
+  it("advances on 3 picks, sending the picks to the from-selection endpoint (server infers the North Star)", async () => {
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
     advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
-    kpiPutMock.mockResolvedValue({ ok: true, version: 2 })
+    kpiSelectionMock.mockResolvedValue({ ok: true, version: 2, north_star: "x" })
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: null }),
@@ -202,24 +217,19 @@ describe("Metrics (container) — pick exactly 3", () => {
       industry: "Fintech",
       business_type: "Marketplace",
     })
-    // the 3 picks → KPI tree
-    expect(kpiPutMock).toHaveBeenCalledTimes(1)
-    const payload = kpiPutMock.mock.calls[0][0] as {
-      north_star: { metric: string }
-      primary_metrics: { metric: string }[]
-      secondary_signals: { metric: string }[]
+    // the picks → /kpi-tree/from-selection as a flat metric list; the server
+    // infers the North Star (no north_star/placeholder sent from the client)
+    expect(kpiSelectionMock).toHaveBeenCalledTimes(1)
+    const payload = kpiSelectionMock.mock.calls[0][0] as {
+      metrics: { metric: string; description: string }[]
     }
-    const persisted = [
-      ...payload.primary_metrics,
-      ...payload.secondary_signals,
-    ].map((m) => m.metric)
-    // all three picks are persisted (none dropped)
+    const persisted = payload.metrics.map((m) => m.metric)
+    // all three picks are sent (none dropped), and no north_star field is present
     expect(persisted.sort()).toEqual([...picks].sort())
     expect(persisted.length).toBe(3)
-    // north_star is a placeholder = the first pick (server infers the real one)
-    expect(payload.north_star.metric).toBe(picks[0])
+    expect("north_star" in payload).toBe(false)
 
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 2)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 

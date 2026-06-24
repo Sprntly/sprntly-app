@@ -503,6 +503,92 @@ def test_split_2part_degenerate_single_part(isolated_settings):
     assert part_b == ""
 
 
+# ── format/style exemplars (company gold-standard templates) ─────────────
+
+def _wire_templates(isolated_settings, monkeypatch, company_id="co-tpl"):
+    """Point company_template storage at the fake db, seed a company, and make
+    the runner resolve the brief's slug to that company."""
+    db = isolated_settings["supabase"]
+    if not db.table("companies").select("id").eq("id", company_id).execute().data:
+        db.table("companies").insert(
+            {"id": company_id, "slug": "asurion", "display_name": "Co"}
+        ).execute()
+    import app.company_template as ct
+    monkeypatch.setattr(ct, "require_client", lambda: db)
+    monkeypatch.setattr(prd_runner, "company_id_for_slug", lambda _slug: company_id)
+    return ct
+
+
+def test_templates_reach_both_compose_calls(isolated_settings, monkeypatch):
+    """A company's uploaded gold-standard templates are folded into BOTH
+    part-calls as a FORMAT/STYLE EXEMPLARS block so the PRD matches house
+    structure & voice."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    ct = _wire_templates(isolated_settings, monkeypatch)
+    ct.save_company_template(
+        "co-tpl", filename="gold.md", data=b"GOLD_TEMPLATE_MARK", label="House style"
+    )
+
+    call, captured = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    assert len(captured) == 2
+    for c in captured:
+        assert "FORMAT/STYLE EXEMPLARS" in c["input"]
+        assert "GOLD_TEMPLATE_MARK" in c["input"]
+        assert "House style" in c["input"]
+        # additive: the structural template + insight are still present
+        assert "Part B" in c["input"]
+
+
+def test_no_templates_is_clean_no_op(isolated_settings, monkeypatch):
+    """No templates uploaded ⇒ no exemplars block in either compose call
+    (additive context only; absence is a clean no-op)."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    _wire_templates(isolated_settings, monkeypatch)  # company exists, but no templates
+
+    call, captured = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    for c in captured:
+        assert "FORMAT/STYLE EXEMPLARS" not in c["input"]
+    # PRD still completes normally.
+    assert db_mod.get_prd(prd_id)["status"] == "ready"
+
+
+def test_template_lookup_failure_does_not_break_prd(isolated_settings, monkeypatch):
+    """A templates read error degrades to no exemplars — never fails the PRD."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    monkeypatch.setattr(prd_runner, "company_id_for_slug", lambda _slug: "co-x")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("templates backend down")
+
+    monkeypatch.setattr(prd_runner, "render_templates_for_prompt", _boom)
+
+    call, captured = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    assert db_mod.get_prd(prd_id)["status"] == "ready"
+    for c in captured:
+        assert "FORMAT/STYLE EXEMPLARS" not in c["input"]
+
+
 # ── error paths (unchanged contract) ─────────────────────────────────────
 
 def test_run_sync_missing_brief_raises(isolated_settings):

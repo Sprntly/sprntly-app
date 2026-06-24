@@ -647,6 +647,42 @@ CREATE TABLE ticket_comments (
 );
 CREATE INDEX idx_ticket_comments_key ON ticket_comments (company_id, ticket_key);
 
+-- Roadmap doc storage (mirrors 20260623120000_roadmap_doc.sql, SQLite-ized).
+-- One row per company (UNIQUE company_id) so a re-upload upserts in place. Holds
+-- the original file (base64) + extracted text the weekly brief reads + the
+-- roadmapdoc artifact renders. bigint identity / timestamptz are INTEGER / TEXT
+-- under SQLite, matching the other seeded tables.
+CREATE TABLE roadmap_doc (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id     TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    filename       TEXT NOT NULL,
+    content_type   TEXT,
+    extracted_text TEXT NOT NULL DEFAULT '',
+    raw_b64        TEXT,
+    version        INTEGER NOT NULL DEFAULT 1,
+    uploaded_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id)
+);
+
+-- Company templates storage (mirrors 20260623140000_company_template.sql,
+-- SQLite-ized). MANY rows per company (unlike roadmap_doc's one-per-company):
+-- each gold-standard PRD exemplar is its own row, listed + individually
+-- deletable. Holds the original file (base64) + extracted text prd-author reads
+-- as FORMAT/STYLE EXEMPLARS. uuid / timestamptz are TEXT here, matching the
+-- other seeded tables.
+CREATE TABLE company_template (
+    id             TEXT PRIMARY KEY,
+    company_id     TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    label          TEXT,
+    type           TEXT NOT NULL DEFAULT 'prd',
+    filename       TEXT NOT NULL,
+    content_type   TEXT,
+    extracted_text TEXT NOT NULL DEFAULT '',
+    raw_b64        TEXT,
+    uploaded_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX company_template_company_idx ON company_template (company_id);
+
 -- Onboarding drip / nudge email tracking (mirrors
 -- 20260614100000_drip_email_sends.sql). One row per delivered (company ×
 -- member × step); UNIQUE is the de-dup guard so steps never double-send.
