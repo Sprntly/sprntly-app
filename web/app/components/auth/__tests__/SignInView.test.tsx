@@ -41,10 +41,10 @@ describe("SignInView (v4)", () => {
     expect(html).toContain("auth-logo")
   })
 
-  it("renders the design's brand tagline pill", () => {
+  it("renders the sign-in tag pill", () => {
     const html = render()
     expect(html).toContain("auth-tag")
-    expect(html).toContain("self-improving recursive AI loop")
+    expect(html).toContain("Sign in")
   })
 
   it("renders the serif heading with brand-green italic accent word", () => {
