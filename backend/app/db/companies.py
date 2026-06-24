@@ -13,17 +13,21 @@ from app.db.client import require_client, retry_on_disconnect
 @retry_on_disconnect
 def list_companies() -> list[dict]:
     """All companies (tenants), shaped {id, slug, display_name,
-    notification_settings}.
+    notification_settings, owner_timezone}.
 
     Used by the scheduler to iterate every tenant for the KG-synthesis cycle and
-    to read each company's configured timezone (notification_settings.timezone)
-    so the weekly brief fires Monday 09:00 in the company's local time.
+    to read each company owner's timezone (profiles.timezone, resolved via the
+    company's `owner`-role member) so the weekly brief fires Monday 06:00 in the
+    owner's local time.
 
     notification_settings is selected best-effort: the fake test Supabase + any
     older schema without the column would 400 on an explicit select, so we fall
     back to the legacy three-column select and default notification_settings to
     {} (resolve_timezone then uses the UTC default). The live schema has the
     JSONB column (20260525150000_onboarding_workspace.sql), so prod returns it.
+
+    owner_timezone is likewise best-effort: any failure (older schema, fake test
+    client) leaves it None and the scheduler falls back to UTC.
     """
     client = require_client()
     try:
@@ -33,7 +37,7 @@ def list_companies() -> list[dict]:
             .order("slug", desc=False)
             .execute()
         )
-        return result.data or []
+        rows = result.data or []
     except Exception:
         result = (
             client.table("companies")
@@ -44,7 +48,54 @@ def list_companies() -> list[dict]:
         rows = result.data or []
         for row in rows:
             row.setdefault("notification_settings", {})
-        return rows
+    return _attach_owner_timezones(rows)
+
+
+def _attach_owner_timezones(companies: list[dict]) -> list[dict]:
+    """Best-effort: set ``owner_timezone`` (IANA str or None) on each company.
+
+    Resolves each company's `owner`-role member → that user's profiles.timezone
+    in two bulk queries (no per-company round-trips). Any failure — legacy schema
+    without profiles.timezone, the fake test Supabase, an empty list — leaves
+    ``owner_timezone`` as None so the scheduler simply falls back to UTC.
+    """
+    for company in companies:
+        company.setdefault("owner_timezone", None)
+    company_ids = [c["id"] for c in companies if c.get("id")]
+    if not company_ids:
+        return companies
+
+    try:
+        client = require_client()
+        owners = (
+            client.table("company_members")
+            .select("company_id, user_id")
+            .eq("role", "owner")
+            .in_("company_id", company_ids)
+            .execute()
+            .data
+            or []
+        )
+        owner_user_by_company = {o["company_id"]: o["user_id"] for o in owners}
+        user_ids = list({uid for uid in owner_user_by_company.values() if uid})
+        tz_by_user: dict[str, str | None] = {}
+        if user_ids:
+            profiles = (
+                client.table("profiles")
+                .select("id, timezone")
+                .in_("id", user_ids)
+                .execute()
+                .data
+                or []
+            )
+            tz_by_user = {p["id"]: p.get("timezone") for p in profiles}
+        for company in companies:
+            owner = owner_user_by_company.get(company.get("id"))
+            if owner:
+                company["owner_timezone"] = tz_by_user.get(owner)
+    except Exception:  # noqa: BLE001 — degrade to UTC, never wedge the scheduler
+        pass
+    return companies
 
 
 @retry_on_disconnect

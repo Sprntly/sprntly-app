@@ -4,12 +4,12 @@ Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
 
   weekly_brief_tick  — fires every WEEKLY_BRIEF_TICK_MINUTES and, for each
                        company, generates the weekly brief iff the company's
-                       local Monday-09:00 firing window is open (v0 checklist
-                       2.4). Timezone comes from
-                       companies.notification_settings.timezone (default UTC).
-                       All day/time/tz/DST logic lives in the pure, unit-testable
-                       app.brief_schedule module; this job is the thin shell that
-                       ticks a clock and drives it per company.
+                       local Monday-06:00 firing window is open (v0 checklist
+                       2.4). Timezone comes from the company owner's
+                       profiles.timezone (default UTC). All day/time/tz/DST logic
+                       lives in the pure, unit-testable app.brief_schedule
+                       module; this job is the thin shell that ticks a clock and
+                       drives it per company.
   refresh_connectors — re-pulls connector data into the KG every
                        PIPELINE_INTERVAL_HOURS so the brief reads fresh data.
 """
@@ -23,7 +23,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app import db
-from app.brief_schedule import resolve_timezone, should_run_weekly_brief
+from app.brief_schedule import resolve_user_timezone, should_run_weekly_brief
 from app.config import settings
 from app.db.companies import list_companies
 from app.kg_ingest.auto_sync import kickoff_sync
@@ -140,13 +140,14 @@ async def _run_synthesis_for_all_companies() -> None:
 
 
 async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
-    """Generate the weekly brief for every company whose local Monday-09:00
+    """Generate the weekly brief for every company whose local Monday-06:00
     firing window is open right now (v0 checklist 2.4).
 
     Ticks every WEEKLY_BRIEF_TICK_MINUTES. For each company it:
-      1. resolves the timezone from notification_settings (default UTC),
+      1. resolves the timezone from the company owner's profiles.timezone
+         (default UTC),
       2. asks the PURE app.brief_schedule.should_run_weekly_brief whether the
-         company's local Monday-09:00 window is open and not yet fired this week,
+         company's local Monday-06:00 window is open and not yet fired this week,
       3. if due, generates that company's brief from current KG state and records
          the run in the in-memory once-per-week ledger.
 
@@ -172,7 +173,7 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
         slug = company.get("slug") or company_id
         if not slug:
             continue
-        tz = resolve_timezone(company.get("notification_settings"))
+        tz = resolve_user_timezone(company.get("owner_timezone"))
         last_run = _last_brief_run.get(company_id) if company_id else None
         if not should_run_weekly_brief(now, tz, last_run):
             continue
