@@ -345,6 +345,12 @@ export type PrdRecord = {
   generated_at: string
   title: string
   payload_md: string
+  /** Part B: the implementation-spec skill output (EARS requirements, design/
+   *  contracts, dependency-ordered tasks, acceptance tests, Definition of Done,
+   *  verification report), stored as faithful markdown. Returned by the
+   *  GET routes' `select("*")`. Optional — absent on legacy rows / when Part B
+   *  generation failed. */
+  llm_part?: string
   status: "generating" | "ready" | "failed"
   error?: string | null
   variant?: string

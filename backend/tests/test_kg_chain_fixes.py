@@ -209,8 +209,8 @@ def test_call_md_stream_retries_on_transient(isolated_settings, patch_client, mo
 
 
 def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
-    """End-to-end-ish: prd_runner._run_sync drives the gateway via TWO
-    concurrent prd-author calls (one per part); each emits its own half and
+    """End-to-end-ish: prd_runner._run_sync drives the gateway via Part A
+    (prd-author) then the chained Part B (implementation-spec, fed Part A);
     completion stores Part A → human_md, Part B → llm_part."""
     import app.prd_runner as pr
 
@@ -225,15 +225,18 @@ def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
                         lambda name: SimpleNamespace(templates={"prd-template.md": "TEMPLATE"}))
     monkeypatch.setattr(pr, "log_agent_decision", lambda **kw: None)
 
-    captured = {}
+    skills_seen = []
 
     def fake_llm(**kw):
-        captured.update(kw)
-        output = ("IMPL SPEC BODY" if kw.get("purpose") == "generate_prd_part_b"
-                  else "HUMAN PRD BODY")
+        skills_seen.append(kw.get("skill"))
+        is_b = kw.get("purpose") == "generate_prd_part_b"
+        output = "IMPL SPEC BODY" if is_b else "HUMAN PRD BODY"
+        # Part B must be fed the finished Part A.
+        if is_b:
+            assert "HUMAN PRD BODY" in kw["input"]
         return SimpleNamespace(
-            output=output,
-            model="m", prompt_version="prd-author-v1+prd-author@abc",
+            output=output, model="m",
+            prompt_version=(kw["prompt_version"] + "+" + kw["skill"] + "@abc"),
         )
 
     completed = {}
@@ -246,7 +249,7 @@ def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
 
     pr._run_sync(prd_id=7, brief_id=1, insight_index=0)
 
-    assert captured["skill"] == "prd-author"
+    assert skills_seen == ["prd-author", "implementation-spec"]
     assert completed["human_md"] == "HUMAN PRD BODY"
     assert completed["llm_part"] == "IMPL SPEC BODY"
 

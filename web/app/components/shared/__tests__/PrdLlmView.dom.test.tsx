@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 //
-// Regression tests for the PRD "LLM-readable" view's empty/generating states.
-// This view used to FABRICATE content when a PRD was missing or had empty
-// sections — a generic "guided, inline experience" feature blurb plus hardcoded
-// acceptance-criteria ("Completes in under 60 seconds") and definition-of-done
-// ("verified in Mixpanel dashboard") lists. That is exactly the "random data"
-// the empty-state pass removes: the view must show a real generating/empty state
-// and only ever render what the PRD actually contains.
+// Tests for the PRD "LLM-readable" view. This view renders the REAL Part B
+// (the implementation-spec markdown the backend stores in `llm_part`) faithfully
+// via the shared markdown renderer — EARS requirements, design/contracts,
+// dependency-ordered tasks, acceptance tests, Definition of Done, verification
+// report. It must NOT reconstruct a summary from Part A's parsed sections, and
+// it must NOT fabricate content when Part B is absent: an empty `llm_part`
+// shows an honest empty line instead.
 import * as React from "react"
 import { cleanup, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -32,7 +32,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("LlmReadableView — honest empty/generating states (no fabricated data)", () => {
+describe("LlmReadableView — renders the real Part B (llm_part)", () => {
   it("shows a generating state, not an empty prompt, while a PRD is generating", () => {
     view(null, { generating: true })
     expect(screen.getByTestId("llm-generating")).toBeTruthy()
@@ -44,37 +44,52 @@ describe("LlmReadableView — honest empty/generating states (no fabricated data
     expect(screen.getByText(/No PRD yet/i)).toBeTruthy()
   })
 
-  it("renders ONLY the PRD's real acceptance criteria and DoD — never the old fake lists", () => {
+  it("renders the real Part B markdown (EARS requirement + Tasks heading), not a reconstructed summary", () => {
+    const llmPart = [
+      "# Implementation Spec: Team Folders",
+      "",
+      "## Requirements",
+      "",
+      "- WHEN a folder is shared THE SYSTEM SHALL make it visible to all team members",
+      "",
+      "## Tasks",
+      "",
+      "1. Add a folders table behind a feature flag",
+      "2. Wire the share endpoint",
+    ].join("\n")
     const prd = {
       prd_id: 1,
       title: "Team Folders",
       metaLine: "From Brief · insight 0",
+      // Part A sections are present but must NOT drive the LLM view.
       sections: [
         { type: "prd-tldr", problem: "PMs lose track of folders.", fix: "Add shared team folders.", impact: "+8% retention" },
-        { type: "prd-acceptance-criteria", rows: [{ givenWhenThen: "Given a team, when a folder is shared, then all members see it" }] },
-        { type: "prd-dod", items: ["Migration ships behind a flag"] },
       ],
+      llmPart,
     }
     view(prd)
-    // Real content is present…
-    expect(screen.getByText(/all members see it/i)).toBeTruthy()
-    expect(screen.getByText(/Migration ships behind a flag/i)).toBeTruthy()
-    expect(screen.getByText(/Add shared team folders/i)).toBeTruthy() // tldr.fix in FEATURE
-    expect(screen.getByText(/PMs lose track of folders/i)).toBeTruthy() // tldr.problem in WHY
-    // …and none of the previously-hardcoded fabrications leak through.
-    expect(screen.queryByText(/Completes in under 60 seconds/i)).toBeNull()
-    expect(screen.queryByText(/Mixpanel/i)).toBeNull()
-    expect(screen.queryByText(/guided, inline experience/i)).toBeNull()
+    // The real Part B content renders…
+    expect(screen.getByTestId("llm-part-b")).toBeTruthy()
+    expect(screen.getByText(/WHEN a folder is shared THE SYSTEM SHALL/i)).toBeTruthy()
+    expect(screen.getByText(/^Tasks$/i)).toBeTruthy()
+    expect(screen.getByText(/Add a folders table behind a feature flag/i)).toBeTruthy()
+    // …and the empty state is NOT shown.
+    expect(screen.queryByTestId("llm-part-b-empty")).toBeNull()
+    // The Part A tldr fix must NOT be reconstructed into a FEATURE blurb here.
+    expect(screen.queryByText(/^FEATURE$/)).toBeNull()
   })
 
-  it("shows honest 'not specified' lines instead of inventing AC/DoD when sections are empty", () => {
-    const prd = { prd_id: 2, title: "Bare PRD", metaLine: "m", sections: [] }
+  it("shows an honest empty line when llm_part is absent/empty (Part B not generated)", () => {
+    const prd = { prd_id: 2, title: "Bare PRD", metaLine: "m", sections: [], llmPart: "" }
     view(prd)
-    expect(screen.getByText(/No acceptance criteria were specified in this PRD/i)).toBeTruthy()
-    expect(screen.getByText(/No definition of done was specified in this PRD/i)).toBeTruthy()
-    expect(screen.getByText(/Not specified in this PRD/i)).toBeTruthy() // WHY
-    // The fabricated fallback lists must be gone.
-    expect(screen.queryByText(/Telemetry: started/i)).toBeNull()
-    expect(screen.queryByText(/PM sign-off/i)).toBeNull()
+    expect(screen.getByTestId("llm-part-b-empty")).toBeTruthy()
+    expect(screen.getByText(/No implementation spec yet/i)).toBeTruthy()
+    expect(screen.queryByTestId("llm-part-b")).toBeNull()
+  })
+
+  it("does not crash and shows the empty line when llmPart is undefined entirely", () => {
+    const prd = { prd_id: 3, title: "No Part B", metaLine: "m", sections: [] }
+    view(prd)
+    expect(screen.getByTestId("llm-part-b-empty")).toBeTruthy()
   })
 })

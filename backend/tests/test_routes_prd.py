@@ -304,8 +304,11 @@ def test_generate_via_prd_author_skill_through_canonical_path(
         "WHEN x THE SYSTEM SHALL y.\n"
     )
 
+    skills_seen: list = []
+
     def _capture(**kwargs):
         captured.update(kwargs)
+        skills_seen.append(kwargs.get("skill"))
         output = part_b if kwargs.get("purpose") == "generate_prd_part_b" else part_a
         return LLMResult(
             output=output, model="claude-sonnet-4-6",
@@ -330,7 +333,9 @@ def test_generate_via_prd_author_skill_through_canonical_path(
     finally:
         loop.close()
 
-    assert captured["skill"] == "prd-author"
+    # Part A binds prd-author; Part B binds the dedicated implementation-spec.
+    assert "prd-author" in skills_seen
+    assert "implementation-spec" in skills_seen
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
     assert row["variant"] == "v2"

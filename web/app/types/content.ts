@@ -521,6 +521,10 @@ export interface PrdState extends PrdContent {
   prd_id: number
   /** Figma file key when the PRD has a connected Figma source; undefined/null when none. */
   figma_file_key?: string | null
+  /** Part B — the implementation-spec markdown (`PrdRecord.llm_part`). Rendered
+   *  faithfully in the LLM-readable view. Undefined/empty when Part B wasn't
+   *  generated or failed. */
+  llmPart?: string
 }
 
 export interface AppContentState {
