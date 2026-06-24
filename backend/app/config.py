@@ -207,8 +207,10 @@ class Settings(BaseSettings):
     connector_health_enabled: bool = True
     connector_health_interval_minutes: int = 60
     connector_health_min_recheck_minutes: int = 50
-    # Single admin alert address. Empty => fall back to signin_monitor_alert_email;
-    # both empty => log-only / no email.
+    # FALLBACK alert address only. Disconnect alerts go to each connector's
+    # OWNER (resolved from profiles); this catches connectors whose owner email
+    # can't be resolved. Empty => fall back to signin_monitor_alert_email; both
+    # empty => unrouted connectors are log-only.
     connector_health_alert_email: str = ""
 
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
