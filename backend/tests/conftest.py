@@ -664,7 +664,7 @@ CREATE TABLE roadmap_doc (
     UNIQUE (company_id)
 );
 
--- Company templates storage (mirrors 20260623130000_company_template.sql,
+-- Company templates storage (mirrors 20260623140000_company_template.sql,
 -- SQLite-ized). MANY rows per company (unlike roadmap_doc's one-per-company):
 -- each gold-standard PRD exemplar is its own row, listed + individually
 -- deletable. Holds the original file (base64) + extracted text prd-author reads

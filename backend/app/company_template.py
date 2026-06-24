@@ -12,7 +12,7 @@ This is the SIBLING of roadmap_doc.py (see that module), with two differences:
   - It shapes prd-author OUTPUT FORMAT (structure/voice), not brief priorities.
 
 Storage: `company_template` table, keyed by `id`, scoped to `company_id` — see
-supabase/migrations/20260623130000_company_template.sql. The original file bytes
+supabase/migrations/20260623140000_company_template.sql. The original file bytes
 are base64-encoded into `raw_b64` for a future source-download affordance; the
 LLM only ever reads `extracted_text` (markdown produced by app.ingest.convert,
 the SAME converter the dataset/roadmap upload paths use).

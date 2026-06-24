@@ -17,4 +17,8 @@ create table if not exists company_template (
 create index if not exists company_template_company_idx
   on company_template (company_id);
 alter table company_template enable row level security;
+-- Idempotent policy create: drop-if-exists first so this migration re-applies
+-- cleanly on any environment where an earlier run already created the policy
+-- (cf. roadmap_doc / #491).
+drop policy if exists "srv_company_template" on company_template;
 create policy "srv_company_template" on company_template for all using (true) with check (true);
