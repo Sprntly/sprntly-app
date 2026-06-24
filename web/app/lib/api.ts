@@ -136,8 +136,46 @@ export type ChartHint = {
   title: string
   data: { label: string; value: number }[]
 }
+/** The weekly-brief skill's closed type taxonomy (drives accent + the category
+ *  pill). See backend/skills/weekly-brief/SKILL.md step 3. */
+export type BriefSkillType =
+  | "reliability"
+  | "retention"
+  | "competitive"
+  | "growth"
+  | "demand"
+  | "engagement"
+  | "compliance"
+
+export type BriefSkillCta = {
+  label: "View PRD" | "Draft PRD" | "View prototype" | "Generate prototype" | string
+  style: "primary" | "ghost" | string
+}
+
+/** The skill's native card, attached to each insight by the backend as `_card`
+ *  (weekly_brief_skill.cards_to_insights). The render layer prefers this over
+ *  the legacy tag fields. `accent` may be mismatched to `type` by the model —
+ *  derive accent from `type` instead (see lib/brief-skill-taxonomy). */
+export type BriefSkillCard = {
+  type?: BriefSkillType | string
+  accent?: string
+  title?: string
+  body?: string
+  sources?: string[]
+  ctas?: BriefSkillCta[]
+  signal_id?: string
+}
+
 export type Insight = {
   tag: "something_new" | "something_better" | "something_broken"
+  /** Skill taxonomy type, hoisted to the insight top level by newer backends.
+   *  Older briefs carry it only inside `_card`. */
+  type?: BriefSkillType | string
+  /** Skill accent hex (may be model-mismatched — prefer deriving from `type`). */
+  accent?: string
+  /** The skill's native card (type/accent/body/sources/ctas), attached by the
+   *  backend. Present on briefs generated since the skill sweep. */
+  _card?: BriefSkillCard
   title: string
   subtitle: string
   metrics: BriefMetric[]
