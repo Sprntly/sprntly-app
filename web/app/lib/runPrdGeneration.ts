@@ -48,6 +48,7 @@ async function pollPrdToResult(
       ...markdownToPrdState(prd.payload_md),
       prd_id: prd.id,
       figma_file_key: undefined,
+      llmPart: prd.llm_part,
     },
   }
 }
@@ -101,6 +102,7 @@ export async function loadPrdById(prdId: number): Promise<PrdLoadResult> {
       ...markdownToPrdState(prd.payload_md),
       prd_id: prd.id,
       figma_file_key: undefined,
+      llmPart: prd.llm_part,
     },
   }
 }
@@ -125,6 +127,7 @@ export async function loadLatestPrd(dataset: string): Promise<PrdLoadResult> {
       ...markdownToPrdState(prd.payload_md),
       prd_id: prd.id,
       figma_file_key: undefined,
+      llmPart: prd.llm_part,
     },
   }
 }

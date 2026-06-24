@@ -151,22 +151,12 @@ export function LlmReadableView({ prd, generating, loading }: { prd: PrdState | 
     )
   }
 
-  const tldr = prd.sections.find((s) => s.type === "prd-tldr")
-  const problemSection = prd.sections.find((s) => s.type === "prd-problem")
-  const acSection = prd.sections.find((s) => s.type === "prd-acceptance-criteria")
-  const dodSection = prd.sections.find((s) => s.type === "prd-dod")
-
-  // Surface only what the PRD actually contains — no fabricated feature blurb,
-  // acceptance criteria, or definition of done. Missing sections get an honest
-  // empty line instead of invented content.
-  const featureText = tldr && tldr.type === "prd-tldr" && tldr.fix ? tldr.fix.trim() : null
-  const whyText =
-    tldr && tldr.type === "prd-tldr" && tldr.problem
-      ? tldr.problem.trim()
-      : problemSection && problemSection.type === "prd-problem" && problemSection.userStory
-        ? problemSection.userStory.trim()
-        : null
-  const mutedStyle = { color: "var(--ink-2)" } as const
+  // Render the REAL Part B (implementation-spec markdown) the backend stores in
+  // `llm_part` — EARS requirements, design/contracts, dependency-ordered tasks,
+  // acceptance tests, Definition of Done, verification report. No reconstruction
+  // from Part A: parse the markdown and render it faithfully via PrdSections.
+  const llmPart = prd.llmPart?.trim() ?? ""
+  const partB = llmPart ? markdownToPrdState(llmPart) : null
 
   return (
     <div className="llm-view">
@@ -183,8 +173,10 @@ export function LlmReadableView({ prd, generating, loading }: { prd: PrdState | 
         <button
           type="button"
           className="llm-action-btn"
+          disabled={!llmPart}
           onClick={() => {
-            navigator.clipboard.writeText(`Implementation brief for: ${prd.title}`).catch(() => {})
+            if (!llmPart) return
+            navigator.clipboard.writeText(llmPart).catch(() => {})
             showToast("Copied", "Implementation brief copied to clipboard.")
           }}
         >
@@ -205,43 +197,17 @@ export function LlmReadableView({ prd, generating, loading }: { prd: PrdState | 
         </button>
       </div>
 
-      <div className="llm-section">
-        <div className="llm-section-label">FEATURE</div>
-        <p className="llm-section-body">
-          Build <strong>{prd.title}</strong>{featureText ? <>. {featureText}</> : "."}
-        </p>
-      </div>
-
-      <div className="llm-section">
-        <div className="llm-section-label">WHY WE ARE BUILDING IT</div>
-        {whyText ? (
-          <p className="llm-section-body">{whyText}</p>
-        ) : (
-          <p className="llm-section-body" style={mutedStyle}>Not specified in this PRD.</p>
-        )}
-      </div>
-
-      <div className="llm-section">
-        <div className="llm-section-label">ACCEPTANCE CRITERIA</div>
-        {acSection && acSection.type === "prd-acceptance-criteria" && acSection.rows.length > 0 ? (
-          <ul className="llm-criteria">
-            {acSection.rows.map((row, i) => <li key={i}>{row.givenWhenThen}</li>)}
-          </ul>
-        ) : (
-          <p className="llm-section-body" style={mutedStyle}>No acceptance criteria were specified in this PRD.</p>
-        )}
-      </div>
-
-      <div className="llm-section">
-        <div className="llm-section-label">DEFINITION OF DONE</div>
-        {dodSection && dodSection.type === "prd-dod" && dodSection.items.length > 0 ? (
-          <ul className="llm-criteria">
-            {dodSection.items.map((item, i) => <li key={i}>{item}</li>)}
-          </ul>
-        ) : (
-          <p className="llm-section-body" style={mutedStyle}>No definition of done was specified in this PRD.</p>
-        )}
-      </div>
+      {partB ? (
+        <div className="llm-section" data-testid="llm-part-b">
+          <PrdSections sections={partB.sections} />
+        </div>
+      ) : (
+        <div className="llm-section">
+          <p className="llm-section-body" style={{ color: "var(--ink-2)" }} data-testid="llm-part-b-empty">
+            No implementation spec yet — it generates alongside the PRD.
+          </p>
+        </div>
+      )}
     </div>
   )
 }
@@ -281,7 +247,7 @@ export function PrdPanelContent() {
     prdApi.latest(activeCompany).then((record) => {
       if (cancelled || !record.payload_md) return
       setBriefRef({ briefId: record.brief_id, insightIndex: record.insight_index })
-      setContent({ prd: { ...markdownToPrdState(record.payload_md), prd_id: record.id, figma_file_key: undefined } })
+      setContent({ prd: { ...markdownToPrdState(record.payload_md), prd_id: record.id, figma_file_key: undefined, llmPart: record.llm_part } })
     }).catch((e) => {
       if (e instanceof ApiError && e.status === 404) return
     }).finally(() => { if (!cancelled) setPrdLoading(false) })
@@ -324,7 +290,7 @@ export function PrdPanelContent() {
     try {
       const rec = await prdApi.get(genId)
       setBriefRef({ briefId: rec.brief_id, insightIndex: rec.insight_index })
-      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined } })
+      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, llmPart: rec.llm_part } })
       setShowVersions(false)
     } catch {
       showToast("Couldn't open version", "Failed to load that generation.")

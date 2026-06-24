@@ -1,26 +1,25 @@
-"""Tests for app.prd_runner — the 2-part PRD generation, now produced by TWO
-CONCURRENT `prd-author` calls instead of one sequential call that emits both
-halves and is then split.
+"""Tests for app.prd_runner — the 2-part PRD generation. Part A (the human PRD)
+is produced by the `prd-author` skill; Part B (the Implementation Spec) is now
+produced by the dedicated `implementation-spec` skill, fed the FINISHED Part A
+(chained), instead of a second prd-author call steered by a directive.
 
 Contract under test:
-  - Part A (human PRD) and Part B (Implementation Spec) are produced by TWO
-    separate `gateway.llm_call` invocations, both bound to skill='prd-author'
-    (METHOD + version pin preserved), each steered to one half via a per-part
-    directive in the prompt.
-  - The two calls run CONCURRENTLY (wall-clock ~max, not sum) — asserted with a
-    threading.Barrier the two mocked calls must both reach before either
-    returns, and via a sequential-vs-concurrent timing check.
+  - Part A and Part B are produced by TWO separate `gateway.llm_call`
+    invocations: Part A binds skill='prd-author' (steered to the human-PRD half
+    via _PART_A_DIRECTIVE); Part B binds skill='implementation-spec' and is fed
+    the finished Part A as its input.
+  - The two calls are CHAINED (Part B runs after Part A, consuming its output) —
+    asserted by Part B's prompt containing Part A's text and by call order.
   - Part A output → payload_md; Part B output → llm_part.
   - Part B empty (degenerate) still renders payload_md (Part A alone is valid).
   - Part B CALL failure → PRD still completes with Part A + empty llm_part, and
-    the failure is logged (not silent), Part A failure fails the whole PRD.
-  - The generation is decision-logged with the prd-author skill hash pinned and
+    the failure is logged (not silent); Part A failure fails the whole PRD.
+  - The generation is decision-logged with both skills recorded and
     has_llm_part accurate.
 
-The runner generates via `gateway.llm_call(skill="prd-author", ...)`. These
-tests mock at the gateway/llm seam: most patch `prd_runner.llm_call`; a couple
-let the REAL gateway run and patch `app.llm.call_md` to assert the prd-author
-METHOD reaches the prompt and its content-hash reaches the decision log.
+These tests mock at the gateway/llm seam: most patch `prd_runner.llm_call`; a
+couple let the REAL gateway run and patch `app.llm.call_md` to assert each
+half's METHOD (prd-author for A, implementation-spec for B) reaches the prompt.
 
 New rows are written with variant='v2' by the route; the runner itself
 doesn't touch variant — it produces the two parts and calls
@@ -117,9 +116,9 @@ def test_run_sync_makes_two_separate_llm_calls(isolated_settings, monkeypatch):
     assert purposes == {"generate_prd_part_a", "generate_prd_part_b"}
 
 
-def test_both_calls_bind_prd_author_skill(isolated_settings, monkeypatch):
-    """BOTH calls keep skill='prd-author' so the METHOD + version pin apply to
-    each half."""
+def test_part_a_binds_prd_author_part_b_binds_impl_spec(isolated_settings, monkeypatch):
+    """Part A binds skill='prd-author'; Part B binds skill='implementation-spec'
+    — the dedicated spec skill. Both calls are the 'prd' agent."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
@@ -129,14 +128,16 @@ def test_both_calls_bind_prd_author_skill(isolated_settings, monkeypatch):
     monkeypatch.setattr(prd_runner, "llm_call", call)
     prd_runner._run_sync(prd_id, brief_id, 0)
 
-    assert all(c["skill"] == "prd-author" for c in captured)
+    by_purpose = {c["purpose"]: c for c in captured}
+    assert by_purpose["generate_prd_part_a"]["skill"] == "prd-author"
+    assert by_purpose["generate_prd_part_b"]["skill"] == "implementation-spec"
     assert all(c["agent"] == "prd" for c in captured)
 
 
-def test_calls_carry_distinct_part_directives(isolated_settings, monkeypatch):
-    """Each call is steered to exactly one half via a distinct directive — the
-    'only Part A' / 'only Part B' instruction that achieves single-part output
-    while keeping the same skill binding."""
+def test_part_a_directed_part_b_fed_finished_part_a(isolated_settings, monkeypatch):
+    """Part A is steered to the human-PRD half via its directive. Part B is NOT
+    directive-steered — it is the implementation-spec skill fed the FINISHED
+    Part A as its input (the chaining contract)."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
@@ -149,18 +150,18 @@ def test_calls_carry_distinct_part_directives(isolated_settings, monkeypatch):
     by_purpose = {c["purpose"]: c for c in captured}
     a_input = by_purpose["generate_prd_part_a"]["input"]
     b_input = by_purpose["generate_prd_part_b"]["input"]
-    # Part-A call directs ONLY Part A and forbids Part B + the separator.
+    # Part-A call directs ONLY Part A and forbids the separator.
     assert "ONLY Part A" in a_input
     assert "do NOT emit the `---`" in a_input
-    # Part-B call directs ONLY Part B.
-    assert "ONLY Part B" in b_input
-    # Distinct directives — not the same prompt twice.
-    assert a_input != b_input
+    # Part-B is fed the finished human PRD (Part A's output text), not a directive.
+    assert "HUMAN PRD (Part A" in b_input
+    assert "Ship the thing" in b_input  # Part A's content (from _PART_A) flows in
+    assert "ONLY Part B" not in b_input
 
 
-def test_both_calls_share_same_insight_and_evidence(isolated_settings, monkeypatch):
-    """Coherence: both calls receive the SAME insight + grounding so the two
-    halves derive from the same brief."""
+def test_part_b_derives_from_part_a_and_shared_evidence(isolated_settings, monkeypatch):
+    """Coherence: Part A receives the insight + grounding; Part B derives from
+    the finished Part A and the SAME evidence, so the two halves stay aligned."""
     _seed_corpus(isolated_settings["data_dir"], body="UNIQUE_CORPUS_MARK")
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(
@@ -172,64 +173,45 @@ def test_both_calls_share_same_insight_and_evidence(isolated_settings, monkeypat
     monkeypatch.setattr(prd_runner, "llm_call", call)
     prd_runner._run_sync(prd_id, brief_id, 0)
 
-    for c in captured:
-        assert "UNIQUE_INSIGHT_MARK" in c["input"]
-        assert "UNIQUE_CORPUS_MARK" in c["input"]
-        # The full template structure rides along to both.
-        assert "Part B" in c["input"]
+    by_purpose = {c["purpose"]: c for c in captured}
+    a_input = by_purpose["generate_prd_part_a"]["input"]
+    b_input = by_purpose["generate_prd_part_b"]["input"]
+    # Part A gets the insight directly.
+    assert "UNIQUE_INSIGHT_MARK" in a_input
+    # Both share the same evidence grounding.
+    assert "UNIQUE_CORPUS_MARK" in a_input
+    assert "UNIQUE_CORPUS_MARK" in b_input
+    # Part B derives from the finished Part A (its output text flows in).
+    assert "Part A — Product Requirements Document" in b_input
 
 
-# ── concurrency ──────────────────────────────────────────────────────────
+# ── chaining ─────────────────────────────────────────────────────────────
 
-def test_two_calls_run_concurrently_barrier(isolated_settings, monkeypatch):
-    """Both calls are issued before EITHER completes: a 2-party barrier inside
-    the mock only releases if both threads reach it together. If the runner ran
-    them sequentially the barrier would time out (BrokenBarrierError)."""
+def test_part_b_runs_after_part_a_chained(isolated_settings, monkeypatch):
+    """Part B runs AFTER Part A and consumes its output: the calls are ordered
+    (A then B) and Part B's prompt carries Part A's finished text."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
     prd_id = _start_prd(db_mod, brief_id)
 
-    barrier = threading.Barrier(2, timeout=5)
+    order: list[str] = []
 
     def _call(**kwargs):
-        # Blocks until BOTH part-calls have entered — proving concurrency.
-        barrier.wait()
+        order.append(kwargs["purpose"])
         if kwargs.get("purpose") == "generate_prd_part_b":
+            # Part B must be fed the finished Part A text.
+            assert "Ship the thing" in kwargs["input"]
             return _llm_result(_PART_B)
         return _llm_result(_PART_A)
 
     monkeypatch.setattr(prd_runner, "llm_call", _call)
-    # Would raise BrokenBarrierError on timeout if calls were sequential.
     prd_runner._run_sync(prd_id, brief_id, 0)
 
+    # Strict order: Part A completes before Part B is issued.
+    assert order == ["generate_prd_part_a", "generate_prd_part_b"]
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
-
-
-def test_wall_clock_is_max_not_sum(isolated_settings, monkeypatch):
-    """Each call sleeps; concurrent wall-clock is ~max(A,B), well under A+B."""
-    _seed_corpus(isolated_settings["data_dir"])
-    db_mod = isolated_settings["db"]
-    brief_id = _seed_brief(db_mod)
-    prd_id = _start_prd(db_mod, brief_id)
-
-    delay = 0.4
-
-    def _call(**kwargs):
-        time.sleep(delay)
-        if kwargs.get("purpose") == "generate_prd_part_b":
-            return _llm_result(_PART_B)
-        return _llm_result(_PART_A)
-
-    monkeypatch.setattr(prd_runner, "llm_call", _call)
-    t0 = time.monotonic()
-    prd_runner._run_sync(prd_id, brief_id, 0)
-    elapsed = time.monotonic() - t0
-
-    # Sequential would be ~2*delay; concurrent ~1*delay. Assert clearly under
-    # the sum with margin.
-    assert elapsed < 2 * delay - 0.1, f"elapsed={elapsed:.3f}s not concurrent"
 
 
 # ── assembly + storage ───────────────────────────────────────────────────
@@ -456,31 +438,35 @@ def test_decision_log_records_part_b_error(isolated_settings, monkeypatch):
     assert gen[0]["factors"]["has_llm_part"] is False
 
 
-def test_real_gateway_prepends_method_to_both_calls(isolated_settings, monkeypatch):
-    """End-to-end through the real gateway: the prd-author METHOD (its SKILL.md)
-    is prepended to the system prompt of BOTH part-calls."""
+def test_real_gateway_prepends_each_halfs_method(isolated_settings, monkeypatch):
+    """End-to-end through the real gateway: Part A's prompt carries the
+    prd-author METHOD; Part B's carries the implementation-spec METHOD."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
     prd_id = _start_prd(db_mod, brief_id)
 
-    systems: list[str] = []
+    systems: dict[str, str] = {}
 
     def _call_md(**kwargs):
-        systems.append(kwargs["system"])
-        if "ONLY Part B" in kwargs["user"]:
+        # Part B's user prompt is fed the finished human PRD.
+        if "HUMAN PRD (Part A" in kwargs["user"]:
+            systems["b"] = kwargs["system"]
             return _PART_B
+        systems["a"] = kwargs["system"]
         return _PART_A
 
     import app.graph.gateway as gw
     monkeypatch.setattr(gw, "call_md", _call_md)
     prd_runner._run_sync(prd_id, brief_id, 0)
 
-    assert len(systems) == 2
-    for sys_prompt in systems:
-        assert "METHOD (skill: prd-author" in sys_prompt
-        assert "PRD Author" in sys_prompt           # from SKILL.md
-        assert "Sprntly's PRD agent" in sys_prompt  # agent layer, after method
+    assert set(systems) == {"a", "b"}
+    # Part A: prd-author METHOD + the PRD agent layer after it.
+    assert "METHOD (skill: prd-author" in systems["a"]
+    assert "Sprntly's PRD agent" in systems["a"]
+    # Part B: the implementation-spec METHOD + the spec agent layer.
+    assert "METHOD (skill: implementation-spec" in systems["b"]
+    assert "Sprntly's Implementation Spec agent" in systems["b"]
 
     row = db_mod.get_prd(prd_id)
     assert "Part A" in row["payload_md"]
