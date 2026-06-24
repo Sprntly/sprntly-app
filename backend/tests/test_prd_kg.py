@@ -315,24 +315,27 @@ def _setup_kg_prd(isolated_settings, facade, *, support_n=2):
 
 
 def test_prd_grounds_on_kg_trail_not_corpus(isolated_settings, facade, monkeypatch):
-    """The prd-author input carries the KG trail's signals (cited) and NOT the
-    corpus dump (KG-first grounding)."""
+    """Part A's input carries the KG trail's signals (cited) and NOT the corpus
+    dump (KG-first grounding). Part A binds prd-author; Part B (chained) binds
+    implementation-spec."""
     db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
 
-    captured: dict = {}
+    calls: list[dict] = []
     monkeypatch.setattr(prd_runner, "llm_call",
-                        lambda **kw: (captured.update(kw), _llm_result(_TWO_PART))[1])
+                        lambda **kw: (calls.append(kw), _llm_result(_TWO_PART))[1])
     prd_runner._run_sync(prd_id, brief_id, 0)
 
-    inp = captured["input"]
+    by_purpose = {c["purpose"]: c for c in calls}
+    inp = by_purpose["generate_prd_part_a"]["input"]
     assert "KNOWLEDGE GRAPH EVIDENCE" in inp
     assert "KG_SIGNAL_MARK abandon at pay" in inp
     assert "customer_voice" in inp           # source_type cited
     assert "zendesk" in inp                   # provenance cited
     assert "CORPUS_FALLBACK_MARK" not in inp  # corpus is NOT dumped
-    # Skill binding + agent framing unchanged.
-    assert captured["skill"] == "prd-author"
-    assert captured["agent"] == "prd"
+    # Part A binds prd-author; Part B the dedicated implementation-spec skill.
+    assert by_purpose["generate_prd_part_a"]["skill"] == "prd-author"
+    assert by_purpose["generate_prd_part_b"]["skill"] == "implementation-spec"
+    assert all(c["agent"] == "prd" for c in calls)
 
 
 def test_prd_decision_log_carries_kg_refs(isolated_settings, facade, monkeypatch):
