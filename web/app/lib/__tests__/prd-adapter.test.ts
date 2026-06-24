@@ -315,4 +315,84 @@ describe("markdownToPrdState", () => {
       expect(c.text).toContain("[mystery block")
     }
   })
+
+  it("parses :::qa-scenarios into a qa-scenarios section with rows + openQuestions", () => {
+    const md = [
+      "# QA Test Scenarios — Checkout flow",
+      "",
+      "Verify the deductible-step move end to end.",
+      "",
+      ":::qa-scenarios",
+      JSON.stringify({
+        scenarios: [
+          {
+            id: "QA-001",
+            group: "happy",
+            title: "Completes with default deductible",
+            given: "a returning claimant on step 1",
+            when: "they accept the default deductible",
+            then: "the claim is submitted",
+            traces: "REQ-1 deductible default",
+            risk: "low",
+          },
+          {
+            id: "QA-002",
+            group: "failure",
+            title: "Network drop mid-submit",
+            given: "a claimant on the final step",
+            when: "the network drops during submit",
+            then: "the draft is preserved and an error shows",
+            traces: "REQ-4 resilience",
+            risk: "high",
+          },
+        ],
+        open_questions: ["Should partial drafts expire?"],
+      }),
+      ":::",
+    ].join("\n")
+    const out = markdownToPrdState(md)
+    expect(out.title).toBe("QA Test Scenarios — Checkout flow")
+    // The strategy line renders as a normal paragraph; the block as qa-scenarios.
+    const qa = out.sections.find((s) => s.type === "qa-scenarios")
+    if (!qa || qa.type !== "qa-scenarios") throw new Error("expected qa-scenarios")
+    expect(qa.rows).toHaveLength(2)
+    expect(qa.rows[0].id).toBe("QA-001")
+    expect(qa.rows[0].group).toBe("happy")
+    expect(qa.rows[0].risk).toBe("low")
+    expect(qa.rows[0].traces).toContain("REQ-1")
+    expect(qa.rows[1].group).toBe("failure")
+    expect(qa.rows[1].risk).toBe("high")
+    expect(qa.openQuestions).toEqual(["Should partial drafts expire?"])
+  })
+
+  it("skips qa scenarios with no given/when/then and clamps unknown group/risk", () => {
+    const md = [
+      ":::qa-scenarios",
+      JSON.stringify({
+        scenarios: [
+          { id: "QA-1", group: "weird", title: "ok", given: "g", when: "w", then: "t", traces: "", risk: "critical" },
+          { id: "QA-2", group: "edge", title: "empty row" }, // no g/w/t → skipped
+        ],
+      }),
+      ":::",
+    ].join("\n")
+    const out = markdownToPrdState(md)
+    const qa = out.sections.find((s) => s.type === "qa-scenarios")
+    if (!qa || qa.type !== "qa-scenarios") throw new Error("expected qa-scenarios")
+    expect(qa.rows).toHaveLength(1)
+    // Unknown group/risk clamp to "".
+    expect(qa.rows[0].group).toBe("")
+    expect(qa.rows[0].risk).toBe("")
+    expect(qa.openQuestions).toEqual([])
+  })
+
+  it("falls back to a paragraph when :::qa-scenarios body is malformed JSON", () => {
+    const md = [":::qa-scenarios", "{ not json at all", ":::"].join("\n")
+    const out = markdownToPrdState(md)
+    const c = out.sections[0]
+    expect(c.type).toBe("p")
+    if (c.type === "p") {
+      expect(c.text).toContain("[qa-scenarios block")
+    }
+  })
 })

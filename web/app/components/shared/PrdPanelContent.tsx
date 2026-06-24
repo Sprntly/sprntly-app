@@ -13,7 +13,7 @@ import { PrdSections } from "./PrdSections"
 import { ArtifactFooterActions } from "./ArtifactFooterActions"
 import { DesignAgentLauncher } from "../design-agent/DesignAgentLauncher"
 import { EmptyPane } from "./EmptyPane"
-import { ApiError, designAgentApi, prdApi, type PrototypeRecord } from "../../lib/api"
+import { ApiError, designAgentApi, multiAgentApi, prdApi, type PrototypeRecord } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
 import { runDesignAgentGeneration } from "../../lib/runDesignAgentGeneration"
@@ -26,7 +26,7 @@ import {
   IconRedo,
   IconUndo,
 } from "./app-icons"
-import type { PrdState } from "../../types/content"
+import type { PrdSection, PrdState } from "../../types/content"
 
 const PRD_DRAFT_KEY = (prdId: number) => `sprntly_prd_draft_${prdId}`
 function loadDraft(prdId: number): string | null {
@@ -262,6 +262,15 @@ export function PrdPanelContent() {
 
   const [prdLoading, setPrdLoading] = useState(false)
 
+  // The brief insight the loaded PRD was generated from (PrdState only carries
+  // prd_id, but the PrdRecord wire shape also has brief_id/insight_index). Kept
+  // here so we can fetch the matching QA test-scenarios doc for the same source.
+  const [briefRef, setBriefRef] = useState<{ briefId: number; insightIndex: number } | null>(null)
+  // Parsed QA test-scenario sections to render under the PRD. Empty until a
+  // ready qa-scenarios doc is fetched and parsed; a failed/absent/not-ready
+  // fetch leaves this empty so nothing extra renders.
+  const [qaSections, setQaSections] = useState<PrdSection[]>([])
+
   useEffect(() => {
     // Skip the "load latest PRD" fetch while a generation is actively in flight —
     // the in-progress flow will populate `content.prd` itself, and we don't want
@@ -271,12 +280,37 @@ export function PrdPanelContent() {
     setPrdLoading(true)
     prdApi.latest(activeCompany).then((record) => {
       if (cancelled || !record.payload_md) return
+      setBriefRef({ briefId: record.brief_id, insightIndex: record.insight_index })
       setContent({ prd: { ...markdownToPrdState(record.payload_md), prd_id: record.id, figma_file_key: undefined } })
     }).catch((e) => {
       if (e instanceof ApiError && e.status === 404) return
     }).finally(() => { if (!cancelled) setPrdLoading(false) })
     return () => { cancelled = true }
   }, [prd, activeCompany, content.prdGenerating, setContent])
+
+  // After the PRD's brief reference is known, ALSO fetch the QA test-scenarios
+  // doc for the same brief_id + insight_index. Render its parsed sections only
+  // when the doc is present AND ready; otherwise render nothing extra. Resilient:
+  // a failed/absent fetch never breaks the PRD view (errors swallowed → empty).
+  useEffect(() => {
+    if (!briefRef) { setQaSections([]); return }
+    let cancelled = false
+    multiAgentApi
+      .getQaScenarios(briefRef.briefId, briefRef.insightIndex)
+      .then((res) => {
+        if (cancelled) return
+        const doc = res.doc
+        if (!doc || doc.status !== "ready" || !doc.payload_md) {
+          setQaSections([])
+          return
+        }
+        // markdownToPrdState yields the qa-scenarios section among any
+        // title/strategy paragraphs in the QA doc's payload.
+        setQaSections(markdownToPrdState(doc.payload_md).sections)
+      })
+      .catch(() => { if (!cancelled) setQaSections([]) })
+    return () => { cancelled = true }
+  }, [briefRef])
 
   const bodyRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -289,6 +323,7 @@ export function PrdPanelContent() {
   const openGeneration = useCallback(async (genId: number) => {
     try {
       const rec = await prdApi.get(genId)
+      setBriefRef({ briefId: rec.brief_id, insightIndex: rec.insight_index })
       setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined } })
       setShowVersions(false)
     } catch {
@@ -399,6 +434,12 @@ export function PrdPanelContent() {
               <div className="prd-meta">{prd.metaLine}</div>
               <h1 className="prd-title">{prd.title}</h1>
               <PrdSections sections={prd.sections} prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} prdTitle={prd.title} />
+              {qaSections.length > 0 && (
+                <div className="prd-qa-scenarios" data-testid="prd-qa-scenarios">
+                  <h2 className="prd-h2">Test Scenarios</h2>
+                  <PrdSections sections={qaSections} />
+                </div>
+              )}
             </div>
           </>
         ) : (
