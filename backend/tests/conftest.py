@@ -647,6 +647,23 @@ CREATE TABLE ticket_comments (
 );
 CREATE INDEX idx_ticket_comments_key ON ticket_comments (company_id, ticket_key);
 
+-- Roadmap doc storage (mirrors 20260623120000_roadmap_doc.sql, SQLite-ized).
+-- One row per company (UNIQUE company_id) so a re-upload upserts in place. Holds
+-- the original file (base64) + extracted text the weekly brief reads + the
+-- roadmapdoc artifact renders. bigint identity / timestamptz are INTEGER / TEXT
+-- under SQLite, matching the other seeded tables.
+CREATE TABLE roadmap_doc (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id     TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    filename       TEXT NOT NULL,
+    content_type   TEXT,
+    extracted_text TEXT NOT NULL DEFAULT '',
+    raw_b64        TEXT,
+    version        INTEGER NOT NULL DEFAULT 1,
+    uploaded_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id)
+);
+
 -- Onboarding drip / nudge email tracking (mirrors
 -- 20260614100000_drip_email_sends.sql). One row per delivered (company ×
 -- member × step); UNIQUE is the de-dup guard so steps never double-send.

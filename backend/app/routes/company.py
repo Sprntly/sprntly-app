@@ -16,14 +16,22 @@ Team write routes use (app/routes/team.py). Non-admins get 403.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.auth import CompanyContext, require_company
 from app.coworkers import CoworkerNames, load_coworker_names, save_coworker_names
 from app.kpi_tree import KpiTree, load_kpi_tree, save_kpi_tree
+from app.roadmap_doc import load_roadmap_doc, save_roadmap_doc
 from app.routes.team import _require_admin
 
 router = APIRouter(prefix="/v1/company", tags=["company"])
+
+# 20 MB hard cap per roadmap upload — mirrors the dataset upload cap. A roadmap
+# deck/spreadsheet at this size already strains the converter; bigger is wrong-
+# format.
+ROADMAP_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 @router.get("/kpi-tree")
@@ -53,3 +61,71 @@ def put_coworkers(
     _require_admin(company)
     saved = save_coworker_names(company.company_id, names)
     return {"ok": True, "coworker_names": saved.model_dump()}
+
+
+# ── Roadmap doc — the company's uploaded roadmap (priorities anchor) ──────────
+# Backs the onboarding strategy step's roadmap upload (design scene onbstrat) +
+# the read-only `roadmapdoc` artifact view. The stored roadmap feeds weekly-brief
+# composition as a high-weight priorities signal (see app.synthesis.agent). One
+# roadmap per company; the latest upload wins.
+def _roadmap_payload(company_id: str) -> dict | None:
+    doc = load_roadmap_doc(company_id)
+    if doc is None:
+        return None
+    # Don't ship the raw base64 blob in the artifact JSON by default — the
+    # extracted text is what the read-only view renders. (A future download
+    # affordance can fetch the source separately.)
+    return {
+        "filename": doc.filename,
+        "content_type": doc.content_type,
+        "extracted_text": doc.extracted_text,
+        "uploaded_at": doc.uploaded_at,
+        "version": doc.version,
+    }
+
+
+@router.post("/roadmap-doc")
+async def post_roadmap_doc(
+    file: Annotated[UploadFile, File(description="Roadmap doc (PDF/DOCX/MD/spreadsheet/deck)")],
+    company: CompanyContext = Depends(require_company),
+):
+    """Store the company's roadmap upload + its extracted text (multipart `file`).
+
+    Reuses the shared ingest converter (the same one the dataset upload path
+    uses) to extract text, which then feeds the weekly brief as a priorities
+    anchor. Any member may set the company roadmap during onboarding.
+    """
+    filename = file.filename or "roadmap"
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file")
+    if len(data) > ROADMAP_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"File exceeds {ROADMAP_MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit",
+        )
+    doc = save_roadmap_doc(
+        company.company_id,
+        filename=filename,
+        data=data,
+        content_type=file.content_type,
+    )
+    return {
+        "ok": True,
+        "filename": doc.filename,
+        "extracted_chars": len(doc.extracted_text or ""),
+        "version": doc.version,
+    }
+
+
+@router.get("/roadmap-doc")
+def get_roadmap_doc(company: CompanyContext = Depends(require_company)):
+    """Fetch the company's stored roadmap for the read-only artifact view.
+
+    404 when none has been uploaded yet (the artifact view shows its empty
+    state). Returns the extracted text + metadata; not the raw bytes.
+    """
+    payload = _roadmap_payload(company.company_id)
+    if payload is None:
+        raise HTTPException(404, "No roadmap uploaded yet")
+    return payload

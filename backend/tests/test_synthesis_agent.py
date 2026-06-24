@@ -332,6 +332,72 @@ def test_run_synthesis_empty_kg_raises(facade):
         synth.run_synthesis(facade, "ent-empty", dataset_slug="empty")
 
 
+def test_roadmap_reaches_compose_call(facade, isolated_settings):
+    """A company's uploaded roadmap is fed into the weekly-brief compose call as
+    a HIGH-WEIGHT priorities block — the skill input carries the roadmap text and
+    the ranking instruction."""
+    from app.synthesis import agent as synth
+    import app.roadmap_doc as rd
+
+    db = isolated_settings["supabase"]
+    if not db.table("companies").select("id").eq("id", "ent-A").execute().data:
+        db.table("companies").insert(
+            {"id": "ent-A", "slug": "acme", "display_name": "Acme"}
+        ).execute()
+    rd.require_client = lambda: db  # type: ignore[assignment]
+    rd.save_roadmap_doc(
+        "ent-A",
+        filename="roadmap.md",
+        data=b"# H1 Roadmap\n\nBet 1: ship self-serve onboarding.",
+    )
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    ranked = {**_RANKED, "insights": [
+        {**_RANKED["insights"][0], "theme_id": theme.id}]}
+
+    captured = {}
+
+    def _capture(*args, **kwargs):
+        captured["input"] = kwargs.get("input", "")
+        return _llm_result(ranked)
+
+    with patch.object(synth, "llm_call", side_effect=_capture):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    composed = captured["input"]
+    assert "ROADMAP" in composed
+    assert "self-serve onboarding" in composed
+    # The high-weight ranking/justify instruction is present.
+    assert "Rank and justify findings against it" in composed
+
+
+def test_no_roadmap_block_when_unset(facade, isolated_settings):
+    """No roadmap uploaded ⇒ no ROADMAP block in the compose input (additive
+    context only; absence is a clean no-op)."""
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    ranked = {**_RANKED, "insights": [
+        {**_RANKED["insights"][0], "theme_id": theme.id}]}
+
+    captured = {}
+
+    def _capture(*args, **kwargs):
+        captured["input"] = kwargs.get("input", "")
+        return _llm_result(ranked)
+
+    with patch.object(synth, "llm_call", side_effect=_capture):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    assert "Rank and justify findings against it" not in captured["input"]
+
+
 # ---------- evidence gate: has_sufficient_evidence (pure) ----------
 
 def test_sufficient_when_multi_source_connected_theme(facade):

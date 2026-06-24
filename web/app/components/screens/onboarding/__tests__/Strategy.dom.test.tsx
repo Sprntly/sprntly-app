@@ -2,11 +2,12 @@
 //
 // Container mount test for the onboarding step 04 — "Strategy, leadership &
 // your roadmap" (design scene onbstrat). Captures free-text priorities (→
-// companies.okrs) and a roadmap-doc upload affordance stubbed to
+// companies.okrs) and a roadmap-doc upload wired to the REAL
 // POST /v1/company/roadmap-doc (roadmapDocApi.upload).
 //
-// Covers: priorities persist + advance to workspace, skip, and the roadmap-doc
-// upload SOFT-FAILS (the assumed endpoint may not exist) without blocking.
+// Covers: priorities persist + advance to workspace, skip, the roadmap-doc
+// upload calls the real API + shows the "uploaded" confirmation on success,
+// and a failed upload surfaces a non-blocking notice without halting the step.
 //
 // Matchers: native DOM only.
 import * as React from "react"
@@ -98,10 +99,37 @@ describe("Strategy (onboarding step 04)", () => {
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
   })
 
-  it("roadmap-doc upload calls the stub endpoint and SOFT-FAILS without blocking", async () => {
+  it("roadmap-doc upload calls the REAL API and shows the uploaded confirmation", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
-    // The assumed endpoint isn't implemented yet — simulate a rejection.
-    roadmapUploadMock.mockRejectedValue(new Error("404 Not Found"))
+    roadmapUploadMock.mockResolvedValue({
+      ok: true,
+      filename: "roadmap.pdf",
+      extracted_chars: 420,
+      version: 1,
+    })
+
+    render(React.createElement(Strategy))
+    const fileInput = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement
+    const file = new File(["roadmap"], "roadmap.pdf", { type: "application/pdf" })
+    await act(async () => {
+      fireEvent.change(fileInput, { target: { files: [file] } })
+    })
+
+    // The real endpoint is called with the picked file.
+    expect(roadmapUploadMock).toHaveBeenCalledTimes(1)
+    expect((roadmapUploadMock.mock.calls[0][0] as File).name).toBe("roadmap.pdf")
+    // The design's "uploaded" confirmation state renders.
+    expect(screen.getByText(/uploaded just now/i)).not.toBeNull()
+    expect(
+      document.querySelector('[data-field="roadmap-doc"][data-uploaded="true"]'),
+    ).not.toBeNull()
+  })
+
+  it("roadmap-doc upload failure surfaces a non-blocking notice", async () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx())
+    roadmapUploadMock.mockRejectedValue(new Error("network error"))
 
     render(React.createElement(Strategy))
     const fileInput = document.querySelector(
@@ -113,8 +141,11 @@ describe("Strategy (onboarding step 04)", () => {
     })
 
     expect(roadmapUploadMock).toHaveBeenCalledTimes(1)
-    // Soft-fail: a friendly notice renders and the step is NOT blocked.
-    expect(screen.getByText(/won't block setup|roadmap import is enabled/i)).not.toBeNull()
+    // A friendly notice renders and the step is NOT blocked.
+    expect(screen.getByText(/won't block setup/i)).not.toBeNull()
+    expect(
+      document.querySelector('[data-field="roadmap-doc"][data-uploaded="true"]'),
+    ).toBeNull()
     // Continue still works after a failed upload.
     const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
       /create workspace|continue/i.test(b.textContent ?? ""),

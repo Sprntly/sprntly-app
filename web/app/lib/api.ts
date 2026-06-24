@@ -673,31 +673,46 @@ export const businessContextApi = {
 
 export type RoadmapDocUploadResponse = {
   ok: true
-  /** Server-assigned doc id / filename, if the endpoint returns one. */
-  id?: string
-  filename?: string
+  filename: string
+  /** Number of characters extracted from the upload. */
+  extracted_chars: number
+  version: number
   [k: string]: unknown
 }
 
+/** The stored roadmap, as the `roadmapdoc` artifact view reads it. */
+export type RoadmapDoc = {
+  filename: string
+  content_type: string | null
+  /** Markdown text extracted from the upload — what the read-only view renders. */
+  extracted_text: string
+  uploaded_at: string | null
+  version: number
+}
+
 /**
- * Roadmap-doc upload for the onboarding strategy step (design scene onbstrat).
+ * Roadmap-doc API for the onboarding strategy step (design scene onbstrat) +
+ * the read-only `roadmapdoc` artifact view.
  *
- * STUB / ASSUMED ENDPOINT — `POST /v1/company/roadmap-doc` does NOT exist in
- * the backend yet (see backend follow-ups in the redesign PR). The strategy
- * onboarding step calls this so the upload affordance is fully wired UI-side;
- * a failure (incl. 404 / 405 from the missing route) is caught at the call site
- * and surfaced as a soft "we'll wire this later" notice — it NEVER blocks the
- * step. Remove the stub guard once the backend ships the endpoint.
- *
- * TODO(backend): implement `POST /v1/company/roadmap-doc` (multipart `file`)
- * that stores the roadmap doc against the company for the roadmap agent to
- * pressure-test, then drop the soft-fail handling in Strategy.tsx.
+ * `upload` POSTs the multipart file to `POST /v1/company/roadmap-doc`, which
+ * stores the doc + its extracted text against the company so the weekly brief
+ * can pressure-test findings against the roadmap. `get` reads the stored
+ * roadmap (404 → null) for the artifact view.
  */
 export const roadmapDocApi = {
   upload: (file: File) => {
     const form = new FormData()
     form.append("file", file, file.name)
     return api.post<RoadmapDocUploadResponse>("/v1/company/roadmap-doc", form)
+  },
+  /** Fetch the stored roadmap; resolves to null when none uploaded yet (404). */
+  get: async (): Promise<RoadmapDoc | null> => {
+    try {
+      return await api.get<RoadmapDoc>("/v1/company/roadmap-doc")
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null
+      throw e
+    }
   },
 }
 
