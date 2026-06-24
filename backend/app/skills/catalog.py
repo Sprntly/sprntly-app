@@ -24,8 +24,10 @@ from app.skills.loader import get_skill, list_skills
 SKILL_CATEGORY: dict[str, str] = {
     "prd-author": "Documentation & Specification",
     "prd-critique": "Documentation & Specification",
+    "implementation-spec": "Documentation & Specification",
     "product-one-pager": "Documentation & Specification",
     "tech-spec": "Documentation & Specification",
+    "test-scenario-builder": "Documentation & Specification",
     "user-stories": "Documentation & Specification",
     "assumption-risk-map": "Discovery & Research",
     "business-context": "Discovery & Research",
