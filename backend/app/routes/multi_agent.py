@@ -107,6 +107,34 @@ async def generate(
     }
 
 
+@router.get("/qa-scenarios")
+def get_qa_scenarios(
+    brief_id: int,
+    insight_index: int = 0,
+    company: CompanyContext = Depends(require_company),
+):
+    """Latest QA test-scenarios doc for a (brief, insight) — the PRD panel's
+    'Test Scenarios' section reads this. Returns {"doc": null} when none has
+    been generated yet (the multi-agent 'aggressive' run produces it), so the
+    section simply doesn't show. Tenant-scoped via the brief.
+
+    NOTE: declared BEFORE the `/{run_id}` route so the static path wins —
+    otherwise `/{run_id}` would capture "qa-scenarios" as a run id."""
+    require_owned_brief(brief_id, company.company_id)
+    from app.db.multi_agent_docs import find_existing_doc
+    doc = find_existing_doc(brief_id, insight_index, "qa_test_cases")
+    if not doc:
+        return {"doc": None}
+    return {
+        "doc": {
+            "id": doc["id"],
+            "title": doc["title"],
+            "status": doc["status"],
+            "payload_md": doc.get("payload_md", ""),
+        }
+    }
+
+
 @router.get("/{run_id}")
 def get_status(
     run_id: str,

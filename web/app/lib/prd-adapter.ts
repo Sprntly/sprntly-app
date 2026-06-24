@@ -26,6 +26,7 @@ import type {
   PrdRiskRow,
   PrdSection,
   PrdContent,
+  QaScenarioRow,
 } from "../types/content"
 
 const HEADING_RULE = /^─+$/
@@ -312,6 +313,54 @@ function parseMilestonesBlock(body: string): PrdSection | null {
   return { type: "prd-milestones", phases }
 }
 
+const QA_GROUPS = ["happy", "edge", "failure"] as const
+
+function normalizeQaGroup(raw: unknown): QaScenarioRow["group"] {
+  const g = typeof raw === "string" ? raw.toLowerCase() : ""
+  return (QA_GROUPS as readonly string[]).includes(g)
+    ? (g as QaScenarioRow["group"])
+    : ""
+}
+
+function normalizeQaRisk(raw: unknown): QaScenarioRow["risk"] {
+  const r = typeof raw === "string" ? raw.toLowerCase() : ""
+  return (SEVERITIES as readonly string[]).includes(r)
+    ? (r as QaScenarioRow["risk"])
+    : ""
+}
+
+export function parseQaScenariosBlock(body: string): PrdSection | null {
+  const parsed = tryParseJson(body)
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
+  const r = parsed as Record<string, unknown>
+  const scenariosRaw = Array.isArray(r.scenarios) ? (r.scenarios as unknown[]) : []
+  const rows: QaScenarioRow[] = scenariosRaw
+    .map((raw) => {
+      if (!raw || typeof raw !== "object") return null
+      const s = raw as Record<string, unknown>
+      const given = toStr(s.given)
+      const when = toStr(s.when)
+      const then = toStr(s.then)
+      // Skip empty rows — a scenario needs at least its Given/When/Then.
+      if (!given && !when && !then) return null
+      return {
+        id: toStr(s.id),
+        group: normalizeQaGroup(s.group),
+        title: toStr(s.title),
+        given,
+        when,
+        then,
+        traces: toStr(s.traces),
+        risk: normalizeQaRisk(s.risk),
+      }
+    })
+    .filter((s): s is QaScenarioRow => s !== null)
+  const oqRaw = Array.isArray(r.open_questions) ? (r.open_questions as unknown[]) : []
+  const openQuestions = oqRaw.map((q) => toStr(q)).filter(Boolean)
+  if (rows.length === 0 && openQuestions.length === 0) return null
+  return { type: "qa-scenarios", rows, openQuestions }
+}
+
 function parseDodBlock(body: string): PrdSection | null {
   const parsed = tryParseJson(body)
   if (!Array.isArray(parsed)) return null
@@ -402,6 +451,10 @@ function parseSemanticBlock(name: string, _attrs: string, body: string): PrdSect
       ]
     case "dod":
       return [parseDodBlock(body) ?? fallbackParagraphFromBlock(name, body)]
+    case "qa-scenarios":
+      return [
+        parseQaScenariosBlock(body) ?? fallbackParagraphFromBlock(name, body),
+      ]
     case "design":
       // Never falls back — parseDesignBlock is lenient and always returns a
       // valid prd-design block so the Design entry point still renders.

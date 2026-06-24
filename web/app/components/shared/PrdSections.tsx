@@ -25,6 +25,7 @@ import type {
   PrdRiskRow,
   PrdSection,
   PrdState,
+  QaScenarioRow,
 } from "../../types/content"
 import { renderInline } from "../../lib/inline-md"
 import { InlineChart } from "./InlineChart"
@@ -156,6 +157,8 @@ function RenderBlock({
       return <MilestonesBlock phases={block.phases} />
     case "prd-dod":
       return <DodChecklist items={block.items} />
+    case "qa-scenarios":
+      return <QaScenariosList rows={block.rows} openQuestions={block.openQuestions} />
     case "prd-design":
       return <DesignSection prdId={prdId} figmaFileKey={figmaFileKey} prdTitle={prdTitle} />
     default:
@@ -487,5 +490,97 @@ function DodChecklist({ items }: { items: string[] }) {
         </li>
       ))}
     </ul>
+  )
+}
+
+/* ---------- QA test scenarios ---------- */
+
+// Display order + labels for the scenario groups. Ungrouped rows ("" group)
+// fall into a trailing "Other" bucket so nothing silently disappears.
+const QA_GROUP_ORDER: Array<{ key: QaScenarioRow["group"]; label: string }> = [
+  { key: "happy", label: "Happy path" },
+  { key: "edge", label: "Edge cases" },
+  { key: "failure", label: "Failure modes" },
+  { key: "", label: "Other" },
+]
+
+// Risk chip tone: high → danger, medium → warn, low/"" → neutral.
+const QA_RISK_LABEL: Record<QaScenarioRow["risk"], string> = {
+  high: "high risk",
+  medium: "med risk",
+  low: "low risk",
+  "": "",
+}
+
+function QaScenariosList({
+  rows,
+  openQuestions,
+}: {
+  rows: QaScenarioRow[]
+  openQuestions: string[]
+}) {
+  return (
+    <div className="prdv2-qa">
+      {QA_GROUP_ORDER.map(({ key, label }) => {
+        const groupRows = rows.filter((r) => r.group === key)
+        if (groupRows.length === 0) return null
+        return (
+          <div key={key || "other"} className="prdv2-qa-group">
+            <div className="prdv2-qa-group-label">{label}</div>
+            {groupRows.map((r, i) => (
+              <div key={r.id || i} className="prdv2-qa-row">
+                <div className="prdv2-qa-head">
+                  {r.id ? <span className="prdv2-qa-id">{r.id}</span> : null}
+                  {r.title ? (
+                    <span className="prdv2-qa-title">{renderInline(r.title)}</span>
+                  ) : null}
+                  {r.risk ? (
+                    <span className={`prdv2-qa-risk prdv2-qa-risk-${r.risk}`}>
+                      {QA_RISK_LABEL[r.risk]}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="prdv2-qa-gwt">
+                  {r.given ? (
+                    <div className="prdv2-qa-gwt-row">
+                      <span className="prdv2-qa-gwt-k">Given</span>
+                      <span className="prdv2-qa-gwt-v">{renderInline(r.given)}</span>
+                    </div>
+                  ) : null}
+                  {r.when ? (
+                    <div className="prdv2-qa-gwt-row">
+                      <span className="prdv2-qa-gwt-k">When</span>
+                      <span className="prdv2-qa-gwt-v">{renderInline(r.when)}</span>
+                    </div>
+                  ) : null}
+                  {r.then ? (
+                    <div className="prdv2-qa-gwt-row">
+                      <span className="prdv2-qa-gwt-k">Then</span>
+                      <span className="prdv2-qa-gwt-v">{renderInline(r.then)}</span>
+                    </div>
+                  ) : null}
+                </div>
+                {r.traces ? (
+                  <div className="prdv2-qa-foot">
+                    <span className="prdv2-qa-foot-k">Verifies:</span>{" "}
+                    <span className="prdv2-qa-foot-v">{renderInline(r.traces)}</span>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )
+      })}
+      {openQuestions.length > 0 ? (
+        <div className="prdv2-qa-oq">
+          <div className="prdv2-qa-oq-label">Open questions</div>
+          <ul className="prdv2-qa-oq-list">
+            {openQuestions.map((q, i) => (
+              <li key={i}>{renderInline(q)}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
   )
 }

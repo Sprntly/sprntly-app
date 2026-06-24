@@ -410,6 +410,19 @@ export interface PrdAcceptanceCriterionRow {
   verifiedBy: string
 }
 
+/** One generated QA test scenario row (from a `:::qa-scenarios` block). The
+ *  JSON keys map directly (given/when/then/traces/risk/group/title/id). */
+export interface QaScenarioRow {
+  id: string
+  group: "happy" | "edge" | "failure" | ""
+  title: string
+  given: string
+  when: string
+  then: string
+  traces: string
+  risk: "high" | "medium" | "low" | ""
+}
+
 export type PrdRiskSeverity = "high" | "medium" | "low" | string
 
 export interface PrdRiskRow {
@@ -480,6 +493,7 @@ export type PrdSection =
   | { type: "prd-risks"; rows: PrdRiskRow[] }
   | { type: "prd-milestones"; phases: PrdMilestonePhase[] }
   | { type: "prd-dod"; items: string[] }
+  | { type: "qa-scenarios"; rows: QaScenarioRow[]; openQuestions: string[] }
   | PrdDesignBlock
 
 /**

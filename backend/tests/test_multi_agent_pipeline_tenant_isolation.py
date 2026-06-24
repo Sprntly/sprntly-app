@@ -87,6 +87,43 @@ def test_single_doc_guard_binds_via_brief(isolated_settings):
     assert getattr(ei.value, "status_code", None) == 404
 
 
+def test_qa_scenarios_route_returns_doc_and_is_tenant_scoped(isolated_settings):
+    """GET /v1/multi-agent/qa-scenarios returns the latest qa doc for a
+    (brief, insight), {"doc": None} when none, and 404 for a foreign tenant."""
+    from app.auth import CompanyContext
+
+    sb = isolated_settings["supabase"]
+    db = isolated_settings["db"]
+    a = _seed_company(sb, "company-a")
+    b = _seed_company(sb, "company-b")
+    brief_id = _save_brief(db, "company-a")
+
+    def _ctx(cid):
+        return CompanyContext(company_id=cid, role="owner", user_id="u")
+
+    # No qa doc yet → null section (doesn't render).
+    assert ma.get_qa_scenarios(brief_id, 0, _ctx(a)) == {"doc": None}
+
+    # Seed a ready qa doc and complete it with a scenarios payload.
+    doc_id = multi_agent_docs.start_doc(
+        brief_id=brief_id, insight_index=0, prd_id=None,
+        doc_type="qa_test_cases", title="t",
+    )
+    multi_agent_docs.complete_doc(
+        doc_id, "QA Test Scenarios — X",
+        "# QA Test Scenarios\n\n:::qa-scenarios\n{\"scenarios\": []}\n:::\n",
+    )
+
+    got = ma.get_qa_scenarios(brief_id, 0, _ctx(a))
+    assert got["doc"]["id"] == doc_id
+    assert ":::qa-scenarios" in got["doc"]["payload_md"]
+
+    # Foreign tenant → 404 (no existence disclosure).
+    with pytest.raises(Exception) as ei:
+        ma.get_qa_scenarios(brief_id, 0, _ctx(b))
+    assert getattr(ei.value, "status_code", None) == 404
+
+
 def test_pipeline_routes_are_company_scoped():
     """Source guard: pipeline must not use the non-tenant require_session, and
     every route must gate on dataset ownership."""

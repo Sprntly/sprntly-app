@@ -1955,6 +1955,14 @@ export const multiAgentApi = {
   /** Fetch a single doc by id. */
   getDoc: (docId: number) =>
     api.get<MultiAgentDoc>(`/v1/multi-agent/doc/${docId}`),
+
+  /** Read the generated QA test-scenarios doc for a brief insight. Returns
+   *  `{ doc: null }` when none exists; the doc's `payload_md` carries the
+   *  `:::qa-scenarios` semantic block. */
+  getQaScenarios: (briefId: number, insightIndex = 0) =>
+    api.get<{ doc: { id: number; title: string; status: string; payload_md: string } | null }>(
+      `/v1/multi-agent/qa-scenarios?brief_id=${briefId}&insight_index=${insightIndex}`,
+    ),
 }
 
 // ---- Artifacts (All-Chats "Artifacts" tab) ---------------------------------

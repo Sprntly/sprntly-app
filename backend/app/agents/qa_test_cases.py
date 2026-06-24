@@ -1,18 +1,17 @@
 """QA Test Cases generator agent.
 
-Produces comprehensive QA test cases from a PRD (Part A + Part B) and its
-evidence trail. Output includes: functional tests, edge cases, negative tests,
-integration tests, regression tests, performance tests, and security tests.
-
-Each test case has: ID, title, preconditions, steps, expected result, priority,
-and traceability back to PRD requirements.
+Produces Given/When/Then test SCENARIOS from a PRD (Part A + Part B) and its
+evidence trail, via the vendored `test-scenario-builder` skill (its SKILL.md
+is the METHOD layer: read the spec → happy paths → edge cases → failure modes
+→ trace each to its requirement → risk-rank). The Sprntly OUTPUT contract is a
+single `:::qa-scenarios` block the frontend renders as grouped scenario cards
+(see web/app/lib/qa-adapter.ts).
 
 Bound to the LLM gateway for attribution + decision logging.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 from app.db.multi_agent_docs import complete_doc, fail_doc
@@ -20,49 +19,62 @@ from app.graph.gateway import llm_call
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "qa-test-cases-v1"
+PROMPT_VERSION = "qa-test-cases-v2"
 AGENT = "qa_test_cases"
 
 _SYSTEM = """\
-You are Sprntly's QA Test Cases agent. You produce implementation-ready and \
-audit-ready QA test cases from a Product Requirements Document (PRD) and its \
-supporting evidence.
+You are Sprntly's QA Test Scenarios agent, running the **test-scenario-builder** \
+skill's METHOD (prepended above). Apply that method to the PRD: read each \
+requirement / acceptance criterion as the spec to verify; cover the HAPPY \
+path(s), then EDGE cases (boundaries, empty/zero/max, concurrency, \
+permissions, localization), then FAILURE modes (invalid input, timeouts, \
+partial success, idempotency/retry); trace every scenario to the requirement \
+it verifies; risk-rank so the highest-damage scenarios are flagged to test \
+first.
 
-Your output MUST include:
+GROUNDING DISCIPLINE (non-negotiable):
+- Every scenario verifies a SPECIFIC requirement or acceptance criterion from \
+the PRD. Never invent requirements, data, or expected results.
+- When an expected result is assumed rather than stated, mark it [ASSUMPTION].
+- Coverage gaps become open questions — never fabricated scenarios.
 
-1. **Test Strategy Overview** — scope, approach, environments, entry/exit criteria.
+OUTPUT CONTRACT (Sprntly — emit EXACTLY this; ignore the skill's own output \
+formatting): a short title line, one sentence of test strategy, then a single \
+`:::qa-scenarios` fenced block whose body is JSON the app renders as grouped \
+scenario cards. No other prose, no markdown tables, no TC-ID tables.
 
-2. **Functional Test Cases** — one per requirement/user flow. Each test case has:
-   - TC-ID (e.g. TC-F-001)
-   - Title
-   - Requirement traced to (PRD section/requirement ID)
-   - Preconditions
-   - Test Steps (numbered)
-   - Expected Result
-   - Priority (P0-Critical / P1-High / P2-Medium / P3-Low)
+# QA Test Scenarios — <PRD title>
 
-3. **Edge Case & Negative Tests** — boundary values, invalid inputs, error \
-   states, concurrency, timeout scenarios.
+<one-sentence strategy: what's covered and the riskiest area to test first>
 
-4. **Integration Test Cases** — cross-system, API contract, data flow tests.
+:::qa-scenarios
+{
+  "scenarios": [
+    {
+      "id": "QA-001",
+      "group": "happy" | "edge" | "failure",
+      "title": "<short scenario title>",
+      "given": "<preconditions / starting state>",
+      "when": "<the action under test>",
+      "then": "<the expected, verifiable outcome>",
+      "traces": "<the requirement or acceptance criterion this verifies>",
+      "risk": "high" | "medium" | "low"
+    }
+  ],
+  "open_questions": ["<coverage gap or ambiguity, if any>"]
+}
+:::
 
-5. **Performance Test Cases** — load, stress, response time baselines from PRD \
-   metrics.
-
-6. **Security Test Cases** — OWASP-relevant checks per the PRD's domain.
-
-7. **Regression Test Suite** — critical paths that must not break.
-
-8. **Test Data Requirements** — what test data is needed, how to set up fixtures.
-
-Ground every test in the PRD's requirements. Reference specific PRD sections. \
-Mark any test whose requirement is ambiguous with [ASSUMPTION]. \
-Emit Markdown only — no commentary outside the document."""
+Order scenarios happy → edge → failure. `risk` reflects the damage if the \
+scenario fails in production. Emit valid JSON only inside the block."""
 
 _USER_TEMPLATE = """\
-Generate comprehensive QA test cases for the following PRD.
+Generate Given/When/Then test scenarios for the spec below. The PRD's \
+requirements and acceptance criteria ARE the spec to verify — derive scenarios \
+from them, covering happy paths, edge cases, and failure modes, each traced \
+back to the requirement it verifies.
 
-## PRD
+## PRD (the spec — requirements + acceptance criteria)
 {prd_content}
 
 ## Evidence / Context
@@ -107,6 +119,10 @@ def generate_qa_test_cases_sync(
         prompt_version=PROMPT_VERSION,
         system=_SYSTEM,
         input=_build_input(prd, evidence_md, clickup_context),
+        # Bind the test-scenario-builder skill: its SKILL.md is the METHOD
+        # (happy → edge → failure → trace → risk-rank). The Sprntly
+        # `:::qa-scenarios` output contract lives in _SYSTEM.
+        skill="test-scenario-builder",
     )
     md = result.output if isinstance(result.output, str) else str(result.output)
 
@@ -116,7 +132,11 @@ def generate_qa_test_cases_sync(
             enterprise_id=enterprise_id,
             agent=AGENT,
             decision_type="generate_qa_test_cases",
-            factors={"prd_id": prd.get("id"), "has_evidence": bool(evidence_md)},
+            factors={
+                "prd_id": prd.get("id"),
+                "has_evidence": bool(evidence_md),
+                "skill": "test-scenario-builder",
+            },
             output={"length": len(md)},
             model=result.model,
             prompt_version=result.prompt_version,
@@ -141,7 +161,7 @@ async def generate_qa_test_cases(
             generate_qa_test_cases_sync,
             enterprise_id, prd, evidence_md, clickup_context,
         )
-        title = f"QA Test Cases — {prd.get('title', 'Untitled PRD')}"
+        title = f"QA Test Scenarios — {prd.get('title', 'Untitled PRD')}"
         complete_doc(doc_id, title, md)
         logger.info("QA test case generation succeeded doc_id=%s", doc_id)
     except Exception as exc:
