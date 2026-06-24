@@ -73,6 +73,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // prompting the user to choose a PRD first.
   prototype: PROTOTYPE_PATH,
   backlog: "/backlog",
+  templates: "/templates",
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -91,6 +92,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   // pathname-based screen derivation ignores — the path is always `/prototype`.
   [PROTOTYPE_PATH]: "prototype",
   "/backlog": "backlog",
+  "/templates": "templates",
 }
 
 // Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).

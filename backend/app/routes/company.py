@@ -18,9 +18,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.auth import CompanyContext, require_company
+from app.company_template import (
+    delete_company_template,
+    list_company_templates,
+    save_company_template,
+)
 from app.coworkers import CoworkerNames, load_coworker_names, save_coworker_names
 from app.kpi_tree import (
     KpiTree,
@@ -149,3 +154,79 @@ def get_roadmap_doc(company: CompanyContext = Depends(require_company)):
     if payload is None:
         raise HTTPException(404, "No roadmap uploaded yet")
     return payload
+
+
+# ── Templates — the company's gold-standard PRD examples ("what good looks like")
+# Sibling of the roadmap doc above, but MANY per company: each upload is its own
+# row, listed and individually deletable. The extracted text feeds prd-author
+# composition as FORMAT/STYLE EXEMPLARS (see app.prd_runner) so generated PRDs
+# match the company's structure & voice. 20 MB cap, same converter as roadmap.
+TEMPLATE_MAX_UPLOAD_BYTES = ROADMAP_MAX_UPLOAD_BYTES
+
+
+def _template_item(t) -> dict:
+    """Public list-item shape — extracted text + metadata, never the raw bytes."""
+    return {
+        "id": t.id,
+        "label": t.label,
+        "type": t.type,
+        "filename": t.filename,
+        "content_type": t.content_type,
+        "extracted_chars": len(t.extracted_text or ""),
+        "uploaded_at": t.uploaded_at,
+    }
+
+
+@router.post("/templates")
+async def post_template(
+    file: Annotated[UploadFile, File(description="Gold-standard PRD example (PDF/DOCX/MD/…)")],
+    label: Annotated[str | None, Form()] = None,
+    type: Annotated[str, Form()] = "prd",
+    company: CompanyContext = Depends(require_company),
+):
+    """Upload a gold-standard PRD example for the company (multiple allowed).
+
+    Reuses the shared ingest converter to extract text, which then feeds
+    prd-author as a FORMAT/STYLE EXEMPLAR. Any member may add a template.
+    """
+    filename = file.filename or "template"
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file")
+    if len(data) > TEMPLATE_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"File exceeds {TEMPLATE_MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit",
+        )
+    saved = save_company_template(
+        company.company_id,
+        filename=filename,
+        data=data,
+        label=(label or None),
+        type=(type or "prd"),
+        content_type=file.content_type,
+    )
+    return {"ok": True, **_template_item(saved)}
+
+
+@router.get("/templates")
+def get_templates(
+    type: str | None = None,
+    company: CompanyContext = Depends(require_company),
+):
+    """List the company's gold-standard templates (newest first). Optionally
+    filtered by `type` (e.g. 'prd'). Returns metadata + extracted-char counts,
+    not the raw bytes."""
+    items = list_company_templates(company.company_id, type=type)
+    return {"templates": [_template_item(t) for t in items]}
+
+
+@router.delete("/templates/{template_id}")
+def delete_template(
+    template_id: str, company: CompanyContext = Depends(require_company)
+):
+    """Remove one gold-standard template owned by the company. 404 if it does
+    not exist (or belongs to another company)."""
+    if not delete_company_template(company.company_id, template_id):
+        raise HTTPException(404, "Template not found")
+    return {"ok": True, "id": template_id}
